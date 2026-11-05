@@ -43,7 +43,8 @@ pub fn quest_list(quest_dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Every quest script, as paths relative to `quest_dir`, sorted.
+/// Every quest script, as paths relative to `quest_dir`, sorted. A linked folder is walked like
+/// the folder it names.
 ///
 /// # Errors
 ///
@@ -53,7 +54,7 @@ pub fn scripts(quest_dir: &Path) -> io::Result<Vec<PathBuf>> {
     for entry in fs::read_dir(quest_dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        if entry.file_type()?.is_dir() && !NOT_SCRIPTS.iter().any(|skip| name == *skip) {
+        if entry.path().is_dir() && !NOT_SCRIPTS.iter().any(|skip| name == *skip) {
             walk(quest_dir, &PathBuf::from(name), &mut paths)?;
         }
     }
@@ -65,7 +66,7 @@ fn walk(root: &Path, relative: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()
     for entry in fs::read_dir(root.join(relative))? {
         let entry = entry?;
         let path = relative.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if entry.path().is_dir() {
             walk(root, &path, paths)?;
         } else {
             paths.push(path);
@@ -172,5 +173,25 @@ mod tests {
             let message = format!("quest_list names {listed}, which is not a quest script");
             assert_eq!(refusal(refused), message);
         }
+    }
+
+    /// A folder linked into the quest directory holds scripts as a real one does, at its
+    /// linked path, and so does a linked file.
+    #[test]
+    fn a_linked_folder_holds_scripts_like_a_real_one() {
+        let files = [("a/one.lua", ""), ("elsewhere/b/two.lua", "")];
+        let scripts = in_quest_dir("linked", &files, |root| {
+            let quest_dir = root.join("quest");
+            fs::create_dir_all(quest_dir.join("c")).unwrap();
+            std::os::unix::fs::symlink(root.join("a"), quest_dir.join("a")).unwrap();
+            std::os::unix::fs::symlink(root.join("elsewhere/b"), quest_dir.join("c/b")).unwrap();
+            std::os::unix::fs::symlink(root.join("a/one.lua"), quest_dir.join("c/one.lua"))
+                .unwrap();
+            scripts(&quest_dir)
+        });
+        assert_eq!(
+            scripts.unwrap(),
+            ["a/one.lua", "c/b/two.lua", "c/one.lua"].map(PathBuf::from)
+        );
     }
 }

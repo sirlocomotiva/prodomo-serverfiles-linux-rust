@@ -7,12 +7,14 @@
 
 pub mod accounts;
 pub mod credentials;
+pub mod events;
 pub mod guilds;
 pub mod item_id_range;
 pub mod items;
 pub mod messenger;
 pub mod player_affects;
 pub mod player_skills;
+pub mod player_top;
 pub mod players;
 pub mod quest_flags;
 pub mod quickslots;

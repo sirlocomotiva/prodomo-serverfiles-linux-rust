@@ -23,16 +23,26 @@ pub const ITEM_WEAPON: i32 = 1;
 pub const ITEM_ARMOR: i32 = 2;
 /// `ITEM_USE`, an item used up by `CG_ITEM_USE`: potions among others.
 pub const ITEM_USE: i32 = 3;
+/// `ITEM_MATERIAL`, a refine material.
+pub const ITEM_MATERIAL: i32 = 5;
 /// `ITEM_ELK`, gold as an item, which `CreateItem` neither numbers nor counts.
 pub const ITEM_ELK: i32 = 9;
 /// `ITEM_METIN`, a stone that sits in another item's socket.
 pub const ITEM_METIN: i32 = 10;
+/// `ITEM_FISH`, a caught fish, which the campfire grills.
+pub const ITEM_FISH: i32 = 12;
 /// `ITEM_ROD`, a fishing rod.
 pub const ITEM_ROD: i32 = 13;
+/// `FISH_ALIVE`.
+pub const FISH_ALIVE: i32 = 0;
+/// `FISH_DEAD`.
+pub const FISH_DEAD: i32 = 1;
 /// `ITEM_UNIQUE`.
 pub const ITEM_UNIQUE: i32 = 16;
 /// `ITEM_SKILLBOOK` (17): a master-training book, read by `LearnSkillByBook`.
 pub const ITEM_SKILLBOOK: i32 = 17;
+/// `ITEM_SKILLFORGET`, a book that makes a skill forgotten.
+pub const ITEM_SKILLFORGET: i32 = 22;
 /// `ITEM_QUEST`, an item a quest reads.
 pub const ITEM_QUEST: i32 = 18;
 /// `ITEM_PICK`, a pickaxe.
@@ -92,6 +102,10 @@ pub const WEAPON_MOUNT_SPEAR: i32 = 7;
 
 /// `USE_POTION`: a potion whose recovery runs over the following seconds.
 pub const USE_POTION: i32 = 0;
+/// `USE_TUNING`: a refine scroll, which the smith refuses to refine.
+pub const USE_TUNING: i32 = 2;
+/// `USE_BAIT`: a bait, which `UseItemEx` puts on the worn rod (`G/char_item.cpp:6800-6825`).
+pub const USE_BAIT: i32 = 6;
 /// `USE_ABILITY_UP`: a potion that raises a point for a while.
 pub const USE_ABILITY_UP: i32 = 7;
 /// `USE_POTION_NODELAY`: a potion whose recovery is immediate.
@@ -223,11 +237,14 @@ mod tests {
             (ITEM_WEAPON, "ITEM_WEAPON"),
             (ITEM_ARMOR, "ITEM_ARMOR"),
             (ITEM_USE, "ITEM_USE"),
+            (ITEM_MATERIAL, "ITEM_MATERIAL"),
             (ITEM_ELK, "ITEM_ELK"),
             (ITEM_METIN, "ITEM_METIN"),
+            (ITEM_FISH, "ITEM_FISH"),
             (ITEM_ROD, "ITEM_ROD"),
             (ITEM_UNIQUE, "ITEM_UNIQUE"),
             (ITEM_SKILLBOOK, "ITEM_SKILLBOOK"),
+            (ITEM_SKILLFORGET, "ITEM_SKILLFORGET"),
             (ITEM_QUEST, "ITEM_QUEST"),
             (ITEM_PICK, "ITEM_PICK"),
             (ITEM_TOTEM, "ITEM_TOTEM"),
@@ -271,11 +288,17 @@ mod tests {
         ] {
             assert_eq!(value, index(weapon, name), "{name}");
         }
+        let fish = SUB_TYPE[usize::try_from(ITEM_FISH).expect("a small index")];
+        for (value, name) in [(FISH_ALIVE, "FISH_ALIVE"), (FISH_DEAD, "FISH_DEAD")] {
+            assert_eq!(value, index(fish, name), "{name}");
+        }
         let usable = SUB_TYPE[usize::try_from(ITEM_USE).expect("a small index")];
         for (value, name) in [
             (USE_POTION, "USE_POTION"),
+            (USE_TUNING, "USE_TUNING"),
             (USE_ABILITY_UP, "USE_ABILITY_UP"),
             (USE_POTION_NODELAY, "USE_POTION_NODELAY"),
+            (USE_BAIT, "USE_BAIT"),
             (USE_SPECIAL, "USE_SPECIAL"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");

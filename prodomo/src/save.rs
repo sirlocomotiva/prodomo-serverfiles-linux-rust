@@ -231,12 +231,15 @@ pub fn player_save(
         exp: character.exp,
         conqueror_level: character.conqueror_level,
         conqueror_exp: character.conqueror_exp,
+        conqueror_level_step: character.conqueror_level_step,
+        conqueror_point: character.conqueror_point,
         random_hp: character.random_hp,
         random_sp: character.random_sp,
         stat_point: character.stat_point,
         skill_point: character.skill_point,
         sub_skill_point: character.sub_skill_point,
         level_step: character.level_step,
+        stat_reset_count: character.stat_reset_count,
         st: character.st,
         ht: character.ht,
         dx: character.dx,
@@ -258,6 +261,12 @@ pub fn player_save(
         skill_group: character.skill_group,
         playtime_minutes: played.minutes,
         alignment: character.alignment,
+        sungma_str: character.sungma_str,
+        sungma_hp: character.sungma_hp,
+        sungma_move: character.sungma_move,
+        sungma_immune: character.sungma_immune,
+        gaya: character.gaya,
+        horse: character.horse,
     }
 }
 
@@ -277,12 +286,15 @@ mod tests {
             exp: 11,
             conqueror_level: 3,
             conqueror_exp: 13,
+            conqueror_level_step: 3,
+            conqueror_point: 83,
             random_hp: 0,
             random_sp: 0,
             stat_point: 67,
             skill_point: 71,
             sub_skill_point: 73,
             level_step: 2,
+            stat_reset_count: 0,
             sungma_str: 53,
             sungma_hp: 59,
             sungma_move: 61,
@@ -295,6 +307,7 @@ mod tests {
             sp: 37,
             stamina: 41,
             gold: 43,
+            gaya: 45,
             voice: 47,
             part_base: 2,
             main_part: 1001,
@@ -310,6 +323,8 @@ mod tests {
             playtime_minutes: 12,
             alignment: -250,
             change_name: false,
+            horse: db::players::PlayerHorse::default(),
+            logoff_interval: 0,
         }
     }
 
@@ -349,6 +364,8 @@ mod tests {
         assert_eq!(save.exp, 11);
         assert_eq!(save.conqueror_level, 3);
         assert_eq!(save.conqueror_exp, 13);
+        assert_eq!(save.conqueror_level_step, 3);
+        assert_eq!(save.conqueror_point, 83);
         assert_eq!(save.st, 17);
         assert_eq!(save.ht, 19);
         assert_eq!(save.dx, 23);

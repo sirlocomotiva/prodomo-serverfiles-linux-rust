@@ -124,6 +124,27 @@ pub enum CgArgU8Error {
     },
 }
 
+impl std::fmt::Display for CgArgU8Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated { needed, available } => {
+                write!(f, "truncated: needed {needed}, had {available}")
+            }
+            Self::LengthMismatch { expected, actual } => {
+                write!(f, "length mismatch: expected {expected}, had {actual}")
+            }
+            Self::InvalidHeader { expected, actual } => {
+                write!(
+                    f,
+                    "invalid header: expected {expected:#04x}, had {actual:#04x}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CgArgU8Error {}
+
 /// Reject anything that is not exactly `expected` bytes wide.
 fn check_exact(actual: usize, expected: usize) -> Result<(), CgArgU8Error> {
     if actual < expected {

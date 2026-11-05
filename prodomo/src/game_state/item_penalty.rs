@@ -188,8 +188,14 @@ impl GameState {
     ///
     /// The killer is read for the war only: legacy's `ItemDropPenalty` takes it and never uses
     /// it (`:1016`), and what the victim loses depends on the victim's own alignment.
-    pub(super) fn item_drop_penalty(&mut self, vid: Vid, killer: Option<Attacker>) {
-        if !self.penalty_applies(vid, killer) {
+    /// `agreed_pvp` is `isAgreedPVP` (`:1333-1335`): an agreed duel's death drops nothing.
+    pub(super) fn item_drop_penalty(
+        &mut self,
+        vid: Vid,
+        killer: Option<Attacker>,
+        agreed_pvp: bool,
+    ) {
+        if !self.penalty_applies(vid, killer, agreed_pvp) {
             return;
         }
         let Some(points) = self
@@ -342,13 +348,17 @@ impl GameState {
     /// Whether the death is the one legacy's `Dead` hands to the penalty
     /// (`G/char_battle.cpp:1333-1345`).
     ///
-    /// The agreed PvP, the arena duel and the forked road are not ported, so their flags are
-    /// always false; the guild war is.
-    fn penalty_applies(&self, vid: Vid, killer: Option<Attacker>) -> bool {
+    /// The arena duel and the forked road are not ported, so their flags are
+    /// always false; the guild war and the agreed duel are.
+    fn penalty_applies(&self, vid: Vid, killer: Option<Attacker>, agreed_pvp: bool) -> bool {
         // `pkKiller` (`:1333`): a death with no killer is not the penalty's.
         let Some(killer) = killer else {
             return false;
         };
+        // `!isAgreedPVP` (`:1334`): the agreed duel's death drops nothing.
+        if agreed_pvp {
+            return false;
+        }
         // `!isUnderGuildWar` (`:1304-1306`): the war's own fight does not drop items. The
         // flag is read only when the killer is a player, as legacy reads it.
         if killer.pc && self.under_guild_war(vid, killer.vid) {
@@ -560,14 +570,14 @@ impl GameState {
         self.order_the_item_rows(vid, key.0, key.1, outcome.changes, order);
     }
 
-    /// Hands the rows the death penalty took to the descriptor that holds the victim.
+    /// Hands the rows a world step took from or gave to `vid` to the descriptor that holds it:
+    /// the items the death penalty took, or the drops the direct pick-up gave.
     ///
-    /// The game thread cannot write the store (ADR-0002), and the victim is dying, so the
-    /// descriptor writes them and tells the pick-ups of the dropped items that they are
-    /// gone. A victim whose descriptor has left leaves the rows where they are, and the
-    /// pick-ups wait for a tell that never comes, which is what a drop whose dropper left
-    /// does.
-    fn order_the_item_rows(
+    /// The game thread cannot write the store (ADR-0002), so the descriptor writes them and,
+    /// for the penalty, tells the pick-ups of the dropped items that they are gone. A
+    /// character whose descriptor has left leaves the rows where they are, and the pick-ups
+    /// wait for a tell that never comes, which is what a drop whose dropper left does.
+    pub(super) fn order_the_item_rows(
         &self,
         vid: Vid,
         channel: u8,
@@ -699,6 +709,7 @@ mod tests {
                 pk_mode: PK_MODE_PROTECT,
                 skill_group: 0,
                 alignment,
+                voice: 0,
             };
             self.world.place_body(
                 Vid::new(vid),
@@ -824,6 +835,7 @@ mod tests {
                 vid: Vid::new(KILLER),
                 pc: false,
             }),
+            false,
         );
         assert!(
             field.holds(EWindows::Inventory, 0),
@@ -855,6 +867,7 @@ mod tests {
                 vid: Vid::new(KILLER),
                 pc: false,
             }),
+            false,
         );
         assert!(
             field.holds(EWindows::Inventory, 0),
@@ -867,7 +880,26 @@ mod tests {
     fn a_death_without_a_killer_keeps_its_items() {
         let mut field = Field::a_field();
         field.join(60, WORST, &[in_inventory(0)]);
-        field.world.item_drop_penalty(Vid::new(VICTIM), None);
+        field.world.item_drop_penalty(Vid::new(VICTIM), None, false);
+        assert!(
+            field.holds(EWindows::Inventory, 0),
+            "the item keeps its slot"
+        );
+    }
+
+    /// An agreed duel's death drops nothing (`!isAgreedPVP`, `G/char_battle.cpp:1334`).
+    #[test]
+    fn an_agreed_duels_death_keeps_its_items() {
+        let mut field = Field::a_field();
+        field.join(60, WORST, &[in_inventory(0)]);
+        field.world.item_drop_penalty(
+            Vid::new(VICTIM),
+            Some(Attacker {
+                vid: Vid::new(KILLER),
+                pc: true,
+            }),
+            true,
+        );
         assert!(
             field.holds(EWindows::Inventory, 0),
             "the item keeps its slot"
@@ -897,6 +929,7 @@ mod tests {
                     vid: Vid::new(KILLER),
                     pc: false,
                 }),
+                false,
             );
             assert!(
                 field.holds(EWindows::Inventory, 0),
@@ -922,6 +955,7 @@ mod tests {
                 vid: Vid::new(KILLER),
                 pc: false,
             }),
+            false,
         );
         assert!(
             !field.holds(EWindows::Inventory, 0),
@@ -966,6 +1000,7 @@ mod tests {
                 vid: Vid::new(KILLER),
                 pc: false,
             }),
+            false,
         );
         assert!(
             field.holds(EWindows::Inventory, 0),
@@ -992,6 +1027,7 @@ mod tests {
                 vid: Vid::new(KILLER),
                 pc: false,
             }),
+            false,
         );
         assert!(
             !field.holds(
@@ -1027,6 +1063,7 @@ mod tests {
                 vid: Vid::new(KILLER),
                 pc: false,
             }),
+            false,
         );
         assert!(
             field.holds(EWindows::Inventory, 0),

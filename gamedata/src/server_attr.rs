@@ -238,6 +238,56 @@ impl ServerAttr {
         }
         self.blocks.get(row * self.columns + column)
     }
+
+    /// `/saveati`'s image of the map (`SECTREE_MANAGER::SaveAttributeToImage`,
+    /// `G/sectree_manager.cpp:1369-1473`): an uncompressed 32-bit TGA, top-left first, one
+    /// pixel per cell, over the sectrees `grid` covers. Water is blue, `BANPK` green,
+    /// blocked red, anything else white, with water winning over `BANPK` over blocked; a
+    /// sectree the file does not cover paints black. The `u16` width and height narrow the
+    /// grid, as `CTargaImage` keeps them in words; `None` for a grid the header cannot hold.
+    #[must_use]
+    pub fn attribute_image(&self, grid: SectreeGrid) -> Option<Vec<u8>> {
+        let width = grid.columns.checked_mul(128)?;
+        let height = grid.rows.checked_mul(128)?;
+        let (Ok(width), Ok(height)) = (u16::try_from(width), u16::try_from(height)) else {
+            return None;
+        };
+        // `Create` zeroes the 18-byte header, then sets the type, the size and the depth.
+        let mut image = vec![0u8; 18];
+        image[2] = 2;
+        image[12..14].copy_from_slice(&width.to_le_bytes());
+        image[14..16].copy_from_slice(&height.to_le_bytes());
+        image[16] = 32;
+        image[17] = 0x20;
+        image.reserve(usize::from(width) * usize::from(height) * 4);
+        for row in 0..grid.rows {
+            for cell_row in 0..SECTREE_CELLS {
+                for column in 0..grid.columns {
+                    for cell_column in 0..SECTREE_CELLS {
+                        let color: u32 = match self
+                            .block(usize::try_from(column).ok()?, usize::try_from(row).ok()?)
+                        {
+                            None => 0,
+                            Some(block) => {
+                                let attr = block.get(cell_column, cell_row);
+                                if attr & ATTR_WATER != 0 {
+                                    0xff00_00ff
+                                } else if attr & ATTR_BANPK != 0 {
+                                    0xff00_ff00
+                                } else if attr & ATTR_BLOCK != 0 {
+                                    0xffff_0000
+                                } else {
+                                    0xffff_ffff
+                                }
+                            }
+                        };
+                        image.extend_from_slice(&color.to_le_bytes());
+                    }
+                }
+            }
+        }
+        Some(image)
+    }
 }
 
 /// The sectrees legacy `BuildSectreeFromSetting` (`sectree_manager.cpp:224-262`) builds for a
@@ -950,5 +1000,57 @@ mod tests {
                 length: 65537
             }
         );
+    }
+
+    /// `/saveati`'s image: the 18-byte TGA header (type 2, the pixel size, 32 bits,
+    /// top-left), then one little-endian color per cell — water blue, `BANPK` green,
+    /// blocked red, anything else white, and black for a sectree the file skips.
+    #[test]
+    fn the_attribute_image_paints_one_pixel_per_cell() {
+        use super::{ATTR_BANPK, ATTR_BLOCK, ATTR_OBJECT, ATTR_WATER};
+
+        let first = cells(|at| match at {
+            0 => ATTR_WATER | ATTR_BLOCK,
+            1 => ATTR_BANPK | ATTR_BLOCK,
+            2 => ATTR_BLOCK,
+            3 => ATTR_OBJECT,
+            _ => 0,
+        });
+        let attr = ServerAttr::from_blocks(
+            2,
+            1,
+            vec![
+                CellBlock::from_cells(&first),
+                CellBlock::from_cells(&cells(|_| ATTR_WATER)),
+            ],
+        )
+        .expect("two blocks");
+        let grid = SectreeGrid {
+            x: 0,
+            y: 0,
+            columns: 3,
+            rows: 1,
+        };
+        let image = attr.attribute_image(grid).expect("a small grid");
+        assert_eq!(image.len(), 18 + 3 * 128 * 128 * 4);
+        assert_eq!(
+            &image[..18],
+            &[0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 1, 128, 0, 32, 32],
+            "the header: 384 x 128, top-left"
+        );
+        let pixel = |at: usize| u32::from_le_bytes(image[18 + at * 4..][..4].try_into().unwrap());
+        assert_eq!(
+            [pixel(0), pixel(1), pixel(2), pixel(3), pixel(4)],
+            [
+                0xff00_00ff,
+                0xff00_ff00,
+                0xffff_0000,
+                0xffff_ffff,
+                0xffff_ffff
+            ],
+            "water wins over blocked, BANPK over blocked, the rest is white"
+        );
+        assert_eq!(pixel(128), 0xff00_00ff, "the second sectree's first cell");
+        assert_eq!(pixel(256), 0, "a sectree past the file paints black");
     }
 }

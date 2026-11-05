@@ -221,6 +221,8 @@ pub enum ShopAnswer {
         guild_ops: Vec<super::guild::GuildQuestStore>,
         /// The item rows the scripts' gives changed, for the descriptor to store.
         items: Vec<db::items::RowChange>,
+        /// The gold the scripts' moves left the character holding, for the same store.
+        gold: Option<u64>,
     },
 }
 
@@ -254,10 +256,30 @@ impl GameState {
         self.item_attrs = attrs;
         self
     }
+    /// Share the `item_attr_rare` rows boot read. Without them a rare attribute rolls
+    /// against nothing.
+    #[must_use]
+    pub fn with_item_rare_attrs(
+        mut self,
+        rare: Arc<Vec<gamedata::records::ItemAttrRecord>>,
+    ) -> Self {
+        self.item_rare_attrs = rare;
+        self
+    }
     /// Share the vnum mask table boot read. Without it every item shows its own vnum.
     #[must_use]
     pub fn with_item_masks(mut self, masks: Arc<gamedata::item_mask::ItemMasks>) -> Self {
         self.item_masks = masks;
+        self
+    }
+    /// Share the special item groups boot read. Without them `/letters_open` lists
+    /// nothing and `/give_reward` draws nothing.
+    #[must_use]
+    pub fn with_item_groups(
+        mut self,
+        groups: Arc<gamedata::special_item_group::SpecialItemGroups>,
+    ) -> Self {
+        self.item_groups = groups;
         self
     }
 
@@ -320,15 +342,16 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
-        let (taken, (mut records, climbs, guild_ops, items)) =
+        let (taken, (mut records, climbs, guild_ops, items, gold)) =
             self.quest_click(vid, (target, race), place, mover);
         // A give's rows are stored even when no script took the click.
-        if taken || !items.is_empty() {
+        if taken || !items.is_empty() || gold.is_some() {
             return ShopAnswer::Quest {
                 records,
                 climbs,
                 guild_ops,
                 items,
+                gold,
             };
         }
         match self.open_window(vid, target, place, mover) {
@@ -1319,6 +1342,7 @@ mod tests {
             climbs: Vec::new(),
             guild_ops: Vec::new(),
             items: Vec::new(),
+            gold: None,
         };
         assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
         assert!(state.browsing.is_empty());

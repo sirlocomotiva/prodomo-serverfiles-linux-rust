@@ -14,7 +14,7 @@
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use gamedata::server_attr::SectreeGrid;
 
@@ -102,6 +102,10 @@ pub(super) struct MapIndex {
     spots: HashMap<EntityKey, Spot>,
     /// Looked up by key, never iterated.
     views: HashMap<EntityKey, View>,
+    /// `m_bIsObserver` (`G/entity.h:60`): the entities that watch without taking part. Only a
+    /// player ever joins, through `/observer` or a war map's watch. Looked up by key, never
+    /// iterated.
+    observers: HashSet<EntityKey>,
     /// `m_iPCCount`: the players standing in each sectree's nine. A sectree no player stands
     /// near has no entry. Looked up by key, never iterated.
     pc_counts: HashMap<Tree, u32>,
@@ -118,6 +122,7 @@ impl MapIndex {
             trees: HashMap::new(),
             spots: HashMap::new(),
             views: HashMap::new(),
+            observers: HashSet::new(),
             pc_counts: HashMap::new(),
             wakes: Vec::new(),
         }
@@ -147,6 +152,14 @@ impl MapIndex {
         self.grid
             .sectree_at(x, y)
             .map(|(column, row)| Tree { column, row })
+    }
+    /// The map's base point (`m_setting.iBaseX/Y`): the grid's first sectree times 6400.
+    pub(super) fn base(&self) -> (i32, i32) {
+        // A map base is a multiple of 6400 below `i32::MAX`; the grid column and row are
+        // small (map 1's are 64 and 140), so the products fit.
+        let x = i32::try_from(self.grid.x).unwrap_or(i32::MAX / 6400) * 6400;
+        let y = i32::try_from(self.grid.y).unwrap_or(i32::MAX / 6400) * 6400;
+        (x, y)
     }
 
     /// Where an entity stands.
@@ -293,7 +306,9 @@ impl MapIndex {
         near
     }
 
-    /// `CEntity::ViewInsert` (`G/entity_view.cpp:47-67`). Observers are dormant.
+    /// `CEntity::ViewInsert` (`G/entity_view.cpp:47-67`). An observer's insert is never sent
+    /// (`:63-64`): it is linked both ways, so it sees everything around it, but nobody is told
+    /// it is there.
     fn view_insert(
         &mut self,
         me: EntityKey,
@@ -312,13 +327,16 @@ impl MapIndex {
             return;
         }
         view.seen.insert(ent, age);
-        out.push(Effect::Insert { of: ent, to: me });
+        if !self.observers.contains(&ent) {
+            out.push(Effect::Insert { of: ent, to: me });
+        }
         if recursive {
             self.view_insert(ent, me, false, out);
         }
     }
 
-    /// `CEntity::ViewRemove` (`:69-83`).
+    /// `CEntity::ViewRemove` (`:69-83`). An observer's removal is never sent (`:78-79`):
+    /// nobody was told it is there, so nobody is told it left.
     fn view_remove(
         &mut self,
         me: EntityKey,
@@ -333,7 +351,9 @@ impl MapIndex {
         if !removed {
             return;
         }
-        out.push(Effect::Remove { of: ent, to: me });
+        if !self.observers.contains(&ent) {
+            out.push(Effect::Remove { of: ent, to: me });
+        }
         if recursive {
             self.view_remove(ent, me, false, out);
         }
@@ -355,17 +375,23 @@ impl MapIndex {
         }
     }
 
-    /// `CEntity::ViewReencode` (`:23-45`): `me`'s own removal and insert, then for each entity
-    /// it sees, `me`'s removal and insert to it and its insert to `me`, with no removal before
-    /// that last insert (quirk 3).
+    /// `CEntity::ViewReencode` (`:23-45`): nothing at all for an observer (`:25-26`); else
+    /// `me`'s own removal and insert, then for each entity it sees, `me`'s removal and insert
+    /// to it and its insert to `me`, with no removal before that last insert (quirk 3) and no
+    /// insert of an observer (`:42-43`).
     fn view_reencode(&self, me: EntityKey, out: &mut Vec<Effect>) {
+        if self.observers.contains(&me) {
+            return;
+        }
         out.push(Effect::Remove { of: me, to: me });
         out.push(Effect::Insert { of: me, to: me });
         if let Some(view) = self.views.get(&me) {
             for ent in view.seen.keys().copied() {
                 out.push(Effect::Remove { of: me, to: ent });
                 out.push(Effect::Insert { of: me, to: ent });
-                out.push(Effect::Insert { of: ent, to: me });
+                if !self.observers.contains(&ent) {
+                    out.push(Effect::Insert { of: ent, to: me });
+                }
             }
         }
     }
@@ -389,6 +415,90 @@ impl MapIndex {
             .and_then(|spot| spot.tree)
             .map(|tree| self.around(tree))
             .unwrap_or_default()
+    }
+
+    /// Whether `me` is an observer.
+    pub(super) fn is_observer(&self, me: EntityKey) -> bool {
+        self.observers.contains(&me)
+    }
+
+    /// `CEntity::SetObserverMode` (`G/entity.cpp:107-118`): the flag, then the recompute with
+    /// the change dance (`G/entity_view.cpp:145-210`) instead of the plain stale drop. Same
+    /// value changes nothing (`:109-110`). An entity standing nowhere is flagged without any
+    /// recompute, as the null-sectree return does.
+    ///
+    /// Becoming an observer sends only the own removal to each entity still around
+    /// (`:161-178`); its own view keeps them all, so it still sees everything around it.
+    /// Leaving sends both inserts to each, and links the other side back (`:182-205`).
+    /// Entries the recompute did not find drop as in [`Self::update_sectree`].
+    pub(super) fn set_observer(
+        &mut self,
+        me: EntityKey,
+        flag: bool,
+        radius: i64,
+        out: &mut Vec<Effect>,
+    ) {
+        if self.observers.contains(&me) == flag {
+            return;
+        }
+        if flag {
+            self.observers.insert(me);
+        } else {
+            self.observers.remove(&me);
+        }
+        let Some(spot) = self.spots.get(&me).copied() else {
+            return;
+        };
+        let Some(tree) = spot.tree else {
+            return;
+        };
+        let around = self.around(tree);
+        let age = {
+            let view = self.views.entry(me).or_default();
+            view.age = view.age.wrapping_add(1);
+            view.age
+        };
+        // `CFuncViewInsert`, as in `update_sectree`: an observer's view starts NPC state
+        // machines too, since no arm there reads the flag.
+        for ent in around {
+            let Some(other) = self.spots.get(&ent).copied() else {
+                continue;
+            };
+            let dx = other.x.saturating_sub(spot.x);
+            let dy = other.y.saturating_sub(spot.y);
+            if i64::from(distance_approx(dx, dy)) > radius {
+                continue;
+            }
+            self.view_insert(me, ent, true, out);
+            if let (EntityKey::Character(_), EntityKey::Npc(vid)) = (me, ent) {
+                self.wakes.push(Wake::Start(vid));
+            }
+        }
+        let seen: Vec<EntityKey> = self
+            .views
+            .get(&me)
+            .map(|view| view.seen.keys().copied().collect())
+            .unwrap_or_default();
+        for ent in seen {
+            let fresh = self
+                .views
+                .get(&me)
+                .and_then(|view| view.seen.get(&ent))
+                .is_some_and(|seen| *seen >= age);
+            if !fresh {
+                out.push(Effect::Remove { of: ent, to: me });
+                if let Some(view) = self.views.get_mut(&me) {
+                    view.seen.remove(&ent);
+                }
+                self.view_remove(ent, me, false, out);
+            } else if flag {
+                out.push(Effect::Remove { of: me, to: ent });
+            } else {
+                out.push(Effect::Insert { of: ent, to: me });
+                out.push(Effect::Insert { of: me, to: ent });
+                self.view_insert(ent, me, true, out);
+            }
+        }
     }
 
     /// `CEntity::UpdateSectree` (`G/entity_view.cpp:122-236`): insert every entity around within
@@ -580,6 +690,8 @@ impl MapIndex {
         }
         self.spots.remove(&me);
         self.views.remove(&me);
+        // The entity is gone with its flag: a re-login observes only when a war map says so.
+        self.observers.remove(&me);
     }
 }
 
@@ -1324,5 +1436,104 @@ mod tests {
         assert!(map.move_body(Npc(7), x, y, RADIUS, &mut out));
         assert_eq!(map.take_wakes(), []);
         assert_eq!(map.take_wakes(), [], "a take empties the list");
+    }
+
+    /// `SetObserverMode(true)` sends only the own removal to each entity still around, and
+    /// the observer's own view keeps them: it still sees everything, but nobody is told it
+    /// is there. A second set of the same value changes nothing.
+    #[test]
+    fn becoming_an_observer_hides_from_everyone_it_still_sees() {
+        let mut map = grid();
+        let mut out = Vec::new();
+        assert!(map.show(Pc(1), centre(5, 5), RADIUS, &mut out));
+        assert!(map.show(Pc(2), centre(5, 5), RADIUS, &mut out));
+        assert!(map.show(Npc(3), centre(5, 5), RADIUS, &mut out));
+        out.clear();
+        map.set_observer(Pc(1), true, RADIUS, &mut out);
+        assert_eq!(out, vec![rem(Pc(1), Pc(2)), rem(Pc(1), Npc(3))]);
+        assert!(map.sees(Pc(1), Pc(2)) && map.sees(Pc(1), Npc(3)));
+        assert!(map.sees(Pc(2), Pc(1)) && map.sees(Npc(3), Pc(1)));
+        out.clear();
+        map.set_observer(Pc(1), true, RADIUS, &mut out);
+        assert!(out.is_empty(), "the same value changes nothing");
+    }
+
+    /// `SetObserverMode(false)` sends both inserts to each entity still around, without
+    /// doubling the other side's link. Entities that left the range while the flag stood
+    /// drop both ways.
+    #[test]
+    fn leaving_observer_mode_shows_to_everyone_it_still_sees() {
+        let mut map = grid();
+        let mut out = Vec::new();
+        assert!(map.show(Pc(1), centre(5, 5), RADIUS, &mut out));
+        assert!(map.show(Pc(2), centre(5, 5), RADIUS, &mut out));
+        assert!(map.show(Npc(3), centre(5, 5), RADIUS, &mut out));
+        map.set_observer(Pc(1), true, RADIUS, &mut out);
+        // Npc(3) walks out of range while Pc(1) observes.
+        let (x, y, _) = centre(9, 9);
+        assert!(map.move_body(Npc(3), x, y, RADIUS, &mut out));
+        out.clear();
+        map.set_observer(Pc(1), false, RADIUS, &mut out);
+        assert_eq!(
+            out,
+            vec![
+                ins(Pc(2), Pc(1)),
+                ins(Pc(1), Pc(2)),
+                rem(Npc(3), Pc(1)),
+                rem(Pc(1), Npc(3)),
+            ]
+        );
+        assert!(!map.sees(Pc(1), Npc(3)) && !map.sees(Npc(3), Pc(1)));
+        assert!(map.sees(Pc(1), Pc(2)) && map.sees(Pc(2), Pc(1)));
+    }
+
+    /// While the flag stands, a newcomer's insert of the observer is never sent, but the
+    /// newcomer is linked both ways; the observer's removal is never sent either, on any
+    /// side's drop.
+    #[test]
+    fn an_observers_insert_and_removal_are_never_sent() {
+        let mut map = grid();
+        let mut out = Vec::new();
+        assert!(map.show(Pc(1), centre(5, 5), RADIUS, &mut out));
+        map.set_observer(Pc(1), true, RADIUS, &mut out);
+        out.clear();
+        assert!(map.show(Pc(2), centre(5, 5), RADIUS, &mut out));
+        assert_eq!(out, vec![ins(Pc(2), Pc(2)), ins(Pc(2), Pc(1))]);
+        assert!(map.sees(Pc(1), Pc(2)) && map.sees(Pc(2), Pc(1)));
+        out.clear();
+        map.remove(Pc(2), &mut out);
+        assert_eq!(out, vec![rem(Pc(2), Pc(1))]);
+        out.clear();
+        map.remove(Pc(1), &mut out);
+        assert!(out.is_empty(), "the observer leaves nothing behind");
+        assert!(!map.is_observer(Pc(1)), "the flag goes with the entity");
+    }
+
+    /// `ViewReencode` sends nothing at all for an observer, and skips an observer's insert
+    /// for anyone else.
+    #[test]
+    fn reencode_is_silent_for_observers_and_skips_their_inserts() {
+        let mut map = grid();
+        let mut out = Vec::new();
+        assert!(map.show(Pc(1), centre(5, 5), RADIUS, &mut out));
+        assert!(map.show(Pc(2), centre(5, 5), RADIUS, &mut out));
+        map.set_observer(Pc(1), true, RADIUS, &mut out);
+        out.clear();
+        // A same-spot `show` is `ViewReencode`.
+        assert!(map.show(Pc(1), centre(5, 5), RADIUS, &mut out));
+        assert!(out.is_empty());
+        map.set_observer(Pc(1), false, RADIUS, &mut out);
+        map.set_observer(Pc(2), true, RADIUS, &mut out);
+        out.clear();
+        assert!(map.show(Pc(1), centre(5, 5), RADIUS, &mut out));
+        assert_eq!(
+            out,
+            vec![
+                rem(Pc(1), Pc(1)),
+                ins(Pc(1), Pc(1)),
+                rem(Pc(1), Pc(2)),
+                ins(Pc(1), Pc(2)),
+            ]
+        );
     }
 }

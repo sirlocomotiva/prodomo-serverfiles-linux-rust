@@ -204,6 +204,7 @@ fn give_request(target: &str, vnum: u32, count: Option<u32>) -> GrantRequest {
         count: count.map(|count| {
             u16::try_from(count.clamp(1, u32::from(LIMIT))).expect("a clamped count fits a u16")
         }),
+        socket0: None,
     }
 }
 

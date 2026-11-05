@@ -302,6 +302,72 @@ impl PcSkills {
     }
 }
 
+/// `CSkillManager`'s lookup half: every `skill_proto` row's vnum and name
+/// (`G/skill.cpp:327-350`), for the `/setskill` lines (ledger 314).
+///
+/// [`PcSkills`] keeps only the hosted PC rows with compiled polys, but legacy's
+/// `Get` answers any row its `Initialize` kept, which on the owner's data is
+/// every dump row: each point name is a known one and each poly parses. This
+/// index carries no polys, only the vnums and the raw name bytes, so a name or
+/// vnum the hosted subsets never compiled still resolves, as legacy's does.
+/// The dump holds 119 rows; a duplicate vnum keeps the first row, as the map
+/// insert would, and a name lookup answers the lowest vnum whose name matches
+/// case-insensitively, as the `std::map` walk does.
+#[derive(Debug, Clone, Default)]
+pub struct SkillNames {
+    /// The raw `szName` bytes by vnum, in dump order.
+    by_vnum: BTreeMap<u32, Vec<u8>>,
+}
+
+impl SkillNames {
+    /// Read every `skill_proto` row's vnum and name from the `player.sql`
+    /// dump. Only the two columns are read; a row is never refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PcSkillError`] for a dump that does not parse or a missing
+    /// `dwVnum` or `szName` column.
+    pub fn from_dump(player: &[u8]) -> Result<Self, PcSkillError> {
+        let table = read_table(player, "skill_proto").map_err(PcSkillError::Dump)?;
+        let Some(name_at) = table.column("szName") else {
+            return Err(PcSkillError::NoColumn {
+                vnum: 0,
+                column: "szName".to_string(),
+            });
+        };
+        let mut by_vnum = BTreeMap::new();
+        for row in &table.rows {
+            let vnum = number_at(&table, row, "dwVnum")?;
+            let name = match &row[name_at] {
+                SqlValue::Text(text) | SqlValue::Bare(text) => text.clone(),
+                SqlValue::Null => Vec::new(),
+            };
+            by_vnum.entry(vnum).or_insert(name);
+        }
+        Ok(Self { by_vnum })
+    }
+
+    /// `CSkillManager::Get(vnum)`: whether any row carries `vnum`.
+    #[must_use]
+    pub fn contains(&self, vnum: u32) -> bool {
+        self.by_vnum.contains_key(&vnum)
+    }
+
+    /// `CSkillManager::Get(name)`: the lowest vnum whose name matches `name`
+    /// case-insensitively (`strcasecmp` over the `std::map`, `G/skill.cpp:337-350`).
+    #[must_use]
+    pub fn by_name(&self, name: &[u8]) -> Option<u32> {
+        self.by_vnum.iter().find_map(|(vnum, row)| {
+            (row.len() == name.len()
+                && row
+                    .iter()
+                    .zip(name.iter())
+                    .all(|(cell, want)| cell.eq_ignore_ascii_case(want)))
+            .then_some(*vnum)
+        })
+    }
+}
+
 /// What went wrong reading the PC skill tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PcSkillError {
@@ -794,5 +860,26 @@ mod tests {
         assert!(can_use(0, 1, true, 137));
         assert!(can_use(0, 1, true, 140));
         assert!(!can_use(0, 1, true, 141));
+    }
+
+    #[test]
+    fn the_name_index_covers_every_row() {
+        let names = SkillNames::from_dump(&dump("player.sql")).unwrap();
+        // All 119 rows resolve by vnum, including the refused (31) and the
+        // unhosted (125, 229) ones.
+        assert!(names.contains(1));
+        assert!(names.contains(31));
+        assert!(names.contains(125));
+        assert!(names.contains(229));
+        assert!(!names.contains(0));
+        assert!(!names.contains(7));
+        // The name match is case-insensitive and answers the vnum.
+        assert_eq!(names.by_name(b"Ambuscada"), Some(31));
+        assert_eq!(names.by_name(b"aMbUsCaDa"), Some(31));
+        assert_eq!(names.by_name(b"Incizie Tripla"), Some(1));
+        assert_eq!(names.by_name(b"incizie tripla"), Some(1));
+        assert_eq!(names.by_name(b"No Such Skill"), None);
+        assert_eq!(names.by_name(b"Ambuscad"), None);
+        assert_eq!(names.by_name(b""), None);
     }
 }

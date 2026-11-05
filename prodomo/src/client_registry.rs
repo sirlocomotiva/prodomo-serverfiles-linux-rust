@@ -89,6 +89,10 @@ pub enum ClientOrder {
         /// where it stood so that the war's end can send it back (`G/war_map.cpp:459`).
         /// `None` for a warp that lands on a public map.
         exit: Option<crate::save::ExitLocation>,
+        /// `GetSortInventoryPulse()`: the `get_global_time()` second the character's last
+        /// inventory sort holds its warps until, 0 for none. `WarpSet` refuses before it
+        /// (`G/char.cpp:6738-6741`).
+        sorted_until: u32,
     },
     /// The rows the death penalty took from a victim (`CHARACTER::ItemDropPenalty`,
     /// `G/char_battle.cpp:1016-1200`).
@@ -113,6 +117,17 @@ pub enum ClientOrder {
     /// brings it back to the place it came from (`SetPlayerProto`,
     /// `G/char.cpp:2289-2294`).
     Close,
+    /// The character returns to the select phase.
+    ///
+    /// `/phase_select`'s arm (`timed_event`, `G/cmd_general.cpp:369-379`): the
+    /// character disconnects with a full save (`Disconnect`), and the descriptor
+    /// returns to select (`SetPhase(PHASE_SELECT)`), keeping its login claim. The
+    /// connection stays open: the client picks another character on it.
+    ToSelect,
+    /// The character's row is written now (`CHARACTER::SaveReal`, which `/flush` calls,
+    /// `G/cmd_gm.cpp:4425-4446`). The game thread cannot write the store (ADR-0002), so
+    /// the descriptor writes it, as its save event does, without queueing a save.
+    Save,
 }
 
 #[derive(Debug)]
@@ -266,10 +281,109 @@ impl ChannelClients {
             .unwrap_or_default()
     }
 
+    /// The `(channel, lease)` pairs whose entry carries `vid`, in Channel order.
+    ///
+    /// The shutdown's force-close orders `Close` by lease, and the world knows its
+    /// clients by VID: this is the join between the two. The lock is never held
+    /// across an `await`; the caller copies what it needs.
+    #[must_use]
+    pub fn leases_of_vid(&self, vid: u32) -> Vec<(u8, u64)> {
+        let Ok(channels) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let mut leases: Vec<(u8, u64)> = channels
+            .iter()
+            .flat_map(|(channel, members)| {
+                members
+                    .iter()
+                    .filter(|member| member.entry.vid == vid)
+                    .map(|member| (*channel, member.id))
+            })
+            .collect();
+        leases.sort_unstable();
+        leases
+    }
+
+    /// The Names the clients of one Channel hold a character under, in join
+    /// order: `DESC_MANAGER::GetClientSet()` walked for the Names (`do_user`,
+    /// `G/cmd_gm.cpp:1741-1753`). The registry holds only clients past the
+    /// select, so every member is one `user_func` would count. Legacy's walk
+    /// stays inside one core's process, and one Channel is this process's
+    /// nearest scope, so the caller's Channel is the walk.
+    ///
+    /// The lock is never held across an `await`; the caller copies what it needs.
+    #[must_use]
+    pub fn online_names(&self, channel: u8) -> Vec<String> {
+        let Ok(channels) = self.inner.lock() else {
+            return Vec::new();
+        };
+        channels
+            .get(&channel)
+            .map(|members| {
+                members
+                    .iter()
+                    .map(|member| member.entry.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The counts `/who` reports (`do_who`, `G/cmd_gm.cpp:1682-1692`): the
+    /// empires' totals across every Channel, and the caller's Channel's own
+    /// count, which is the line's `this server`. Legacy caches the counts on
+    /// a five-second tick (`UpdateLocalUserCount`, `G/main.cpp:283-286`) and
+    /// adds the P2P cores' (`GetEmpireUserCount`); the one registry holds
+    /// every Channel, so the walk is fresh and whole.
+    ///
+    /// The empire answer skips what neither index names: `FuncWho` counts by
+    /// `GetEmpire()`, and the line prints only empires 1-3.
+    ///
+    /// The lock is never held across an `await`; the caller copies what it needs.
+    #[must_use]
+    pub fn who_counts(&self, channel: u8) -> ([usize; 4], usize) {
+        let Ok(channels) = self.inner.lock() else {
+            return ([0; 4], 0);
+        };
+        let mut empires = [0usize; 4];
+        let mut local = 0usize;
+        for (id, members) in channels.iter() {
+            for member in members {
+                if let Some(slot) = empires.get_mut(usize::from(member.entry.empire)) {
+                    *slot += 1;
+                }
+                if *id == channel {
+                    local += 1;
+                }
+            }
+        }
+        (empires, local)
+    }
+
     /// How many clients are on one map of one Channel.
     #[must_use]
     pub fn count_on_map(&self, channel: u8, map: i32) -> usize {
         self.on_map(channel, map).len()
+    }
+
+    /// How many clients are in game on the whole server: every lease on every
+    /// Channel (the `iTotal` of `DESC_MANAGER::GetUserCount`,
+    /// `G/desc_manager.cpp:430-442`, which the status reporter compares against
+    /// the two counts, `G/desc_client.cpp:292-313`). The registry holds only
+    /// clients past the select, so every member is one legacy would count.
+    ///
+    /// The lock is never held across an `await`; the caller copies what it needs.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        let Ok(channels) = self.inner.lock() else {
+            return 0;
+        };
+        channels.values().map(Vec::len).sum()
+    }
+
+    /// Whether any client is in game on the whole server.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Deliver a line built for each client to every client on every Channel, and answer how
@@ -305,10 +419,20 @@ impl ChannelClients {
     /// same character.
     #[must_use]
     pub fn outbox_of(&self, name: &str) -> Option<ClientOutbox> {
+        self.entry_of(name).map(|(_, _, outbox)| outbox)
+    }
+
+    /// The lease, entry and outbox of the client whose character's name
+    /// matches, in every Channel, for `do_transfer`'s cross-Channel arm
+    /// (`P2P_MANAGER::Find`, `G/cmd_gm.cpp:116`): the caller is told which
+    /// Channel holds the target. The match is case-insensitive, as `FindPC`
+    /// matches (`G/char_manager.cpp:244-260`).
+    #[must_use]
+    pub fn entry_of(&self, name: &str) -> Option<(u64, ClientEntry, ClientOutbox)> {
         let channels = self.inner.lock().ok()?;
         for member in channels.values().flatten() {
             if member.entry.name.eq_ignore_ascii_case(name) {
-                return Some(member.outbox.clone());
+                return Some((member.id, member.entry.clone(), member.outbox.clone()));
             }
         }
         None
@@ -416,6 +540,23 @@ impl Lease {
     #[must_use]
     pub const fn channel(&self) -> u8 {
         self.channel
+    }
+
+    /// `DESC::SetLanguage` (`G/char.cpp:11641`): the client switched its language, so every
+    /// line addressed through its entry from now on is looked up in the new one, as legacy's
+    /// `ChatPacket` reads the descriptor's language at each send.
+    pub fn set_language(&self, language: u8) {
+        let mut channels = self
+            .registry
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(member) = channels
+            .get_mut(&self.channel)
+            .and_then(|members| members.iter_mut().find(|member| member.id == self.id))
+        {
+            member.entry.language = language;
+        }
     }
 }
 
@@ -539,6 +680,7 @@ mod tests {
             private_map_index: 0,
             channel: None,
             exit: None,
+            sorted_until: 0,
         };
 
         assert!(registry.order(1, named.id(), warp.clone()));
@@ -571,6 +713,7 @@ mod tests {
             private_map_index: 0,
             channel: None,
             exit: None,
+            sorted_until: 0,
         };
 
         assert!(!registry.order(1, departed_id, warp.clone()));
@@ -591,6 +734,18 @@ mod tests {
         assert_eq!(registry.count_on_map(1, 100), 0);
     }
 
+    #[test]
+    fn the_length_spans_every_channel() {
+        let registry = Arc::new(ChannelClients::new());
+        assert!(registry.is_empty());
+        let _one = registry.join(entry(1, 100, "One"));
+        let dropped = registry.join(entry(1, 200, "Two"));
+        let _three = registry.join(entry(99, 72, "Three"));
+        assert_eq!(registry.len(), 3);
+        drop(dropped);
+        assert_eq!(registry.len(), 2);
+        assert!(!registry.is_empty());
+    }
     #[test]
     fn the_registry_reports_an_unknown_channel_as_empty() {
         let registry = ChannelClients::new();
@@ -614,5 +769,42 @@ mod tests {
         let registry = Arc::new(ChannelClients::new());
         let mut lease = registry.join(entry(1, 100, "A"));
         assert!(lease.try_next().is_none());
+    }
+
+    #[test]
+    fn the_online_names_of_a_channel_run_in_join_order() {
+        let registry = Arc::new(ChannelClients::new());
+        let _two = registry.join(entry(2, 100, "Two"));
+        let _one_first = registry.join(entry(1, 100, "OneFirst"));
+        let _one_second = registry.join(entry(1, 200, "OneSecond"));
+        assert_eq!(
+            registry.online_names(1),
+            vec!["OneFirst".to_string(), "OneSecond".to_string()]
+        );
+        assert_eq!(registry.online_names(2), vec!["Two".to_string()]);
+        assert!(registry.online_names(3).is_empty());
+    }
+
+    #[test]
+    fn the_who_counts_span_every_channel_and_name_the_caller_local() {
+        let registry = Arc::new(ChannelClients::new());
+        let _one = registry.join(ClientEntry {
+            empire: 1,
+            ..entry(1, 100, "One")
+        });
+        let _two = registry.join(ClientEntry {
+            empire: 2,
+            ..entry(1, 200, "Two")
+        });
+        let _far = registry.join(ClientEntry {
+            empire: 2,
+            ..entry(99, 72, "Far")
+        });
+        let _unled = registry.join(ClientEntry {
+            empire: 9,
+            ..entry(1, 100, "Unled")
+        });
+        assert_eq!(registry.who_counts(1), ([0, 1, 2, 0], 3));
+        assert_eq!(registry.who_counts(99), ([0, 1, 2, 0], 1));
     }
 }

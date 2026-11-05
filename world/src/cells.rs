@@ -98,6 +98,13 @@ impl MapCells {
         self.grid
     }
 
+    /// `/saveati`'s image of the map, one pixel per cell; `None` for a grid the TGA
+    /// header cannot hold.
+    #[must_use]
+    pub fn attribute_image(&self) -> Option<Vec<u8>> {
+        self.attr.attribute_image(self.grid)
+    }
+
     /// The attribute of the cell holding a position (`SECTREE::GetAttribute`), or `None` where
     /// the map built no sectree.
     #[must_use]

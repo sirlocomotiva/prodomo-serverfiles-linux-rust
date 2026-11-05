@@ -79,6 +79,10 @@ pub const CHAR_TYPE_NPC: u8 = 1;
 pub const CHAR_TYPE_STONE: u8 = 2;
 /// `CHAR_TYPE_WARP`.
 pub const CHAR_TYPE_WARP: u8 = 3;
+/// `CHAR_TYPE_DOOR`.
+pub const CHAR_TYPE_DOOR: u8 = 4;
+/// `CHAR_TYPE_BUILDING`.
+pub const CHAR_TYPE_BUILDING: u8 = 5;
 /// `CHAR_TYPE_PC`, the type a player's character carries.
 pub const CHAR_TYPE_PC: u8 = 6;
 /// `CHAR_TYPE_HORSE`.

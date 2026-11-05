@@ -27,8 +27,12 @@ use super::view::EntityKey;
 use super::GameState;
 use crate::item_move::Mover;
 use crate::loading_phase::{
-    point_changes, AFFECT_REVIVE_INVISIBLE, AFF_REVIVE_INVISIBLE, AFF_STUN,
-    REVIVE_INVISIBLE_SECONDS,
+    point_changes, AFFECT_BLEND_POTION_FIRST, AFFECT_BLEND_POTION_LAST, AFFECT_BLOCK_CHAT,
+    AFFECT_GUILD_BONUS_FIRST, AFFECT_GUILD_BONUS_LAST, AFFECT_INVISIBILITY,
+    AFFECT_MULTI_FARM_PREMIUM, AFFECT_PICKUP_ENABLE, AFFECT_PLAYER_TOP_1, AFFECT_PLAYER_TOP_3,
+    AFFECT_PREMIUM_END, AFFECT_PREMIUM_START, AFFECT_REVIVE_INVISIBLE, AFFECT_SUNGMA_END,
+    AFFECT_SUNGMA_FIRST, AFFECT_WAR_FLAG, AFFECT_WORLD_BOSS_REWARD, AFF_INVISIBILITY,
+    AFF_REVIVE_INVISIBLE, AFF_STUN, INFINITE_AFFECT_DURATION, REVIVE_INVISIBLE_SECONDS,
 };
 use crate::save::PASSES_PER_SEC;
 
@@ -47,7 +51,8 @@ pub(super) struct Affect {
     pub(super) value: i32,
     /// `dwFlag`, numbered from 1: the affect flag it sets, or 0 for none.
     pub(super) flag: u32,
-    /// `lDuration` in ticks: each tick takes one away, and the affect ends at 0 or below.
+    /// `lDuration`: in ticks, each tick taking one away until the affect ends at 0 or
+    /// below; for a realtime affect ([`is_realtime_affect`]), the `time(0)` it ends at.
     pub(super) remaining: i32,
     /// `lSPCost`: the spell points each tick spends; under them the affect ends
     /// (`ProcessAffect`, `G/char_affect.cpp:410-416`).
@@ -118,13 +123,42 @@ pub(super) fn flags_of(affects: &[Affect]) -> [u32; 2] {
     words
 }
 
-/// One tick of the countdown (`ProcessAffect`): every affect loses a tick, and those at 0 or
-/// below are taken out. The taken-out affects come back in the order they were added.
-fn count_down(affects: &mut Vec<Affect>) -> Vec<Affect> {
+/// `AFFECT_PICKUP_DEACTIVE` (`G/affect.h:181`): the pick-up row while it is switched off.
+pub(super) const AFFECT_PICKUP_DEACTIVE: u32 = AFFECT_PICKUP_ENABLE + 1;
+
+/// `IsRealTimeAffect` (`G/char_affect.cpp:29-40`): the two pick-up rows, whose `lDuration`
+/// is the wall-clock second they end at. `AddAffect` adds `time(0)` to the duration it is
+/// given (`:732`), the add packet sends the seconds left (`:120`), and each tick ends the
+/// affect once none are left instead of counting down (`:422`). The store keeps the end
+/// second, so the time a character is away counts.
+pub(super) const fn is_realtime_affect(kind: u32) -> bool {
+    kind == AFFECT_PICKUP_ENABLE || kind == AFFECT_PICKUP_DEACTIVE
+}
+
+/// `time(0)` as the 32-bit `long` legacy adds to a realtime duration.
+pub(super) fn wall_now() -> i32 {
+    i32::from_ne_bytes(GameState::global_time().to_ne_bytes())
+}
+
+/// The seconds `affect` has left: its ticks, or a realtime affect's end less `now`.
+const fn left_of(affect: &Affect, now: i32) -> i32 {
+    if is_realtime_affect(affect.kind) {
+        affect.remaining.wrapping_sub(now)
+    } else {
+        affect.remaining
+    }
+}
+
+/// One tick of the countdown (`ProcessAffect`): every affect loses a tick, or reads what is
+/// left of it at `now` when it is realtime, and those at 0 or below are taken out. The
+/// taken-out affects come back in the order they were added.
+fn count_down(affects: &mut Vec<Affect>, now: i32) -> Vec<Affect> {
     let mut expired = Vec::new();
     affects.retain_mut(|affect| {
-        affect.remaining -= 1;
-        if affect.remaining > 0 {
+        if !is_realtime_affect(affect.kind) {
+            affect.remaining -= 1;
+        }
+        if left_of(affect, now) > 0 {
             return true;
         }
         expired.push(*affect);
@@ -155,7 +189,8 @@ pub(super) fn affect_remove_frame(affect: &Affect) -> Vec<u8> {
 }
 
 /// The `GC_AFFECT_ADD` of one affect (`SendAffectAddPacket`, `G/char_affect.cpp:111-128`): the
-/// duration is the ticks it has left, and the per-tick spell-point cost it carries.
+/// duration is the ticks it has left (a realtime affect's seconds left), and the per-tick
+/// spell-point cost it carries.
 pub(super) fn affect_add_frame(affect: &Affect) -> Vec<u8> {
     let mut frame = Vec::new();
     GcAffectAdd {
@@ -165,12 +200,46 @@ pub(super) fn affect_add_frame(affect: &Affect) -> Vec<u8> {
             apply_on: affect.apply_on,
             apply_value: affect.value,
             flag: affect.flag,
-            duration: affect.remaining,
+            duration: left_of(affect, wall_now()),
             sp_cost: affect.sp_cost,
         },
     }
     .encode_into(&mut frame);
     frame
+}
+
+/// Whether `ClearAffect(true)` keeps an affect of `kind`
+/// (`G/char_affect.cpp:245-310`, called without an owner): the no-clear band 500-600
+/// with the silence and the renewal blend span, the no-save premium span with the war
+/// flag and the entry invisibility, the conqueror span, the first four guild bonuses,
+/// the multi-farm row, the two world-boss rows, the three top-player rows, and the two
+/// realtime pickup rows. `ClearAffect` passes no owner, so the GM arm answers as it
+/// does for everyone: invisibility goes.
+fn clear_affect_keeps(kind: u32) -> bool {
+    if (500..=600).contains(&kind)
+        || kind == AFFECT_BLOCK_CHAT
+        || (AFFECT_BLEND_POTION_FIRST..=AFFECT_BLEND_POTION_LAST).contains(&kind)
+    {
+        return true;
+    }
+    if (AFFECT_PREMIUM_START..=AFFECT_PREMIUM_END).contains(&kind)
+        || kind == AFFECT_WAR_FLAG
+        || kind == AFFECT_REVIVE_INVISIBLE
+    {
+        return true;
+    }
+    if (AFFECT_SUNGMA_FIRST..AFFECT_SUNGMA_END).contains(&kind)
+        || (AFFECT_GUILD_BONUS_FIRST..=AFFECT_GUILD_BONUS_LAST).contains(&kind)
+        || kind == AFFECT_MULTI_FARM_PREMIUM
+        || kind == AFFECT_WORLD_BOSS_REWARD
+        || kind == AFFECT_WORLD_BOSS_REWARD + 1
+        || (AFFECT_PLAYER_TOP_1..=AFFECT_PLAYER_TOP_3).contains(&kind)
+        || kind == AFFECT_PICKUP_ENABLE
+        || kind == AFFECT_PICKUP_ENABLE + 1
+    {
+        return true;
+    }
+    false
 }
 
 impl GameState {
@@ -209,6 +278,9 @@ impl GameState {
     pub(super) fn add_pc_affect(&mut self, vid: Vid, mut affect: Affect, over: bool) {
         if affect.remaining == 0 {
             affect.remaining = 1;
+        }
+        if is_realtime_affect(affect.kind) {
+            affect.remaining = wall_now().wrapping_add(affect.remaining);
         }
         if affect.flag == AFF_STUN {
             self.stop_for_stun(vid);
@@ -302,11 +374,18 @@ impl GameState {
             .map_or(0, |points| points.get_point(point::POINT_ATT_SPEED))
     }
 
-    /// The affect flag words `vid` has now: the ones its affects set, or 0 with no event.
+    /// The affect flag words `vid` has now: the bits set straight on its flags (the body's
+    /// base words) with the ones its affects set, as `m_afAffectFlag` holds both.
     pub(super) fn affect_flags_of(&self, vid: Vid) -> [u32; 2] {
-        self.affect_events
+        let base = self
+            .bodies
             .get(&vid)
-            .map_or([0; 2], |event| flags_of(&event.affects))
+            .map_or([0; 2], |body| body.base_affect_flags);
+        let Some(event) = self.affect_events.get(&vid) else {
+            return base;
+        };
+        let timed = flags_of(&event.affects);
+        [base[0] | timed[0], base[1] | timed[1]]
     }
 
     /// The `GC_CHARACTER_UPDATE` of `vid` with `flags` in its affect words, or `None` when the
@@ -338,6 +417,19 @@ impl GameState {
         };
         let me = EntityKey::Character(vid.raw());
         self.packet_around(me, &frame, None);
+    }
+
+    /// `CHARACTER::ChangeLanguage`'s world half (`G/char.cpp:11628-11647`): the body's
+    /// language becomes `language` and its `UpdatePacket` goes to its view. Answers
+    /// whether the character is online (`IsPC` and the descriptor hold it).
+    pub(super) fn switch_language(&mut self, vid: Vid, language: u8) -> bool {
+        let Some(body) = self.bodies.get_mut(&vid) else {
+            return false;
+        };
+        body.card.language = language;
+        let flags = self.affect_flags_of(vid);
+        self.send_affect_update(vid, flags);
+        true
     }
 
     /// `ch->ReviveInvisible(5)` at entry (`G/char.cpp:7490-7493`): the affect joins the event,
@@ -376,6 +468,211 @@ impl GameState {
         for affect in &removed {
             let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
         }
+    }
+    /// `ACMD(do_invisibility)` (`G/cmd_gm.cpp:2253-2264`): with the
+    /// invisibility flag the 203 rows go (each uncomputed through
+    /// `RemoveAffect`, its remove packet sent, the flags updated last), else
+    /// `AddAffect(203, POINT_NONE, 0, flag 3, INFINITE, 0, true)` lands.
+    pub(super) fn toggle_invisible(&mut self, vid: Vid) {
+        let flags_before = self.affect_flags_of(vid);
+        if flags_before[0] & (1 << (AFF_INVISIBILITY - 1)) == 0 {
+            self.add_pc_affect(
+                vid,
+                Affect {
+                    kind: AFFECT_INVISIBILITY,
+                    apply_on: 0,
+                    value: 0,
+                    flag: AFF_INVISIBILITY,
+                    remaining: INFINITE_AFFECT_DURATION,
+                    sp_cost: 0,
+                },
+                true,
+            );
+            return;
+        }
+        let removed = match self.affect_events.get_mut(&vid) {
+            Some(event) => take_affects_of_kind(&mut event.affects, AFFECT_INVISIBILITY),
+            None => Vec::new(),
+        };
+        for affect in &removed {
+            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            let frame = affect_remove_frame(affect);
+            let _retired = self.write_to_client(vid, frame);
+        }
+        let flags_after = self.affect_flags_of(vid);
+        if flags_after != flags_before {
+            self.send_affect_update(vid, flags_after);
+        }
+    }
+    /// `ACMD(do_affect_remove)` (`G/cmd_gm.cpp:3865-3918`): with fewer than two
+    /// words the caller's (or the named character's, falling back to the
+    /// caller) affect list goes out, after the two syntax lines; else every
+    /// affect of the type and point leaves (`FindAffect` treats point 0 as any
+    /// point, `G/char_affect.cpp:129-142`), each uncomputed, its remove packet
+    /// sent, the flags updated once at the end, and the success or the miss
+    /// line answers.
+    pub(super) fn affect_remove(&mut self, vid: Vid, rest: &[u8]) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let (first, back) = crate::command::one_argument(rest);
+        let (second, _) = crate::command::one_argument(back);
+        if first.is_empty() || second.is_empty() {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Syntax: /affect_remove <player name>",
+                &[],
+            );
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Syntax: /affect_remove <type> <point>",
+                &[],
+            );
+            let shown = if first.is_empty() {
+                vid
+            } else {
+                std::str::from_utf8(&first)
+                    .ok()
+                    .and_then(|name| self.whisper_target(name))
+                    .unwrap_or(vid)
+            };
+            let name = self
+                .characters
+                .find_by_vid(shown)
+                .map_or_else(|_| String::new(), |found| found.name().to_string());
+            let head = format!("-- Affect List of {name} -------------------------------");
+            self.tell(vid, mover, CHAT_TYPE_INFO, head.as_bytes(), &[]);
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Type Point Modif Duration Flag",
+                &[],
+            );
+            let rows: Vec<Affect> = self
+                .affect_events
+                .get(&shown)
+                .map_or_else(Vec::new, |event| event.affects.clone());
+            for row in &rows {
+                let line = format!(
+                    "{:>4} {:>5} {:>5} {:>8} {}",
+                    row.kind, row.apply_on, row.value, row.remaining, row.flag
+                );
+                self.tell(vid, mover, CHAT_TYPE_INFO, line.as_bytes(), &[]);
+            }
+            return;
+        }
+        let kind = super::skill_admin::str_to_dword(&first);
+        let point = super::skill_admin::str_to_byte(&second);
+        let flags_before = self.affect_flags_of(vid);
+        let removed = match self.affect_events.get_mut(&vid) {
+            Some(event) => {
+                let mut taken = Vec::new();
+                event.affects.retain(|affect| {
+                    if affect.kind != kind || (point != 0 && point != affect.apply_on) {
+                        return true;
+                    }
+                    taken.push(*affect);
+                    false
+                });
+                taken
+            }
+            None => Vec::new(),
+        };
+        if removed.is_empty() {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Not affected by that type and point",
+                &[],
+            );
+            return;
+        }
+        for affect in &removed {
+            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            let frame = affect_remove_frame(affect);
+            let _retired = self.write_to_client(vid, frame);
+        }
+        let flags_after = self.affect_flags_of(vid);
+        if flags_after != flags_before {
+            self.send_affect_update(vid, flags_after);
+        }
+        self.tell(
+            vid,
+            mover,
+            CHAT_TYPE_INFO,
+            b"Affect successfully removed",
+            &[],
+        );
+    }
+
+    /// `ACMD(do_clear_affect)`: `ClearAffect(true)` on the caller
+    /// (`G/cmd_gm.cpp:5019-5022`, `G/char_affect.cpp:242-340`). The kept rows stay;
+    /// each other row answers its remove packet, then uncomputes its point. Then one
+    /// update goes out when the flags or either raw speed moved, the hit and spell
+    /// points clamp to their maxima, and the event ends with its last row.
+    /// `ComputeAffect`'s MUYEONG and top-player arms wait for those systems; the DB
+    /// packet is the retired peer's.
+    pub(super) fn run_clear_affect(&mut self, vid: Vid) {
+        let flags_before = self.affect_flags_of(vid);
+        let mov_before = self.raw_point_of(vid, point::POINT_MOV_SPEED);
+        let att_before = self.raw_point_of(vid, point::POINT_ATT_SPEED);
+        let taken = match self.affect_events.get_mut(&vid) {
+            Some(event) => {
+                let mut taken = Vec::new();
+                event.affects.retain(|affect| {
+                    if clear_affect_keeps(affect.kind) {
+                        return true;
+                    }
+                    taken.push(*affect);
+                    false
+                });
+                taken
+            }
+            None => Vec::new(),
+        };
+        for affect in &taken {
+            let frame = affect_remove_frame(affect);
+            let _retired = self.write_to_client(vid, frame);
+            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+        }
+        let flags_after = self.affect_flags_of(vid);
+        if flags_after != flags_before
+            || self.raw_point_of(vid, point::POINT_MOV_SPEED) != mov_before
+            || self.raw_point_of(vid, point::POINT_ATT_SPEED) != att_before
+        {
+            self.send_affect_update(vid, flags_after);
+        }
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            let clamped = points.check_maximum_points();
+            let frames = point_changes(&clamped, vid.raw());
+            for frame in frames {
+                let _delivered = self.write_to_client(vid, frame);
+            }
+        }
+        if self
+            .affect_events
+            .get(&vid)
+            .is_some_and(|event| event.affects.is_empty())
+        {
+            let _ended = self.affect_events.remove(&vid);
+        }
+    }
+
+    /// The raw instant point of the player under `vid` (`GetPoint`,
+    /// `G/char.cpp:3705-3727`): unclamped, 0 with no character or points.
+    fn raw_point_of(&self, vid: Vid, kind: usize) -> i32 {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(0, |points| points.get_point(kind))
     }
 
     /// Runs the affect events due by `pulse`, in the order they were started.
@@ -441,7 +738,7 @@ impl GameState {
             drained += affect.sp_cost;
             true
         });
-        let expired = count_down(&mut event.affects);
+        let expired = count_down(&mut event.affects, wall_now());
         let again = recovering || !event.affects.is_empty() || !stamina_full;
         for frame in point_changes(&records, vid.raw()) {
             let _delivered = self.write_to_client(vid, frame);
@@ -684,7 +981,7 @@ impl GameState {
         let Some(event) = self.npc_affects.get_mut(&vid) else {
             return;
         };
-        let expired = count_down(&mut event.affects);
+        let expired = count_down(&mut event.affects, wall_now());
         let again = !event.affects.is_empty();
         // `ComputeAffect(pkAff, false)` on each expired affect (`ProcessAffect`): the point
         // is taken back, with no remove packet for a non-player, and the flags update
@@ -741,7 +1038,7 @@ impl GameState {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_down, flags_of, Affect};
+    use super::{count_down, flags_of, left_of, Affect, AFFECT_PICKUP_DEACTIVE};
     use crate::game_loop::PulseProcessor;
     use crate::game_state::fixtures::{a_world, enter_on, TestClock, PLACE};
     use crate::game_state::GameState;
@@ -773,14 +1070,29 @@ mod tests {
         assert_eq!(flags_of(&[]), [0, 0]);
     }
 
+    /// A realtime row is not counted down: it holds its end second, and the tick at that
+    /// second or after ends it, while a ticked row beside it loses its tick.
+    #[test]
+    fn a_realtime_affect_ends_at_its_second_and_is_not_counted_down() {
+        let pickup = Affect::buff(AFFECT_PICKUP_DEACTIVE, 0, 0, 0, 1_000, 0);
+        let mut affects = vec![pickup, Affect::revive_invisible()];
+        assert!(count_down(&mut affects, 999).is_empty());
+        assert_eq!(affects[0].remaining, 1_000);
+        assert_eq!(left_of(&affects[0], 999), 1);
+        let expired = count_down(&mut affects, 1_000);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].kind, AFFECT_PICKUP_DEACTIVE);
+        assert_eq!(affects.len(), 1);
+    }
+
     #[test]
     fn the_countdown_ends_the_revive_invisible_affect_on_the_fifth_tick() {
         let mut affects = vec![Affect::revive_invisible()];
         for _ in 0..4 {
-            assert!(count_down(&mut affects).is_empty());
+            assert!(count_down(&mut affects, 0).is_empty());
             assert_eq!(affects.len(), 1);
         }
-        let expired = count_down(&mut affects);
+        let expired = count_down(&mut affects, 0);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].kind, AFFECT_REVIVE_INVISIBLE);
         assert_eq!(expired[0].remaining, 0);
@@ -1200,5 +1512,215 @@ mod tests {
                 .all(|frame| !matches!(frame.first(), Some(0x7e | 0x7f))),
             "no add or remove: {heard:02x?}"
         );
+    }
+
+    /// `/invisible` on adds 203 with flag 3 and the infinite duration, then
+    /// off takes it back: the add and the remove each ride with the update.
+    #[test]
+    fn the_invisible_line_adds_and_removes_the_203_with_the_flag_following() {
+        use crate::loading_phase::{
+            AFFECT_INVISIBILITY, AFF_INVISIBILITY, INFINITE_AFFECT_DURATION,
+        };
+        use protocol::gc_inventory::{HEADER_GC_AFFECT_ADD, HEADER_GC_CHARACTER_UPDATE};
+        use protocol::gc_nested::GcAffectAdd;
+        use protocol::gc_vid::HEADER_GC_AFFECT_REMOVE;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (3100, 3200), 10_000);
+        while inbox.try_recv().is_ok() {}
+        let vid = Vid::new(1);
+        world.toggle_invisible(vid);
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        let add = heard
+            .iter()
+            .find(|record| record.first() == Some(&HEADER_GC_AFFECT_ADD.value()))
+            .expect("the add rides");
+        let element = GcAffectAdd::decode(add).unwrap().element;
+        assert_eq!(element.affect_type, AFFECT_INVISIBILITY);
+        assert_eq!(element.flag, AFF_INVISIBILITY);
+        assert_eq!(element.duration, INFINITE_AFFECT_DURATION);
+        assert!(
+            heard
+                .iter()
+                .any(|record| record.first() == Some(&HEADER_GC_CHARACTER_UPDATE.value())),
+            "the update rides: {heard:02x?}"
+        );
+        assert_eq!(world.affect_flags_of(vid), [0x4, 0]);
+        world.toggle_invisible(vid);
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard
+                .iter()
+                .any(|record| record.first() == Some(&HEADER_GC_AFFECT_REMOVE)),
+            "the remove rides: {heard:02x?}"
+        );
+        assert!(
+            heard
+                .iter()
+                .any(|record| record.first() == Some(&HEADER_GC_CHARACTER_UPDATE.value())),
+            "the update rides back: {heard:02x?}"
+        );
+        assert_eq!(world.affect_flags_of(vid), [0, 0]);
+    }
+
+    /// `/affect_remove` with one word lists the named character's affects after
+    /// the two syntax lines; with two words the type-and-point rows go and the
+    /// success line answers.
+    #[test]
+    fn the_affect_remove_line_lists_then_removes() {
+        use crate::game_state::fixtures::enter;
+        use protocol::gc_chat::{GcChat, CHAT_TYPE_INFO};
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, 1, (3100, 3200), 10_000);
+        let mut _other = enter(&mut world, 2, (3100, 3200), 10_000);
+        world.toggle_invisible(Vid::new(1));
+        while inbox.try_recv().is_ok() {}
+        let texts = |frames: Vec<Vec<u8>>| {
+            frames
+                .into_iter()
+                .filter(|frame| frame.first() == Some(&4))
+                .map(|frame| {
+                    let chat = GcChat::decode(&frame).unwrap();
+                    assert_eq!(chat.chat_type, CHAT_TYPE_INFO);
+                    String::from_utf8(chat.text).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        world.affect_remove(Vid::new(1), b"P2");
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert_eq!(
+            texts(heard),
+            [
+                "Syntax: /affect_remove <player name>",
+                "Syntax: /affect_remove <type> <point>",
+                "-- Affect List of P2 -------------------------------",
+                "Type Point Modif Duration Flag",
+            ]
+        );
+        world.affect_remove(Vid::new(1), b"203 0");
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        let chats = texts(heard);
+        assert_eq!(chats, ["Affect successfully removed"]);
+        assert_eq!(world.affect_flags_of(Vid::new(1)), [0, 0]);
+        world.affect_remove(Vid::new(1), b"203 0");
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert_eq!(texts(heard), ["Not affected by that type and point"]);
+    }
+
+    /// Seeds one affect of `kind` on `vid`: `value` on `point` with `flag`, 100 ticks left.
+    fn seed_affect(world: &mut GameState, vid: Vid, kind: u32, point: u8, value: i32, flag: u32) {
+        world.add_affect(
+            vid,
+            Affect {
+                kind,
+                apply_on: point,
+                value,
+                flag,
+                remaining: 100,
+                sp_cost: 0,
+            },
+        );
+    }
+
+    /// `/do_clear_affect` keeps the silence, the premium span with the war flag and
+    /// the entry invisibility, and every other listed row; each other row answers its
+    /// remove packet, then uncomputes — invisibility among them, since the call passes
+    /// no owner. One update goes out for the flag move, and the hit points clamp to
+    /// the lowered maximum.
+    #[test]
+    fn the_clear_affect_line_keeps_the_listed_rows_and_takes_the_rest() {
+        use crate::loading_phase::{
+            AFFECT_BLEND_POTION_LAST, AFFECT_BLOCK_CHAT, AFFECT_GUILD_BONUS_LAST,
+            AFFECT_INVISIBILITY, AFFECT_MULTI_FARM_PREMIUM, AFFECT_PICKUP_ENABLE,
+            AFFECT_PLAYER_TOP_3, AFFECT_POISON, AFFECT_PREMIUM_END, AFFECT_STUN,
+            AFFECT_SUNGMA_FIRST, AFFECT_WAR_FLAG, AFFECT_WORLD_BOSS_REWARD, AFF_INVISIBILITY,
+        };
+        use common::point_slot as point;
+        use protocol::gc_inventory::HEADER_GC_CHARACTER_UPDATE;
+        use protocol::gc_vid::HEADER_GC_AFFECT_REMOVE;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (3100, 3200), 10_000);
+        while inbox.try_recv().is_ok() {}
+        let vid = Vid::new(1);
+        let kept = [
+            AFFECT_BLOCK_CHAT,            // the silence
+            600,                          // the no-clear band's far end
+            AFFECT_BLEND_POTION_LAST,     // the renewal blend span's far end
+            AFFECT_PREMIUM_END,           // the no-save premium span's far end
+            AFFECT_WAR_FLAG,              // the war flag
+            AFFECT_REVIVE_INVISIBLE,      // the entry invisibility
+            AFFECT_SUNGMA_FIRST,          // the conqueror span's start
+            AFFECT_GUILD_BONUS_LAST,      // the kept guild bonuses' far end
+            AFFECT_MULTI_FARM_PREMIUM,    // the multi-farm row
+            AFFECT_WORLD_BOSS_REWARD + 1, // the daily world-boss row
+            AFFECT_PLAYER_TOP_3,          // the top-player span's far end
+            AFFECT_PICKUP_ENABLE + 1,     // the deactive pickup row
+        ];
+        for kind in &kept {
+            seed_affect(&mut world, vid, *kind, 0, 0, 0);
+        }
+        seed_affect(&mut world, vid, AFFECT_INVISIBILITY, 0, 0, AFF_INVISIBILITY);
+        seed_affect(
+            &mut world,
+            vid,
+            AFFECT_STUN,
+            u8::try_from(point::POINT_MOV_SPEED).unwrap(),
+            10,
+            5,
+        );
+        seed_affect(
+            &mut world,
+            vid,
+            AFFECT_POISON,
+            u8::try_from(point::POINT_MAX_HP).unwrap(),
+            50,
+            0,
+        );
+        world.change_pc_point(vid, point::POINT_MAX_HP, 50, false);
+        world.change_pc_point(vid, point::POINT_HP, 10_000, false);
+        while inbox.try_recv().is_ok() {}
+        world.run_clear_affect(vid);
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        let removes: Vec<u32> = heard
+            .iter()
+            .filter(|frame| frame.first() == Some(&HEADER_GC_AFFECT_REMOVE))
+            .map(|frame| u32::from_le_bytes(frame[1..5].try_into().unwrap()))
+            .collect();
+        assert_eq!(removes, [AFFECT_INVISIBILITY, AFFECT_STUN, AFFECT_POISON]);
+        assert!(
+            heard
+                .iter()
+                .any(|frame| frame.first() == Some(&HEADER_GC_CHARACTER_UPDATE.value())),
+            "the update rides: {heard:02x?}"
+        );
+        let left: Vec<u32> = world.affect_events[&vid]
+            .affects
+            .iter()
+            .map(|affect| affect.kind)
+            .collect();
+        assert_eq!(left, kept);
+        let points = world.characters.find_by_vid(vid).unwrap().points().unwrap();
+        assert_eq!(points.hp(), points.max_hp());
+    }
+
+    /// The keep predicate's span ends: each listed span's far end stays, the
+    /// conqueror span ends before its immune, and the fifth guild bonus goes.
+    #[test]
+    fn the_clear_keep_predicate_holds_its_span_ends() {
+        use crate::loading_phase::{
+            AFFECT_BLEND_POTION_FIRST, AFFECT_GUILD_BONUS_FIRST, AFFECT_GUILD_BONUS_LAST,
+            AFFECT_PICKUP_ENABLE, AFFECT_PLAYER_TOP_1, AFFECT_PREMIUM_START, AFFECT_SUNGMA_END,
+            AFFECT_WORLD_BOSS_REWARD,
+        };
+        assert!(super::clear_affect_keeps(AFFECT_BLEND_POTION_FIRST));
+        assert!(super::clear_affect_keeps(AFFECT_GUILD_BONUS_FIRST));
+        assert!(super::clear_affect_keeps(AFFECT_PLAYER_TOP_1));
+        assert!(super::clear_affect_keeps(AFFECT_PREMIUM_START));
+        assert!(!super::clear_affect_keeps(AFFECT_SUNGMA_END));
+        assert!(super::clear_affect_keeps(AFFECT_WORLD_BOSS_REWARD));
+        assert!(super::clear_affect_keeps(AFFECT_PICKUP_ENABLE));
+        assert!(!super::clear_affect_keeps(AFFECT_GUILD_BONUS_LAST + 1));
     }
 }

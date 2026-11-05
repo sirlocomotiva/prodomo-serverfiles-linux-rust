@@ -38,7 +38,7 @@ use crate::game_loop_messages::{EnterPlace, GameCommand, GroundPlace};
 use crate::loading_phase::{PcCard, PK_MODE_PEACE};
 use crate::movement::{
     judge_move, move_relay, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, FUNC_ATTACK,
-    FUNC_COMBO,
+    FUNC_COMBO, FUNC_SKILL,
 };
 use crate::sync_position::{distance_approx, SyncOwnershipState};
 use tracing::{debug, info, warn};
@@ -160,9 +160,23 @@ pub(super) struct Body {
     pub(super) sync: SyncOwnershipState,
     /// What its insert records say that walking does not change.
     pub(super) card: PcCard,
+    /// `m_bNowWalking` (`G/char.h:1031`): what the walk-mode record and the `IsWalking`
+    /// move clip read. `m_bWalking`, the restore point, changes only on the two mode
+    /// lines and the stamina refill, both of which set the two flags together.
+    pub(super) now_walking: bool,
     /// The Pulse the body last stopped moving on, which the stamina refill counts three seconds
     /// from (`m_dwStopTime`, in Pulses; see [`crate::game_state::affect`]).
     pub(super) stop_pulse: u64,
+    /// `m_pointsInstant.iDragonSoulActiveDeck` (`G/char.h:472`): the deck the stones draw
+    /// from, -1 while no deck is active (`G/char.cpp:469`).
+    pub(super) active_deck: i32,
+    /// `m_afAffectFlag`'s bits no affect sets: `SetPolymorph`'s `AFF_SPAWN`
+    /// (`G/char.cpp:7701`), which nothing resets (D5).
+    /// [`GameState::affect_flags_of`](super::GameState::affect_flags_of) ORs the timed bits in.
+    pub(super) base_affect_flags: [u32; 2],
+    /// `m_bAddChrState`'s `ADD_CHARACTER_STATE_SPAWN`, held only while `SetPolymorph`
+    /// reencodes (`G/char.cpp:7700-7705`), so only that reencode's inserts carry it.
+    pub(super) add_spawn: bool,
 }
 
 impl Body {
@@ -190,7 +204,11 @@ impl Body {
                 claimed_at: None,
             },
             card,
+            now_walking: false,
             stop_pulse,
+            active_deck: -1,
+            base_affect_flags: [0; 2],
+            add_spawn: false,
         }
     }
 }
@@ -259,12 +277,14 @@ pub(super) fn rotation_to_xy(dx: i32, dy: i32) -> f32 {
 }
 
 /// `IsWalking()` for a player: `m_bNowWalking || GetStamina() <= 0` (`G/char.h:951`).
-/// `m_bNowWalking` changes only through the stamina arm of `PointChange`, which is not ported,
-/// so a player walks exactly when its stamina is spent (V3). A player with no points runs.
-pub(super) fn is_walking(character: &Character) -> bool {
-    character
-        .points()
-        .is_some_and(|points| points.stamina() <= 0)
+/// The flag rode with the two mode lines (ledger 295); the stamina drain and refill
+/// are not ported, so a player walks when its flag is set or its stamina is spent
+/// (V3). A player with no points runs.
+pub(super) fn is_walking(character: &Character, now_walking: bool) -> bool {
+    now_walking
+        || character
+            .points()
+            .is_some_and(|points| points.stamina() <= 0)
 }
 
 /// `CHARACTER::GetMotionMode` (`G/char.cpp:3513-3553`) for the weapon in the weapon slot, or no
@@ -362,11 +382,15 @@ impl GameState {
         let Some(points) = character.points() else {
             return MOTION_SPEED_FALLBACK;
         };
+        let flag = self
+            .bodies
+            .get(&Vid::new(vid))
+            .is_some_and(|body| body.now_walking);
         let weapon =
             Equipment::of(character.items(), &self.protos).wear(EWearPositions::Weapon as u16);
         let mode = motion_mode_of(weapon.as_ref());
         self.motions
-            .get(points.race(), mode, is_walking(character))
+            .get(points.race(), mode, is_walking(character, flag))
             .map_or(MOTION_SPEED_FALLBACK, MotionClip::speed)
     }
 
@@ -448,6 +472,32 @@ impl GameState {
                 index.place_treeless(EntityKey::Character(vid.raw()), at, &mut effects);
             }
             self.deliver(&effects, Some((vid.raw(), &mut records)));
+        }
+        // `CWarMap::IncMember` (`G/war_map.cpp:384`) runs after the login's `Show`
+        // (`G/input_login.cpp:590,780`): a watcher is shown first, then hidden with the dance,
+        // so its viewers are sent the insert and the removal. The dance writes nothing to the
+        // watcher itself, so only the records it sends others ride out here.
+        if self
+            .war_maps
+            .get(&place.map)
+            .and_then(|war| {
+                self.characters
+                    .find_by_vid(vid)
+                    .ok()
+                    .map(|character| war.watchers.contains(&character.player_id()))
+            })
+            .unwrap_or(false)
+        {
+            let mut effects = Vec::new();
+            if let Some(index) = self.maps.get_mut(&key) {
+                index.set_observer(
+                    EntityKey::Character(vid.raw()),
+                    true,
+                    self.view_radius,
+                    &mut effects,
+                );
+            }
+            self.deliver(&effects, None);
         }
         records
     }
@@ -570,6 +620,13 @@ impl GameState {
                 if matches!(record.function, FUNC_ATTACK | FUNC_COMBO) {
                     self.remove_revive_invisible(vid);
                 }
+                // `OnMove`'s `mining_cancel` (`G/char.cpp:6176-6178`), for the attack
+                // functions' `OnMove(true)` and a skill motion's `OnMove()`.
+                if matches!(record.function, FUNC_ATTACK | FUNC_COMBO)
+                    || record.function & FUNC_SKILL != 0
+                {
+                    self.cancel_mining(vid);
+                }
                 match accepted.disposition {
                     MoveDisposition::Goto { x, y } => {
                         let _set = self.goto(raw, x, y);
@@ -623,7 +680,8 @@ impl GameState {
     }
 
     /// `CHARACTER::Move` (`G/char.cpp:3610-3622`): the same point returns true at once, with
-    /// nothing changed; any other point is a `Sync`. `OnMove` is not ported (no attack state).
+    /// nothing changed; any other point runs `OnMove` (only its `mining_cancel` is ported) and
+    /// is a `Sync`.
     pub(super) fn move_to(&mut self, vid: u32, x: i32, y: i32) -> bool {
         if self
             .spot_of(vid)
@@ -631,6 +689,7 @@ impl GameState {
         {
             return true;
         }
+        self.cancel_mining(Vid::new(vid));
         self.sync_body(vid, x, y)
     }
 
@@ -1212,7 +1271,7 @@ mod tests {
                 body,
                 spot,
                 &points(820),
-                Some((to, false)),
+                Some((to, false, false)),
                 clock.now(),
                 [0; 2],
                 (0, 0),
@@ -1351,16 +1410,25 @@ mod tests {
     }
 
     #[test]
-    fn walking_is_stamina_at_or_below_zero() {
+    fn walking_is_the_flag_or_a_spent_stamina() {
         let clock = TestClock::default();
         let mut world = a_world(&clock);
         let _one = enter(&mut world, 7, (3200, 3200), 0);
         let _two = enter(&mut world, 8, (3200, 3200), 1);
         let _three = enter(&mut world, 9, (3200, 3200), -1);
-        let walking = |vid: u32| is_walking(world.characters.find_by_vid(Vid::new(vid)).unwrap());
-        assert!(walking(7));
-        assert!(!walking(8));
-        assert!(walking(9));
+        let walking = |world: &GameState, vid: u32| {
+            let character = world.characters.find_by_vid(Vid::new(vid)).unwrap();
+            let flag = world
+                .bodies
+                .get(&Vid::new(vid))
+                .is_some_and(|body| body.now_walking);
+            is_walking(character, flag)
+        };
+        assert!(walking(&world, 7));
+        assert!(!walking(&world, 8));
+        assert!(walking(&world, 9));
+        world.bodies.get_mut(&Vid::new(8)).unwrap().now_walking = true;
+        assert!(walking(&world, 8), "the flag walks a rested body");
     }
 
     #[test]
@@ -1368,8 +1436,14 @@ mod tests {
         let clock = TestClock::default();
         let mut world = a_world(&clock);
         let _inbox = enter(&mut world, 7, (3200, 3200), 0);
-        let walking =
-            |world: &GameState| is_walking(world.characters.find_by_vid(Vid::new(7)).unwrap());
+        let walking = |world: &GameState| {
+            let character = world.characters.find_by_vid(Vid::new(7)).unwrap();
+            let flag = world
+                .bodies
+                .get(&Vid::new(7))
+                .is_some_and(|body| body.now_walking);
+            is_walking(character, flag)
+        };
         assert!(walking(&world));
         world
             .characters

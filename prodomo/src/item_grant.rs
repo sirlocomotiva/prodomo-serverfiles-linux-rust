@@ -75,6 +75,9 @@ pub struct GrantRequest {
     /// The ceiling is the global `ITEM_MAX_COUNT` (`common/item_length.h:19`), 5000.
     /// There is no per-prototype maximum in this fork; see 200.4.
     pub count: Option<u16>,
+    /// The first socket's value (`SetSocket(0, ...)`), or `None` for a zeroed item.
+    /// `/polyitem` grants its ball with the mob vnum here (`G/cmd_gm.cpp:3084`).
+    pub socket0: Option<u32>,
 }
 
 /// Why a grant did not happen.
@@ -225,6 +228,11 @@ pub fn grant_item(
     // both travel from the prototype and not from anything the grant chose.
     item.flags = proto.flags;
     item.anti_flags = proto.anti_flags;
+    // `SetSocket(0, ...)` (`G/cmd_gm.cpp:3084`): the socket is a `long`, so the vnum's
+    // bits read back signed, as the legacy caller's `DWORD` argument does.
+    if let Some(socket0) = request.socket0 {
+        item.sockets[0] = i32::from_ne_bytes(socket0.to_ne_bytes());
+    }
 
     let placed =
         place(character.items_mut(), &mut item, &banks, inven_point).map_err(
@@ -352,6 +360,7 @@ mod tests {
             target: "Shaman".to_owned(),
             vnum,
             count,
+            socket0: None,
         }
     }
 

@@ -11,7 +11,7 @@
 //! Divergences follow: the status is never up to five minutes stale, and the entries are in port
 //! order, where legacy used the iteration order of an `unordered_map`.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use common::config::GameSettings;
 use protocol::gc_channel_status::{encode_channel_status, ChannelStatusEntry};
@@ -25,13 +25,15 @@ pub const STATUS_BUSY: u8 = 2;
 /// `bStatus` above the full count.
 pub const STATUS_FULL: u8 = 3;
 
-/// The legacy status rule (`G/desc_client.cpp:306-307`).
+/// The legacy status rule (`G/desc_client.cpp:306-307`): `iTotal > g_iFullUserCount ? 3 :
+/// iTotal > g_iBusyUserCount ? 2 : 1`, all `int`.
 ///
 /// `online` is every character in game on the whole server: legacy adds the P2P count, and the DB
 /// server introduces every game Core to every other one, whatever its Channel
-/// (`D/ClientManager.cpp:1415-1433`). Both comparisons are strict.
+/// (`D/ClientManager.cpp:1415-1433`). Both comparisons are strict, and a negative
+/// threshold keeps every non-negative count above it.
 #[must_use]
-pub const fn channel_status(online: u32, no_more_clients: bool, busy: u32, full: u32) -> u8 {
+pub const fn channel_status(online: i32, no_more_clients: bool, busy: i32, full: i32) -> u8 {
     if no_more_clients {
         STATUS_CLOSED
     } else if online > full {
@@ -47,10 +49,9 @@ pub const fn channel_status(online: u32, no_more_clients: bool, busy: u32, full:
 #[derive(Debug)]
 pub struct ChannelStatusBoard {
     ports: Vec<u16>,
-    busy: u32,
-    full: u32,
+    busy: AtomicI32,
+    full: AtomicI32,
     shutdowned: bool,
-    online: AtomicU32,
 }
 
 impl ChannelStatusBoard {
@@ -63,33 +64,36 @@ impl ChannelStatusBoard {
         ports.dedup();
         Self {
             ports,
-            busy: game.busy_user_count,
-            full: game.full_user_count,
+            busy: AtomicI32::new(i32::try_from(game.busy_user_count).unwrap_or(i32::MAX)),
+            full: AtomicI32::new(i32::try_from(game.full_user_count).unwrap_or(i32::MAX)),
             shutdowned: game.shutdowned,
-            online: AtomicU32::new(0),
         }
     }
 
-    /// Record how many characters are in game on the whole server.
-    pub fn set_online(&self, online: u32) {
-        self.online.store(online, Ordering::Relaxed);
+    /// Reread the two thresholds (`/reload u`, `LoadStateUserCount`,
+    /// `G/config.cpp:1778-1788`), which the next status list answers from.
+    pub fn set_counts(&self, busy: i32, full: i32) {
+        self.busy.store(busy, Ordering::Relaxed);
+        self.full.store(full, Ordering::Relaxed);
     }
 
-    /// How many characters are in game on the whole server.
-    #[must_use]
-    pub fn online(&self) -> u32 {
-        self.online.load(Ordering::Relaxed)
+    /// Reread the `full` threshold alone: the half of [`Self::set_counts`] a lone
+    /// first word in `state_user_count` moves, while `busy` stands.
+    pub fn set_full(&self, full: i32) {
+        self.full.store(full, Ordering::Relaxed);
     }
 
-    /// The `HEADER_GC_RESPOND_CHANNELSTATUS` record. Every port shares one status, as in legacy,
-    /// where every Core computes it from the same server-wide count.
+    /// The `HEADER_GC_RESPOND_CHANNELSTATUS` record: `online` is every character in game
+    /// on the whole server, which the caller counts fresh (legacy caches it on a
+    /// five-second tick and adds the P2P cores'). Every port shares one status, as in
+    /// legacy, where every Core computes it from the same server-wide count.
     #[must_use]
-    pub fn respond(&self, shutting_down: bool) -> Vec<u8> {
+    pub fn respond(&self, online: i32, shutting_down: bool) -> Vec<u8> {
         let status = channel_status(
-            self.online.load(Ordering::Relaxed),
+            online,
             self.shutdowned || shutting_down,
-            self.busy,
-            self.full,
+            self.busy.load(Ordering::Relaxed),
+            self.full.load(Ordering::Relaxed),
         );
         let entries: Vec<ChannelStatusEntry> = self
             .ports
@@ -112,6 +116,10 @@ mod tests {
         assert_eq!(channel_status(1200, false, 650, 1200), STATUS_BUSY);
         assert_eq!(channel_status(1201, false, 650, 1200), STATUS_FULL);
         assert_eq!(channel_status(1201, true, 650, 1200), STATUS_CLOSED);
+        // Signed, as the `int` globals are: a negative threshold keeps even an
+        // empty server above it.
+        assert_eq!(channel_status(0, false, -1, 1200), STATUS_BUSY);
+        assert_eq!(channel_status(0, false, -1, -1), STATUS_FULL);
         assert_eq!(channel_status(0, true, 650, 1200), STATUS_CLOSED);
     }
 
@@ -119,7 +127,7 @@ mod tests {
     fn the_board_lists_each_port_once_in_order_with_one_status() {
         let board = ChannelStatusBoard::new([30005, 30003, 30019, 30003], &GameSettings::default());
         assert_eq!(
-            board.respond(false),
+            board.respond(0, false),
             [
                 0xd2, 3, 0, 0, 0, // header and count
                 0x33, 0x75, 1, // 30003
@@ -128,9 +136,8 @@ mod tests {
                 1,
             ]
         );
-        board.set_online(651);
-        assert_eq!(board.respond(false)[7], STATUS_BUSY);
-        assert_eq!(board.respond(true)[7], STATUS_CLOSED);
+        assert_eq!(board.respond(651, false)[7], STATUS_BUSY);
+        assert_eq!(board.respond(651, true)[7], STATUS_CLOSED);
     }
 
     #[test]
@@ -140,6 +147,6 @@ mod tests {
             ..GameSettings::default()
         };
         let board = ChannelStatusBoard::new([30003], &game);
-        assert_eq!(board.respond(false)[7], STATUS_CLOSED);
+        assert_eq!(board.respond(0, false)[7], STATUS_CLOSED);
     }
 }

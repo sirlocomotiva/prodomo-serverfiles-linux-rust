@@ -82,7 +82,6 @@ impl GameState {
         let Some(&(channel, map, at)) = self.npc_of.get(&mob) else {
             return false;
         };
-        let (channel, map, at) = (channel, map, at);
         let characters = &self.characters;
         let Ok(character) = characters.find_by_vid(victim) else {
             return false;
@@ -152,6 +151,7 @@ impl GameState {
         if let Some(body) = self.bodies.get_mut(&victim) {
             body.last_move = now;
         }
+        self.cancel_mining(victim);
         true
     }
 
@@ -1575,13 +1575,9 @@ mod tests {
         let mut fighter = a_fighter(ME, 406, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
         fighter.fight.damage_range = [30, 30];
         fighter.fight.dam_multiply_bits = 1.0f32.to_bits();
-        let mut user_quests = quests();
-        user_quests.manager_mut().set_event_flag(b"user_dam", 200);
-        let mut mob_quests = quests();
-        mob_quests.manager_mut().set_event_flag(b"mob_dam", 200);
         let plain = run_swings(&clock, fighter.clone(), None);
-        let user = run_swings(&clock, fighter.clone(), Some(user_quests));
-        let mob = run_swings(&clock, fighter.clone(), Some(mob_quests));
+        let user = run_swings(&clock, fighter.clone(), Some((b"user_dam".as_slice(), 200)));
+        let mob = run_swings(&clock, fighter.clone(), Some((b"mob_dam".as_slice(), 200)));
         // The player's swing draws only the damage roll: weaponless, no crit or
         // penetrate points, so `user_dam` multiplies the shown number exactly.
         assert_eq!(user.0, plain.0 * 2, "user_dam doubles the player's hit");
@@ -1590,27 +1586,16 @@ mod tests {
         assert!(mob.1 > plain.1, "mob_dam grows the monster's swing");
     }
 
-    /// The quest runtime over the legacy locale, for the flag tests.
-    fn quests() -> super::super::quests::Quests {
-        use gamedata::mob_locale_names::MobNamesByLanguage;
-        use quest::manager::Manager;
-        use std::sync::Arc;
-        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../legacy/gamedata/locale/europe");
-        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
-        super::super::quests::Quests::new(manager, Arc::default(), MobNamesByLanguage::default())
-    }
-
-    /// The player's shown hit and the monster's shown swing on a fresh field with
-    /// `quests`: the player's hit starts the fight, the seed fixes the dice.
+    /// The player's shown hit and the monster's shown swing on a fresh field with the
+    /// event flag `flag` set: the player's hit starts the fight, the seed fixes the dice.
     fn run_swings(
         clock: &TestClock,
         fighter: world::npc::Npc,
-        quests: Option<super::super::quests::Quests>,
+        flag: Option<(&[u8], i32)>,
     ) -> (i32, i32) {
         let mut world = stand_field(clock, vec![fighter], open_cells(), true);
-        if let Some(quests) = quests {
-            world = world.with_quests(quests);
+        if let Some((name, value)) = flag {
+            world.set_event_flag(name, value);
         }
         let mut alpha = enter(&mut world, 1, NEAR, 12_345);
         world.start_pc_recovery(Vid::new(1));

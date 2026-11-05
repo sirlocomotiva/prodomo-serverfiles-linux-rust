@@ -137,6 +137,19 @@ const RESTART_WAIT_NOTICE: &[u8] = b"[LS;516;%d]";
 /// What `/restart_now` says to a player short of its price (`G/cmd_general.cpp:482`).
 const RESTART_NOW_PRICE_NOTICE: &[u8] = b"@@(cmd_general)tradus:You have to pay 300000 Gold";
 
+/// Whether `/cannot_dead` stands on a player: legacy's `cannot_dead`
+/// (`G/char.h:2106`), set by `SetArmada` and cleared by `ResetArmada`
+/// (`G/char.h:2103-2104`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Armada {
+    /// Mortal: damage changes the hit points.
+    #[default]
+    Off,
+    /// `/cannot_dead` stands: the damage path skips the hit-point change
+    /// (`G/char_battle.cpp:2387-2394`).
+    On,
+}
+
 /// What legacy's `CHARACTER` keeps of a player's fight beyond its points.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct PcCombat {
@@ -144,6 +157,8 @@ pub(super) struct PcCombat {
     stunned: bool,
     /// `POS_DEAD` and `ADD_CHARACTER_STATE_DEAD`.
     pub(super) dead: bool,
+    /// The Armada: `/cannot_dead` stands it, `/can_dead` lays it down.
+    pub(super) armada: Armada,
     /// `m_dwKillerPID`: the player whose hit stunned it, which `Dead` reads and resets.
     killer_pid: u32,
     /// `INSTANT_FLAG_DEATH_PENALTY`: the next `DeathPenalty` may take experience.
@@ -288,6 +303,22 @@ impl GameState {
         self
     }
 
+    /// Set `g_iStatusPointSetMaxValue`, the configured
+    /// `game.status_point_set_max_value`, which `/stat` reads as its cap.
+    #[must_use]
+    pub const fn with_status_point_set_max_value(mut self, max: i32) -> Self {
+        self.stat_max = max;
+        self
+    }
+
+    /// Set `gPlayerMaxConquerorLevel`, the configured `game.max_conqueror_level`, which
+    /// the conqueror arms read.
+    #[must_use]
+    pub const fn with_max_conqueror_level(mut self, max: i32) -> Self {
+        self.max_conqueror_level = max;
+        self
+    }
+
     /// Set `PK_PROTECT_LEVEL`, below which a character is in the protect PK mode.
     ///
     /// The configured `game.pk_protect_level`. Until this is called the level is 15.
@@ -370,7 +401,7 @@ impl GameState {
 
     /// One quest `levelup` raise for the player under `vid`, which just leveled up: its
     /// scripts' records go to its own client.
-    fn raise_quest_levelup(&mut self, vid: Vid) {
+    pub(super) fn raise_quest_levelup(&mut self, vid: Vid) {
         let Some(mover) = self.own_mover(vid) else {
             return;
         };
@@ -563,12 +594,18 @@ impl GameState {
                 .map(|attacker| attacker.vid);
             self.send_pc_damage_info_to(victim, attacker, flag, damage);
         }
+        // `Damage`'s detail line (`:2367-2371`): a flagged victim hears its player
+        // attacker's name, VID and point, after the damage packet.
+        if let Some(found) = attacker.filter(|attacker| attacker.pc) {
+            self.log_pc_damage(found.vid, victim);
+        }
         PcDamageHead::Open { hp, damage }
     }
 
     /// What [`GameState::damage_pc`] does from the hit-point change on: the lethal clamp,
     /// the change, the targeters' broadcast, and the stun with the attacker's PID as the
-    /// killer when the attacker is a player.
+    /// killer when the attacker is a player. While the Armada stands the
+    /// whole guard runs and nothing inside it does (`:2387-2394`).
     pub(super) fn damage_pc_tail(
         &mut self,
         attacker: Option<Attacker>,
@@ -577,7 +614,13 @@ impl GameState {
         damage: i32,
     ) {
         let raw = victim.raw();
-        // `cannot_dead` is a GM's flag, which no player has.
+        if self
+            .pc_combat
+            .get(&raw)
+            .is_some_and(|combat| combat.armada == Armada::On)
+        {
+            return;
+        }
         let damage = if hp.saturating_sub(damage) <= 0 {
             hp
         } else {
@@ -593,6 +636,15 @@ impl GameState {
             let killer = attacker.filter(|attacker| attacker.pc);
             self.pc_combat.entry(raw).or_default().killer_pid =
                 killer.map_or(0, |attacker| attacker.vid.raw());
+        }
+    }
+
+    /// `ACMD(do_can_dead)` (`G/cmd_gm.cpp:4715-4721`): the caller's
+    /// Armada lays down (`can_dead`) or stands (`cannot_dead`). Nothing
+    /// rides, nothing is stored.
+    pub(super) fn run_can_dead(&mut self, vid: Vid, can: bool) {
+        if let Some(combat) = self.pc_combat.get_mut(&vid.raw()) {
+            combat.armada = if can { Armada::Off } else { Armada::On };
         }
     }
 
@@ -646,7 +698,7 @@ impl GameState {
 
     /// The player arms of `Dead` (`G/char_battle.cpp:1238-1696`), for the player under `vid`
     /// killed by `killer`, or else by the player whose PID it kept.
-    fn dead_pc(&mut self, vid: Vid, killer: Option<Attacker>) {
+    pub(super) fn dead_pc(&mut self, vid: Vid, killer: Option<Attacker>) {
         let raw = vid.raw();
         let Some(combat) = self.pc_combat.get_mut(&raw) else {
             return;
@@ -664,12 +716,15 @@ impl GameState {
                 pc: true,
             })
         });
-        // A player killer drops its target when it is this player (`:1275-1276`). The PvP,
-        // battle-pass and quest-kill steps wait for PvP; the guild step scores the war.
+        // A player killer drops its target when it is this player (`:1275-1276`). The
+        // battle-pass step waits for its system; the quest-kill and guild steps run.
+        // `isAgreedPVP` (`:1280`): the duel's death, won for the killer when they fight.
+        let mut agreed_pvp = false;
         if let Some(killer) = killer.filter(|killer| killer.pc) {
             if self.targets.of(killer.vid.raw()) == Some(raw) {
                 self.target(killer.vid, 0);
             }
+            agreed_pvp = self.pvp_dead(vid, self.pvp_pid_of(killer.vid));
             // `SetQuestNPCID(GetVID())` and `CQuestManager::Kill(pkKiller->GetPlayerID(),
             // quest::QUEST_NO_NPC)` (`G/char_battle.cpp:1308-1309`): the killer's `kill`
             // scripts run, and the no-NPC map's are the ones that run — the victim's
@@ -683,8 +738,8 @@ impl GameState {
         }
         // `ItemDropPenalty` (`:1338-1346`): the victim loses the items its own alignment
         // and the draws choose. The call is outside the player-killer arm, because legacy's
-        // is: a monster's kill reaches it too, and only the war skips it.
-        self.item_drop_penalty(vid, killer);
+        // is: a monster's kill reaches it too, and only the war and the agreed duel skip it.
+        self.item_drop_penalty(vid, killer, agreed_pvp);
         // `SetPosition(POS_DEAD)`. `ClearAffect(true)` uncomputes every affect but the
         // no-save and no-clear ones (`G/char_affect.cpp:259-337`): of the affects a player
         // can hold, the revive-invisible stays and the poison, stun, slow and 263's slow
@@ -957,6 +1012,7 @@ impl GameState {
                         private_map_index: 0,
                         channel: None,
                         exit: None,
+                        sorted_until: self.sort_lock(vid),
                     },
                 )
             });
@@ -1125,9 +1181,11 @@ impl GameState {
     /// (`G/char_affect.cpp:259-337`): every affect but the no-clear and no-save ones is
     /// uncomputed, erased, and refused its next run, with its remove packet to the player.
     /// Of the affects a player can hold, the revive-invisible stays (no-save, `:43-55`),
-    /// the silence stays (no-clear, `IS_NO_CLEAR_ON_DEATH_AFFECT`, `:57-83`), and
-    /// the poison, stun, slow and 263's slow go. Then the flags update when they or either
-    /// speed moved. `CheckMaximumPoints` is dead here: no affect here touches a maximum.
+    /// the silence and the 500-600 band stay (no-clear, `IS_NO_CLEAR_ON_DEATH_AFFECT`,
+    /// `:57-83` — the band holds the skill-book delays and the dragon-soul
+    /// qualification), and the poison, stun, slow and 263's slow go. Then the flags
+    /// update when they or either speed moved. `CheckMaximumPoints` is dead here: no
+    /// affect here touches a maximum.
     fn clear_affects_on_death(&mut self, vid: Vid) {
         let flags_before = self.affect_flags_of(vid);
         let mov_before = self.move_speed_of(vid.raw());
@@ -1138,6 +1196,7 @@ impl GameState {
         event.affects.retain(|affect| {
             if affect.kind == crate::loading_phase::AFFECT_REVIVE_INVISIBLE
                 || affect.kind == crate::loading_phase::AFFECT_BLOCK_CHAT
+                || (500..=600).contains(&affect.kind)
             {
                 return true;
             }
@@ -1350,6 +1409,7 @@ mod tests {
         private_map_index: 0,
         channel: None,
         exit: None,
+        sorted_until: 0,
     };
 
     /// A world with its client registry, and each joined player's lease and inbox.
@@ -1443,6 +1503,7 @@ mod tests {
                 pk_mode: PK_MODE_PROTECT,
                 skill_group: 0,
                 alignment: 0,
+                voice: 0,
             };
             let place = EnterPlace {
                 channel: PLACE.0,
@@ -1747,6 +1808,28 @@ mod tests {
         }
     }
 
+    /// `/cannot_dead` survives a lethal hit: the points do not move, nothing
+    /// rides, and the player neither stuns nor dies; `/can_dead` gives the
+    /// hit back.
+    #[test]
+    fn a_cannot_dead_player_survives_a_lethal_hit_and_a_can_dead_one_does_not() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let hp = field.points(ALPHA).hp();
+        field.world.run_can_dead(ALPHA, false);
+        field.quiet();
+        assert!(
+            !field.world.damage_pc(Some(MONSTER), ALPHA, hp, None),
+            "no death"
+        );
+        assert_eq!(field.points(ALPHA).hp(), hp, "the points do not move");
+        assert!(!field.world.is_stunned(ALPHA.raw()), "no stun");
+        assert!(!field.world.is_dead(ALPHA.raw()), "no death");
+        assert!(field.heard(ALPHA).is_empty(), "nothing rides");
+        field.world.run_can_dead(ALPHA, true);
+        field.struck_down(ALPHA);
+        assert_eq!(field.points(ALPHA).hp(), 0, "the hit lands again");
+    }
     /// Table A: the hit leaves no hit points, empties the potion pools, stuns the player in its
     /// view, locks its pools, ends its recovery and makes `StunEvent` due 75 Pulses on; the
     /// players targeting it are told at the next broadcast.
@@ -3120,7 +3203,8 @@ mod tests {
                 y,
                 private_map_index: 0,
                 channel: None,
-                exit: None
+                exit: None,
+                sorted_until: 0,
             }]
         );
         assert!(!field.world.is_down(ALPHA.raw()));
@@ -3333,7 +3417,7 @@ mod tests {
     }
 
     /// Death clears the poison, stun and slow with their removes and the +30, keeps the
-    /// revive, and ends the poison event.
+    /// revive, the silence and the 500-600 band, and ends the poison event.
     #[test]
     fn death_clears_the_hit_affects_and_ends_the_poison() {
         use crate::loading_phase::{
@@ -3345,6 +3429,18 @@ mod tests {
         let mut field = a_field(true);
         let _alpha = field.join(ALPHA, HERE);
         let before = field.world.move_speed_of(ALPHA.raw());
+        field.world.add_pc_affect(
+            ALPHA,
+            Affect {
+                kind: crate::loading_phase::AFFECT_DRAGON_SOUL_QUALIFIED,
+                apply_on: 0,
+                value: 0,
+                flag: 0,
+                remaining: 100,
+                sp_cost: 0,
+            },
+            false,
+        );
         field.world.add_pc_affect(
             ALPHA,
             Affect {
@@ -3395,7 +3491,18 @@ mod tests {
         assert!(removes.contains(&(AFFECT_POISON, 0)));
         assert!(removes.contains(&(AFFECT_STUN, 0)));
         assert!(removes.contains(&(AFFECT_SLOW, u8::try_from(point::POINT_MOV_SPEED).unwrap())));
-        assert_eq!(field.world.move_speed_of(ALPHA.raw()), before);
+        assert!(
+            !removes.iter().any(|(kind, _)| (500..=600).contains(kind)),
+            "the 500-600 band stays: {removes:?}"
+        );
+        assert!(field
+            .world
+            .affect_events
+            .get(&ALPHA)
+            .is_some_and(|event| event
+                .affects
+                .iter()
+                .any(|affect| affect.kind == crate::loading_phase::AFFECT_DRAGON_SOUL_QUALIFIED)));
         assert_eq!(
             field.world.affect_flags_of(ALPHA),
             [0, 0],

@@ -11,8 +11,11 @@
 pub mod banword;
 pub mod belt_inventory;
 pub mod csv_table;
+pub mod dragon_soul_table;
 pub mod drop;
 pub mod event;
+pub mod fishing;
+pub mod forked;
 /// The guild skill rows, 151-162.
 pub mod guild_skill_data;
 pub mod item_attr;

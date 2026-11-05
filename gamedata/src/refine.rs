@@ -10,6 +10,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::records::{RefineMaterialRecord, RefineTableRecord};
+use crate::sql_dump::{read_table, SqlDumpError, SqlValue};
 
 /// Number of columns selected by the fixed legacy refine query.
 pub const REFINE_TABLE_QUERY_COLUMNS: usize = 13;
@@ -476,12 +477,142 @@ pub fn build_refine_table(
     Ok(records)
 }
 
+/// Why the `refine_proto` rows of a dump cannot become recipes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefineDumpError {
+    /// The dump cannot be read.
+    Dump(SqlDumpError),
+    /// The rows lack a column the legacy query selects.
+    NoColumn(&'static str),
+    /// A row does not decode.
+    Table(RefineTableError),
+}
+
+impl fmt::Display for RefineDumpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dump(error) => error.fmt(formatter),
+            Self::NoColumn(name) => write!(formatter, "refine_proto has no `{name}` column"),
+            Self::Table(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for RefineDumpError {}
+
+/// The refine recipes by id: `CRefineManager`'s map (`G/refine.cpp:12-22`). Legacy inserts
+/// each row with `std::map::insert`, so the first row of an id is the one kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefineRecipes {
+    by_id: std::collections::BTreeMap<u32, RefineTableRecord>,
+}
+
+impl RefineRecipes {
+    /// Build the recipes from decoded rows, keeping the first row of each id.
+    #[must_use]
+    pub fn from_records(records: impl IntoIterator<Item = RefineTableRecord>) -> Self {
+        let mut by_id = std::collections::BTreeMap::new();
+        for record in records {
+            by_id.entry(record.id).or_insert(record);
+        }
+        Self { by_id }
+    }
+
+    /// Read the `refine_proto` rows of the owner's `player.sql` dump, with the thirteen
+    /// columns `CClientManager::InitializeRefineTable` selects (`D/ClientManagerBoot.cpp:151-210`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RefineDumpError`] when the dump cannot be read, a selected column is
+    /// missing, or a value does not decode.
+    pub fn from_dump(dump: &[u8]) -> Result<Self, RefineDumpError> {
+        let table = read_table(dump, "refine_proto").map_err(RefineDumpError::Dump)?;
+        if table.rows.is_empty() {
+            return Ok(Self::default());
+        }
+        let mut at = [0_usize; REFINE_TABLE_QUERY_COLUMNS];
+        for (slot, name) in at.iter_mut().zip(REFINE_TABLE_QUERY_COLUMN_NAMES) {
+            *slot = table.column(name).ok_or(RefineDumpError::NoColumn(name))?;
+        }
+        let rows: Vec<RefineTableQueryRow> = table
+            .rows
+            .iter()
+            .map(|values| {
+                RefineTableQueryRow::new(at.iter().map(|&column| match &values[column] {
+                    SqlValue::Null => RefineQueryValue::Null,
+                    SqlValue::Text(text) | SqlValue::Bare(text) => {
+                        RefineQueryValue::Text(String::from_utf8_lossy(text).into_owned())
+                    }
+                }))
+            })
+            .collect();
+        let records =
+            build_refine_table(&rows, RefineLimits::default()).map_err(RefineDumpError::Table)?;
+        Ok(Self::from_records(records))
+    }
+
+    /// `CRefineManager::GetRefineRecipe`: the recipe of `id`, never for 0.
+    #[must_use]
+    pub fn get(&self, id: u32) -> Option<&RefineTableRecord> {
+        (id != 0).then(|| self.by_id.get(&id)).flatten()
+    }
+
+    /// How many recipes there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    /// Whether there are none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn value(text: &str) -> RefineQueryValue {
         RefineQueryValue::text(text)
+    }
+
+    #[test]
+    fn the_owner_dump_holds_every_recipe_with_its_materials() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../legacy/sql/gamedata/player.sql"
+        );
+        let recipes = RefineRecipes::from_dump(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(recipes.len(), 579);
+        assert!(recipes.get(0).is_none());
+        let plain = recipes.get(1).unwrap();
+        assert_eq!((plain.cost, plain.prob, plain.material_count), (600, 90, 0));
+        let seven = recipes.get(7).unwrap();
+        assert_eq!(
+            (seven.cost, seven.prob, seven.material_count),
+            (30_000, 54, 1)
+        );
+        assert_eq!(
+            seven.materials[0],
+            RefineMaterialRecord {
+                vnum: 30_053,
+                count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn the_first_row_of_an_id_is_kept() {
+        let first = RefineTableRecord {
+            id: 3,
+            cost: 1,
+            ..RefineTableRecord::default()
+        };
+        let second = RefineTableRecord { cost: 2, ..first };
+        let recipes = RefineRecipes::from_records([first, second]);
+        assert_eq!(recipes.get(3).map(|recipe| recipe.cost), Some(1));
     }
 
     fn row_with_pairs(pairs: &[(u32, i32); 5]) -> RefineTableQueryRow {

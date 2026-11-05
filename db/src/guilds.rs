@@ -340,6 +340,45 @@ pub async fn remove_member(store: &Store, pid: u32) -> Result<bool, AccountError
         .await?;
     Ok(done.rows_affected() > 0)
 }
+/// Disband a guild in one transaction: every member's disband stamp lands, then the
+/// guild row goes, which cascades the grade, member, comment, mark and symbol rows
+/// (`GuildDisband`, `D/ClientManagerGuild.cpp:101-127`). Answers whether the guild row
+/// was there.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for an id or a pid above `i32::MAX`, and
+/// [`AccountError::Database`] otherwise.
+pub async fn disband_guild(
+    store: &Store,
+    guild_id: u32,
+    members: &[u32],
+    at: u32,
+) -> Result<bool, AccountError> {
+    let id = i32::try_from(guild_id).map_err(|_| AccountError::NoSuchPlayer(guild_id))?;
+    let stamp = i32::try_from(at).unwrap_or(i32::MAX);
+    let mut transaction = store.pool().begin().await?;
+    // A zero stamp is no flag (`quest::PC::SetFlag`, `G/questpc.cpp:60-64`), and the table
+    // refuses it; the world's online loop wrote nothing either.
+    for pid in members.iter().filter(|_| stamp != 0) {
+        let member = i32::try_from(*pid).map_err(|_| AccountError::NoSuchPlayer(*pid))?;
+        sqlx::query(
+            "INSERT INTO quest_flag (player_id, name, value) VALUES ($1, \
+             'guild_manage.new_disband_time', $2) ON CONFLICT (player_id, name) DO UPDATE \
+             SET value = excluded.value",
+        )
+        .bind(member)
+        .bind(stamp)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    let done = sqlx::query("DELETE FROM guild WHERE id = $1")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(done.rows_affected() > 0)
+}
 
 /// Rename a grade: `ChangeGradeName`'s update (`G/guild.cpp:851-855`). Answers whether
 /// a row was there.

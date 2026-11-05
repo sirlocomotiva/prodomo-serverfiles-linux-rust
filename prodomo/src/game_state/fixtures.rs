@@ -124,11 +124,14 @@ pub(super) fn points_at(level: u8, stamina: i32, exp: i64) -> Points {
         skill_point: 0,
         sub_skill_point: 0,
         level_step: 0,
+        stat_reset_count: 0,
         map_index: PLACE.1,
         part_base: 0,
         hair_part: 0,
         sash_part: 0,
         playtime: 0,
+        conqueror_exp: 0,
+        gaya: 0,
     });
     let _ = points.compute_points();
     points
@@ -199,6 +202,7 @@ pub(super) fn enter_seeing_with(
         pk_mode: crate::loading_phase::PK_MODE_PROTECT,
         skill_group: 0,
         alignment: 0,
+        voice: 0,
     };
     let shown = world.place_body(
         Vid::new(vid),

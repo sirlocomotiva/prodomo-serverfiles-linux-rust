@@ -88,11 +88,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         })
     }
 

@@ -1,4 +1,3 @@
-//! The state the game thread owns: the characters, the item ids, and the item prototypes.
 //!
 //! ADR-0002 says one process hosts auth and every Channel, that each Channel is one
 //! world, and that all worlds step on one game thread at 25 Pulses per second. The
@@ -29,20 +28,21 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{BuildHasher, RandomState};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::LocaleStrings;
 use gamedata::map_atlas::MapRegion;
+use gamedata::mob_locale_names::NO_NAME;
 use gamedata::regen::RegenEntry;
 use gamedata::server_attr::SectreeGrid;
 use world::cells::MapCells;
 use world::character::{
-    drop_gold, drop_item, move_item, pickup_gold, pickup_item, use_item, CharacterManager,
-    CharacterManagerError, DropAt, Gear, GroundItem, MoveRefused, MoveRequest, MoveRules, Pcg32,
-    Picker, Rejected, Side,
+    can_receive, destroy_item, drop_gold, drop_item, move_item, pickup_gold, pickup_item, use_item,
+    CharacterManager, CharacterManagerError, DropAt, Gear, GiveAnswer, GroundItem, MoveRefused,
+    MoveRequest, MoveRules, Pcg32, Picker, Rejected, Side,
 };
 use world::item::{ItemIdRange, ItemIds};
 use world::npc::{MapNpcs, NpcSpawner, NpcVidsExhausted};
@@ -62,52 +62,98 @@ use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
 mod affect;
+mod alignment;
+mod conqueror;
+mod costume;
 mod death;
+mod detail_log;
+mod dice;
+mod dragon_soul;
+mod duel;
+mod emotion;
+mod empire_priv;
+mod event_calendar;
+mod event_flag;
 mod fight;
+mod fish_simul;
+mod fishing;
 #[cfg(test)]
 mod fixtures;
+mod full_set;
+mod gm_lines;
 mod guild;
 mod guild_mark;
+mod horse;
 mod item_penalty;
+mod item_purge;
+mod letters;
+mod level;
 mod messenger;
+mod mining;
 mod mob_ai;
 mod mob_battle;
 mod mob_party;
 mod mob_skill;
 mod mob_strike;
 mod motion;
+mod move_channel;
+mod observer;
 mod party;
 mod pc_heal;
 pub(crate) mod pc_skill;
+mod pickup;
+mod pk_mode;
+mod polymorph;
 mod pvp;
 mod quest_target;
 mod quests;
 mod regen;
+mod reload;
 mod reward;
 mod safebox;
+mod set_attr;
 mod shop;
+mod shutdown;
+mod skill_admin;
+mod smith_refine;
+mod socket_item;
+mod sort_inventory;
+mod stat;
+mod state;
 mod sync;
 mod target;
+mod target_info;
+mod timed_exit;
 mod trade;
+mod use_to_item;
 mod view;
 mod view_encode;
+mod walk_mode;
 mod war_map;
 mod warp_npc;
 mod whisper;
 
+pub use gm_lines::GmRows;
 pub use guild::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
     GuildGradeSet, GuildJoinAnswer, GuildJoinCommit, GuildMakeAnswer, GuildMakeCommit,
-    GuildQuestStore, GuildRemoveAnswer, GuildRemoveCommit, GuildSkillUp, GuildSkillUpAnswer,
-    GuildSkillUseAnswer, GuildSkillUseCommit, GuildWarAnswer, GuildWarListLine, GuildWarNotice,
-    MarkUploadAnswer, WarEndOutcome, WarEndRow, GUILD_COMMENT_MAX_COUNT,
+    GuildQuestJudged, GuildQuestStore, GuildRemoveAnswer, GuildRemoveCommit, GuildSkillUp,
+    GuildSkillUpAnswer, GuildSkillUseAnswer, GuildSkillUseCommit, GuildStateLine, GuildWarAnswer,
+    GuildWarListLine, GuildWarNotice, MarkUploadAnswer, WarEndOutcome, WarEndRow,
+    GUILD_COMMENT_MAX_COUNT,
 };
+pub use letters::LettersTrade;
+pub use level::{AdvanceLanded, LevelHeld, ResetHeld};
 pub use quests::{QuestStep, QuestStepOutcome, Quests};
+pub use reload::ReloadRead;
 pub use safebox::{
     SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
     OTHER_WINDOW_NOTICE, SAFEBOX_WAIT_NOTICE, TRADE_WAIT_NOTICE, TRADE_WAIT_SECONDS,
 };
+pub use set_attr::SetAttrStored;
 pub use shop::{ShopAnswer, ShopDeclined, ShopStep, SAFEBOX_OPEN_NOTICE};
+pub use skill_admin::{SetJobLanded, SetSkillLanded, SetSkillOtherLanded};
+pub use stat::{SetStatHeld, StatHeld};
 pub use trade::{
     TradeAnswer, TradeDeclined, TradeSettled, TradeStep, EXCHANGE_SUBHEADER_CG_ACCEPT,
     EXCHANGE_SUBHEADER_CG_CANCEL, EXCHANGE_SUBHEADER_CG_ELK_ADD, EXCHANGE_SUBHEADER_CG_ITEM_ADD,
@@ -116,6 +162,17 @@ pub use trade::{
 
 /// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
 const PICKUP_DISTANCE: i32 = 300;
+
+/// `[LS;1947;%s]`: the destroy confirm, with the item's name (`G/char_item.cpp:7439`).
+const DESTROYED_NOTICE: &[u8] = b"[LS;1947;%s]";
+
+/// `[LS;710]`: the gift's victim is nobody (`CInputMain::ItemGive`, `G/input_main.cpp:3180`).
+const GIVE_NOBODY_NOTICE: &[u8] = b"[LS;710]";
+
+/// `You cannot take this item if you're using quests`: the gift of a character whose script
+/// waits for its client (`@fixme150`, `G/char_item.cpp:9231-9237`).
+const GIVE_QUESTING_NOTICE: &[u8] = b"You cannot take this item if you're using quests";
+
 /// One running `ownership_event` (`G/item.cpp:1704-1728`).
 #[derive(Debug, Clone)]
 struct GroundOwner {
@@ -152,6 +209,9 @@ struct Lying {
 #[derive(Debug, Default)]
 pub struct GameStateMetrics {
     pulses: AtomicU64,
+    /// Whether the shutdown countdown reached its 0 tick (`g_bNoMoreClient`).
+    /// The game thread sets it; the listeners read it through the controller.
+    bars_clients: AtomicBool,
 }
 
 impl GameStateMetrics {
@@ -163,13 +223,16 @@ impl GameStateMetrics {
     pub fn pulses(&self) -> u64 {
         self.pulses.load(Ordering::SeqCst)
     }
+
+    /// Whether the shutdown countdown reached its 0 tick, barring new clients.
+    pub fn bars_clients(&self) -> bool {
+        self.bars_clients.load(Ordering::SeqCst)
+    }
 }
 
 /// An id range was installed over an allocator that is already installed.
 ///
 /// Named rather than logged, because the consequence is a duplicate item id and no
-/// store write will report it: the second allocator hands out the same numbers the
-/// first one did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AlreadyInstalled;
 
@@ -436,6 +499,13 @@ pub struct GameState {
     /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist. A
     /// session's own: the leave forgets it.
     block_modes: HashMap<common::vid::Vid, u8>,
+    /// The characters whose detail flag is on (`m_bDetailLog`, `G/char.h:1739`), which
+    /// the damage log line reads. A session's own: the leave forgets it.
+    detail_logs: std::collections::HashSet<common::vid::Vid>,
+    /// The characters subscribed to the monster log (`m_set_pkChrMonsterLog`,
+    /// `G/char_manager.h:127`), which `PacketMonsterLog` fans to. A session's own: the
+    /// leave forgets it.
+    monster_logs: std::collections::HashSet<common::vid::Vid>,
     /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
     /// recovery, the stamina refill and the timed affects. See [`affect`].
     affect_events: HashMap<common::vid::Vid, affect::AffectEvent>,
@@ -459,20 +529,58 @@ pub struct GameState {
     mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
     /// The hosted PC skill rows and the eight power rows, which a cast reads.
     pc_skill_tables: Arc<gamedata::pc_skill_data::PcSkills>,
+    /// Every `skill_proto` row's vnum and name, which the `/setskill` lines read.
+    skill_names: Arc<gamedata::pc_skill_data::SkillNames>,
     /// The hosted guild skill rows, which a guild skill-up and a guild cast read.
     guild_skill_tables: Arc<gamedata::guild_skill_data::GuildSkills>,
+    /// The refine recipes by id (`CRefineManager`), which a smith's window and refine read.
+    refine_recipes: Arc<gamedata::refine::RefineRecipes>,
+    /// The characters a smith's window is open for (`m_bUnderRefine`), by VID.
+    refining: std::collections::HashSet<common::vid::Vid>,
+    /// The scroll cell each character's last refine window remembered
+    /// (`m_iRefineAdditionalCell`), which closing the window leaves. A character with no
+    /// entry has none: a smith's window sets -1, and legacy never initialises the field.
+    refine_scroll: HashMap<common::vid::Vid, u16>,
+    /// The event calendar (`CEventManager::m_mapEvent`) in id order, installed once the store
+    /// is up; `None` until then.
+    events: Option<Vec<db::events::StoredEvent>>,
     /// The skill clips, which stood-up NPCs copy their `SPECIALn` data from.
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
     /// The drop tables, which a monster's death will pay from.
     drops: Arc<gamedata::drop::DropTables>,
     /// The `item_attr` rows, which a dropped item's magic rolls against.
     item_attrs: Arc<Vec<gamedata::records::ItemAttrRecord>>,
+    /// The `item_attr_rare` rows (`g_map_itemRare`), which a rare attribute rolls against.
+    item_rare_attrs: Arc<Vec<gamedata::records::ItemAttrRecord>>,
     /// The vnum mask table, which a made item's shown vnum answers through.
     item_masks: Arc<gamedata::item_mask::ItemMasks>,
+    /// The special item groups, which `/letters_open` lists and `/give_reward` draws from.
+    item_groups: Arc<gamedata::special_item_group::SpecialItemGroups>,
+    /// The fishing table, which the fishing events and `/fish_simul` draw from.
+    fishing: Arc<gamedata::fishing::Fishing>,
+    /// Each fishing character's `m_pkFishingEvent` (`G/fishing.cpp:464-537`).
+    fishing_events: HashMap<common::vid::Vid, fishing::FishingEvent>,
+    /// Each digging character's `m_pkMiningEvent` (`G/mining.cpp:355-418`).
+    mining_events: HashMap<common::vid::Vid, mining::MiningEvent>,
+    /// The Pulse each character's horse stamina event fires on (`m_eventStaminaRegen`,
+    /// `m_eventStaminaConsume`, `G/horse_rider.h:84-85`); which one runs is the horse's.
+    horse_timers: HashMap<common::vid::Vid, u64>,
+    /// The dragon soul table, which `/ds_change_attr` redraws a stone's attributes from.
+    dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
     gauss: world::character::Gauss,
     /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
     shop_price_3x_disabled: bool,
+    /// `g_bDisableEmotionMask`: emotions need no mask.
+    emotion_mask_disabled: bool,
+    /// `s_emotion_set`: the consent pairs `/emotion_allow` and a `NEED_PC` emotion insert.
+    /// Never cleared, as legacy never clears it — not even on logout.
+    emotion_consents: emotion::EmotionConsents,
+    /// `m_aakPrivEmpireData`: the empire rate grants, `[type][empire]`, each with its end
+    /// Pulse. Legacy holds them in the DB process; the one process holds them here.
+    empire_privs: empire_priv::EmpirePrivs,
+    /// `CHARACTER_MANAGER`'s rates, which the rate event flags set.
+    mob_rates: event_flag::MobRates,
     /// `test_server` (`G/config.cpp:72`): the test-server mode, on unless the
     /// configuration turns it off.
     ///
@@ -481,7 +589,32 @@ pub struct GameState {
     /// ten in it (`G/war_map.cpp:700`), which is the rule that uses it here; the other
     /// rules wait for the `test_server` audit (owner question 5).
     test_server: bool,
-    /// The keeper each character browses, keyed by its VID.
+    /// The shutdown countdown's seconds left (`shutdown_event_data::seconds`,
+    /// `G/cmd_general.cpp:188-196`), or `None` while no `/shutdown` runs. The tick
+    /// that reaches 0 sends every player the `quit` command, bars new clients, and
+    /// counts into the negatives; the tick that reaches -10 force-closes every
+    /// descriptor, and the tick past it ends the countdown.
+    shutdown_left: Option<i32>,
+    /// The Pulse the countdown's next tick runs on. Set when the line runs (one
+    /// Pulse on) and after every tick, one second on.
+    shutdown_due: u64,
+    /// The characters' pending timed events (`m_pkTimedEvent`, `G/char.h`), keyed
+    /// by VID. The exit lines hold the slot while their countdown runs.
+    timed_events: HashMap<common::vid::Vid, timed_exit::TimedEvent>,
+    /// The waiters whose `confirm` timeout is armed (`confirm_timeout_event`,
+    /// `G/questlua.cpp:879-904`), keyed by store id: the Pulse the waiter's script hears
+    /// `CONFIRM_TIMEOUT` on. A new `confirm` replaces the old arm, as `event_create`
+    /// replaces none but the waiter's one wait answers one answer.
+    confirm_timeouts: HashMap<u32, u64>,
+    /// When each character may sort its inventory again (`m_sortInventoryPulse`, in
+    /// `get_global_time()` seconds), keyed by VID with the PID that set it, so a reused
+    /// VID starts fresh as a new `CHARACTER` does.
+    sort_inventory_until: HashMap<common::vid::Vid, (u32, u32)>,
+    /// The live consent duels (`CPVPManager::m_map_pkPVP`, `G/pvp.h:92`).
+    duels: duel::Duels,
+    /// The SungZi map indices (`forkedmapindex.txt`'s `sungzi:` lines), whose
+    /// players skip the exit's `IsHack` gate (`IsSungZiMapIndex`).
+    sungzi_maps: Arc<gamedata::forked::SungziMaps>,
     browsing: HashMap<common::vid::Vid, shop::Browsing>,
     /// The open trades, keyed by the VID of the character that started each.
     trades: BTreeMap<u32, trade::Deal>,
@@ -489,7 +622,13 @@ pub struct GameState {
     trading: HashMap<common::vid::Vid, (u32, Side)>,
     /// The safebox and mall of each character that has opened one, keyed by its VID.
     storages: HashMap<common::vid::Vid, safebox::Storage>,
-    /// The quests boot loaded, when it did.
+    /// The sash window each character has open, keyed by its VID:
+    /// `m_bSashCombination`/`m_bSashAbsorption` (`G/char.h:2377`), as combination
+    /// (`true`) or absorption. Absent when no window stands.
+    sash_windows: HashMap<common::vid::Vid, bool>,
+    /// The characters whose changelook (Transmutation) window stands:
+    /// `m_bChangeLook` (`G/char.cpp:10504-10535`). Absent when no window stands.
+    changelook_windows: std::collections::HashSet<common::vid::Vid>,
     quests: Option<Quests>,
     /// The characters the quests marked for their characters' clients (`CTargetManager`).
     quest_targets: quest_target::QuestTargets,
@@ -528,7 +667,12 @@ pub struct GameState {
     parties: party::Parties,
     /// `gPlayerMaxLevel` and `g_iStatusPointGetLevelLimit`, which the experience gain reads.
     exp_limits: world::character::ExpLimits,
-    /// Where a town restart sends a player. See [`death`].
+    /// `gPlayerMaxConquerorLevel` (`[game] max_conqueror_level`), which the conqueror
+    /// arms read.
+    max_conqueror_level: i32,
+    /// `g_iStatusPointSetMaxValue` (`[game] status_point_set_max_value`): the highest
+    /// real point `/stat` raises to.
+    stat_max: i32,
     recall: death::Recall,
     /// `PK_PROTECT_LEVEL` (`[game] pk_protect_level`): below it a character is in the
     /// protect PK mode, and a level-up that reaches it switches the mode to peace.
@@ -609,6 +753,8 @@ impl GameState {
             offline_messages: HashMap::new(),
             last_offline_pm: HashMap::new(),
             block_modes: HashMap::new(),
+            detail_logs: std::collections::HashSet::new(),
+            monster_logs: std::collections::HashSet::new(),
             affect_events: HashMap::new(),
             affect_sequence: 0,
             npc_affects: HashMap::new(),
@@ -617,18 +763,44 @@ impl GameState {
             motions: Arc::default(),
             mob_skills: Arc::default(),
             pc_skill_tables: Arc::default(),
+            skill_names: Arc::default(),
             guild_skill_tables: Arc::default(),
+            refine_recipes: Arc::default(),
+            refining: std::collections::HashSet::new(),
+            refine_scroll: HashMap::new(),
+            events: None,
             mob_clips: Arc::default(),
             drops: Arc::default(),
             item_attrs: Arc::default(),
+            item_rare_attrs: Arc::default(),
             item_masks: Arc::default(),
+            item_groups: Arc::default(),
+            fishing: Arc::default(),
+            fishing_events: HashMap::new(),
+            mining_events: HashMap::new(),
+            horse_timers: HashMap::new(),
+            dragon_soul_table: Arc::default(),
             gauss: world::character::Gauss::new(),
             shop_price_3x_disabled: false,
+            emotion_mask_disabled: false,
+            emotion_consents: emotion::EmotionConsents::new(),
+            empire_privs: [[empire_priv::EmpirePriv { value: 0, ends: 0 };
+                empire_priv::EMPIRE_MAX_NUM]; empire_priv::MAX_PRIV_NUM],
+            mob_rates: event_flag::MobRates::default(),
             test_server: true,
+            shutdown_left: None,
+            shutdown_due: 0,
+            timed_events: HashMap::new(),
+            confirm_timeouts: HashMap::new(),
+            sort_inventory_until: HashMap::new(),
+            duels: duel::Duels::default(),
+            sungzi_maps: Arc::default(),
             browsing: HashMap::new(),
             trades: BTreeMap::new(),
             trading: HashMap::new(),
             storages: HashMap::new(),
+            sash_windows: HashMap::new(),
+            changelook_windows: std::collections::HashSet::new(),
             quests: None,
             quest_targets: quest_target::QuestTargets::default(),
             warp_npcs: BTreeMap::new(),
@@ -650,6 +822,8 @@ impl GameState {
                 max_level: DEFAULT_MAX_LEVEL,
                 status_point_get_level_limit: DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT,
             },
+            stat_max: DEFAULT_STATUS_POINT_SET_MAX_VALUE,
+            max_conqueror_level: DEFAULT_MAX_CONQUEROR_LEVEL,
             recall: death::Recall::default(),
             protect_level: DEFAULT_PROTECT_LEVEL,
             guilds: guild::Guilds::default(),
@@ -708,6 +882,13 @@ impl GameState {
     #[must_use]
     pub fn with_clients(mut self, clients: Arc<ChannelClients>) -> Self {
         self.clients = Some(clients);
+        self
+    }
+
+    /// Share the SungZi map indices, whose players skip the exit's `IsHack` gate.
+    #[must_use]
+    pub fn with_sungzi_maps(mut self, maps: Arc<gamedata::forked::SungziMaps>) -> Self {
+        self.sungzi_maps = maps;
         self
     }
 
@@ -899,6 +1080,9 @@ impl GameState {
                 symbols,
                 reply,
             } => self.answer_install_guilds(&stored, &marks, &symbols, reply),
+            GameCommand::InstallEvents { events, reply } => {
+                self.answer_install_events(events, reply);
+            }
             GameCommand::RevokeGrant { target, id, reply } => {
                 self.answer_revoke(&target, id, reply);
             }
@@ -945,6 +1129,11 @@ impl GameState {
                 map_index,
                 reply,
             } => self.answer_map_of(channel, map_index, reply),
+            GameCommand::LoginEventLines { reply } => {
+                if reply.send(self.login_event_lines()).is_err() {
+                    debug!("nobody was left to hear the login event lines");
+                }
+            }
             GameCommand::Restart {
                 vid,
                 kind,
@@ -955,10 +1144,17 @@ impl GameState {
             GameCommand::SetBlockMode { vid, rest, reply } => {
                 self.answer_set_block_mode(vid, &rest, reply);
             }
-            GameCommand::BlockChatOf { vid, reply } => self.answer_block_chat_of(vid, reply),
-            GameCommand::BlockChat { vid, rest, reply } => {
-                self.answer_block_chat(vid, &rest, reply);
+            GameCommand::HideCostume { vid, rest, reply } => {
+                self.answer_hide_costume(vid, &rest, reply);
             }
+            GameCommand::ChangeLanguage {
+                vid,
+                language,
+                reply,
+            } => {
+                let _heard = reply.send(self.switch_language(vid, language));
+            }
+            command if command.is_chat_line() => self.apply_chat_line(command),
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -973,7 +1169,898 @@ impl GameState {
         }
     }
 
-    /// Runs one messenger command; the relations live on this state's own field.
+    /// Runs one chat-line command: an emotion, a priv grant, a silence's read or lay,
+    /// a disconnect, a transfer, a kill, or a poison. The flag, letters, stat, PK
+    /// and walk lines run through [`GameState::apply_chat_flag`]. Split out so the
+    /// dispatch does not trip the line lint.
+    fn apply_chat_line(&mut self, command: GameCommand) {
+        if Self::is_chat_mode_line(&command) {
+            self.apply_chat_mode(command);
+            return;
+        }
+        if matches!(
+            command,
+            GameCommand::Reset { .. }
+                | GameCommand::EventFlag { .. }
+                | GameCommand::GetEventFlag { .. }
+                | GameCommand::EventLine { .. }
+                | GameCommand::GiveReward { .. }
+                | GameCommand::LettersOpen { .. }
+                | GameCommand::Stat { .. }
+                | GameCommand::StatVal { .. }
+                | GameCommand::StatPlus { .. }
+                | GameCommand::SetStat { .. }
+                | GameCommand::StatReset { .. }
+        ) {
+            self.apply_chat_flag(command);
+            return;
+        }
+        if Self::is_goto_level_skill_line(&command) {
+            self.apply_goto_level_skill_line(command);
+            return;
+        }
+        if Self::is_emotion_priv_line(&command) {
+            self.apply_emotion_priv_line(command);
+            return;
+        }
+        match command {
+            GameCommand::BlockChatOf { vid, reply } => self.answer_block_chat_of(vid, reply),
+            GameCommand::BlockChat { vid, rest, reply } => {
+                self.answer_block_chat(vid, &rest, reply);
+            }
+            GameCommand::BlockChatList { vid, reply } => {
+                self.block_chat_list(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a silence list");
+                }
+            }
+            GameCommand::Dc { vid, rest, reply } => {
+                self.disconnect(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a disconnect's answer");
+                }
+            }
+            GameCommand::Transfer { vid, rest, reply } => {
+                self.transfer(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a transfer's answer");
+                }
+            }
+            GameCommand::Kill { vid, rest, reply } => {
+                self.kill(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a kill's answer");
+                }
+            }
+            GameCommand::Poison { vid, rest, reply } => {
+                self.poison(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a poison's answer");
+                }
+            }
+            GameCommand::Stun { vid, rest, reply } => {
+                self.stun(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a stun's answer");
+                }
+            }
+            command @ (GameCommand::GetQf { .. }
+            | GameCommand::SetQf { .. }
+            | GameCommand::DelQf { .. }
+            | GameCommand::SetState { .. }
+            | GameCommand::Qf { .. }
+            | GameCommand::ClearQuest { .. }
+            | GameCommand::ViewEquip { .. }) => {
+                self.apply_quest_flag_line(command);
+            }
+            command if Self::is_gm_item_line(&command) => self.apply_gm_item_line(command),
+            command @ (GameCommand::Warp { .. }
+            | GameCommand::Private { .. }
+            | GameCommand::Rewarp { .. }
+            | GameCommand::ObserverExit { .. }
+            | GameCommand::ObserverSettled { .. }) => {
+                self.apply_warp_line(command);
+            }
+            _ => debug_assert!(false, "the dispatch routes only chat lines here"),
+        }
+    }
+
+    /// Runs one warp line: split from [`GameState::apply_chat_line`]
+    /// so neither trips the line lint.
+    fn apply_warp_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Warp { vid, rest, reply } => {
+                self.warp_command(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a warp's answer");
+                }
+            }
+            GameCommand::Private { vid, rest, reply } => {
+                self.private_command(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a private's answer");
+                }
+            }
+            GameCommand::Rewarp { vid, reply } => {
+                self.rewarp_command(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a rewarp's answer");
+                }
+            }
+            GameCommand::ObserverExit { vid, reply } => {
+                let lock = self.observer_exit_lock(vid);
+                if reply.send(lock).is_err() {
+                    debug!(?vid, "nobody was left to hear an observer exit's answer");
+                }
+            }
+            GameCommand::ObserverSettled { vid, reply } => {
+                self.observer_settled(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an observer settle's answer");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only warp lines here"),
+        }
+    }
+
+    /// Runs one quest-flag line: split from [`GameState::apply_chat_line`]
+    /// so neither trips the line lint.
+    fn apply_quest_flag_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::GetQf { vid, rest, reply } => {
+                self.getqf(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a getqf's answer");
+                }
+            }
+            GameCommand::SetQf { vid, rest, reply } => {
+                self.setqf(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a setqf's answer");
+                }
+            }
+            GameCommand::DelQf { vid, rest, reply } => {
+                self.delqf(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a delqf's answer");
+                }
+            }
+            GameCommand::SetState { vid, rest, reply } => {
+                self.set_state(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a set_state's answer");
+                }
+            }
+            GameCommand::Qf { vid, rest, reply } => {
+                self.qf(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a qf's answer");
+                }
+            }
+            GameCommand::ClearQuest { vid, rest, reply } => {
+                self.clear_quest(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a clear_quest's answer");
+                }
+            }
+            GameCommand::ViewEquip { vid, rest, reply } => {
+                self.view_equip(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a view_equip's answer");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only quest-flag lines here"),
+        }
+    }
+
+    /// Whether the dispatch runs the line through `apply_goto_level_skill_line`.
+    fn is_goto_level_skill_line(command: &GameCommand) -> bool {
+        matches!(
+            command,
+            GameCommand::Goto { .. }
+                | GameCommand::Level { .. }
+                | GameCommand::Advance { .. }
+                | GameCommand::GrantTopAffect { .. }
+                | GameCommand::SetSkill { .. }
+                | GameCommand::SetSkillOther { .. }
+                | GameCommand::SetSkillPoint { .. }
+                | GameCommand::SetJob { .. }
+                | GameCommand::AllSkillMaster { .. }
+                | GameCommand::ItemFullSet { .. }
+                | GameCommand::AttrFullSet { .. }
+                | GameCommand::FullSet { .. }
+                | GameCommand::ToolRefineLine { .. }
+                | GameCommand::UseItemLine { .. }
+                | GameCommand::ClearAffect { .. }
+                | GameCommand::DragonSoul { .. }
+                | GameCommand::Costume { .. }
+                | GameCommand::DsList { .. }
+                | GameCommand::DsChangeAttr { .. }
+                | GameCommand::Dice { .. }
+                | GameCommand::Gift { .. }
+                | GameCommand::Hair { .. }
+                | GameCommand::FishSimul { .. }
+                | GameCommand::Shutdown { .. }
+                | GameCommand::DoCmd { .. }
+                | GameCommand::Pvp { .. }
+                | GameCommand::Reload { .. }
+                | GameCommand::State { .. }
+                | GameCommand::Inventory { .. }
+                | GameCommand::Slow { .. }
+                | GameCommand::ItemPurge { .. }
+                | GameCommand::Book { .. }
+                | GameCommand::Console { .. }
+                | GameCommand::SetAttr { .. }
+                | GameCommand::Invisible { .. }
+                | GameCommand::Cooltime { .. }
+                | GameCommand::AffectRemove { .. }
+                | GameCommand::Purge { .. }
+                | GameCommand::Respawn { .. }
+                | GameCommand::Mob { .. }
+                | GameCommand::MobLd { .. }
+                | GameCommand::MobAggressive { .. }
+                | GameCommand::MobCoward { .. }
+                | GameCommand::MobMap { .. }
+                | GameCommand::DetailLog { .. }
+                | GameCommand::MonsterLog { .. }
+                | GameCommand::Polymorph { .. }
+                | GameCommand::ForgetMe { .. }
+                | GameCommand::Aggregate { .. }
+                | GameCommand::AttractRanger { .. }
+                | GameCommand::PullMonster { .. }
+                | GameCommand::Group { .. }
+                | GameCommand::GroupRandom { .. }
+        )
+    }
+
+    /// Whether the dispatch runs the line through `apply_emotion_priv_line`.
+    fn is_emotion_priv_line(command: &GameCommand) -> bool {
+        matches!(
+            command,
+            GameCommand::Emotion { .. } | GameCommand::PrivEmpire { .. }
+        )
+    }
+
+    /// Runs the emotion or priv line: one quarter of
+    /// [`GameState::apply_chat_line`], split out so none trips the line lint.
+    fn apply_emotion_priv_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Emotion {
+                vid,
+                command,
+                rest,
+                mover,
+                reply,
+            } => {
+                self.answer_emotion(vid, &command, &rest, mover, reply);
+            }
+            GameCommand::PrivEmpire {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => {
+                self.run_priv_empire(vid, &rest, mover);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a priv's answer");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only these lines here"),
+        }
+    }
+
+    /// Runs the goto, level, top-grant or skill-admin line: one quarter of
+    /// [`GameState::apply_chat_line`], split out so none trips the line lint.
+    fn apply_goto_level_skill_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Goto { vid, rest, reply } => {
+                self.goto_command(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a goto's answer");
+                }
+            }
+            GameCommand::Level {
+                vid,
+                rest,
+                gold,
+                voice,
+                reply,
+            } => {
+                let mover = self.own_mover(vid);
+                let held = mover.and_then(|mover| self.run_level(vid, &rest, mover, gold, voice));
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear a level's answer");
+                }
+            }
+            GameCommand::Advance {
+                vid,
+                rest,
+                gold,
+                voice,
+                reply,
+            } => {
+                let mover = self.own_mover(vid);
+                let held = mover.and_then(|mover| self.run_advance(vid, &rest, mover, gold, voice));
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear an advance's answer");
+                }
+            }
+            GameCommand::GrantTopAffect { vid, rank, reply } => {
+                self.grant_top_affect(vid, rank);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a top grant's answer");
+                }
+            }
+            command @ (GameCommand::SetSkill { .. }
+            | GameCommand::SetSkillOther { .. }
+            | GameCommand::SetSkillPoint { .. }
+            | GameCommand::SetJob { .. }
+            | GameCommand::AllSkillMaster { .. }
+            | GameCommand::ItemFullSet { .. }
+            | GameCommand::AttrFullSet { .. }
+            | GameCommand::FullSet { .. }
+            | GameCommand::ToolRefineLine { .. }
+            | GameCommand::UseItemLine { .. }
+            | GameCommand::ClearAffect { .. }
+            | GameCommand::DragonSoul { .. }
+            | GameCommand::Costume { .. }
+            | GameCommand::DsList { .. }
+            | GameCommand::DsChangeAttr { .. }
+            | GameCommand::Dice { .. }
+            | GameCommand::Gift { .. }
+            | GameCommand::Hair { .. }
+            | GameCommand::FishSimul { .. }
+            | GameCommand::Shutdown { .. }
+            | GameCommand::DoCmd { .. }
+            | GameCommand::Pvp { .. }
+            | GameCommand::Reload { .. }
+            | GameCommand::State { .. }
+            | GameCommand::Inventory { .. }
+            | GameCommand::Slow { .. }
+            | GameCommand::ItemPurge { .. }
+            | GameCommand::Book { .. }
+            | GameCommand::Console { .. }
+            | GameCommand::SetAttr { .. }
+            | GameCommand::Invisible { .. }
+            | GameCommand::Cooltime { .. }
+            | GameCommand::AffectRemove { .. }) => self.apply_skill_admin_tail(command),
+            command @ (GameCommand::Purge { .. }
+            | GameCommand::Respawn { .. }
+            | GameCommand::Mob { .. }
+            | GameCommand::MobLd { .. }
+            | GameCommand::MobAggressive { .. }
+            | GameCommand::MobCoward { .. }
+            | GameCommand::MobMap { .. }) => self.apply_purge_respawn_line(command),
+            command @ (GameCommand::ForgetMe { .. }
+            | GameCommand::Aggregate { .. }
+            | GameCommand::AttractRanger { .. }
+            | GameCommand::PullMonster { .. }
+            | GameCommand::Group { .. }
+            | GameCommand::GroupRandom { .. }) => self.apply_mob_around_line(command),
+            command @ (GameCommand::DetailLog { .. }
+            | GameCommand::MonsterLog { .. }
+            | GameCommand::Polymorph { .. }) => {
+                self.apply_log_line(command);
+            }
+            _ => debug_assert!(false, "the dispatch routes only these lines here"),
+        }
+    }
+
+    /// Runs one skill-admin tail line: split from
+    /// [`GameState::apply_goto_level_skill_line`] so neither trips the line lint.
+    fn apply_skill_admin_tail(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Invisible { vid, reply } => {
+                self.toggle_invisible(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an invisible's answer");
+                }
+            }
+            GameCommand::Cooltime { vid, reply } => {
+                self.disable_cooltime(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a cooltime's answer");
+                }
+            }
+            GameCommand::AffectRemove { vid, rest, reply } => {
+                self.affect_remove(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an affect-remove's answer");
+                }
+            }
+            command => self.apply_skill_admin_line(command),
+        }
+    }
+
+    /// Runs one skill-admin line: split from
+    /// [`GameState::apply_goto_level_skill_line`] so neither trips the line lint.
+    fn apply_skill_admin_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::SetSkill { vid, rest, reply } => {
+                let set = self.run_setskill(vid, &rest);
+                if reply.send(set).is_err() {
+                    debug!(?vid, "nobody was left to hear a setskill's answer");
+                }
+            }
+            GameCommand::SetSkillOther { vid, rest, reply } => {
+                let set = self.run_setskillother(vid, &rest);
+                if reply.send(set).is_err() {
+                    debug!(?vid, "nobody was left to hear a setskillother's answer");
+                }
+            }
+            GameCommand::SetSkillPoint { vid, rest, reply } => {
+                let counter = self.run_setskillpoint(vid, &rest);
+                if reply.send(counter).is_err() {
+                    debug!(?vid, "nobody was left to hear a setskillpoint's answer");
+                }
+            }
+            GameCommand::SetJob { vid, rest, reply } => {
+                let landed = self.run_setjob(vid, &rest);
+                if reply.send(landed).is_err() {
+                    debug!(?vid, "nobody was left to hear a setjob's answer");
+                }
+            }
+            GameCommand::AllSkillMaster { vid, reply } => {
+                let planted = self.run_all_skill_master(vid);
+                if reply.send(planted).is_err() {
+                    debug!(?vid, "nobody was left to hear a master's answer");
+                }
+            }
+            command @ (GameCommand::ItemFullSet { .. }
+            | GameCommand::AttrFullSet { .. }
+            | GameCommand::FullSet { .. }
+            | GameCommand::Slow { .. }
+            | GameCommand::ItemPurge { .. }
+            | GameCommand::Book { .. }
+            | GameCommand::SetAttr { .. }
+            | GameCommand::ToolRefineLine { .. }
+            | GameCommand::UseItemLine { .. }
+            | GameCommand::DragonSoul { .. }
+            | GameCommand::Costume { .. }
+            | GameCommand::DsChangeAttr { .. }) => self.apply_kit_line(command),
+            GameCommand::ClearAffect { .. }
+            | GameCommand::DsList { .. }
+            | GameCommand::Dice { .. }
+            | GameCommand::Gift { .. }
+            | GameCommand::Hair { .. }
+            | GameCommand::FishSimul { .. }
+            | GameCommand::Shutdown { .. }
+            | GameCommand::DoCmd { .. }
+            | GameCommand::Pvp { .. }
+            | GameCommand::Reload { .. }
+            | GameCommand::State { .. }
+            | GameCommand::Inventory { .. }
+            | GameCommand::Console { .. } => self.apply_tell_line(command),
+            _ => debug_assert!(false, "the dispatch routes only skill lines here"),
+        }
+    }
+
+    /// Runs one kit, tool, use or costume line: split from
+    /// [`GameState::apply_skill_admin_line`] so neither trips the line lint.
+    fn apply_kit_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::ItemFullSet { vid, mover, reply } => {
+                answer_item_step(vid, reply, self.item_full_set(vid, mover));
+            }
+            GameCommand::AttrFullSet { vid, mover, reply } => {
+                answer_item_step(vid, reply, self.attr_full_set(vid, mover));
+            }
+            GameCommand::FullSet { vid, mover, reply } => {
+                let moved = self.full_set(vid, mover);
+                if reply.send(moved).is_err() {
+                    debug!(?vid, "nobody was left to hear a full one's answer");
+                }
+            }
+            GameCommand::Slow { vid, mover, reply } => {
+                answer_item_step(vid, reply, self.slow(vid, mover));
+            }
+            GameCommand::ItemPurge { vid, mover, reply } => {
+                answer_item_step(vid, reply, self.item_purge(vid, mover));
+            }
+            GameCommand::Book {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.book(vid, &rest, mover)),
+            GameCommand::SetAttr { vid, rest, reply } => {
+                let stored = self.run_set_attr(vid, &rest);
+                if reply.send(stored).is_err() {
+                    debug!(?vid, "nobody was left to hear a set's answer");
+                }
+            }
+            GameCommand::ToolRefineLine {
+                vid,
+                rest,
+                mover,
+                line,
+                reply,
+            } => {
+                answer_item_step(
+                    vid,
+                    reply,
+                    self.run_tool_refine_line(vid, &rest, mover, line),
+                );
+            }
+            GameCommand::UseItemLine {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.run_use_item_line(vid, &rest, mover));
+            }
+            GameCommand::DragonSoul { vid, rest, reply } => {
+                answer_item_step(vid, reply, self.run_dragon_soul(vid, &rest));
+            }
+            GameCommand::Costume {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.run_costume(vid, &rest, mover)),
+            GameCommand::DsChangeAttr {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.run_ds_change_attr(vid, &rest, mover)),
+            _ => debug_assert!(false, "the dispatch routes only kit lines here"),
+        }
+    }
+
+    /// Runs one tell-only line: split from [`GameState::apply_skill_admin_line`] so
+    /// neither trips the line lint.
+    fn apply_tell_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::ClearAffect { vid, reply } => {
+                self.run_clear_affect(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a clear's answer");
+                }
+            }
+            GameCommand::DsList { vid, reply } => {
+                self.run_ds_list(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a ds list's answer");
+                }
+            }
+            GameCommand::Dice { vid, rest, reply } => {
+                self.run_dice(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a dice's answer");
+                }
+            }
+            GameCommand::Gift { vid, reply } => {
+                self.run_gift(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a gift's answer");
+                }
+            }
+            GameCommand::Hair { vid, reply } => {
+                self.run_hair(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a hair's answer");
+                }
+            }
+            GameCommand::FishSimul { vid, rest, reply } => {
+                self.run_fish_simul(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a simul's answer");
+                }
+            }
+            GameCommand::Shutdown { vid, reply } => {
+                self.run_shutdown(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a shutdown's answer");
+                }
+            }
+            GameCommand::DoCmd { vid, kind, reply } => {
+                self.run_do_cmd(vid, kind);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an exit's answer");
+                }
+            }
+            GameCommand::Pvp { vid, rest, reply } => {
+                self.run_pvp(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a duel's answer");
+                }
+            }
+            GameCommand::Reload {
+                vid,
+                rest,
+                read,
+                reply,
+            } => {
+                self.reload_command(vid, &rest, &read);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a reload's answer");
+                }
+            }
+            GameCommand::State { vid, rest, reply } => {
+                self.run_state(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a state's answer");
+                }
+            }
+            GameCommand::Inventory { vid, rest, reply } => {
+                self.run_inventory(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an inventory's answer");
+                }
+            }
+            GameCommand::Console { vid, reply } => {
+                self.run_console(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a console's answer");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only tells here"),
+        }
+    }
+    /// Runs one purge, weaken or respawn line: split from
+    /// [`GameState::apply_goto_level_skill_line`] so neither trips the line lint.
+    fn apply_purge_respawn_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Purge {
+                vid,
+                rest,
+                weaken,
+                reply,
+            } => {
+                let (word, _) = crate::command::one_argument(&rest);
+                self.purge_around(vid, word.as_slice() == b"all", weaken);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a purge's answer");
+                }
+            }
+            GameCommand::Respawn { vid, rest, reply } => {
+                let (word, _) = crate::command::one_argument(&rest);
+                let all = !word.is_empty() && word.eq_ignore_ascii_case(b"all");
+                self.respawn_around(vid, all);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a respawn's answer");
+                }
+            }
+            GameCommand::Mob { vid, rest, reply } => {
+                self.mob_around(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a mob's answer");
+                }
+            }
+            GameCommand::MobLd { vid, rest, reply } => {
+                self.mob_ld_at(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a mob_ld's answer");
+                }
+            }
+            GameCommand::MobAggressive { vid, rest, reply } => {
+                self.mob_flagged(vid, &rest, false);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a mob's flagged answer");
+                }
+            }
+            GameCommand::MobCoward { vid, rest, reply } => {
+                self.mob_flagged(vid, &rest, true);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a coward mob's answer");
+                }
+            }
+            GameCommand::MobMap { vid, rest, reply } => {
+                self.mob_somewhere(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a mob_map's answer");
+                }
+            }
+            _ => debug_assert!(false, "the purge dispatch routes only these lines here"),
+        }
+    }
+
+    /// Runs one forget, aggregate, attract, pull or group line: split from
+    /// [`GameState::apply_purge_respawn_line`] so neither trips the line lint.
+    fn apply_mob_around_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::ForgetMe { vid, reply } => {
+                self.forget_my_attacker(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a forgetme's answer");
+                }
+            }
+            GameCommand::Aggregate { vid, reply } => {
+                self.aggregate_monster(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an aggregate's answer");
+                }
+            }
+            GameCommand::AttractRanger { vid, reply } => {
+                self.attract_ranger(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an attract_ranger's answer");
+                }
+            }
+            GameCommand::PullMonster { vid, reply } => {
+                self.pull_monster(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a pull_monster's answer");
+                }
+            }
+            GameCommand::Group { vid, rest, reply } => {
+                self.group_around(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a group's answer");
+                }
+            }
+            GameCommand::GroupRandom { vid, rest, reply } => {
+                self.group_random_around(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a grrandom's answer");
+                }
+            }
+            _ => debug_assert!(false, "the around dispatch routes only these lines here"),
+        }
+    }
+
+    /// Runs one log line: split from [`GameState::apply_purge_respawn_line`] so neither
+    /// trips the line lint.
+    fn apply_log_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::DetailLog { vid, reply } => {
+                self.toggle_detail_log(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a detaillog's answer");
+                }
+            }
+            GameCommand::MonsterLog { vid, reply } => {
+                self.toggle_monster_log(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a monsterlog's answer");
+                }
+            }
+            GameCommand::Polymorph { vid, rest, reply } => {
+                self.run_polymorph(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a polymorph's answer");
+                }
+            }
+            _ => debug_assert!(false, "the log dispatch routes only these lines here"),
+        }
+    }
+
+    /// Runs one flag, letters, stat, PK or walk line: the second half of
+    /// [`GameState::apply_chat_line`], split out so neither trips the line lint.
+    fn apply_chat_flag(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Reset { vid, reply } => {
+                let held = self.run_reset(vid);
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear a reset's answer");
+                }
+            }
+            GameCommand::EventFlag {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => {
+                self.run_event_flag(vid, &rest, mover);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a flag's answer");
+                }
+            }
+            GameCommand::GetEventFlag { vid, mover, reply } => {
+                self.run_get_event_flag(vid, mover);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a flag list's answer");
+                }
+            }
+            GameCommand::EventLine {
+                vid,
+                line,
+                rest,
+                mover,
+                reply,
+            } => {
+                self.run_event_line(vid, line, &rest, mover);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear an event line's answer");
+                }
+            }
+            GameCommand::GiveReward { vid, mover, reply } => {
+                let trade = self.run_give_reward(vid, mover);
+                if reply.send(trade).is_err() {
+                    debug!(?vid, "nobody was left to hear a reward's answer");
+                }
+            }
+            GameCommand::LettersOpen { vid, mover, reply } => {
+                self.run_letters_open(vid, mover);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a letters window");
+                }
+            }
+            GameCommand::Stat {
+                vid,
+                rest,
+                lower,
+                reply,
+            } => {
+                let held = self.run_stat(vid, &rest, lower);
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear a stat's answer");
+                }
+            }
+            GameCommand::StatVal { vid, rest, reply } => {
+                let held = self.run_stat_val(vid, &rest);
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear a stat value's answer");
+                }
+            }
+            GameCommand::StatPlus {
+                vid,
+                rest,
+                kind,
+                reply,
+            } => {
+                let held = self.run_stat_plus(vid, &rest, kind);
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear a stat plus's answer");
+                }
+            }
+            GameCommand::SetStat {
+                vid,
+                rest,
+                kind,
+                reply,
+            } => {
+                let held = self.run_set_stat(vid, &rest, kind);
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear a set stat's answer");
+                }
+            }
+            GameCommand::StatReset { vid, reply } => {
+                let held = self.reset_stat_count(vid);
+                if reply.send(held).is_err() {
+                    debug!(?vid, "nobody was left to hear a stat reset's answer");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only flag lines here"),
+        }
+    }
+
+    /// Whether `command` is a PK, walk or Armada line.
+    fn is_chat_mode_line(command: &GameCommand) -> bool {
+        matches!(
+            command,
+            GameCommand::PkMode { .. } | GameCommand::WalkMode { .. } | GameCommand::CanDead { .. }
+        )
+    }
+
+    /// Runs the PK, walk or Armada line: one quarter of [`GameState::apply_chat_line`],
+    /// split out so none trips the line lint.
+    fn apply_chat_mode(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::PkMode { vid, rest, reply } => {
+                self.run_pkmode(vid, &rest);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a PK mode");
+                }
+            }
+            GameCommand::WalkMode { vid, walk, reply } => {
+                self.run_walk_mode(vid, walk);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a walk mode");
+                }
+            }
+            GameCommand::CanDead { vid, can, reply } => {
+                self.run_can_dead(vid, can);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a can dead");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only mode lines here"),
+        }
+    }
+
     fn apply_messenger(&mut self, command: GameCommand) {
         match command {
             GameCommand::MessengerLogin {
@@ -1033,6 +2120,9 @@ impl GameState {
             | GameCommand::Safebox { .. }
             | GameCommand::AnswerMakeGuild { .. }
             | GameCommand::CommitMakeGuild { .. }
+            | GameCommand::JudgeMakeguild { .. }
+            | GameCommand::CommitMakeguild { .. }
+            | GameCommand::JudgeDeleteguild { .. }
             | GameCommand::Quest { .. }) => {
                 self.apply_item_step(command);
                 None
@@ -1048,6 +2138,7 @@ impl GameState {
             | GameCommand::AnswerGuildMemberGeneral { .. }
             | GameCommand::AnswerGuildOffer { .. }
             | GameCommand::AnswerGuildCharge { .. }
+            | GameCommand::RunGuildReset { .. }
             | GameCommand::AnswerGuildPostComment { .. }
             | GameCommand::CommitGuildPostComment { .. }
             | GameCommand::AnswerGuildRefreshComment { .. }
@@ -1062,13 +2153,19 @@ impl GameState {
             | GameCommand::GuildWarStop { .. }
             | GameCommand::GuildWarCancel { .. }
             | GameCommand::GuildWarList { .. }
+            | GameCommand::GuildState { .. }
             | GameCommand::TakeWarEnds { .. }) => {
                 self.apply_guild_step(command);
                 None
             }
             command @ (GameCommand::DropItem { .. }
             | GameCommand::DropGold { .. }
+            | GameCommand::DestroyItem { .. }
+            | GameCommand::Refine { .. }
+            | GameCommand::UseItemToItem { .. }
+            | GameCommand::GiveItem { .. }
             | GameCommand::PickupItem { .. }
+            | GameCommand::Fishing { .. }
             | GameCommand::NpcsOn { .. }) => {
                 self.apply_ground(command);
                 None
@@ -1080,6 +2177,8 @@ impl GameState {
                 None
             }
             command @ (GameCommand::Target { .. }
+            | GameCommand::TargetInfo { .. }
+            | GameCommand::EventInfo { .. }
             | GameCommand::UseSkill { .. }
             | GameCommand::Attack { .. }
             | GameCommand::FlyTarget { .. }
@@ -1089,18 +2188,24 @@ impl GameState {
             | GameCommand::PartyRequest { .. }
             | GameCommand::PartyRequestAccept { .. }
             | GameCommand::PartyRequestDeny { .. }
+            | GameCommand::Ungroup { .. }
             | GameCommand::PartyRemove { .. }
             | GameCommand::PartySetState { .. }
             | GameCommand::PartyParameter { .. }
             | GameCommand::PartyUseSkill { .. }
             | GameCommand::PartyOf { .. }
             | GameCommand::GuildOf { .. }
+            | GameCommand::QuestConfirm { .. }
             | GameCommand::MarkUpload { .. }
             | GameCommand::MarkIdxList { .. }
             | GameCommand::MarkCrcList { .. }
             | GameCommand::SymbolUpload { .. }
             | GameCommand::SymbolCrc { .. }) => {
                 self.apply_pick(command);
+                None
+            }
+            command @ GameCommand::HorseLine { .. } => {
+                self.apply_horse_line(command);
                 None
             }
             command => Some(command),
@@ -1186,6 +2291,10 @@ impl GameState {
     ) {
         let answer = self.enter_world_with_items(vid, player_id, name, items, outbox);
         let answer = answer.map(|()| {
+            // `CPVPManager::Connect` and `SendList` (`G/input_login.cpp:669-670`): the
+            // entrant's live pairs re-stamp its VID, and every live pair replays.
+            self.pvp_connect(vid);
+            self.pvp_send_list(vid);
             // `MessengerManager::instance().Login(ch->GetName())`
             // (`G/input_login.cpp:671`) runs before the lines that waited are read
             // (`ReadOfflineMessages`, `:728-729`).
@@ -1209,6 +2318,9 @@ impl GameState {
             // that waited for this character are read when it enters.
             self.deliver_offline_messages(vid, name);
             let shown = self.shown_on_admit(vid, player_id, name, loaded);
+            // `EnterHorse` (`G/input_login.cpp:647-650`) and the `__FIX_NIVEL_CAL__` horse
+            // refresh (`:887-897`), the last `Entergame` lines before the quest login.
+            self.enter_horse(vid);
             // `CQuestManager::Login` (`G/input_db.cpp:1005-1048`) runs once the
             // descriptor is in `PHASE_GAME`, after everything `Entergame` sent; its
             // records ride the outbox, which the descriptor drains after the burst.
@@ -1311,10 +2423,11 @@ impl GameState {
             .unwrap_or_default()
     }
 
-    /// The saved affects of the character under `vid` (`LoadAffect`'s rows,
-    /// `G/char_affect.cpp:573-666`): the silence rows it still carries, in row
-    /// order. A save writes them; an expired silence is already gone from the
-    /// event, so it is gone from the save too.
+    /// The saved affects of the character under `vid` (`SaveAffect`,
+    /// `G/char_affect.cpp:468-492`): every row but the premium band, the war flag and
+    /// the revive-invisible (`IS_NO_SAVE_AFFECT`, `:43-55`), in row order. A save
+    /// writes them; an expired row is already gone from the event, so it is gone from
+    /// the save too.
     fn saved_affects_of(&self, vid: common::vid::Vid) -> Vec<db::player_affects::StoredAffect> {
         self.affect_events
             .get(&vid)
@@ -1322,7 +2435,13 @@ impl GameState {
                 event
                     .affects
                     .iter()
-                    .filter(|affect| affect.kind == crate::loading_phase::AFFECT_BLOCK_CHAT)
+                    .filter(|affect| {
+                        !(crate::loading_phase::AFFECT_PREMIUM_START
+                            ..=crate::loading_phase::AFFECT_PREMIUM_END)
+                            .contains(&affect.kind)
+                            && affect.kind != crate::loading_phase::AFFECT_WAR_FLAG
+                            && affect.kind != crate::loading_phase::AFFECT_REVIVE_INVISIBLE
+                    })
                     .map(|affect| db::player_affects::StoredAffect {
                         affect_type: affect.kind,
                         apply_on: affect.apply_on,
@@ -1378,6 +2497,65 @@ impl GameState {
         }
         if reply.send(answer).is_err() {
             debug!(?vid, "nobody was left to hear a block mode's answer");
+        }
+    }
+    /// Run the `/hide_costume` line and answer with its quest-flag write. An empty line
+    /// is quiet (`if (*arg1)`); a part outside 1-5 is quiet too. The `SetXCostumeHidden`
+    /// line rides the client's own queue and the look update rides it and everyone that
+    /// sees the character (`UpdatePacket`, `G/entity.cpp:88-105`), before the answer, as
+    /// does the `[LS;1971]` refusal when the character is mid-move or fought or moved
+    /// within 1.5 seconds.
+    /// Run one `/emotion_allow` or `/do_emotion` line: the consent insert or the
+    /// emotion's gates and its broadcast to the caller's view, before the answer.
+    fn answer_emotion(
+        &mut self,
+        vid: common::vid::Vid,
+        command: &str,
+        rest: &[u8],
+        mover: Mover,
+        reply: oneshot::Sender<()>,
+    ) {
+        if command == "emotion_allow" {
+            self.allow_emotion(vid, rest);
+        } else {
+            let _victim = self.run_emotion(vid, command, rest, mover);
+        }
+        if reply.send(()).is_err() {
+            debug!(?vid, "nobody was left to hear an emotion's answer");
+        }
+    }
+
+    fn answer_hide_costume(
+        &mut self,
+        vid: common::vid::Vid,
+        rest: &[u8],
+        reply: oneshot::Sender<crate::game_loop_messages::HideCostumeAnswer>,
+    ) {
+        use crate::command::one_argument;
+        use crate::game_state::whisper::{parse_hide_number, HideCostumeOutcome};
+        let (part_word, back) = one_argument(rest);
+        let answer = if part_word.is_empty() {
+            crate::game_loop_messages::HideCostumeAnswer::default()
+        } else {
+            let part = parse_hide_number(&part_word);
+            let (hide_word, _) = one_argument(back);
+            let hide = hide_word.is_empty() || parse_hide_number(&hide_word) != 0;
+            match self.hide_costume(vid, part, hide) {
+                Some(HideCostumeOutcome::Hid { line, update, flag }) => {
+                    let _sent = self.write_to_client(vid, line);
+                    let me = crate::game_state::view::EntityKey::Character(vid.raw());
+                    self.packet_around(me, &update, None);
+                    crate::game_loop_messages::HideCostumeAnswer { flag: Some(flag) }
+                }
+                Some(HideCostumeOutcome::Refused(line)) => {
+                    let _sent = self.write_to_client(vid, line);
+                    crate::game_loop_messages::HideCostumeAnswer::default()
+                }
+                None => crate::game_loop_messages::HideCostumeAnswer::default(),
+            }
+        };
+        if reply.send(answer).is_err() {
+            debug!(?vid, "nobody was left to hear a hide's answer");
         }
     }
 
@@ -1626,6 +2804,9 @@ impl GameState {
             character.set_quickslots(loaded.quickslots);
             character.set_gold(loaded.gold);
         }
+        // The five `costume_option.hide_*` flags the enter-game hide restore reads
+        // (`G/input_login.cpp:612-638`), before the move below takes the flags.
+        let hides = quest_hide_flags(&loaded.quest_flags);
         // `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`): the character's quest flags
         // are set on its quest record when it enters, so a quest that ran in an earlier
         // session is where it left it. The record is the one the quest manager holds for
@@ -1644,15 +2825,28 @@ impl GameState {
             }
         }
         // `LoadAffect` (`G/char_affect.cpp:573-666`): the saved affects the store read
-        // are the character's timed affects again. Only the silence is saved, so only
-        // it is restored, and a row that would fire no tick is gone instead
+        // are the character's timed affects again. Every row restores but `SKILL_MUYEONG`
+        // (78), the two auto-recovery rows without their item, and a row whose point
+        // is past `POINT_MAX_NUM` (255). A row that would fire no tick is gone instead
         // (`ProcessAffect` ends it on its first run, `G/char_affect.cpp:424-442`).
-        // Each add packet the burst carries, behind the update, as the load's adds
-        // ride the queue they found.
+        // Each add packet the burst carries, behind the update, as the load's adds ride
+        // the queue they found.
         let mut silence = Vec::new();
         for saved in &loaded.affects {
-            if saved.affect_type == crate::loading_phase::AFFECT_BLOCK_CHAT && saved.duration > 0 {
-                let restored = crate::game_state::affect::Affect {
+            let orphaned = (saved.affect_type == crate::loading_phase::AFFECT_AUTO_HP_RECOVERY
+                || saved.affect_type == crate::loading_phase::AFFECT_AUTO_SP_RECOVERY)
+                && self
+                    .characters
+                    .find_by_vid(vid)
+                    .ok()
+                    .and_then(|character| character.items().item(saved.flag))
+                    .is_none();
+            let kept = saved.affect_type != crate::loading_phase::SKILL_MUYEONG
+                && !orphaned
+                && usize::from(saved.apply_on) < crate::loading_phase::POINT_MAX_NUM
+                && saved.duration > 0;
+            if kept {
+                let revived = crate::game_state::affect::Affect {
                     kind: saved.affect_type,
                     apply_on: saved.apply_on,
                     value: saved.apply_value,
@@ -1660,8 +2854,8 @@ impl GameState {
                     remaining: saved.duration,
                     sp_cost: saved.sp_cost,
                 };
-                self.add_affect(vid, restored);
-                silence.push(crate::game_state::affect::affect_add_frame(&restored));
+                self.add_affect(vid, revived);
+                silence.push(crate::game_state::affect::affect_add_frame(&revived));
             }
         }
         let (records, update) = match loaded.show {
@@ -1672,10 +2866,30 @@ impl GameState {
             }
             None => (Vec::new(), None),
         };
+        // `CInputLogin::Entergame`'s hide restore (`G/input_login.cpp:612-638`) runs after
+        // the show and the revive-invisible add, whose pair and update read the mask
+        // still clear, and its lines ride the burst after the phase change. The setters
+        // land the bits and re-chat; they send no update, so the parts wait for the
+        // login scripts' own hides.
+        let hide_lines = self.restore_hidden(vid, hides);
+        // `_send_bonus_info` (`G/input_login.cpp:39-66`) runs after the show, so the
+        // body's empire is placed and `priv_of` reads the right row. The lines ride the
+        // burst after the Channel record.
+        let priv_lines = self.priv_bonus_lines(vid);
+        // `SEventLetters` (`G/input_login.cpp:69-82`) runs in `Entergame`: the line reads
+        // 1 when the `letters_event` flag is not 0, else 0.
+        let letters_event = self
+            .quests
+            .as_ref()
+            .is_some_and(|quests| quests.manager().event_flag(b"letters_event") != 0);
         Shown {
             records,
             update,
             silence,
+            hide_lines,
+            priv_lines,
+            letters_event,
+            observer: self.is_observing(vid),
         }
     }
 
@@ -1781,7 +2995,18 @@ impl GameState {
         self.leave_fight(vid, departure);
         self.clear_target(vid);
         let _outbox = self.outboxes.remove(&vid);
+        // The save takes the affects before the event goes with them (`SaveAffect` runs in
+        // `CHARACTER::Save`, before `Disconnect` ends the character's events).
+        let affects = self.saved_affects_of(vid);
         let _event = self.affect_events.remove(&vid);
+        // `event_cancel(&m_pkFishingEvent)` and `event_cancel(&m_pkMiningEvent)` in
+        // `CHARACTER::Destroy` (`G/char.cpp:719`, `:733`): silent, unlike `mining_cancel`.
+        let _fishing = self.fishing_events.remove(&vid);
+        let _mining = self.mining_events.remove(&vid);
+        // `CHorseRider::Destroy` cancels both stamina events (`G/horse_rider.cpp:81-85`).
+        let _horse = self.horse_timers.remove(&vid);
+        // `m_sortInventoryPulse` is the `CHARACTER`'s: the next login starts at 0.
+        let _sorted = self.sort_inventory_until.remove(&vid);
         self.stop_browsing(vid);
         self.close_storage(vid);
         // `MessengerManager::instance().Logout(GetName())` (`G/char.cpp:1817`): the
@@ -1804,21 +3029,35 @@ impl GameState {
         // after it: a member that left the map is no member of the war.
         let war_map = self.bodies.get(&vid).map_or(0, |body| body.map);
         self.leave_war_map(vid, war_map);
-        // The quest flags are taken before the quest record goes: `CHARACTER::Disconnect`
-        // writes the character, and with it the quest flags (`G/char.cpp:1673-1679`),
-        // before it erases the quest record (`CQuestManager::DisconnectPC`,
-        // `G/char.cpp:1800`).
+        // A disconnect runs the `logout` scripts before the flags are taken, and drops
+        // the record after: `CHARACTER::Disconnect` runs `CQuestManager::LogoutPC`
+        // (`G/char.cpp:1773`), writes the character with its quest flags
+        // (`G/char.cpp:1673-1679` in the legacy order the save follows), and only then
+        // erases the record (`DisconnectPC`, `G/char.cpp:1802`). A warp runs nothing
+        // and drops nothing: the character stays online.
+        if departure == Departure::Disconnect {
+            self.end_quests(vid);
+        }
         let quest_flags = self
             .characters
             .find_by_vid(vid)
             .map(|character| self.quest_flags_of(character.player_id()))
             .unwrap_or_default();
-        self.end_quests(vid);
+        if departure == Departure::Disconnect {
+            if let Ok(character) = self.characters.find_by_vid(vid) {
+                let pid = character.player_id();
+                self.forget_quests(pid);
+            }
+            // `CHARACTER::Disconnect` cancels the timed event (`G/char.cpp:717`); a
+            // warp keeps it, and the re-entered character resumes the countdown.
+            self.timed_events.remove(&vid);
+        }
         self.forget_portal_times(vid);
+        self.refining.remove(&vid);
+        self.refine_scroll.remove(&vid);
         self.forget_whisper_session(vid);
         let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
-        let affects = self.saved_affects_of(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
             points: character.points().cloned(),
@@ -1941,6 +3180,144 @@ impl GameState {
         }
     }
 
+    /// `ACMD(do_use_item)`: the cell the line names runs through `UseItem`
+    /// (`G/cmd_gm.cpp:4999-5016`). The parse is `str_to_number(int)` on the first
+    /// word, 0 when empty; the cast to `WORD` truncates before the lookup, so a
+    /// negative or past-the-end cell answers the no-item line. An empty cell answers
+    /// it too. Otherwise the step runs as a record's does, and its answer rides back
+    /// for the store like a record's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub(super) fn run_use_item_line(
+        &mut self,
+        vid: common::vid::Vid,
+        rest: &[u8],
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let mover = self.own_mover(vid);
+        let (word, _) = crate::command::one_argument(rest);
+        let cell = if word.is_empty() {
+            0
+        } else {
+            skill_admin::str_to_wrapping_int(&word)
+        };
+        let cell = u16::from_le_bytes(cell.to_le_bytes()[..2].try_into().expect("two bytes fit"));
+        let at =
+            protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
+        let held = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at));
+        if held.is_none() {
+            if let Some(mover) = mover {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"I can't wear it because I don't have the item.",
+                    &[],
+                );
+            }
+            let character = self
+                .characters
+                .find_by_vid(vid)
+                .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+            let mut empty = MovedItems::new(
+                character.player_id(),
+                vid.raw(),
+                world::character::MoveDone {
+                    kind: world::character::MoveKind::Used,
+                    records: Vec::new(),
+                    changes: Vec::new(),
+                },
+                actor,
+                &self.protos,
+                &self.locale,
+            );
+            empty.points = character.points().cloned();
+            return Ok(empty);
+        }
+        self.use_item(vid, at, actor)
+    }
+
+    /// Run one `/refine_rod`, `/refine_pick` or `/max_pick` line against the storage of
+    /// the character online under `vid` (`ACMD(do_refine_rod)`, `do_refine_pick`,
+    /// `do_max_pick`, `G/cmd_gm.cpp:2181-2222`): the word's low byte names the
+    /// inventory cell, whose tool refines, maxes, or both.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub(super) fn run_tool_refine_line(
+        &mut self,
+        vid: common::vid::Vid,
+        rest: &[u8],
+        actor: Mover,
+        line: world::character::ToolRefine,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        use world::character::{refine_cell, ToolRefine};
+        let (word, _) = crate::command::one_argument(rest);
+        let cell = refine_cell(&word);
+        // The line carries the maxed pick's own max (`G/mining.cpp:314`), read
+        // before the step swaps the pick for a fresh tool with its own max.
+        let maxed = (line == ToolRefine::Pick || line == ToolRefine::Max)
+            .then(|| self.pick_max_before(vid, cell))
+            .flatten();
+        let mut moved = self.run_tool_refine_step(vid, actor, cell, line)?;
+        // `CHEAT_MAX_PICK` (`G/mining.cpp:304-315`) sets the training first — and
+        // `CItem::SetSocket` (`G/item.cpp:1643-1656`) sends the update for the
+        // just-set training — and then tells the line, so the line goes into the
+        // records behind the update, ahead of the swap's clear and set.
+        if let (Some(mover), Some(trained)) = (self.own_mover(vid), maxed) {
+            let line = crate::chat_line::chat_packet(
+                mover.recipient(&self.locale),
+                protocol::gc_chat::CHAT_TYPE_INFO,
+                b"Pickaxe training has reached maximum (%d).",
+                &[crate::chat_line::Arg::Int(i64::from(trained))],
+            );
+            // The max's update is the step's first record, and the pick's swap
+            // follows it, so the line goes behind the first record.
+            let at = moved.records.len().min(1);
+            moved.records.insert(at, line);
+        }
+        Ok(moved)
+    }
+
+    /// The storage half of [`Self::run_tool_refine_line`]: the dice are drawn before the
+    /// storage borrows, so the closure owns the draw and borrows nothing beside the step.
+    fn run_tool_refine_step(
+        &mut self,
+        vid: common::vid::Vid,
+        actor: Mover,
+        cell: u8,
+        line: world::character::ToolRefine,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        use world::character::{number, refine_tool};
+        let draw = number(&mut self.dice, 1, 100);
+        self.run_item_step(vid, actor, |items, ids, _rules, _gear, protos| {
+            let mut fixed = world::character::FixedDraw::new(draw);
+            Ok(refine_tool(items, ids, protos, &mut fixed, cell, line).0)
+        })
+    }
+
+    /// The max `CHEAT_MAX_PICK` tells for the pick in `cell`: the held pick's proto
+    /// `VALUE2`, `None` when the cell holds no pick (`G/mining.cpp:304-314`). Read
+    /// before the step, while the maxed pick is still the cell's holder.
+    fn pick_max_before(&self, vid: common::vid::Vid, cell: u8) -> Option<i32> {
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let at = protocol::item_pos::ItemPos::new(
+            common::item_slots::EWindows::Inventory as u8,
+            u16::from(cell),
+        );
+        let held = character.items().item_at(at)?;
+        let proto = self.protos.get(held.vnum)?;
+        (proto.item_type == gamedata::item_kind::ITEM_PICK).then_some(proto.values[2])
+    }
+
     /// Run one `CG_ITEM_USE` for the character online under `vid`: an equippable item goes on
     /// or comes off, a potion is drunk, and a skill book is read (`CHARACTER::UseItem`,
     /// `G/char_item.cpp:7168`).
@@ -1961,6 +3338,9 @@ impl GameState {
     ) -> Result<MovedItems, MoveItemRefused> {
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
+        }
+        if self.bait_at(vid, at) {
+            return self.use_bait(vid, at, actor);
         }
         // The book the read passed, and the slot it climbed, for the store: `None` while
         // the step is no read.
@@ -2005,7 +3385,17 @@ impl GameState {
             use_item(items, at, rules, gear)
         })?;
         if moved.kind == world::character::MoveKind::QuestUsed {
-            self.use_quest_item(vid, at, actor, &mut moved);
+            let pickup = self
+                .characters
+                .find_by_vid(vid)
+                .ok()
+                .and_then(|character| character.items().item_at(at))
+                .is_some_and(|item| item.vnum == world::character::PICKUP_AFFECT_ITEM);
+            if pickup {
+                self.use_pickup_item(vid, actor);
+            } else {
+                self.use_quest_item(vid, at, actor, &mut moved);
+            }
         }
         // `StartAffectEvent`: a potion that left recovery starts the event, one second out,
         // unless it already runs.
@@ -2094,6 +3484,7 @@ impl GameState {
             | GameCommand::AnswerGuildMemberGeneral { .. }
             | GameCommand::AnswerGuildOffer { .. }
             | GameCommand::AnswerGuildCharge { .. }
+            | GameCommand::RunGuildReset { .. }
             | GameCommand::AnswerGuildUseSkill { .. }
             | GameCommand::CommitGuildUseSkill { .. }
             | GameCommand::GuildSkillUp { .. }
@@ -2102,6 +3493,7 @@ impl GameState {
             | GameCommand::GuildWarStop { .. }
             | GameCommand::GuildWarCancel { .. }
             | GameCommand::GuildWarList { .. }
+            | GameCommand::GuildState { .. }
             | GameCommand::TakeWarEnds { .. }
             | GameCommand::AnswerGuildPostComment { .. }
             | GameCommand::CommitGuildPostComment { .. }
@@ -2183,10 +3575,9 @@ impl GameState {
                     warn!(?vid, "a guild offer ran and nobody was left to store it");
                 }
             }
-            GameCommand::AnswerGuildCharge { vid, offer, reply } => {
-                if reply.send(self.answer_guild_charge(vid, offer)).is_err() {
-                    warn!(?vid, "a guild charge ran and nobody was left to store it");
-                }
+            command @ (GameCommand::AnswerGuildCharge { .. }
+            | GameCommand::RunGuildReset { .. }) => {
+                self.apply_guild_faith_step(command);
             }
             command @ (GameCommand::AnswerGuildUseSkill { .. }
             | GameCommand::CommitGuildUseSkill { .. }
@@ -2196,6 +3587,7 @@ impl GameState {
             | GameCommand::GuildWarStop { .. }
             | GameCommand::GuildWarCancel { .. }
             | GameCommand::GuildWarList { .. }
+            | GameCommand::GuildState { .. }
             | GameCommand::TakeWarEnds { .. }) => {
                 self.apply_guild_skill_step(command);
             }
@@ -2216,6 +3608,27 @@ impl GameState {
             }
             _ => {
                 debug_assert!(false, "a non-grade step reached the grade handler");
+            }
+        }
+    }
+
+    /// Run one guild faith step: the charge and the `/greset`. Split from
+    /// [`Self::apply_guild_grade_step`] so neither dispatch grows past the
+    /// line limit.
+    fn apply_guild_faith_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::AnswerGuildCharge { vid, offer, reply } => {
+                if reply.send(self.answer_guild_charge(vid, offer)).is_err() {
+                    warn!(?vid, "a guild charge ran and nobody was left to store it");
+                }
+            }
+            GameCommand::RunGuildReset { vid, reply } => {
+                if reply.send(self.run_guild_reset(vid)).is_err() {
+                    warn!(?vid, "a guild reset ran and nobody was left to store it");
+                }
+            }
+            _ => {
+                debug_assert!(false, "a non-faith step reached the faith handler");
             }
         }
     }
@@ -2294,6 +3707,11 @@ impl GameState {
             GameCommand::GuildWarList { now, reply } => {
                 if reply.send(self.guild_war_list(now)).is_err() {
                     warn!("a guild war list ran and nobody was left to send it");
+                }
+            }
+            GameCommand::GuildState { rest, reply } => {
+                if reply.send(self.guild_state(&rest)).is_err() {
+                    warn!("a guild state ran and nobody was left to send it");
                 }
             }
             _ => {
@@ -2419,6 +3837,18 @@ impl GameState {
                 mover,
                 reply,
             } => self.commit_make_guild_step(vid, &commit, mover, reply),
+            GameCommand::JudgeMakeguild { vid, word, reply } => {
+                self.judge_makeguild_step(vid, &word, reply);
+            }
+            GameCommand::CommitMakeguild {
+                vid,
+                commit,
+                mover,
+                reply,
+            } => self.commit_makeguild_step(vid, &commit, mover, reply),
+            GameCommand::JudgeDeleteguild { vid, now, reply } => {
+                self.judge_deleteguild_step(vid, now, reply);
+            }
             GameCommand::Quest {
                 vid,
                 step,
@@ -2427,6 +3857,49 @@ impl GameState {
                 reply,
             } => self.answer_quest_step(vid, &step, place, mover, reply),
             _ => debug_assert!(false, "only item steps reach apply_item_step"),
+        }
+    }
+
+    /// Judge one `/makeguild` word and answer.
+    fn judge_makeguild_step(
+        &self,
+        vid: common::vid::Vid,
+        word: &[u8],
+        reply: tokio::sync::oneshot::Sender<GuildMakeAnswer>,
+    ) {
+        if reply.send(self.judge_makeguild(vid, word)).is_err() {
+            warn!(?vid, "a makeguild ran and nobody was left to store it");
+        }
+    }
+
+    /// Commit one judged `/makeguild` and answer.
+    fn commit_makeguild_step(
+        &mut self,
+        vid: common::vid::Vid,
+        commit: &GuildMakeCommit,
+        mover: crate::item_move::Mover,
+        reply: tokio::sync::oneshot::Sender<GuildMakeAnswer>,
+    ) {
+        if reply
+            .send(self.commit_makeguild(vid, commit, mover))
+            .is_err()
+        {
+            warn!(
+                ?vid,
+                "a makeguild commit ran and nobody was left to store it"
+            );
+        }
+    }
+
+    /// Judge one `/deleteguild` and answer.
+    fn judge_deleteguild_step(
+        &mut self,
+        vid: common::vid::Vid,
+        now: u32,
+        reply: tokio::sync::oneshot::Sender<GuildQuestJudged>,
+    ) {
+        if reply.send(self.judge_deleteguild(vid, now)).is_err() {
+            warn!(?vid, "a deleteguild ran and nobody was left to store it");
         }
     }
 
@@ -2493,6 +3966,43 @@ impl GameState {
                 let place = self.live_place(vid, place);
                 answer_item_step(vid, reply, self.drop_item(vid, at, count, place, mover));
             }
+            GameCommand::DestroyItem {
+                vid,
+                at,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.destroy_item(vid, at, mover));
+            }
+            GameCommand::Refine {
+                vid,
+                pos,
+                refine_type,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.refine(vid, pos, refine_type, mover));
+            }
+            GameCommand::UseItemToItem {
+                vid,
+                at,
+                dest,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.use_item_to_item(vid, at, dest, mover));
+            }
+            GameCommand::GiveItem {
+                vid,
+                target,
+                at,
+                place,
+                mover,
+                reply,
+            } => {
+                let place = self.live_place(vid, place);
+                answer_item_step(vid, reply, self.give_item(vid, target, at, place, mover));
+            }
             GameCommand::DropGold {
                 vid,
                 gold,
@@ -2513,6 +4023,12 @@ impl GameState {
                 let place = self.live_place(vid, place);
                 answer_item_step(vid, reply, self.pickup_item(vid, ground, place, mover));
             }
+            GameCommand::Fishing {
+                vid,
+                dir,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.fish(vid, dir, mover)),
             GameCommand::NpcsOn {
                 channel,
                 map,
@@ -2688,6 +4204,231 @@ impl GameState {
         Ok(moved)
     }
 
+    /// Run one `CG_ITEM_DESTROY` for the character online under `vid`
+    /// (`CHARACTER::DestroyItem`, `G/char_item.cpp:7407-7441`). The whole stack leaves, its
+    /// slots are deleted, its row is destroyed, and the `[LS;1947;%s]` confirm names it.
+    /// The confirm's name is `GetName`: the default-locale item name, the quest tables'
+    /// when they are loaded, else the prototype's locale name.
+    ///
+    /// `CanHandleItem` is the windows this build has: a sash, changelook or smith's window
+    /// refuses silently, as does a dead character; the observer gate is the descriptor's.
+    /// The personal shop, the cube, the dragon soul refine, the warp, the aura and the locks
+    /// and the secured state are not ported, so none refuses, and each port re-gates here.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub fn destroy_item(
+        &mut self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if self.sash_windows.contains_key(&vid)
+            || self.changelook_windows.contains(&vid)
+            || self.under_refine(vid)
+        {
+            return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
+        }
+        if self.is_dead(vid.raw()) {
+            return Err(MoveItemRefused::Refused(MoveRefused::DestroyedWhileDead));
+        }
+        let mut vnum = 0;
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, _gear, _protos| {
+            destroy_item(items, at, rules.questing).map(|(done, named)| {
+                vnum = named;
+                done
+            })
+        })?;
+        let name = self.item_get_name(vnum);
+        let line = crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
+            protocol::gc_chat::CHAT_TYPE_INFO,
+            DESTROYED_NOTICE,
+            &[crate::chat_line::Arg::Text(&name)],
+        );
+        moved.records.push(line);
+        Ok(moved)
+    }
+
+    /// `CItem::GetName` (`G/item.cpp:2994-2997`): the default-locale item name, the quest
+    /// tables' when they are loaded and name the vnum, else the prototype's locale name.
+    pub(super) fn item_get_name(&self, vnum: u32) -> Vec<u8> {
+        self.quests
+            .as_ref()
+            .map(|quests| {
+                quests
+                    .item_names()
+                    .find(vnum, common::enums::LOCALE_DEFAULT as u8)
+            })
+            .filter(|named| *named != NO_NAME)
+            .map_or_else(
+                || {
+                    self.protos
+                        .get(vnum)
+                        .map_or(&[][..], |proto| proto.locale_name.as_slice())
+                },
+                |named| named,
+            )
+            .to_vec()
+    }
+
+    /// Run one `CG_ITEM_GIVE` for the character online under `vid`
+    /// (`CInputMain::ItemGive`, `G/input_main.cpp:3174-3183` →
+    /// `CHARACTER::GiveItem`, `G/char_item.cpp:9226-9248`). A gift to nobody is answered
+    /// `[LS;710]`; a gift to a player, to an empty cell, of an offered item, or past the
+    /// 2000 bound is refused silently. A gift whose script waits is answered the questing
+    /// line. A gift an NPC takes runs its `take` scripts after `SetQuestNPCID`, with the
+    /// `TakeItem` log line first.
+    ///
+    /// `CanHandleItem` is the windows this build has, as in [`Self::destroy_item`]; the
+    /// observer gate is the descriptor's. The smiths open their refine window. The grill,
+    /// the horse and the Meley statue are not ported, so a gift that judges to one is
+    /// refused with a log line and the item stays. The count byte rides the record unread,
+    /// as legacy never reads it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub fn give_item(
+        &mut self,
+        vid: common::vid::Vid,
+        target: u32,
+        at: protocol::item_pos::ItemPos,
+        place: GroundPlace,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if self.sash_windows.contains_key(&vid)
+            || self.changelook_windows.contains(&vid)
+            || self.under_refine(vid)
+        {
+            return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
+        }
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?
+            .player_id();
+        let mut moved = MovedItems::new(
+            pid,
+            vid.raw(),
+            world::character::MoveDone {
+                kind: world::character::MoveKind::Given,
+                records: Vec::new(),
+                changes: Vec::new(),
+            },
+            actor,
+            &self.protos,
+            &self.locale,
+        );
+        if self.quest_running(vid) {
+            moved
+                .records
+                .push(self.give_line(actor, GIVE_QUESTING_NOTICE));
+            return Ok(moved);
+        }
+        let giver = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let Some(item) = giver.items().item_at(at) else {
+            return Ok(moved);
+        };
+        if giver.items().is_exchanging(item.id) {
+            return Ok(moved);
+        }
+        let (id, vnum) = (item.id, item.vnum);
+        let Some(proto) = self.protos.get(vnum) else {
+            return Err(MoveItemRefused::Refused(MoveRefused::UnknownVnum(vnum)));
+        };
+        let proto = proto.clone();
+        if self
+            .characters
+            .find_by_vid(common::vid::Vid::new(target))
+            .is_ok()
+        {
+            return Ok(moved);
+        }
+        let Some(npc) = self.npc_by_vid(target) else {
+            moved
+                .records
+                .push(self.give_line(actor, GIVE_NOBODY_NOTICE));
+            return Ok(moved);
+        };
+        let (race, npc_x, npc_y, npc_dead) = (u32::from(npc.race), npc.x, npc.y, npc.hp <= 0);
+        if distance_approx(place.x - npc_x, place.y - npc_y) > world::character::GIVE_DISTANCE {
+            return Ok(moved);
+        }
+        match can_receive(race, npc_dead, vnum, &proto) {
+            GiveAnswer::Take => {
+                tracing::info!(
+                    "TakeItem {} {} {}",
+                    self.characters
+                        .find_by_vid(vid)
+                        .map_or(String::new(), |giver| giver.name().to_owned()),
+                    race,
+                    String::from_utf8_lossy(&proto.locale_name)
+                );
+                let records = self.take_gift(vid, (target, race), id, place, actor, moved.owner_id);
+                moved.records.extend(records);
+                Ok(moved)
+            }
+            GiveAnswer::RefusedWith(format) => {
+                moved.records.push(self.give_line(actor, format));
+                Ok(moved)
+            }
+            GiveAnswer::Refused => Ok(moved),
+            answer @ (GiveAnswer::RefineNormal | GiveAnswer::RefineMoneyOnly) => {
+                let money_only = answer == GiveAnswer::RefineMoneyOnly;
+                let records = self.smith_gift(vid, at, money_only, proto.refine_set, actor);
+                moved.records.extend(records);
+                Ok(moved)
+            }
+            arm => match world::character::unported_of(arm) {
+                Some(system) => Err(MoveItemRefused::Refused(MoveRefused::NotPorted(
+                    world::character::Unported::Give(system),
+                ))),
+                None => Ok(moved),
+            },
+        }
+    }
+
+    /// The `take` scripts of the NPC `target` of `race` for the item `id` the player `pid`
+    /// under `vid` gave, after `SetQuestNPCID`: the records the giver is sent.
+    fn take_gift(
+        &mut self,
+        vid: common::vid::Vid,
+        (target, race): (u32, u32),
+        id: u32,
+        place: GroundPlace,
+        actor: Mover,
+        pid: u32,
+    ) -> Vec<Vec<u8>> {
+        let level = self.characters.find_by_vid(vid).map_or(1, |giver| {
+            giver.points().map_or(1, world::character::Points::level)
+        });
+        let landed = self.run_quests(place, actor, level, pid, |manager, game| {
+            manager.set_quest_npc(target);
+            manager.take(pid, (id, race), game);
+        });
+        let Some(((), (records, _, _, block_mode, _, _, _))) = landed else {
+            return Vec::new();
+        };
+        if let Some(mode) = block_mode {
+            self.block_modes.insert(vid, mode);
+        }
+        records
+    }
+
+    /// An info line to the giver of a gift.
+    fn give_line(&self, actor: Mover, format: &[u8]) -> Vec<u8> {
+        crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
+            protocol::gc_chat::CHAT_TYPE_INFO,
+            format,
+            &[],
+        )
+    }
     /// Run one `CG_ITEM_PICKUP` for the character online under `vid` (`CHARACTER::PickupItem`,
     /// `G/char_item.cpp:7972`). An item picked up whole leaves the view
     /// (`CItem::RemoveFromGround`, `G/item.cpp:533-547`).
@@ -2705,6 +4446,11 @@ impl GameState {
     ) -> Result<MovedItems, MoveItemRefused> {
         if self.is_dead(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::PickedUpWhileDead));
+        }
+        // `IsObserverMode` (`G/char_item.cpp:7976`): an observer's pick-up fails, though
+        // every caller gates first. Silent: the refusal never answers.
+        if self.is_observing(vid) {
+            return Err(MoveItemRefused::Refused(MoveRefused::NotOnGround));
         }
         let lying = self
             .ground
@@ -2981,6 +4727,59 @@ impl GameState {
             inven_point,
         )
     }
+
+    /// `CInputLogin::Entergame`'s hide restore (`G/input_login.cpp:612-638`): each of the
+    /// five `costume_option.hide_*` flags lands its mask bit and chats its
+    /// `SetXCostumeHidden` line, in part order, with no update. Answers the lines for
+    /// the burst's far half; without a body there is no recipient, so nothing.
+    fn restore_hidden(&mut self, vid: common::vid::Vid, hides: [bool; 5]) -> Vec<Vec<u8>> {
+        let Some(mover) = self.own_mover(vid) else {
+            return Vec::new();
+        };
+        if let Ok(character) = self.characters.find_by_vid_mut(vid) {
+            let (items, points) = character.items_and_points_mut();
+            if let Some(points) = points {
+                for (part, hide) in hides.iter().enumerate() {
+                    points.set_hidden(u8::try_from(part + 1).unwrap_or(0), *hide);
+                }
+                let equipment = world::character::Equipment::of(items, &self.protos);
+                let parts = points.hidden_parts(&equipment);
+                points.set_parts(parts);
+            }
+        }
+        hides
+            .iter()
+            .enumerate()
+            .map(|(part, hide)| {
+                let format = crate::game_state::whisper::hide_chat_format(
+                    u8::try_from(part + 1).unwrap_or(0),
+                );
+                crate::chat_line::chat_packet(
+                    mover.recipient(&self.locale),
+                    protocol::gc_chat::CHAT_TYPE_COMMAND,
+                    format,
+                    &[crate::chat_line::Arg::Int(i64::from(*hide))],
+                )
+            })
+            .collect()
+    }
+}
+
+/// The five hide bits `CInputLogin::Entergame` restores (`G/input_login.cpp:612-638`),
+/// in part order: each set while its `costume_option.hide_*` flag is nonzero.
+fn quest_hide_flags(flags: &[(Vec<u8>, i32)]) -> [bool; 5] {
+    let set = |name: &[u8]| {
+        flags
+            .iter()
+            .any(|(held, value)| held == name && *value != 0)
+    };
+    [
+        set(b"costume_option.hide_body"),
+        set(b"costume_option.hide_hair"),
+        set(b"costume_option.hide_sash"),
+        set(b"costume_option.hide_aura"),
+        set(b"costume_option.hide_weapon"),
+    ]
 }
 /// What the book read needs of the item at the step's cell: its vnum, its socket 0
 /// (only 50300 reads it), and its proto's six values (`alValues`).
@@ -3027,8 +4826,16 @@ impl PulseProcessor for GameState {
         self.run_quest_targets(pulse);
         self.step_motion(pulse);
         self.run_guild_ticks(pulse);
+        self.run_shutdown_tick(pulse);
+        self.run_timed_exits(pulse);
+        self.run_confirm_timeouts(pulse);
+        self.run_fishing_events(pulse);
+        self.run_mining_events(pulse);
+        self.run_horse_timers(pulse);
+        self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_party_ticks(pulse);
+        self.expire_empire_privs();
         self.run_minds(pulse);
         self.broadcast_targets();
     }
@@ -3049,10 +4856,16 @@ const DEFAULT_VIEW_RANGE: i32 = 5000;
 /// `gPlayerMaxLevel`'s default (`G/config.cpp:143`), the configured `game.max_level`'s too.
 const DEFAULT_MAX_LEVEL: i32 = 99;
 
+/// `gPlayerMaxConquerorLevel`'s default, the configured `game.max_conqueror_level`'s too.
+const DEFAULT_MAX_CONQUEROR_LEVEL: i32 = 30;
+
 /// `g_iStatusPointGetLevelLimit`'s default (`G/config.cpp:135`), the configured
 /// `game.status_point_get_level_limit`'s too.
 const DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT: i32 = 90;
 
+/// `g_iStatusPointSetMaxValue`'s default (`G/config.cpp:51`), the configured
+/// `game.status_point_set_max_value`'s too.
+const DEFAULT_STATUS_POINT_SET_MAX_VALUE: i32 = 90;
 /// `PK_PROTECT_LEVEL`'s default (`common/config.rs:514`), the configured
 /// `game.pk_protect_level`'s too.
 const DEFAULT_PROTECT_LEVEL: u8 = 15;
@@ -3267,6 +5080,7 @@ mod tests {
             target: "Shaman".to_owned(),
             vnum: 19,
             count: None,
+            socket0: None,
         };
         let outcome = state.grant(&request).expect("the grant is placed");
         assert_eq!(outcome.row.pos, 1);
@@ -3398,6 +5212,7 @@ mod tests {
             target: "shaman".to_owned(),
             vnum: 30_000,
             count: None,
+            socket0: None,
         };
         // The grant is asked for by a differently-cased spelling, which the world's
         // index accepts, and it places rather than answering "no such character".
@@ -3489,6 +5304,7 @@ mod tests {
             target: "Shaman".to_owned(),
             vnum: 30_000,
             count: None,
+            socket0: None,
         };
         assert_eq!(state.grant(&request), Err(GrantRefusal::NoAllocator));
         // The refused grant placed nothing: no cell is taken, and no id is burned,
@@ -3519,6 +5335,7 @@ mod tests {
             target: "Shaman".to_owned(),
             vnum: 30_000,
             count: None,
+            socket0: None,
         };
         assert_eq!(state.grant(&request), Err(GrantRefusal::NoAllocator));
         state
@@ -3635,6 +5452,7 @@ mod tests {
             target: target.to_owned(),
             vnum,
             count: None,
+            socket0: None,
         }
     }
 
@@ -4664,6 +6482,69 @@ mod tests {
         );
     }
 
+    /// `/use_item` parses its word as an `int` and uses the cell it truncates to: a
+    /// held potion is drunk, while an empty cell, a past-the-end cell, a negative one,
+    /// and a bare line answer the no-item line with an empty step.
+    #[test]
+    fn the_use_item_line_drinks_the_named_cell_or_answers_no_item() {
+        use protocol::gc_chat::{GcChat, CHAT_TYPE_INFO};
+        let clock = fixtures::TestClock::default();
+        let mut state = fixtures::a_world(&clock);
+        let (mut inbox, _seen) = fixtures::enter_seeing_with(
+            &mut state,
+            fixtures::PLACE,
+            7,
+            (3200, 3200),
+            820,
+            &[(inventory(0), a_potion_stack(11, 2))],
+        );
+        state
+            .characters
+            .find_by_vid_mut(Vid::new(7))
+            .expect("the player is in the world")
+            .items_and_points_mut()
+            .1
+            .expect("the player has points")
+            .point_change(common::point_slot::POINT_HP, -500, false, false)
+            .expect("a pool changes");
+        let texts = |inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>| {
+            std::iter::from_fn(|| inbox.try_recv().ok())
+                .filter(|frame| frame.first() == Some(&4))
+                .map(|frame| {
+                    let chat = GcChat::decode(&frame).unwrap();
+                    assert_eq!(chat.chat_type, CHAT_TYPE_INFO);
+                    String::from_utf8(chat.text).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        while inbox.try_recv().is_ok() {}
+        let used = state.run_use_item_line(Vid::new(7), b"0", a_mover());
+        assert_eq!(
+            used.map(|moved| moved.kind),
+            Ok(world::character::MoveKind::Used)
+        );
+        assert!(texts(&mut inbox).is_empty());
+        for rest in [&b"5"[..], &b"99999"[..], &b"-1"[..]] {
+            let used = state.run_use_item_line(Vid::new(7), rest, a_mover());
+            assert_eq!(
+                used.map(|moved| (moved.kind, moved.changes.len())),
+                Ok((world::character::MoveKind::Used, 0))
+            );
+            assert_eq!(
+                texts(&mut inbox),
+                ["I can't wear it because I don't have the item."]
+            );
+        }
+        // A bare line parses as cell 0, where the one left potion still lies: it too is
+        // drunk, silently.
+        let used = state.run_use_item_line(Vid::new(7), b"", a_mover());
+        assert_eq!(
+            used.map(|moved| moved.kind),
+            Ok(world::character::MoveKind::Used)
+        );
+        assert!(texts(&mut inbox).is_empty());
+    }
+
     /// Puts a one-cell item of a real vnum in the inventory cell `cell` of the player `vid`,
     /// and answers its vnum.
     fn hold(state: &mut GameState, vid: u32, cell: u16) -> u32 {
@@ -5063,11 +6944,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         });
         let _ = points.compute_points();
         for kind in [common::point_slot::POINT_HP, common::point_slot::POINT_SP] {
@@ -5482,6 +7366,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
             skill_group: 0,
             alignment: 0,
+            voice: 0,
         };
         let place = crate::game_loop_messages::EnterPlace {
             channel: 1,

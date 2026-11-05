@@ -33,9 +33,9 @@
 //! - The dialog text, its skin and the error flag live for one call into the manager. Legacy
 //!   kept them process-wide, so text a script added and never sent went out with the next
 //!   character's dialog; the Rewrite logs and drops it.
-//! - A script error, a suspension other than `select`, `wait` and `input` (`confirm` and
-//!   `select_item` are not ported), a first result that is not text (legacy's `strcmp(NULL)`)
-//!   and a `select` whose last result is not a table (legacy's unprotected `luaL_getn`) all end
+//! - A script error, a suspension other than `select`, `wait`, `input`, `confirm` and
+//!   `select_item`, a first result that is not text (legacy's `strcmp(NULL)`)
+//!   a `select` whose last result is not a table (legacy's unprotected `luaL_getn`) all end
 //!   the script the way a Lua error did.
 //! - A call of an API the Rewrite does not back ends the script as a script that says nothing
 //!   ends: the bare `[DONE]` is not sent (`SendScript`, `G/questmanager.cpp:1122-1130`). The
@@ -78,6 +78,15 @@ pub const QUEST_SKIN_NOWINDOW: u8 = 0;
 
 /// `QUEST_SKIN_NORMAL`: the dialog window, the skin every dialog starts with.
 pub const QUEST_SKIN_NORMAL: u8 = 1;
+
+/// `CONFIRM_NO` (`G/quest.h:83-88`): the confirm's script hears 0 for a no.
+pub const CONFIRM_NO: u8 = 0;
+
+/// `CONFIRM_YES`: the confirm's script hears 1 for a yes.
+pub const CONFIRM_YES: u8 = 1;
+
+/// `CONFIRM_TIMEOUT`: the confirm's script hears 2 when nobody answered in time.
+pub const CONFIRM_TIMEOUT: u8 = 2;
 
 /// `QUEST_SKIN_COUNT` (`questmanager.h:47-55`): `set_skin` takes a skin below it.
 const QUEST_SKIN_COUNT: u8 = 6;
@@ -183,6 +192,16 @@ pub trait Game {
     /// when it holds none: what `item.get_vnum` reads through the quest item pointer.
     fn held_vnum(&self, id: u32) -> Option<u32>;
 
+    /// The cell of the item of ID `id` the character the script runs for holds, or `None`
+    /// when it holds none: what `item.get_cell` reads through the quest item pointer
+    /// (`CItem::GetCell`, `G/item.h:116`).
+    fn held_cell(&self, id: u32) -> Option<u16>;
+
+    /// The ID of the item in the character's base inventory cell `cell`, or `None` when
+    /// the cell holds none: what `item.select_cell` moves the quest item pointer to
+    /// (`CHARACTER::GetInventoryItem`, `G/char_item.cpp:249-252`).
+    fn inventory_at(&self, cell: u32) -> Option<u32>;
+
     /// `CItem::SetSocket(index, value)` (`G/item.cpp:1643-1656`) of the item of ID `id`, the
     /// quest item, with `index` below the six sockets: the item the character holds is updated
     /// in its cell and saved, and one its give laid on the ground takes the value unseen.
@@ -209,6 +228,15 @@ pub trait Game {
 
     /// `number(from, to)`: a random number from `from` to `to`.
     fn number(&mut self, from: i32, to: i32) -> i32;
+    /// `mining::OreRefine(ch, npc, item, cost, pct, metinstone)` (`G/mining.cpp:421-464`):
+    /// the quest item of ID `ore` melts into its refined vnum, 100 of its count for one,
+    /// for the fee `cost` with the refine NPC's guild rate, and `Some` of the inventory
+    /// cell `stone`'s item (the melt's detritus) goes with it. Answers `false` with no
+    /// NPC, when the character holds no such quest item, when the ore's count is below
+    /// 100, when no refined vnum answers its vnum, or when the gold does not cover the
+    /// fee; the fee and the metin go only when the melt runs, and the refined item lands
+    /// through `AutoGiveItem` on the draw (`number(1, 100) <= pct`).
+    fn ore_refine(&mut self, ore: u32, cost: i32, pct: i32, stone: Option<u32>) -> bool;
 
     /// `LearnGrandMasterSkill(vnum)` (`G/char_skill.cpp:341`): the 7/8th-skills
     /// quest's read of a GRAND skill (230g). `total` is the read count including
@@ -225,6 +253,24 @@ pub trait Game {
     /// hears every slot either way.
     fn set_skill_level(&mut self, vnum: u32, level: u8);
 
+    /// `GetRealAlignment()` of the character the script runs for
+    /// (`G/questlua_pc.cpp:1081-1085`), before the /10 the client sees.
+    fn real_alignment(&self) -> i32;
+
+    /// `UpdateAlignment(amount)` of the character the script runs for
+    /// (`G/questlua_pc.cpp:1093-1100`, `G/char_battle.cpp:3477-3565`): the stored
+    /// alignment moves by `amount`, the crossing update goes out, and the band affects
+    /// follow.
+    fn change_alignment(&mut self, amount: i32);
+
+    /// `FindAffect(AFFECT_SKILL_NO_BOOK_DELAY)` of the character the script runs for
+    /// (`G/questlua_pc.cpp:113-119`): whether it holds the no-delay book affect.
+    fn has_skill_book_no_delay(&self) -> bool;
+
+    /// `RemoveAffect(AFFECT_SKILL_NO_BOOK_DELAY)` of the character the script runs for
+    /// (`G/questlua_pc.cpp:106-111`).
+    fn remove_skill_book_no_delay(&mut self);
+
     /// `SetBlockModeForce(mode)` of the character the script runs for
     /// (`G/questlua_pc.cpp:2190-2197`): the byte becomes the character's own
     /// block mode, the client hears `setblockmode %d`, and no quest flag moves.
@@ -237,6 +283,157 @@ pub trait Game {
     /// `GetWarMap()` of the character the script runs for: the war map's private index,
     /// and 0 when it stands on no war map.
     fn war_map(&self) -> i32;
+    /// `GetGold()` of the character the script runs for (`G/questlua_pc.cpp:1073-1077`).
+    fn gold(&self) -> u64;
+    /// `pc_change_money` (`G/questlua_pc.cpp:1102-1121`) under its four names: the gold
+    /// moves by `(long long)` of the last argument, unless the move would drop it below
+    /// 0 (logged, nothing moves) or reach `GOLD_MAX_MAX` (logged, nothing moves).
+    fn change_gold(&mut self, amount: i64);
+    /// `pc_hide_costume` (`G/questlua_pc.cpp:3553-3600`): part 1-5 (body, hair, sash, aura,
+    /// weapon) hides or shows, the client hears `SetXCostumeHidden`, and the parts the
+    /// next update sends follow.
+    fn hide_costume(&mut self, part: u8, hide: bool);
+    /// `pc_open_sash` (`G/questlua_pc.cpp:3523-3536`): the sash window opens for
+    /// combination (`true`) or absorption, unless the window already stands (the
+    /// legacy `SASH_OPEN`/`SASH_CLOSE`/`COMBINE_CLOSE` line chats instead).
+    fn open_sash(&mut self, combination: bool);
+    /// `pc_open_changelook` (`G/questlua_pc.cpp:3540-3549`): the changelook window
+    /// opens, unless it already stands (the transmutation line chats instead).
+    fn open_changelook(&mut self);
+    /// `pc_mining` (`G/questlua_pc.cpp:1881-1887`): `CHARACTER::mining` on the NPC the script
+    /// runs for, `npc_vid` (0 with none): a running dig is cancelled, else the dig starts
+    /// when the NPC is a vein near the character and a pick is worn.
+    fn mining(&mut self, npc_vid: u32);
+    /// `_refine_pick` and `_fish_real_refine_rod` (`G/questlua_global.cpp:450-478`):
+    /// `RealRefinePick` (or, with `rod`, `RealRefineRod`) on the tool in inventory `cell`;
+    /// answers 1 for the refined tool, 0 for the fallback and 2 for a refusal.
+    fn refine_tool(&mut self, cell: u8, rod: bool) -> u8;
+
+    /// The horse of the character the script runs for (`CHorseRider`), as the `horse.*` and
+    /// `pc.*_horse_*` readers see it.
+    fn horse(&self) -> HorseView;
+
+    /// `SetHorseLevel`, `ComputePoints` and `SkillLevelPacket` on the character the script
+    /// runs for (`G/questlua_horse.cpp:110-121`); the level is already clamped to 0..30.
+    fn set_horse_level(&mut self, level: i32);
+
+    /// `FeedHorse` on the character the script runs for (`G/questlua_horse.cpp:231-240`).
+    fn feed_horse(&mut self);
+
+    /// `GetEmpire()` of the character the script runs for (`G/questlua_pc.cpp:1304-1308`).
+    fn empire(&self) -> u8;
+
+    /// `GetHP()` of the character the script runs for (`G/questlua_pc.cpp:975-979`).
+    fn hp(&self) -> i32;
+
+    /// `GetMaxHP()` of the character the script runs for (`G/questlua_pc.cpp:969-973`).
+    fn max_hp(&self) -> i32;
+
+    /// `GetSP()` of the character the script runs for (`G/questlua_pc.cpp:927-931`).
+    fn sp(&self) -> i32;
+
+    /// `GetMaxSP()` of the character the script runs for (`G/questlua_pc.cpp:921-925`).
+    fn max_sp(&self) -> i32;
+
+    /// `GetExp()` of the character the script runs for (`G/questlua_pc.cpp:897-901`).
+    fn exp(&self) -> u32;
+
+    /// `GetNextExp()` of the character the script runs for (`G/questlua_pc.cpp:891-895`).
+    fn next_exp(&self) -> u32;
+
+    /// `GetRaceNum()` of the character the script runs for (`G/questlua_pc.cpp:903-907`).
+    fn race(&self) -> u16;
+
+    /// `GetName()` of the character the script runs for (`G/questlua_pc.cpp:885-889`).
+    fn char_name(&self) -> Vec<u8>;
+
+    /// The VID of the character the script runs for (`G/questlua_pc.cpp:880-884`).
+    fn char_vid(&self) -> u32;
+
+    /// `GetLeadershipSkillLevel()` of the character the script runs for
+    /// (`G/questlua_pc.cpp:862-866`): its leadership skill's level.
+    fn leadership(&self) -> u8;
+
+    /// `GetX()/100` and `GetY()/100` of the character the script runs for
+    /// (`G/questlua_pc.cpp:737-749`), and the local pair against the map's base
+    /// (`:751-775`).
+    fn position(&self) -> (i32, i32, i32, i32);
+
+    /// `GetWear(cell)` of the character the script runs for (`G/questlua_pc.cpp:1052-1071`):
+    /// the vnum worn in `cell`, and `None` when the cell is out of range or empty.
+    fn worn_vnum(&self, cell: u8) -> Option<u32>;
+
+    /// `GetEmpire()` of the NPC `vid` (`G/questlua_npc.cpp:43-52`), and `None` when no NPC
+    /// stands under it.
+    fn empire_of(&self, vid: u32) -> Option<u8>;
+    /// `GetGuild()->GetID()` of the NPC `vid` (`G/questlua_npc.cpp:60-70`), and 0 when no
+    /// NPC stands under it or it holds no guild. No NPC holds one: no building stands.
+    fn npc_guild(&self, vid: u32) -> u32;
+
+    /// `GetGMLevel()` of the character the script runs for (`G/questlua_pc.cpp:1867-1877`):
+    /// its `m_pointsInstant.gm_level`, which rode the admission. The test-server silence
+    /// (`G/char.cpp:6355-6356`) is the audit's (V26): the production arm answers.
+    fn gm_level(&self) -> u8;
+
+    /// `GetEmptyInventory(size) != -1` for a `vnum` with a proto
+    /// (`G/questlua_pc.cpp:478-499`, `G/char_item.cpp:1258-1267`): whether a fresh base
+    /// cell below the unlocked count is empty, and false with no proto.
+    fn has_empty_inventory(&self, vnum: u32) -> bool;
+
+    /// `GetSocket(index)` of the item of ID `id` (`G/questlua_item.cpp:107-123`): the
+    /// quest item's socket, and `None` when the character holds no such item.
+    fn held_socket(&self, id: u32, index: usize) -> Option<i32>;
+
+    /// `GetValue(index)` of the item of ID `id` (`G/questlua_item.cpp:175-202`): the
+    /// quest item's proto value, and `None` when the character holds no such item or
+    /// no proto names its vnum.
+    fn held_value(&self, id: u32, index: usize) -> Option<i32>;
+
+    /// `GetCount()`, `GetType()` and `GetSubType()` of the item of ID `id`
+    /// (`G/questlua_item.cpp:259-301`): the quest item's count and its proto's type
+    /// pair, and `None` when the character holds no such item. The type pair is 0
+    /// with no proto (`CItem::GetType`, `G/item.h:108-109`).
+    fn held_shape(&self, id: u32) -> Option<(u16, u8, u8)>;
+
+    /// `GetGuild()` of the character the script runs for (`G/questlua_pc.cpp:325-336`): its
+    /// guild id, and 0 with none.
+    fn guild_id(&self) -> u32;
+
+    /// Whether the character the script runs for leads its guild (`G/questlua_pc.cpp:339-350`).
+    fn is_guild_master(&self) -> bool;
+
+    /// `test_server` (`G/config.cpp:72`): whether the deployment runs in test-server mode.
+    fn test_server(&self) -> bool;
+
+    /// `_find_pc` (`G/questlua_global.cpp:743-757`): the VID of the online PC named `name`,
+    /// case-insensitively, and 0 when no PC holds it.
+    fn find_pc_vid(&self, name: &[u8]) -> u32;
+
+    /// The PID of the character `vid` names, when a PC stands under it
+    /// (`CHARACTER_MANAGER::Find`, `G/questlua.cpp:922-926`): the confirm's target.
+    fn pid_of(&self, vid: u32) -> Option<u32>;
+
+    /// `CHARACTER::ConfirmWithMsg` (`G/char.cpp:8076-8088`): the `GC_QUEST_CONFIRM` with
+    /// `msg` and `timeout` for the character `to_pid`, naming `request_pid`. Sent at once,
+    /// as `ConfirmWithMsg` sends it; the quest that asked keeps its own script.
+    fn confirm_to(&mut self, to_pid: u32, msg: &[u8], timeout: i32, request_pid: u32);
+
+    /// Arms the confirm's timeout: after `timeout` seconds the waiter's script hears
+    /// `CONFIRM_TIMEOUT` (`confirm_timeout_event`, `G/questlua.cpp:879-904`).
+    fn arm_confirm_timeout(&mut self, waiter: u32, timeout: i32);
+
+    /// `pc_destroy_guild` (`G/questlua_pc.cpp:352-370`): the character's guild disbands,
+    /// unless it holds none, it is at war (the caller hears the line), or the character
+    /// does not lead it. The world judges after the step.
+    fn destroy_guild(&mut self);
+
+    /// `pc_remove_from_guild` (`G/questlua_pc.cpp:372-381`): the character leaves its
+    /// guild, unless it holds none or leads it (both quiet). The world judges after the
+    /// step.
+    fn remove_from_guild(&mut self);
+    /// `game.request_make_guild` (`G/questlua_game.cpp:51-62`): the character's client hears
+    /// the one-byte `HEADER_GC_REQUEST_MAKE_GUILD`.
+    fn request_make_guild(&mut self);
 
     /// One `guild.*` quest call (230s): the call's member name (`level`, `get_sp0`) and
     /// its arguments, dworded numbers or raw text. The world's guilds judge it now, while
@@ -267,6 +464,146 @@ pub trait Game {
     /// `GetTargetInfo(pid, TARGET_TYPE_VID, vid)` (`G/target.cpp:317-348`): the quest and the
     /// kept name of the character's first target that points at `vid`, when one does.
     fn target_at(&self, vid: u32) -> Option<(u32, Vec<u8>)>;
+
+    /// `pc_warp` (`G/questlua_pc.cpp:209-240`): the character warps to (`x`, `y`) on
+    /// `private` (a private map index at or above 10000, else the position's own map),
+    /// unless `IsHack` refuses. Answers whether the warp runs. The test-server line stays
+    /// with the audit, as the anywhere spawn's does.
+    fn warp(&mut self, x: i32, y: i32, private: i32) -> bool;
+
+    /// `game_drop_item_with_ownership` (`G/questlua_game.cpp:168-213`): `count` of `vnum`
+    /// lie at the character's feet, owned by it for `secs` seconds (`None` with no
+    /// number: 30, as 10 or below). Nothing happens with no proto.
+    fn drop_with_ownership(&mut self, vnum: u32, count: i32, secs: Option<i32>);
+
+    /// `pc_get_conqueror_level` (`G/questlua_pc.cpp:3632-3637`): the conqueror level of
+    /// the character the script runs for.
+    fn conqueror_level(&self) -> u8;
+
+    /// `GetConquerorExp()` of the character the script runs for
+    /// (`G/questlua_pc.cpp:3617-3622`).
+    fn conqueror_exp(&self) -> u32;
+
+    /// `_warp_to_village` (`G/questlua_global.cpp:1060-1071`): the character warps to
+    /// its empire's start. It pushes nothing.
+    fn warp_to_village(&mut self);
+
+    /// `pc_can_warp` (`G/questlua_pc.cpp:2723-2737`): whether `CanWarp` passes for the
+    /// character the script runs for.
+    fn can_warp(&self) -> bool;
+
+    /// `pc_set_conqueror` (`G/questlua_pc.cpp:3639-3644`, always `true`; `G/char.cpp`,
+    /// `SetConqueror`): the character becomes a conqueror past the level-120 marble
+    /// gates. It pushes nothing.
+    fn set_conqueror(&mut self);
+
+    /// `GetMountVnum()` of the character the script runs for
+    /// (`G/questlua_pc.cpp:1385-1390`): whether it rides a mount.
+    fn is_mount(&self) -> bool;
+
+    /// `GetParty()` of the character the script runs for
+    /// (`G/questlua_party.cpp:236-241`): whether it stands in a party.
+    fn is_party(&self) -> bool;
+
+    /// `GetParty()->GetLeaderPID() == GetPlayerID()` of the character the
+    /// script runs for (`G/questlua_party.cpp:224-234`): whether it leads its
+    /// party.
+    fn is_party_leader(&self) -> bool;
+
+    /// `g_bChannel` (`G/questlua_pc.cpp:2767-2772`): the Channel the script runs
+    /// on.
+    fn channel_id(&self) -> u8;
+
+    /// `GetParty()->GetFlag(name)` of the character the script runs for
+    /// (`G/questlua_party.cpp:315-325`): its party's flag, 0 with no party.
+    fn party_flag(&self, name: &[u8]) -> i32;
+
+    /// `GetParty()->SetFlag(name, value)` of the character the script runs for
+    /// (`G/questlua_party.cpp:305-313`): its party's flag becomes `value`.
+    /// Quiet with no party.
+    fn set_party_flag(&mut self, name: Vec<u8>, value: i32);
+
+    /// `GetParty()->GetLeaderPID()` of the character the script runs for
+    /// (`G/questlua_party.cpp:243-255`): its party's leader PID, -1 with none.
+    fn party_leader_pid(&self) -> i32;
+
+    /// The PIDs of the party members on the character's map, in ascending PID
+    /// order (`FPartyPIDCollector` over `ForEachOnMapMember`,
+    /// `G/questlua_party.cpp:413-442`, `G/party.h:295-309`): the PIDs
+    /// `party.get_member_pids` pushes. Empty with no party.
+    fn party_member_pids(&self) -> Vec<u32>;
+
+    /// `CQuestManager::BeginOtherPCBlock(pid)`
+    /// (`G/questmanager.cpp:2051-2076`): the character `pid` names becomes the
+    /// one the script runs for, and the bridge answers for it until
+    /// [`Game::end_other_pc`] runs. Quiet with no such online character: the
+    /// stack still grows, but the script keeps running for the old one.
+    fn begin_other_pc(&mut self, pid: u32);
+
+    /// Whether the last [`Game::begin_other_pc`] switched the character: false
+    /// when the named character is not online, so the script kept running for
+    /// the old one (`GetPC` returned `NULL`, `G/questmanager.cpp:1087-1099`).
+    fn switched_pc(&self) -> bool;
+
+    /// `CQuestManager::EndOtherPCBlock` (`G/questmanager.cpp:2078-2093`): the
+    /// script runs for the character it ran for before the matching
+    /// [`Game::begin_other_pc`] again. Quiet with no open block.
+    fn end_other_pc(&mut self);
+
+    /// `CDungeonManager::FindByMapIndex(index) != NULL`
+    /// (`G/questlua_dungeon.cpp:1540-1563`): whether a dungeon lives under the
+    /// map index.
+    fn dungeon_lives(&self, index: u32) -> bool;
+
+    /// `DragonSoul_IsQualified()` of the character the script runs for
+    /// (`G/questlua_dragonsoul.cpp:57-70`): whether it holds
+    /// `AFFECT_DRAGON_SOUL_QUALIFIED` (540, `G/affect.h:105`).
+    fn is_ds_qualified(&self) -> bool;
+
+    /// `DragonSoul_GiveQualification()` of the character the script runs for
+    /// (`G/questlua_dragonsoul.cpp:43-55`, `G/char_dragonsoul.cpp:75-85`):
+    /// `AddAffect(540, APPLY_NONE, 0, AFF_NONE, INFINITE_AFFECT_DURATION, 0,
+    /// false)` (`G/char_affect.cpp:668-760`). Quiet with no character.
+    fn give_ds_qualification(&mut self);
+
+    /// `ds_open_refine_window` of the character the script runs for
+    /// (`G/questlua_dragonsoul.cpp:14-28`): with the qualification, its client
+    /// hears `HEADER_GC_DRAGON_SOUL_REFINE` with `DS_SUB_HEADER_OPEN`.
+    fn open_ds_refine(&mut self);
+
+    /// `ds_open_attr_change_window` of the character the script runs for
+    /// (`G/questlua_dragonsoul.cpp:30-41`, `G/char.cpp:11235-11242`): its client
+    /// hears `HEADER_GC_DS_PLUS_CHANGE_ATTR_OPEN`.
+    fn open_ds_attr_change(&mut self);
+}
+
+/// The horse a quest reads (`CHorseRider`'s getters).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HorseView {
+    /// `GetHorseLevel`, 0 to 30.
+    pub level: u8,
+    /// `GetHorseHealth`.
+    pub health: i16,
+    /// `GetHorseStamina`.
+    pub stamina: i16,
+    /// `GetHorseMaxHealth`: the level's row, 1 without a horse.
+    pub max_health: i16,
+    /// `GetHorseMaxStamina`: the level's row, 1 without a horse.
+    pub max_stamina: i16,
+    /// `IsHorseRiding`.
+    pub riding: bool,
+}
+
+impl HorseView {
+    /// `GetHorseGrade` (`G/horse_rider.cpp:378-386`).
+    #[must_use]
+    pub const fn grade(&self) -> u8 {
+        if self.level == 0 {
+            0
+        } else {
+            (self.level - 1) / 10 + 1
+        }
+    }
 }
 
 /// What `target.vid` asks `CTargetManager::CreateTarget` for (`G/questlua_target.cpp:45-66`):
@@ -408,6 +745,81 @@ impl Manager {
         &self.host
     }
 
+    /// `GetQuestStateName` (`G/questmanager.cpp:1154-1169`): the name of state
+    /// `state` of quest `quest`, or the empty name for a state the quest does
+    /// not have. What `SendFlagList` prints for a `.__status` flag.
+    pub fn state_name(&self, quest: &[u8], state: i32) -> Vec<u8> {
+        self.host
+            .quests()
+            .iter()
+            .find(|candidate| candidate.name == quest)
+            .and_then(|quest| quest.states.iter().find(|(_, number)| **number == state))
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default()
+    }
+
+    /// `GetQuestStateIndex` (`G/questmanager.cpp:1172-1190`): the number of
+    /// state `state` of quest `quest`, 0 for a state the quest does not have.
+    /// What `do_set_state` writes.
+    pub fn state_index(&self, quest: &[u8], state: &[u8]) -> i32 {
+        self.host
+            .quests()
+            .iter()
+            .find(|candidate| candidate.name == quest)
+            .and_then(|quest| quest.states.get(state))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// `do_set_state`'s write (`G/cmd_gm.cpp:2915-2948`): the status flag of
+    /// quest `quest` of character `pid` becomes `value`, and the quest list
+    /// follows when the quest is listed. Creates the record, as `GetPCForce`
+    /// does. No timer is cleared: the port holds no `m_TimerMap` (the timer
+    /// names are still `missing`).
+    pub fn set_quest_state(&mut self, pid: u32, quest: &[u8], value: i32) {
+        let status = [quest, b".__status"].concat();
+        self.set_quest_flag(pid, &status, value);
+        let Some(index) = self.host.quest_index(quest) else {
+            return;
+        };
+        if let Some(pc) = self.pcs.get_mut(&pid) {
+            if pc.quests.contains_key(&index) {
+                pc.quests.insert(index, value);
+            }
+        }
+    }
+
+    /// The name of the quest character `pid` ran last (`GetCurrentQuestName`,
+    /// `G/questpc.cpp:42-45`): `m_stCurQuest`, empty when it ran none. What
+    /// `do_qf` names.
+    pub fn current_quest_name(&self, pid: u32) -> Vec<u8> {
+        self.pcs
+            .get(&pid)
+            .map_or_else(Vec::new, |pc| pc.current.clone())
+    }
+
+    /// `do_clear_quest`'s wipe (`G/questpc.cpp:681-701`): every flag of
+    /// character `pid` whose name starts with `quest.` is set to 0, and the
+    /// listed quest rests at 0. A flag already at 0 is no flag — legacy's
+    /// `SetFlag(name, 0)` deletes it — so the wipe deletes in one pass.
+    /// Creates the record, as `GetPCForce` does. No timer is cleared: the
+    /// port holds no `m_TimerMap` (the timer names are still `missing`).
+    pub fn clear_quest(&mut self, pid: u32, quest: &[u8]) {
+        self.pcs.entry(pid).or_default();
+        let prefix = [quest, b"."].concat();
+        if let Some(pc) = self.pcs.get_mut(&pid) {
+            pc.flags.retain(|name, _| !name.starts_with(&prefix));
+        }
+        let Some(index) = self.host.quest_index(quest) else {
+            return;
+        };
+        if let Some(pc) = self.pcs.get_mut(&pid) {
+            if pc.quests.contains_key(&index) {
+                pc.quests.insert(index, 0);
+            }
+        }
+    }
+
     /// Whether NPC race `race` has any script.
     pub fn has_npc(&self, race: u32) -> bool {
         self.npcs.get(&race).is_some_and(|npc| !npc.is_empty())
@@ -447,6 +859,15 @@ impl Manager {
             .or_default()
             .flags
             .insert(name.to_vec(), value);
+    }
+
+    /// `quest::PC::DeleteFlag` (`G/questpc.cpp:78-90`): deletes a quest flag of
+    /// character `pid`. Answers whether the flag was there, which is what
+    /// `do_delqf` chats. A missing record holds no flag.
+    pub fn delete_quest_flag(&mut self, pid: u32, name: &[u8]) -> bool {
+        self.pcs
+            .get_mut(&pid)
+            .is_some_and(|pc| pc.flags.remove(name).is_some())
     }
 
     /// `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`) with `quest::PC::SetFlag`
@@ -502,10 +923,14 @@ impl Manager {
         self.event_flags.get(name).copied().unwrap_or(0)
     }
 
-    /// `game.set_event_flag`: sets an event flag, which `noguard` reads. A GM command
-    /// would call this; no quest on the owner's data sets `noguard`.
+    /// `game.set_event_flag` and `do_event_flag`'s set: the flag `name` takes `value`.
     pub fn set_event_flag(&mut self, name: &[u8], value: i32) {
         self.event_flags.insert(name.to_vec(), value);
+    }
+
+    /// Every event flag, in name order, for `do_get_event_flag`'s list.
+    pub fn event_flags(&self) -> impl Iterator<Item = (&Vec<u8>, &i32)> {
+        self.event_flags.iter()
     }
 
     /// `CQuestManager::Click`: character `pid` clicked the NPC `npc_vid` of race `race`. Returns
@@ -543,6 +968,21 @@ impl Manager {
         self.pcs.entry(pid).or_default().item = item;
         self.operate(pid, game, |run, pc, npcs| match npcs.get(&vnum) {
             Some(npc) => run.handle_event(pc, npc, "use"),
+            None => false,
+        })
+    }
+
+    /// `CQuestManager::TakeItem` (`G/questmanager.cpp:791-815`): character `pid` gave the item
+    /// of ID `item` to the NPC of race `race`, so it becomes the quest item (`SetCurrentItem`)
+    /// and the NPC's `take` scripts run (`NPC::OnTakeItem`, `G/questnpc.cpp:278-281`, then
+    /// `HandleEvent`). Returns whether one ran. The caller records the NPC first
+    /// (`SetQuestNPCID`), as `CHARACTER::ReceiveItem` does. Legacy's `GetPC` makes the
+    /// record of a character it never saw, as a click does, and the flags ride the login,
+    /// so no `Loading quest` wait exists.
+    pub fn take(&mut self, pid: u32, (item, race): (u32, u32), game: &mut dyn Game) -> bool {
+        self.pcs.entry(pid).or_default().item = item;
+        self.operate(pid, game, |run, pc, npcs| match npcs.get(&race) {
+            Some(npc) => run.handle_event(pc, npc, "take"),
             None => false,
         })
     }
@@ -691,6 +1131,17 @@ impl Manager {
     /// `quest/questlib.lua:117-122`), and the high bit asks for the quest's info
     /// instead of its button (`CInputMain::ScriptButton`, `G/input_main.cpp:2179-2198`).
     pub fn button(&mut self, pid: u32, quest: u32, game: &mut dyn Game) -> bool {
+        // `CInputMain::ScriptButton` (`G/input_main.cpp:2184-2188`): a button pressed while
+        // the character waits on a confirm is not a button at all; the wait hears
+        // `CONFIRM_TIMEOUT` instead.
+        if self
+            .pcs
+            .get(&pid)
+            .is_some_and(|pc| pc.confirm_wait.is_some())
+        {
+            self.confirm(pid, CONFIRM_TIMEOUT, None, game);
+            return false;
+        }
         self.operate(pid, game, |run, pc, npcs| {
             // A running script holds the character (`NPC::OnButton` refuses one).
             if pc.running.is_some() {
@@ -709,6 +1160,16 @@ impl Manager {
             };
             run.event_script(pc, npc, "button", quest, state)
         })
+    }
+
+    /// `CQuestManager::RequestEventQuest` (`G/questmanager.cpp:1956-1963`): the client's
+    /// event panel names a quest, whose button runs when no script waits. An unknown
+    /// name answers nothing: `GetQuestIndexByName` answers 0, which no quest has.
+    pub fn event_quest(&mut self, pid: u32, name: &[u8], game: &mut dyn Game) -> bool {
+        let Some(quest) = self.host.quest_indices().get(name).copied() else {
+            return false;
+        };
+        self.button(pid, quest, game)
     }
 
     /// `CQuestManager::QuestInfo` (`G/questmanager.cpp:739-765`) and `NPC::OnInfo`
@@ -737,6 +1198,61 @@ impl Manager {
             );
             false
         })
+    }
+
+    /// `CQuestManager::SelectItem` (`G/questmanager.cpp:179-194`): the selection the
+    /// character picked while its script waited in `select_item`, or 0 for a window the
+    /// client closed. A script that waits nowhere, or waits elsewhere, is undisturbed.
+    pub fn select_item(&mut self, pid: u32, selection: u32, game: &mut dyn Game) {
+        if !self.suspended(pid, Suspend::SelectItem) {
+            tracing::warn!("wrong QUEST_SELECT_ITEM request! : {pid}");
+            return;
+        }
+        self.operate(pid, game, |run, pc, _| {
+            pc.send_done = true;
+            let answer = Value::Number(f64::from(selection));
+            run.resume(pc, Ok(MultiValue::from_iter([answer])));
+        });
+    }
+
+    /// `CQuestManager::Confirm` (`G/questmanager.cpp:196-235`): `confirm`'s answer for the
+    /// character `waiter` whose script waits for it, from the character `replier` whose
+    /// client sent it (`None` is the timeout's own voice, whose `pc2` legacy leaves 0).
+    /// Returns whether the script heard it.
+    ///
+    /// A script that waits nowhere, or waits elsewhere, is undisturbed. An answer from a
+    /// character the script does not wait for is refused with a log line, and the wait
+    /// stands (`pc2 && !pPC->IsConfirmWait(pc2)`); the timeout has no `pc2` and always
+    /// passes. A heard answer first closes the waiting window (`[END_CONFIRM_WAIT]` in
+    /// `QUEST_SKIN_NOWINDOW`), then the script resumes with it.
+    pub fn confirm(
+        &mut self,
+        waiter: u32,
+        confirm: u8,
+        replier: Option<u32>,
+        game: &mut dyn Game,
+    ) -> bool {
+        if !self.suspended(waiter, Suspend::Confirm) {
+            tracing::warn!("wrong QUEST_CONFIRM request! : {waiter}");
+            return false;
+        }
+        if replier.is_some_and(|replier| {
+            self.pcs
+                .get(&waiter)
+                .and_then(|pc| pc.confirm_wait)
+                .is_none_or(|wait| wait != replier)
+        }) {
+            tracing::warn!("wrong QUEST_CONFIRM replier! : {waiter}");
+            return false;
+        }
+        self.operate(waiter, game, |run, pc, _| {
+            pc.confirm_wait = None;
+            pc.send_done = true;
+            run.end_confirm_wait(pc);
+            let answer = Value::Number(f64::from(confirm));
+            run.resume(pc, Ok(MultiValue::from_iter([answer])));
+        });
+        true
     }
 
     /// `CQuestManager::Input`: the text a script's `input()` waits for.
@@ -768,9 +1284,24 @@ impl Manager {
         }
     }
 
-    /// `CQuestManager::DisconnectPC`: the character logged out, and its running script ends
-    /// unfinished.
-    pub fn logout(&mut self, pid: u32) {
+    /// `CQuestManager::LogoutPC` (`G/questmanager.cpp:516-535`): the running script ends
+    /// unfinished and the no-target `logout` scripts run (`NPC::OnLogout`,
+    /// `G/questnpc.cpp:399-402`). The record stays for the save to take.
+    pub fn logout(&mut self, pid: u32, game: &mut dyn Game) {
+        if !self.pcs.contains_key(&pid) {
+            return;
+        }
+        self.operate(pid, game, |run, pc, npcs| {
+            let Some(npc) = npcs.get(&QUEST_NO_NPC) else {
+                return;
+            };
+            run.handle_receive_all(pc, npc, "logout", Wait::Kept);
+        });
+    }
+
+    /// `CQuestManager::DisconnectPC` (`G/questmanager.cpp:1068-1071`): the record goes,
+    /// after the save took its flags.
+    pub fn disconnect(&mut self, pid: u32) {
         self.pcs.remove(&pid);
     }
 
@@ -844,52 +1375,75 @@ impl Manager {
             quest_npc_vid,
             categories,
         } = self;
-        let pc = pcs.entry(pid).or_default();
-        // `SetQuestNPCID` overwrites what the click recorded (`Reward` runs after any
-        // click, and the kill's scripts read the victim).
-        if *quest_npc_vid != 0 {
-            pc.npc_vid = *quest_npc_vid;
-            *quest_npc_vid = 0;
-        }
-        // The bridge owns `pc.flags` while Lua runs (`Cx::quest_flags`): a name whose
-        // answer mutates quest state does it now, while the script that asked still
-        // waits. Swapped out and back — `execute` also writes `__status` there, but
-        // never while a bridge call holds the `RefCell`.
-        let mut loaned = std::mem::take(&mut pc.flags);
+        let (npc_vid, current, item) = {
+            let pc = pcs.entry(pid).or_default();
+            // `SetQuestNPCID` overwrites what the click recorded (`Reward` runs after any
+            // click, and the kill's scripts read the victim).
+            if *quest_npc_vid != 0 {
+                pc.npc_vid = *quest_npc_vid;
+                *quest_npc_vid = 0;
+            }
+            (pc.npc_vid, pc.current.clone(), pc.item)
+        };
+        // The bridge owns every PC's flags while Lua runs (`Cx::borrowed`): a name
+        // whose answer mutates quest state does it now, while the script that asked
+        // still waits, and a `q.begin_other_pc_block` switches the live map to the
+        // blocked PC's. Swapped out and back — `execute` also writes `__status`
+        // into the empty `pc.flags`, which is merged back on top, but never while
+        // a bridge call holds the `RefCell`.
+        let mut borrowed: BTreeMap<u32, BTreeMap<Vec<u8>, i32>> = pcs
+            .iter_mut()
+            .map(|(pid, pc)| (*pid, std::mem::take(&mut pc.flags)))
+            .collect();
         let host: &Host = host;
         let npcs: &BTreeMap<u32, Npc> = npcs;
         let quest_indices = host.quest_indices();
-        let cx = RefCell::new(Cx {
+        let cx = Cx {
             output: Output::default(),
             game,
             event_flags,
             npc_ids,
             quest_indices,
-            npc_vid: pc.npc_vid,
-            quest: pc.current.clone(),
+            npc_vid,
+            quest: current,
             pending_state: None,
-            quest_flags: Some(&mut loaned),
+            borrowed: Some(&mut borrowed),
+            current: pid,
+            stack: Vec::new(),
             window: Window::default(),
             categories,
-            item: pc.item,
-        });
-        let run = Run {
-            host,
-            cx: &cx,
-            no_npc: npcs.get(&QUEST_NO_NPC),
-            changes: Cell::new(0),
+            item,
+            confirm_wait: None,
         };
-        let result = run.bridged(|| op(&run, pc, npcs));
-        let cx = cx.into_inner();
+        let cell = RefCell::new(cx);
+        let result = {
+            let pc = pcs.entry(pid).or_default();
+            let run = Run {
+                host,
+                cx: &cell,
+                no_npc: npcs.get(&QUEST_NO_NPC),
+                changes: Cell::new(0),
+            };
+            run.bridged(|| op(&run, pc, npcs))
+        };
+        let cx = cell.into_inner();
+        let pc = pcs.entry(pid).or_default();
         pc.item = cx.item;
         let unsent = cx.output.script.clone();
-        // The loaned map is the live one: the bridge's writes landed there, and
-        // `pc.flags` stood empty meanwhile — except `execute`'s `__status`, which
-        // wrote the empty map and is merged back on top.
+        // The borrowed maps are the live ones: the bridge's writes landed there, and
+        // every `pc.flags` stood empty meanwhile — except `execute`'s `__status`,
+        // which wrote the root's empty map and is merged back on top.
         for (name, value) in std::mem::take(&mut pc.flags) {
-            loaned.insert(name, value);
+            borrowed.entry(pid).or_default().insert(name, value);
         }
-        pc.flags = loaned;
+        for (pid, pc) in pcs.iter_mut() {
+            if let Some(map) = borrowed.remove(pid) {
+                pc.flags = map;
+            }
+        }
+        for (pid, map) in borrowed {
+            pcs.entry(pid).or_default().flags = map;
+        }
         if !unsent.is_empty() {
             tracing::warn!(
                 pid,
@@ -1362,6 +1916,9 @@ struct Pc {
     /// `item.get_vnum` reads freed memory (a Defect); the Rewrite keeps the ID and asks the
     /// game whether the character still holds it.
     item: u32,
+    /// `m_bConfirmWait` and `m_dwWaitConfirmFromPID` (`G/questpc.cpp:22`, `:141-144`): the PID
+    /// whose answer the confirm waits for (`Some(0)` when the target was not a PC).
+    confirm_wait: Option<u32>,
 }
 
 /// A running script (`QuestState`).
@@ -1432,6 +1989,8 @@ enum Suspend {
     Pause,
     Select,
     Input,
+    Confirm,
+    SelectItem,
 }
 
 /// The dialog being built (`m_strScript`, `m_iCurrentSkin`, `m_bError`).
@@ -1467,11 +2026,16 @@ struct Cx<'g> {
     /// What `set_state` asked for in this step, which [`Run::end_running`] moves the `Pc` to
     /// when the script ends, or the `Pc` carries while the script waits.
     pending_state: Option<Vec<u8>>,
-    /// The character's quest flags: the split half the bridge owns while `op` keeps
-    /// the rest (`operate`). A name whose answer mutates quest state
-    /// (`pc.learn_grand_master_skill`'s count) does it here, now. `None` only in
-    /// the direct-call probe, which answers through the `Game` alone.
-    quest_flags: Option<&'g mut BTreeMap<Vec<u8>, i32>>,
+    /// Every PC's flag map, borrowed from the manager for Lua's length: the bridge
+    /// reads and writes the `current` PC's map, and a `q.begin_other_pc_block`
+    /// switches `current` to the blocked PC's. `None` only in the direct-call
+    /// probe, which answers through the `Game` alone.
+    borrowed: Option<&'g mut BTreeMap<u32, BTreeMap<Vec<u8>, i32>>>,
+    /// The PID whose flag map the bridge reads: the step's root, or the innermost
+    /// blocked PC's (`m_pCurrentPC->GetID()`, `G/questmanager.cpp:2051-2093`).
+    current: u32,
+    /// `m_vecPCStack`: the PIDs the open blocks pushed, oldest first.
+    stack: Vec<u32>,
     /// The quest window of the script whose step runs, which `q.set_title`, `q.start` and
     /// `q.done` change; [`Run::resume`] moves it in from [`Running::window`] and back.
     window: Window,
@@ -1479,6 +2043,24 @@ struct Cx<'g> {
     categories: &'g BTreeMap<u16, u32>,
     /// The quest item's ID ([`Pc::item`]), which `item.get_vnum` reads.
     item: u32,
+    /// What a `confirm` yield asked the waiter's `confirm_wait` to become, carried until
+    /// the resume moves it into the `Pc`, like `pending_state`.
+    confirm_wait: Option<u32>,
+}
+
+impl Cx<'_> {
+    /// The live flag map for a read: the `current` PC's, or `None` when the
+    /// bridge never touched it.
+    fn flag_map(&self) -> Option<&BTreeMap<Vec<u8>, i32>> {
+        self.borrowed.as_deref()?.get(&self.current)
+    }
+
+    /// The live flag map for a write: the `current` PC's, made when the bridge
+    /// first touches it (`GetPCForce`, `G/questmanager.cpp:1073-1085`).
+    fn flags(&mut self) -> Option<&mut BTreeMap<Vec<u8>, i32>> {
+        let current = self.current;
+        Some(self.borrowed.as_deref_mut()?.entry(current).or_default())
+    }
 }
 
 /// One call into the manager. No `Cx` borrow is held across a call into Lua, which may call
@@ -1878,6 +2460,9 @@ impl Run<'_, '_> {
         if let Some(state) = self.cx.borrow_mut().pending_state.take() {
             pc.pending_state = Some(state);
         }
+        if let Some(wait) = self.cx.borrow_mut().confirm_wait.take() {
+            pc.confirm_wait = Some(wait);
+        }
         self.send_script(pc);
         true
     }
@@ -1914,12 +2499,35 @@ impl Run<'_, '_> {
             }
             b"wait" => Some((Suspend::Pause, b"[NEXT]".to_vec())),
             b"input" => Some((Suspend::Input, b"[INPUT]".to_vec())),
-            b"confirm" | b"select_item" => {
-                tracing::warn!(
-                    "QUEST not ported: {} suspends the script",
-                    String::from_utf8_lossy(&what)
-                );
-                None
+            b"select_item" => Some((Suspend::SelectItem, b"[SELECT_ITEM]".to_vec())),
+            b"confirm" => {
+                // `GotoConfirmState` (`G/questlua.cpp:906-943`): the stack above `confirm`
+                // holds the vid, the message and the timeout.
+                let mut rest = values.into_iter();
+                let _confirm = rest.next();
+                let vid = rest.next();
+                let msg = rest.next();
+                let timeout = rest.next();
+                let vid = vid.and_then(|vid| host::c_int(self.lua(), vid.clone()).ok());
+                let msg = msg
+                    .and_then(|msg| host::c_string(self.lua(), msg.clone()).ok().flatten())
+                    .unwrap_or_default();
+                let timeout = timeout
+                    .and_then(|timeout| host::c_int(self.lua(), timeout.clone()).ok())
+                    .unwrap_or(0);
+                let vid = u32::try_from(vid.unwrap_or(0)).unwrap_or(0);
+                let mut cx = self.cx.borrow_mut();
+                let to_pid = cx.game.pid_of(vid);
+                let waiter = cx.current;
+                if let Some(to_pid) = to_pid {
+                    cx.game.confirm_to(to_pid, &msg, timeout, waiter);
+                }
+                cx.game.arm_confirm_timeout(waiter, timeout);
+                cx.confirm_wait = Some(to_pid.unwrap_or(0));
+                let mut text = b"[CONFIRM_WAIT timeout;".to_vec();
+                text.extend_from_slice(timeout.to_string().as_bytes());
+                text.push(b']');
+                Some((Suspend::Confirm, text))
             }
             _ => None,
         }
@@ -1932,6 +2540,17 @@ impl Run<'_, '_> {
             .output
             .script
             .extend_from_slice(b"[DONE]");
+        self.send_script(pc);
+    }
+
+    /// `Confirm`'s close of the waiting window (`G/questmanager.cpp:224-226`):
+    /// `[END_CONFIRM_WAIT]` in `QUEST_SKIN_NOWINDOW`, sent before the script resumes.
+    fn end_confirm_wait(&self, pc: &mut Pc) {
+        {
+            let mut cx = self.cx.borrow_mut();
+            cx.output.script.extend_from_slice(b"[END_CONFIRM_WAIT]");
+            cx.output.skin = QUEST_SKIN_NOWINDOW;
+        }
         self.send_script(pc);
     }
     /// `SetCurrentQuestStateName` (`questlua_quest.cpp:112`): the quest of the finished script
@@ -2107,12 +2726,87 @@ fn give_item2(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<u32
     Ok(cx.game.give_item(vnum, count))
 }
 
+/// `pc_warp` (`G/questlua_pc.cpp:209-240`): the first two arguments are the point as
+/// `(int)`; a third that is number-like is the private index, 0 else. `IsHack` answers
+/// through the game. Arguments that are not number-like log and answer false.
+fn pc_warp(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<bool> {
+    let x = args.front().cloned().unwrap_or(Value::Nil);
+    let y = args.get(1).cloned().unwrap_or(Value::Nil);
+    let private = args.get(2).cloned().unwrap_or(Value::Nil);
+    let (Some(_), Some(_)) = (lua.coerce_number(x.clone())?, lua.coerce_number(y.clone())?) else {
+        tracing::warn!("QUEST wrong argument: pc_warp needs two numbers");
+        return Ok(false);
+    };
+    let x = host::c_int(lua, x)?;
+    let y = host::c_int(lua, y)?;
+    let private = match lua.coerce_number(private.clone())? {
+        Some(_) => host::c_int(lua, private)?,
+        None => 0,
+    };
+    Ok(cx.game.warp(x, y, private))
+}
+/// `pc_ore_refine` (`G/questlua_pc.cpp:1912-1937`) and `pc_diamond_refine` (`:1889-1910`):
+/// the quest item melts for the fee of the first argument and the odds of the second
+/// (both `(int)`, 0 for a second that is not a number). The first must be a number or
+/// the melt is refused; with no quest item it is refused too. The diamond takes no
+/// stone; the ore takes the item in the base inventory cell of the third (`(int)` of a
+/// number, 0 of one that is not), whose presence the world judges before it spends.
+fn ore_refine(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<bool> {
+    let cost = args.front().cloned().unwrap_or(Value::Nil);
+    let pct = args.get(1).cloned().unwrap_or(Value::Nil);
+    if lua.coerce_number(cost.clone())?.is_none() || cx.item == 0 {
+        return Ok(false);
+    }
+    let cost = host::c_int(lua, cost)?;
+    let pct = match lua.coerce_number(pct)? {
+        Some(_) => host::c_int(lua, args.get(1).cloned().unwrap_or(Value::Nil))?,
+        None => 0,
+    };
+    let stone = if name == b"pc.ore_refine" {
+        let cell = host::c_int(lua, args.get(2).cloned().unwrap_or(Value::Nil))?;
+        let cell = u32::try_from(cell).unwrap_or(u32::MAX);
+        cx.game.inventory_at(cell)
+    } else {
+        None
+    };
+    if name == b"pc.ore_refine" && stone.is_none() {
+        return Ok(false);
+    }
+    Ok(cx.game.ore_refine(cx.item, cost, pct, stone))
+}
+
 /// `pc_give_or_drop_item_and_select` (`G/questlua_pc.cpp:679-729`): `give_item2`'s reads and
 /// give, but nothing is pushed, and the item given becomes the quest item.
 fn give_item2_select(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
     let given = give_item2(lua, cx, args)?;
     if given != 0 {
         cx.item = given;
+    }
+    Ok(())
+}
+
+/// `game_drop_item_with_ownership` (`G/questlua_game.cpp:168-213`): one to three
+/// arguments makes `count` of the vnum at the character's feet (1 with one argument);
+/// any other count drops nothing. A vnum that is not number-like is 0 through the
+/// `(DWORD)` cast, so nothing is made. The seconds are `None` with no third number.
+fn drop_with_ownership(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
+    let top = args.len();
+    if (1..=3).contains(&top) {
+        let vnum = args.front().cloned().unwrap_or(Value::Nil);
+        let count = args.get(1).cloned().unwrap_or(Value::Nil);
+        let secs = args.get(2).cloned().unwrap_or(Value::Nil);
+        let vnum = u32::from_le_bytes(host::c_int(lua, vnum)?.to_le_bytes());
+        let count = if top >= 2 {
+            host::c_int(lua, count)?
+        } else {
+            1
+        };
+        let secs = if top >= 3 && lua.coerce_number(secs.clone())?.is_some() {
+            Some(host::c_int(lua, secs)?)
+        } else {
+            None
+        };
+        cx.game.drop_with_ownership(vnum, count, secs);
     }
     Ok(())
 }
@@ -2161,6 +2855,108 @@ fn set_socket(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()>
         cx.game.set_socket(cx.item, index, value);
     }
     Ok(())
+}
+
+/// (`:3834`, `:3837`): `(int)(lua_tonumber * 10)`, and nothing pushed.
+fn change_alignment(lua: &Lua, cx: &mut Cx<'_>, first: &Value) -> mlua::Result<()> {
+    let amount = match lua.coerce_number(first.clone())? {
+        Some(number) => host::c_int(lua, Value::Number(number * 10.0))?,
+        None => 0,
+    };
+    cx.game.change_alignment(amount);
+    Ok(())
+}
+/// `pc_change_money` (`G/questlua_pc.cpp:1102-1121`) under its four names (`:3832-3833`,
+/// `:3835-3836`): `(long long)` of the last argument (`lua_tonumber(L, -1)`), so a missing
+/// or non-number argument moves nothing. It pushes nothing.
+fn change_gold(lua: &Lua, cx: &mut Cx<'_>, last: &Value) -> mlua::Result<()> {
+    let amount = match lua.coerce_number(last.clone())? {
+        Some(number) => {
+            let truncated = number.trunc();
+            if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated) {
+                format!("{truncated:.0}").parse().unwrap_or(i64::MIN)
+            } else {
+                i64::MIN
+            }
+        }
+        None => 0,
+    };
+    cx.game.change_gold(amount);
+    Ok(())
+}
+/// `pc_hide_costume` (`G/questlua_pc.cpp:3553-3600`): `(BYTE)` of the first argument is the
+/// part (1-5: body, hair, sash, aura, weapon) and the second, which must be a boolean, hides
+/// or shows it. A non-number part, a non-boolean hide, or a part outside 1-5 logs and
+/// changes nothing. The `costume_option.hide_*` quest flag follows the bit. It pushes
+/// nothing.
+fn hide_costume(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let second = args.get(1).cloned().unwrap_or(Value::Nil);
+    let Some(number) = lua.coerce_number(first)? else {
+        tracing::error!("pc_hide_costume::wrong part value (1-4)");
+        return Ok(());
+    };
+    let Value::Boolean(hide) = second else {
+        tracing::error!("Invalid argument: arg2 must be boolean.");
+        return Ok(());
+    };
+    let part = dword(number).to_le_bytes()[0];
+    if !(1..=5).contains(&part) {
+        tracing::error!("Invalid part");
+        return Ok(());
+    }
+    cx.game.hide_costume(part, hide);
+    let flag: &[u8] = match part {
+        1 => b"costume_option.hide_body",
+        2 => b"costume_option.hide_hair",
+        3 => b"costume_option.hide_sash",
+        4 => b"costume_option.hide_aura",
+        _ => b"costume_option.hide_weapon",
+    };
+    let flag = flag.to_vec();
+    if let Some(flags) = cx.flags() {
+        if hide {
+            flags.insert(flag, 1);
+        } else {
+            flags.remove(&flag);
+        }
+    }
+    Ok(())
+}
+
+/// `pc_open_sash` (`G/questlua_pc.cpp:3523-3536`): the first argument must be a
+/// boolean, combination (`true`) or absorption; anything else logs and changes
+/// nothing. It pushes nothing.
+fn open_sash(cx: &mut Cx<'_>, args: &MultiValue) {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let Value::Boolean(combination) = first else {
+        tracing::error!("Invalid argument: arg1 must be boolean");
+        return;
+    };
+    cx.game.open_sash(combination);
+}
+
+/// `pc_open_changelook` (`G/questlua_pc.cpp:3540-3549`): no argument is read.
+/// It pushes nothing.
+fn open_changelook(cx: &mut Cx<'_>) {
+    cx.game.open_changelook();
+}
+
+/// `pc_get_wear` (`G/questlua_pc.cpp:1052-1071`): the vnum worn in `(BYTE)` of the first
+/// argument, nil when the cell is out of range or empty. A non-number argument logs and
+/// pushes nothing.
+fn worn_vnum(lua: &Lua, cx: &mut Cx<'_>, first: &Value) -> mlua::Result<Option<Value>> {
+    let Some(number) = lua.coerce_number(first.clone())? else {
+        tracing::warn!("QUEST wrong set flag");
+        return Ok(None);
+    };
+    // `(BYTE)` of the number, the low byte of `dword`, as `pc_send_block_mode` reads it.
+    let cell = dword(number).to_le_bytes()[0];
+    Ok(Some(
+        cx.game
+            .worn_vnum(cell)
+            .map_or(Value::Nil, |vnum| Value::Number(f64::from(vnum))),
+    ))
 }
 
 /// `pc_set_skill_level` (`G/questlua_pc.cpp:2112-2123`): `(DWORD)` and `(BYTE)` of
@@ -2212,7 +3008,31 @@ fn remove_item(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()
     Ok(())
 }
 
-/// `(DWORD)lua_tonumber(L, n)` on x86-64: the fraction dropped, then the low 32 bits of the
+/// `pc_learn_grand_master_skill` (`questlua_pc.cpp:121-133`): a non-number pushes nothing; a
+/// number pushes the climb. The count lives in the character's flags, so the second read in
+/// one script sees the first.
+fn learn_grand_master_skill(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    first: &Value,
+) -> mlua::Result<Option<Value>> {
+    let Some(vnum) = lua.coerce_number(first.clone())? else {
+        return Ok(None);
+    };
+    let vnum = dword(vnum);
+    let name = format!("training_grandmaster_skill.skill{vnum}");
+    let total = cx
+        .flag_map()
+        .and_then(|flags| flags.get(name.as_bytes()).copied())
+        .unwrap_or(0)
+        + 1;
+    if let Some(flags) = cx.flags() {
+        flags.insert(name.into_bytes(), total);
+    }
+    let climbed = cx.game.learn_grand_master_skill(vnum, total);
+    Ok(Some(Value::Boolean(climbed)))
+}
+
 /// 64-bit conversion, which is 0 where the conversion has no answer (out of range or NaN).
 fn dword(number: f64) -> u32 {
     let truncated = number.trunc();
@@ -2222,6 +3042,67 @@ fn dword(number: f64) -> u32 {
     let wide: i64 = format!("{truncated:.0}").parse().unwrap_or(0);
     let bytes = wide.to_le_bytes();
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+/// `asctime(gmtime())` of a stamp (`_time_to_str`, `G/questlua_global.cpp:65-70`):
+/// `Www Mmm DD HH:MM:SS YYYY\n`, the day blank-padded, in UTC. `None` (no argument or
+/// a non-number one) is 0 (`(time_t)lua_tonumber`), and a fraction or a text stamp
+/// truncates toward zero. The civil date is Howard Hinnant's days-from-epoch
+/// algorithm, so no time crate is needed; the weekday of 1970-01-01 was a Thursday.
+fn time_to_str(stamp: Option<f64>) -> Vec<u8> {
+    const DAYS: [&[u8]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat"];
+    const MONTHS: [&[u8]; 12] = [
+        b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
+        b"Dec",
+    ];
+    // `(time_t)lua_tonumber`, truncated toward zero; out of range is 0, as the
+    // 64-bit conversion answers it in `dword`.
+    let seconds: i64 = match stamp {
+        Some(stamp) => {
+            let truncated = stamp.trunc();
+            if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated) {
+                format!("{truncated:.0}").parse().unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        None => 0,
+    };
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    // The days since 0000-03-01, from which the era breaks into years.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    let weekday = DAYS[usize::try_from(days.rem_euclid(7) + 4).unwrap_or(4) % 7];
+    let month_name = MONTHS[usize::try_from(month - 1).unwrap_or(0).clamp(0, 11)];
+    let (hour, minute, second) = (
+        day_seconds / 3_600,
+        day_seconds % 3_600 / 60,
+        day_seconds % 60,
+    );
+    format!(
+        "{} {} {:2} {:02}:{:02}:{:02} {}\n",
+        String::from_utf8_lossy(weekday),
+        String::from_utf8_lossy(month_name),
+        day,
+        hour,
+        minute,
+        second,
+        year,
+    )
+    .into_bytes()
 }
 
 /// The [`crate::host::BRIDGED`] names (`questlua_global.cpp`, `questlua_game.cpp`,
@@ -2276,48 +3157,143 @@ fn text_api(
     Ok(TextOutcome::Hit(result))
 }
 
-/// The `pc.*` bridged names: the level, the minutes played, the map, the quest flags, the
-/// grand-master read, the skill level and the block mode. Returns `None` for a name this table
-/// does not hold.
-fn pc_api(
+/// The read-only character readers among the `pc.*` bridged names: gold, empire, HP,
+/// SP, exp, race, name, VID, leadership, the four positions, the worn vnums, alignment,
+/// and the guild triad. Each pushes one value and touches no state, so they sit apart
+/// from the arms that write. Returns `None` for a name this table does not hold.
+fn pc_readers(lua: &Lua, cx: &mut Cx<'_>, name: &[u8]) -> mlua::Result<Option<Value>> {
+    let result = match name {
+        // `pc_get_money` (`G/questlua_pc.cpp:1073-1077`) under the four names it is
+        // registered as (`:3822-3823`, `:3830-3831`).
+        b"pc.getmoney" | b"pc.get_money" | b"pc.getgold" | b"pc.get_gold" => {
+            #[allow(clippy::cast_precision_loss)]
+            // Legacy pushes `GetGold()` (`unsigned long long`, `:1076`) through
+            // `lua_pushnumber` (`double`); gold above 2^53 rounds there too.
+            let gold = cx.game.gold() as f64;
+            Some(Value::Number(gold))
+        }
+        // `pc_get_empire` (`G/questlua_pc.cpp:1304-1308`) under both names (`:3904-3905`).
+        b"pc.getempire" | b"pc.get_empire" => Some(Value::Number(f64::from(cx.game.empire()))),
+        // `pc_get_hp` (`:975-979`) and `pc_get_max_hp` (`:969-973`), each under both
+        // names (`:3813-3816`).
+        b"pc.gethp" | b"pc.get_hp" => Some(Value::Number(f64::from(cx.game.hp()))),
+        b"pc.getmaxhp" | b"pc.get_max_hp" => Some(Value::Number(f64::from(cx.game.max_hp()))),
+        // `pc_get_sp` (`:927-931`) and `pc_get_max_sp` (`:921-925`), each under both
+        // names (`:3817-3820`).
+        b"pc.getsp" | b"pc.get_sp" => Some(Value::Number(f64::from(cx.game.sp()))),
+        b"pc.getmaxsp" | b"pc.get_max_sp" => Some(Value::Number(f64::from(cx.game.max_sp()))),
+        // `pc_get_exp` (`:897-901`) and `pc_get_next_exp` (`:891-895`).
+        b"pc.get_exp" => Some(Value::Number(f64::from(cx.game.exp()))),
+        b"pc.get_next_exp" => Some(Value::Number(f64::from(cx.game.next_exp()))),
+        // `pc_get_race` (`:903-907`).
+        b"pc.get_race" => Some(Value::Number(f64::from(cx.game.race()))),
+        // `pc_get_name` (`:885-889`) under both names (`:3838-3839`).
+        b"pc.getname" | b"pc.get_name" => {
+            Some(Value::String(lua.create_string(cx.game.char_name())?))
+        }
+        // `pc_get_vid` (`:880-884`).
+        b"pc.get_vid" => Some(Value::Number(f64::from(cx.game.char_vid()))),
+        // `pc_get_leadership` (`:862-866`) under both names (`:3843-3844`).
+        b"pc.getleadership" | b"pc.get_leadership" => {
+            Some(Value::Number(f64::from(cx.game.leadership())))
+        }
+        // `pc_get_x`/`pc_get_y` (`:737-749`) and the local pair (`:751-775`), each under
+        // both names (`:3850-3855`).
+        b"pc.get_x" | b"pc.getx" => Some(Value::Number(f64::from(cx.game.position().0))),
+        b"pc.get_y" | b"pc.gety" => Some(Value::Number(f64::from(cx.game.position().1))),
+        b"pc.get_local_x" => Some(Value::Number(f64::from(cx.game.position().2))),
+        b"pc.get_local_y" => Some(Value::Number(f64::from(cx.game.position().3))),
+        // `pc_get_weapon` (`:1028-1038`) and `pc_get_armor` (`:1040-1050`): the worn vnum,
+        // 0 when empty. (`pc_get_wear` sits in `pc_api`: a non-number argument pushes
+        // nothing, which this table's `None` cannot say.)
+        b"pc.getweapon" | b"pc.get_weapon" => {
+            Some(Value::Number(f64::from(cx.game.worn_vnum(4).unwrap_or(0))))
+        }
+        b"pc.getarmor" | b"pc.get_armor" => {
+            Some(Value::Number(f64::from(cx.game.worn_vnum(0).unwrap_or(0))))
+        }
+        // `pc_get_real_alignment` (`:1081-1085`) and `pc_get_alignment` (`:1087-1091`):
+        // the real and the shown value, each /10. This build keeps one value (the shown
+        // always follows the real), so one arm answers both.
+        b"pc.get_real_alignment" | b"pc.get_alignment" => {
+            Some(Value::Number(f64::from(cx.game.real_alignment() / 10)))
+        }
+        // `pc_hasguild` (`:325-330`) and `pc_isguildmaster` (`:339-350`), each under both
+        // names (`:3895-3900`).
+        b"pc.has_guild" | b"pc.hasguild" => Some(Value::Boolean(cx.game.guild_id() != 0)),
+        b"pc.isguildmaster" | b"pc.is_guild_master" => {
+            Some(Value::Boolean(cx.game.is_guild_master()))
+        }
+        // `pc_getguild` (`:332-337`) under both names (`:3897-3898`).
+        b"pc.get_guild" | b"pc.getguild" => Some(Value::Number(f64::from(cx.game.guild_id()))),
+        // `pc_is_gm` (`:1867-1871`) and `pc_get_gm_level` (`:1873-1877`): the gate at
+        // `GM_HIGH_WIZARD` and the level itself.
+        b"pc.is_gm" => Some(Value::Boolean(cx.game.gm_level() >= 3)),
+        b"pc.get_gm_level" => Some(Value::Number(f64::from(cx.game.gm_level()))),
+        // `pc_get_conqueror_level` (`G/questlua_pc.cpp:3632-3637`).
+        b"pc.get_conqueror_level" => Some(Value::Number(f64::from(cx.game.conqueror_level()))),
+        // `pc_get_conqueror_exp` (`G/questlua_pc.cpp:3617-3622`).
+        b"pc.get_conqueror_exp" => Some(Value::Number(f64::from(cx.game.conqueror_exp()))),
+        // `pc_get_conqueror_next_exp` (`:3624-3629`): `GetConquerorNextExp()`, the cost of
+        // the conqueror level the game reports.
+        b"pc.get_conqueror_next_exp" => {
+            let next = common::levels::conqueror_next_exp(cx.game.conqueror_level());
+            Some(Value::Number(f64::from(
+                u32::try_from(next).unwrap_or(u32::MAX),
+            )))
+        }
+        // `pc_is_mount` (`G/questlua_pc.cpp:1385-1390`): whether the mount vnum stands.
+        b"pc.is_mount" => Some(Value::Boolean(cx.game.is_mount())),
+        // `pc_get_channel_id` (`G/questlua_pc.cpp:2767-2772`): the Channel.
+        b"pc.get_channel_id" => Some(Value::Number(f64::from(cx.game.channel_id()))),
+        _ => return Ok(None),
+    };
+    Ok(result)
+}
+
+/// The `pc.*` bridged names: the read-only character readers (answered by
+/// [`pc_readers`]), the level, the minutes played, the map, the quest flags, the
+/// grand-master read, the skill level and the block mode. Returns `None` for a name
+/// this table does not hold.
+/// The quest-flag pair among [`pc_api`]'s names (`pc.getqf`, `pc.setqf`), split out so
+/// neither function trips the line lint.
+/// `pc_set_quest_flag` (`G/questlua_pc.cpp:1215-1229`): text or a number names a flag of
+/// the quest that runs, and a number, rounded to even and cast to `int`, is its value
+/// (`int(rint(...))`); 0 deletes the flag (`quest::PC::SetFlag`, `G/questpc.cpp:52-76`).
+/// Anything else logs and changes nothing.
+fn set_quest_flag(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    first: &Value,
+    second: Value,
+) -> mlua::Result<Option<Value>> {
+    let flag = host::c_string(lua, first.clone())?;
+    let value = lua.coerce_number(second)?;
+    let (Some(flag), Some(value)) = (flag, value) else {
+        tracing::warn!("QUEST wrong set flag");
+        return Ok(None);
+    };
+    let value = host::c_int(lua, Value::Number(value.round_ties_even()))?;
+    let name = [&cx.quest[..], b".", &flag].concat();
+    if let Some(flags) = cx.flags() {
+        if value == 0 {
+            flags.remove(&name);
+        } else {
+            flags.insert(name, value);
+        }
+    }
+    Ok(None)
+}
+
+fn pc_flags(
     lua: &Lua,
     cx: &mut Cx<'_>,
     name: &[u8],
+    first: &Value,
+    last: &Value,
     args: &MultiValue,
 ) -> mlua::Result<Option<MultiValue>> {
-    let first = &args.front().cloned().unwrap_or(Value::Nil);
-    let last = &args.back().cloned().unwrap_or(Value::Nil);
-    let number = |value: u32| Some(Value::Number(f64::from(value)));
-    let result = match name {
-        b"pc.get_level" => number(u32::from(cx.game.level())),
-        // `pc_get_job` (`G/questlua_pc.cpp:915-919`).
-        b"pc.get_job" => number(u32::from(cx.game.job())),
-        // `pc_get_playtime` (`G/questlua_pc.cpp:874-878`) under both names it is registered as
-        // (`:3841-3842`).
-        b"pc.getplaytime" | b"pc.get_playtime" => {
-            Some(Value::Number(f64::from(cx.game.playtime())))
-        }
-        b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
-        b"pc.give_item2" => number(give_item2(lua, cx, args)?),
-        b"pc.give_item2_select" => {
-            give_item2_select(lua, cx, args)?;
-            None
-        }
-        b"pc.count_item" | b"pc.countitem" => {
-            Some(Value::Number(f64::from(count_item(lua, cx, args)?)))
-        }
-        b"pc.remove_item" | b"pc.removeitem" => {
-            remove_item(lua, cx, args)?;
-            None
-        }
-        b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
-        // `pc_get_skillgroup` (`G/questlua_pc.cpp:1339-1343`).
-        b"pc.get_skill_group" => number(u32::from(cx.game.skill_group())),
-        b"pc.is_gm" => Some(Value::Boolean(false)),
-        b"pc.set_skill_level" => {
-            set_skill_level(lua, cx, args)?;
-            None
-        }
+    let result: Option<Value> = match name {
         b"pc.getqf" => {
             // `pc_get_quest_flag` (`G/questlua_pc.cpp:1180-1197`): the last argument, text
             // or a number, names a flag of the quest that runs (`GetCurrentQuestName() + "."
@@ -2329,27 +3305,53 @@ fn pc_api(
             };
             let name = [&cx.quest[..], b".", &flag].concat();
             let value = cx
-                .quest_flags
-                .as_deref()
+                .flag_map()
                 .and_then(|flags| flags.get(&name).copied())
                 .unwrap_or(0);
             Some(Value::Number(f64::from(value)))
         }
-        b"pc.setqf" => {
-            // `pc_set_quest_flag` (`G/questlua_pc.cpp:1215-1229`): text or a number names a
-            // flag of the quest that runs, and a number, rounded to even and cast to `int`,
-            // is its value (`int(rint(...))`); 0 deletes the flag (`quest::PC::SetFlag`,
-            // `G/questpc.cpp:52-76`). Anything else logs and changes nothing.
+        b"pc.setqf" => set_quest_flag(lua, cx, first, args.get(1).cloned().unwrap_or(Value::Nil))?,
+        b"pc.getf" => {
+            // `pc_get_another_quest_flag` (`G/questlua_pc.cpp:1141-1165`): the first two
+            // arguments name a flag of another quest (`sz.sz2`); text or a number names
+            // each, as `pc.getqf` reads its one. An unset flag reads 0. Anything else
+            // logs and pushes nothing.
             let second = args.get(1).cloned().unwrap_or(Value::Nil);
-            let flag = host::c_string(lua, first.clone())?;
-            let value = lua.coerce_number(second)?;
-            let (Some(flag), Some(value)) = (flag, value) else {
+            let (Some(quest), Some(flag)) = (
+                host::c_string(lua, first.clone())?,
+                host::c_string(lua, second)?,
+            ) else {
+                tracing::warn!("QUEST wrong get flag");
+                return Ok(Some(MultiValue::new()));
+            };
+            let name = [quest, b".".to_vec(), flag].concat();
+            let value = cx
+                .flag_map()
+                .and_then(|flags| flags.get(&name).copied())
+                .unwrap_or(0);
+            Some(Value::Number(f64::from(value)))
+        }
+        b"pc.setf" => {
+            // `pc_set_another_quest_flag` (`G/questlua_pc.cpp:1123-1139`): the first two
+            // arguments name a flag of another quest, the third is its value; text or a
+            // number names each, and the value rounds as `pc.setqf`'s does. Anything
+            // else logs and changes nothing.
+            let second = args.get(1).cloned().unwrap_or(Value::Nil);
+            let third = args.get(2).cloned().unwrap_or(Value::Nil);
+            let (Some(quest), Some(flag)) = (
+                host::c_string(lua, first.clone())?,
+                host::c_string(lua, second)?,
+            ) else {
                 tracing::warn!("QUEST wrong set flag");
                 return Ok(Some(MultiValue::new()));
             };
-            let value = host::c_int(lua, Value::Number(value.round_ties_even()))?;
-            let name = [&cx.quest[..], b".", &flag].concat();
-            if let Some(flags) = cx.quest_flags.as_deref_mut() {
+            let Some(number) = lua.coerce_number(third)? else {
+                tracing::warn!("QUEST wrong set flag");
+                return Ok(Some(MultiValue::new()));
+            };
+            let value = host::c_int(lua, Value::Number(number.round_ties_even()))?;
+            let name = [quest, b".".to_vec(), flag].concat();
+            if let Some(flags) = cx.flags() {
                 if value == 0 {
                     flags.remove(&name);
                 } else {
@@ -2358,36 +3360,151 @@ fn pc_api(
             }
             None
         }
-        b"pc.learn_grand_master_skill" => {
-            // `pc_learn_grand_master_skill` (`questlua_pc.cpp:121-133`): a non-number
-            // pushes nothing; a number pushes the climb. The count lives here, in
-            // the character's flags, so the second read in one script sees the first.
-            let Some(vnum) = lua.coerce_number(first.clone())? else {
+        b"pc.delqf" => {
+            // `pc_del_quest_flag` (`G/questlua_pc.cpp:1231-1243`): text or a number names
+            // a flag of the quest that runs, and it is deleted whether or not it was
+            // set. Anything else logs and changes nothing.
+            let Some(flag) = host::c_string(lua, first.clone())? else {
+                tracing::warn!("argument error");
                 return Ok(Some(MultiValue::new()));
             };
-            let vnum = dword(vnum);
-            let name = format!("training_grandmaster_skill.skill{vnum}");
-            let total = cx
-                .quest_flags
-                .as_deref()
-                .and_then(|flags| flags.get(name.as_bytes()).copied())
-                .unwrap_or(0)
-                + 1;
-            if let Some(flags) = cx.quest_flags.as_deref_mut() {
-                flags.insert(name.into_bytes(), total);
+            let name = [&cx.quest[..], b".", &flag].concat();
+            if let Some(flags) = cx.flags() {
+                flags.remove(&name);
             }
-            let climbed = cx.game.learn_grand_master_skill(vnum, total);
-            Some(Value::Boolean(climbed))
+            None
         }
-        b"pc.get_skill_level" => {
-            // `pc_get_skill_level` (`questlua_pc.cpp:1734-1749`): a non-number logs
-            // and answers 0; a number answers the level.
-            let Some(vnum) = lua.coerce_number(first.clone())? else {
-                tracing::warn!("QUEST invalid argument");
-                return Ok(Some(MultiValue::from_iter([Value::Number(0.0)])));
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// The `pc.*` window calls: `hide_costume`, the sash and changelook opens, and
+/// `get_wear`. Returns `None` for a name this table does not hold.
+fn pc_windows(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+    first: &Value,
+) -> mlua::Result<Option<MultiValue>> {
+    let result: Option<Value> = match name {
+        // `pc_hide_costume` (see `hide_costume`).
+        b"pc.hide_costume" => {
+            hide_costume(lua, cx, args)?;
+            None
+        }
+        // `pc_open_sash` (see `open_sash`).
+        b"pc.open_sash" => {
+            open_sash(cx, args);
+            None
+        }
+        // `pc_open_changelook` (see `open_changelook`).
+        b"pc.open_changelook" => {
+            open_changelook(cx);
+            None
+        }
+        // `pc_mining` (`:1881-1887`): no argument is read; the NPC is the script's own.
+        b"pc.mining" => {
+            cx.game.mining(cx.npc_vid);
+            None
+        }
+        // `pc_get_wear` (`:1052-1071`): the vnum worn in `(BYTE)` of the first argument,
+        // nil when the cell is out of range or empty. A non-number argument logs and
+        // pushes nothing.
+        b"pc.get_wear" => worn_vnum(lua, cx, first)?,
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+fn pc_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let first = &args.front().cloned().unwrap_or(Value::Nil);
+    let last = &args.back().cloned().unwrap_or(Value::Nil);
+    if let Some(read) = pc_readers(lua, cx, name)? {
+        return Ok(Some(MultiValue::from_iter([read])));
+    }
+    if let Some(window) = pc_windows(lua, cx, name, args, first)? {
+        return Ok(Some(window));
+    }
+    let number = |value: u32| Some(Value::Number(f64::from(value)));
+    let result = match name {
+        b"pc.get_level" => number(u32::from(cx.game.level())),
+        // `pc_get_job` (`G/questlua_pc.cpp:915-919`).
+        b"pc.get_job" => number(u32::from(cx.game.job())),
+        // `pc_get_playtime` (`G/questlua_pc.cpp:874-878`) under both names it is registered as
+        // (`:3841-3842`).
+        b"pc.getplaytime" | b"pc.get_playtime" => {
+            Some(Value::Number(f64::from(cx.game.playtime())))
+        }
+        // `pc_change_alignment` (`G/questlua_pc.cpp:1093-1100`) under both names it is
+        // registered as (`:3834`, `:3837`).
+        b"pc.changealignment" | b"pc.change_alignment" => {
+            change_alignment(lua, cx, first)?;
+            None
+        }
+        // `pc_change_money` under its four names (see `change_gold`).
+        b"pc.changegold" | b"pc.changemoney" | b"pc.change_gold" | b"pc.change_money" => {
+            change_gold(lua, cx, last)?;
+            None
+        }
+        b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
+        b"pc.give_item2" => number(give_item2(lua, cx, args)?),
+        b"pc.give_item2_select" => {
+            give_item2_select(lua, cx, args)?;
+            None
+        }
+        b"pc.ore_refine" | b"pc.diamond_refine" => {
+            Some(Value::Boolean(ore_refine(lua, cx, name, args)?))
+        }
+        b"pc.count_item" | b"pc.countitem" => {
+            Some(Value::Number(f64::from(count_item(lua, cx, args)?)))
+        }
+        b"pc.remove_item" | b"pc.removeitem" => {
+            remove_item(lua, cx, args)?;
+            None
+        }
+        b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
+        // `pc_get_skillgroup` (`G/questlua_pc.cpp:1339-1343`).
+        b"pc.get_skill_group" => number(u32::from(cx.game.skill_group())),
+        // `pc_warp` (see `pc_warp`).
+        b"pc.warp" => Some(Value::Boolean(pc_warp(lua, cx, args)?)),
+        // `pc_enough_inventory` (`:478-499`): a vnum that is not number-like, or names no
+        // proto, answers false; otherwise whether a fresh base cell below the unlocked
+        // count is empty.
+        b"pc.enough_inventory" => {
+            let enough = match lua.coerce_number(first.clone())? {
+                Some(vnum) => cx.game.has_empty_inventory(dword(vnum)),
+                None => false,
             };
-            Some(Value::Number(f64::from(cx.game.skill_level(dword(vnum)))))
+            Some(Value::Boolean(enough))
         }
+        b"pc.set_skill_level" => {
+            set_skill_level(lua, cx, args)?;
+            None
+        }
+        b"pc.getqf" | b"pc.setqf" | b"pc.getf" | b"pc.setf" | b"pc.delqf" => {
+            return pc_flags(lua, cx, name, first, last, args);
+        }
+        b"pc.learn_grand_master_skill" => {
+            let Some(climbed) = learn_grand_master_skill(lua, cx, first)? else {
+                return Ok(Some(MultiValue::new()));
+            };
+            Some(climbed)
+        }
+        // `pc_is_skill_book_no_delay` (`G/questlua_pc.cpp:113-119`) and
+        // `pc_remove_skill_book_no_delay` (`:106-111`).
+        b"pc.is_skill_book_no_delay" => Some(Value::Boolean(cx.game.has_skill_book_no_delay())),
+        b"pc.remove_skill_book_no_delay" => {
+            cx.game.remove_skill_book_no_delay();
+            None
+        }
+        b"pc.get_skill_level" => return get_skill_level(lua, cx, first),
         b"pc.send_block_mode" => {
             // `pc_send_block_mode` (`G/questlua_pc.cpp:2190-2197`): the number
             // becomes the character's own block mode; a non-number is zero
@@ -2402,10 +3519,39 @@ fn pc_api(
             cx.game.send_block_mode(mode);
             None
         }
+        // `pc_can_warp` (`G/questlua_pc.cpp:2723-2737`).
+        b"pc.can_warp" => Some(Value::Boolean(cx.game.can_warp())),
+        // `pc_set_conqueror` (`G/questlua_pc.cpp:3639-3644`): pushes nothing.
+        b"pc.set_conqueror" => {
+            cx.game.set_conqueror();
+            None
+        }
+        // `pc_destroy_guild` (`:352-370`) and `pc_remove_from_guild` (`:372-381`) push
+        // nothing.
+        b"pc.destroy_guild" => {
+            cx.game.destroy_guild();
+            None
+        }
+        b"pc.remove_from_guild" => {
+            cx.game.remove_from_guild();
+            None
+        }
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
 }
+/// `pc_get_skill_level` (`G/questlua_pc.cpp:1734-1749`): a non-number logs and answers 0;
+/// a number answers the level. Split out so `pc_api` stays under the line lint.
+fn get_skill_level(lua: &Lua, cx: &mut Cx<'_>, first: &Value) -> mlua::Result<Option<MultiValue>> {
+    let Some(vnum) = lua.coerce_number(first.clone())? else {
+        tracing::warn!("QUEST invalid argument");
+        return Ok(Some(MultiValue::from_iter([Value::Number(0.0)])));
+    };
+    Ok(Some(MultiValue::from_iter([Value::Number(f64::from(
+        cx.game.skill_level(dword(vnum)),
+    ))])))
+}
+
 /// The `guild.*` bridged names (230s): the core readers and writers, answered by the world's
 /// guilds now, while the script that asked still waits. Each argument dword-decides as
 /// legacy's `lua_tonumber`/`lua_tostring` do: a number-like one arrives dworded, a
@@ -2477,6 +3623,214 @@ fn guild_api(
         }
     };
     Ok(Some(pushed))
+}
+
+/// The `party.*` bridged calls: the two readers, the leader PID, and the flag
+/// pair. Returns `None` for a name this table does not hold.
+fn party_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let result: Option<Value> = match name {
+        // `party_is_party` (`G/questlua_party.cpp:236-241`).
+        b"party.is_party" => Some(Value::Boolean(cx.game.is_party())),
+        // `party_is_leader` (`G/questlua_party.cpp:224-234`).
+        b"party.is_leader" => Some(Value::Boolean(cx.game.is_party_leader())),
+        // `party_get_leader_pid` (`G/questlua_party.cpp:243-255`): -1 with none.
+        b"party.get_leader_pid" => Some(Value::Number(f64::from(cx.game.party_leader_pid()))),
+        // `party_get_member_pids` (`G/questlua_party.cpp:424-442`) pushes one value
+        // per PID, so it returns early with its own arity.
+        b"party.get_member_pids" => {
+            return Ok(Some(
+                cx.game
+                    .party_member_pids()
+                    .into_iter()
+                    .map(|pid| Value::Number(f64::from(pid)))
+                    .collect(),
+            ));
+        }
+        // `party_get_flag` (`G/questlua_party.cpp:315-325`): 0 with no party or
+        // a non-string name.
+        b"party.getf" => {
+            let value = match host::c_string(lua, first)? {
+                Some(flag) => cx.game.party_flag(&flag),
+                None => 0,
+            };
+            Some(Value::Number(f64::from(value)))
+        }
+        // `party_set_flag` (`G/questlua_party.cpp:305-313`): a string name and
+        // a number value set; anything else is quiet. Pushes nothing.
+        b"party.setf" => {
+            let second = args.get(1).cloned().unwrap_or(Value::Nil);
+            if let (Some(flag), Some(value)) =
+                (host::c_string(lua, first)?, lua.coerce_number(second)?)
+            {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                // Legacy casts `(int)lua_tonumber`.
+                let value = value as i32;
+                cx.game.set_party_flag(flag, value);
+            }
+            None
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// The `horse.*` calls that need no summoned horse (`G/questlua_horse.cpp:24-228`), and
+/// `pc.get_horse_level` and `pc.is_horse_alive` (`G/questlua_pc.cpp:1491-1525`). The pools
+/// and their percentages read 0 without a horse. Returns `None` for a name this table does
+/// not hold.
+fn horse_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let horse = cx.game.horse();
+    let number = |value: i32| Some(Value::Number(f64::from(value)));
+    // `MINMAX(0, x * 100 / max, 100)`, pushed only with a horse.
+    let owned = |value: i16, max: i16, pct: bool| {
+        if horse.level == 0 {
+            0
+        } else if pct {
+            (i32::from(value) * 100 / i32::from(max).max(1)).clamp(0, 100)
+        } else {
+            i32::from(value)
+        }
+    };
+    let result: Option<Value> = match name {
+        b"horse.is_riding" => number(i32::from(horse.riding)),
+        b"horse.get_level" | b"pc.get_horse_level" => number(i32::from(horse.level)),
+        b"horse.get_health" => number(owned(horse.health, horse.max_health, false)),
+        b"horse.get_health_pct" => number(owned(horse.health, horse.max_health, true)),
+        b"horse.get_stamina" => number(owned(horse.stamina, horse.max_stamina, false)),
+        b"horse.get_stamina_pct" => number(owned(horse.stamina, horse.max_stamina, true)),
+        b"horse.get_grade" => number(i32::from(horse.grade())),
+        b"horse.is_dead" => Some(Value::Boolean(horse.health <= 0)),
+        b"pc.is_horse_alive" => Some(Value::Boolean(horse.level > 0 && horse.health > 0)),
+        // `horse_set_level`: only a number (or a numeric string) sets, `(int)` then clamped.
+        b"horse.set_level" => {
+            let first = args.front().cloned().unwrap_or(Value::Nil);
+            if lua.coerce_number(first.clone())?.is_some() {
+                let level = host::c_int(lua, first)?.clamp(0, 30);
+                cx.game.set_horse_level(level);
+            }
+            None
+        }
+        b"horse.advance" => {
+            if horse.level < 30 {
+                cx.game.set_horse_level(i32::from(horse.level) + 1);
+            }
+            None
+        }
+        b"horse.feed" => {
+            if horse.level > 0 && horse.health > 0 {
+                cx.game.feed_horse();
+            }
+            None
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// The `d.*` and `ds.*` bridged calls: the dungeon pair answer whether a dungeon
+/// lives under `(DWORD)` of the first argument; the `ds.*` names read and grant the
+/// dragon-soul qualification and open its windows. Returns `None` for a name this
+/// table does not hold.
+fn dungeon_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    if matches!(name, b"d.select" | b"d.find") {
+        let first = args.front().cloned().unwrap_or(Value::Nil);
+        // `dungeon_select`/`dungeon_find` (`G/questlua_dungeon.cpp:1540-1563`):
+        // `(DWORD)lua_tonumber`, false with no number.
+        let lives = match lua.coerce_number(first)? {
+            Some(index) => cx.game.dungeon_lives(dword(index)),
+            None => false,
+        };
+        return Ok(Some(MultiValue::from_iter([Value::Boolean(lives)])));
+    }
+    let result: Option<Value> = match name {
+        // `ds_is_qualified` (`G/questlua_dragonsoul.cpp:57-70`): a Lua number, 1 or 0.
+        b"ds.is_qualified" => Some(Value::Number(f64::from(u8::from(
+            cx.game.is_ds_qualified(),
+        )))),
+        // `ds_give_qualification` (`G/questlua_dragonsoul.cpp:43-55`). Pushes nothing.
+        b"ds.give_qualification" => {
+            cx.game.give_ds_qualification();
+            None
+        }
+        // `ds_open_refine_window` (`G/questlua_dragonsoul.cpp:14-28`). Pushes nothing.
+        b"ds.open_refine_window" => {
+            cx.game.open_ds_refine();
+            None
+        }
+        // `ds_open_attr_change_window` (`G/questlua_dragonsoul.cpp:30-41`).
+        // Pushes nothing.
+        b"ds.open_attr_change_window" => {
+            cx.game.open_ds_attr_change();
+            None
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// The `q.*` bridged calls that name the running quest or its blocked PC: the index
+/// and name readers, and the other-PC stack. Returns `None` for a name this table
+/// does not hold.
+fn quest_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let last = args.back().cloned().unwrap_or(Value::Nil);
+    let result: Option<Value> = match name {
+        b"q.getcurrentquestindex" => {
+            // `CQuestManager::GetQuestIndexByName` (`G/questmanager.cpp:1282-1290`): the
+            // number of the quest that runs, and 0 for a name no quest has.
+            let index = cx
+                .quest_indices
+                .get(cx.quest.as_slice())
+                .copied()
+                .unwrap_or(0);
+            Some(Value::Number(f64::from(index)))
+        }
+        b"q.getcurrentquestname" => Some(Value::String(lua.create_string(cx.quest.clone())?)),
+        // `quest_begin_other_pc_block` (`G/questlua_quest.cpp:204-210`): `lua_tonumber`
+        // of the last argument names the blocked PC, and the stack grows even when
+        // the game knows no such online character. Pushes nothing.
+        b"q.begin_other_pc_block" => {
+            let pid = dword(lua.coerce_number(last)?.unwrap_or(0.0));
+            cx.stack.push(cx.current);
+            cx.game.begin_other_pc(pid);
+            if cx.game.switched_pc() {
+                cx.current = pid;
+            }
+            None
+        }
+        // `quest_end_other_pc_block` (`G/questlua_quest.cpp:212-217`): the script runs
+        // for the PID the matching begin pushed again. Quiet with no open block.
+        // Pushes nothing.
+        b"q.end_other_pc_block" => {
+            if let Some(pid) = cx.stack.pop() {
+                cx.current = pid;
+            }
+            cx.game.end_other_pc();
+            None
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
 }
 
 /// `find_npc_by_vnum` (`G/questlua_global.cpp:792-823`) and the `target.*` names
@@ -2646,6 +4000,148 @@ fn look_api(
     Ok(Some(MultiValue::new()))
 }
 
+/// The quest item's readers and its socket writer: the vnum, socket, value, count and
+/// type the character's held item answers, each 0 with no quest item, and the socket
+/// write. Returns `None` for a name this family does not hold.
+fn item_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let number = |value: u32| Some(Value::Number(f64::from(value)));
+    let result = match name {
+        // `item_get_id` (`G/questlua_item.cpp:78-89`): the quest item's ID, or 0 with none.
+        b"item.get_id" => number(cx.item),
+        // `item_get_cell` (`:21-32`): the quest item's cell, or 0 with none or one the
+        // character no longer holds (the `Pc::item` Defect, as `item.get_vnum` reads it).
+        b"item.get_cell" => {
+            let cell = (cx.item != 0).then(|| cx.game.held_cell(cx.item)).flatten();
+            number(u32::from(cell.unwrap_or(0)))
+        }
+        // `item_select` (`:57-77`) and `item_select_cell` (`:34-56`): the quest item
+        // pointer moves to the item of the first argument's ID, or to the one in its
+        // base inventory cell (`(DWORD)` of a number, so -1 is 4294967295 and finds
+        // nothing). A non-number argument, or one that names nothing, moves nothing;
+        // either way the call answers whether it moved.
+        b"item.select" => {
+            let moved = match lua.coerce_number(first.clone())? {
+                Some(id) if dword(id) != 0 && cx.game.held_vnum(dword(id)).is_some() => {
+                    cx.item = dword(id);
+                    true
+                }
+                _ => false,
+            };
+            Some(Value::Boolean(moved))
+        }
+        b"item.select_cell" => {
+            let moved = match lua.coerce_number(first.clone())? {
+                Some(cell) => match cx.game.inventory_at(dword(cell)) {
+                    Some(id) if id != 0 => {
+                        cx.item = id;
+                        true
+                    }
+                    _ => false,
+                },
+                None => false,
+            };
+            Some(Value::Boolean(moved))
+        }
+        // `item_get_vnum` (`G/questlua_item.cpp:138-149`): the quest item's vnum, or 0 when
+        // there is none. One the character no longer holds answers 0 (the `Pc::item` Defect).
+        b"item.get_vnum" => {
+            let held = (cx.item != 0).then(|| cx.game.held_vnum(cx.item)).flatten();
+            number(held.unwrap_or(0))
+        }
+        // `item_get_socket` (`G/questlua_item.cpp:107-123`): the quest item's socket at
+        // `(int)` of the first argument, 0 with no quest item, a non-number argument
+        // or an index outside 0-5. One the character no longer holds answers 0 (the
+        // `Pc::item` Defect, as `item.get_vnum` reads it).
+        b"item.get_socket" => {
+            let socket = match lua.coerce_number(first.clone())? {
+                Some(index) if cx.item != 0 => {
+                    let index = host::c_int(lua, Value::Number(index))?;
+                    usize::try_from(index)
+                        .ok()
+                        .filter(|index| *index < 6)
+                        .and_then(|index| cx.game.held_socket(cx.item, index))
+                }
+                _ => None,
+            };
+            Some(Value::Number(f64::from(socket.unwrap_or(0))))
+        }
+        // `item_get_value` (`:175-202`): the quest item's proto value at `(int)` of the
+        // first argument, 0 with no quest item, no proto, a non-number argument or an
+        // index outside 0-5.
+        b"item.get_value" => {
+            let value = match lua.coerce_number(first.clone())? {
+                Some(index) if cx.item != 0 => {
+                    let index = host::c_int(lua, Value::Number(index))?;
+                    usize::try_from(index)
+                        .ok()
+                        .filter(|index| *index < 6)
+                        .and_then(|index| cx.game.held_value(cx.item, index))
+                }
+                _ => None,
+            };
+            Some(Value::Number(f64::from(value.unwrap_or(0))))
+        }
+        // `item_get_count` (`:259-270`): the quest item's count, 0 with none.
+        b"item.get_count" => {
+            let count = (cx.item != 0)
+                .then(|| cx.game.held_shape(cx.item))
+                .flatten();
+            number(u32::from(count.map_or(0, |(count, _, _)| count)))
+        }
+        // `item_get_type` (`:272-284`) and `item_get_sub_type` (`:286-298`): the quest
+        // item's proto type pair, 0 with none or no proto.
+        b"item.get_type" => {
+            let shape = (cx.item != 0)
+                .then(|| cx.game.held_shape(cx.item))
+                .flatten();
+            number(u32::from(shape.map_or(0, |(_, kind, _)| kind)))
+        }
+        b"item.get_sub_type" => {
+            let shape = (cx.item != 0)
+                .then(|| cx.game.held_shape(cx.item))
+                .flatten();
+            number(u32::from(shape.map_or(0, |(_, _, sub)| sub)))
+        }
+        b"item.set_socket" => {
+            set_socket(lua, cx, args)?;
+            None
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// `number` (`G/questlua_global.cpp`): a random roll over the first two arguments,
+/// both number-like, and 0 when either is not.
+fn drawn_number(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue, first: Value) -> mlua::Result<i32> {
+    let second = args.get(1).cloned().unwrap_or(Value::Nil);
+    let both =
+        lua.coerce_number(first.clone())?.is_some() && lua.coerce_number(second.clone())?.is_some();
+    if !both {
+        return Ok(0);
+    }
+    let from = host::c_int(lua, first)?;
+    let to = host::c_int(lua, second)?;
+    Ok(cx.game.number(from, to))
+}
+
+/// `item_name`/`mob_name`: the name the game holds for the first argument's vnum,
+/// and the empty string for a non-number or an unknown vnum.
+fn named_thing(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], first: Value) -> mlua::Result<Vec<u8>> {
+    let text = match lua.coerce_number(first)? {
+        Some(vnum) if name == b"item_name" => cx.game.item_name(dword(vnum)),
+        Some(vnum) => cx.game.mob_name(dword(vnum)),
+        None => None,
+    };
+    Ok(text.unwrap_or_default())
+}
+
 fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
     let first = args.front().cloned().unwrap_or(Value::Nil);
     let last = args.back().cloned().unwrap_or(Value::Nil);
@@ -2653,7 +4149,17 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 4] = [look_api, pc_api, target_api, guild_api];
+    let families: [Family; 9] = [
+        look_api,
+        pc_api,
+        item_api,
+        target_api,
+        guild_api,
+        party_api,
+        dungeon_api,
+        quest_api,
+        horse_api,
+    ];
     for family in families {
         if let Some(answered) = family(lua, cx, name, args)? {
             return Ok(answered);
@@ -2669,56 +4175,67 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
                 .unwrap_or(0);
             number(id)
         }
-        b"number" => {
-            let second = args.get(1).cloned().unwrap_or(Value::Nil);
-            let both = lua.coerce_number(first.clone())?.is_some()
-                && lua.coerce_number(second.clone())?.is_some();
-            let drawn = if both {
-                let from = host::c_int(lua, first)?;
-                let to = host::c_int(lua, second)?;
-                cx.game.number(from, to)
-            } else {
-                0
-            };
-            Some(Value::Number(f64::from(drawn)))
+        b"number" => Some(Value::Number(f64::from(drawn_number(
+            lua, cx, args, first,
+        )?))),
+        // `_refine_pick` and `_fish_real_refine_rod` (`G/questlua_global.cpp:450-478`): the
+        // tool in inventory cell `(BYTE)` of the last argument (`lua_tonumber`, so a
+        // non-number is cell 0) runs `RealRefinePick` or `RealRefineRod`; 0, 1 or 2 is pushed.
+        b"__refine_pick" | b"__fish_real_refine_rod" => {
+            let cell = dword(lua.coerce_number(last)?.unwrap_or(0.0)).to_le_bytes()[0];
+            let rod = name == b"__fish_real_refine_rod";
+            number(u32::from(cx.game.refine_tool(cell, rod)))
         }
-        b"item_name" | b"mob_name" => {
-            let text = match lua.coerce_number(first)? {
-                Some(vnum) if name == b"item_name" => cx.game.item_name(dword(vnum)),
-                Some(vnum) => cx.game.mob_name(dword(vnum)),
-                None => None,
-            };
-            Some(Value::String(lua.create_string(text.unwrap_or_default())?))
-        }
+        b"item_name" | b"mob_name" => Some(Value::String(
+            lua.create_string(named_thing(lua, cx, name, first)?)?,
+        )),
         b"get_time" | b"get_global_time" => number(cx.game.global_time()),
+        // `_time_to_str` (`G/questlua_global.cpp:65-70`): `asctime(gmtime())` of
+        // `(time_t)` of the last argument, a number or a text one.
+        b"time_to_str" => {
+            let stamp = lua.coerce_number(last)?;
+            Some(Value::String(lua.create_string(time_to_str(stamp))?))
+        }
+        // `_is_test_server` (`G/questlua_global.cpp:298-302`).
+        b"is_test_server" => Some(Value::Boolean(cx.game.test_server())),
+        // `_find_pc` (`G/questlua_global.cpp:743-757`): the VID of the online PC the
+        // first argument names, and 0 for a non-string or an unknown name.
+        b"find_pc_by_name" => {
+            let vid = match first {
+                Value::String(text) => host::c_string(lua, Value::String(text.clone()))?
+                    .map_or(0, |name| cx.game.find_pc_vid(&name)),
+                _ => 0,
+            };
+            number(vid)
+        }
         b"game.get_event_flag" => {
             let value = host::c_string(lua, first)?
                 .and_then(|flag| cx.event_flags.get(&flag).copied())
                 .unwrap_or(0);
             Some(Value::Number(f64::from(value)))
         }
-        b"npc.getrace" | b"npc.get_race" => number(cx.game.race_of(cx.npc_vid).unwrap_or(0)),
-        // `item_get_vnum` (`G/questlua_item.cpp:138-149`): the quest item's vnum, or 0 when
-        // there is none. One the character no longer holds answers 0 (the `Pc::item` Defect).
-        b"item.get_vnum" => {
-            let held = (cx.item != 0).then(|| cx.game.held_vnum(cx.item)).flatten();
-            number(held.unwrap_or(0))
-        }
-        b"item.set_socket" => {
-            set_socket(lua, cx, args)?;
+        // `game_request_make_guild` (`G/questlua_game.cpp:51-62`): the client hears
+        // `HEADER_GC_REQUEST_MAKE_GUILD`. It pushes nothing.
+        b"game.request_make_guild" => {
+            cx.game.request_make_guild();
             None
         }
-        b"q.getcurrentquestindex" => {
-            // `CQuestManager::GetQuestIndexByName` (`G/questmanager.cpp:1282-1290`): the
-            // number of the quest that runs, and 0 for a name no quest has.
-            let index = cx
-                .quest_indices
-                .get(cx.quest.as_slice())
-                .copied()
-                .unwrap_or(0);
-            number(index)
+        // `game_drop_item_with_ownership` (see `drop_with_ownership`): pushes nothing.
+        b"game.drop_item_with_ownership" => {
+            drop_with_ownership(lua, cx, args)?;
+            None
         }
-        b"q.getcurrentquestname" => Some(Value::String(lua.create_string(cx.quest.clone())?)),
+        // `_warp_to_village` (`G/questlua_global.cpp:1060-1071`): pushes nothing.
+        b"warp_to_village" => {
+            cx.game.warp_to_village();
+            None
+        }
+        b"npc.getrace" | b"npc.get_race" => number(cx.game.race_of(cx.npc_vid).unwrap_or(0)),
+        // `npc_get_empire` (`G/questlua_npc.cpp:43-52`): the NPC's empire, 0 with no NPC.
+        b"npc.get_empire" => number(u32::from(cx.game.empire_of(cx.npc_vid).unwrap_or(0))),
+        // `npc_get_guild` (`G/questlua_npc.cpp:60-70`): the NPC's guild ID, 0 with no NPC
+        // or no guild. No NPC holds one: no building stands.
+        b"npc.get_guild" => number(cx.game.npc_guild(cx.npc_vid)),
         b"set_state" | b"q.setstate" | b"q.set_state" => {
             match host::c_string(lua, last)? {
                 Some(state) if !state.is_empty() => {
@@ -2758,6 +4275,7 @@ mod tests {
     const OX_MANAGER: u32 = 20011;
 
     #[derive(Default)]
+    #[allow(clippy::struct_excessive_bools)]
     struct Fake {
         level: u8,
         playtime: i32,
@@ -2774,11 +4292,27 @@ mod tests {
         skill_group: u8,
         /// The vnum `held_vnum` finds by item ID.
         held: BTreeMap<u32, u32>,
+        /// The cell `held_cell` finds by item ID.
+        held_cells: BTreeMap<u32, u16>,
+        /// The ID `inventory_at` finds by base cell.
+        inventory: BTreeMap<u32, u32>,
+        /// Every `ore_refine` call, in order.
+        melts: Vec<(u32, i32, i32, Option<u32>)>,
+        /// What `ore_refine` answers.
+        melted: bool,
         job: u8,
         /// The levels `set_skill_level` set, which `skill_level` then reads.
         levels: BTreeMap<u32, u8>,
         /// Every `set_skill_level` call, in order.
         set_levels: Vec<(u32, u8)>,
+        /// The character's stored alignment, which `change_alignment` moves.
+        alignment: i32,
+        /// Every `change_alignment` amount, in order.
+        alignment_changes: Vec<i32>,
+        /// Whether the character holds the no-delay book affect.
+        skill_book_no_delay: bool,
+        /// Every `remove_skill_book_no_delay` call.
+        skill_book_removals: usize,
         /// Every `set_socket` call, in order.
         sockets: Vec<(u32, usize, i32)>,
         races: BTreeMap<u32, u32>,
@@ -2789,6 +4323,49 @@ mod tests {
         guild_calls: Vec<(Vec<u8>, Vec<GuildArg>)>,
         map_index: i32,
         war_map: i32,
+        gold: u64,
+        gold_changes: Vec<i64>,
+        hides: Vec<(u8, bool)>,
+        empire: u8,
+        hp: i32,
+        max_hp: i32,
+        sp: i32,
+        max_sp: i32,
+        exp: u32,
+        next_exp: u32,
+        race: u16,
+        char_name: Vec<u8>,
+        char_vid: u32,
+        leadership: u8,
+        position: (i32, i32, i32, i32),
+        worn: BTreeMap<u8, u32>,
+        empires: BTreeMap<u32, u8>,
+        gm_level: u8,
+        /// Whether `has_empty_inventory` answers true, by vnum.
+        room: BTreeMap<u32, bool>,
+        /// The sockets `held_socket` finds by item ID.
+        held_sockets: BTreeMap<(u32, usize), i32>,
+        /// The values `held_value` finds by item ID.
+        held_values: BTreeMap<(u32, usize), i32>,
+        /// The shape `held_shape` finds by item ID.
+        held_shapes: BTreeMap<u32, (u16, u8, u8)>,
+        guild_id: u32,
+        is_guild_master: bool,
+        /// Whether the deployment runs in test-server mode.
+        test_server: bool,
+        /// The VID `find_pc_vid` answers for each PC name.
+        pcs: BTreeMap<Vec<u8>, u32>,
+        /// The PID `pid_of` answers for each VID.
+        vids: BTreeMap<u32, u32>,
+        /// Every `confirm_to` call, in order.
+        confirms: Vec<(u32, Vec<u8>, i32, u32)>,
+        /// Every `arm_confirm_timeout` call, in order.
+        confirm_timeouts: Vec<(u32, i32)>,
+        /// Every `destroy_guild` call.
+        disbands: usize,
+        /// Every `remove_from_guild` call.
+        leaves: usize,
+        make_guild_asks: usize,
         any_war: f64,
         blocked: Vec<u8>,
         infos: Vec<QuestInfo>,
@@ -2800,6 +4377,64 @@ mod tests {
         created: Vec<Target>,
         /// Every `delete_target` call, in order.
         deleted: Vec<(u32, Option<Vec<u8>>)>,
+        /// Every `warp` call, in order.
+        warps: Vec<(i32, i32, i32)>,
+        /// Whether `IsHack` refuses the character.
+        hack: bool,
+        /// Every `drop_with_ownership` call, in order.
+        drops: Vec<(u32, i32, Option<i32>)>,
+        /// The character's conqueror level.
+        conqueror_level: u8,
+        /// The character's conqueror experience.
+        conqueror_exp: u32,
+        /// The `warp_to_village` calls.
+        villages: u32,
+        /// Whether `CanWarp` passes for the character.
+        able: bool,
+        /// The `set_conqueror` calls.
+        conquerors: u32,
+        /// Every `open_sash` call's combination flag, in order.
+        sash_opens: Vec<bool>,
+        /// The `open_changelook` calls.
+        changelooks: u32,
+        /// Every `mining` call's NPC, in order.
+        minings: Vec<u32>,
+        /// Every `refine_tool` call's cell and rod flag, in order.
+        tool_refines: Vec<(u8, bool)>,
+        /// The horse the readers read.
+        horse: HorseView,
+        /// Every `set_horse_level` call's level, in order.
+        horse_levels: Vec<i32>,
+        /// The `feed_horse` calls.
+        horse_feeds: u32,
+        /// Whether the character rides a mount.
+        mounted: bool,
+        /// Whether the character stands in a party.
+        party: bool,
+        /// Whether the character leads its party.
+        party_leader: bool,
+        /// The Channel the script runs on.
+        channel: u8,
+        /// The party flags `party_flag` reads.
+        party_flags: BTreeMap<Vec<u8>, i32>,
+        /// What `party_leader_pid` answers.
+        leader_pid: i32,
+        /// What `party_member_pids` answers.
+        member_pids: Vec<u32>,
+        /// The PIDs `begin_other_pc` switches to; any other PID is offline.
+        online: Vec<u32>,
+        /// Whether the last `begin_other_pc` switched.
+        switched: bool,
+        /// Whether a dungeon lives under any map index.
+        dungeon: bool,
+        /// Whether `is_ds_qualified` answers true.
+        ds_qualified: bool,
+        /// Every `give_ds_qualification` call.
+        ds_gives: u32,
+        /// Every `open_ds_refine` call that found the qualification.
+        ds_refines: u32,
+        /// Every `open_ds_attr_change` call.
+        ds_attrs: u32,
     }
 
     impl Fake {
@@ -2855,6 +4490,13 @@ mod tests {
         fn held_vnum(&self, id: u32) -> Option<u32> {
             self.held.get(&id).copied()
         }
+        fn held_cell(&self, id: u32) -> Option<u16> {
+            self.held_cells.get(&id).copied()
+        }
+
+        fn inventory_at(&self, cell: u32) -> Option<u32> {
+            self.inventory.get(&cell).copied()
+        }
 
         fn set_socket(&mut self, id: u32, index: usize, value: i32) {
             self.sockets.push((id, index, value));
@@ -2888,6 +4530,10 @@ mod tests {
             self.draws.push((from, to));
             to
         }
+        fn ore_refine(&mut self, ore: u32, cost: i32, pct: i32, stone: Option<u32>) -> bool {
+            self.melts.push((ore, cost, pct, stone));
+            self.melted
+        }
 
         fn learn_grand_master_skill(&mut self, vnum: u32, _total: i32) -> bool {
             !self.learned.insert(vnum)
@@ -2905,6 +4551,27 @@ mod tests {
             self.set_levels.push((vnum, level));
         }
 
+        fn real_alignment(&self) -> i32 {
+            self.alignment
+        }
+
+        fn change_alignment(&mut self, amount: i32) {
+            self.alignment_changes.push(amount);
+            self.alignment = self
+                .alignment
+                .saturating_add(amount)
+                .clamp(-200_000, 200_000);
+        }
+
+        fn has_skill_book_no_delay(&self) -> bool {
+            self.skill_book_no_delay
+        }
+
+        fn remove_skill_book_no_delay(&mut self) {
+            self.skill_book_removals += 1;
+            self.skill_book_no_delay = false;
+        }
+
         fn send_block_mode(&mut self, mode: u8) {
             self.blocked.push(mode);
         }
@@ -2915,6 +4582,158 @@ mod tests {
 
         fn war_map(&self) -> i32 {
             self.war_map
+        }
+        fn gold(&self) -> u64 {
+            self.gold
+        }
+        fn change_gold(&mut self, amount: i64) {
+            self.gold_changes.push(amount);
+        }
+        fn hide_costume(&mut self, part: u8, hide: bool) {
+            self.hides.push((part, hide));
+        }
+        fn open_sash(&mut self, combination: bool) {
+            self.sash_opens.push(combination);
+        }
+        fn open_changelook(&mut self) {
+            self.changelooks += 1;
+        }
+        fn mining(&mut self, npc_vid: u32) {
+            self.minings.push(npc_vid);
+        }
+        fn refine_tool(&mut self, cell: u8, rod: bool) -> u8 {
+            self.tool_refines.push((cell, rod));
+            2
+        }
+
+        fn horse(&self) -> HorseView {
+            self.horse
+        }
+
+        fn set_horse_level(&mut self, level: i32) {
+            self.horse_levels.push(level);
+            self.horse.level = u8::try_from(level).unwrap_or(0);
+        }
+
+        fn feed_horse(&mut self) {
+            self.horse_feeds += 1;
+        }
+
+        fn empire(&self) -> u8 {
+            self.empire
+        }
+
+        fn hp(&self) -> i32 {
+            self.hp
+        }
+
+        fn max_hp(&self) -> i32 {
+            self.max_hp
+        }
+
+        fn sp(&self) -> i32 {
+            self.sp
+        }
+
+        fn max_sp(&self) -> i32 {
+            self.max_sp
+        }
+
+        fn exp(&self) -> u32 {
+            self.exp
+        }
+
+        fn next_exp(&self) -> u32 {
+            self.next_exp
+        }
+
+        fn race(&self) -> u16 {
+            self.race
+        }
+
+        fn char_name(&self) -> Vec<u8> {
+            self.char_name.clone()
+        }
+
+        fn char_vid(&self) -> u32 {
+            self.char_vid
+        }
+
+        fn leadership(&self) -> u8 {
+            self.leadership
+        }
+
+        fn position(&self) -> (i32, i32, i32, i32) {
+            self.position
+        }
+
+        fn worn_vnum(&self, cell: u8) -> Option<u32> {
+            self.worn.get(&cell).copied()
+        }
+
+        fn empire_of(&self, vid: u32) -> Option<u8> {
+            self.empires.get(&vid).copied()
+        }
+        fn npc_guild(&self, _vid: u32) -> u32 {
+            0
+        }
+        fn gm_level(&self) -> u8 {
+            self.gm_level
+        }
+
+        fn has_empty_inventory(&self, vnum: u32) -> bool {
+            self.room.get(&vnum).copied().unwrap_or(false)
+        }
+
+        fn held_socket(&self, id: u32, index: usize) -> Option<i32> {
+            self.held_sockets.get(&(id, index)).copied()
+        }
+
+        fn held_value(&self, id: u32, index: usize) -> Option<i32> {
+            self.held_values.get(&(id, index)).copied()
+        }
+
+        fn held_shape(&self, id: u32) -> Option<(u16, u8, u8)> {
+            self.held_shapes.get(&id).copied()
+        }
+        fn guild_id(&self) -> u32 {
+            self.guild_id
+        }
+
+        fn is_guild_master(&self) -> bool {
+            self.is_guild_master
+        }
+
+        fn test_server(&self) -> bool {
+            self.test_server
+        }
+
+        fn find_pc_vid(&self, name: &[u8]) -> u32 {
+            self.pcs.get(name).copied().unwrap_or(0)
+        }
+
+        fn pid_of(&self, vid: u32) -> Option<u32> {
+            self.vids.get(&vid).copied()
+        }
+
+        fn confirm_to(&mut self, to_pid: u32, msg: &[u8], timeout: i32, request_pid: u32) {
+            self.confirms
+                .push((to_pid, msg.to_vec(), timeout, request_pid));
+        }
+
+        fn arm_confirm_timeout(&mut self, waiter: u32, timeout: i32) {
+            self.confirm_timeouts.push((waiter, timeout));
+        }
+
+        fn destroy_guild(&mut self) {
+            self.disbands += 1;
+        }
+
+        fn remove_from_guild(&mut self) {
+            self.leaves += 1;
+        }
+        fn request_make_guild(&mut self) {
+            self.make_guild_asks += 1;
         }
 
         fn guild_call(&mut self, name: &[u8], args: &[GuildArg]) -> GuildAnswer {
@@ -2960,6 +4779,100 @@ mod tests {
                 .find(|target| target.vid == vid)
                 .map(|target| (target.quest, target.name.clone()))
         }
+
+        fn warp(&mut self, x: i32, y: i32, private: i32) -> bool {
+            self.warps.push((x, y, private));
+            !self.hack
+        }
+
+        fn drop_with_ownership(&mut self, vnum: u32, count: i32, secs: Option<i32>) {
+            self.drops.push((vnum, count, secs));
+        }
+
+        fn conqueror_level(&self) -> u8 {
+            self.conqueror_level
+        }
+
+        fn conqueror_exp(&self) -> u32 {
+            self.conqueror_exp
+        }
+
+        fn warp_to_village(&mut self) {
+            self.villages += 1;
+        }
+
+        fn can_warp(&self) -> bool {
+            self.able
+        }
+
+        fn set_conqueror(&mut self) {
+            self.conquerors += 1;
+        }
+
+        fn is_mount(&self) -> bool {
+            self.mounted
+        }
+
+        fn is_party(&self) -> bool {
+            self.party
+        }
+
+        fn is_party_leader(&self) -> bool {
+            self.party_leader
+        }
+
+        fn channel_id(&self) -> u8 {
+            self.channel
+        }
+
+        fn party_flag(&self, name: &[u8]) -> i32 {
+            self.party_flags.get(name).copied().unwrap_or(0)
+        }
+
+        fn set_party_flag(&mut self, name: Vec<u8>, value: i32) {
+            self.party_flags.insert(name, value);
+        }
+
+        fn party_leader_pid(&self) -> i32 {
+            self.leader_pid
+        }
+
+        fn party_member_pids(&self) -> Vec<u32> {
+            self.member_pids.clone()
+        }
+
+        fn begin_other_pc(&mut self, pid: u32) {
+            self.switched = self.online.contains(&pid);
+        }
+
+        fn switched_pc(&self) -> bool {
+            self.switched
+        }
+
+        fn end_other_pc(&mut self) {}
+
+        fn dungeon_lives(&self, _index: u32) -> bool {
+            self.dungeon
+        }
+
+        fn is_ds_qualified(&self) -> bool {
+            self.ds_qualified
+        }
+
+        fn give_ds_qualification(&mut self) {
+            self.ds_qualified = true;
+            self.ds_gives += 1;
+        }
+
+        fn open_ds_refine(&mut self) {
+            if self.ds_qualified {
+                self.ds_refines += 1;
+            }
+        }
+
+        fn open_ds_attr_change(&mut self) {
+            self.ds_attrs += 1;
+        }
     }
 
     /// The text a Lua expression evaluates to, through the loaded libraries.
@@ -3003,7 +4916,7 @@ mod tests {
     #[test]
     fn the_ox_manager_offers_its_menu_and_runs_the_entry() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake::at_ox_manager();
         assert!(manager.click(PID, VID, OX_MANAGER, &mut game));
         assert_eq!(
@@ -3039,13 +4952,13 @@ mod tests {
         assert_eq!(game.take(), [(1, last)]);
         assert!(!manager.is_running(PID));
         assert!(game.chats.is_empty());
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     #[test]
     fn closing_the_menu_closes_the_window() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake::at_ox_manager();
         assert!(manager.click(PID, VID, OX_MANAGER, &mut game));
         game.take();
@@ -3053,7 +4966,7 @@ mod tests {
         manager.answer(PID, 1, &mut game);
         assert_eq!(game.take(), [(0, "[DONE]".to_owned())]);
         assert!(!manager.is_running(PID));
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// `NPC::HandleEvent` starts nothing for a character whose script waits
@@ -3063,18 +4976,18 @@ mod tests {
     fn a_click_while_a_script_waits_starts_no_other() {
         const LAND_SELLER: u32 = 20_040;
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake::at_ox_manager();
         assert!(!manager.npcs[&LAND_SELLER].has_chat());
         assert!(manager.click(PID, VID, LAND_SELLER, &mut game));
         assert!(!game.take().is_empty());
-        manager.logout(PID);
+        manager.disconnect(PID);
         assert!(manager.click(PID, VID, OX_MANAGER, &mut game));
         game.take();
         assert!(!manager.click(PID, VID, LAND_SELLER, &mut game));
         assert!(game.take().is_empty());
         assert!(manager.is_running(PID));
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// A used quest item runs its own `use` scripts (`NPC::OnUseItem`): the 71000 book asks
@@ -3084,7 +4997,7 @@ mod tests {
     fn a_used_quest_item_runs_its_use_script() {
         const RESET_BOOK: u32 = 71_000;
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake::default();
         assert!(manager.use_item(PID, (5, RESET_BOOK), &mut game));
         let said = game.take();
@@ -3108,7 +5021,143 @@ mod tests {
         assert!(manager.is_running(PID));
         assert!(!manager.use_item(PID, (5, RESET_BOOK), &mut game));
         assert!(game.take().is_empty());
-        manager.logout(PID);
+        manager.disconnect(PID);
+    }
+
+    /// A given ore runs the refiner's `take` scripts (`NPC::OnTakeItem`): the diamond's guard
+    /// (`GetMyRefineNum(20060) == 50601`) holds, so the melt script says its line. The Fake
+    /// holds fewer than 100, so the script ends instead of asking. A sword matches no guard:
+    /// the script runs and says nothing. A race with no `take` script runs nothing.
+    #[test]
+    fn a_given_ore_runs_its_take_script() {
+        const REFINER: u32 = 20_060;
+        const DIAMOND_ORE: u32 = 50_601;
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake::default();
+        game.races.insert(VID, REFINER);
+        game.held.insert(5, DIAMOND_ORE);
+        manager.set_quest_npc(VID);
+        assert!(manager.take(PID, (5, REFINER), &mut game));
+        let said = game.take();
+        assert_eq!(said.len(), 1);
+        assert!(said[0].1.contains("100 de pietricele"), "{}", said[0].1);
+        assert!(!manager.is_running(PID));
+        manager.disconnect(PID);
+        game.held.insert(5, 19);
+        assert!(manager.take(PID, (5, REFINER), &mut game));
+        assert!(game.take().is_empty());
+        manager.disconnect(PID);
+        assert!(!manager.take(PID, (5, 9009), &mut game));
+        assert!(game.take().is_empty());
+        manager.disconnect(PID);
+    }
+    /// `item.select` moves the quest item pointer to a held ID and `item.select_cell` to the
+    /// item in a base cell (`(DWORD)` of a number, so -1 finds nothing); a non-number or
+    /// an unheld one moves nothing, and the call answers whether it moved.
+    /// `item.get_id` reads the pointer, `item.get_cell` its held cell (0 with none or one
+    /// no longer held).
+    #[test]
+    fn the_item_pointer_selects_by_id_and_by_cell() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake {
+            held: [(5, 50_601), (9, 19)].into_iter().collect(),
+            held_cells: [(5, 3), (9, 7)].into_iter().collect(),
+            inventory: [(3, 5), (7, 9)].into_iter().collect(),
+            ..Fake::default()
+        };
+        let run = |manager: &mut Manager, game: &mut Fake, source: &[u8]| {
+            let code = host::load_chunk(manager.host.lua(), source, "=test");
+            manager.operate(PID, game, |run, pc, _| {
+                run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+            });
+            game.take()
+        };
+        let said = run(
+            &mut manager,
+            &mut game,
+            b"say(item.get_id()) say(item.get_cell()) \
+              say(tostring(item.select(5))) say(item.get_id()) say(item.get_cell()) \
+              say(tostring(item.select(77))) say(item.get_id()) \
+              say(tostring(item.select('x'))) say(item.get_id()) \
+              say(tostring(item.select_cell(7))) say(item.get_id()) say(item.get_cell()) \
+              say(tostring(item.select_cell(4294967295))) say(item.get_id()) \
+              say(tostring(item.select_cell(-1))) say(item.get_id()) \
+              say(tostring(item.select_cell('x'))) say(item.get_id())",
+        );
+        assert_eq!(
+            said,
+            [(
+                1,
+                "0[ENTER]0[ENTER]true[ENTER]5[ENTER]3[ENTER]false[ENTER]5[ENTER]\
+                 false[ENTER]5[ENTER]true[ENTER]9[ENTER]7[ENTER]false[ENTER]9[ENTER]\
+                 false[ENTER]9[ENTER]false[ENTER]9[ENTER][DONE]"
+                    .to_owned()
+            )]
+        );
+        game.held.remove(&9);
+        game.held_cells.remove(&9);
+        let said = run(
+            &mut manager,
+            &mut game,
+            b"say(item.get_cell()) say(item.get_vnum())",
+        );
+        assert_eq!(said, [(1, "0[ENTER]0[ENTER][DONE]".to_owned())]);
+        manager.disconnect(PID);
+    }
+
+    /// `pc.diamond_refine` melts the quest item for `(int)` fee and odds with no stone; a
+    /// non-number fee or no quest item is refused. `pc.ore_refine` takes the stone from
+    /// the `(int)` third cell, 0 of a non-number, and melts with its held ID; an empty
+    /// cell is refused without a melt.
+    #[test]
+    fn the_melt_names_melt_the_quest_item() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake {
+            held: [(5, 50_601)].into_iter().collect(),
+            inventory: [(4, 11)].into_iter().collect(),
+            melted: true,
+            ..Fake::default()
+        };
+        let run = |manager: &mut Manager, game: &mut Fake, source: &[u8]| {
+            let code = host::load_chunk(manager.host.lua(), source, "=test");
+            manager.operate(PID, game, |run, pc, _| {
+                run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+            });
+            game.take()
+        };
+        let said = run(
+            &mut manager,
+            &mut game,
+            b"say(tostring(pc.diamond_refine(10000, 60))) \
+              say(tostring(pc.diamond_refine('x', 60))) \
+              item.select(5) \
+              say(tostring(pc.diamond_refine(10000.9, '60'))) \
+              say(tostring(pc.diamond_refine(10000))) \
+              say(tostring(pc.ore_refine(3000, 60, 4))) \
+              say(tostring(pc.ore_refine(3000, 60, 9))) \
+              say(tostring(pc.ore_refine(3000, 60, 'x')))",
+        );
+        assert_eq!(
+            said,
+            [(
+                1,
+                "false[ENTER]false[ENTER]true[ENTER]true[ENTER]true[ENTER]\
+                 false[ENTER]false[ENTER][DONE]"
+                    .to_owned()
+            )]
+        );
+        assert_eq!(
+            game.melts,
+            [
+                (5, 10_000, 60, None),
+                (5, 10_000, 0, None),
+                (5, 3_000, 60, Some(11))
+            ]
+        );
+        manager.disconnect(PID);
     }
 
     /// The boost book (50514) offers the job's boost skill of the group through `select_table`,
@@ -3117,7 +5166,7 @@ mod tests {
     #[test]
     fn the_boost_book_teaches_the_chosen_skill_and_the_reset_book_forgets_it() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake {
             job: 3,
             skill_group: 2,
@@ -3146,7 +5195,7 @@ mod tests {
         manager.answer(PID, 0, &mut game);
         assert_eq!(game.set_levels, [(243, 1), (243, 0)]);
         assert_eq!(game.removals, [(50_514, 1), (71_000, 1)]);
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// `pc.give_item2_select` gives as `pc.give_item2` reads, pushes nothing, and makes the item
@@ -3156,7 +5205,7 @@ mod tests {
     #[test]
     fn the_selected_give_becomes_the_quest_item_whose_socket_is_set() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake {
             given: 77,
             held: [(77, 85_005)].into_iter().collect(),
@@ -3192,7 +5241,7 @@ mod tests {
         );
         assert_eq!(said, [(1, "85005[ENTER][DONE]".to_owned())]);
         assert_eq!(game.sockets.last(), Some(&(77, 4, 9)));
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// `pc.get_job` answers the job, and `pc.set_skill_level` passes `(DWORD)` and `(BYTE)` of
@@ -3200,7 +5249,7 @@ mod tests {
     #[test]
     fn the_job_reads_and_the_skill_level_sets_its_numbers() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake {
             job: 2,
             ..Fake::default()
@@ -3214,7 +5263,51 @@ mod tests {
         });
         assert_eq!(game.take(), [(1, "2[ENTER]none[ENTER][DONE]".to_owned())]);
         assert_eq!(game.set_levels, [(239, 44), (0, 0), (4, 0), (141, 40)]);
-        manager.logout(PID);
+        manager.disconnect(PID);
+    }
+    /// `time_to_str` is `asctime(gmtime())`: the epoch, a 2026 stamp, a negative one, a
+    /// text stamp, a fraction (truncated) and no argument (0). `is_test_server` answers
+    /// the deployment; `find_pc_by_name` answers the named VID and 0 for a non-string or
+    /// an unknown name; the guild pair push nothing and record their calls.
+    #[test]
+    fn the_guild_manage_names_answer() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake {
+            test_server: true,
+            pcs: [(b"Yankee".to_vec(), 77)].into_iter().collect(),
+            ..Fake::default()
+        };
+        let source = b"say(time_to_str(0)) say(time_to_str(1790000000)) say(time_to_str(-1)) \
+            say(time_to_str('2000000000')) say(time_to_str(1790000000.9)) say(time_to_str()) \
+            say(tostring(is_test_server())) say(find_pc_by_name('Yankee')) say(find_pc_by_name(7)) \
+            say(find_pc_by_name('Nobody')) \
+            say(pcall(type, pc.destroy_guild()) and 'one' or 'none') \
+            say(pcall(type, pc.remove_from_guild()) and 'one' or 'none')";
+        let code = host::load_chunk(manager.host.lua(), source, "=test");
+        manager.operate(PID, &mut game, |run, pc, _| {
+            run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+        });
+        let said = "Thu Jan  1 00:00:00 1970\n[ENTER]\
+            Mon Sep 21 14:13:20 2026\n[ENTER]\
+            Wed Dec 31 23:59:59 1969\n[ENTER]\
+            Wed May 18 03:33:20 2033\n[ENTER]\
+            Mon Sep 21 14:13:20 2026\n[ENTER]\
+            Thu Jan  1 00:00:00 1970\n[ENTER]\
+            true[ENTER]77[ENTER]0[ENTER]0[ENTER]none[ENTER]none[ENTER][DONE]";
+        assert_eq!(game.take(), [(1, said.to_owned())]);
+        assert_eq!((game.disbands, game.leaves), (1, 1));
+        game.test_server = false;
+        let code = host::load_chunk(
+            manager.host.lua(),
+            b"say(tostring(is_test_server()))",
+            "=test",
+        );
+        manager.operate(PID, &mut game, |run, pc, _| {
+            run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+        });
+        assert_eq!(game.take(), [(1, "false[ENTER][DONE]".to_owned())]);
+        manager.disconnect(PID);
     }
 
     /// `item.get_vnum` reads the item the last `use` named while the character holds it, and
@@ -3222,7 +5315,7 @@ mod tests {
     #[test]
     fn the_quest_item_is_the_used_one_while_it_is_held() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake::default();
         let source = b"say(item.get_vnum())";
         let read = |manager: &mut Manager, game: &mut Fake| {
@@ -3247,7 +5340,74 @@ mod tests {
             read(&mut manager, &mut game),
             [(1, "0[ENTER][DONE]".to_owned())]
         );
-        manager.logout(PID);
+        manager.disconnect(PID);
+    }
+    /// The GM gate, the room check and the quest item's readers: `pc.is_gm` answers the
+    /// level-3 gate and `pc.get_gm_level` the level; `pc.enough_inventory` answers the
+    /// room by vnum and false for a non-number; the socket and value read `(int)` of
+    /// the index and answer 0 outside 0-5, with no quest item or no held row; the
+    /// count, type and sub-type read the held row and answer 0 with none.
+    #[test]
+    fn the_gm_gate_the_room_and_the_quest_items_readers_answer() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake {
+            gm_level: 2,
+            room: [(72_300, true)].into_iter().collect(),
+            held: [(9, 72_347)].into_iter().collect(),
+            held_sockets: [((9, 2), -7)].into_iter().collect(),
+            held_values: [((9, 3), 10)].into_iter().collect(),
+            held_shapes: [(9, (4, 16, 0))].into_iter().collect(),
+            ..Fake::default()
+        };
+        let source = b"say(pc.is_gm() and 'gm' or 'player') say(pc.get_gm_level()) \
+            say(pc.enough_inventory(72300) and 'room' or 'full') \
+            say(pc.enough_inventory('72300x') and 'room' or 'full') \
+            say(item.get_socket(2)) say(item.get_socket(6)) say(item.get_socket('x')) \
+            say(item.get_value(3)) say(item.get_value(-1)) \
+            say(item.get_count()) say(item.get_type()) say(item.get_sub_type())";
+        let code = host::load_chunk(manager.host.lua(), source, "=test");
+        assert!(!manager.use_item(PID, (9, 50_000), &mut game));
+        manager.operate(PID, &mut game, |run, pc, _| {
+            run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+        });
+        assert_eq!(
+            game.take(),
+            [(
+                1,
+                "player[ENTER]2[ENTER]room[ENTER]full[ENTER]-7[ENTER]0[ENTER]0[ENTER]\
+                 10[ENTER]0[ENTER]4[ENTER]16[ENTER]0[ENTER][DONE]"
+                    .to_owned()
+            )]
+        );
+        game.gm_level = 3;
+        let code = host::load_chunk(
+            manager.host.lua(),
+            b"say(pc.is_gm() and 'gm' or 'no')",
+            "=test",
+        );
+        manager.operate(PID, &mut game, |run, pc, _| {
+            run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+        });
+        assert_eq!(game.take(), [(1, "gm[ENTER][DONE]".to_owned())]);
+        game.held.clear();
+        game.held_sockets.clear();
+        game.held_values.clear();
+        game.held_shapes.clear();
+        let code = host::load_chunk(
+            manager.host.lua(),
+            b"say(item.get_socket(2)) say(item.get_value(3)) say(item.get_count()) \
+              say(item.get_type())",
+            "=test",
+        );
+        manager.operate(PID, &mut game, |run, pc, _| {
+            run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+        });
+        assert_eq!(
+            game.take(),
+            [(1, "0[ENTER]0[ENTER]0[ENTER]0[ENTER][DONE]".to_owned())]
+        );
+        manager.disconnect(PID);
     }
 
     /// `input()` sends `[INPUT]` and waits for `CG_QUEST_INPUT_STRING`, which it reads up to its
@@ -3256,7 +5416,7 @@ mod tests {
     #[test]
     fn an_input_waits_for_the_text_and_nothing_else() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake::default();
         manager.input(PID, b"early", &mut game);
         assert!(game.take().is_empty());
@@ -3276,7 +5436,7 @@ mod tests {
         manager.answer(PID, 254, &mut game);
         assert_eq!(game.take(), [(0, "[DONE]".to_owned())]);
         assert!(!manager.is_running(PID));
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// `quest_setstate` writes the running state in whichever step of the script calls it
@@ -3287,7 +5447,7 @@ mod tests {
     #[test]
     fn a_set_state_lands_when_the_script_ends_whichever_step_asked() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut game = Fake::default();
         let quest = manager.host.quest_index(b"item_attr67add").unwrap();
         let at = usize::try_from(quest - 1).unwrap();
@@ -3345,7 +5505,7 @@ mod tests {
             Some(talk),
             "the refusal ends the script with the state it asked for"
         );
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// `CQuestManager::Kill` (`G/questmanager.cpp:574-611`): the no-target kill quest
@@ -3359,7 +5519,7 @@ mod tests {
     #[test]
     fn a_kill_runs_the_no_target_quest_and_the_client_sees_nothing() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         manager.load_flags(PID, []);
         let mut game = Fake::default();
         assert!(
@@ -3372,7 +5532,7 @@ mod tests {
     #[test]
     fn an_unported_api_ends_the_script_as_an_error_did() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         manager.event_flags.insert(b"oxevent_status".to_vec(), 1);
         let enter = text(&manager, "translate.locale.monkey_dungeon.enter");
         let cancel = text(&manager, "translate.locale.cancel");
@@ -3405,7 +5565,7 @@ mod tests {
         assert_eq!(game.take(), [(0, "[DONE]".to_owned())]);
         assert!(!manager.is_running(PID));
         manager.event_flags.remove(&b"oxevent_status"[..]);
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     #[test]
@@ -3419,7 +5579,7 @@ mod tests {
         assert!(!manager.click(PID, VID, 1, &mut game));
         assert!(game.scripts.is_empty());
         assert!(manager.has_npc(OX_MANAGER));
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     #[test]
@@ -3526,7 +5686,9 @@ mod tests {
             manager: &manager,
             game: Fake::default(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         let table = Value::Table(lua.create_table().unwrap());
@@ -3653,8 +5815,14 @@ mod tests {
         manager: &'m Manager,
         game: Fake,
         output: Output,
-        /// The loaned quest flags, as `operate` lends them: the count arms persist here.
-        flags: BTreeMap<Vec<u8>, i32>,
+        /// The borrowed flag maps, as `operate` lends them: the count arms persist
+        /// in the `PID` map.
+        borrowed: BTreeMap<u32, BTreeMap<Vec<u8>, i32>>,
+        /// The PID whose map the bridge reads, as `operate`'s `Cx` holds it: the
+        /// block arms switch it, and it persists across calls.
+        current: u32,
+        /// The open blocks' pushed PIDs, as `operate`'s `Cx` holds them.
+        stack: Vec<u32>,
         /// The quest window the `q.*` arms change.
         window: Window,
     }
@@ -3670,15 +5838,20 @@ mod tests {
                 npc_vid: VID,
                 quest: b"q".to_vec(),
                 pending_state: None,
-                quest_flags: Some(&mut self.flags),
+                borrowed: Some(&mut self.borrowed),
+                current: self.current,
+                stack: std::mem::take(&mut self.stack),
                 window: std::mem::take(&mut self.window),
                 categories: &self.manager.categories,
                 item: 0,
+                confirm_wait: None,
             };
             let args: MultiValue = args.iter().cloned().collect();
             let result = api(self.manager.host.lua(), &mut cx, name.as_bytes(), &args);
             self.output = cx.output;
             self.window = cx.window;
+            self.current = cx.current;
+            self.stack = cx.stack;
             Ok(result?.into_iter().collect())
         }
 
@@ -3701,7 +5874,9 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         // Text and numbers join, each up to a zero byte; anything else is skipped.
@@ -3785,8 +5960,172 @@ mod tests {
         for name in ["get_time", "get_global_time"] {
             assert_eq!(probe.call(name, &[]).unwrap(), number(1_790_000_000.0));
         }
-        let error = probe.call("pc.warp", &[]).unwrap_err().to_string();
-        assert!(error.contains("not ported: pc.warp"), "{error}");
+    }
+
+    /// `pc.warp` answers false without two numbers; past them it warps and answers the
+    /// game, with the third number as the private index, and `pc.get_conqueror_level`
+    /// reads the game.
+    #[test]
+    fn the_warp_and_the_conqueror_follow_legacys_argument_rules() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let table = Value::Table(lua.create_table().unwrap());
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let boolean = |value: bool| vec![Value::Boolean(value)];
+        let warp = |probe: &mut Probe, args: &[Value]| probe.call("pc.warp", args).unwrap();
+        assert_eq!(warp(&mut probe, &[]), boolean(false));
+        assert_eq!(
+            warp(&mut probe, &[Value::Number(1.0), table.clone()]),
+            boolean(false)
+        );
+        assert_eq!(
+            warp(
+                &mut probe,
+                &[Value::Number(853_700.7), Value::Number(1_416_400.2)],
+            ),
+            boolean(true)
+        );
+        assert_eq!(
+            warp(
+                &mut probe,
+                &[
+                    Value::Number(853_700.0),
+                    Value::Number(1_416_400.0),
+                    Value::Number(209_0000.0),
+                ],
+            ),
+            boolean(true)
+        );
+        probe.game.hack = true;
+        assert_eq!(
+            warp(
+                &mut probe,
+                &[Value::Number(853_700.0), Value::Number(1_416_400.0)],
+            ),
+            boolean(false)
+        );
+        probe.game.hack = false;
+        assert_eq!(
+            probe.game.warps,
+            [
+                (853_700, 1_416_400, 0),
+                (853_700, 1_416_400, 2_090_000),
+                (853_700, 1_416_400, 0),
+            ]
+        );
+        probe.game.conqueror_level = 33;
+        assert_eq!(
+            probe.call("pc.get_conqueror_level", &[]).unwrap(),
+            number(33.0)
+        );
+        probe.game.conqueror_level = 2;
+        probe.game.conqueror_exp = 0x0001_0203;
+        assert_eq!(
+            probe.call("pc.get_conqueror_exp", &[]).unwrap(),
+            number(66_051.0)
+        );
+        assert_eq!(
+            probe.call("pc.get_conqueror_next_exp", &[]).unwrap(),
+            number(1_300_204.0),
+            "the cost of conqueror level 2"
+        );
+    }
+
+    /// `warp_to_village` pushes nothing, `pc.can_warp` answers the game, and
+    /// `pc.set_conqueror` pushes nothing.
+    #[test]
+    fn the_village_the_gate_and_the_conqueror_follow_the_game() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let boolean = |value: bool| vec![Value::Boolean(value)];
+        assert!(probe.call("warp_to_village", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.villages, 1);
+        assert_eq!(probe.call("pc.can_warp", &[]).unwrap(), boolean(false));
+        probe.game.able = true;
+        assert_eq!(probe.call("pc.can_warp", &[]).unwrap(), boolean(true));
+        assert!(probe.call("pc.set_conqueror", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.conquerors, 1);
+    }
+
+    /// `game.drop_item_with_ownership` pushes nothing; one to three arguments drops
+    /// (1 with one argument, `None` seconds with no third number), any other count
+    #[test]
+    fn the_owned_drop_follows_legacys_argument_rules() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let table = Value::Table(lua.create_table().unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let drop =
+            |probe: &mut Probe, args: &[Value]| probe.call("game.drop_item_with_ownership", args);
+        assert!(drop(&mut probe, &[]).unwrap().is_empty());
+        assert!(drop(&mut probe, &[table.clone()]).unwrap().is_empty());
+        assert_eq!(probe.game.drops, [(0, 1, None)]);
+        drop(
+            &mut probe,
+            &[
+                Value::Number(2145.0),
+                Value::Number(3.0),
+                Value::Number(300.0),
+            ],
+        )
+        .unwrap();
+        drop(&mut probe, &[Value::Number(2145.0), Value::Number(3.0)]).unwrap();
+        drop(
+            &mut probe,
+            &[Value::Number(2145.0), Value::Number(3.0), string(b"soon")],
+        )
+        .unwrap();
+        drop(
+            &mut probe,
+            &[
+                Value::Number(2145.0),
+                Value::Number(3.0),
+                Value::Number(300.0),
+                Value::Number(1.0),
+            ],
+        )
+        .unwrap();
+        drop(
+            &mut probe,
+            &[Value::Number(2145.0), table.clone(), Value::Number(300.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            probe.game.drops,
+            [
+                (0, 1, None),
+                (2145, 3, Some(300)),
+                (2145, 3, None),
+                (2145, 3, None),
+                (2145, 0, Some(300)),
+            ]
+        );
     }
 
     /// The `guild.*` arms: a number-like argument arrives dworded, a text-only one arrives
@@ -3801,7 +6140,9 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         // A fractional id arrives dworded, truncating toward zero.
@@ -3853,7 +6194,9 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         // `pc.give_item2`: a vnum, a count rounded to even, 1 without one, nothing for a
@@ -3940,7 +6283,9 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         probe.game.item_vnums.insert(b"Okey".to_vec(), 79_506);
@@ -3993,7 +6338,9 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         probe.game.level = 40;
@@ -4015,9 +6362,7 @@ mod tests {
         assert_eq!(climbed(&mut probe, &number(1.9)), [Value::Boolean(false)]);
         assert_eq!(climbed(&mut probe, &number(1.9)), [Value::Boolean(true)]);
         assert_eq!(
-            probe
-                .flags
-                .get(b"training_grandmaster_skill.skill1".as_slice()),
+            probe.borrowed[&PID].get(b"training_grandmaster_skill.skill1".as_slice()),
             Some(&2),
             "each numbered read bumps the count, dworded"
         );
@@ -4032,9 +6377,668 @@ mod tests {
         assert_eq!(leveled(&mut probe, &[]), number(0.0));
     }
 
+    /// The `horse.*` names: without a horse the pools and percentages read 0; with one they
+    /// read the pools and `MINMAX(0, x * 100 / max, 100)`; `set_level` sets only a number,
+    /// truncated and clamped to 0..30; `advance` stops at 30; `feed` needs a living horse.
+    #[test]
+    fn the_horse_names_read_the_pools_and_clamp_the_level() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        probe.game.horse = HorseView {
+            level: 0,
+            health: 7,
+            stamina: 9,
+            max_health: 1,
+            max_stamina: 1,
+            riding: false,
+        };
+        assert_eq!(probe.call("horse.get_health", &[]).unwrap(), number(0.0));
+        assert_eq!(
+            probe.call("horse.get_stamina_pct", &[]).unwrap(),
+            number(0.0)
+        );
+        assert_eq!(
+            probe.call("pc.is_horse_alive", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        probe.game.horse = HorseView {
+            level: 21,
+            health: 13,
+            stamina: 250,
+            max_health: 40,
+            max_stamina: 140,
+            riding: true,
+        };
+        assert_eq!(probe.call("horse.get_health", &[]).unwrap(), number(13.0));
+        assert_eq!(
+            probe.call("horse.get_health_pct", &[]).unwrap(),
+            number(32.0)
+        );
+        assert_eq!(
+            probe.call("horse.get_stamina_pct", &[]).unwrap(),
+            number(100.0)
+        );
+        assert_eq!(probe.call("horse.get_grade", &[]).unwrap(), number(3.0));
+        assert_eq!(probe.call("horse.is_riding", &[]).unwrap(), number(1.0));
+        assert_eq!(probe.call("pc.get_horse_level", &[]).unwrap(), number(21.0));
+        assert_eq!(
+            probe.call("horse.is_dead", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        assert!(probe.call("horse.feed", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.horse_feeds, 1);
+        let text = Value::String(lua.create_string(b"x").unwrap());
+        assert!(probe.call("horse.set_level", &[text]).unwrap().is_empty());
+        assert!(probe.game.horse_levels.is_empty(), "a word sets nothing");
+        probe
+            .call("horse.set_level", &[Value::Number(99.7)])
+            .unwrap();
+        probe
+            .call("horse.set_level", &[Value::Number(-3.9)])
+            .unwrap();
+        probe
+            .call("horse.set_level", &[Value::Number(12.9)])
+            .unwrap();
+        probe.call("horse.advance", &[]).unwrap();
+        assert_eq!(probe.game.horse_levels, [30, 0, 12, 13]);
+        probe.game.horse.level = 30;
+        probe.call("horse.advance", &[]).unwrap();
+        assert_eq!(probe.game.horse_levels.len(), 4, "30 advances no further");
+        probe.game.horse.health = 0;
+        assert_eq!(
+            probe.call("horse.is_dead", &[]).unwrap(),
+            [Value::Boolean(true)]
+        );
+        probe.call("horse.feed", &[]).unwrap();
+        assert_eq!(probe.game.horse_feeds, 1, "a dead horse is not fed");
+    }
+
+    /// The character-reader names: gold under its four spellings, empire, hp/sp and their
+    /// maxima, exp and next exp, race, name, VID, leadership, the position pairs, the worn
+    /// vnums (0 when empty, nil from `get_wear` for a bad cell, nothing pushed for a
+    /// non-number cell), the shown alignment, and the NPC's empire.
+    #[test]
+    fn the_reader_names_answer_what_the_game_holds() {
+        let manager = manager().lock().unwrap();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake {
+                gold: 200_001,
+                empire: 2,
+                hp: 1234,
+                max_hp: 2345,
+                sp: 345,
+                max_sp: 456,
+                exp: 789_012,
+                next_exp: 1_000_000,
+                race: 5,
+                char_name: b"Zulu".to_vec(),
+                char_vid: 4321,
+                leadership: 7,
+                position: (4701, 9500, 101, 300),
+                worn: [(0, 11209), (4, 19)].into_iter().collect(),
+                empires: [(VID, 1)].into_iter().collect(),
+                alignment: -12_345,
+                ..Fake::default()
+            },
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        for name in ["pc.getmoney", "pc.get_money", "pc.getgold", "pc.get_gold"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(200_001.0), "{name}");
+        }
+        for name in ["pc.getempire", "pc.get_empire"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(2.0), "{name}");
+        }
+        for name in ["pc.gethp", "pc.get_hp"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(1234.0), "{name}");
+        }
+        for name in ["pc.getmaxhp", "pc.get_max_hp"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(2345.0), "{name}");
+        }
+        for name in ["pc.getsp", "pc.get_sp"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(345.0), "{name}");
+        }
+        for name in ["pc.getmaxsp", "pc.get_max_sp"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(456.0), "{name}");
+        }
+        assert_eq!(probe.call("pc.get_exp", &[]).unwrap(), number(789_012.0));
+        assert_eq!(
+            probe.call("pc.get_next_exp", &[]).unwrap(),
+            number(1_000_000.0)
+        );
+        assert_eq!(probe.call("pc.get_race", &[]).unwrap(), number(5.0));
+        assert_eq!(probe.text("pc.get_name", &[]), b"Zulu");
+        assert_eq!(probe.text("pc.getname", &[]), b"Zulu");
+        assert_eq!(probe.call("pc.get_vid", &[]).unwrap(), number(4321.0));
+        for name in ["pc.getleadership", "pc.get_leadership"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(7.0), "{name}");
+        }
+        the_positions_and_worn(&manager, &mut probe, &number);
+        the_npc_empire(&mut probe, &number);
+        the_guild_triads(&mut probe, &number);
+        the_mount_and_party(&mut probe);
+    }
+
+    /// The NPC's empire among the reader names: the NPC's empire, 0 with no NPC.
+    fn the_npc_empire(probe: &mut Probe<'_>, number: &dyn Fn(f64) -> Vec<Value>) {
+        assert_eq!(probe.call("npc.get_empire", &[]).unwrap(), number(1.0));
+        probe.game.empires.clear();
+        assert_eq!(
+            probe.call("npc.get_empire", &[]).unwrap(),
+            number(0.0),
+            "no NPC is 0"
+        );
+    }
+
+    /// The positions, the worn vnums, and the shown alignment among the reader names.
+    fn the_positions_and_worn(
+        manager: &std::sync::MutexGuard<'_, Manager>,
+        probe: &mut Probe<'_>,
+        number: &dyn Fn(f64) -> Vec<Value>,
+    ) {
+        for name in ["pc.get_x", "pc.getx"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(4701.0), "{name}");
+        }
+        for name in ["pc.get_y", "pc.gety"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(9500.0), "{name}");
+        }
+        assert_eq!(probe.call("pc.get_local_x", &[]).unwrap(), number(101.0));
+        assert_eq!(probe.call("pc.get_local_y", &[]).unwrap(), number(300.0));
+        for name in ["pc.getweapon", "pc.get_weapon"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(19.0), "{name}");
+        }
+        for name in ["pc.getarmor", "pc.get_armor"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(11209.0), "{name}");
+        }
+        assert_eq!(
+            probe.call("pc.get_wear", &[Value::Number(4.0)]).unwrap(),
+            number(19.0)
+        );
+        assert_eq!(
+            probe.call("pc.get_wear", &[Value::Number(5.0)]).unwrap(),
+            [Value::Nil],
+            "an empty cell is nil"
+        );
+        assert_eq!(
+            probe.call("pc.get_wear", &[Value::Number(64.0)]).unwrap(),
+            [Value::Nil],
+            "a cell past the bound is nil"
+        );
+        let table = Value::Table(manager.host.lua().create_table().unwrap());
+        assert!(
+            probe.call("pc.get_wear", &[table]).unwrap().is_empty(),
+            "a non-number pushes nothing"
+        );
+        assert!(
+            probe.call("pc.get_wear", &[]).unwrap().is_empty(),
+            "a missing cell pushes nothing"
+        );
+        assert_eq!(
+            probe.call("pc.get_alignment", &[]).unwrap(),
+            number(-1234.0),
+            "the shown /10 truncates toward zero"
+        );
+    }
+
+    /// The guild triad among the reader names: `pc.has_guild`/`pc.hasguild` answer whether
+    /// a guild id is held, `pc.isguildmaster`/`pc.is_guild_master` answer the master flag,
+    /// and `pc.get_guild`/`pc.getguild` answer the id, 0 with none.
+    fn the_guild_triads(probe: &mut Probe<'_>, number: &dyn Fn(f64) -> Vec<Value>) {
+        for name in ["pc.has_guild", "pc.hasguild"] {
+            assert_eq!(
+                probe.call(name, &[]).unwrap(),
+                [Value::Boolean(false)],
+                "{name} with no guild"
+            );
+        }
+        for name in ["pc.isguildmaster", "pc.is_guild_master"] {
+            assert_eq!(
+                probe.call(name, &[]).unwrap(),
+                [Value::Boolean(false)],
+                "{name} with no guild"
+            );
+        }
+        for name in ["pc.get_guild", "pc.getguild"] {
+            assert_eq!(probe.call(name, &[]).unwrap(), number(0.0), "{name}");
+        }
+        probe.game.guild_id = 42;
+        probe.game.is_guild_master = true;
+        assert_eq!(
+            probe.call("pc.has_guild", &[]).unwrap(),
+            [Value::Boolean(true)],
+            "a guild id is a guild"
+        );
+        assert_eq!(
+            probe.call("pc.is_guild_master", &[]).unwrap(),
+            [Value::Boolean(true)],
+            "the master flag"
+        );
+        assert_eq!(probe.call("pc.get_guild", &[]).unwrap(), number(42.0));
+    }
+
+    /// The mount and the party among the reader names: `pc.is_mount` answers the
+    /// mount flag, `party.is_party` the party flag, and `party.is_leader` the
+    /// leader flag.
+    fn the_mount_and_party(probe: &mut Probe<'_>) {
+        assert_eq!(
+            probe.call("pc.is_mount", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        assert_eq!(
+            probe.call("party.is_party", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        assert_eq!(
+            probe.call("party.is_leader", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        probe.game.mounted = true;
+        probe.game.party = true;
+        probe.game.party_leader = true;
+        assert_eq!(
+            probe.call("pc.is_mount", &[]).unwrap(),
+            [Value::Boolean(true)],
+            "mounted"
+        );
+        assert_eq!(
+            probe.call("party.is_party", &[]).unwrap(),
+            [Value::Boolean(true)],
+            "in a party"
+        );
+        assert_eq!(
+            probe.call("party.is_leader", &[]).unwrap(),
+            [Value::Boolean(true)],
+            "leading it"
+        );
+        probe.game.channel = 3;
+        assert_eq!(
+            probe.call("pc.get_channel_id", &[]).unwrap(),
+            [Value::Number(3.0)],
+            "the Channel"
+        );
+        the_party_flags(probe);
+    }
+
+    /// The party flags: `party.get_leader_pid` answers the leader PID,
+    /// `party.getf` answers the flag or 0, and `party.setf` sets a string name
+    /// with a number value and pushes nothing.
+    fn the_party_flags(probe: &mut Probe<'_>) {
+        let flag = Value::String(
+            probe
+                .manager
+                .host
+                .lua()
+                .create_string(b"frt_dungeon_index")
+                .unwrap(),
+        );
+        assert_eq!(
+            probe.call("party.get_leader_pid", &[]).unwrap(),
+            [Value::Number(0.0)]
+        );
+        assert_eq!(
+            probe.call("party.getf", &[flag.clone()]).unwrap(),
+            [Value::Number(0.0)],
+            "no such flag is 0"
+        );
+        assert_eq!(
+            probe.call("party.getf", &[Value::Number(1.0)]).unwrap(),
+            [Value::Number(0.0)],
+            "a non-string name is 0"
+        );
+        probe.game.leader_pid = 4321;
+        assert_eq!(
+            probe.call("party.get_leader_pid", &[]).unwrap(),
+            [Value::Number(4321.0)]
+        );
+        let value = Value::Number(210.0);
+        assert!(probe
+            .call("party.setf", &[flag.clone(), value])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe.call("party.getf", &[flag]).unwrap(),
+            [Value::Number(210.0)]
+        );
+        assert!(probe
+            .call("party.setf", &[Value::Number(1.0), Value::Number(2.0)])
+            .unwrap()
+            .is_empty());
+        let other = Value::String(probe.manager.host.lua().create_string(b"other").unwrap());
+        assert!(probe
+            .call("party.setf", &[other, Value::Nil])
+            .unwrap()
+            .is_empty());
+        for name in ["d.select", "d.find"] {
+            assert_eq!(
+                probe.call(name, &[Value::Number(0.0)]).unwrap(),
+                [Value::Boolean(false)],
+                "{name} with no dungeon"
+            );
+            assert_eq!(
+                probe.call(name, &[Value::Nil]).unwrap(),
+                [Value::Boolean(false)],
+                "{name} with no number"
+            );
+        }
+        probe.game.dungeon = true;
+        assert_eq!(
+            probe.call("d.find", &[Value::Number(216.0)]).unwrap(),
+            [Value::Boolean(true)],
+            "a living dungeon"
+        );
+        assert_eq!(
+            probe.call("d.select", &[Value::Number(-1.0)]).unwrap(),
+            [Value::Boolean(true)],
+            "(DWORD) of -1"
+        );
+        the_member_pids_and_the_block(probe);
+        the_ds_names(probe);
+    }
+
+    /// The `ds.*` names: `is_qualified` answers 1 or 0 as a number, the grant sets
+    /// it, the refine open runs only with the qualification, and the attr-change
+    /// open always runs. The three writers push nothing.
+    fn the_ds_names(probe: &mut Probe<'_>) {
+        assert_eq!(
+            probe.call("ds.is_qualified", &[]).unwrap(),
+            [Value::Number(0.0)]
+        );
+        assert!(probe.call("ds.open_refine_window", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.ds_refines, 0, "unqualified opens nothing");
+        assert!(probe.call("ds.give_qualification", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.ds_gives, 1);
+        assert_eq!(
+            probe.call("ds.is_qualified", &[]).unwrap(),
+            [Value::Number(1.0)]
+        );
+        assert!(probe.call("ds.open_refine_window", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.ds_refines, 1);
+        assert!(probe
+            .call("ds.open_attr_change_window", &[])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.ds_attrs, 1);
+    }
+
+    /// `party.get_member_pids` pushes the PIDs the game names, none with no party,
+    /// and `q.begin_other_pc_block`/`q.end_other_pc_block` push nothing: the begin
+    /// grows the stack even for an offline PID, the end restores the pushed PID,
+    /// and a flag written in the block lands on the blocked PC's map.
+    fn the_member_pids_and_the_block(probe: &mut Probe<'_>) {
+        assert!(probe.call("party.get_member_pids", &[]).unwrap().is_empty());
+        probe.game.member_pids = vec![11, 7, 23];
+        assert_eq!(
+            probe.call("party.get_member_pids", &[]).unwrap(),
+            [Value::Number(11.0), Value::Number(7.0), Value::Number(23.0)]
+        );
+        let flag = Value::String(probe.manager.host.lua().create_string(b"flag").unwrap());
+        let quest = Value::String(probe.manager.host.lua().create_string(b"q").unwrap());
+        let one = Value::Number(1.0);
+        assert!(probe
+            .call("pc.setf", &[quest.clone(), flag.clone(), one.clone()])
+            .unwrap()
+            .is_empty());
+        // Fake.blocked answers None: an offline PID grows the stack but the flag
+        // still lands on the root's map.
+        assert!(probe
+            .call("q.begin_other_pc_block", &[Value::Number(23.0)])
+            .unwrap()
+            .is_empty());
+        assert!(probe
+            .call(
+                "pc.setf",
+                &[quest.clone(), flag.clone(), Value::Number(2.0)]
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe
+                .call("pc.getf", &[quest.clone(), flag.clone()])
+                .unwrap(),
+            [Value::Number(2.0)]
+        );
+        assert!(probe.call("q.end_other_pc_block", &[]).unwrap().is_empty());
+        assert_eq!(probe.borrowed.len(), 1, "no blocked map was made");
+        assert!(probe.call("q.end_other_pc_block", &[]).unwrap().is_empty());
+        assert_eq!(
+            probe
+                .call("pc.getf", &[quest.clone(), flag.clone()])
+                .unwrap(),
+            [Value::Number(2.0)],
+            "the root kept the write"
+        );
+        // An online PID switches: the write lands on the blocked map, and the end
+        // reads the root's again.
+        probe.game.online = vec![23];
+        assert!(probe
+            .call("q.begin_other_pc_block", &[Value::Number(23.0)])
+            .unwrap()
+            .is_empty());
+        assert!(probe
+            .call(
+                "pc.setf",
+                &[quest.clone(), flag.clone(), Value::Number(3.0)]
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe
+                .call("pc.getf", &[quest.clone(), flag.clone()])
+                .unwrap(),
+            [Value::Number(3.0)]
+        );
+        assert_eq!(probe.borrowed[&23].get(b"q.flag".as_slice()), Some(&3));
+        assert!(probe.call("q.end_other_pc_block", &[]).unwrap().is_empty());
+        assert_eq!(
+            probe.call("pc.getf", &[quest, flag]).unwrap(),
+            [Value::Number(2.0)],
+            "the end reads the root's again"
+        );
+    }
+
+    /// The alignment and no-delay book names: `pc.get_real_alignment` answers the stored value
+    /// over ten, `pc.changealignment`/`pc.change_alignment` pass `(int)(number * 10)` (a
+    /// non-number is zero), `pc.is_skill_book_no_delay` answers the affect, and
+    /// `pc.remove_skill_book_no_delay` removes it.
+    #[test]
+    fn the_alignment_and_no_delay_book_names_follow_legacy() {
+        let manager = manager().lock().unwrap();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        probe.game.alignment = -190_000;
+        assert_eq!(
+            probe.call("pc.get_real_alignment", &[]).unwrap(),
+            number(-19_000.0)
+        );
+        probe.game.alignment = -5;
+        assert_eq!(
+            probe.call("pc.get_real_alignment", &[]).unwrap(),
+            number(0.0),
+            "the division truncates toward zero, as C's int / 10 does"
+        );
+        for name in ["pc.changealignment", "pc.change_alignment"] {
+            let change = |probe: &mut Probe, args: &[Value]| probe.call(name, args).unwrap();
+            assert!(change(&mut probe, &number(12.34)).is_empty());
+            assert!(change(&mut probe, &number(-3.9)).is_empty());
+            assert!(change(&mut probe, &[Value::Nil]).is_empty());
+        }
+        assert_eq!(
+            probe.game.alignment_changes,
+            [123, -39, 0, 123, -39, 0],
+            "the amount is (int)(lua_tonumber * 10), and a non-number is zero"
+        );
+        assert_eq!(
+            probe.call("pc.is_skill_book_no_delay", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        probe.game.skill_book_no_delay = true;
+        assert_eq!(
+            probe.call("pc.is_skill_book_no_delay", &[]).unwrap(),
+            [Value::Boolean(true)]
+        );
+        assert!(probe
+            .call("pc.remove_skill_book_no_delay", &[])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.skill_book_removals, 1);
+        assert!(!probe.game.skill_book_no_delay);
+    }
+    /// `pc_change_money` (`G/questlua_pc.cpp:1102-1121`) under its four names: `(long long)`
+    /// of the last argument, so a fraction drops toward zero, a missing or non-number
+    /// argument moves nothing, and nothing is pushed.
+    #[test]
+    fn the_money_change_passes_long_long_of_the_last_argument() {
+        let manager = manager().lock().unwrap();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        for name in [
+            "pc.changegold",
+            "pc.changemoney",
+            "pc.change_gold",
+            "pc.change_money",
+        ] {
+            let change = |probe: &mut Probe, args: &[Value]| probe.call(name, args).unwrap();
+            assert!(change(&mut probe, &number(12.9)).is_empty());
+            assert!(change(&mut probe, &number(-3_000_000.9)).is_empty());
+            assert!(change(&mut probe, &[]).is_empty());
+            assert!(change(&mut probe, &[Value::Nil]).is_empty());
+            assert!(change(&mut probe, &[Value::Number(1.0), Value::Number(2.0)]).is_empty());
+        }
+        assert_eq!(
+            probe.game.gold_changes,
+            [
+                12, -3_000_000, 0, 0, 2, 12, -3_000_000, 0, 0, 2, 12, -3_000_000, 0, 0, 2, 12,
+                -3_000_000, 0, 0, 2
+            ],
+            "the last argument, truncated toward zero"
+        );
+    }
+    /// `pc_hide_costume` (`G/questlua_pc.cpp:3553-3600`): part 1-5 with a boolean hides or
+    /// shows it and writes the `costume_option.hide_*` flag (a show deletes it). A
+    /// non-number part, a non-boolean hide, or a part outside 1-5 changes nothing. Nothing
+    /// is pushed.
+    #[test]
+    fn the_costume_hide_names_its_part_and_writes_its_flag() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let hide = |probe: &mut Probe, args: &[Value]| probe.call("pc.hide_costume", args).unwrap();
+        let yes = Value::Boolean(true);
+        let no = Value::Boolean(false);
+        for (part, flag) in [
+            (1.0, b"costume_option.hide_body".as_slice()),
+            (2.0, b"costume_option.hide_hair".as_slice()),
+            (3.0, b"costume_option.hide_sash".as_slice()),
+            (4.0, b"costume_option.hide_aura".as_slice()),
+            (5.0, b"costume_option.hide_weapon".as_slice()),
+        ] {
+            assert!(hide(&mut probe, &[Value::Number(part), yes.clone()]).is_empty());
+            assert_eq!(probe.borrowed[&PID].get(flag), Some(&1), "hide writes");
+            assert!(hide(&mut probe, &[Value::Number(part), no.clone()]).is_empty());
+            assert_eq!(probe.borrowed[&PID].get(flag), None, "show deletes");
+        }
+        assert_eq!(
+            probe.game.hides,
+            [
+                (1, true),
+                (1, false),
+                (2, true),
+                (2, false),
+                (3, true),
+                (3, false),
+                (4, true),
+                (4, false),
+                (5, true),
+                (5, false)
+            ]
+        );
+        let table = Value::Table(manager.host.lua().create_table().unwrap());
+        assert!(hide(&mut probe, &[table.clone(), yes.clone()]).is_empty());
+        assert!(hide(&mut probe, &[Value::Number(1.0), Value::Number(1.0)]).is_empty());
+        assert!(hide(&mut probe, &[Value::Number(0.0), yes.clone()]).is_empty());
+        assert!(hide(&mut probe, &[Value::Number(6.0), yes.clone()]).is_empty());
+        assert!(hide(&mut probe, &[Value::Number(1.0)]).is_empty());
+        assert!(hide(&mut probe, &[]).is_empty());
+        assert_eq!(probe.game.hides.len(), 10, "no bad call hides");
+        assert!(probe.borrowed[&PID].is_empty());
+    }
+
+    /// `pc_open_sash` takes only a boolean (combination or absorption) and
+    /// `pc_open_changelook` reads no argument; both push nothing, and anything
+    /// else logs and changes nothing.
+    #[test]
+    fn the_window_opens_take_their_arguments_and_push_nothing() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let yes = Value::Boolean(true);
+        let no = Value::Boolean(false);
+        assert!(probe.call("pc.open_sash", &[yes]).unwrap().is_empty());
+        assert!(probe.call("pc.open_sash", &[no]).unwrap().is_empty());
+        assert_eq!(probe.game.sash_opens, [true, false]);
+        assert!(probe.call("pc.open_changelook", &[]).unwrap().is_empty());
+        assert!(probe
+            .call("pc.open_changelook", &[Value::Number(1.0)])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.changelooks, 2, "no argument is read");
+        let table = Value::Table(manager.host.lua().create_table().unwrap());
+        assert!(probe
+            .call("pc.open_sash", &[Value::Number(1.0)])
+            .unwrap()
+            .is_empty());
+        assert!(probe.call("pc.open_sash", &[table]).unwrap().is_empty());
+        assert!(probe.call("pc.open_sash", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.sash_opens.len(), 2, "no bad call opens");
+    }
+
     /// `pc_send_block_mode` (`G/questlua_pc.cpp:2190-2197`): the number becomes
     /// the character's own block mode, dworded and low-byte only; a non-number
-    /// is zero; the call pushes nothing.
     #[test]
     fn the_block_mode_number_becomes_the_characters_own_byte() {
         let manager = manager().lock().unwrap();
@@ -4043,7 +7047,9 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         let blocked =
@@ -4067,7 +7073,9 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         for (skin, want) in [
@@ -4108,14 +7116,14 @@ mod tests {
             };
             ((QUEST_SKIN_NOWINDOW, script), info)
         };
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut stranger = Fake::default();
         assert!(!manager.levelup(PID, &mut stranger));
         assert!(stranger.scripts.is_empty());
         let mut game = Fake::at_ox_manager();
         assert!(manager.click(PID, VID, OX_MANAGER, &mut game));
         game.scripts.clear();
-        manager.logout(PID);
+        manager.disconnect(PID);
         manager.pcs.entry(PID).or_default();
         game.level = 40;
         assert!(manager.levelup(PID, &mut game));
@@ -4133,7 +7141,7 @@ mod tests {
         assert_eq!(game.take(), [script]);
         assert_eq!(std::mem::take(&mut game.infos), [info]);
         assert!(game.created.is_empty(), "no Theowahdan on the map");
-        manager.logout(PID);
+        manager.disconnect(PID);
         manager.pcs.entry(PID).or_default();
         game.level = 120;
         assert!(manager.levelup(PID, &mut game));
@@ -4147,7 +7155,7 @@ mod tests {
         assert_eq!(game.take(), [sash_script, yohara_script]);
         assert_eq!(game.infos, [sash_info, yohara_info]);
         assert!(game.created.is_empty() && game.deleted.is_empty());
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// The sash quest's state change at 40 (`G/questpc.cpp:352-371`): its `enter` script
@@ -4160,7 +7168,7 @@ mod tests {
         const THEOWAHDAN: u32 = 0x8000_0007;
         let mut manager = manager().lock().unwrap();
         let sash = manager.host().quest_index(b"sash_mission").expect("sash");
-        manager.logout(PID);
+        manager.disconnect(PID);
         let stored = [
             (b"sash_mission.time_to_wait".to_vec(), 5),
             (b"sash_mission.collect_count".to_vec(), 3),
@@ -4193,7 +7201,7 @@ mod tests {
         game.created.clear();
         game.infos.clear();
         let flags = manager.flags_of(PID);
-        manager.logout(PID);
+        manager.disconnect(PID);
         manager.load_flags(PID, flags);
         // The sash's own `login` script is `start`'s; other quests' run.
         manager.login(PID, &mut game);
@@ -4201,7 +7209,7 @@ mod tests {
         assert_eq!(game.targets, [target]);
         let scripts: Vec<_> = game.take().into_iter().map(|(_, text)| text).collect();
         assert!(scripts.contains(&button), "{scripts:?}");
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// A manager over a locale of the test's own: empty libraries and the one quest `source`.
@@ -4336,13 +7344,15 @@ end
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         let mut set = |name: Value, value: Value| {
             let answer = probe.call("pc.setqf", &[name, value]).unwrap();
             assert!(answer.is_empty());
-            probe.flags.get(b"q.a".as_slice()).copied()
+            probe.borrowed[&PID].get(b"q.a".as_slice()).copied()
         };
         assert_eq!(set(string(b"a"), Value::Number(2.5)), Some(2));
         assert_eq!(set(string(b"a"), Value::Number(3.5)), Some(4));
@@ -4368,11 +7378,78 @@ end
         );
         assert_eq!(set(Value::Number(1.0), Value::Number(6.0)), None);
         assert_eq!(
-            probe.flags.get(b"q.1".as_slice()),
+            probe.borrowed[&PID].get(b"q.1".as_slice()),
             Some(&6),
             "a number names"
         );
-        assert_eq!(probe.flags.len(), 1);
+        assert_eq!(probe.borrowed[&PID].len(), 1);
+    }
+    /// The other quest's flags and the delete: `pc.getf`/`pc.setf` name `quest.flag` of
+    /// another quest (`G/questlua_pc.cpp:1123-1165`), and `pc.delqf` deletes a flag of the
+    /// quest that runs (`:1231-1243`). Reads miss as 0; anything but text or a number
+    /// logs and changes nothing.
+    #[test]
+    fn the_other_quest_flags_and_the_delete_follow_legacy() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let table = Value::Table(lua.create_table().unwrap());
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let get = |probe: &mut Probe, args: &[Value]| probe.call("pc.getf", args).unwrap();
+        assert_eq!(get(&mut probe, &[string(b"r"), string(b"a")]), number(0.0));
+        let set = |probe: &mut Probe, args: &[Value]| probe.call("pc.setf", args).unwrap();
+        assert!(set(
+            &mut probe,
+            &[string(b"r"), string(b"a"), Value::Number(9.0)]
+        )
+        .is_empty());
+        assert_eq!(get(&mut probe, &[string(b"r"), string(b"a")]), number(9.0));
+        assert!(set(
+            &mut probe,
+            &[string(b"r"), string(b"a"), Value::Number(0.4)]
+        )
+        .is_empty());
+        assert_eq!(
+            get(&mut probe, &[string(b"r"), string(b"a")]),
+            number(0.0),
+            "a zero deletes"
+        );
+        assert!(set(
+            &mut probe,
+            &[table.clone(), string(b"a"), Value::Number(1.0)]
+        )
+        .is_empty());
+        assert!(set(
+            &mut probe,
+            &[string(b"r"), table.clone(), Value::Number(1.0)]
+        )
+        .is_empty());
+        assert!(set(&mut probe, &[string(b"r"), string(b"a"), table.clone()]).is_empty());
+        assert_eq!(probe.borrowed[&PID].len(), 0, "no bad write lands");
+        assert!(get(&mut probe, &[table.clone(), string(b"a")]).is_empty());
+        probe
+            .call("pc.setqf", &[string(b"gone"), Value::Number(3.0)])
+            .unwrap();
+        assert_eq!(probe.borrowed[&PID].get(b"q.gone".as_slice()), Some(&3));
+        assert!(probe
+            .call("pc.delqf", &[string(b"gone")])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.borrowed[&PID].get(b"q.gone".as_slice()), None);
+        assert!(probe
+            .call("pc.delqf", &[string(b"never")])
+            .unwrap()
+            .is_empty());
+        assert!(probe.call("pc.delqf", &[table]).unwrap().is_empty());
     }
 
     /// `find_npc_by_vnum` (`G/questlua_global.cpp:792-823`): a number or numeric text names
@@ -4388,7 +7465,9 @@ end
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         probe.game.npcs.insert(60003, 0x8000_0007);
@@ -4423,7 +7502,9 @@ end
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         let target = |name: &[u8], vid: u32, desc: Option<&[u8]>, send: bool| Target {
@@ -4514,7 +7595,9 @@ end
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
-            flags: BTreeMap::new(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
             window: Window::default(),
         };
         for (name, vid) in [(string(b"t"), -1.0), (Value::Number(5.0), 12.0)] {
@@ -4672,7 +7755,7 @@ end
         let index = u16::try_from(quest).expect("a small number");
         let talk = manager.host().quests()[usize::try_from(quest).expect("small") - 1].states
             [&b"talk"[..]];
-        manager.logout(PID);
+        manager.disconnect(PID);
         manager.load_flags(PID, Vec::new());
         let mut young = Fake {
             level: 29,
@@ -4682,7 +7765,7 @@ end
         assert!(manager.login(PID, &mut young));
         assert!(young.infos.is_empty(), "no letter below level 30");
 
-        manager.logout(PID);
+        manager.disconnect(PID);
         manager.load_flags(PID, Vec::new());
         let mut game = Fake {
             level: 30,
@@ -4734,7 +7817,7 @@ end
             .expect("the dungeon quest");
         assert!(!manager.info(PID, dungeoninfo, &mut game), "no info event");
         assert!(game.take().is_empty() && game.infos.len() == 1);
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
 
     /// `SendQuestInfoPakcet` (`G/questpc.cpp:231-308`): nothing is sent unless a bit is
@@ -4802,7 +7885,7 @@ end
     #[test]
     fn a_login_restores_the_block_byte_from_the_flags_the_load_read() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
+        manager.disconnect(PID);
         let mut stranger = Fake::default();
         assert!(!manager.login(PID, &mut stranger));
         assert!(stranger.blocked.is_empty() && stranger.chats.is_empty());
@@ -4846,13 +7929,13 @@ end
             "{:?} lacks {said:?}",
             game.chats
         );
-        manager.logout(PID);
+        manager.disconnect(PID);
     }
     #[test]
     fn a_kill_runs_party_kill_on_the_leaders_pc_not_the_killers() {
         let mut manager = manager().lock().unwrap();
-        manager.logout(PID);
-        manager.logout(PID + 1);
+        manager.disconnect(PID);
+        manager.disconnect(PID + 1);
         let mut game = Fake::at_ox_manager();
         // The killer exists (a click); the leader is never seen — `GetPCForce`
         // creates it for the `party_kill` half.
@@ -4870,11 +7953,33 @@ end
         assert_eq!(manager.quest_flag(PID, b"guild_create.__status"), None);
         assert_eq!(manager.quest_flag(PID + 1, b"guild_create.__status"), None);
         // An offline leader (`None`) runs the `kill` halves only: no PC appears.
-        manager.logout(PID + 2);
+        manager.disconnect(PID + 2);
         assert!(manager.kill(PID, 691, None, &mut game));
         assert!(!manager.pcs.contains_key(&(PID + 2)));
-        manager.logout(PID);
-        manager.logout(PID + 1);
+        manager.disconnect(PID);
+        manager.disconnect(PID + 1);
+    }
+
+    /// `CQuestManager::LogoutPC` then `DisconnectPC` (`G/questmanager.cpp:516-535`,
+    /// `:1068-1071`): the `logout` scripts run with the record held, and only the
+    /// disconnect drops it. An unseen PC runs nothing and makes no record.
+    #[test]
+    fn a_logout_runs_scripts_and_the_disconnect_drops_the_pc() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake::at_ox_manager();
+        assert!(manager.click(PID, VID, OX_MANAGER, &mut game));
+        manager.answer(PID, 1, &mut game);
+        assert!(manager.pcs.contains_key(&PID));
+        manager.logout(PID, &mut game);
+        assert!(
+            manager.pcs.contains_key(&PID),
+            "the record stays for the save"
+        );
+        manager.disconnect(PID);
+        assert!(!manager.pcs.contains_key(&PID), "the disconnect drops it");
+        manager.logout(PID + 9, &mut game);
+        assert!(!manager.pcs.contains_key(&(PID + 9)), "no record made");
     }
 
     /// `CQuestManager::Letter` (`G/questmanager.cpp:502-514`) and
@@ -5031,6 +8136,31 @@ end
         let mut manager = load();
         let mut game = Fake::default();
         assert!(!manager.letter(PID, 9999, 0, &mut game), "no such quest");
+        assert!(game.take().is_empty(), "nothing ran");
+    }
+
+    /// `CQuestManager::RequestEventQuest` (`G/questmanager.cpp:1956-1963`): the named
+    /// quest's button runs, and an unknown name runs nothing.
+    #[test]
+    fn the_event_panel_runs_the_named_quests_button() {
+        let mut manager = load();
+        let mut game = Fake {
+            map_index: 100,
+            any_war: 4.0,
+            ..Fake::default()
+        };
+        assert!(
+            manager.event_quest(PID, b"guild_war_join", &mut game),
+            "the named button runs"
+        );
+        assert!(
+            game.take().iter().any(|(_, text)| text.contains("Knights")),
+            "the button names the enemy guild"
+        );
+        assert!(
+            !manager.event_quest(PID, b"no_such_quest", &mut game),
+            "an unknown name runs nothing"
+        );
         assert!(game.take().is_empty(), "nothing ran");
     }
 

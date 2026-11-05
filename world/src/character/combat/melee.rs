@@ -51,6 +51,9 @@ pub const FLY_HP_SMALL: u8 = 15;
 /// `FLY_EXP` (`G/char.h:91`): the orb that flies from a slain monster to each receiver of
 /// its experience.
 pub const FLY_EXP: u8 = 1;
+/// `FLY_CONQUEROR_EXP` (`G/char.h:108`, after `FLY_SKILL_MUYEONG` at 16): the orb a slain
+/// monster sends a conqueror on a new-world map.
+pub const FLY_CONQUEROR_EXP: u8 = 17;
 /// `DAMAGE_NORMAL` (`G/char.h:131`).
 pub const DAMAGE_NORMAL: u8 = 1 << 0;
 /// `DAMAGE_POISON` (`G/char.h:132`): the flag a poison tick's damage shows.
@@ -1474,11 +1477,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         })
     }
 
@@ -1810,11 +1816,14 @@ mod tests {
                     skill_point: 0,
                     sub_skill_point: 0,
                     level_step: 0,
+                    stat_reset_count: 0,
                     map_index: 1,
                     part_base: 0,
                     hair_part: 0,
                     sash_part: 0,
                     playtime: 0,
+                    conqueror_exp: 0,
+                    gaya: 0,
                 });
                 let expected = if usize::from(race % 4) == job {
                     750
@@ -1849,11 +1858,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 373,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         });
         // Map 373 asks for 15 strength; 10 halves the 322.
         let mut dice = Script::new(&[0]);

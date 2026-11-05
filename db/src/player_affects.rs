@@ -66,7 +66,10 @@ pub async fn load_affects(store: &Store, player: u32) -> Result<Vec<StoredAffect
         .collect()
 }
 
-/// Replace a character's saved affects with `affects`, in one transaction.
+/// Replace a character's saved affects with `affects`, in one transaction. Each row is
+/// `QUERY_ADD_AFFECT`'s `REPLACE` (`server/server/db/ClientManagerPlayer.cpp:1563-1585`):
+/// a later row with the same type, point and value takes the earlier one's place, as the
+/// dragon soul qualification a login grants beside the one it restored does.
 ///
 /// # Errors
 ///
@@ -86,7 +89,9 @@ pub async fn save_affects(
     for affect in affects {
         sqlx::query(
             "INSERT INTO player_affect (player_id, affect_type, apply_on, apply_value, flag, \
-             duration, sp_cost) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             duration, sp_cost) VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (player_id, affect_type, apply_on, apply_value) DO UPDATE SET \
+             flag = EXCLUDED.flag, duration = EXCLUDED.duration, sp_cost = EXCLUDED.sp_cost",
         )
         .bind(player_id)
         .bind(i32::try_from(affect.affect_type).unwrap_or(i32::MAX))

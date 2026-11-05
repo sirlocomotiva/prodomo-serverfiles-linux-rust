@@ -339,7 +339,7 @@ pub(super) struct Guilds {
     war_end_times: BTreeMap<(u32, u32), u32>,
     /// The war ends the tick judged but no descriptor stored yet: the tick has no
     /// session, so it queues the outcomes here and a poll command drains them.
-    pending_war_ends: Vec<WarEndOutcome>,
+    pub(in crate::game_state) pending_war_ends: Vec<WarEndOutcome>,
 }
 
 /// What one `CG_ANSWER_MAKE_GUILD` step judged.
@@ -662,6 +662,13 @@ pub enum GuildGradeSet {
         /// the SP the guild gained.
         gained: u32,
     },
+    /// A `/greset`: `CGuild::Reset`'s power (`G/guild.h:175`), the maximum
+    /// the guild holds after the line. Quiet, as legacy's line is: no
+    /// `SKILL_INFO` fans, unlike a charge.
+    FaithRefill {
+        /// The guild's refilled power.
+        power: u32,
+    },
 }
 
 /// One `guild.*` quest call a script made (230s): the call's member name and its arguments,
@@ -767,6 +774,23 @@ pub enum GuildQuestStore {
         level: u8,
         /// The guild's judged ladder.
         ladder: i32,
+    },
+    /// A quest leave: `RemoveMember`'s row delete (`D/ClientManagerGuild.cpp`, the
+    /// `HEADER_GD_GUILD_REMOVE_MEMBER` arm). The world already unlinked and fanned.
+    Leave {
+        /// The leaving member's PID.
+        pid: u32,
+    },
+    /// A quest disband: `GuildDisband`'s row deletes (`D/ClientManagerGuild.cpp:101-127`)
+    /// plus the disband stamp for every member pid. The world already unlinked, fanned
+    /// and deleted.
+    Disband {
+        /// The guild id.
+        guild_id: u32,
+        /// Every member's PID, for the disband stamp.
+        members: Vec<u32>,
+        /// The stamp the world's online loop wrote.
+        at: u32,
     },
 }
 
@@ -889,7 +913,7 @@ pub enum GuildWarNotice {
 /// (`G/guild_manager.cpp:676-717`), which the scores judge too. A war's map that
 /// names the winner itself is the one arm where the two differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WarEndJudgement {
+pub(super) enum WarEndJudgement {
     /// The scores judge (`CWarMap::GetWinnerGuild`, `G/war_map.cpp:249-263`): the side
     /// with the higher score wins, and equal scores are a draw.
     Scores,
@@ -942,6 +966,18 @@ pub struct GuildWarListLine {
     pub seconds: u32,
 }
 
+/// One `/gstate` answer (`do_guild_state`, `G/cmd_gm.cpp:2806-2822`): the
+/// named guild's id, its master's PID, and whether it holds any begun war.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuildStateLine {
+    /// `GetID()`.
+    pub id: u32,
+    /// `GetMasterPID()`.
+    pub master_pid: u32,
+    /// `UnderAnyWar()`.
+    pub in_war: bool,
+}
+
 /// Fill `outcome`'s row for `id` from the live `guild`.
 fn outcome_row(outcome: &mut WarEndOutcome, id: u32, guild: &Guild) {
     let row = if id == outcome.lo.guild_id {
@@ -960,6 +996,32 @@ impl GameState {
     /// `G/guild_manager.cpp:126-134`).
     pub(super) fn guild_of(&self, pid: u32) -> Option<u32> {
         self.guilds.of.get(&pid).copied()
+    }
+    /// `CGuild::LevelChange` (`G/guild.cpp:1672-1690`): the member row of `pid`
+    /// carries `level`. The DB packet is the retired peer's; the save writes the
+    /// member rows from the world, as it writes everything else. Quiet with no
+    /// guild or no such member, as the `m_member.end()` return is.
+    pub(super) fn set_guild_member_level(&mut self, pid: u32, level: u8) {
+        let Some(id) = self.guilds.of.get(&pid).copied() else {
+            return;
+        };
+        if let Some(guild) = self.guilds.by_id.get_mut(&id) {
+            if let Some(member) = guild.members.get_mut(&pid) {
+                member.level = level;
+            }
+        }
+    }
+    /// The guild id of `pid`'s guild and whether `pid` leads it, for a quest session that
+    /// holds the guilds but not the world: 0 and false with none.
+    pub(super) fn guild_pair(guilds: &Guilds, pid: u32) -> (u32, bool) {
+        let Some(id) = guilds.of.get(&pid).copied() else {
+            return (0, false);
+        };
+        let master = guilds
+            .by_id
+            .get(&id)
+            .is_some_and(|guild| guild.master_pid == pid);
+        (id, master)
     }
 
     /// The guild fields `EncodeInsertPacket` and `UpdatePacket` write for the character of
@@ -2206,6 +2268,29 @@ impl GameState {
         }
     }
 
+    /// Run one `/greset` (`do_greset`, `G/cmd_gm.cpp:2175-2179`, plus
+    /// `CGuild::Reset`, `G/guild.h:175`): the caller's guild's power becomes
+    /// its maximum. Quiet with no guild or no character under `vid`, as
+    /// legacy's guarded call is, and quiet on the wire either way.
+    pub(super) fn run_guild_reset(&mut self, vid: Vid) -> GuildGradeAnswer {
+        let quiet = GuildGradeAnswer::Refused { line: None };
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return quiet;
+        };
+        let Some(id) = self.guild_of(character.player_id()) else {
+            return quiet;
+        };
+        let power = self
+            .guilds
+            .by_id
+            .get(&id)
+            .map_or(0, |guild| guild.max_power);
+        GuildGradeAnswer::Store {
+            guild_id: id,
+            set: GuildGradeSet::FaithRefill { power },
+        }
+    }
+
     /// Judge one `GUILD_SUBHEADER_CG_POST_COMMENT` (`CInputMain::Guild`'s arm,
     /// `G/input_main.cpp:3048-3080`, plus `AddComment`, `G/guild.cpp:1049-1072`): the
     /// guildless gate, the notice gate, the minute gate, and the judged content. The
@@ -2508,36 +2593,16 @@ impl GameState {
             .collect();
         let fan = match set {
             GuildGradeSet::GradeName { grade, name } => {
-                let index = usize::from(grade.saturating_sub(1));
-                let Some(grades) = self
-                    .guilds
-                    .by_id
-                    .get_mut(guild_id)
-                    .map(|guild| &mut guild.grades)
-                else {
+                let Some(fan) = self.commit_grade_name(*guild_id, *grade, name.as_bytes()) else {
                     return empty;
                 };
-                let Some(slot) = grades.get_mut(index) else {
-                    return empty;
-                };
-                slot.0 = name.as_bytes().to_vec();
-                guild_grade_name_record(*grade, name.as_bytes())
+                fan
             }
             GuildGradeSet::GradeAuth { grade, auth } => {
-                let index = usize::from(grade.saturating_sub(1));
-                let Some(grades) = self
-                    .guilds
-                    .by_id
-                    .get_mut(guild_id)
-                    .map(|guild| &mut guild.grades)
-                else {
+                let Some(fan) = self.commit_grade_auth(*guild_id, *grade, *auth) else {
                     return empty;
                 };
-                let Some(slot) = grades.get_mut(index) else {
-                    return empty;
-                };
-                slot.1 = *auth;
-                guild_grade_auth_record(*grade, *auth)
+                fan
             }
             GuildGradeSet::MemberGrade { pid, grade } => {
                 if *grade == GUILD_LEADER_GRADE {
@@ -2586,11 +2651,44 @@ impl GameState {
             } => {
                 return self.commit_guild_charge(*guild_id, *speaker, *power, *gained);
             }
+            GuildGradeSet::FaithRefill { power } => {
+                return self.commit_guild_refill(*guild_id, *power);
+            }
         };
         for member in members {
             let _sent = self.write_to_client(member, fan.clone());
         }
         empty
+    }
+
+    /// Land one judged grade name: the stored name and its fan, or `None`
+    /// for a missing row. Split out so the grade commit stays under the line
+    /// limit.
+    fn commit_grade_name(&mut self, guild_id: u32, grade: u8, name: &[u8]) -> Option<Vec<u8>> {
+        let index = usize::from(grade.saturating_sub(1));
+        let grades = self
+            .guilds
+            .by_id
+            .get_mut(&guild_id)
+            .map(|guild| &mut guild.grades)?;
+        let slot = grades.get_mut(index)?;
+        slot.0 = name.to_vec();
+        Some(guild_grade_name_record(grade, name))
+    }
+
+    /// Land one judged grade auth: the stored auth and its fan, or `None`
+    /// for a missing row. Split out so the grade commit stays under the line
+    /// limit.
+    fn commit_grade_auth(&mut self, guild_id: u32, grade: u8, auth: u8) -> Option<Vec<u8>> {
+        let index = usize::from(grade.saturating_sub(1));
+        let grades = self
+            .guilds
+            .by_id
+            .get_mut(&guild_id)
+            .map(|guild| &mut guild.grades)?;
+        let slot = grades.get_mut(index)?;
+        slot.1 = auth;
+        Some(guild_grade_auth_record(grade, auth))
     }
 
     /// Land one judged general flag (`ChangeMemberGeneral`, `G/guild.cpp:1144-1151`):
@@ -3373,6 +3471,12 @@ impl GameState {
         self.war_user_count(map);
         if let Some(war) = self.war_maps.get_mut(&map) {
             war.leave_present(vid);
+        }
+        // `DecMember` ends the leaving watcher's watch with the dance
+        // (`ch->EndObserverMode()`, `G/war_map.cpp:414-430`), which the watching set keeps:
+        // the leaver is still a watcher when it comes back to the map.
+        if observer {
+            self.end_war_watch(vid);
         }
     }
 
@@ -4562,7 +4666,7 @@ impl GameState {
     /// who won: the scores, a forced draw (`gwstop`), or the war's map's own arm.
     /// `math` false is `gwcancel`'s (the math and tallies skip, the
     /// stamp stays). The outcome carries both rows for the descriptor's store write.
-    fn manager_end_war(
+    pub(super) fn manager_end_war(
         &mut self,
         lo: u32,
         hi: u32,
@@ -4743,7 +4847,7 @@ impl GameState {
     /// A `CHAT_TYPE_NOTICE` line to every PC (`SendNotice`,
     /// `G/cmd_gm.cpp:1389-1425`): the client set, each descriptor's character, in
     /// VID order.
-    fn notice_every_pc(&self, key: &[u8], args: &[Arg<'_>]) {
+    pub(super) fn notice_every_pc(&self, key: &[u8], args: &[Arg<'_>]) {
         let mut vids: Vec<Vid> = self.outboxes.keys().copied().collect();
         vids.sort_by_key(|vid| vid.raw());
         for vid in vids {
@@ -5026,6 +5130,16 @@ impl GameState {
         GuildSkillUseAnswer::Committed
     }
 
+    /// Land one judged `/greset` under the stored row (`CGuild::Reset`,
+    /// `G/guild.h:175`): the power lands, quietly — no `SKILL_INFO` fans,
+    /// no count chats, as legacy's bare assignment sends nothing.
+    fn commit_guild_refill(&mut self, id: u32, power: u32) -> GuildGradeAnswer {
+        if let Some(guild) = self.guilds.by_id.get_mut(&id) {
+            guild.power = power;
+        }
+        GuildGradeAnswer::Committed { post: None }
+    }
+
     /// Commit one judged charge under the stored row (`ChargeSP`, `G/guild.cpp:1804-1831`,
     /// plus `GuildPointChange`'s SP arm, `:1572-1581`): the power lands and the `SKILL_INFO`
     /// fans through the outboxes, and the `[LS;938]` count answers on the speaker's own
@@ -5166,10 +5280,12 @@ impl GameState {
     /// which is the exit location the join remembered (`SaveExitLocation`,
     /// `G/char.cpp:6679-6683`).
     ///
-    /// Legacy's `ExitToSavedLocation` warps to the pending Warp, which the warp to the
-    /// war map overwrote with the map's own start position, so the player it sends back
-    /// lands on the war map again. The Rewrite sends the player to the place it came
-    /// from, which is what the rule is for.
+    /// Legacy's `ExitToSavedLocation` warps to the pending Warp (`m_posWarp`), which the warp
+    /// to the war map left holding the war map's own start position — but the re-login on the
+    /// new address re-seeds it from the row's exit columns (`G/char.cpp:2289-2294`), which the
+    /// join's `SaveExitLocation` wrote, so the player it sends back lands where it came from.
+    /// The game thread holds no pending Warp (that is the descriptor's `held.warp`), so the
+    /// Rewrite names the remembered exit location in the order instead, which is the same place.
     fn exit_war_map(&mut self, index: i32) {
         let Some(map) = self.war_maps.get(&index) else {
             return;
@@ -5224,6 +5340,7 @@ impl GameState {
                         private_map_index: 0,
                         channel: None,
                         exit: None,
+                        sorted_until: self.sort_lock(vid),
                     },
                 )
             });
@@ -5280,6 +5397,62 @@ impl GameState {
                 })
             })
             .collect()
+    }
+
+    /// The `/gstate` answer for `rest` (`do_guild_state`,
+    /// `G/cmd_gm.cpp:2806-2822`): the named guild's id, its master's PID,
+    /// and whether it holds any begun war — or none when no guild answers
+    /// to the name. The lookup is `FindGuildByName`'s byte-exact one, so an
+    /// empty line names nobody.
+    pub(super) fn guild_state(&self, rest: &[u8]) -> Option<GuildStateLine> {
+        let (name, _) = crate::command::one_argument(rest);
+        let id = self.guild_named_id(&name)?;
+        let guild = self.guilds.by_id.get(&id)?;
+        Some(GuildStateLine {
+            id,
+            master_pid: guild.master_pid,
+            in_war: self.guild_under_any_war(id),
+        })
+    }
+
+    /// Judge one `/makeguild` word (`ACMD(do_makeguild)`, `G/cmd_gm.cpp:2143-2167`): the
+    /// guilded caller is silent; else the word's bytes to the first NUL face the
+    /// alphabet check, and a failure tells `#ERR_CODE: 1433030623`. A judged name
+    /// commits through the same store-and-commit as the window's answer.
+    pub(super) fn judge_makeguild(&self, vid: Vid, word: &[u8]) -> GuildMakeAnswer {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return GuildMakeAnswer::Refused { line: None };
+        };
+        if self.guild_of(character.player_id()).is_some() {
+            return GuildMakeAnswer::Refused { line: None };
+        }
+        let end = word
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(word.len());
+        let name = &word[..end];
+        if name.len() < 2
+            || name.len() > GUILD_NAME_MAX_LEN
+            || !name.iter().all(u8::is_ascii_alphanumeric)
+            || !self.name_rules.guild_name_ok(name)
+        {
+            return GuildMakeAnswer::Refused {
+                line: Some(self.guild_info_line(vid, b"#ERR_CODE: 1433030623")),
+            };
+        }
+        if self
+            .guilds
+            .by_id
+            .values()
+            .any(|guild| guild.name.eq_ignore_ascii_case(name))
+        {
+            return GuildMakeAnswer::Refused {
+                line: Some(self.guild_info_line(vid, b"[LS;473]")),
+            };
+        }
+        GuildMakeAnswer::Store {
+            name: String::from_utf8_lossy(name).into_owned(),
+        }
     }
 
     /// Judge one `CG_ANSWER_MAKE_GUILD` (`CInputMain::AnswerMakeGuild`,
@@ -5406,6 +5579,28 @@ impl GameState {
         commit: &GuildMakeCommit,
         mover: Mover,
     ) -> GuildMakeAnswer {
+        self.commit_make_guild_inner(vid, commit, mover, false)
+    }
+
+    /// Commit one judged `/makeguild` under the id the store answered: the registry and
+    /// the master's link, the `GUILD_NAME` record, the confirmation, and the login walk.
+    /// No fee, no item — the window's answer is the only path that pays.
+    pub(super) fn commit_makeguild(
+        &mut self,
+        vid: Vid,
+        commit: &GuildMakeCommit,
+        mover: Mover,
+    ) -> GuildMakeAnswer {
+        self.commit_make_guild_inner(vid, commit, mover, true)
+    }
+
+    fn commit_make_guild_inner(
+        &mut self,
+        vid: Vid,
+        commit: &GuildMakeCommit,
+        mover: Mover,
+        gm_line: bool,
+    ) -> GuildMakeAnswer {
         let Ok(master) = self.characters.find_by_vid(vid) else {
             return GuildMakeAnswer::Refused { line: None };
         };
@@ -5464,11 +5659,17 @@ impl GameState {
         );
         self.guilds.of.insert(pid, commit.id);
         let name_record = guild_name_record(commit.id, commit.name.as_bytes());
-        let mut own = vec![
-            name_record.clone(),
-            self.guild_made_line(mover, commit.name.as_bytes()),
-        ];
-        let (due, changes, records) = self.take_guild_fee(vid, mover, pid);
+        let confirm = if gm_line {
+            self.guild_makeguild_line(mover, commit.name.as_bytes())
+        } else {
+            self.guild_made_line(mover, commit.name.as_bytes())
+        };
+        let mut own = vec![name_record.clone(), confirm];
+        let (due, changes, records) = if gm_line {
+            (0, Vec::new(), Vec::new())
+        } else {
+            self.take_guild_fee(vid, mover, pid)
+        };
         own.extend(records);
         own.extend(self.guild_login_records(commit.id));
         GuildMakeAnswer::Committed {
@@ -5554,6 +5755,18 @@ impl GameState {
 
     /// The `[LS;682;%s]` line (`G/input_main.cpp:2716`): the new guild's name, formatted as
     /// a C string.
+    /// The GM line's confirmation (`LC_TEXT("(%s) #ERR_CODE: 1434030623")`,
+    /// `G/cmd_gm.cpp:2166`): `LC_TEXT` at `LOCALE_YMIR` answers the text itself
+    /// (`G/locale.cpp:73-74`), so the line goes out in legacy's words.
+    fn guild_makeguild_line(&self, mover: Mover, name: &[u8]) -> Vec<u8> {
+        chat_packet(
+            mover.recipient(&self.locale),
+            CHAT_TYPE_INFO,
+            b"(%s) #ERR_CODE: 1434030623",
+            &[Arg::Text(name)],
+        )
+    }
+
     fn guild_made_line(&self, mover: Mover, name: &[u8]) -> Vec<u8> {
         chat_packet(
             mover.recipient(&self.locale),
@@ -5698,6 +5911,8 @@ impl GameState {
                 quiet(number(enemy))
             }
             b"war_enter" => self.quest_war_enter(vid, caller, own, first),
+            b"destroy_guild" => self.quest_destroy_guild(vid, caller, own, now),
+            b"remove_from_guild" => self.quest_remove_from_guild(vid, caller, own),
             _ => quiet(GuildAnswer::None),
         }
     }
@@ -5772,6 +5987,134 @@ impl GameState {
         self.order_war_warp(vid, x, y, map_index, Some(channel));
         quiet
     }
+    /// `pc_destroy_guild` (`G/questlua_pc.cpp:352-370`, plus `RequestDisband`,
+    /// `G/guild.cpp:1034-1046`, and `DisbandGuild`, `G/guild_manager.cpp:259-273`): the
+    /// guildless caller is quiet; a guild at war chats the line; a caller that does not
+    /// lead is quiet; else the guild disbands — every online member's link leaves, the
+    /// REMOVE fans, the disband stamp lands, the guild, the links, the mark and the
+    /// symbol go — and the descriptor deletes the rows and stamps every member. The
+    /// `__GUILD_BONUSES__` ungrant waits for `sys.guild.bonuses`, as the wire removal's
+    /// does.
+    /// Judge one `/deleteguild` (`ACMD(do_deleteguild)`, `G/cmd_gm.cpp:2169-2173`):
+    /// `RequestDisband` on the caller's guild, which is what the quest destroy runs.
+    pub(super) fn judge_deleteguild(&mut self, vid: Vid, now: u32) -> GuildQuestJudged {
+        let caller = self
+            .characters
+            .find_by_vid(vid)
+            .map(world::character::Character::player_id)
+            .ok();
+        let own = caller.and_then(|pid| self.guild_of(pid));
+        self.quest_destroy_guild(vid, caller, own, now)
+    }
+
+    fn quest_destroy_guild(
+        &mut self,
+        vid: Vid,
+        caller: Option<u32>,
+        own: Option<u32>,
+        now: u32,
+    ) -> GuildQuestJudged {
+        use quest::manager::GuildAnswer;
+        let quiet = GuildQuestJudged::silent(GuildAnswer::None);
+        let (Some(caller), Some(id)) = (caller, own) else {
+            return quiet;
+        };
+        let Some(guild) = self.guilds.by_id.get(&id) else {
+            return quiet;
+        };
+        if guild.master_pid != caller {
+            // `RequestDisband`'s master arm (`G/guild.cpp:1036-1037`): quiet.
+            return quiet;
+        }
+        if self.guild_under_any_war(id) {
+            // `LC_TEXT` answers the text itself (`G/locale.cpp:73-74`), so the line
+            // goes out in legacy's words.
+            self.tell_guild(vid, b"You can't destroy the guild when you're at war", &[]);
+            return quiet;
+        }
+        let members: Vec<u32> = guild.members.keys().copied().collect();
+        let online: Vec<(u32, Vid)> = guild
+            .members
+            .iter()
+            .filter_map(|(pid, row)| row.vid.map(|vid| (*pid, vid)))
+            .collect();
+        let fan: Vec<Vec<u8>> = online
+            .iter()
+            .map(|(pid, _)| guild_remove_record(*pid))
+            .collect();
+        for (pid, member) in &online {
+            // `Disband`'s online loop (`G/guild.cpp:1015-1023`): the victim unlinks, every
+            // member's REMOVE fans to it, and the disband stamp lands.
+            self.guilds.of.remove(pid);
+            for record in &fan {
+                let _sent = self.write_to_client(*member, record.clone());
+            }
+            if let Some(quests) = self.quests.as_mut() {
+                quests.manager_mut().set_quest_flag(
+                    *pid,
+                    b"guild_manage.new_disband_time",
+                    i32::try_from(now).unwrap_or(i32::MAX),
+                );
+            }
+        }
+        for pid in &members {
+            self.guilds.of.remove(pid);
+        }
+        self.guilds.by_id.remove(&id);
+        self.marks.delete_mark(id);
+        self.symbols.remove(&id);
+        GuildQuestJudged {
+            answer: GuildAnswer::None,
+            own: Vec::new(),
+            stores: vec![GuildQuestStore::Disband {
+                guild_id: id,
+                members,
+                at: now,
+            }],
+        }
+    }
+
+    /// `pc_remove_from_guild` (`G/questlua_pc.cpp:372-381`, plus `RequestRemoveMember`,
+    /// `G/guild.cpp:195-211`): the guildless caller and the leading caller are quiet;
+    /// else the caller leaves through the wire removal's commit, and the descriptor
+    /// deletes the row.
+    fn quest_remove_from_guild(
+        &mut self,
+        vid: Vid,
+        caller: Option<u32>,
+        own: Option<u32>,
+    ) -> GuildQuestJudged {
+        use quest::manager::GuildAnswer;
+        let quiet = GuildQuestJudged::silent(GuildAnswer::None);
+        let (Some(caller), Some(id)) = (caller, own) else {
+            return quiet;
+        };
+        let Some(guild) = self.guilds.by_id.get(&id) else {
+            return quiet;
+        };
+        if guild
+            .members
+            .get(&caller)
+            .is_none_or(|row| row.grade == GUILD_LEADER_GRADE)
+        {
+            // The leader's and the rowless caller's quiet refusal
+            // (`G/guild.cpp:199-203`).
+            return quiet;
+        }
+        let commit = GuildRemoveCommit {
+            speaker: vid,
+            pid: caller,
+            online: true,
+        };
+        let GuildRemoveAnswer::Committed { .. } = self.commit_guild_remove(&commit) else {
+            return quiet;
+        };
+        GuildQuestJudged {
+            answer: GuildAnswer::None,
+            own: Vec::new(),
+            stores: vec![GuildQuestStore::Leave { pid: caller }],
+        }
+    }
 
     /// The Channel that holds a war's private map (`CWarMapManager::CreateWarMap`,
     /// `G/war_map.cpp:1042-1059`): the copy stands on the Channel of the master that
@@ -5832,6 +6175,7 @@ impl GameState {
                         private_map_index: map_index,
                         channel,
                         exit,
+                        sorted_until: self.sort_lock(vid),
                     },
                 )
             });
@@ -7309,6 +7653,126 @@ mod tests {
         );
         assert!(heard(&mut guest).is_empty());
     }
+    /// `pc.destroy_guild` disbands the caller's guild: the master hears its own REMOVE,
+    /// the guild, the link and the rows' halves go, and the disband stamp lands. A guild
+    /// at war chats the line and stays; a non-master and a guildless caller are quiet.
+    #[test]
+    fn a_quest_disband_unlinks_fans_stamps_and_deletes() {
+        use quest::manager::GuildAnswer;
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        world.quests = Some(a_quest_manager());
+        heard(&mut master);
+        heard(&mut guest);
+        // The war arm first: the line chats and the guild stays.
+        world.declare_war(GUILD_ID, 4242, GUILD_WAR_TYPE_FIELD, GUILD_WAR_ON_WAR);
+        heard(&mut master);
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"destroy_guild", &[], NOW);
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert!(judged.stores.is_empty());
+        let lines = heard(&mut master);
+        assert_eq!(lines.len(), 1, "the caller hears the war line alone");
+        assert!(
+            lines[0].windows(b"at war".len()).any(|w| w == b"at war"),
+            "the line names the war"
+        );
+        assert!(world.guilds.by_id.contains_key(&GUILD_ID));
+        world
+            .guilds
+            .by_id
+            .get_mut(&GUILD_ID)
+            .expect("the guild stays")
+            .enemies
+            .clear();
+        // A non-master member and a guildless caller are quiet.
+        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"destroy_guild", &[], NOW);
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert!(judged.stores.is_empty());
+        assert!(heard(&mut guest).is_empty());
+        // The master disbands: one REMOVE (one online member), the stores carry the
+        // guild, the member and the stamp.
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"destroy_guild", &[], NOW);
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert_eq!(
+            judged.stores,
+            [GuildQuestStore::Disband {
+                guild_id: GUILD_ID,
+                members: vec![MASTER_VID],
+                at: NOW,
+            }]
+        );
+        let fanned = heard(&mut master);
+        assert_eq!(
+            subheaders(&fanned),
+            [protocol::gc_guild::GUILD_SUBHEADER_GC_REMOVE]
+        );
+        assert_eq!(
+            u32::from_le_bytes(fanned[0][4..8].try_into().unwrap()),
+            MASTER_VID
+        );
+        assert!(!world.guilds.by_id.contains_key(&GUILD_ID));
+        assert_eq!(world.guild_of(MASTER_VID), None);
+        let stamp = world.quests.as_ref().and_then(|quests| {
+            quests
+                .manager()
+                .quest_flag(MASTER_VID, b"guild_manage.new_disband_time")
+        });
+        assert_eq!(stamp, Some(i32::try_from(NOW).unwrap()));
+    }
+
+    /// `pc.remove_from_guild` leaves through the wire removal's commit: the rest hear the
+    /// REMOVE and the descriptor deletes the row. The leader and the guildless are quiet.
+    #[test]
+    fn a_quest_leave_fans_the_remove_and_queues_the_row() {
+        use quest::manager::GuildAnswer;
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        heard(&mut master);
+        heard(&mut guest);
+        // The leader's and the guildless caller's quiet refusal.
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"remove_from_guild", &[], NOW);
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert!(judged.stores.is_empty());
+        assert!(heard(&mut master).is_empty());
+        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"remove_from_guild", &[], NOW);
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert!(judged.stores.is_empty());
+        // The guest joins as a follower, then leaves: the master hears the REMOVE and
+        // the descriptor deletes the row.
+        world.guilds.of.insert(GUEST_VID, GUILD_ID);
+        world
+            .guilds
+            .by_id
+            .get_mut(&GUILD_ID)
+            .expect("the guild stays")
+            .members
+            .insert(
+                GUEST_VID,
+                GuildMember {
+                    grade: 15,
+                    is_general: 0,
+                    job: 0,
+                    level: 10,
+                    offer: 0,
+                    name: format!("P{GUEST_VID}").into_bytes(),
+                    vid: Some(Vid::new(GUEST_VID)),
+                },
+            );
+        heard(&mut master);
+        heard(&mut guest);
+        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"remove_from_guild", &[], NOW);
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert_eq!(judged.stores, [GuildQuestStore::Leave { pid: GUEST_VID }]);
+        let fanned = heard(&mut master);
+        assert_eq!(
+            subheaders(&fanned),
+            [protocol::gc_guild::GUILD_SUBHEADER_GC_REMOVE]
+        );
+        assert_eq!(
+            u32::from_le_bytes(fanned[0][4..8].try_into().unwrap()),
+            GUEST_VID
+        );
+        assert_eq!(world.guild_of(GUEST_VID), None);
+        assert!(world.guilds.by_id.contains_key(&GUILD_ID));
+    }
 
     /// An invitee who blocks guild invites refuses the invite: the inviter hears
     /// `[LS;940]` and the guest hears nothing, and no invite waits
@@ -7922,6 +8386,49 @@ mod tests {
                 .iter()
                 .any(|record| record[3] == protocol::gc_guild::GUILD_SUBHEADER_GC_SKILL_INFO),
             "the SKILL_INFO fans"
+        );
+    }
+
+    #[test]
+    fn a_guild_reset_refills_quietly_and_the_guildless_stay_quiet() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        world
+            .guilds
+            .by_id
+            .get_mut(&GUILD_ID)
+            .expect("the guild")
+            .power = 350;
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        let answer = world.run_guild_reset(Vid::new(MASTER_VID));
+        let GuildGradeAnswer::Store { guild_id, set } = answer else {
+            panic!("the line judges");
+        };
+        let GuildGradeSet::FaithRefill { power } = set else {
+            panic!("the refill stores");
+        };
+        assert_eq!(power, 400, "level 1 holds 400");
+        let answer = world.commit_guild_grade(&GuildGradeCommit {
+            speaker: Vid::new(MASTER_VID),
+            guild_id,
+            set: GuildGradeSet::FaithRefill { power },
+        });
+        let GuildGradeAnswer::Committed { post } = answer else {
+            panic!("the refill commits");
+        };
+        assert!(post.is_none(), "no count chats");
+        assert_eq!(world.guilds.by_id[&GUILD_ID].power, 400);
+        assert!(heard(&mut master).is_empty(), "no SKILL_INFO fans");
+        assert!(heard(&mut guest).is_empty(), "the guest hears nothing");
+        let answer = world.run_guild_reset(Vid::new(GUEST_VID));
+        assert!(
+            matches!(answer, GuildGradeAnswer::Refused { line: None }),
+            "the guildless line is quiet"
+        );
+        let answer = world.run_guild_reset(Vid::new(0x9));
+        assert!(
+            matches!(answer, GuildGradeAnswer::Refused { line: None }),
+            "no character, no run"
         );
     }
 
@@ -9188,6 +9695,7 @@ mod tests {
                 pk_mode: crate::loading_phase::PK_MODE_PROTECT,
                 skill_group: 0,
                 alignment: 0,
+                voice: 0,
             },
         );
     }
@@ -9250,7 +9758,7 @@ mod tests {
         // The letter asks the client for the button.
         world.quest_letter(Vid::new(MASTER_VID), quest);
         // The button runs the quest's button event, which asks the player to confirm.
-        let (records, _climbs, _stores, _items) = world
+        let (records, _climbs, _stores, _items, _gold) = world
             .quest(
                 Vid::new(MASTER_VID),
                 &QuestStep::Button(quest),
@@ -9306,6 +9814,7 @@ mod tests {
                     y: HERE.1,
                     map_index: super::super::fixtures::PLACE.1,
                 }),
+                sorted_until: 0,
             }),
             "the member is warped to the war's start position"
         );
@@ -9368,6 +9877,7 @@ mod tests {
                 pk_mode: crate::loading_phase::PK_MODE_PROTECT,
                 skill_group: 0,
                 alignment: 0,
+                voice: 0,
             },
         );
         // The war ends: the map closes with it.
@@ -9395,6 +9905,7 @@ mod tests {
                 channel: None,
                 // `ExitToSavedLocation` (`G/char.cpp:6692`) forgets the exit location.
                 exit: None,
+                sorted_until: 0,
             }),
             "the member is sent back to the place it came from"
         );
@@ -9467,6 +9978,7 @@ mod tests {
                 pk_mode: crate::loading_phase::PK_MODE_PROTECT,
                 skill_group: 0,
                 alignment: 0,
+                voice: 0,
             },
         );
         let outcome =
@@ -10215,6 +10727,7 @@ mod tests {
                 pk_mode: crate::loading_phase::PK_MODE_PROTECT,
                 skill_group: 0,
                 alignment: 0,
+                voice: 0,
             },
         );
         // The war is a minute old, so a score may end it.
@@ -10579,6 +11092,7 @@ mod tests {
                 pk_mode: crate::loading_phase::PK_MODE_PROTECT,
                 skill_group: 0,
                 alignment: 0,
+                voice: 0,
             },
         );
     }
@@ -10884,5 +11398,38 @@ mod tests {
             Some((GUILD_ID, AFF_WAR_FLAG1)),
             "the master carries his own guild's flag"
         );
+    }
+    /// `/shutdown` draws every open war map (`CWarMapManager::OnShutdown`,
+    /// `G/war_map.cpp:1096-1102`): the pair leaves the war set as a forced draw
+    /// with its tallies, and the rows wait for the war-end poll.
+    #[test]
+    fn the_shutdown_line_draws_every_open_war_map() {
+        let (mut world, _orders, _lease, mut master) = a_war_on(" 1");
+        assert!(
+            world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the war is on"
+        );
+        let _burst = heard(&mut master);
+        world.run_shutdown(Vid::new(MASTER_VID));
+        assert!(
+            !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the pair left the war set"
+        );
+        assert_eq!(
+            world.guilds.pending_war_ends.len(),
+            1,
+            "the rows wait for the poll"
+        );
+        let held = heard(&mut master);
+        assert!(
+            held.iter().any(
+                |record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()
+                    && record[protocol::gc_chat::GC_CHAT_WIRE_SIZE..]
+                        .windows(11)
+                        .any(|window| window == b"[LS;509;10]")
+            ),
+            "the master hears the 10's notice: {held:?}"
+        );
+        assert_eq!(world.shutdown_left, Some(10));
     }
 }

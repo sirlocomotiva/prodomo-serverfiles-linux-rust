@@ -124,6 +124,7 @@ async fn an_id_range_installed_from_tokio_lands_on_the_thread_that_owns_the_worl
         target: "Shaman".to_owned(),
         vnum,
         count: None,
+        socket0: None,
     };
 
     // When: a grant is asked for before the range is installed.
@@ -223,6 +224,7 @@ async fn a_grant_sent_from_tokio_is_applied_on_the_thread_that_owns_the_world() 
             target: "SHAMAN".to_owned(),
             vnum,
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -262,6 +264,7 @@ async fn a_grant_sent_from_tokio_is_applied_on_the_thread_that_owns_the_world() 
             target: "Nobody".to_owned(),
             vnum,
             count: None,
+            socket0: None,
         })
         .await
         .expect("the answer crossed back");
@@ -435,6 +438,7 @@ async fn a_refused_write_puts_the_world_back_on_the_thread_that_owns_it() {
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -475,6 +479,7 @@ async fn a_refused_write_puts_the_world_back_on_the_thread_that_owns_it() {
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -593,6 +598,7 @@ async fn a_client_admitted_from_tokio_lands_on_the_thread_that_owns_the_world() 
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -682,6 +688,7 @@ async fn a_client_that_enters_the_world_twice_is_refused_by_the_thread_that_owns
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -697,6 +704,7 @@ async fn a_client_that_enters_the_world_twice_is_refused_by_the_thread_that_owns
             target: "Warrior".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -731,6 +739,7 @@ async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -779,6 +788,7 @@ async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await

@@ -211,6 +211,17 @@ pub enum GameCommand {
         /// Where the game thread reports whether it installed.
         reply: oneshot::Sender<bool>,
     },
+    /// Installs the stored event calendar, once, after migration.
+    ///
+    /// The answer is a `bool` for the same reason
+    /// [`GameCommand::InstallItemIdRange`]'s is: `serve` treats a second install as a
+    /// bug it must not paper over.
+    InstallEvents {
+        /// Every stored event row, in id order.
+        events: Vec<db::events::StoredEvent>,
+        /// Where the game thread reports whether it installed.
+        reply: oneshot::Sender<bool>,
+    },
     /// Takes a granted item back out of the world after its row could not be written.
     ///
     /// The world is mutated before the row exists, because only the world can choose a
@@ -348,6 +359,12 @@ pub enum GameCommand {
         /// Where the game thread reports the map.
         reply: oneshot::Sender<i32>,
     },
+    /// The lines `BroadcastEventFlagOnLogin` sends a loading character
+    /// (`G/input_db.cpp:437`), one per non-zero flag. See `game_state::event_flag`.
+    LoginEventLines {
+        /// Where the game thread reports the lines' texts.
+        reply: oneshot::Sender<Vec<Vec<u8>>>,
+    },
     /// Answers the points and quickslots of the character online under `vid`, which the
     /// descriptor's save writes from: the world changes them on its own too (the potion
     /// recovery on its pulse, a trade the partner closes), so the copy the descriptor held
@@ -421,6 +438,59 @@ pub enum GameCommand {
         /// Where the game thread reports what the drop did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_ITEM_DESTROY` for the character online under `vid`, answered as a move is.
+    DestroyItem {
+        /// The VID of the character whose client sent the destroy.
+        vid: common::vid::Vid,
+        /// The cell the client named.
+        at: protocol::item_pos::ItemPos,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the destroy did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Runs one `CG_ITEM_USE_TO_ITEM` for the character online under `vid`, answered as a
+    /// move is.
+    UseItemToItem {
+        /// The VID of the character whose client sent the use.
+        vid: common::vid::Vid,
+        /// The cell of the item used.
+        at: protocol::item_pos::ItemPos,
+        /// The cell of the item it is used on.
+        dest: protocol::item_pos::ItemPos,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the use did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Runs one `CG_REFINE` for the character online under `vid`, answered as a move is.
+    Refine {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The inventory cell the client named.
+        pos: u8,
+        /// The refine type, or 255 for a closed window.
+        refine_type: u8,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the refine did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Runs one `CG_ITEM_GIVE` for the character online under `vid`, answered as a move is.
+    GiveItem {
+        /// The VID of the character whose client sent the gift.
+        vid: common::vid::Vid,
+        /// The VID the client named as the gift's victim.
+        target: u32,
+        /// The cell the client named.
+        at: protocol::item_pos::ItemPos,
+        /// Where the descriptor believes the character stands.
+        place: GroundPlace,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the gift did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one gold `CG_ITEM_DROP` or `CG_ITEM_DROP2` for the character online under `vid`,
     /// answered as a move is.
     DropGold {
@@ -436,6 +506,19 @@ pub enum GameCommand {
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
 
+    /// Runs one `CG_FISHING` for the character online under `vid`: the cast, or the take
+    /// while its fishing event runs. The records reach the client through the world; the
+    /// answer carries the rows to store.
+    Fishing {
+        /// The VID of the character whose client sent the record.
+        vid: common::vid::Vid,
+        /// The record's direction.
+        dir: u8,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the rows the step changed.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_ITEM_PICKUP` for the character online under `vid`, answered as a move is.
     PickupItem {
         /// The VID of the character whose client sent the pick-up.
@@ -485,6 +568,41 @@ pub enum GameCommand {
         /// `get_global_time()` in seconds, which the descriptor reads.
         now: u32,
         /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildMakeAnswer>,
+    },
+    /// Judges one `/makeguild` word for the character online under `vid`
+    /// (`ACMD(do_makeguild)`, `G/cmd_gm.cpp:2143-2167`): the guildless state, the name,
+    /// and the in-memory duplicate. No fee, no item, no delays.
+    JudgeMakeguild {
+        /// The VID of the character whose client sent the line.
+        vid: common::vid::Vid,
+        /// The raw word the line carried.
+        word: Vec<u8>,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildMakeAnswer>,
+    },
+    /// Judges one `/deleteguild` for the character online under `vid`
+    /// (`ACMD(do_deleteguild)`, `G/cmd_gm.cpp:2169-2173`): the guild disbands when the
+    /// caller leads it and no war holds it. Reports the quest-shaped judgement; the
+    /// descriptor stores the disband half.
+    JudgeDeleteguild {
+        /// The VID of the character whose client sent the line.
+        vid: common::vid::Vid,
+        /// `get_global_time()` in seconds, which the descriptor reads.
+        now: u32,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildQuestJudged>,
+    },
+    /// Commits one judged `/makeguild` for the character online under `vid`: the registry
+    /// and the link, the records, and the confirmation. No fee, no item.
+    CommitMakeguild {
+        /// The VID of the character whose client sent the line.
+        vid: common::vid::Vid,
+        /// The id the store answered plus the judged name.
+        commit: crate::game_state::GuildMakeCommit,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the commit.
         reply: oneshot::Sender<crate::game_state::GuildMakeAnswer>,
     },
     /// Commits one judged creation for the character online under `vid` under the id the
@@ -639,6 +757,16 @@ pub enum GameCommand {
         /// Where the game thread reports the judgement.
         reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
     },
+    /// Runs one `/greset` for the character online under `vid` (`do_greset`,
+    /// `G/cmd_gm.cpp:2175-2179`, plus `CGuild::Reset`, `G/guild.h:175`): the
+    /// world answers what the descriptor must store, if anything; see
+    /// `game_state::guild`.
+    RunGuildReset {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
     /// Judges one `GUILD_SUBHEADER_CG_POST_COMMENT` for the character online under
     /// `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:3048-3080`, plus
     /// `AddComment`, `G/guild.cpp:1049-1072`): the world answers what the descriptor
@@ -781,6 +909,14 @@ pub enum GameCommand {
         now: u32,
         /// Where the game thread reports the pairs, in set order.
         reply: oneshot::Sender<Vec<crate::game_state::GuildWarListLine>>,
+    },
+    /// Runs one `gstate` line (`do_guild_state`, `G/cmd_gm.cpp:2806-2822`); see
+    /// `game_state::guild`.
+    GuildState {
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the guild's numbers, or none.
+        reply: oneshot::Sender<Option<crate::game_state::GuildStateLine>>,
     },
     /// Drains the war ends the guild tick queued: the tick has no descriptor, so the
     /// outcomes wait in the world until a poller asks. See `game_state::guild`.
@@ -946,6 +1082,16 @@ pub enum GameCommand {
         /// Dropped once the deny has run, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
+    /// `/ungroup`: the character online under `vid` leaves its party.
+    /// See `game_state::party`.
+    Ungroup {
+        /// The VID of the leaving character.
+        vid: common::vid::Vid,
+        /// The caller's own PID, which the descriptor loaded.
+        pid: u32,
+        /// Dropped once the leave has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
     /// `CInputMain::PartyRemove`: the character online under `vid` removes the PID
     /// `pid` names from its party. See `game_state::party`.
     PartyRemove {
@@ -1060,6 +1206,20 @@ pub enum GameCommand {
         /// Where the game thread reports the membership.
         reply: oneshot::Sender<bool>,
     },
+    /// Runs one `CG_QUEST_CONFIRM` (`CInputMain::QuestConfirm`,
+    /// `G/input_main.cpp:2236-2248`) for the character online under `vid`: the waiter
+    /// `requestPID` names hears the answer in its own script, and its client hears what
+    /// that script sent. The sender hears nothing.
+    QuestConfirm {
+        /// The VID of the character whose client answered.
+        vid: common::vid::Vid,
+        /// The answer, folded to `CONFIRM_YES` (1) unless it was 0.
+        answer: u8,
+        /// The `requestPID` the client sent: the waiter's store id.
+        request_pid: u32,
+        /// Where the game thread reports that the answer ran.
+        reply: oneshot::Sender<()>,
+    },
     /// Judges one `MARK_UPLOAD` (`GuildMarkUpload`, `G/input_login.cpp:1059-1090`): the
     /// guild, its level against `min_level`, and the image. An all-zero image deletes;
     /// anything else commits into the mark manager. Carries the 192 native words the
@@ -1123,6 +1283,26 @@ pub enum GameCommand {
         vid: common::vid::Vid,
         /// The VID the client sent.
         target: u32,
+        /// Dropped once the answer is sent, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::TargetInfoLoad`: the character online under `vid` asks for the drop list
+    /// of the character `target` names. The world answers with one `GC_TARGET_INFO` per entry.
+    TargetInfo {
+        /// The VID of the asking character.
+        vid: common::vid::Vid,
+        /// The VID the client sent.
+        target: u32,
+        /// Dropped once the answer is sent, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::RequestEventData`: the character online under `vid` asks for the event
+    /// calendar of `month`. The world answers with one `GC_EVENT_INFO`.
+    EventInfo {
+        /// The VID of the asking character.
+        vid: common::vid::Vid,
+        /// The 0-based month the client sent.
+        month: u8,
         /// Dropped once the answer is sent, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
@@ -1204,6 +1384,519 @@ pub enum GameCommand {
         /// Where the game thread reports the line and the flag writes, when the line runs.
         reply: oneshot::Sender<SetBlockModeAnswer>,
     },
+    /// Run one `/hide_costume` line: the line's part hides or shows its costume, the
+    /// client hears `SetXCostumeHidden`, and the world's answer carries the
+    /// `costume_option.hide_*` quest flag for the store. See `game_state::whisper`.
+    HideCostume {
+        /// The VID of the hiding player.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line and the flag write, when the line runs.
+        reply: oneshot::Sender<HideCostumeAnswer>,
+    },
+    /// Run `CHARACTER::ChangeLanguage`'s world half for the player online under `vid`:
+    /// the body's language becomes `language` and its look update goes to its view.
+    /// See `game_state::affect`.
+    ChangeLanguage {
+        /// The VID of the switching player.
+        vid: common::vid::Vid,
+        /// The language the client switched to, 1 to 11.
+        language: u8,
+        /// Where the game thread reports whether the player is online.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Run one `/emotion_allow` or `/do_emotion` line: the consent insert or the
+    /// emotion's gates and its broadcast to the caller's view. What the line shows
+    /// rode the outbox already; the answer carries nothing. See `game_state::emotion`.
+    Emotion {
+        /// The VID of the emoting player.
+        vid: common::vid::Vid,
+        /// The command entry's name: `emotion_allow` or the emotion.
+        command: String,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/priv_empire` line: the usage lines or the grant and its notice to
+    /// every client. What the line shows rode the outbox already; the answer carries
+    /// nothing. See `game_state::empire_priv`.
+    PrivEmpire {
+        /// The VID of the granting GM.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/eventflag` line: the flag takes the value, and the caller hears
+    /// the `RequestSetEventFlag` line. Nothing otherwise. See `game_state::event_flag`.
+    EventFlag {
+        /// The VID of the setting GM.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/geteventflag` line: every flag is listed on the caller, one
+    /// `name value` line each. See `game_state::event_flag`.
+    GetEventFlag {
+        /// The VID of the asking GM.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/horse_state`, `/horse_level` or `/horse_set_stat` line. See
+    /// `game_state::horse`. Answers what `/horse_level` planted in the target's horse
+    /// skill, for the store.
+    HorseLine {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Which of the three lines.
+        line: HorseLine,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<Option<crate::game_state::SetSkillOtherLanded>>,
+    },
+    /// Run one `/xmas_boom`, `/xmas_snow`, `/xmas_santa`, `/eclipse` or `/eventhelper`
+    /// line: the named flag is set, or the firework sellers stand or go. See
+    /// `game_state::event_flag`.
+    EventLine {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Which of the five lines.
+        line: EventLine,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/give_reward` line: the busy, event and letter gates first, then the
+    /// six letters go and the box draw lands. Answers the stored rows, or `None`
+    /// for a refusal the caller already heard. See `game_state::letters`.
+    GiveReward {
+        /// The VID of the trading character.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the trade's rows.
+        reply: oneshot::Sender<Option<crate::game_state::LettersTrade>>,
+    },
+    /// Run one `/socketitem` line's give: one item of `vnum` by `AutoGiveItem` with its
+    /// first `sockets` sockets set to 1. Answers the stored rows, or `None` when nothing
+    /// was made, which the caller already heard. See `game_state::socket_item`.
+    SocketItem {
+        /// The VID of the GM.
+        vid: common::vid::Vid,
+        /// The item vnum.
+        vnum: u32,
+        /// How many leading sockets take 1.
+        sockets: usize,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the give's rows.
+        reply: oneshot::Sender<Option<crate::game_state::LettersTrade>>,
+    },
+    /// Run one of the small GM lines in `game_state::gm_lines`: the item ID list, the mob
+    /// count, the effect, and the two socket writes. What a line tells rides the outbox;
+    /// the answer is the rows a socket write changed, for the caller to store.
+    GmLine {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Which line.
+        line: GmLine,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the rows, or `None` when nothing is stored.
+        reply: oneshot::Sender<Option<crate::game_state::GmRows>>,
+    },
+    /// Run one `/letters_open` line: the caller hears the box's table and opens the
+    /// window. See `game_state::letters`.
+    LettersOpen {
+        /// The VID of the opening character.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/stat` or `/stat-` line: the named attribute rises or falls by 1,
+    /// the records ride the outbox, and the held row's numbers follow. See
+    /// `game_state::stat`.
+    Stat {
+        /// The VID of the raising character.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Whether the line lowers (`stat-`) rather than raises (`stat`).
+        lower: bool,
+        /// Where the game thread reports the new held numbers, when the line runs.
+        reply: oneshot::Sender<Option<crate::game_state::StatHeld>>,
+    },
+    /// Run one `/stat_val` line: the named attribute rises by the line's
+    /// amount for stat points, the records ride the outbox, and the held
+    /// row's numbers follow. See `game_state::stat`.
+    StatVal {
+        /// The VID of the raising character.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the new held numbers, when the line runs.
+        reply: oneshot::Sender<Option<crate::game_state::StatHeld>>,
+    },
+    /// Run one `*+` line: the entry's attribute rises by the line's amount
+    /// for stat points, the records ride the outbox, and the held row's
+    /// numbers follow. See `game_state::stat`.
+    StatPlus {
+        /// The VID of the raising character.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// The attribute the entry names, as a point slot.
+        kind: usize,
+        /// Where the game thread reports the new held numbers, when the line runs.
+        reply: oneshot::Sender<Option<crate::game_state::StatHeld>>,
+    },
+    /// Run one `t*` line: the named character's entry attribute moves by the
+    /// line's delta for the named character's stat points, the records ride
+    /// the outboxes, and the target's held numbers follow for its row. See
+    /// `game_state::stat`.
+    SetStat {
+        /// The VID of the calling character.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// The attribute the entry names, as a point slot.
+        kind: usize,
+        /// Where the game thread reports the target's name and new held
+        /// numbers, when the line runs.
+        reply: oneshot::Sender<Option<crate::game_state::SetStatHeld>>,
+    },
+    /// Run one `/stat_reset` line: the reset count rises to 12, the record
+    /// rides the outbox, and the held row's numbers follow. See
+    /// `game_state::stat`.
+    StatReset {
+        /// The VID of the resetting character.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the new held numbers, when the line runs.
+        reply: oneshot::Sender<Option<crate::game_state::StatHeld>>,
+    },
+    /// Run one `/pkmode` line: the caller's PK mode becomes the line's number,
+    /// and its update fans to its view. See `game_state::pk_mode`.
+    PkMode {
+        /// The VID of the switching character.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/set_walk_mode` or `/set_run_mode` line: the caller walks or
+    /// runs, and a change fans its walk-mode record to its view. See
+    /// `game_state::walk_mode`.
+    WalkMode {
+        /// The VID of the walking character.
+        vid: common::vid::Vid,
+        /// Whether the line walks rather than runs.
+        walk: bool,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/can_dead` or `/cannot_dead` line: the caller's
+    /// `cannot_dead` clears or sets. Nothing rides, nothing is stored: the
+    /// flag lives in memory, as legacy's does. See `game_state::death`.
+    CanDead {
+        /// The VID of the flagged character.
+        vid: common::vid::Vid,
+        /// Whether the line clears (`can_dead`) rather than sets.
+        can: bool,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/all_skill_master` line: every usable skill becomes 40, and
+    /// the planted vnums with their left-alone next-reads ride back for the
+    /// store. See `game_state::skill_admin`.
+    AllSkillMaster {
+        /// The VID of the mastered character.
+        vid: common::vid::Vid,
+        /// Where the game thread reports what the line planted.
+        reply: oneshot::Sender<Vec<crate::game_state::SetSkillLanded>>,
+    },
+    /// Run one `/item_full_set` line: the strips and the job's kit. See
+    /// `game_state::full_set`.
+    ItemFullSet {
+        /// The VID of the kitted character.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/attr_full_set` line: the forced pairs on each worn piece. See
+    /// `game_state::full_set`.
+    AttrFullSet {
+        /// The VID of the kitted character.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/full_set` line: the master line, the kit, the forced pairs. See
+    /// `game_state::full_set`.
+    FullSet {
+        /// The VID of the kitted character.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the planted skills with the moved items.
+        reply: oneshot::Sender<
+            Result<(Vec<crate::game_state::SetSkillLanded>, MovedItems), MoveItemRefused>,
+        >,
+    },
+    /// Run one `/slow` line: ten fresh 12019s, numbered in socket 4. See
+    /// `game_state::item_purge`.
+    Slow {
+        /// The VID of the given character.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/ipurge` line: every flat and dragon soul cell cleared. See
+    /// `game_state::item_purge`.
+    ItemPurge {
+        /// The VID of the purged character.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/book` line: one fresh 50300 with the named skill in socket 0. See
+    /// `game_state::item_purge`.
+    Book {
+        /// The VID of the given character.
+        vid: common::vid::Vid,
+        /// The line past the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/console` line: the `ConsoleEnable` command line. See
+    /// `game_state::item_purge`.
+    Console {
+        /// The VID of the told character.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the telling.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/set` line: the named PC's field set. See `game_state::set_attr`.
+    SetAttr {
+        /// The VID of the calling character.
+        vid: common::vid::Vid,
+        /// The line past the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the gold Transfer, if the arm stored one.
+        reply: oneshot::Sender<Option<crate::game_state::SetAttrStored>>,
+    },
+    /// Run one `/refine_rod`, `/refine_pick` or `/max_pick` line: the named cell's
+    /// tool refines, maxes, or both. See `GameState::run_tool_refine_line`.
+    ToolRefineLine {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Which tool line runs.
+        line: world::character::ToolRefine,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/use_item` line: the named cell through `UseItem`, or the no-item
+    /// line with an empty step. See `GameState::run_use_item_line`.
+    UseItemLine {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/dragon_soul` line (`do_dragon_soul`, `G/cmd_gm.cpp:5024-5047`): the
+    /// named deck activates, or every deck deactivates. See
+    /// `game_state::dragon_soul::run_dragon_soul`.
+    DragonSoul {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/ds_list` line (`do_ds_list`, `G/cmd_gm.cpp:5049-5059`): the caller
+    /// hears one line per dragon soul stone it holds. See
+    /// `game_state::dragon_soul::run_ds_list`.
+    DsList {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/ds_change_attr` line (`do_ds_change_attr`, `G/cmd_general.cpp:3864-3931`):
+    /// the named soul-inventory stone's attributes redrawn. See
+    /// `game_state::dragon_soul::run_ds_change_attr`.
+    DsChangeAttr {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/dice` line (`do_dice`, `G/cmd_general.cpp:3455-3489`): the roll to the
+    /// caller, or the party. See `game_state::dice::run_dice`.
+    Dice {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/gift` line (`do_gift`, `G/cmd_general.cpp:3251-3254`): the caller hears
+    /// the `gift` command line. See `game_state::dice::run_gift`.
+    Gift {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/state` line (`do_state`, `G/cmd_gm.cpp:1017-1202`): the target's
+    /// dump, told to the caller. See `game_state::state::run_state`.
+    State {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/inventory` line (`do_inventory`, `G/cmd_general.cpp:3210-3250`):
+    /// the caller's own cells, told to the caller. See
+    /// `game_state::state::run_inventory`.
+    Inventory {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/hair` line (`do_hair`, `G/cmd_general.cpp:3200-3208`): the caller's
+    /// hair affect as one line. See `game_state::costume::run_hair`.
+    Hair {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/shutdown` line (`do_shutdown`, `G/cmd_general.cpp:265-275`): the 10's
+    /// notice goes out and its countdown starts. See `game_state::shutdown::run_shutdown`.
+    Shutdown {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one exit line (`do_cmd`, `G/cmd_general.cpp:395-448`): the cancel or the
+    /// notice, and past the gate the countdown. See `game_state::timed_exit::run_do_cmd`.
+    DoCmd {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// Which exit the line asks for.
+        kind: ExitKind,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/pvp` line (`do_pvp`, `G/cmd_general.cpp:848-879`): the challenge or
+    /// the accept of the word's VID. See `game_state::duel::run_pvp`.
+    Pvp {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The line past the command word, as the client sent it.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/reload` line (`do_reload`, `G/cmd_gm.cpp:2639-2733`): the tells and the
+    /// table swaps over the files the descriptor read. See `game_state::reload`.
+    Reload {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The line past the command word, as the client sent it.
+        rest: Vec<u8>,
+        /// What the descriptor read for the line: each file's bytes, or `None` when the
+        /// file could not be read.
+        read: crate::game_state::ReloadRead,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/fish_simul` line (`do_fishing_simul`, `G/cmd_gm.cpp:2227-2251`):
+    /// the always-told usage, then the simulation's lines. See
+    /// `game_state::fish_simul::run_fish_simul`.
+    FishSimul {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The line past the command word, as the client sent it.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Run one `/costume` line (`do_costume`, `G/cmd_general.cpp:3089-3198`): the
+    /// costume status lines, and the named piece comes off. See
+    /// `game_state::costume::run_costume`.
+    Costume {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/do_clear_affect` line: `ClearAffect(true)` on the caller. See
+    /// `game_state::affect::run_clear_affect`.
+    ClearAffect {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
     /// The remaining `AFFECT_BLOCK_CHAT` duration of the character online under
     /// `vid` (`FindAffect`, `G/char_affect.cpp:129-142`), or `None` when it holds
     /// none: the descriptor asks before judging a chat line. See
@@ -1225,10 +1918,603 @@ pub enum GameCommand {
         /// Where the game thread reports whether a row moved.
         reply: oneshot::Sender<BlockChatAnswer>,
     },
+    /// Runs one `/block_chat_list` line (`do_block_chat_list`,
+    /// `G/cmd_gm.cpp:3298-3310`): the caller hears one `%s %s sec` line per
+    /// silenced character, or `No one currently blocked`. See
+    /// `game_state::whisper`.
+    BlockChatList {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/dc` line (`do_disconnect`, `G/cmd_gm.cpp:1755-1782`): the
+    /// named character's descriptor closes, or the caller hears the usage,
+    /// the no-such-player line, or the self refusal. See
+    /// `game_state::whisper`.
+    Dc {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/transfer` line (`do_transfer`, `G/cmd_gm.cpp:102-151`): the
+    /// named character warps to the caller's side, or the caller hears the
+    /// usage, the no-character line, the cross-Channel line, or the self
+    /// refusal. See `game_state::whisper`.
+    Transfer {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/kill` line (`do_kill`, `G/cmd_gm.cpp:1784-1805`): the named
+    /// character dies, or the caller hears the usage or the no-such-player
+    /// line. See `game_state::whisper`.
+    Kill {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/poison` line (`do_poison`, `G/cmd_gm.cpp:1808-1829`): the
+    /// named character is poisoned, or the caller hears the usage or the
+    /// no-such-player line. See `game_state::whisper`.
+    Poison {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/stun` line (`do_stun`, `G/cmd_gm.cpp:87-90`): the named
+    /// character is stunned, or the caller hears the usage, the miss, or the
+    /// confirmation. See `game_state::whisper`.
+    Stun {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/getqf` line (`do_getqf`, `G/cmd_gm.cpp:2863-2888`): the
+    /// target's quest flags, one line each. See `game_state::whisper`.
+    GetQf {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/setqf` line (`do_setqf`, `G/cmd_gm.cpp:2958-2992`): sets the
+    /// target's quest flag and chats the confirmation. See `game_state::whisper`.
+    SetQf {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/delqf` line (`do_delqf`, `G/cmd_gm.cpp:2994-3027`): deletes
+    /// the target's quest flag and chats the outcome. See `game_state::whisper`.
+    DelQf {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/set_state` line (`do_set_state`, `G/cmd_gm.cpp:2891-2956`):
+    /// the target's quest moves to the named state. See `game_state::whisper`.
+    SetState {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/qf` line (`do_qf`, `G/cmd_gm.cpp:2326-2364`): the
+    /// caller's current quest moves to the named state. See
+    /// `game_state::whisper`.
+    Qf {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/clear_quest` line (`do_clear_quest`,
+    /// `G/cmd_gm.cpp:3732-3743`): the caller's quest forgets every flag and
+    /// rests at 0. See `game_state::whisper`.
+    ClearQuest {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/view_equip` line (`do_view_equip`,
+    /// `G/cmd_general.cpp:2395-2426`): the caller views the VID's worn
+    /// equipment. See `game_state::whisper`.
+    ViewEquip {
+        /// The VID of the character whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/warp` line (`do_warp`, `G/cmd_gm.cpp:399-457`): the caller
+    /// warps to the named character or the metres, or hears the usage or the
+    /// miss. See `game_state::whisper`.
+    Warp {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/private` line (`do_private`, `G/cmd_gm.cpp:2301-2325`): the
+    /// caller warps to a private copy of the named map, or hears the usage or
+    /// the miss. See `game_state::whisper`.
+    Private {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/rewarp` line (`do_rewarp`, `G/cmd_gm.cpp:459-465`): the
+    /// caller rewarps in place. See `game_state::whisper`.
+    Rewarp {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// The asking half of one `/observer_exit` line (`do_observer_exit`,
+    /// `G/cmd_general.cpp:2370-2393`): the sort lock when the caller observes, else `None`.
+    /// The descriptor runs `ExitToSavedLocation`'s warp first. See `game_state::observer`.
+    ObserverExit {
+        /// The VID of the character whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the lock, or that the caller observes nothing.
+        reply: oneshot::Sender<Option<u32>>,
+    },
+    /// The clearing half of one `/observer_exit` line: the exit's clear, which dances a
+    /// refused warp's character back into view and tells the line. After an accepted warp
+    /// the character is gone and there is nothing to clear. See `game_state::observer`.
+    ObserverSettled {
+        /// The VID of the character whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the clear ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/goto` line (`do_goto`, `G/cmd_gm.cpp:313-397`): the caller
+    /// shows at the metres or warps to the named map, or hears the usage.
+    /// See `game_state::whisper`.
+    Goto {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/level` line (`do_level`, `G/cmd_gm.cpp:2740-2758`): the
+    /// caller's level becomes the line's, or it hears the syntax.
+    /// See `game_state::level`.
+    Level {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// The row's gold, which the points pair carries.
+        gold: i64,
+        /// The row's voice, which the points record carries.
+        voice: u8,
+        /// Where the game thread reports what the line reset.
+        reply: oneshot::Sender<Option<crate::game_state::LevelHeld>>,
+    },
+    /// Runs one `/advance` line (`do_advance`, `G/cmd_gm.cpp:2083-2106`): the
+    /// named character's level becomes the line's, or the caller hears the
+    /// syntax or the miss. See `game_state::level`.
+    Advance {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// The caller's row's gold, which the points pair carries.
+        gold: i64,
+        /// The caller's row's voice, which the points record carries.
+        voice: u8,
+        /// Where the game thread reports the target with what the line reset.
+        reply: oneshot::Sender<Option<crate::game_state::AdvanceLanded>>,
+    },
+    /// Runs one `/reset` line (`do_reset`, `G/cmd_gm.cpp:2076-2081`): the
+    /// caller's hit and spell pools refill. See `game_state::level`.
+    Reset {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the filled pools, when the line runs.
+        reply: oneshot::Sender<Option<crate::game_state::ResetHeld>>,
+    },
+    /// Grants the `rank`th top-player affect (1 to 3) after a `/level` reached
+    /// 120 (`SetTopPlayerEffect`, `G/char.cpp:11255-11284`). The step counted
+    /// the store's `player_top` rows and stood this caller's.
+    GrantTopAffect {
+        /// The VID of the character that reached 120.
+        vid: common::vid::Vid,
+        /// The standing row's rank: 1, 2 or 3.
+        rank: u8,
+        /// Where the game thread reports the grant landed.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/setskill` line (`do_setskill`, `G/cmd_gm.cpp:2574-2605`):
+    /// the caller's named skill becomes the line's level, or it hears the
+    /// syntax or the miss. See `game_state::skill_admin`.
+    SetSkill {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports what the line set.
+        reply: oneshot::Sender<Option<crate::game_state::SetSkillLanded>>,
+    },
+    /// Runs one `/setskillother` line (`do_setskillother`,
+    /// `G/cmd_gm.cpp:2528-2572`): the named character's skill becomes the
+    /// line's level. See `game_state::skill_admin`.
+    SetSkillOther {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the target with the set.
+        reply: oneshot::Sender<Option<crate::game_state::SetSkillOtherLanded>>,
+    },
+    /// Runs one `/setskillpoint` line (`do_set_skill_point`,
+    /// `G/cmd_gm.cpp:2607-2618`): the caller's skill counter becomes the
+    /// line's number. See `game_state::skill_admin`.
+    SetSkillPoint {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the counter.
+        reply: oneshot::Sender<Option<i32>>,
+    },
+    /// Runs one `/setjob` line (`do_set_skill_group`,
+    /// `G/cmd_gm.cpp:2620-2631`): the caller's skill group becomes the
+    /// line's, then the skills clear. See `game_state::skill_admin`.
+    SetJob {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the group with the clear.
+        reply: oneshot::Sender<Option<crate::game_state::SetJobLanded>>,
+    },
+    /// Runs one `/invisible` line (`do_invisibility`,
+    /// `G/cmd_gm.cpp:2253-2264`): the caller's invisibility toggles. See
+    /// `game_state::affect::toggle_invisible`.
+    Invisible {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/cooltime` line (`do_cooltime`, `G/cmd_gm.cpp:2735-2738`):
+    /// the caller's skill cooldowns stop gating. See
+    /// `game_state::pc_skill::disable_cooltime`.
+    Cooltime {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/affect_remove` line (`do_affect_remove`,
+    /// `G/cmd_gm.cpp:3865-3918`): the caller's affect list, or the named
+    /// affect's removal. See `game_state::affect::affect_remove`.
+    AffectRemove {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/purge` or `/weaken` line (`do_purge`, `do_weaken`,
+    /// `G/cmd_gm.cpp:816-868`, `:2824-2861`): every NPC of the sectrees around
+    /// the caller is destroyed or set to 10 hit points. See
+    /// `game_state::regen::purge_around`.
+    Purge {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Whether the line weakens rather than destroys.
+        weaken: bool,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/respawn` line (`do_respawn`, `G/cmd_gm.cpp:2108-2123`): the
+    /// regens holding the caller's position, or every regen when the line
+    /// says `all`, fire one Pulse on. See `game_state::regen::respawn_around`.
+    Respawn {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/mob` line (`do_mob`, `G/cmd_gm.cpp:699-758`): the named
+    /// mob stands around the caller, or the usage or the miss answers. See
+    /// `game_state::regen::mob_around`.
+    Mob {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/mob_ld` line (`do_mob_ld`, `G/cmd_gm.cpp:760-815`): the
+    /// named mob at the named metres, or the usage or the miss answers. See
+    /// `game_state::regen::mob_ld_at`.
+    MobLd {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/ma` line (`do_mob_aggresive`, `G/cmd_gm.cpp:639-698`): the
+    /// named mob stands around the caller with the aggressive bit set, or
+    /// the usage or the miss answers. See `game_state::regen::mob_flagged`.
+    MobAggressive {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/mc` line (`do_mob_coward`, `G/cmd_gm.cpp:557-617`): the
+    /// named mob stands around the caller with the coward bit set, or the
+    /// usage or the miss answers. See `game_state::regen::mob_flagged`.
+    MobCoward {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/mm` line (`do_mob_map`, `G/cmd_gm.cpp:618-637`): the
+    /// numbered mob at a random point of the caller's map, or the syntax,
+    /// the stood line, or the failure answers. See
+    /// `game_state::regen::mob_somewhere`.
+    MobMap {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/detaillog` line (`do_detaillog`, `G/cmd_general.cpp:2242-2245`):
+    /// the caller's detail flag flips. See `game_state::detail_log::toggle_detail_log`.
+    DetailLog {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/monsterlog` line (`do_monsterlog`, `G/cmd_general.cpp:2247-2250`):
+    /// the caller's monster subscription flips. See
+    /// `game_state::detail_log::toggle_monster_log`.
+    MonsterLog {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/polymorph` line (`do_polymorph`, `G/cmd_gm.cpp:3049-3068`):
+    /// the caller shows as the named mob vnum, or unmorphs on an empty or job
+    /// vnum. See `game_state::polymorph::run_polymorph`.
+    Polymorph {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The line's words after the command name.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/forgetme` line (`do_forgetme`, `G/cmd_gm.cpp:3029-3032`):
+    /// every monster around whose victim is the caller drops it, then the
+    /// caller hides for 5 seconds. See `game_state::mob_battle::forget_my_attacker`.
+    ForgetMe {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/aggregate` line (`do_aggregate`, `G/cmd_gm.cpp:3034-3037`):
+    /// each victimless monster around within 5000, with a one-in-two draw,
+    /// begins to fight the caller. See `game_state::mob_battle::aggregate_monster`.
+    Aggregate {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/attract_ranger` line (`do_attract_ranger`, `G/cmd_gm.cpp:3039-3042`):
+    /// each monster around whose victim is none or the caller and whose attack range
+    /// is past 150 is cut to 150 for 3 minutes. See
+    /// `game_state::mob_battle::attract_ranger`.
+    AttractRanger {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/pull_monster` line (`do_pull_monster`, `G/cmd_gm.cpp:3044-3047`):
+    /// each monster around 100 to 3000 out is pulled 300 toward the caller. See
+    /// `game_state::mob_battle::pull_monster`.
+    PullMonster {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/group` line (`do_group`, `G/cmd_gm.cpp:537-555`): the group
+    /// in the 500-box around the caller, or the usage answers. See
+    /// `game_state::regen::group_around`.
+    Group {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `/grrandom` line (`do_group_random`, `G/cmd_gm.cpp:521-536`):
+    /// one group drawn uniformly from the group-group, spawned as `/group`
+    /// spawns it, or the usage answers. See
+    /// `game_state::regen::group_random_around`.
+    GroupRandom {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
 
+impl GameCommand {
+    /// Whether the dispatch runs this through `apply_chat_line`: the emotion
+    /// and the priv, silence, disconnect, transfer, kill, poison, stun, warp,
+    /// rewarp, goto, level, advance, top grant, skill-admin, invisible,
+    /// cooltime, affect-remove, flag, letters, stat, PK, walk, master, use and
+    /// clear lines.
+    pub fn is_chat_line(&self) -> bool {
+        matches!(
+            self,
+            GameCommand::Emotion { .. }
+                | GameCommand::PrivEmpire { .. }
+                | GameCommand::BlockChatOf { .. }
+                | GameCommand::BlockChat { .. }
+                | GameCommand::BlockChatList { .. }
+                | GameCommand::Dc { .. }
+                | GameCommand::Transfer { .. }
+                | GameCommand::Kill { .. }
+                | GameCommand::Poison { .. }
+                | GameCommand::Stun { .. }
+                | GameCommand::GetQf { .. }
+                | GameCommand::SetQf { .. }
+                | GameCommand::DelQf { .. }
+                | GameCommand::SetState { .. }
+                | GameCommand::Qf { .. }
+                | GameCommand::ClearQuest { .. }
+                | GameCommand::ViewEquip { .. }
+                | GameCommand::Warp { .. }
+                | GameCommand::Private { .. }
+                | GameCommand::Rewarp { .. }
+                | GameCommand::ObserverExit { .. }
+                | GameCommand::ObserverSettled { .. }
+                | GameCommand::Goto { .. }
+                | GameCommand::Level { .. }
+                | GameCommand::Advance { .. }
+                | GameCommand::Reset { .. }
+                | GameCommand::GrantTopAffect { .. }
+                | GameCommand::SetSkill { .. }
+                | GameCommand::SetSkillOther { .. }
+                | GameCommand::SetSkillPoint { .. }
+                | GameCommand::SetJob { .. }
+                | GameCommand::Invisible { .. }
+                | GameCommand::Cooltime { .. }
+                | GameCommand::AffectRemove { .. }
+                | GameCommand::Purge { .. }
+                | GameCommand::Respawn { .. }
+                | GameCommand::Mob { .. }
+                | GameCommand::MobLd { .. }
+                | GameCommand::MobAggressive { .. }
+                | GameCommand::MobCoward { .. }
+                | GameCommand::MobMap { .. }
+                | GameCommand::DetailLog { .. }
+                | GameCommand::MonsterLog { .. }
+                | GameCommand::Polymorph { .. }
+                | GameCommand::ForgetMe { .. }
+                | GameCommand::Aggregate { .. }
+                | GameCommand::AttractRanger { .. }
+                | GameCommand::PullMonster { .. }
+                | GameCommand::Group { .. }
+                | GameCommand::GroupRandom { .. }
+                | GameCommand::EventFlag { .. }
+                | GameCommand::GetEventFlag { .. }
+                | GameCommand::EventLine { .. }
+                | GameCommand::GiveReward { .. }
+                | GameCommand::SocketItem { .. }
+                | GameCommand::GmLine { .. }
+                | GameCommand::LettersOpen { .. }
+                | GameCommand::Stat { .. }
+                | GameCommand::StatVal { .. }
+                | GameCommand::StatPlus { .. }
+                | GameCommand::SetStat { .. }
+                | GameCommand::StatReset { .. }
+                | GameCommand::PkMode { .. }
+                | GameCommand::WalkMode { .. }
+                | GameCommand::CanDead { .. }
+                | GameCommand::AllSkillMaster { .. }
+                | GameCommand::ItemFullSet { .. }
+                | GameCommand::AttrFullSet { .. }
+                | GameCommand::FullSet { .. }
+                | GameCommand::ToolRefineLine { .. }
+                | GameCommand::UseItemLine { .. }
+                | GameCommand::ClearAffect { .. }
+                | GameCommand::DragonSoul { .. }
+                | GameCommand::Costume { .. }
+                | GameCommand::DsList { .. }
+                | GameCommand::DsChangeAttr { .. }
+                | GameCommand::Dice { .. }
+                | GameCommand::Gift { .. }
+                | GameCommand::Hair { .. }
+                | GameCommand::FishSimul { .. }
+                | GameCommand::Shutdown { .. }
+                | GameCommand::DoCmd { .. }
+                | GameCommand::Pvp { .. }
+                | GameCommand::Reload { .. }
+                | GameCommand::State { .. }
+                | GameCommand::Inventory { .. }
+                | GameCommand::Slow { .. }
+                | GameCommand::ItemPurge { .. }
+                | GameCommand::Book { .. }
+                | GameCommand::Console { .. }
+                | GameCommand::SetAttr { .. }
+        )
+    }
+}
 /// How a character leaves the world.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Departure {
@@ -1236,6 +2522,74 @@ pub enum Departure {
     Disconnect,
     /// Its client warps, which takes the body out of its sectree first (`G/char.cpp:6751-6752`).
     Warp,
+}
+
+/// The commands that set one named flag, or spawn the event helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventLine {
+    /// `/xmas_boom` (`do_xmas`, `SCMD_XMAS_BOOM`).
+    XmasBoom,
+    /// `/xmas_snow` (`SCMD_XMAS_SNOW`).
+    XmasSnow,
+    /// `/xmas_santa` (`SCMD_XMAS_SANTA`).
+    XmasSanta,
+    /// `/eclipse` (`do_eclipse`).
+    Eclipse,
+    /// `/eventhelper` (`do_event_helper`).
+    EventHelper,
+}
+
+/// The GM horse lines (`G/cmd_gm.cpp:3745-3833`) that run without a summoned horse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HorseLine {
+    /// `/horse_state` (`do_horse_state`).
+    State,
+    /// `/horse_level` (`do_horse_level`).
+    Level,
+    /// `/horse_set_stat` (`do_horse_set_stat`).
+    SetStat,
+}
+
+/// The small GM lines `game_state::gm_lines` runs, and the player's `/conqueror_point`,
+/// `/sort_inventory` and `/pickup_affect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GmLine {
+    /// `/item_id_list` (`do_get_item_id_list`).
+    ItemIdList,
+    /// `/get_mob_count` (`do_get_mob_count`).
+    MobCount,
+    /// `/effect` (`do_effect`).
+    Effect,
+    /// `/add_socket` (`do_add_socket`).
+    AddSocket,
+    /// `/set_socket` (`do_set_socket`).
+    SetSocket,
+    /// `/change_attr` (`do_change_attr`).
+    ChangeAttr,
+    /// `/add_attr` (`do_add_attr`).
+    AddAttr,
+    /// `/change_rare_attr` (`do_change_rare_attr`).
+    ChangeRareAttr,
+    /// `/add_rare_attr` (`do_add_rare_attr`).
+    AddRareAttr,
+    /// `/force_logout` (`do_force_logout`).
+    ForceLogout,
+    /// `/reset_subskill` (`do_reset_subskill`).
+    ResetSubSkill,
+    /// `/conqueror_level` (`do_conqueror_level`).
+    ConquerorLevel,
+    /// `/conqueror_point` (`do_conqueror_point`), a player's line.
+    ConquerorPoint,
+    /// `/sort_inventory` (`do_sort_inventory`), a player's line.
+    SortInventory,
+    /// `/pickup_affect` (`do_pickup_affect`), a player's line.
+    PickupAffect,
+    /// `/move_channel` (`do_move_channel`), a player's line.
+    MoveChannel,
+    /// `/flush` (`do_flush`), an implementor's line.
+    Flush,
+    /// `/observer` (`do_observer`), an implementor's line.
+    Observer,
 }
 
 /// Which restart a dead player asks for.
@@ -1247,6 +2601,17 @@ pub enum RestartKind {
     Town,
     /// `/restart_now`: where it lies, at full hit points, for 300 000 gold.
     Now,
+}
+
+/// Which exit a player asks for (`do_cmd`'s `SCMD_*`, `G/cmd.h:34-36`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExitKind {
+    /// `/logout`: the descriptor closes with a save.
+    Logout,
+    /// `/quit`: the client is told to quit itself.
+    Quit,
+    /// `/phase_select`: the character disconnects and the descriptor returns to select.
+    PhaseSelect,
 }
 
 /// What a restart changed that the descriptor keeps.
@@ -1272,6 +2637,14 @@ pub struct SetBlockModeAnswer {
     pub line: Option<Vec<u8>>,
     /// The seven `game_option.block_*` flag writes for the store.
     pub flags: Vec<(Vec<u8>, i32)>,
+}
+/// What a `/hide_costume` line changed that the descriptor keeps.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HideCostumeAnswer {
+    /// The `costume_option.hide_*` flag write for the store, or `None` when the line
+    /// hid nothing (empty, moving, or no such part). The `SetXCostumeHidden` line and
+    /// the look update rode the outbox already.
+    pub flag: Option<(Vec<u8>, i32)>,
 }
 
 /// What a `/block_chat` line did that the descriptor keeps.
@@ -1302,11 +2675,16 @@ pub enum BlockChatAnswer {
 }
 
 /// What a hit changed that the descriptor keeps.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AttackAnswer {
     /// The gold the hit stole, as the signed change the store applies, or `None` when it
     /// stole none.
     pub gold: Option<i64>,
+    /// The row changes the hit's spends made, in the order they happened: a bow shot's
+    /// arrow (`UseArrow`), and the restack arm's destroy + move when the shot emptied the
+    /// stack. The store applies these with the gold as one Transfer, because a save writes
+    /// no item rows.
+    pub spent: Vec<db::items::RowChange>,
 }
 
 /// Where a whisper went.
@@ -1385,10 +2763,25 @@ pub struct Shown {
     /// The character's own `GC_CHARACTER_UPDATE`, with the affect flags its revive-invisible
     /// affect sets. Its enter-game burst carries it; `None` when the character has no place.
     pub update: Option<Vec<u8>>,
-    /// The `GC_AFFECT_ADD` of each restored silence (`LoadAffect`,
+    /// The `GC_AFFECT_ADD` of each restored saved affect (`LoadAffect`,
     /// `G/char_affect.cpp:573-666`). The burst carries them behind the update, as
     /// the load's add packets ride the queue they found.
     pub silence: Vec<Vec<u8>>,
+    /// The five `SetXCostumeHidden` lines of the enter-game hide restore
+    /// (`CInputLogin::Entergame`, `G/input_login.cpp:612-638`), in part order. The burst
+    /// carries them after the phase change, where legacy sends them after `SetPhase`.
+    pub hide_lines: Vec<Vec<u8>>,
+    /// The live priv bonus notices (`_send_bonus_info`, `G/input_login.cpp:39-66`), in
+    /// type order. The burst carries them after the Channel record, where legacy sends
+    /// them after the greet.
+    pub priv_lines: Vec<Vec<u8>>,
+    /// Whether the character is in the letters event (`SEventLetters`,
+    /// `G/input_login.cpp:69-82`): the `letters_event` flag is not 0. The burst's line
+    /// reads 1 then, else 0.
+    pub letters_event: bool,
+    /// Whether the character observes: a war map's watch sets the flag at admission
+    /// (`CWarMap::IncMember`, `G/war_map.cpp:384`). The descriptor gates the records by it.
+    pub observer: bool,
 }
 
 /// Where a character stands, as the descriptor holds it. The world reads the point of a
@@ -1864,6 +3257,30 @@ impl GameLoopController {
         }
     }
 
+    /// Installs the world's event calendar, and waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallError::NotSent`] when the game thread has closed its receiver and
+    /// [`InstallError::NoAnswer`] when it closed the reply without sending. The
+    /// caller must not open the ready gate on either: a world without its calendar
+    /// answers every event board empty, so a silently missing install is a server
+    /// that looks up and denies every scheduled event.
+    pub async fn install_events(
+        &self,
+        events: Vec<db::events::StoredEvent>,
+    ) -> Result<Result<(), InstallError>, InstallError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::InstallEvents { events, reply })
+            .await
+            .map_err(|_| InstallError::NotSent)?;
+        if answer.await.map_err(|_| InstallError::NoAnswer)? {
+            Ok(Ok(()))
+        } else {
+            Ok(Err(InstallError::AlreadyInstalled))
+        }
+    }
+
     /// Takes a granted item back out of the world, and waits for the answer.
     ///
     /// # Errors
@@ -2042,6 +3459,20 @@ impl GameLoopController {
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
+    /// Asks the world for the event-flag lines a loading character hears
+    /// (`BroadcastEventFlagOnLogin`, `G/questmanager.cpp:1701-1744`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn login_event_lines(&self) -> Result<Vec<Vec<u8>>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::LoginEventLines { reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
     /// Asks the world for the points and quickslots of the character online under `vid`,
     /// which a save writes from, after it banks `playtime` minutes played when there are any.
     ///
@@ -2166,6 +3597,104 @@ impl GameLoopController {
         .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
+
+    /// Asks the world to destroy the item, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn destroy_item(
+        &self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DestroyItem {
+            vid,
+            at,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to use one item on another, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn use_item_to_item(
+        &self,
+        vid: common::vid::Vid,
+        (at, dest): (protocol::item_pos::ItemPos, protocol::item_pos::ItemPos),
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::UseItemToItem {
+            vid,
+            at,
+            dest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a refine request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn refine(
+        &self,
+        vid: common::vid::Vid,
+        (pos, refine_type): (u8, u8),
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Refine {
+            vid,
+            pos,
+            refine_type,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to give the item, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn give_item(
+        &self,
+        vid: common::vid::Vid,
+        target: u32,
+        at: protocol::item_pos::ItemPos,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GiveItem {
+            vid,
+            target,
+            at,
+            place,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
     /// Asks the world to drop gold, and waits for what it did.
     ///
     /// # Errors
@@ -2183,6 +3712,29 @@ impl GameLoopController {
             vid,
             gold,
             place,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `CG_FISHING`, and waits for the rows it changed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn fishing(
+        &self,
+        vid: common::vid::Vid,
+        dir: u8,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Fishing {
+            vid,
+            dir,
             mover,
             reply,
         })
@@ -2257,6 +3809,63 @@ impl GameLoopController {
             vid,
             field,
             now,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `/makeguild` word, and waits for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn judge_makeguild(
+        &self,
+        vid: common::vid::Vid,
+        word: Vec<u8>,
+    ) -> Result<crate::game_state::GuildMakeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::JudgeMakeguild { vid, word, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `/deleteguild`, and waits for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn judge_deleteguild(
+        &self,
+        vid: common::vid::Vid,
+        now: u32,
+    ) -> Result<crate::game_state::GuildQuestJudged, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::JudgeDeleteguild { vid, now, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged `/makeguild`, and waits for the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_makeguild(
+        &self,
+        vid: common::vid::Vid,
+        commit: crate::game_state::GuildMakeCommit,
+        mover: Mover,
+    ) -> Result<crate::game_state::GuildMakeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitMakeguild {
+            vid,
+            commit,
+            mover,
             reply,
         })
         .await
@@ -2513,6 +4122,23 @@ impl GameLoopController {
     ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::AnswerGuildCharge { vid, offer, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/greset`, and waits for what the step
+    /// stores. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_guild_reset(
+        &self,
+        vid: common::vid::Vid,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::RunGuildReset { vid, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
@@ -2784,6 +4410,21 @@ impl GameLoopController {
     ) -> Result<Vec<crate::game_state::GuildWarListLine>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::GuildWarList { now, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world for the `/gstate` answer for `rest`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_state(
+        &self,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::GuildStateLine>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildState { rest, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
@@ -3066,6 +4707,20 @@ impl GameLoopController {
         Ok(settling)
     }
 
+    /// Hands the world a `/ungroup` line from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once the leave has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn ungroup(&self, vid: common::vid::Vid, pid: u32) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::Ungroup { vid, pid, settled })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
     /// Hands the world a `CG_PARTY_REMOVE` from the character online under `vid`, without
     /// waiting. The [`Settled`] resolves once the removal has run.
     ///
@@ -3262,6 +4917,30 @@ impl GameLoopController {
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
+    /// Asks the world to run one `CG_QUEST_CONFIRM` for the character online under
+    /// `vid`, and waits until it ran.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::sync_positions`].
+    pub async fn quest_confirm(
+        &self,
+        vid: common::vid::Vid,
+        answer: u8,
+        request_pid: u32,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answered) = oneshot::channel();
+        self.send_command(GameCommand::QuestConfirm {
+            vid,
+            answer,
+            request_pid,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answered.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
     /// Asks the world whether the character online under `vid` holds a guild, and
     /// waits for the answer.
     ///
@@ -3395,6 +5074,50 @@ impl GameLoopController {
         Ok(settling)
     }
 
+    /// Hands the world a `CG_TARGET_INFO_LOAD` from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once its answer is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn target_info(
+        &self,
+        vid: common::vid::Vid,
+        target: u32,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::TargetInfo {
+            vid,
+            target,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_REQUEST_EVENT_DATA` from the character online under `vid`,
+    /// without waiting. The [`Settled`] resolves once its answer is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn event_info(
+        &self,
+        vid: common::vid::Vid,
+        month: u8,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::EventInfo {
+            vid,
+            month,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
     /// Hands the world a `CG_USE_SKILL` from the character online under `vid`, without
     /// waiting. The [`Settled`] resolves once the cast has run.
     ///
@@ -3477,6 +5200,28 @@ impl GameLoopController {
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
+    /// Asks the world to switch the language of the player online under `vid` and show
+    /// its new look, and waits for whether the player is online.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn change_language(
+        &self,
+        vid: common::vid::Vid,
+        language: u8,
+    ) -> Result<bool, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ChangeLanguage {
+            vid,
+            language,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
     /// Asks the world to run one restart command of a player, and waits for the gold it took.
     /// What it shows is written to the player's outbox before the answer.
     ///
@@ -3537,10 +5282,880 @@ impl GameLoopController {
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
+    /// Asks the world to run one `/hide_costume` line of a player, and waits for the
+    /// flag write. The `SetXCostumeHidden` line and the look update ride the outbox
+    /// before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn hide_costume(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<HideCostumeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::HideCostume { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/emotion_allow` or `/do_emotion` line of a player.
+    /// What the line shows rides the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn emotion(
+        &self,
+        vid: common::vid::Vid,
+        command: String,
+        rest: Vec<u8>,
+        mover: crate::item_move::Mover,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Emotion {
+            vid,
+            command,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/priv_empire` line of a GM. What the line shows rides
+    /// the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn priv_empire(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: crate::item_move::Mover,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::PrivEmpire {
+            vid,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/eventflag` line of a GM. What the line shows rides
+    /// the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn event_flag(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: crate::item_move::Mover,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::EventFlag {
+            vid,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/geteventflag` line of a GM. What the line shows
+    /// rides the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn get_event_flag(
+        &self,
+        vid: common::vid::Vid,
+        mover: crate::item_move::Mover,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GetEventFlag { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/horse_state`, `/horse_level` or `/horse_set_stat` line
+    /// of a GM. What the line shows rides the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn horse_line(
+        &self,
+        vid: common::vid::Vid,
+        line: HorseLine,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::SetSkillOtherLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::HorseLine {
+            vid,
+            line,
+            rest,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/xmas_*`, `/eclipse` or `/eventhelper` line of a GM.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn event_line(
+        &self,
+        vid: common::vid::Vid,
+        line: EventLine,
+        rest: Vec<u8>,
+        mover: crate::item_move::Mover,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::EventLine {
+            vid,
+            line,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/give_reward` line. What the line shows rides the
+    /// outbox before the answer, which is the stored rows or `None` for a refusal
+    /// the caller already heard.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn give_reward(
+        &self,
+        vid: common::vid::Vid,
+        mover: crate::item_move::Mover,
+    ) -> Result<Option<crate::game_state::LettersTrade>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GiveReward { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/socketitem` give. The records ride back with the
+    /// stored rows, which the caller stores before the client hears of them; `None` is a
+    /// give that made nothing, whose line rode the outbox.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn socket_item(
+        &self,
+        vid: common::vid::Vid,
+        (vnum, sockets): (u32, usize),
+        mover: crate::item_move::Mover,
+    ) -> Result<Option<crate::game_state::LettersTrade>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SocketItem {
+            vid,
+            vnum,
+            sockets,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one small GM line. What it tells rides the outbox before the
+    /// answer, which is the rows a socket write changed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn gm_line(
+        &self,
+        vid: common::vid::Vid,
+        line: GmLine,
+        rest: Vec<u8>,
+        mover: crate::item_move::Mover,
+    ) -> Result<Option<crate::game_state::GmRows>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GmLine {
+            vid,
+            line,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/letters_open` line. What the line shows rides the
+    /// outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn letters_open(
+        &self,
+        vid: common::vid::Vid,
+        mover: crate::item_move::Mover,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::LettersOpen { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/stat` or `/stat-` line. What the line shows
+    /// rides the outbox before the answer, which is the new held numbers or
+    /// `None` for a line that runs nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_stat(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        lower: bool,
+    ) -> Result<Option<crate::game_state::StatHeld>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Stat {
+            vid,
+            rest,
+            lower,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/stat_val` line. What the line shows
+    /// rides the outbox before the answer, which is the new held numbers or
+    /// `None` for a line that runs nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_stat_val(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::StatHeld>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::StatVal { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `*+` line. What the line shows rides the
+    /// outbox before the answer, which is the new held numbers or `None` for
+    /// a line that runs nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_stat_plus(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        kind: usize,
+    ) -> Result<Option<crate::game_state::StatHeld>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::StatPlus {
+            vid,
+            rest,
+            kind,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `t*` line. What the line shows rides the
+    /// outboxes before the answer, which is the target's name and new held
+    /// numbers, or `None` for a line that runs nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_set_stat(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        kind: usize,
+    ) -> Result<Option<crate::game_state::SetStatHeld>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetStat {
+            vid,
+            rest,
+            kind,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/stat_reset` line. What the line shows rides
+    /// the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_stat_reset(
+        &self,
+        vid: common::vid::Vid,
+    ) -> Result<Option<crate::game_state::StatHeld>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::StatReset { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/pkmode` line. What the line shows rides the
+    /// outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_pkmode(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::PkMode { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/set_walk_mode` or `/set_run_mode` line. What
+    /// the line shows rides the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_walk_mode(
+        &self,
+        vid: common::vid::Vid,
+        walk: bool,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::WalkMode { vid, walk, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/can_dead` or `/cannot_dead` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_can_dead(
+        &self,
+        vid: common::vid::Vid,
+        can: bool,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CanDead { vid, can, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/all_skill_master` line, and hears what
+    /// the line planted for the store.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_all_skill_master(
+        &self,
+        vid: common::vid::Vid,
+    ) -> Result<Vec<crate::game_state::SetSkillLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AllSkillMaster { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/item_full_set` line, and hears the moved
+    /// items for the store and the client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_item_full_set(
+        &self,
+        vid: common::vid::Vid,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ItemFullSet { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/attr_full_set` line, and hears the moved
+    /// items for the store and the client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_attr_full_set(
+        &self,
+        vid: common::vid::Vid,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AttrFullSet { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/full_set` line, and hears the planted skills
+    /// with the moved items.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_full_set(
+        &self,
+        vid: common::vid::Vid,
+        mover: Mover,
+    ) -> Result<
+        Result<(Vec<crate::game_state::SetSkillLanded>, MovedItems), MoveItemRefused>,
+        MoveItemError,
+    > {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::FullSet { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/slow` line, and hears the moved items
+    /// for the store and the client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_slow(
+        &self,
+        vid: common::vid::Vid,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Slow { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/ipurge` line, and hears the moved items
+    /// for the store and the client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_item_purge(
+        &self,
+        vid: common::vid::Vid,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ItemPurge { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/book` line, and hears the moved items
+    /// for the store and the client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_book(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Book {
+            vid,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/console` line.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the world is gone, [`MoveItemError::NoAnswer`]
+    /// when it gives none.
+    pub async fn run_console(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Console { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/set` line, and hears the gold Transfer for the
+    /// store, if the arm stored one.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the world is gone, [`MoveItemError::NoAnswer`]
+    /// when it gives none.
+    pub async fn run_set_attr(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::SetAttrStored>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetAttr { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/refine_rod`, `/refine_pick` or `/max_pick` line,
+    /// and hears the moved items for the store and the client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_tool_refine_line(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: Mover,
+        line: world::character::ToolRefine,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ToolRefineLine {
+            vid,
+            rest,
+            mover,
+            line,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/use_item` line, and hears the moved items
+    /// for the store and the client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_use_item_line(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::UseItemLine {
+            vid,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/do_clear_affect` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_clear_affect(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ClearAffect { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/dragon_soul` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_dragon_soul(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DragonSoul { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/ds_list` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_ds_list(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DsList { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/ds_change_attr` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_ds_change_attr(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DsChangeAttr {
+            vid,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/dice` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_dice(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Dice { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/gift` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_gift(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Gift { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/state` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_state(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::State { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/inventory` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_inventory(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Inventory { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/hair` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_hair(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Hair { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/fish_simul` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_fish_simul(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::FishSimul { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/shutdown` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_shutdown(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Shutdown { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one exit line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_do_cmd(
+        &self,
+        vid: common::vid::Vid,
+        kind: ExitKind,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DoCmd { vid, kind, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/pvp` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_pvp(&self, vid: common::vid::Vid, rest: Vec<u8>) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Pvp { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/reload` line over the files the caller read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_reload(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        read: crate::game_state::ReloadRead,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Reload {
+            vid,
+            rest,
+            read,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/costume` line, and waits for the moved items.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_costume(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Costume {
+            vid,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
 
     /// Asks the world for the remaining `AFFECT_BLOCK_CHAT` duration of the
     /// character online under `vid`, or `None` when it holds none.
-    ///
     /// # Errors
     ///
     /// As [`Self::move_item`].
@@ -3566,6 +6181,783 @@ impl GameLoopController {
     ) -> Result<BlockChatAnswer, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::BlockChat { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/block_chat_list` line. What the line shows
+    /// is written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn block_chat_list(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::BlockChatList { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/dc` line. What the line shows is written to
+    /// the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn dc_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Dc { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/transfer` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn transfer_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Transfer { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/kill` line. What the line shows is written
+    /// to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn kill_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Kill { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/poison` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn poison_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Poison { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/stun` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn stun_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Stun { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/getqf` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn getqf_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GetQf { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/setqf` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn setqf_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetQf { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/delqf` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn delqf_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DelQf { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/set_state` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn set_state_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetState { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/qf` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn qf_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Qf { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/clear_quest` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn clear_quest_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ClearQuest { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/view_equip` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn view_equip_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ViewEquip { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/warp` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn warp_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Warp { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/private` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn private_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Private { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/rewarp` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn rewarp_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Rewarp { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world for `/observer_exit`'s asking half: the sort lock when `vid`
+    /// observes, else `None`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn observer_exit(&self, vid: common::vid::Vid) -> Result<Option<u32>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ObserverExit { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run `/observer_exit`'s clearing half. What the clear tells is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn observer_settled(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ObserverSettled { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/goto` line. What the line shows is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn goto_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Goto { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/level` line. What the line resets is
+    /// written to the caller's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn level_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        gold: i64,
+        voice: u8,
+    ) -> Result<Option<crate::game_state::LevelHeld>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Level {
+            vid,
+            rest,
+            gold,
+            voice,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/advance` line. What the line resets is
+    /// written to the target's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn advance_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        gold: i64,
+        voice: u8,
+    ) -> Result<Option<crate::game_state::AdvanceLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Advance {
+            vid,
+            rest,
+            gold,
+            voice,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/reset` line. What the line refills rides
+    /// the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn reset_command(
+        &self,
+        vid: common::vid::Vid,
+    ) -> Result<Option<crate::game_state::ResetHeld>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Reset { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to grant the `rank`th top-player affect after a `/level`
+    /// reached 120. The step counted the store's rows and stood this caller's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn grant_top_affect(
+        &self,
+        vid: common::vid::Vid,
+        rank: u8,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GrantTopAffect { vid, rank, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/setskill` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn set_skill_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::SetSkillLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetSkill { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/setskillother` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn set_skill_other_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::SetSkillOtherLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetSkillOther { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/setskillpoint` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn set_skill_point_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<i32>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetSkillPoint { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/setjob` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn set_job_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::SetJobLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetJob { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/invisible` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn invisible_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Invisible { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/purge` or `/weaken` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn purge_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        weaken: bool,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Purge {
+            vid,
+            rest,
+            weaken,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/respawn` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn respawn_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Respawn { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/mob` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mob_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Mob { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/mob_ld` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mob_ld_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MobLd { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/ma` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mob_aggressive_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MobAggressive { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/mc` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mob_coward_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MobCoward { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/mm` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mob_map_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MobMap { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/detaillog` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn detail_log_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DetailLog { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/monsterlog` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn monster_log_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MonsterLog { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/polymorph` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn polymorph_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Polymorph { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/forgetme` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn forget_me_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ForgetMe { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/aggregate` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn aggregate_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Aggregate { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/attract_ranger` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn attract_ranger_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AttractRanger { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/pull_monster` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn pull_monster_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::PullMonster { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/group` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn group_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Group { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/grrandom` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn group_random_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GroupRandom { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/cooltime` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn cooltime_command(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Cooltime { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/affect_remove` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn affect_remove_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AffectRemove { vid, rest, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)

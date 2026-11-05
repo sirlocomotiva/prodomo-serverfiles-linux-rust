@@ -948,6 +948,14 @@ pub enum RowChange {
         /// All of its sockets, as they are now.
         sockets: [i32; SOCKETS],
     },
+    /// The item's attributes changed, which is what `do_attr_full_set` forces
+    /// (`CItem::SetForceAttribute`, `G/item_attribute.cpp:357-378`).
+    Attributes {
+        /// The item.
+        id: u32,
+        /// All of its attributes, as they are now.
+        attributes: [Attribute; ATTRS],
+    },
     /// A trade gave the item to another character, into this window and cell, in stored
     /// terms (`CExchange::Done`, `G/exchange.cpp`). Only [`apply_exchange`] writes one, and
     /// only to another side of the same Transfer.
@@ -1163,6 +1171,7 @@ async fn apply_sides(
         placeholders(COLUMN_COUNT, 1)
     );
     let set_sockets = set_sockets_statement();
+    let set_attributes = set_attributes_statement();
     let mut transaction = store.pool().begin().await?;
     sqlx::query(DEFER_CELL_KEYS)
         .execute(&mut *transaction)
@@ -1181,6 +1190,7 @@ async fn apply_sides(
                 change,
                 &insert,
                 &set_sockets,
+                &set_attributes,
             )
             .await?;
             if touched == 0 {
@@ -1493,6 +1503,7 @@ async fn write_change(
     change: &RowChange,
     insert: &str,
     set_sockets: &str,
+    set_attributes: &str,
 ) -> Result<(u32, u64), ItemError> {
     let holder = Holder::Character(owner_id);
     Ok(match change {
@@ -1520,6 +1531,15 @@ async fn write_change(
                 .bind(i64::from(owner_id));
             for socket in sockets {
                 query = query.bind(*socket);
+            }
+            (*id, query.execute(&mut *connection).await?.rows_affected())
+        }
+        RowChange::Attributes { id, attributes } => {
+            let mut query = sqlx::query(set_attributes)
+                .bind(i64::from(*id))
+                .bind(i64::from(owner_id));
+            for attr in attributes {
+                query = query.bind(i16::from(attr.b_type)).bind(attr.s_value);
             }
             (*id, query.execute(&mut *connection).await?.rows_affected())
         }
@@ -1596,6 +1616,24 @@ fn set_sockets_statement() -> String {
     )
 }
 
+/// The statement a [`RowChange::Attributes`] runs: every attribute type and value column
+/// of one owned row, bound from `$3` on in type/value pairs.
+fn set_attributes_statement() -> String {
+    let mut parts = Vec::with_capacity(ATTRS * 2);
+    for (index, (types, values)) in ATTRTYPE_COLUMNS
+        .iter()
+        .zip(ATTRVALUE_COLUMNS.iter())
+        .enumerate()
+    {
+        parts.push(format!("{types} = ${}", 3 + index * 2));
+        parts.push(format!("{values} = ${}", 4 + index * 2));
+    }
+    format!(
+        "UPDATE item SET {} WHERE id = $1 AND owner_id = $2",
+        parts.join(", ")
+    )
+}
+
 /// The change that put a row on a cell another row of `owner_id` holds, for
 /// [`apply_row_changes`] and [`apply_exchange`].
 ///
@@ -1634,6 +1672,7 @@ fn taken_cell(owner_id: u32, sides: &[TransferSide<'_>], shared: &[(i16, i64)]) 
                 RowChange::Count { .. }
                 | RowChange::Destroyed { .. }
                 | RowChange::Sockets { .. }
+                | RowChange::Attributes { .. }
                 | RowChange::Stored { .. } => return None,
             };
             (holder == owner_id).then_some((id, window_type, pos))
@@ -1689,7 +1728,10 @@ fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(),
                 )));
             }
         }
-        RowChange::Destroyed { .. } | RowChange::Sockets { .. } | RowChange::Stored { .. } => {}
+        RowChange::Destroyed { .. }
+        | RowChange::Sockets { .. }
+        | RowChange::Attributes { .. }
+        | RowChange::Stored { .. } => {}
     }
     Ok(())
 }

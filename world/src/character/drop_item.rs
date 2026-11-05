@@ -47,7 +47,7 @@ use common::item_slots::ITEM_COUNT_LIMIT;
 
 /// `ITEM_FLAG_MAKECOUNT` (`item_length.h:366`): the flag whose stackable items with a
 /// count of 1 take the proto's `VALUE1` as their count.
-pub(crate) const ITEM_FLAG_MAKECOUNT: u32 = 1 << 7;
+pub const ITEM_FLAG_MAKECOUNT: u32 = 1 << 7;
 
 /// `APPLY_SKILL_DAMAGE_BONUS`, the addon table's skill bonus (`length.h:567`).
 const APPLY_SKILL_DAMAGE_BONUS: u8 = 71;
@@ -66,6 +66,14 @@ const MAGIC_HIGH: [i32; ATTRIBUTE_LEVELS] = [30, 40, 20, 8, 2];
 /// `aiItemMagicAttributePercentLow` (`G/constants.cpp:872-876`): the level walk of the
 /// second and third magic attributes.
 const MAGIC_LOW: [i32; ATTRIBUTE_LEVELS] = [50, 40, 10, 0, 0];
+
+/// `tmpChangeProb` (`G/item_attribute.cpp:241-244`): the level walk of each attribute
+/// `ChangeAttribute` rolls again.
+const CHANGE_LEVELS: [i32; ATTRIBUTE_LEVELS] = [0, 10, 40, 35, 15];
+
+/// `aiItemAddAttributePercent` (`G/item_attribute.cpp:269-272`): the level walk of the
+/// attribute `AddAttribute()` adds.
+const ADD_LEVELS: [i32; ATTRIBUTE_LEVELS] = [40, 50, 10, 0, 0];
 
 /// `MAX_NORM_ATTR_NUM` (`item_length.h:32`): the magic and addon attributes stop here.
 const NORM_ATTRS: usize = 5;
@@ -415,6 +423,150 @@ fn alter_to_magic_item(
     }
 }
 
+/// `CItem::ChangeAttribute(NULL)` (`G/item_attribute.cpp:228-265`): the five normal
+/// attributes are cleared, the addon pair is drawn again for an addon item, and the item
+/// is filled back to the count it had, each attribute rolled on `tmpChangeProb`. The two
+/// rare attributes stay.
+///
+/// Every write after the clear lands at the current count, so the item's states after
+/// each `SetAttribute` are the prefixes of the result. Answers whether the item had any
+/// attribute: only then does legacy go on to count the change in socket 3. A type with no
+/// attribute set still draws each level, as `PutAttribute` draws before
+/// `PutAttributeWithLevel` refuses.
+pub fn change_attribute(
+    dice: &mut dyn Dice,
+    gauss: &mut Gauss,
+    proto: &ItemProto,
+    attributes: &mut [ItemAttribute],
+    attrs: &[ItemAttrRecord],
+) -> bool {
+    let had = attribute_count(attributes);
+    for attribute in attributes.iter_mut().take(NORM_ATTRS) {
+        *attribute = ItemAttribute::default();
+    }
+    if had == 0 {
+        return false;
+    }
+    if proto.addon_type != 0 {
+        apply_addon_to(dice, gauss, proto, attributes);
+    }
+    let set = attribute_set_index(proto.item_type, proto.sub_type);
+    for _ in attribute_count(attributes)..had {
+        match set {
+            Some(set) => put_attribute(dice, proto, attributes, attrs, set, &CHANGE_LEVELS),
+            None => {
+                let _ = number(dice, 1, 100);
+            }
+        }
+    }
+    true
+}
+
+/// `CItem::AddAttribute()` (`G/item_attribute.cpp:267-276`): below five normal
+/// attributes, one more rolled on `aiItemAddAttributePercent`, at the current count. A
+/// type with no attribute set draws the level and adds nothing.
+pub fn add_rolled_attribute(
+    dice: &mut dyn Dice,
+    proto: &ItemProto,
+    attributes: &mut [ItemAttribute],
+    attrs: &[ItemAttrRecord],
+) {
+    if attribute_count(attributes) >= NORM_ATTRS {
+        return;
+    }
+    match attribute_set_index(proto.item_type, proto.sub_type) {
+        Some(set) => put_attribute(dice, proto, attributes, attrs, set, &ADD_LEVELS),
+        None => {
+            let _ = number(dice, 1, 100);
+        }
+    }
+}
+
+/// `ITEM_ATTRIBUTE_RARE_NUM` (`item_length.h`): the two rare attributes after the normal five.
+const RARE_ATTRS: usize = 2;
+
+/// `CItem::GetRareAttrCount` (`G/item_attribute.cpp:383-394`): the set rare attributes,
+/// wherever they stand in the two slots.
+fn rare_count(attributes: &[ItemAttribute]) -> usize {
+    attributes
+        .iter()
+        .skip(NORM_ATTRS)
+        .take(RARE_ATTRS)
+        .filter(|attr| attr.b_type != 0)
+        .count()
+}
+
+/// `CItem::AddRareAttribute()` (`G/item_attribute.cpp:422-464`): below two rare
+/// attributes, one more at slot `5 + count`, drawn evenly (`number(0, n - 1)`) from the
+/// applies whose `item_attr_rare` row caps the item's set above 0 and that the rare slots
+/// do not hold, at level `min(5, cap)`. The value is written even when it is 0. Answers the
+/// write, the slot and the attribute.
+///
+/// `g_map_itemRare` is keyed by apply, the last row of an apply winning, and the walk
+/// stops at `MAX_APPLY_NUM`, past every apply the enum names. Two legacy Defects are not
+/// reproduced: a type with no attribute set (a rod or a pick in the weapon slot) reads
+/// `bMaxLevelBySet[-1]`, and an empty choice indexes `avail` out of its bounds; both add
+/// nothing here.
+pub fn add_rare_attribute(
+    dice: &mut dyn Dice,
+    proto: &ItemProto,
+    attributes: &mut [ItemAttribute],
+    rare: &[ItemAttrRecord],
+) -> Option<(usize, ItemAttribute)> {
+    let count = rare_count(attributes);
+    if count >= RARE_ATTRS {
+        return None;
+    }
+    let set = attribute_set_index(proto.item_type, proto.sub_type)?;
+    let held = |apply: u32| {
+        attributes
+            .iter()
+            .skip(NORM_ATTRS)
+            .take(RARE_ATTRS)
+            .any(|attr| u32::from(attr.b_type) == apply)
+    };
+    let avail: Vec<&ItemAttrRecord> = (1..=u32::from(u8::MAX))
+        .filter_map(|apply| rare.iter().rfind(|row| row.apply_index == apply))
+        .filter(|row| row.max_level_by_set.get(set).is_some_and(|&cap| cap > 0))
+        .filter(|row| !held(row.apply_index))
+        .collect();
+    let last = i32::try_from(avail.len()).ok()?.checked_sub(1)?;
+    let row = avail[usize::try_from(number(dice, 0, last)).ok()?];
+    let level = usize::from(row.max_level_by_set[set].min(5));
+    let apply = u8::try_from(row.apply_index).ok()?;
+    // `attr.sValue = r.lValues[...]`: the `long`'s low 16 bits.
+    let [low, high, ..] = row.values[level - 1].to_le_bytes();
+    let value = i16::from_le_bytes([low, high]);
+    let at = NORM_ATTRS + count;
+    let written = ItemAttribute::new(apply, value);
+    attributes[at] = written;
+    Some((at, written))
+}
+
+/// `CItem::ChangeRareAttribute()` (`G/item_attribute.cpp:396-420`): an item with rare
+/// attributes clears the first `count` rare slots without a record, then adds `count`
+/// again through [`add_rare_attribute`]. Answers `None` for an item with none, else the
+/// writes in order.
+pub fn change_rare_attribute(
+    dice: &mut dyn Dice,
+    proto: &ItemProto,
+    attributes: &mut [ItemAttribute],
+    rare: &[ItemAttrRecord],
+) -> Option<Vec<(usize, ItemAttribute)>> {
+    let count = rare_count(attributes);
+    if count == 0 {
+        return None;
+    }
+    for attr in attributes.iter_mut().skip(NORM_ATTRS).take(count) {
+        *attr = ItemAttribute::default();
+    }
+    Some(
+        (0..count)
+            .filter_map(|_| add_rare_attribute(dice, proto, attributes, rare))
+            .collect(),
+    )
+}
+
 /// `CItemAddonManager::ApplyAddonTo` (`G/item_addon.cpp:16-52`): the skill and hit
 /// bonus pair, added twice — the second pair is dead, because `HasAttr` keeps the
 /// first (`G/item_attribute.cpp:95-107`).
@@ -467,6 +619,44 @@ pub struct DropAsk {
     pub count: i32,
     /// The row's rare percent, or `-1` for the proto's `bAlterToMagicItemPct`.
     pub rare_pct: i32,
+}
+
+/// The sockets `CreateItem` fills on a new item of `proto`: the gain-socket loop
+/// (`AlterToSocketItem`, `G/item.cpp:1795-1805`), then the limit stamps in socket 0
+/// (`G/item_manager.cpp:277-320`), with `now_secs` the base of a `LIMIT_REAL_TIME` one.
+pub fn stamp_created_sockets(item: &mut Item, proto: &ItemProto, now_secs: i64) {
+    // `bGainSocketPct` is a `BYTE`, so the low byte; past six the whole array fills.
+    let [socket_pct, ..] = proto.gain_socket_pct.to_le_bytes();
+    for socket in item
+        .sockets
+        .iter_mut()
+        .take(usize::from(socket_pct).min(SOCKETS))
+    {
+        *socket = 1;
+    }
+    for limit in &proto.limits {
+        if limit.kind == LIMIT_REAL_TIME {
+            // `time(0) + value`, or a week when the value is 0 (`:287-288`); the ground
+            // destroy sweep already covers a lying item, so the socket only marks it.
+            let span = i64::from(limit.value).max(0);
+            let span = if span == 0 { 7 * 24 * 60 * 60 } else { span };
+            #[allow(clippy::cast_possible_truncation)]
+            let at = now_secs.saturating_add(span) as i32;
+            item.sockets[0] = at;
+        } else if limit.kind == LIMIT_TIMER_BASED_ON_WEAR {
+            // Not equipped and made fresh: its socket, or the value, or 10 h (`:306`).
+            let mut span = i64::from(item.sockets[0]);
+            if span == 0 {
+                span = i64::from(limit.value);
+            }
+            if span == 0 {
+                span = 10 * 60 * 60;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let span = span as i32;
+            item.sockets[0] = span;
+        }
+    }
 }
 
 /// `ITEM_MANAGER::CreateItem(vnum, count, 0, true, rare_pct)` (`G/item_manager.cpp:160-455`)
@@ -528,39 +718,7 @@ pub fn make_drop_item(
     };
     item.flags = proto.flags;
     item.anti_flags = proto.anti_flags;
-    // The gain-socket loop (`AlterToSocketItem`, `G/item.cpp:1795-1805`): `bGainSocketPct`
-    // is a `BYTE`, so the low byte; past six the whole array fills.
-    let [socket_pct, ..] = proto.gain_socket_pct.to_le_bytes();
-    for socket in item
-        .sockets
-        .iter_mut()
-        .take(usize::from(socket_pct).min(SOCKETS))
-    {
-        *socket = 1;
-    }
-    for limit in &proto.limits {
-        if limit.kind == LIMIT_REAL_TIME {
-            // `time(0) + value`, or a week when the value is 0 (`:287-288`); the ground
-            // destroy sweep already covers a lying item, so the socket only marks it.
-            let span = i64::from(limit.value).max(0);
-            let span = if span == 0 { 7 * 24 * 60 * 60 } else { span };
-            #[allow(clippy::cast_possible_truncation)]
-            let at = made.now_secs.saturating_add(span) as i32;
-            item.sockets[0] = at;
-        } else if limit.kind == LIMIT_TIMER_BASED_ON_WEAR {
-            // Not equipped and made fresh: its socket, or the value, or 10 h (`:306`).
-            let mut span = i64::from(item.sockets[0]);
-            if span == 0 {
-                span = i64::from(limit.value);
-            }
-            if span == 0 {
-                span = 10 * 60 * 60;
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            let span = span as i32;
-            item.sockets[0] = span;
-        }
-    }
+    stamp_created_sockets(&mut item, proto, made.now_secs);
     // `SetRarity(iRarePct)`: dropped — display-only through the target-info preview
     // (D8), which nothing reads before then.
     let _ = ask.rare_pct;
@@ -1045,6 +1203,151 @@ mod tests {
         assert_eq!(item.attributes[0], ItemAttribute::new(5, 6));
         // Second gate draw 99 -> 100 <= 10 never; third never: one attribute.
         assert!(item.attributes[1..].iter().all(|attr| attr.b_type == 0));
+    }
+
+    /// Two rows the foots set allows to level 5: STR (5) and DEX (6).
+    fn foots_rows() -> Vec<ItemAttrRecord> {
+        [(5, [6, 7, 8, 10, 12]), (6, [16, 17, 18, 20, 22])]
+            .into_iter()
+            .map(|(apply_index, values)| ItemAttrRecord {
+                apply: [0; 33],
+                apply_index,
+                prob: 10,
+                values,
+                max_level_by_set: [0, 0, 0, 5, 0, 0, 0, 0, 0, 0],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn change_rolls_back_to_the_count_and_keeps_the_rare_pair() {
+        let proto = ItemProto::for_category_rule(15370, ITEM_ARMOR, ARMOR_FOOTS);
+        let mut attributes = [ItemAttribute::default(); crate::item::ATTRIBUTES];
+        attributes[0] = ItemAttribute::new(9, 1);
+        attributes[1] = ItemAttribute::new(10, 2);
+        attributes[5] = ItemAttribute::new(1, 9);
+        attributes[6] = ItemAttribute::new(2, 9);
+        // Each refill: level draw 0 -> 1, past `tmpChangeProb`'s 0 into level 2; then the
+        // walk draw 0 -> 1 takes the first row left.
+        let mut dice = Script::new(vec![0]);
+        let rows = foots_rows();
+        let counts = change_attribute(&mut dice, &mut Gauss::new(), &proto, &mut attributes, &rows);
+        assert!(counts, "an item with attributes counts its change");
+        assert_eq!(attributes[0], ItemAttribute::new(5, 7));
+        assert_eq!(attributes[1], ItemAttribute::new(6, 17));
+        assert!(attributes[2..5].iter().all(|attr| attr.b_type == 0));
+        assert_eq!(
+            attributes[5..],
+            [ItemAttribute::new(1, 9), ItemAttribute::new(2, 9)]
+        );
+        assert_eq!(dice.at, 4, "two levels and two walks");
+    }
+
+    #[test]
+    fn change_of_a_bare_item_draws_nothing_and_does_not_count() {
+        let proto = ItemProto::for_category_rule(15370, ITEM_ARMOR, ARMOR_FOOTS);
+        let mut attributes = [ItemAttribute::default(); crate::item::ATTRIBUTES];
+        attributes[5] = ItemAttribute::new(1, 9);
+        let mut dice = Script::new(vec![0]);
+        let rows = foots_rows();
+        let counts = change_attribute(&mut dice, &mut Gauss::new(), &proto, &mut attributes, &rows);
+        assert!(!counts);
+        assert_eq!(attributes[5], ItemAttribute::new(1, 9));
+        assert_eq!(dice.at, 0);
+    }
+
+    #[test]
+    fn add_rolls_on_the_add_walk_below_five() {
+        let proto = ItemProto::for_category_rule(15370, ITEM_ARMOR, ARMOR_FOOTS);
+        let rows = foots_rows();
+        let mut attributes = [ItemAttribute::default(); crate::item::ATTRIBUTES];
+        attributes[0] = ItemAttribute::new(5, 6);
+        // Level draw 50 -> 51: past 40 into level 2 (11 <= 50); the walk then has DEX only.
+        let mut dice = Script::new(vec![50, 0]);
+        add_rolled_attribute(&mut dice, &proto, &mut attributes, &rows);
+        assert_eq!(attributes[1], ItemAttribute::new(6, 17));
+
+        let mut full = [ItemAttribute::new(9, 1); crate::item::ATTRIBUTES];
+        let before = full;
+        let mut dice = Script::new(vec![0]);
+        add_rolled_attribute(&mut dice, &proto, &mut full, &rows);
+        assert_eq!(full, before, "five normal attributes take no sixth");
+        assert_eq!(dice.at, 0);
+    }
+
+    /// Three rare rows: `MAX_HP` (1) to weapon level 5, `MAX_SP` (2) to weapon level 3,
+    /// and `CON` (3), which the weapon set does not allow.
+    fn rare_rows() -> Vec<ItemAttrRecord> {
+        [
+            (1, 5, [500; 5]),
+            (2, 3, [10, 20, 30, 40, 50]),
+            (3, 0, [1; 5]),
+        ]
+        .into_iter()
+        .map(|(apply_index, weapon, values)| ItemAttrRecord {
+            apply: [0; 33],
+            apply_index,
+            prob: 1,
+            values,
+            max_level_by_set: [weapon, 5, 5, 5, 5, 5, 5, 5, 0, 0],
+        })
+        .collect()
+    }
+
+    #[test]
+    fn rare_adds_draw_evenly_until_two_stand() {
+        use gamedata::item_kind::{ITEM_WEAPON, WEAPON_SWORD};
+        let proto = ItemProto::for_category_rule(10, ITEM_WEAPON, WEAPON_SWORD);
+        let rows = rare_rows();
+        let mut attributes = [ItemAttribute::default(); crate::item::ATTRIBUTES];
+        // Draw 1 of `number(0, 1)` takes MAX_SP, capped at its level 3.
+        let mut dice = Script::new(vec![1, 0]);
+        let first = add_rare_attribute(&mut dice, &proto, &mut attributes, &rows);
+        assert_eq!(first, Some((5, ItemAttribute::new(2, 30))));
+        // MAX_SP is held, so MAX_HP is the only choice.
+        let second = add_rare_attribute(&mut dice, &proto, &mut attributes, &rows);
+        assert_eq!(second, Some((6, ItemAttribute::new(1, 500))));
+        assert_eq!(
+            add_rare_attribute(&mut dice, &proto, &mut attributes, &rows),
+            None
+        );
+        assert_eq!(dice.at, 2, "the full item draws nothing");
+    }
+
+    #[test]
+    fn rare_change_clears_then_adds_the_same_count() {
+        use gamedata::item_kind::{ITEM_ROD, ITEM_WEAPON, WEAPON_SWORD};
+        let proto = ItemProto::for_category_rule(10, ITEM_WEAPON, WEAPON_SWORD);
+        let rows = rare_rows();
+        let mut attributes = [ItemAttribute::default(); crate::item::ATTRIBUTES];
+        attributes[0] = ItemAttribute::new(5, 6);
+        attributes[5] = ItemAttribute::new(2, 30);
+        attributes[6] = ItemAttribute::new(1, 500);
+        let mut dice = Script::new(vec![0]);
+        let writes = change_rare_attribute(&mut dice, &proto, &mut attributes, &rows);
+        assert_eq!(
+            writes,
+            Some(vec![
+                (5, ItemAttribute::new(1, 500)),
+                (6, ItemAttribute::new(2, 30))
+            ])
+        );
+        assert_eq!(
+            attributes[0],
+            ItemAttribute::new(5, 6),
+            "the normal ones stay"
+        );
+
+        let mut bare = [ItemAttribute::default(); crate::item::ATTRIBUTES];
+        assert_eq!(
+            change_rare_attribute(&mut dice, &proto, &mut bare, &rows),
+            None
+        );
+        // A rod has no attribute set: legacy reads `bMaxLevelBySet[-1]`; nothing is added.
+        let rod = ItemProto::for_category_rule(27400, ITEM_ROD, 0);
+        let mut dice = Script::new(vec![0]);
+        assert_eq!(add_rare_attribute(&mut dice, &rod, &mut bare, &rows), None);
+        assert_eq!(dice.at, 0);
     }
 
     #[test]

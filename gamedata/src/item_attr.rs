@@ -182,6 +182,105 @@ pub const ITEM_ATTR_APPLY_ENUM: [&str; 83] = [
     "MAX_HP",
 ];
 
+/// The `apply` enum of the `item_attr_rare` table, in schema order
+/// (`legacy/sql/schema/player.sql:433-434`): a different list from
+/// [`ITEM_ATTR_APPLY_ENUM`], which lacks `ATT_BONUS_TO_MONSTER` and the later names the
+/// rare rows use. Its `apply+0` is computed by position the same way, and a test pins it
+/// against the schema.
+pub const ITEM_ATTR_RARE_APPLY_ENUM: [&str; 91] = [
+    "MAX_HP",
+    "MAX_SP",
+    "CON",
+    "INT",
+    "STR",
+    "DEX",
+    "ATT_SPEED",
+    "MOV_SPEED",
+    "CAST_SPEED",
+    "HP_REGEN",
+    "SP_REGEN",
+    "POISON_PCT",
+    "STUN_PCT",
+    "SLOW_PCT",
+    "CRITICAL_PCT",
+    "PENETRATE_PCT",
+    "ATTBONUS_HUMAN",
+    "ATTBONUS_ANIMAL",
+    "ATTBONUS_ORC",
+    "ATTBONUS_MILGYO",
+    "ATTBONUS_UNDEAD",
+    "ATTBONUS_DEVIL",
+    "STEAL_HP",
+    "STEAL_SP",
+    "MANA_BURN_PCT",
+    "DAMAGE_SP_RECOVER",
+    "BLOCK",
+    "DODGE",
+    "RESIST_SWORD",
+    "RESIST_TWOHAND",
+    "RESIST_DAGGER",
+    "RESIST_BELL",
+    "RESIST_FAN",
+    "RESIST_BOW",
+    "RESIST_FIRE",
+    "RESIST_ELEC",
+    "RESIST_MAGIC",
+    "RESIST_WIND",
+    "REFLECT_MELEE",
+    "REFLECT_CURSE",
+    "POISON_REDUCE",
+    "KILL_SP_RECOVER",
+    "EXP_DOUBLE_BONUS",
+    "GOLD_DOUBLE_BONUS",
+    "ITEM_DROP_BONUS",
+    "POTION_BONUS",
+    "KILL_HP_RECOVER",
+    "IMMUNE_STUN",
+    "IMMUNE_SLOW",
+    "IMMUNE_FALL",
+    "SKILL",
+    "BOW_DISTANCE",
+    "ATT_GRADE_BONUS",
+    "DEF_GRADE_BONUS",
+    "MAGIC_ATT_GRADE_BONUS",
+    "MAGIC_DEF_GRADE_BONUS",
+    "CURSE_PCT",
+    "MAX_STAMINA",
+    "ATT_BONUS_TO_WARRIOR",
+    "ATT_BONUS_TO_ASSASSIN",
+    "ATT_BONUS_TO_SURA",
+    "ATT_BONUS_TO_SHAMAN",
+    "ATT_BONUS_TO_MONSTER",
+    "ATT_BONUS",
+    "MALL_DEFBONUS",
+    "MALL_EXPBONUS",
+    "MALL_ITEMBONUS",
+    "MALL_GOLDBONUS",
+    "MAX_HP_PCT",
+    "MAX_SP_PCT",
+    "SKILL_DAMAGE_BONUS",
+    "NORMAL_HIT_DAMAGE_BONUS",
+    "SKILL_DEFEND_BONUS",
+    "NORMAL_HIT_DEFEND_BONUS",
+    "EXTRACT_HP_PCT",
+    "RESIST_WARRIOR",
+    "RESIST_ASSASSIN",
+    "RESIST_SURA",
+    "RESIST_SHAMAN",
+    "ENERGY",
+    "DEF_GRADE",
+    "COSTUME_ATTR_BONUS",
+    "MAGIC_ATT_BONUS_PER",
+    "MELEE_MAGIC_ATT_BONUS_PER",
+    "RESIST_ICE",
+    "RESIST_EARTH",
+    "RESIST_DARK",
+    "RESIST_CRITICAL",
+    "RESIST_PENETRATE",
+    "ATTBONUS_METIN",
+    "ATTBONUS_BOSS",
+];
+
 /// Selects which fixed legacy item-attribute table is being converted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemAttrTableKind {
@@ -1169,7 +1268,7 @@ pub fn build_item_attr_table(
     build_records(kind, rows, limits, decode_item_attr_query_row)
 }
 
-/// What [`attrs_from_dump`] reports.
+/// What [`attrs_from_dump`] and [`rare_attrs_from_dump`] report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemAttrDumpError {
     /// The dump could not be read.
@@ -1221,40 +1320,50 @@ impl Error for ItemAttrDumpError {
 /// [`ItemAttrDumpError`] for an unreadable dump, a missing column, an `apply` outside
 /// the schema enum, or a row the strict decode refuses.
 pub fn attrs_from_dump(dump: &[u8]) -> Result<Vec<ItemAttrRecord>, ItemAttrDumpError> {
+    table_from_dump(dump, ItemAttrTableKind::Normal)
+}
+
+/// The boot `item_attr_rare` rows of the owner's dump, as [`attrs_from_dump`] reads the
+/// normal ones: the query names eight sets, weapon to ear, so talisman and glove stay 0
+/// (`ClientManagerBoot.cpp:848-895`). An empty table refuses, as legacy's boot does (`no
+/// result from item_attr_rare`).
+///
+/// # Errors
+///
+/// As [`attrs_from_dump`].
+pub fn rare_attrs_from_dump(dump: &[u8]) -> Result<Vec<ItemAttrRecord>, ItemAttrDumpError> {
+    table_from_dump(dump, ItemAttrTableKind::Rare)
+}
+
+/// The `kind` table's rows of the dump, with `apply+0` computed.
+fn table_from_dump(
+    dump: &[u8],
+    kind: ItemAttrTableKind,
+) -> Result<Vec<ItemAttrRecord>, ItemAttrDumpError> {
     use crate::sql_dump::{read_table, SqlValue};
     const NAMES: [&str; 17] = [
         "apply", "prob", "lv1", "lv2", "lv3", "lv4", "lv5", "weapon", "body", "wrist", "foots",
         "neck", "head", "shield", "ear", "talisman", "glove",
     ];
-    let table = read_table(dump, "item_attr").map_err(ItemAttrDumpError::Dump)?;
+    // The query's columns less the computed `apply+0`.
+    let names = &NAMES[..kind.column_count() - 1];
+    let (table_name, applies): (&str, &[&str]) = match kind {
+        ItemAttrTableKind::Normal => ("item_attr", &ITEM_ATTR_APPLY_ENUM),
+        ItemAttrTableKind::Rare => ("item_attr_rare", &ITEM_ATTR_RARE_APPLY_ENUM),
+    };
+    let table = read_table(dump, table_name).map_err(ItemAttrDumpError::Dump)?;
     if table.rows.is_empty() {
         return Err(ItemAttrDumpError::Table(ItemAttrTableError::EmptySource {
-            kind: ItemAttrTableKind::Normal,
+            kind,
         }));
     }
-    let mut at = [0_usize; 17];
-    for (slot, name) in at.iter_mut().zip(NAMES) {
-        *slot = table
-            .column(name)
-            .ok_or(ItemAttrDumpError::NoColumn(match name {
-                "apply" => "apply",
-                "prob" => "prob",
-                "lv1" => "lv1",
-                "lv2" => "lv2",
-                "lv3" => "lv3",
-                "lv4" => "lv4",
-                "lv5" => "lv5",
-                "weapon" => "weapon",
-                "body" => "body",
-                "wrist" => "wrist",
-                "foots" => "foots",
-                "neck" => "neck",
-                "head" => "head",
-                "shield" => "shield",
-                "ear" => "ear",
-                "talisman" => "talisman",
-                _ => "glove",
-            }))?;
+    let mut at = Vec::with_capacity(names.len());
+    for &name in names {
+        at.push(
+            table
+                .column(name)
+                .ok_or(ItemAttrDumpError::NoColumn(name))?,
+        );
     }
     let mut rows = Vec::with_capacity(table.rows.len());
     for values in &table.rows {
@@ -1267,20 +1376,19 @@ pub fn attrs_from_dump(dump: &[u8]) -> Result<Vec<ItemAttrRecord>, ItemAttrDumpE
             SqlValue::Text(text) | SqlValue::Bare(text) => text.clone(),
             SqlValue::Null => Vec::new(),
         };
-        let index = ITEM_ATTR_APPLY_ENUM
+        let index = applies
             .iter()
             .position(|name| name.as_bytes() == apply.as_slice())
             .ok_or(ItemAttrDumpError::UnknownApply(apply.clone()))?;
-        let mut columns = Vec::with_capacity(18);
+        let mut columns = Vec::with_capacity(kind.column_count());
         columns.push(cell(0));
         columns.push(ItemAttrQueryValue::text((index + 1).to_string()));
-        for name in 1..17 {
+        for name in 1..names.len() {
             columns.push(cell(name));
         }
         rows.push(ItemAttrTableQueryRow::new(columns));
     }
-    build_item_attr_table(ItemAttrTableKind::Normal, &rows, ItemAttrLimits::default())
-        .map_err(ItemAttrDumpError::Table)
+    build_item_attr_table(kind, &rows, ItemAttrLimits::default()).map_err(ItemAttrDumpError::Table)
 }
 
 /// Decode `kind` rows with the legacy conversion policy, preserving source
@@ -1676,6 +1784,23 @@ mod tests {
     }
 
     #[test]
+    fn rare_enum_const_matches_the_schema() {
+        use std::path::Path;
+        let schema = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/sql/schema/player.sql"),
+        )
+        .expect("schema reads");
+        let mut lines = schema.lines();
+        lines
+            .find(|line| line.starts_with("CREATE TABLE `item_attr_rare`"))
+            .expect("rare table");
+        let line = lines.next().expect("apply enum");
+        let members = &line[..line.find(") NOT NULL").expect("enum close")];
+        let names: Vec<&str> = members.split('\'').skip(1).step_by(2).collect();
+        assert_eq!(names, ITEM_ATTR_RARE_APPLY_ENUM);
+    }
+
+    #[test]
     fn owner_dump_loads_45_rows() {
         use std::path::Path;
         let dump = std::fs::read(
@@ -1700,6 +1825,32 @@ mod tests {
         let grade = by_apply(53);
         assert_eq!(grade.prob, 9);
         assert_eq!(grade.values, [30, 30, 30, 30, 50]);
+    }
+
+    #[test]
+    fn owner_dump_loads_18_rare_rows_with_eight_sets() {
+        use std::path::Path;
+        let dump = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/sql/gamedata/player.sql"),
+        )
+        .expect("dump reads");
+        let rows = rare_attrs_from_dump(&dump).expect("rare attrs load");
+        assert_eq!(rows.len(), 18);
+        // MAX_HP: prob 1, 500 at every level, 5 on each of the eight sets; the dump's
+        // costume columns are not the query's, and talisman and glove stay 0.
+        let hp = rows
+            .iter()
+            .find(|row| row.apply_index == 1)
+            .expect("MAX_HP");
+        assert_eq!(hp.prob, 1);
+        assert_eq!(hp.values, [500; 5]);
+        assert_eq!(hp.max_level_by_set, [5, 5, 5, 5, 5, 5, 5, 5, 0, 0]);
+        assert!(matches!(
+            rare_attrs_from_dump(b"-- nothing\n"),
+            Err(ItemAttrDumpError::Table(ItemAttrTableError::EmptySource {
+                kind: ItemAttrTableKind::Rare
+            }))
+        ));
     }
 
     #[test]

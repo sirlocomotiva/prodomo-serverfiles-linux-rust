@@ -1032,6 +1032,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
             skill_group: 0,
             alignment: 0,
+            voice: 0,
         }
     }
 
@@ -1982,6 +1983,7 @@ mod tests {
             private_map_index: 0,
             channel: None,
             exit: None,
+            sorted_until: 0,
         }
     }
 

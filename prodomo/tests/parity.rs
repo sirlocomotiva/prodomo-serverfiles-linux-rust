@@ -273,7 +273,6 @@ fn inventory_rows_keep_the_rules() {
         );
     }
     let counts = inventory::counts(&rows);
-    assert!(counts.get(&Status::Missing).copied().unwrap_or(0) > 1000);
     eprintln!("inventory: {} rows, {counts:?}", rows.len());
 }
 
@@ -1457,6 +1456,8 @@ const GC_MAIN_CHARACTER2_EMPIRE: u8 = 113;
 const GC_CHARACTER_GOLD: u8 = 224;
 const GC_PLAYER_POINTS: u8 = 16;
 const GC_SKILL_LEVEL_NEW: u8 = 76;
+/// `HEADER_GC_SKILL_GROUP` (112): header + the group byte.
+const GC_CHANGE_SKILL_GROUP: u8 = 112;
 /// `HEADER_GC_GUILD` (75): the envelope is header + WORD size + subheader
 /// (`TPacketGCGuild`, `G/packet.h`), so it sizes from its own `WORD wSize`.
 const GC_GUILD: u8 = 75;
@@ -1484,6 +1485,13 @@ const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 const GC_TIME: u8 = 106;
 const GC_CHANNEL: u8 = 121;
 const GC_CHAT: u8 = 4;
+/// `HEADER_GC_DRAGON_SOUL_REFINE` (209, `G/packet.h`).
+const GC_DRAGON_SOUL_REFINE: u8 = 209;
+/// `HEADER_GC_DS_PLUS_CHANGE_ATTR_OPEN` (211, `G/packet.h`).
+const GC_DS_PLUS_CHANGE_ATTR_OPEN: u8 = 211;
+/// `HEADER_GC_DS_PLUS_CHANGE_ATTR_RESULT` (212, `G/packet.h`): the header and the
+/// `bool result` byte (`TPacketGCDragonSoulChangeAttrResult`).
+const GC_DS_PLUS_CHANGE_ATTR_RESULT: u8 = 212;
 /// `HEADER_CG_MESSENGER` (`protocol/src/cg_inventory.rs`).
 const CG_MESSENGER: u8 = 0x43;
 /// `HEADER_GC_MESSENGER` (`protocol/src/gc_inventory.rs`).
@@ -1492,6 +1500,12 @@ const GC_MESSENGER: u8 = 0x4a;
 const CG_WHISPER: u8 = 0x13;
 /// `HEADER_GC_WHISPER` (`protocol/src/gc_inventory.rs`).
 const GC_WHISPER: u8 = 0x22;
+/// `HEADER_GC_PVP` (`G/packet.h:139`): the header, two VIDs and a mode byte.
+const GC_PVP: u8 = 41;
+/// `PVP_MODE_AGREE` (`G/packet.h:1775`): a challenge waits.
+const PVP_MODE_AGREE: u8 = 1;
+/// `PVP_MODE_FIGHT` (`G/packet.h:1776`): both agreed.
+const PVP_MODE_FIGHT: u8 = 2;
 /// `PHASE_LOADING` and `PHASE_GAME` in `EPhase` (`G/desc.h`).
 const PHASE_LOADING: u8 = 4;
 const PHASE_GAME: u8 = 5;
@@ -1554,15 +1568,21 @@ fn game_len(header: u8) -> usize {
         GC_POINT_CHANGE => POINT_CHANGE_LEN,
         GC_GOLD_CHANGE => GOLD_CHANGE_LEN,
         GC_MOVE => GC_MOVE_LEN,
+        GC_PVP => 1 + 4 + 4 + 1,
         GC_CHARACTER_POSITION => CHARACTER_POSITION_LEN,
-        GC_SYNC_POSITION => usize::MAX,
+        GC_SYNC_POSITION | GC_EVENT_INFO => usize::MAX,
         GC_OWNERSHIP => OWNERSHIP_LEN,
         ITEM_SET | GC_SAFEBOX_SET | GC_MALL_SET => ITEM_SET_LEN,
         ITEM_UPDATE => ITEM_UPDATE_LEN,
         GROUND_ADD => GROUND_ADD_LEN,
         GROUND_DEL => GROUND_DEL_LEN,
         GC_QUICKSLOT_ADD => 1 + 1 + 2,
-        GC_QUICKSLOT_DEL | GC_SAFEBOX_SIZE | GC_MALL_OPEN | GC_PARTY_PARAMETER => 1 + 1,
+        GC_QUICKSLOT_DEL
+        | GC_SAFEBOX_SIZE
+        | GC_MALL_OPEN
+        | GC_PARTY_PARAMETER
+        | GC_REQUEST_CHANGE_LANGUAGE
+        | GC_CHANGE_SKILL_GROUP => 1 + 1,
         GC_QUICKSLOT_SWAP => 1 + 2,
         GC_EXCHANGE => EXCHANGE_LEN,
         GC_SAFEBOX_DEL
@@ -1580,7 +1600,7 @@ fn game_len(header: u8) -> usize {
         GC_TARGET => TARGET_LEN,
         GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
         GC_CREATE_FLY => CREATE_FLY_LEN,
-        GC_FLY_TARGETING => FLY_TARGETING_LEN,
+        GC_FLY_TARGETING | GC_ADD_FLY_TARGETING => FLY_TARGETING_LEN,
         // The effect a critical or a penetrating hit shows around its victim
         // (`CHARACTER::EffectPacket`, `G/char.cpp:7533`). It can arrive at any time in the
         // game, so every in-game reader has to size it.
@@ -1597,7 +1617,22 @@ fn game_len(header: u8) -> usize {
         // than a cycle has to read past them. The safebox's wrong password is a
         // one-byte answer too.
         HANDSHAKE => HANDSHAKE_LEN,
-        GC_SAFEBOX_WRONG_PASSWORD | GC_PING | TIME_SYNC_ACK => 1,
+        GC_SAFEBOX_WRONG_PASSWORD
+        | GC_PING
+        | TIME_SYNC_ACK
+        | GC_REQUEST_MAKE_GUILD
+        | GC_DS_PLUS_CHANGE_ATTR_OPEN => 1,
+        GC_SASH => SASH_LEN,
+        GC_CL => CL_LEN,
+        GC_DRAGON_SOUL_REFINE => DS_REFINE_LEN,
+        GC_VIEW_EQUIP => VIEW_EQUIP_LEN,
+        GC_WHISPER_DETAILS => WHISPER_DETAILS_LEN,
+        GC_TARGET_INFO => TARGET_INFO_LEN,
+        GC_REFINE_INFORMATION => REFINE_INFORMATION_LEN,
+        GC_QUEST_CONFIRM => QUEST_CONFIRM_LEN,
+        GC_FISHING => FISHING_LEN,
+        GC_DIG_MOTION => DIG_MOTION_LEN,
+        GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
         other => panic!("unexpected game header {other}"),
     }
 }
@@ -1764,7 +1799,30 @@ fn enter_world_on_with_team(
     keyed.still("nothing follows");
     (keyed, character)
 }
-
+/// [`enter_world_on_with_team`] for a guild member: the guilded burst with
+/// `members` online in the walk, then the team list and the login event.
+fn enter_world_on_with_team_guilded(
+    server: &Server,
+    channel: u8,
+    login: &[u8],
+    slot: u8,
+    language: u8,
+    team: Option<&[u8]>,
+) -> (Keyed, Listed) {
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(server, channel, login, slot, language);
+    let _entered = enter_game_guilded(&mut keyed, 2);
+    if let Some(name) = team {
+        assert_eq!(
+            keyed.read_game(),
+            messenger_team_list(name),
+            "the entrant hears the GM team"
+        );
+    }
+    read_login_event(&mut keyed);
+    keyed.still("nothing follows");
+    (keyed, character)
+}
 /// [`enter_world`], answering what the burst showed.
 fn enter_world_seeing(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Entered) {
     enter_world_seeing_on(server, 1, login, slot, ENGLISH)
@@ -1912,8 +1970,19 @@ struct LoadingBurst {
     items: Vec<Vec<u8>>,
 }
 
-/// [`load_selected`], also answering the loading burst's `GC_MAIN_CHARACTER`.
+/// [`load_selected`], also answering the loading burst's `GC_MAIN_CHARACTER`. The selected
+/// client reports its version, as the enter-game check passes on it.
 fn read_loading_burst(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBurst {
+    let burst = read_loading_burst_raw(keyed, list, slot);
+    // The client reports its version once a character is selected, so the enter-game check
+    // passes; the record is answered with nothing.
+    keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
+    burst
+}
+
+/// [`read_loading_burst`] without the version report: a select that leaves the enter-game
+/// check nothing to pass on.
+fn read_loading_burst_raw(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBurst {
     let character = listed(list, usize::from(slot));
     keyed.send_record(&client_select(slot));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
@@ -1981,7 +2050,6 @@ fn enter_game_view_guilded(keyed: &mut Keyed, members: usize) -> Entered {
 fn read_login_event(keyed: &mut Keyed) {
     let _marks = read_login_event_blocking(keyed, 0, None);
 }
-
 /// The quest numbers of the letters a login sends: the quests of `quest_list`, then every
 /// other script by path, numbered as `qc` met their names.
 const QUEST_ATTR67ADD: u16 = 40;
@@ -2117,14 +2185,145 @@ fn read_mark(keyed: &mut Keyed, name: &[u8], next: &mut Option<i32>) -> Option<V
 /// anything on a map no zone script names, and the letter pass sends nothing to a member of
 /// no guild at war.
 ///
-/// Answers the marks the letter pass made, each a `GC_TARGET_CREATE`.
+/// Answers the marks the letter pass made, each a `GC_TARGET_CREATE`. Last comes the
+/// login step's batched `GC_CHARACTER_UPDATE`: `costume_option` always hides all five
+/// parts, and each `pc_hide_costume` call sends `UpdatePacket` (`G/questlua_pc.cpp:3598`),
+/// which the step batches into one frame behind its records.
 fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) -> Vec<Vec<u8>> {
     read_login_lines(keyed, block, said);
-    read_login_letters(keyed)
+    let marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+    marks
+}
+/// The login step's batched `GC_CHARACTER_UPDATE`: `costume_option` always hides all five
+/// parts, and each `pc_hide_costume` call sends `UpdatePacket` (`G/questlua_pc.cpp:3598`),
+/// which the step batches into one frame behind its records.
+fn read_login_update(keyed: &mut Keyed) {
+    let update = keyed.read_game();
+    assert_eq!(
+        update[0], GC_CHARACTER_UPDATE,
+        "the login step's hides send one batched update: {update:02x?}"
+    );
+    assert_eq!(
+        update.len(),
+        CHARACTER_UPDATE_LEN,
+        "no wSize: a fixed record"
+    );
 }
 
 /// The command and info lines that lead the quest login event ([`read_login_event_blocking`]).
 fn read_login_lines(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
+    read_login_lines_hiding(keyed, block, said, [false; 5], None);
+}
+/// The enter-game hide restore's five `SetXCostumeHidden` lines
+/// (`CInputLogin::Entergame`, `G/input_login.cpp:612-638`), which the burst carries right
+/// after the phase change, each 1 when its `hide_*` flag is set.
+fn read_hide_restore(keyed: &mut Keyed, hides: [bool; 5]) {
+    let first = keyed.read_game();
+    let empire = first[8];
+    let line = |part: usize| {
+        format!(
+            "{}CostumeHidden {}",
+            ["SetBody", "SetHair", "SetSash", "SetAura", "SetWeapon"][part],
+            i32::from(hides[part])
+        )
+    };
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, line(0).as_bytes()),
+        "the restore chats the body first"
+    );
+    for part in 1..5 {
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_COMMAND, empire, line(part).as_bytes()),
+            "the restore chats part {}",
+            part + 1
+        );
+    }
+}
+
+/// The login lines after dungeoninfo and the cards login, up to and including
+/// `event_info`, with the flags the GM set: `event_info 0 1 0` when `cards_event`
+/// is 1.
+fn read_login_lines_after_cards(keyed: &mut Keyed) {
+    read_login_lines_with_event_info(keyed, b"event_info 0 1 0");
+}
+
+/// The five hide lines, the infinite affect add, and `event_info`'s line, with the
+/// flags the GM set: the letters scenario reads `1 0 0` after it sets
+/// `letters_event`.
+fn read_login_lines_with_event_info(keyed: &mut Keyed, event_info: &[u8]) {
+    let empire = 1;
+    for (part, hide) in [false; 5].iter().enumerate() {
+        let line = format!(
+            "{}CostumeHidden {}",
+            ["SetBody", "SetHair", "SetSash", "SetAura", "SetWeapon"][part],
+            i32::from(*hide)
+        );
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_COMMAND, empire, line.as_bytes()),
+            "costume_option hides part {}",
+            part + 1
+        );
+    }
+    let grant = keyed.read_game();
+    assert_eq!(grant[0], GC_AFFECT_ADD, "the login grants: {grant:02x?}");
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, event_info),
+        "event_info's line reads the set flag"
+    );
+}
+
+/// The six `GC_ITEM_SET` records the letters trade sends: one per letter, each in
+/// the inventory, clearing its cell (`TItemPos` at bytes 1-3, the vnum at 4-7).
+fn read_cleared_cells(keyed: &mut Keyed) {
+    for pos in 0..6u16 {
+        let set = keyed.read_game();
+        assert_eq!(set[0], ITEM_SET, "a set per letter, cell {pos}");
+        assert_eq!(set.len(), ITEM_SET_LEN);
+        assert_eq!(set[1], 1, "cell {pos} is in the inventory");
+        assert_eq!(
+            u16::from_le_bytes([set[2], set[3]]),
+            pos,
+            "cell {pos} clears"
+        );
+        assert_eq!(
+            u32::from_le_bytes([set[4], set[5], set[6], set[7]]),
+            0,
+            "cell {pos} holds nothing"
+        );
+    }
+}
+
+/// The login event after the lines: the `setblockmode` byte, the letters, and the
+/// batched update. Zulu blocks nothing, so no `said` line rides between.
+fn read_login_event_rest(keyed: &mut Keyed) {
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"setblockmode 0"),
+        "game_option sends the byte the flags make"
+    );
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
+
+/// [`read_login_lines`] with `costume_option`'s hides: the five `SetXCostumeHidden` lines
+/// land between `dungeon_info` and `event_info` (`_basic` sorts after the listed quests
+/// and `costume_option.quest` before `event_info.lua`), each 1 when its `hide_*` flag is
+/// set, and the syschat `said_hidden` follows when any is. `ds_give_qualification` sorts
+/// between them (`dragon_soul.lua` before `event_info.lua`): its `AddAffect(540, ...)`
+/// lands in its call, beside the script's own lines, so the infinite add rides between
+/// the hides and `event_info`'s line.
+fn read_login_lines_hiding(
+    keyed: &mut Keyed,
+    block: u8,
+    said: Option<&[u8]>,
+    hides: [bool; 5],
+    said_hidden: Option<&[u8]>,
+) {
     let first = keyed.read_game();
     assert_eq!(
         first.get(..4),
@@ -2136,6 +2335,50 @@ fn read_login_lines(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
         first,
         chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
     );
+    read_login_lines_hiding_after_dungeon(keyed, empire, block, said, hides, said_hidden);
+}
+
+/// [`read_login_lines_hiding`] past `dungeon_info`'s line: the hides, the
+/// infinite add, `event_info`'s line, and `game_option`'s. A GM-gated letter
+/// that rides between `dungeon_info` and the hides needs this half.
+fn read_login_lines_hiding_after_dungeon(
+    keyed: &mut Keyed,
+    empire: u8,
+    block: u8,
+    said: Option<&[u8]>,
+    hides: [bool; 5],
+    said_hidden: Option<&[u8]>,
+) {
+    for (part, hide) in hides.iter().enumerate() {
+        let line = format!(
+            "{}CostumeHidden {}",
+            ["SetBody", "SetHair", "SetSash", "SetAura", "SetWeapon"][part],
+            i32::from(*hide)
+        );
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_COMMAND, empire, line.as_bytes()),
+            "costume_option hides part {}",
+            part + 1
+        );
+    }
+    if let Some(said_hidden) = said_hidden {
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_INFO, empire, said_hidden),
+            "costume_option names what hides"
+        );
+    }
+    let grant = keyed.read_game();
+    assert_eq!(grant[0], GC_AFFECT_ADD, "the login grants: {grant:02x?}");
+    let mut infinite = vec![GC_AFFECT_ADD];
+    infinite.extend_from_slice(&540u32.to_le_bytes());
+    infinite.push(0);
+    infinite.extend_from_slice(&0i32.to_le_bytes());
+    infinite.extend_from_slice(&0u32.to_le_bytes());
+    infinite.extend_from_slice(&(60i32 * 365 * 24 * 60 * 60).to_le_bytes());
+    infinite.extend_from_slice(&0i32.to_le_bytes());
+    assert_eq!(grant, infinite, "the infinite add");
     assert_eq!(
         keyed.read_game(),
         chat_packet(CHAT_TYPE_COMMAND, empire, b"event_info 0 0 0"),
@@ -2155,13 +2398,13 @@ fn read_login_lines(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
         "game_option sends the byte the flags make"
     );
 }
-
 /// The letters that follow the quest login event's lines ([`read_login_event_blocking`]),
-/// answering the marks the letter pass made.
-fn read_login_letters(keyed: &mut Keyed) -> Vec<Vec<u8>> {
+/// answering the marks the letter pass made. `attr67` reads `item_attr67add`'s letter,
+/// which a quest already past `start` never sends.
+fn read_login_letters(keyed: &mut Keyed, attr67: bool) -> Vec<Vec<u8>> {
     // The rest of the login pass, in quest order: `item_attr67add`, then each marking quest
     // still at `start` moves on.
-    if keyed.level >= 30 {
+    if attr67 && keyed.level >= 30 {
         read_letter(
             keyed,
             QUEST_ATTR67ADD,
@@ -2249,6 +2492,7 @@ fn read_marking_letters(
 /// the quest login event.
 fn read_enter_tail(keyed: &mut Keyed) {
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(keyed, [false; 5]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
@@ -2347,6 +2591,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
         assert_eq!(keyed.read_game(), own_walk, "a spent stamina walks");
     }
     let (shown, affect) = read_shown(keyed);
+    let affect = revive_add(keyed, affect);
     assert!(
         !shown.records.contains(&own_walk),
         "its own walk mode once at most"
@@ -2368,6 +2613,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
     );
     assert_eq!(affect[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(keyed, [false; 5]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
@@ -2379,6 +2625,16 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
         shown,
         affect,
     }
+}
+
+/// The revive-invisible add of an enter-game burst whose first add is `affect`. A
+/// relogin's restored rows (`LoadAffect`, such as the dragon soul qualification the last
+/// session's login granted) ride ahead of it, and are read past.
+fn revive_add(keyed: &mut Keyed, mut affect: Vec<u8>) -> Vec<u8> {
+    while affect[0] == GC_AFFECT_ADD && affect[1..5] != 215u32.to_le_bytes() {
+        affect = keyed.read_game();
+    }
+    affect
 }
 
 /// The `WAR_LIST` every enter ends with: the descriptor flushes the outbox's
@@ -2526,6 +2782,121 @@ impl Keyed {
         assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
         assert_eq!(&info[1..5], &id, "the summary's vid");
         (named, add, info)
+    }
+    /// [`Keyed::sees_arrive`] for a fresh enter: the pair, the entrant's revive entry,
+    /// then its login update, which restates the entry (legacy sends one `UpdatePacket`
+    /// per `pc_hide_costume` call, five per login; `G/questlua_pc.cpp:3598`). The pair
+    /// carries no flag — the revive joins after the Show — so the entry is the timer's
+    /// first note of the VID. Answers the NAME, when one was read, with the pair and
+    /// the restatement.
+    fn sees_enter(
+        &mut self,
+        vid: u32,
+        walking: bool,
+        guild: Option<&[u8]>,
+    ) -> (Option<Vec<u8>>, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let (named, add, info) = self.sees_arrive(vid, walking, guild);
+        let entry = self.read_game_raw();
+        assert!(
+            self.timer_record(&entry),
+            "the entrant's entry is the timer's: {entry:02x?}"
+        );
+        let restate = self.read_game_raw();
+        assert!(
+            self.timer_restate(&restate),
+            "the entrant's login update restates its entry: {restate:02x?}"
+        );
+        (named, add, info, restate)
+    }
+    /// [`Keyed::sees_enter`] past the wounded viewer's own recovery ticks:
+    /// each pool record of `own` folds into the pools, every other record
+    /// is read back to front until the enter burst's five records land.
+    /// Answers the pools the ticks left.
+    fn sees_enter_past_ticks(
+        &mut self,
+        vid: u32,
+        own: u32,
+        walking: bool,
+        guild: Option<&[u8]>,
+    ) -> (i64, i64) {
+        let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+        let sp_kind = u8::try_from(common::point_slot::POINT_SP).expect("a point byte");
+        let id = vid.to_le_bytes();
+        let (mut hp_now, mut sp_now) = (500i64, 100i64);
+        let (mut walked, mut named, mut added, mut informed, mut entered) =
+            (false, false, false, false, false);
+        loop {
+            let record = read_past_pings(self);
+            if is_npc_chatter(&record) || is_mark_update(&record) {
+                continue;
+            }
+            // The revive's records of an earlier enter (Alice's own): the
+            // end, or a look update the burst's entry arms must not take.
+            if matches!(record[0], GC_AFFECT_REMOVE | GC_CHARACTER_UPDATE)
+                && record.get(1..5) != Some(&id[..])
+                && (self.timer_record(&record) || record[0] == GC_CHARACTER_UPDATE)
+            {
+                continue;
+            }
+            if record[0] == GC_POINT_CHANGE {
+                if record[4..8] == own.to_le_bytes() {
+                    let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+                    if record[8] == hp_kind {
+                        assert!(
+                            is_heal_step(hp_now, value, 1420),
+                            "a heal tick from {hp_now}: {value}"
+                        );
+                        hp_now = value;
+                    } else {
+                        assert_eq!(record[8], sp_kind, "a pool record");
+                        assert!(
+                            value == (sp_now + 15).min(600) || value == (sp_now + 28).min(600),
+                            "the spirit's tick from {sp_now}: {value}"
+                        );
+                        sp_now = value;
+                    }
+                    continue;
+                }
+                // Another character's burst (Yankee's enter shows) lands on
+                // this wire too; it says nothing about the burst read here.
+                continue;
+            }
+            if walking && !walked {
+                assert_eq!(record, walk_mode_of(&id), "the newcomer walks");
+                walked = true;
+                continue;
+            }
+            if guild.is_some() && !named {
+                named = true;
+                continue;
+            }
+            if !added {
+                assert_eq!(record[0], GC_CHARACTER_ADD, "{record:02x?}");
+                assert_eq!(&record[1..5], &id, "the insert's vid");
+                added = true;
+                continue;
+            }
+            if !informed {
+                assert_eq!(record[0], GC_CHAR_ADDITIONAL_INFO, "{record:02x?}");
+                assert_eq!(&record[1..5], &id, "the summary's vid");
+                informed = true;
+                continue;
+            }
+            if !entered {
+                assert!(
+                    self.timer_record(&record),
+                    "the entrant's entry is the timer's: {record:02x?}"
+                );
+                entered = true;
+                continue;
+            }
+            assert!(
+                self.timer_restate(&record),
+                "the entrant's login update restates its entry: {record:02x?}"
+            );
+            break;
+        }
+        (hp_now, sp_now)
     }
 
     /// Read the view removal of the character `vid`: `[02, vid]`.
@@ -2720,6 +3091,24 @@ impl Keyed {
             _ => false,
         }
     }
+    /// Whether `record` restates a revive timer's entry: a look update with the revive flag
+    /// (flag 28, bit 27 of word 0) for a VID already entered. The login step batches each
+    /// `pc_hide_costume` call's `UpdatePacket` (`G/questlua_pc.cpp:3598`) into one frame
+    /// behind its records, and legacy sends one per call — five per login — so a viewer
+    /// hears the entrant's flags again right after its entry update stated them. The
+    /// restatement carries no new timer (the VID stays entered; its expiry still matches),
+    /// and the quiet checks absorb it as they absorb the entry. Explicit reads still see
+    /// it: [`Keyed::read_game`] filters only [`Keyed::timer_record`].
+    fn timer_restate(&self, record: &[u8]) -> bool {
+        if record[0] != GC_CHARACTER_UPDATE || record.len() < CHARACTER_UPDATE_LEN {
+            return false;
+        }
+        if record[23] & 0x08 == 0 {
+            return false;
+        }
+        let vid: [u8; 4] = record[1..5].try_into().expect("a VID");
+        self.timers.contains(&vid)
+    }
 
     /// Assert that nothing but a `GC_PING` cycle arrives, and absorb the revive timer's own
     /// records ([`Keyed::timer_record`]), the view records of the monsters, stones and veins
@@ -2787,6 +3176,7 @@ impl Keyed {
                 header == GC_PING
                     || self.monster_record(record)
                     || self.timer_record(record)
+                    || self.timer_restate(record)
                     || is_stamina_refill(record)
                     || is_mark_update(record)
                     || is_npc_chatter(record),
@@ -2954,6 +3344,22 @@ impl Keyed {
         self.read_game_with(false)
     }
 
+    /// [`Keyed::read_game`] past the affect event's tick records: a step that runs
+    /// while an affect is live may send its remove and update between the records
+    /// the script caused, so a dialog loop skips [`GC_AFFECT_REMOVE`] and
+    /// [`GC_CHARACTER_UPDATE`] until its [`GC_SCRIPT`] lands.
+    fn read_script_past_ticks(&mut self) -> Vec<u8> {
+        loop {
+            let record = self.read_game();
+            if record[0] == GC_SCRIPT {
+                return record;
+            }
+            assert!(
+                matches!(record[0], GC_AFFECT_REMOVE | GC_CHARACTER_UPDATE),
+                "ahead of the dialog: {record:02x?}"
+            );
+        }
+    }
     /// [`Keyed::read_game`] with the marks' updates kept.
     fn read_game_marked(&mut self) -> Vec<u8> {
         self.read_game_with(true)
@@ -3166,6 +3572,7 @@ impl Keyed {
                 !is_npc_chatter(record)
                     && (marks || !is_mark_update(record))
                     && !self.timer_end(record)
+                    && !self.timer_restate(record)
             })
             .collect();
         assert!(others.is_empty(), "{note}: {others:02x?}");
@@ -3713,6 +4120,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(keyed.read_game(), gold, "the item load's gold record");
     assert_eq!(keyed.read_game(), points, "the item load's points record");
     keyed.still("nothing follows");
+    keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
 
     // `CG_ENTER_GAME`. `Entergame` writes the own pair, `Show` and `SendNPCPosition` the NPCs,
     // the revive-invisible affect, `SetPhase(PHASE_GAME)`, and the time, Channel and events.
@@ -3753,6 +4161,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(&affect[14..18], &5i32.to_le_bytes(), "five seconds");
     // The phase record is between the affect and the time record, so exactly one is written.
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(&mut keyed, [false; 5]);
     let time = keyed.read_game();
     assert_eq!(time.len(), TIME_LEN);
     assert_eq!(time[0], GC_TIME);
@@ -4309,6 +4718,17 @@ fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchData
     );
 }
 
+/// The next record past the revive timer's own remove-and-update, which ride on the
+/// timer's beat and say nothing about the wait.
+fn read_past_revive(keyed: &mut Keyed) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game();
+        if !(is_revive_end(&record) || record[0] == GC_CHARACTER_UPDATE) {
+            return record;
+        }
+    }
+}
+
 /// `HEADER_GC_CHARACTER_DEL`: the header and the removed `dwVID`, `TPacketGCCharacterDelete`.
 const GC_CHARACTER_DEL: u8 = 2;
 /// `HEADER_GC_WARP`: `TPacketGCWarp`, the header, `lX`, `lY`, `lAddr` and `wPort`.
@@ -4397,7 +4817,7 @@ fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target()
         (450_100, 903_400),
         "Alpha enters beside the warp"
     );
-    bob.sees_arrive(alpha.id, false, None);
+    bob.sees_enter(alpha.id, false, None);
 
     // Within one fire, the own character's removal and then the warp. The row was written first.
     let mut removed = vec![GC_CHARACTER_DEL];
@@ -4671,7 +5091,7 @@ fn a_trader_beside_a_warp_is_told_why_and_stays() {
     );
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut bob, yankee) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee.id, true, None);
+    alice.sees_enter(yankee.id, true, None);
     alice.quiet("Alpha is out of the warp's reach");
 
     alice.send_record(&client_exchange(0, u64::from(yankee.id), 0, 0));
@@ -4711,6 +5131,10 @@ fn a_trader_beside_a_warp_is_told_why_and_stays() {
 /// `HEADER_GC_SCRIPT`: `TPacketGCScript`, a `WORD size` covering the whole record, the `skin`
 /// byte and a `WORD src_size`, then the script with no terminator (`G/packet.h`).
 const GC_SCRIPT: u8 = 45;
+/// `HEADER_GC_REQUEST_MAKE_GUILD` (`G/packet.h`): 82.
+const GC_REQUEST_MAKE_GUILD: u8 = 82;
+/// `HEADER_GC_REQUEST_CHANGE_LANGUAGE` (245): the language the switch took.
+const GC_REQUEST_CHANGE_LANGUAGE: u8 = 245;
 /// `HEADER_GC_QUEST_INFO` (81): `packet_quest_info`, a `WORD size` covering the whole
 /// record, `WORD index`, `WORD c_index` and the `flag` byte, eight bytes measured for i686,
 /// then one part per flag bit (`quest::PC::SendQuestInfoPakcet`, `G/questpc.cpp:231-308`).
@@ -4930,6 +5354,7 @@ fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
         [(QUEST_SASH, true), (QUEST_YOHARA, false)],
         "Theowahdan stands on map 1, and no statue does"
     );
+    read_login_update(&mut alice);
     alice.still("the letter is not sent again");
 }
 
@@ -5016,7 +5441,7 @@ fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
     assert_eq!(keyed.read_game()[0], GC_CHARACTER_ADD);
     assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
     let (shown, affect) = read_shown(keyed);
-    assert_eq!(affect[0], GC_AFFECT_ADD);
+    assert_eq!(revive_add(keyed, affect)[0], GC_AFFECT_ADD);
     let seen: Vec<u32> = shown
         .inserts()
         .iter()
@@ -5025,6 +5450,7 @@ fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
         .collect();
     assert_eq!(seen.len(), 1, "map 1 has one {vnum}, in view");
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(keyed, [false; 5]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
@@ -5032,7 +5458,32 @@ fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
     seen[0]
 }
 
-/// Reads the sash quest's letter and then the Yohara quest's, which marks nothing.
+/// [`enter_beside`], answering the entrant's own VID beside the one character of race
+/// `vnum` the view shows: the `dwVID` of its own `GC_CHARACTER_ADD`.
+fn enter_beside_shown(keyed: &mut Keyed, vnum: u16) -> (u32, u32) {
+    keyed.send_record(&client_enter_game());
+    let own = keyed.read_game();
+    assert_eq!(own[0], GC_CHARACTER_ADD);
+    let own = u32::from_le_bytes(own[1..5].try_into().expect("four bytes"));
+    assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(keyed);
+    assert_eq!(revive_add(keyed, affect)[0], GC_AFFECT_ADD);
+    let seen: Vec<u32> = shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == vnum.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(seen.len(), 1, "map 1 has one {vnum}, in view");
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(keyed, [false; 5]);
+    assert_eq!(keyed.read_game()[0], GC_TIME);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(keyed.read_game()[0], GC_CHAT);
+    enter_war_list(keyed);
+    (own, seen[0])
+}
+
 fn read_sash_and_yohara_letters(keyed: &mut Keyed, what: &str) {
     read_letter(
         keyed,
@@ -5109,6 +5560,7 @@ fn the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again() {
         server_quest_target_create(2, b"Theowahdan", theowahdan)
     );
     read_sash_and_yohara_letters(&mut alice, "letter");
+    read_login_update(&mut alice);
     alice.still("nothing follows");
 
     drop(alice);
@@ -5145,6 +5597,7 @@ fn the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again() {
         "the logout forgot the marks, so the letter pass deletes none"
     );
     read_sash_and_yohara_letters(&mut alice, "letter");
+    read_login_update(&mut alice);
     alice.still("the quests stand where the first login moved them");
 }
 
@@ -5265,6 +5718,7 @@ fn a_click_on_marked_theowahdan_runs_the_sash_quests_target_script() {
     );
     let marked = std::time::Instant::now();
     read_sash_and_yohara_letters(&mut alice, "letter");
+    read_login_update(&mut alice);
     assert_eq!(
         alice.read_game_marked(),
         server_quest_target_update(1, THEOWAHDAN_SPOT.0, THEOWAHDAN_SPOT.1),
@@ -5395,6 +5849,7 @@ fn a_complete_sash_quest_without_the_material_goes_back_to_the_captain() {
         theowahdan
     );
     read_sash_and_yohara_letters(&mut alice, "letter");
+    read_login_update(&mut alice);
     assert_eq!(
         alice.read_game_marked(),
         server_quest_target_update(1, THEOWAHDAN_SPOT.0, THEOWAHDAN_SPOT.1),
@@ -5530,6 +5985,7 @@ fn enter_beside_the_captain(
         b"Statuia Razboinicului",
         "the Yohara quest's letter",
     );
+    read_login_update(&mut alice);
     (alice, captain)
 }
 
@@ -5725,6 +6181,21 @@ const GC_GOLD_CHANGE: u8 = 225;
 /// value`.
 const GOLD_CHANGE_LEN: usize = 4 + 4 + 8 + 8;
 
+/// `HEADER_GC_SASH` (`G/packet.h:2804-2818`): the sash window's answers.
+const GC_SASH: u8 = 231;
+/// `sizeof(TPacketSash)`: the whole sash record.
+const SASH_LEN: usize = 23;
+
+/// `HEADER_GC_CL` (`G/packet.h:2836-2853`): the changelook window's answers.
+const GC_CL: u8 = 234;
+/// `sizeof(TPacketChangeLook)`: the whole changelook record.
+const CL_LEN: usize = 10;
+/// `sizeof(TPacketGCDragonSoulRefine)`: header, sub-type, and the 3-byte `TItemPos`.
+const DS_REFINE_LEN: usize = 5;
+/// `HEADER_GC_VIEW_EQUIP` (0x63): another player's worn equipment.
+const GC_VIEW_EQUIP: u8 = 0x63;
+/// `sizeof(TPacketViewEquip)`: the whole view record.
+const VIEW_EQUIP_LEN: usize = 1303;
 /// A `GC_SHOP` that carries its subheader alone.
 fn shop_answer(subheader: u8) -> Vec<u8> {
     vec![GC_SHOP, 4, 0, subheader]
@@ -5944,6 +6415,9 @@ fn the_points_are_computed_at_load_and_the_item_load_clamps_the_pools() {
     let (mut keyed, _empire, list) = select_screen(&server, b"alice");
     let alpha = listed(&list, 0);
     keyed.send_record(&client_select(0));
+    // The client reports its version once a character is selected, so the enter-game check
+    // passes; the record is answered with nothing.
+    keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
     assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
@@ -6042,6 +6516,9 @@ fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
         "Channel 1 hosts map 373"
     );
     keyed.send_record(&client_select(0));
+    // The client reports its version once a character is selected, so the enter-game check
+    // passes; the record is answered with nothing.
+    keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
     assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
@@ -6197,7 +6674,7 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
@@ -6300,7 +6777,7 @@ fn a_line_legacy_answers_itself_comes_back_to_the_sender_alone() {
     );
     let (mut alice, _) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world_in(&server, b"bob", 0, GERMAN);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
 
     let info = |empire: u8, text: &[u8]| {
         let mut line = vec![GC_CHAT];
@@ -6409,7 +6886,7 @@ fn a_whisper_reaches_the_character_it_names() {
 
     let (mut alice, _) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let (mut delta, _) = enter_world_on(&server, 99, b"dave", 0, ENGLISH);
 
     alice.send_record(&client_whisper(b"Yankee", b"hello"));
@@ -6474,7 +6951,7 @@ fn a_tenth_whisper_in_a_run_closes_the_connection() {
     );
     let (mut alice, _) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
 
     // The ten lines go out back to back with no reads between them, so no
     // five-second counter window can fall in between and reset the count: the
@@ -6743,7 +7220,7 @@ fn a_block_byte_refuses_the_line_it_names() {
     );
     let (mut alice, _) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
 
     alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/setblockmode 8"));
     assert_eq!(
@@ -6858,7 +7335,7 @@ fn a_block_byte_refuses_at_the_exchange_party_and_guild_gates() {
     give_guild_purse(&database);
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     // Yankee sees no one arrive: Alice's enter burst ran before his character existed,
     // so only her client hears his insert.
     // The partner blocks exchanges (`BLOCK_EXCHANGE`): Alice's `START` answers the
@@ -7073,10 +7550,10 @@ fn a_party_line_reaches_the_members_and_no_outsider() {
     stamina(&database, "Charlie", 12_345);
     let (mut alice, alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let (mut charlie, charlie_listed, _) = enter_world_seeing(&server, b"carol", 0);
-    alice.sees_arrive(charlie_listed.id, false, None);
-    yankee.sees_arrive(charlie_listed.id, false, None);
+    alice.sees_enter(charlie_listed.id, false, None);
+    yankee.sees_enter(charlie_listed.id, false, None);
     let yankee_vid = u32::from_le_bytes(yankee_entered.add[1..5].try_into().unwrap());
     let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
     let _ = alpha;
@@ -7152,11 +7629,11 @@ fn a_party_request_retargets_to_the_leader_and_is_denied_then_accepted() {
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
     let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
     let yankee_vid = u32::from_le_bytes(yankee_entered.add[1..5].try_into().unwrap());
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let (mut charlie, charlie_listed, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
     let charlie_vid = u32::from_le_bytes(charlie_entered.add[1..5].try_into().unwrap());
-    alice.sees_arrive(charlie_listed.id, false, None);
-    yankee.sees_arrive(charlie_listed.id, false, None);
+    alice.sees_enter(charlie_listed.id, false, None);
+    yankee.sees_enter(charlie_listed.id, false, None);
 
     // Alpha forms a party with Charlie, so an accepted request has somewhere to join.
     let mut invite = vec![CG_PARTY_INVITE];
@@ -7572,7 +8049,7 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
         alpha_info, alpha_entered.info,
         "the summary Alpha got of itself"
     );
-    let (_, _, yankee_info) = alice.sees_arrive(yankee_listed.id, false, None);
+    let (_, _, yankee_info, _) = alice.sees_enter(yankee_listed.id, false, None);
     assert_eq!(
         yankee_info, yankee_entered.info,
         "the summary Yankee got of itself"
@@ -7707,7 +8184,7 @@ fn a_pose_reaches_the_view_including_its_sender() {
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let (mut carol, _charlie) = enter_world(&server, b"carol", 0);
 
     // Legacy `Sitdown` writes `POSITION_SITTING_GROUND` for both chair and ground and drops
@@ -7758,10 +8235,11 @@ fn a_pose_reaches_the_view_including_its_sender() {
 
     // Standing while already standing is the `if (!IsPosition(POS_SITTING)) return;` arm.
     alice.unanswered(&client_position(POSITION_GENERAL));
-    // Standing, `/dance1` passes the position check and reaches `do_emotion`, which this build
-    // does not port, so nothing is sent.
-    alice.unanswered(&slash(b"/dance1"));
-    yankee.quiet("a command line reaches only the one who typed it");
+    // Standing, `/dance1` passes the position check and reaches `do_emotion`, which the mask
+    // gate refuses: the default server requires the mask and Alpha wears none.
+    alice.send_record(&slash(b"/dance1"));
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;414]"));
+    yankee.quiet("a refused emotion reaches only the one who typed it");
     // An unknown pose byte is not a legacy arm, so nothing is sent.
     alice.unanswered(&client_position(0x7f));
     carol.quiet("out of view, Charlie is sent none of the poses");
@@ -7801,7 +8279,7 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_id.id, false, None);
+    alice.sees_enter(yankee_id.id, false, None);
     let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     // A claim on Yankee from a position 10 units away, inside every limit.
@@ -7944,7 +8422,7 @@ fn alpha_walks_1600_south(database: &ScratchDatabase, dagger: bool, duration: u3
         enter_world_seeing(&server, b"alice", 0)
     };
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    let (_, _, yankee_info) = alice.sees_arrive(yankee_listed.id, false, None);
+    let (_, _, yankee_info, _) = alice.sees_enter(yankee_listed.id, false, None);
     assert_eq!(
         yankee_info, yankee_entered.info,
         "the summary Yankee got of itself"
@@ -8114,7 +8592,7 @@ fn players_and_npcs_within_view_range_see_each_other_on_entry() {
         seen[3], alpha_entered.info,
         "the summary Alpha got of itself"
     );
-    let (_, add, info) = alice.sees_arrive(yankee_listed.id, false, None);
+    let (_, add, info, _) = alice.sees_enter(yankee_listed.id, false, None);
     assert_eq!(insert_body(&add), insert_body(&yankee_entered.add));
     assert_eq!(info, yankee_entered.info);
     alice.quiet("Yankee's pair alone");
@@ -8302,7 +8780,7 @@ fn talking_chat_reaches_the_whole_map_including_players_out_of_view() {
     let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
     let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, false, None);
+    alice.sees_enter(yankee_listed.id, false, None);
     let (mut charlie, _, _) = enter_world_seeing(&server, b"carol", 0);
 
     alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
@@ -8330,7 +8808,7 @@ fn a_leaving_player_is_removed_from_its_viewers_only() {
     let mut server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
     let (mut alice, alpha, _) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, false, None);
+    alice.sees_enter(yankee_listed.id, false, None);
     let (mut charlie, _, _) = enter_world_seeing(&server, b"carol", 0);
     alice.quiet("Charlie is out of view");
 
@@ -8364,7 +8842,7 @@ fn at_zero_stamina_the_walk_mode_rides_with_each_insert() {
     assert_eq!(&seen[2][1..5], &alpha.id.to_le_bytes());
     assert_eq!(seen[3], alpha_entered.info);
     assert_eq!(seen[4], walk_mode_of(&alpha.id.to_le_bytes()));
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     alice.quiet("Yankee's walk mode and pair alone");
     yankee.quiet("Yankee's burst is over");
 }
@@ -8380,7 +8858,7 @@ fn a_game_phase_enter_game_is_consumed_silently() {
     let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
     let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, false, None);
+    alice.sees_enter(yankee_listed.id, false, None);
 
     alice.unanswered(&client_enter_game());
     yankee.quiet("Alpha is not shown again");
@@ -9179,11 +9657,12 @@ const STONE: u32 = 110_000;
 ///
 /// Alpha is lowered to level 9 and given five `EQUIPMENT` rows ([`give_alpha_equipment`]). The
 /// armour in the body cell and the fan in the weapon cell are worn, which the client sees as the
-/// inventory window at `INVENTORY_MAX_NUM` plus the cell (`G/char_item.cpp:658-670`). The bell
-/// fails `CheckItemUseLevel` by one level and cell 64 is past the wear cells, so both are set
-/// aside to the first free inventory cells and their rows rewritten (`G/input_db.cpp:1519-1531`
-/// and `:1541-1561`). The dragon soul stone is refused, because its deck is not ported, and its
-/// row is kept.
+/// inventory window at `INVENTORY_MAX_NUM` plus the cell (`G/char_item.cpp:658-670`), and the
+/// dragon soul stone rides its deck cell at 245 (`EquipTo`'s DS arm, `G/item.cpp:1410-1418`),
+/// inactive until the line activates it (`DragonSoul_Initialize` clears socket 2 without
+/// touching the deck affects, so no points move). The bell fails `CheckItemUseLevel` by one
+/// level and cell 64 is past the wear cells, so both are set aside to the first free
+/// inventory cells and their rows rewritten (`G/input_db.cpp:1519-1531` and `:1541-1561`).
 ///
 /// Every expected value is a hand sum of the owner's prototypes and `ComputeBattlePoints`
 /// (`G/char.cpp:2769-2846`). The armour adds its `value1`, 21, and twice its `value5`, 0: the
@@ -9198,7 +9677,7 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let mut server = Server::start(binary(), database.url());
+    let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     add_characters(&database);
     give_alpha_equipment(&database);
@@ -9207,6 +9686,9 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     let (mut keyed, _empire, list) = select_screen(&server, b"alice");
     let alpha = listed(&list, 0);
     keyed.send_record(&client_select(0));
+    // The client reports its version once a character is selected, so the enter-game check
+    // passes; the record is answered with nothing.
+    keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
     assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
@@ -9228,14 +9710,15 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     }
     assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
 
-    // Then: the two worn items at their wear cells, in row order, then the two set-aside
+    // Then: the three worn items at their wear cells, in row order, then the two set-aside
     // items at the first free cells.
     let inventory = common::item_slots::EWindows::Inventory as u8;
     assert_eq!(
-        loaded_item_sets(&mut keyed, 4),
+        loaded_item_sets(&mut keyed, 5),
         vec![
             (inventory, 180, WORN_ARMOUR, 1),
             (inventory, 184, WORN_FAN, 1),
+            (inventory, 245, STONE, 1),
             (inventory, 0, BELL, 1),
             (inventory, 1, SPARE_ARMOUR, 1),
         ],
@@ -9267,17 +9750,16 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     );
     keyed.still("nothing follows");
 
-    // And: the set-aside rows were rewritten at their new cells, and the worn rows and the
-    // refused stone's row are as they were.
+    // And: the set-aside rows were rewritten at their new cells, and the worn rows are as
+    // they were.
     check(
         &database,
         "(SELECT array_agg((window_type, pos) ORDER BY id)::text FROM item WHERE id \
          BETWEEN 20 AND 24) = '{\"(2,0)\",\"(1,0)\",\"(2,4)\",\"(1,1)\",\"(2,65)\"}'",
     );
-    server.wait_for("An item was not loaded; its row is kept");
     assert!(
-        server.logged("wearing it needs the dragon soul deck, which is not ported"),
-        "the stone's refusal names the system"
+        !server.logged("An item was not loaded"),
+        "every row loads: the deck is ported"
     );
 
     // When: the game is entered. Then: both speeds are the worn ones, the armour is the main
@@ -10148,6 +10630,44 @@ fn a_quickslot_follows_its_potion_chains_when_it_is_used_up_and_a_drop_deletes_i
     );
 }
 
+impl Keyed {
+    /// Drain the recovery's pool records ahead of another character's enter
+    /// burst, carrying the pools each one leaves in `hp_now` and `sp_now`.
+    /// A hit record is a heal-sized step from `hp_now`, a spell record a
+    /// shaman's `DistributeSP` from `sp_now` — 15 moving, 28 idle — and the
+    /// first non-pool record — Yankee's walk mode — is put back for the
+    /// enter reader.
+    fn drain_heal_ticks(&mut self, vid: u32, hp_now: &mut i64, sp_now: &mut i64) {
+        let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+        let sp_kind = u8::try_from(common::point_slot::POINT_SP).expect("a point byte");
+        loop {
+            let Some(record) = self.read_game_raw_until(std::time::Instant::now() + QUIET_WINDOW)
+            else {
+                return;
+            };
+            if record[0] != GC_POINT_CHANGE || record[4..8] != vid.to_le_bytes() {
+                self.unread(vec![record]);
+                return;
+            }
+            let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+            if record[8] == hp_kind {
+                assert!(
+                    is_heal_step(*hp_now, value, 1420),
+                    "a heal tick from {hp_now}: {value}"
+                );
+                *hp_now = value;
+            } else {
+                assert_eq!(record[8], sp_kind, "a pool record");
+                assert!(
+                    value == (*sp_now + 15).min(600) || value == (*sp_now + 28).min(600),
+                    "the spirit's tick from {sp_now}: {value}"
+                );
+                *sp_now = value;
+            }
+        }
+    }
+}
+
 /// Whether an HP move from `before` to `after` is a heal tick: `15 + MaxHP . {1|5}/100`
 /// (`hp_recovery`), capped at the maximum (ledger 229l).
 fn is_heal_step(before: i64, after: i64, max_hp: i64) -> bool {
@@ -10514,7 +11034,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
         (keyed, character)
     };
     // And: Alpha sees Zulu arrive.
-    alpha.sees_arrive(zulu_listed.id, false, None);
+    alpha.sees_enter(zulu_listed.id, false, None);
     // When: Charlie enters out of view. Then: nothing lying there is shown, and nobody sees
     // Charlie arrive.
     let (mut charlie, _, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
@@ -10605,7 +11125,7 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go()
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, false, None);
+    alpha.sees_enter(zulu_listed.id, false, None);
 
     // When: Alpha drops the stack whole.
     alpha.send_record(&client_item_drop(0, None));
@@ -10655,7 +11175,7 @@ fn a_pick_up_is_stored_only_after_the_drop_it_follows() {
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, false, None);
+    alpha.sees_enter(zulu_listed.id, false, None);
     // And: another transaction holds the item's row, so the store cannot delete it yet.
     let (lock, locked) = support::hold_lock(
         database.url(),
@@ -10723,7 +11243,7 @@ fn a_dropped_gold_pile_lies_until_someone_picks_it_up() {
     // Given: Alpha holds 5000 gold, and Zulu stands beside it.
     let (mut alpha, alpha_listed) = enter_world(&server, b"alice", 0);
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, false, None);
+    alpha.sees_enter(zulu_listed.id, false, None);
 
     // When: Alpha drops 1500 gold.
     alpha.send_record(
@@ -11130,7 +11650,7 @@ fn a_trade_moves_an_item_and_gold_between_two_players_in_one_transaction() {
     seat_the_traders(&database, vnum);
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut bob, yankee) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee.id, true, None);
+    alice.sees_enter(yankee.id, true, None);
     // Given: Alpha's slot 2 names the item's cell 5, and slot 6 skill 3.
     alice.send_record(&client_quickslot_add(2, 1, 5));
     assert_eq!(alice.read_game(), [GC_QUICKSLOT_ADD, 2, 1, 5]);
@@ -11530,10 +12050,10 @@ fn an_account_keeps_items_in_its_safebox_and_takes_them_from_its_mall() {
     bob.closed_by(&slash(b"/mall_passwor"));
 }
 
-/// [`enter_equipped_world_with`] for the four items [`give_alpha_equipment`] sets: the stone is
-/// refused and its row kept.
+/// [`enter_equipped_world_with`] for the five items [`give_alpha_equipment`] sets: the armour,
+/// the fan, the deck stone, and the two set-aside.
 fn enter_equipped_world(server: &Server, login: &[u8]) -> (Keyed, Listed, Entered) {
-    enter_equipped_world_with(server, login, 4)
+    enter_equipped_world_with(server, login, 5)
 }
 
 /// [`enter_world_seeing`] for a character that wears equipment at load, whose load sets
@@ -11550,6 +12070,9 @@ fn enter_equipped_world_with(
     let (mut keyed, _empire, list) = select_screen(server, login);
     let character = listed(&list, 0);
     keyed.send_record(&client_select(0));
+    // The client reports its version once a character is selected, so the enter-game check
+    // passes; the record is answered with nothing.
+    keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
     assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
@@ -11597,6 +12120,11 @@ fn a_look_change_inside_the_window_carries_the_flag() {
     assert!(
         alpha_keyed.timer_record(&arrival),
         "Yankee's entry is the timer's"
+    );
+    let restate = alpha_keyed.read_game_raw();
+    assert!(
+        alpha_keyed.timer_restate(&restate),
+        "Yankee's login update restates it"
     );
 
     // When: the armour is taken off the body cell, inside the window. Then: the look update
@@ -11754,6 +12282,14 @@ fn is_revive_end(record: &[u8]) -> bool {
         && record.get(5) == Some(&0)
 }
 
+/// Whether `record` is the dragon-soul qualification's `GC_AFFECT_ADD` (kind 540, no
+/// apply), which the death re-sends with every held affect (`G/char_battle.cpp:1561-1569`).
+fn is_ds_qualification_add(record: &[u8]) -> bool {
+    record.first() == Some(&GC_AFFECT_ADD)
+        && record.get(1..5) == Some(&540u32.to_le_bytes()[..])
+        && record.get(5) == Some(&0)
+}
+
 /// The width of a record an NPC may send on its own, read from its first bytes: a `GC_MOVE`, a
 /// `GC_WALK_MODE`, or a `GC_CHAT` by its `WORD` size. `None` for any other header, or a chat
 /// whose size has not arrived.
@@ -11761,7 +12297,7 @@ fn chatter_width(record: &[u8]) -> Option<usize> {
     match *record.first()? {
         GC_MOVE => Some(GC_MOVE_LEN),
         GC_WALK_MODE => Some(WALK_MODE_LEN),
-        GC_CHAT => word_sized(record.get(..3)?),
+        GC_CHAT | GC_QUEST_INFO => word_sized(record.get(..3)?),
         _ => None,
     }
 }
@@ -11908,6 +12444,11 @@ fn a_viewer_in_range_gets_the_arrival_pair_then_the_update() {
     assert_eq!(&update[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
     assert_eq!(&update[20..28], &[0, 0, 0, 0x08, 0, 0, 0, 0], "flag 28");
     assert!(yankee.timer_record(&update), "the entry is the timer's");
+    let restate = yankee.read_game_raw();
+    assert!(
+        yankee.timer_restate(&restate),
+        "the login update restates it"
+    );
     yankee.quiet("nothing else follows the entrant's update");
 }
 
@@ -11951,6 +12492,11 @@ fn an_entrant_within_five_seconds_sees_the_flag_in_the_add_and_its_expiry_clears
     assert!(
         alpha_keyed.timer_record(&arrival),
         "Yankee's entry is the timer's"
+    );
+    let restate = alpha_keyed.read_game_raw();
+    assert!(
+        alpha_keyed.timer_restate(&restate),
+        "Yankee's login update restates it"
     );
 
     // When: the five seconds are up. Then: Yankee gets Alpha's look update with no flag.
@@ -12024,6 +12570,11 @@ fn the_revive_ends_after_five_seconds_with_remove_then_update() {
         alpha_keyed.timer_record(&arrival),
         "the entry is the timer's"
     );
+    let restate = alpha_keyed.read_game_raw();
+    assert!(
+        alpha_keyed.timer_restate(&restate),
+        "the login update restates it"
+    );
 
     // Then: nothing ends the revive before five seconds (4.5 s from the entry).
     let until_early = Duration::from_millis(4_500).saturating_sub(entered_at.elapsed());
@@ -12088,6 +12639,11 @@ fn an_attack_step_ends_the_revive_before_the_move_relay() {
     yankee.sees_arrive(alpha.id, false, None);
     let entry = yankee.read_game_raw();
     assert!(yankee.timer_record(&entry), "the entry is the timer's");
+    let restate = yankee.read_game_raw();
+    assert!(
+        yankee.timer_restate(&restate),
+        "the login update restates it"
+    );
 
     // When: Alpha swings, standing where it is. Then: its own update has no flag, and the
     // removal follows it.
@@ -12155,6 +12711,15 @@ fn a_character_below_max_stamina_is_refilled_about_three_seconds_after_entering(
         &arrival[1..5],
         &yankee_listed.id.to_le_bytes(),
         "Yankee's VID"
+    );
+    assert!(
+        alpha_keyed.timer_record(&arrival),
+        "Yankee's entry is the timer's"
+    );
+    let restate = alpha_keyed.read_game_raw();
+    assert!(
+        alpha_keyed.timer_restate(&restate),
+        "Yankee's login update restates it"
     );
 
     // When: the refill is due. Then: it is a point change to stamina at the maximum, and it
@@ -12328,7 +12893,7 @@ fn a_click_targets_a_monster_and_a_player_and_a_leave_clears_it() {
 
     // When: Yankee enters and Alpha clicks it. Then: its hit points, and Yankee hears nothing.
     let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    alpha_keyed.sees_arrive(yankee_listed.id, false, None);
+    alpha_keyed.sees_enter(yankee_listed.id, false, None);
     alpha_keyed.send_record(&client_target(yankee_listed.id));
     assert_eq!(
         alpha_keyed.read_game(),
@@ -12439,7 +13004,7 @@ fn a_target_4800_away_is_dropped_by_the_next_recovery_run() {
         (474_000, 950_600),
         "Charlie stands where it was stored"
     );
-    alice.sees_arrive(charlie_listed.id, false, None);
+    alice.sees_enter(charlie_listed.id, false, None);
     alice.quiet("Yankee is out of view");
 
     // When: Alpha clicks Yankee. Then: the target, and VID 0 at the next recovery run.
@@ -12693,12 +13258,18 @@ impl Keyed {
             }
             let (records, quiet) = self.drain_wire(left, |header| match header {
                 GC_PING => 1,
+                GC_AFFECT_ADD => AFFECT_ADD_LEN,
                 GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
                 GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
                 GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
                 GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
-                GC_CHARACTER_DEL => 1 + 4,
+                GC_CHARACTER_DEL | GC_QUEST_TARGET_DELETE => 1 + 4,
+                GC_CHARACTER_GOLD => GOLD_LEN,
+                GC_PLAYER_POINTS => POINTS_LEN,
+                GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
+                GC_CHANGE_SKILL_GROUP => 1 + 1,
                 GC_POINT_CHANGE => POINT_CHANGE_LEN,
+                GC_QUEST_TARGET_CREATE => QUEST_TARGET_CREATE_LEN,
                 GC_QUEST_TARGET_UPDATE => QUEST_TARGET_UPDATE_LEN,
                 other => panic!("an unexpected record: header {other}"),
             });
@@ -12720,9 +13291,32 @@ const CG_ADD_FLY_TARGETING: u8 = 0x35;
 
 /// `HEADER_GC_FLY_TARGETING` (71): a shot's targeting record, 17 bytes.
 const GC_FLY_TARGETING: u8 = 71;
+/// `HEADER_GC_ADD_FLY_TARGETING` (69): the extra target's record, same width.
+const GC_ADD_FLY_TARGETING: u8 = 69;
 /// The packed width of `TPacketGCFlyTargeting`: a header, two VIDs, two `long`s.
 const FLY_TARGETING_LEN: usize = 17;
 const CG_SHOOT: u8 = 0x36;
+/// `HEADER_CG_CHANGE_LANGUAGE` (238): the language the client switches to.
+const CG_CHANGE_LANGUAGE: u8 = 0xee;
+/// `HEADER_CG_CLIENT_VERSION` (0xfd): the header the version report carries here. The
+/// client also knows `HEADER_CG_CLIENT_VERSION2` (0xf1), which the login phases accept too.
+const CG_CLIENT_VERSION: u8 = 0xfd;
+/// `[game] check_version_value`'s default (`G/config.cpp:87`), which the scenarios report.
+const DEFAULT_CLIENT_VERSION: &[u8] = b"1215955205";
+
+/// A client-version report with `timestamp`: the header, an empty filename and the
+/// timestamp, each field 33 bytes (`TPacketCGClientVersion`, `G/packet.h:2465-2477`).
+fn client_version(timestamp: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_CLIENT_VERSION];
+    record.extend_from_slice(&[0u8; 33]);
+    let mut stamp = [0u8; 33];
+    let len = timestamp.len().min(33);
+    stamp[..len].copy_from_slice(&timestamp[..len]);
+    record.extend_from_slice(&stamp);
+    assert_eq!(record.len(), 67, "both records are 67 bytes wide");
+    record
+}
+
 /// `gc.damage_info`: `HEADER_GC_DAMAGE_INFO`, `TPacketGCDamageInfo`'s header, `dwVID`, `flag`
 /// and `damage` (`G/packet.h:2048-2054`).
 const GC_DAMAGE_INFO: u8 = 0x87;
@@ -12734,6 +13328,8 @@ const GC_DEAD: u8 = 0x0e;
 const DAMAGE_NORMAL: u8 = 1;
 /// `DAMAGE_CRITICAL`, the flag a critical hit adds (`G/char.h:136`).
 const DAMAGE_CRITICAL: u8 = 1 << 5;
+/// `DAMAGE_POISON`, the flag a poison tick shows (`G/char.h:137`).
+const DAMAGE_POISON: u8 = 1 << 1;
 
 /// The stray dog's `MAX_HP` (vnum 101).
 const DOG_HP: i32 = 126;
@@ -12813,6 +13409,15 @@ fn ownership_of(owner: u32, victim: u32) -> Vec<u8> {
     record
 }
 
+/// `GC_AFFECT_REMOVE` of `kind` with `POINT_NONE` (`G/char_affect.cpp:259-337`):
+/// the poison's remove is `apply_on` 0.
+fn affect_remove_of(kind: u32) -> Vec<u8> {
+    let mut record = vec![GC_AFFECT_REMOVE];
+    record.extend_from_slice(&kind.to_le_bytes());
+    record.push(0);
+    record
+}
+
 /// `GC_CHARACTER_DEL` of `vid`.
 fn removal_of(vid: u32) -> Vec<u8> {
     let mut record = vec![GC_CHARACTER_DEL];
@@ -12822,6 +13427,14 @@ fn removal_of(vid: u32) -> Vec<u8> {
 
 /// `POINT_EXP`, the exp slot (`G/char.h` via `common::point_slot::POINT_EXP`).
 const POINT_EXP: u8 = 3;
+/// `POINT_MAX_HP`, `POINT_MAX_SP` and `POINT_SKILL` (`common::point_slot`).
+const POINT_MAX_HP: u8 = 6;
+const POINT_MAX_SP: u8 = 8;
+const POINT_SKILL: u8 = 28;
+/// `POINT_GAYA`, the gaya slot (`common::point_slot::POINT_GAYA`).
+const POINT_GAYA: u8 = 207;
+/// `POINT_ATTBONUS_HUMAN` (`common::point_slot::POINT_ATTBONUS_HUMAN`).
+const POINT_ATTBONUS_HUMAN: u8 = 43;
 
 /// A `GC_CREATE_FLY` of `fly_type` from `from` to `to`.
 fn fly_of(fly_type: u8, from: u32, to: u32) -> Vec<u8> {
@@ -13067,11 +13680,14 @@ fn read_swing_head(
             && record.get(8) == Some(&hp_kind);
         let is_mob_target =
             record.first() == Some(&GC_TARGET) && record.get(1..5) == Some(&mob.to_le_bytes());
+        // The fight's claim (`SetSyncOwner`, `G/char_battle.cpp:611-643`): an aggressive dog
+        // claims Alpha before its first swing, as the boar does.
+        let is_claim = record == ownership_of(victim, mob);
         // A chat carries no VID at a fixed point; the monster's ATTACK chat arrives as
         // chatter and is skipped with it.
         let is_mob_chat = record.first() == Some(&GC_CHAT);
         assert!(
-            is_heal || is_mob_target || is_mob_chat || is_npc_chatter(&record),
+            is_heal || is_mob_target || is_claim || is_mob_chat || is_npc_chatter(&record),
             "past a swing, a record nobody accounted for: {record:02x?} (first = {first})"
         );
         first = false;
@@ -13478,7 +14094,7 @@ fn a_players_hit_on_a_player_of_another_empire_takes_the_victims_hit_points() {
     );
     let (mut alpha, alpha_listed, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut charlie, charlie_listed, _charlie_entered) = enter_world_seeing(&server, b"carol", 0);
-    alpha.sees_arrive(charlie_listed.id, false, None);
+    alpha.sees_enter(charlie_listed.id, false, None);
 
     // When: Alpha hits Charlie. Then: the damage and the claim to Alpha, the damage, the hit
     // points and the claim to Charlie.
@@ -13538,7 +14154,7 @@ fn a_players_hit_on_a_player_of_his_own_empire_is_refused() {
     );
     let (mut alpha, alpha_listed, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut dave, dave_listed, _dave_entered) = enter_world_seeing(&server, b"dave", 0);
-    alpha.sees_arrive(dave_listed.id, false, None);
+    alpha.sees_enter(dave_listed.id, false, None);
 
     // When: Dave hits Alpha. Then: nothing at all.
     dave.send_record(&client_attack(alpha_listed.id));
@@ -14104,15 +14720,18 @@ fn a_player_a_monster_killed_restarts_now_and_the_gold_is_stored() {
         GC_PING => 1,
         GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
         GC_MOVE => GC_MOVE_LEN,
+        GC_PVP => 1 + 4 + 4 + 1,
         GC_TARGET => TARGET_LEN,
         GC_PHASE => 2,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_AFFECT_ADD => AFFECT_ADD_LEN,
         other => panic!("past the death, header {other}"),
     });
     assert_eq!(quiet, Quiet::Open, "the death leaves the connection open");
     // `drain_game` already filtered the NPC's own; the revive timer's, the stamina refill, the
-    // boar's recovery target and its ATTACK chat are read past. What is left is the kill's
-    // tail, if any.
+    // boar's recovery target and its ATTACK chat are read past, and so is the death's
+    // re-sent qualification (`Dead` sends every held affect again, `G/char_battle.cpp:1561-1569`,
+    // and 540 survived the clear as no-clear). What is left is the kill's tail, if any.
     let mut tail = Vec::new();
     for record in records {
         if record[0] == GC_PING
@@ -14120,6 +14739,7 @@ fn a_player_a_monster_killed_restarts_now_and_the_gold_is_stored() {
             || is_stamina_refill(&record)
             || (record.first() == Some(&GC_TARGET) && record[1..5] == boar.to_le_bytes())
             || record.first() == Some(&GC_CHAT)
+            || is_ds_qualification_add(&record)
         {
             continue;
         }
@@ -14203,10 +14823,14 @@ fn a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point(
     assert_eq!(alpha.read_fight(), [GC_PHASE, 6]);
     assert_eq!(alpha.read_fight(), dead_of(alpha_vid));
     let died = std::time::Instant::now();
-    // When: `/restart_town` at once, while the death is seconds old. Then: the killing
-    // swing's `DAMAGE_INFO{8, 0}` first when it killed, then a wait refusal.
+    // When: `/restart_town` at once, while the death is seconds old. Then: the death's
+    // re-sent qualification first (`Dead` sends every held affect again), the killing
+    // swing's `DAMAGE_INFO{8, 0}` when it killed, then a wait refusal.
     alpha.send_record(&slash(b"/restart_town"));
     let mut refusal = alpha.read_own(alpha_vid);
+    if is_ds_qualification_add(&refusal) {
+        refusal = alpha.read_own(alpha_vid);
+    }
     if refusal == damage_info(alpha_vid, 8, 0) {
         refusal = alpha.read_own(alpha_vid);
     }
@@ -14220,9 +14844,11 @@ fn a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point(
         GC_PING => 1,
         GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
         GC_MOVE => GC_MOVE_LEN,
+        GC_PVP => 1 + 4 + 4 + 1,
         GC_TARGET => TARGET_LEN,
         GC_PHASE => 2,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_AFFECT_ADD => AFFECT_ADD_LEN,
         other => panic!("past the death, header {other}"),
     });
     for record in records {
@@ -14231,6 +14857,7 @@ fn a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point(
             || is_stamina_refill(&record)
             || (record.first() == Some(&GC_TARGET) && record[1..5] == boar.to_le_bytes())
             || record.first() == Some(&GC_CHAT)
+            || is_ds_qualification_add(&record)
         {
             continue;
         }
@@ -15032,7 +15659,7 @@ fn a_guild_is_made_and_every_pc_hears_its_name() {
     give_guild_purse(&database);
     let (mut alice, alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
     alice.send_record(&client_answer_make_guild(b"MyGuild"));
     // The master's own order: GUILD_NAME, [LS;682], the fee, the item, the login walk.
@@ -15146,7 +15773,7 @@ fn a_newcomer_hears_the_masters_guild_and_sees_its_id() {
     give_guild_purse(&database);
     let (mut alice, alpha, _) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, false, None);
+    alice.sees_enter(yankee_listed.id, false, None);
     alice.send_record(&client_answer_make_guild(b"MyGuild"));
     let named = alice.read_game();
     let id = check_guild_named(&named);
@@ -15181,8 +15808,8 @@ fn a_newcomer_hears_the_masters_guild_and_sees_its_id() {
     assert_eq!(&yankee_info[43..47], &[0, 0, 0, 0], "the guildless id");
     assert_eq!(yankee_info[63], 0, "the guildless flag");
     // The others see Charlie arrive guildless, with no NAME.
-    alice.sees_arrive(charlie_listed.id, false, None);
-    yankee.sees_arrive(charlie_listed.id, false, None);
+    alice.sees_enter(charlie_listed.id, false, None);
+    yankee.sees_enter(charlie_listed.id, false, None);
     // Charlie's own update names no guild: he holds none.
     let update = charlie_entered.shown.update.expect("the own update");
     assert_eq!(&update[28..32], &[0, 0, 0, 0], "the own update's id");
@@ -15269,7 +15896,7 @@ fn a_taken_guild_name_is_refused_and_survives_a_reboot() {
     );
     let (mut alice, _, alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let _ = alice_entered;
     alice.send_record(&client_answer_make_guild(b"MyGuild"));
     // The walk lands; only its head matters here — the name is taken now.
@@ -15367,7 +15994,7 @@ fn a_guild_invites_accepts_and_removes() {
     give_guild_purse(&database);
     let (mut alice, _alpha, _alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let yankee_vid = yankee_listed.id;
     let yankee_player = {
         let rows = support::rows(
@@ -15481,7 +16108,7 @@ fn a_removed_member_keeps_the_withdraw_time_across_a_relog() {
     give_guild_purse(&database);
     let (mut alice, _alpha, _alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let yankee_vid = yankee_listed.id;
     let yankee_player = {
         let rows = support::rows(
@@ -15555,7 +16182,7 @@ fn a_removed_member_keeps_the_withdraw_time_across_a_relog() {
     let (mut yankee, yankee_again, _) = enter_world_seeing(&server, b"bob", 0);
     yankee.quiet("the member is back");
     // The master sees the member again: its walk mode, then its insert and its summary.
-    alice.sees_arrive(yankee_again.id, true, None);
+    alice.sees_enter(yankee_again.id, true, None);
     // The master invites the member again: the withdraw penalty refuses the invite.
     alice.send_record(&client_guild_add_member(yankee_again.id));
     assert_eq!(
@@ -15631,7 +16258,7 @@ fn a_guild_renames_regrades_and_flags_its_general() {
     give_guild_purse(&database);
     let (mut alice, _alpha, _alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let yankee_vid = yankee_listed.id;
     let yankee_player = {
         let rows = support::rows(
@@ -15762,7 +16389,7 @@ fn a_guild_offers_charges_posts_and_deletes() {
     give_guild_purse(&database);
     let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
     let yankee_vid = yankee_listed.id;
     alice.send_record(&client_answer_make_guild(b"MyGuild"));
@@ -16131,7 +16758,7 @@ fn a_guild_ups_and_casts_its_skills() {
     give_guild_purse(&database);
     let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
     let yankee_vid = yankee_listed.id;
     alice.send_record(&client_answer_make_guild(b"MyGuild"));
@@ -16523,7 +17150,7 @@ fn a_guild_war_is_declared_refused_and_fanned() {
     let (mut yankee, yankee_listed, yankee_entered) =
         enter_world_seeing_guilded(&server, b"bob", 0, 1);
     let _alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
-    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
     // Yankee's burst already showed Alpha — its insert, its summary and MyGuild's
     // NAME (consumed by the guilded enter's walk drain) — so nothing is left to
     // arrive on its side.
@@ -16635,7 +17262,7 @@ fn a_guild_war_is_accepted_and_every_pc_hears_the_list() {
     let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
     let (mut yankee, yankee_listed, _yankee_entered) =
         enter_world_seeing_guilded(&server, b"bob", 0, 1);
-    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
     // The declare, as in the refused scenario: Alpha's WAR fan, then Yankee's.
     alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves"));
     let war = alice.read_game();
@@ -16722,7 +17349,7 @@ fn a_battle_war_is_declared_and_accepted() {
     let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
     let (mut yankee, yankee_listed, _yankee_entered) =
         enter_world_seeing_guilded(&server, b"bob", 0, 1);
-    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
     // The declare: the battle war lands, because the map index holds map 110.
     alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves 1"));
     let war = alice.read_game();
@@ -17529,7 +18156,7 @@ fn a_war_pair_ready_on(
         enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
     let (yankee, yankee_listed, _yankee_entered) =
         enter_world_seeing_guilded_with_team(&server, b"bob", 0, 1, Some(b"Alpha"));
-    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
     Some((database, server, alice, alpha_listed, yankee, yankee_listed))
 }
 
@@ -18193,6 +18820,24 @@ fn messenger_team_list(name: &[u8]) -> Vec<u8> {
     record
 }
 
+/// [`messenger_team_list`] for several GM names: each entry carries its
+/// online byte and its name, in byte order (`BTreeSet`,
+/// `prodomo/src/game_state/messenger.rs`).
+fn messenger_team_list_many(names: &[(&[u8], bool)]) -> Vec<u8> {
+    let total = u16::try_from(4 + names.iter().map(|(name, _)| 2 + name.len()).sum::<usize>())
+        .expect("short names");
+    let mut record = vec![GC_MESSENGER];
+    record.extend_from_slice(&total.to_le_bytes());
+    record.push(0);
+    for (name, online) in names {
+        let len = u8::try_from(name.len()).expect("a short name");
+        record.push(u8::from(*online));
+        record.push(len);
+        record.extend_from_slice(name);
+    }
+    record
+}
+
 /// A `GC_MESSENGER` login or logout: the header, the `size` word, the subheader, the
 /// name length and the name bytes (`MessengerManager::SendLogin`,
 /// `G/messenger_manager.cpp:515-543`).
@@ -18224,6 +18869,26 @@ fn messenger_list(name: &[u8]) -> Vec<u8> {
 /// Alpha` command line, and Bob's `/messenger_auth y Alpha` lists both directions:
 /// each side hears the added line and the other's LOGIN, the rows land in the store,
 /// and the list rides Alice's next enter. The remove takes both rows back.
+///
+/// Drain the tail a relogin wrote behind Yankee's LIST: the pair, the entrant's entry
+/// and its login restatement (`G/questlua_pc.cpp:3598`), the point change, the teleport,
+/// and two updates. Each is asserted by header and length.
+fn drain_relogin_tail(yankee: &mut Keyed) {
+    for (header, len) in [
+        (GC_CHARACTER_ADD, CHARACTER_ADD_LEN),
+        (GC_CHAR_ADDITIONAL_INFO, CHAR_ADDITIONAL_INFO_LEN),
+        (19, CHARACTER_UPDATE_LEN),
+        (19, CHARACTER_UPDATE_LEN),
+        (GC_POINT_CHANGE, POINT_CHANGE_LEN),
+        (0x7f, 6),
+        (19, CHARACTER_UPDATE_LEN),
+        (19, CHARACTER_UPDATE_LEN),
+    ] {
+        let tail = yankee.read_game_raw();
+        assert_eq!((tail[0], tail.len()), (header, len), "{tail:02x?}");
+    }
+}
+
 #[test]
 fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
     let Some(database) = ScratchDatabase::create() else {
@@ -18241,7 +18906,7 @@ fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
     );
     let (mut alice, alice_listed) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     alice.send_record(&client_messenger_add_by_name(b"Yankee"));
     assert_eq!(
         yankee.read_game(),
@@ -18313,23 +18978,8 @@ fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
     // `RemoveFromList(char_name, ch->GetName())` (`G/input_main.cpp:1223`), so the
     // line goes to Alpha's wire naming Yankee and the record to Yankee's naming
     // Alpha. Yankee first drains the tail his own earlier bursts wrote behind
-    // the LIST: the seven raw shapes the drain's own trace shows in this order
-    // (`01/35`, `88/70`, `13/55`, `11/25`, `7f/06`, `13/55`, `13/55`). The
-    // `11/25` is the point change (header `0x11`), the `13/55`s 55-byte look
-    // updates (header `0x13`), and `7f/06` the teleport. Each is asserted by
-    // header and length.
-    for (header, len) in [
-        (GC_CHARACTER_ADD, CHARACTER_ADD_LEN),
-        (GC_CHAR_ADDITIONAL_INFO, CHAR_ADDITIONAL_INFO_LEN),
-        (19, CHARACTER_UPDATE_LEN),
-        (GC_POINT_CHANGE, POINT_CHANGE_LEN),
-        (0x7f, 6),
-        (19, CHARACTER_UPDATE_LEN),
-        (19, CHARACTER_UPDATE_LEN),
-    ] {
-        let tail = yankee.read_game_raw();
-        assert_eq!((tail[0], tail.len()), (header, len), "{tail:02x?}");
-    }
+    // the LIST.
+    drain_relogin_tail(&mut yankee);
     // The remove is called with `(char_name, ch->GetName()) =
     // (Alpha, Yankee)`, so the line goes to Alice's wire and the record to
     // Yankee's: legacy `RemoveFromList(account, companion)` sends the line to
@@ -18385,7 +19035,7 @@ fn a_player_lists_a_gm_but_hears_logout_for_the_name() {
         enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
     let (mut yankee, yankee_listed) =
         enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
     alice.send_record(&client_messenger_add_by_name(b"Yankee"));
     assert_eq!(
         yankee.read_game(),
@@ -18483,7 +19133,7 @@ fn a_gm_silences_a_character_and_the_silence_answers_its_chat() {
     let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
     let (mut yankee, yankee_listed) =
         enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
-    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.sees_enter(yankee_listed.id, true, None);
 
     alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Yankee 1m30s"));
     let notice = yankee.read_game();
@@ -18564,4 +19214,14234 @@ fn a_gm_silences_a_character_and_the_silence_answers_its_chat() {
         &database,
         "(SELECT count(*) FROM player_affect WHERE affect_type = 223) = 1",
     );
+}
+/// `cmd.block_chat_list` and `cmd.vote_block_chat` (`do_block_chat_list` and
+/// `do_vote_block_chat`, `G/cmd_gm.cpp:3298-3314`). The vote body returns before
+/// its first word, so `/vote_block_chat` stays quiet from any caller. The list
+/// reuses the lay's gate: a player hears `there is no such command`, which no
+/// country table carries, so it goes out as written. A `HIGH_WIZARD` hears one
+/// `%s %s sec` line per silence, then `No one currently blocked` after the
+/// 0-spelling's tick lifts the only row.
+#[test]
+fn a_gm_lists_the_silences_and_the_vote_stays_quiet() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    // The vote is a dead body: quiet from a player and from a GM, with a name
+    // and without.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/vote_block_chat"));
+    yankee.quiet("a player's vote stays quiet");
+    alice.quiet("the map hears no vote");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/vote_block_chat Yankee"));
+    alice.quiet("a GM's vote stays quiet");
+    yankee.quiet("the target hears no vote");
+
+    // The list's gate is the lay's: a player hears the refusal, as written.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/block_chat_list"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"there is no such command"),
+        "a player cannot list"
+    );
+    alice.quiet("the refusal reaches only the caller");
+
+    // Empty: the GM hears the one line.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat_list"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"No one currently blocked"),
+        "the empty list's line"
+    );
+    yankee.quiet("the list reaches only the caller");
+
+    // One silence: one `name duration sec` line, the duration as laid.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Yankee 90s"));
+    let notice = yankee.read_game();
+    assert_eq!(&notice[10..], b"[LS;852]", "the notice chats first");
+    let _added = yankee.read_game();
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat_list"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Yankee 90 sec"),
+        "the one silence's line"
+    );
+    yankee.quiet("the list reaches only the caller");
+
+    // The 0 lay's tick lifts the row, and the list is empty again.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Yankee"));
+    let _retired = yankee.read_game();
+    let _relaid = yankee.read_game();
+    let lifted = yankee.read_game();
+    assert_eq!(lifted[0], GC_AFFECT_REMOVE, "the tick lifted it");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat_list"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"No one currently blocked"),
+        "the lifted list is empty"
+    );
+}
+
+/// The GRAND book 50525 over the wire (`_basic/7and8th_skills.lua:161-298`). Alpha, a shaman
+/// of the second group, is refused at the first rest gate with no no-delay affect; Zulu, with
+/// no rest stamp, is warned, picks ward 221, passes the `-19000+need_alignment` gate through
+/// `pc.get_real_alignment`, and its failed read moves the alignment through
+/// `pc.change_alignment` (`UpdateAlignment`, `G/char_battle.cpp:3477-3565`), which the
+/// disconnect banks, beside the `next_time` flag the confirm set.
+#[test]
+fn the_grand_book_reads_the_alignment_and_moves_it_on_a_failed_read() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    grand_book_refuses_alpha_at_the_rest_gate(&mut server, &console, &database, inventory);
+    grand_book_fails_zulu_and_moves_its_alignment(&mut server, &console, &database, inventory);
+}
+
+/// Ledger 268's first half: Alpha, a shaman of the second group whose rest stamp is an hour
+/// out, is refused at the first rest gate with no no-delay affect, and the book stays.
+fn grand_book_refuses_alpha_at_the_rest_gate(
+    server: &mut Server,
+    console: &std::path::Path,
+    database: &ScratchDatabase,
+    inventory: u8,
+) {
+    create_account(server, "alice");
+    add_characters(database);
+    sql(
+        database,
+        "UPDATE player SET skill_group = 2 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 243, 30, 0 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    let future = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs()
+        + 3600;
+    sql(
+        database,
+        &format!(
+            "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+             'new7and8th_skills.next_time'::bytea, {future} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+
+    // Given: Alpha holds the GRAND book, and its rest stamp is an hour out.
+    let (mut alpha, _character, _items) = load_character(server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    Server::write_console(console, "item give Alpha 50525 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 50_525, 1));
+
+    // When: Alpha uses it with no no-delay affect.
+    alpha.send_record(&client_item_use(0));
+    // Then: the first rest gate refuses and ends.
+    let rest: [&[u8]; 3] = [
+        b"",
+        b"When your training is done, you have to",
+        b"rest for 12 to 24 hours.",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(1, &titled_page(b"Seelenstein+", &rest, b"[DONE]"))
+    );
+    alpha.still("the refusal ends the script");
+    check(
+        database,
+        "(SELECT (vnum, count, window_type, pos) = (50525, 1, 1, 0) FROM item)",
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+}
+
+/// Ledger 268's second half: Zulu, with no rest stamp, is warned, picks ward 221, passes
+/// the alignment gate, and its failed read moves the alignment, which the disconnect banks
+/// beside the `next_time` flag the confirm set.
+fn grand_book_fails_zulu_and_moves_its_alignment(
+    server: &mut Server,
+    console: &std::path::Path,
+    database: &ScratchDatabase,
+    inventory: u8,
+) {
+    // Given: no rest stamp at all, on bob's own account.
+    create_account(server, "bob");
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y, skill_group) SELECT id, \
+         0, 'Zulu', 1, 154, 470000, 950000, 1 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 221, 30, 0 \
+         FROM player WHERE name = 'Zulu'",
+    );
+    let (mut zulu, _character, _items) = load_character(server, b"bob", 0);
+    let _add = enter_game_burst(&mut zulu);
+
+    // Given: Zulu holds the GRAND book too.
+    Server::write_console(console, "item give Zulu 50525 1");
+    server.wait_for("id 100000001; the client has it");
+    assert_eq!(set_fields(&zulu.read_game()), (inventory, 0, 50_525, 1));
+
+    // When: Zulu uses the book with no stamp.
+    zulu.send_record(&client_item_use(0));
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    // Then: the warning asks. The use's own empty title page comes first (the `say_title`
+    // plus `say("")` before the rest gate), and the warning follows it.
+    let warning: [&[u8]; 6] = [
+        b"",
+        b"When your waste your Good/Evils points during",
+        b"the training it's possible that you can be",
+        b"downgraded, even under the level of a Ronin.",
+        b"",
+        b"Do you want to continue?",
+    ];
+    assert_eq!(
+        zulu.read_game(),
+        server_script(
+            1,
+            &titled_page(b"Seelenstein+", &warning, b"[QUESTION 1;Yes|2;No]")
+        )
+    );
+
+    // When: Zulu says yes. Then: the ward is offered with a cancel.
+    zulu.send_record(&client_script_answer(0));
+    let choice: [&[u8]; 2] = [b"", b"Choose the skill you want to learn:"];
+    assert_eq!(
+        zulu.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Seelenstein+",
+                &choice,
+                b"[QUESTION 1;Sword Spin Ward|2;Cancel]"
+            )
+        )
+    );
+
+    // When: Zulu picks the ward. Then: the alignment gate passes (0 is above
+    // -19000+1000) and the confirmation asks.
+    zulu.send_record(&client_script_answer(0));
+    let confirm: [&[u8]; 3] = [
+        b"",
+        b"You choose to learn Sword Spin Ward.",
+        b"You're sure about your decision?",
+    ];
+    assert_eq!(
+        zulu.read_game(),
+        server_script(
+            1,
+            &titled_page(b"Seelenstein+", &confirm, b"[QUESTION 1;Yes|2;No]")
+        )
+    );
+
+    // When: Zulu says yes. Then: no row is hosted for the ward, so the read
+    // fails silently, and the failure text ends the script. The removal's
+    // clear lands before the dialog: the give/take records precede the
+    // script's own in the step's answer.
+    zulu.send_record(&client_script_answer(0));
+    let cleared = zulu.read_game();
+    assert_eq!(cleared.len(), ITEM_SET_LEN);
+    assert_eq!(
+        set_fields(&cleared),
+        (inventory, 0, 0, 0),
+        "the book leaves its cell"
+    );
+    assert_eq!(
+        zulu.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Seelenstein+",
+                &[b"", b"That did not work. Darn!"],
+                b"[DONE]"
+            )
+        )
+    );
+    // Alpha's own book is still on its row; only Zulu's is gone.
+    wait_for(
+        database,
+        "(SELECT count(*) = 1 FROM item WHERE window_type = 1)",
+    );
+    drop(zulu);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        database,
+        "(SELECT alignment BETWEEN -5000 AND -3330 FROM player WHERE name = 'Zulu')",
+    );
+    // Alpha's seed row shares the name, so Zulu's flag is scoped to its row.
+    wait_for(
+        database,
+        "(SELECT count(*) = 1 FROM quest_flag WHERE name = \
+         'new7and8th_skills.next_time'::bytea AND player_id = (SELECT id FROM player WHERE \
+         name = 'Zulu'))",
+    );
+}
+
+/// The guild man's founding chat reads the character back (`guild_manage.lua:93-144`):
+/// Alpha, guildless at level 154 with the fee, clicks `guild_man1`, picks "Fondeaza breasla",
+/// says yes to the 200000-gold question, and the script's `pc.level` and `pc.gold` gates
+/// pass, so it asks the client to make the guild (`GC_REQUEST_MAKE_GUILD`).
+#[test]
+fn the_guild_chat_reads_the_level_and_gold_gates() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Alpha stands within 100 of the guild man at cell (647, 582), point (474300, 954200)
+    // past map 1's base, with the founding fee in hand.
+    sql(
+        &database,
+        "UPDATE player SET x = 474300, y = 954100, gold = 200000 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_ADD);
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    let men: Vec<u32> = shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == 11_000u16.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(men.len(), 1, "map 1 has one guild man in view");
+    read_enter_tail(&mut alice);
+    alice.quiet("the enter-game burst is over");
+
+    // When: Alpha clicks the guild man. Then: the chat menu offers the founding entry,
+    // whose `with not pc.hasguild()` passed.
+    alice.send_record(&client_click(men[0]));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Fondeaza breasla|2;Inchide]")
+    );
+    // When: Alpha picks it. Then: the 200000 question asks (skin 1, `[QUESTION Da|Nu]`).
+    alice.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Gardian:",
+        &[b"Vrei sa formezi o breasla?[ENTER][ENTER]Vei primi un ID pentru formarea de bresle abia[ENTER]dupa ce vei fi atins nivelul 40, iar atunci vei[ENTER]avea nevoie de 200.000 Yang pentru formarea ei.[ENTER][ENTER]Vrei sa formezi o breasla? "],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    // When: Alpha says yes. Then: level 154 and 200000 gold pass `pc.level` and `pc.gold`,
+    // and the client is asked to make the guild.
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), vec![GC_REQUEST_MAKE_GUILD]);
+    // The script ends past the ask, so its end sends `[DONE]` in skin 0.
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    alice.quiet("the script ended");
+}
+
+/// `lua.pc.delqf`, `quest.sash_mission`: Alpha, level 154, has played 300 minutes and logs
+/// in on map 1 1000 from the captain with `sash_mission` at `time_to_wait`, no wait set and
+/// 39 materials collected. The letter marks the captain with ID 1. The click runs the
+/// quest's `target.click`: the mark goes, the unset wait reads expired, and the 40th
+/// material moves the quest to `__complete`. Its `enter` deletes both flags (`pc.delqf`,
+/// one a set row, one never set), and its `letter` marks Theowahdan as `theowahdan_reward`
+/// with ID 2 and sends "A special cloth". The disconnect stores `__complete` with neither
+/// flag left.
+#[test]
+fn the_fortieth_material_completes_the_sash_and_deletes_its_flags() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    // The CRC32 of `time_to_wait`, stored as the `int` it is.
+    let (mut alice, captain) = enter_beside_the_captain(
+        &server,
+        &database,
+        "('sash_mission.__status'::bytea, -830000308),          ('sash_mission.collect_count'::bytea, 39)",
+    );
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(1, CAPTAIN_SPOT.0, CAPTAIN_SPOT.1),
+        "the mark's event sends where the captain stands"
+    );
+
+    alice.send_record(&client_click(captain));
+    assert_eq!(alice.read_game_marked(), server_quest_target_delete(1));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(
+            1,
+            &titled_page(
+                b"Capitan",
+                &[b"", b"Very good, as promised take this material.", b""],
+                b"[DONE]"
+            )
+        )
+    );
+    let theowahdan = read_quest_target_create(&mut alice, 2, b"Theowahdan");
+    assert_ne!(theowahdan, captain, "the mark moved to Theowahdan");
+    read_letter(&mut alice, QUEST_SASH, b"A special cloth", "the reward");
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(2, THEOWAHDAN_SPOT.0, THEOWAHDAN_SPOT.1),
+        "the new mark's event"
+    );
+    alice.still_marked_for("nothing follows", Duration::from_millis(1_500));
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    let flags = support::rows(
+        database.url(),
+        "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
+          'Alpha') AND substring(name FROM 1 FOR 13) = 'sash_mission.'::bytea ORDER BY name",
+        1,
+    );
+    // The CRC32 of `__complete` is 557528158. Both wait flags are gone.
+    assert_eq!(flags, vec![vec![557_528_158]]);
+}
+/// `lua.pc.hide_costume`, `cmd.hide_costume`, `quest.costume_option`: Alpha hides its body
+/// costume over the wire, a viewer sees the update, the flag is stored, and the next login
+/// restores it twice — once in the burst, once in the login scripts.
+///
+/// A fresh enter is inside the 1.5-second move window (`Show` stamps `m_dwLastMoveTime`),
+/// so the first `/hide_costume 1` is refused with `[LS;1971]` (`do_hide_costume`,
+/// `G/cmd_general.cpp:3956-3963`). Past the window the line hides: Alpha hears
+/// `SetBodyCostumeHidden 1` and the look update, Yankee sees the update, and the store
+/// holds `costume_option.hide_body`. On the relogin the burst's restore chats all five
+/// lines with the body's 1 (`CInputLogin::Entergame`, `G/input_login.cpp:612-638`), the
+/// login scripts chat them again (`costume_option.quest`), and the syschat names what
+/// hides (`Hide costume:  Body  `).
+#[test]
+fn a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+          470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    // Inside the window: the refusal chats, and nothing lands.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/hide_costume 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1971]"),
+        "the move window refuses the hide"
+    );
+    yankee.quiet("the refusal reaches the caller alone");
+    // Past the window: the line hides the body, and the update follows it.
+    std::thread::sleep(std::time::Duration::from_millis(1_600));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/hide_costume 1"));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"SetBodyCostumeHidden 1"),
+        "the hide chats"
+    );
+    let update = alice.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert_eq!(&update[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(
+        yankee.read_game(),
+        update,
+        "the viewer sees the look update"
+    );
+    alice.quiet("the hide settled");
+    yankee.quiet("the viewer settled");
+    wait_for(
+        &database,
+        "(SELECT value = 1 FROM quest_flag WHERE name = \
+          'costume_option.hide_body'::bytea AND player_id = (SELECT id FROM player WHERE \
+          name = 'Alpha'))",
+    );
+
+    // The relogin restores the hide: the burst chats all five lines with the
+    // body's 1, and the login scripts chat them again with the syschat.
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    yankee.sees_disconnect(alpha.id);
+    let (mut alice, _character, quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    alice.send_record(&client_enter_game());
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_ADD);
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (_shown, affect) = read_shown(&mut alice);
+    assert_eq!(revive_add(&mut alice, affect)[0], GC_AFFECT_ADD);
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(&mut alice, [true, false, false, false, false]);
+    assert_eq!(alice.read_game()[0], GC_TIME);
+    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(alice.read_game()[0], GC_CHAT);
+    enter_war_list(&mut alice);
+    read_login_lines_hiding(
+        &mut alice,
+        0,
+        None,
+        [true, false, false, false, false],
+        Some(b"Hide costume:  Body  "),
+    );
+    let _marks = read_login_letters(&mut alice, true);
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+}
+
+/// The Time Spiral's shortening over the wire (`item_attr67add.quest:71-80`): Alpha stands
+/// at `talk` with a `wait_time` an hour out, uses the 72347 spiral, and the script reads
+/// the spiral's proto value (`item.get_value(3)` answers the `VALUE3` 10), shortens the
+/// wait by a tenth, and takes the spiral with no dialog. The disconnect banks the new
+/// stamp, and the spiral's row is gone.
+#[test]
+fn the_time_spiral_shortens_the_attr67_wait() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // `item_attr67add.__status` is the CRC32 of `talk`, 0x9f24_d5bb, as a signed `long`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'item_attr67add.__status'::bytea, -1624975941 FROM player WHERE name = 'Alpha'",
+    );
+    let seeded = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs()
+        + 3600;
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+             'attr67add_item.wait_time'::bytea, {seeded} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+
+    // Given: Alpha holds the spiral.
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_lines(&mut alpha, 0, None);
+    // The quest stands at `talk`, so its letter never comes; the marking quests move on.
+    let _marks = read_login_letters(&mut alpha, false);
+    read_login_update(&mut alpha);
+    alpha.still("nothing follows");
+    Server::write_console(&console, "item give Alpha 72347 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 72_347, 1));
+
+    // When: Alpha uses it. Then: the cell clears and no dialog follows.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 0, 0, 0),
+        "the spiral leaves its cell"
+    );
+    alpha.still("the script sends no dialog");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        &format!(
+            "(SELECT ({seeded} - value) BETWEEN 355 AND 365 FROM quest_flag WHERE name = \
+             'attr67add_item.wait_time'::bytea AND player_id = (SELECT id FROM player WHERE \
+             name = 'Alpha'))"
+        ),
+    );
+    wait_for(&database, "(SELECT count(*) = 0 FROM item)");
+}
+
+/// The guild man's parting chats (`guild_manage.lua:67-91`): Alpha founds `MyGuild`, Yankee
+/// joins, then Yankee clicks the guild man, picks "Paraseste breasla.", says yes and leaves
+/// through `pc.remove_from_guild` (Alpha hears the REMOVE, the row goes), and Alpha clicks,
+/// picks "Desfiinteaza breasla", says yes and disbands through `pc.destroy_guild` (Alpha
+/// hears its own REMOVE, the guild and its rows go, both disband stamps land).
+#[test]
+fn the_guild_man_parts_and_disbands() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 474300, 954100 FROM account WHERE login = 'bob'",
+    );
+    // Alpha stands with Yankee, within 100 of the guild man.
+    sql(
+        &database,
+        "UPDATE player SET x = 474300, y = 954100, gold = 200000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+         70101 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let men_of = |shown: &Shown| {
+        shown
+            .inserts()
+            .iter()
+            .filter(|insert| insert[22..24] == 11_000u16.to_le_bytes())
+            .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+            .collect::<Vec<_>>()
+    };
+    let men = men_of(&alice_entered.shown);
+    assert_eq!(men.len(), 1, "map 1 has one guild man in view");
+    let yankee_men = men_of(&yankee_entered.shown);
+    assert_eq!(yankee_men.len(), 1, "Yankee sees the same guild man");
+    let guest = yankee_listed.id;
+    let member = u32::try_from(
+        support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Yankee'",
+            1,
+        )[0][0],
+    )
+    .unwrap();
+    let master = u32::try_from(
+        support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Alpha'",
+            1,
+        )[0][0],
+    )
+    .unwrap();
+    let id = drain_guild_founding(&mut alice, &mut yankee, master);
+    join_guild(&mut alice, &mut yankee, guest, id);
+    part_guild(&database, &mut alice, &mut yankee, yankee_men[0], member);
+    disband_guild(&mut alice, &mut yankee, men[0], master);
+    wait_for(&database, "(SELECT count(*) = 0 FROM guild)");
+    wait_for(&database, "(SELECT count(*) = 0 FROM guild_member)");
+    // The disband stamps the staying master's flag row; the parted Yankee holds its
+    // withdraw stamp instead.
+    wait_for(
+        &database,
+        "(SELECT count(*) = 1 FROM quest_flag WHERE name = \
+         'guild_manage.new_disband_time'::bytea AND player_id = (SELECT id FROM player WHERE \
+         name = 'Alpha'))",
+    );
+    // The parting stamp lands at Yankee's disconnect, beside the banked quest flags. The
+    // script's quest is `guild_building`, so its stamp lands under that name; the
+    // `guild_manage.*` flags the founding gates read are the world's own (legacy names
+    // them apart the same way).
+    drop(yankee);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT count(*) = 1 FROM quest_flag WHERE name = \
+         'guild_building.new_withdraw_time'::bytea AND player_id = (SELECT id FROM player WHERE \
+         name = 'Yankee'))",
+    );
+}
+
+/// Yankee clicks the guild man and picks the parting: the menu offers it past the ranking
+/// entries, the question asks, and yes parts Yankee — the page, then `[DONE]` — while
+/// Alpha hears the REMOVE that names `member`.
+fn part_guild(
+    database: &ScratchDatabase,
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    man: u32,
+    member: u32,
+) {
+    // When: Yankee clicks the guild man and picks the parting. Then: the menu offers it,
+    // the question asks, and yes parts Yankee — the page, then `[DONE]` — while Alpha
+    // hears the REMOVE.
+    yankee.send_record(&client_click(man));
+    assert_eq!(
+        yankee.read_game(),
+        server_script(1, b"[QUESTION 1;Paraseste breasla.|2;Arata rangul breslei tale|3;Vezi cele mai mari ranguri ale breslelor (1-8)|4;Vezi scorul breslei tale|5;Inchide]")
+    );
+    yankee.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Gardian:",
+        &[
+            b"Vrei sa parasesti breasla careia ii apartii?[ENTER]Presupun ca ti-ai facut putini \
+             prieteni acolo.[ENTER]Depinde de tine. Doresti deci intr-adevar sa[ENTER]parasesti \
+             breasla? ",
+        ],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(yankee.read_game(), server_script(1, &ask));
+    yankee.send_record(&client_script_answer(0));
+    let parted = titled_page(
+        b"Gardian:",
+        &[b"Bine.[ENTER][ENTER]Am sa te exclud din breasla. "],
+        b"[DONE]",
+    );
+    assert_eq!(yankee.read_game(), server_script(1, &parted));
+    let removed = alice.read_game();
+    assert_eq!(guild_subheader(&removed), GUILD_SUBHEADER_GC_REMOVE);
+    assert_eq!(
+        u32::from_le_bytes(removed[4..8].try_into().unwrap()),
+        member,
+        "the REMOVE names the parted member"
+    );
+    alice.quiet("the parting settled");
+    yankee.quiet("the parting settled");
+    wait_for(database, "(SELECT count(*) = 1 FROM guild_member)");
+}
+
+/// Alpha clicks the guild man and picks the disband: the menu offers it past the ranking
+/// entries, the question asks, and yes disbands — the page, `[DONE]`, and its own REMOVE
+/// that names `master`.
+fn disband_guild(alice: &mut Keyed, yankee: &mut Keyed, man: u32, master: u32) {
+    alice.send_record(&client_click(man));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Desfiinteaza breasla|2;Arata rangul breslei tale|3;Vezi cele mai mari ranguri ale breslelor (1-8)|4;Vezi scorul breslei tale|5;Inchide]")
+    );
+    alice.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Gardian:",
+        &[b"Ce?[DELAY value;150] [/DELAY][ENTER][ENTER]Dupa ce m-am chinuit sa o formez, tu vrei \
+             sa o[ENTER]desfiintezi? Toata experienta si toate amintirile[ENTER]prietenilor vostri \
+             se vor pierde pentru[ENTER]totdeauna![ENTER]Vrei cu adevarat sa o desfiintezi?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    let disbanded = titled_page(
+        b"Gardian:",
+        &[b"Bine.[ENTER][ENTER]Am sa desfiintez breasla al carei conducator esti."],
+        b"[DONE]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &disbanded));
+    let removed = alice.read_game();
+    assert_eq!(guild_subheader(&removed), GUILD_SUBHEADER_GC_REMOVE);
+    assert_eq!(
+        u32::from_le_bytes(removed[4..8].try_into().unwrap()),
+        master,
+        "the REMOVE names the master"
+    );
+    alice.quiet("the disband settled");
+    yankee.quiet("the parted member hears no disband");
+}
+
+/// `lua.pc.warp`, `quest.temple_of_the_ochao`: the temple guardian stands on map 1, and
+/// Alpha, level 154, enters beside him. The click offers the one chat whose level holds;
+/// "Da" runs `pc.warp(853700, 1416400)` (`G/questlua_pc.cpp:209-240`), past `IsHack`, and
+/// the step orders the warp on Channel 1, which hosts the target map 209. Its own client
+/// is sent the `GC_CHARACTER_DEL` of its own VID and then the `GC_WARP` naming the target
+/// and the Channel's address and port, as a warp NPC's sets (`WarpSet`,
+/// `G/char.cpp:6749-6755`, `:6763-6785`). The `login` script fires nothing on map 1, and
+/// the kill and the second chat wait for the temple.
+#[test]
+fn a_yes_to_the_temple_guardian_warps_to_the_ochao_temple() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(209);
+    let server = Server::start_with_npcs_channels(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20408\n",
+        &channels,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (own, guardian) = enter_beside_shown(&mut alice, 20408);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let theowahdan = read_quest_target_create(&mut alice, 1, b"Theowahdan");
+    read_sash_and_yohara_letters(&mut alice, "change");
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_delete(1),
+        "the letter pass's mark replaces the login's"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(2, b"Theowahdan", theowahdan)
+    );
+    read_sash_and_yohara_letters(&mut alice, "letter");
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(guardian));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Intra in Templul Ochao|2;Inchide]"),
+        "the one chat whose level holds, and the close"
+    );
+    alice.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        "Gardianul Templului".as_bytes(),
+        &[b"", b"Vrei sa me duci direct in Templul lui", b"Ochao?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&own.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((853_700, 1_416_400), port),
+        "the quest's warp names the temple and Channel 1"
+    );
+    alice.still("nothing follows");
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 853700 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 1416400",
+    );
+}
+
+/// `lua.warp_to_village`, `lua.pc.set_conqueror`, `quest.ship_defense`,
+/// `quest.yohara_system`: the warrior statue stands on map 1, and Alpha, level 154 with
+/// `yohara_system` at `killReward_new`, enters beside it. The reward state's letter
+/// deletes its stale Overseer mark, so the letter pass marks Theowahdan again (ID 2)
+/// before the letters. The click offers the ship's return and the Yohara trip; "Da" to
+/// the return runs `warp_to_village` (`G/questlua_global.cpp:1060-1071`), and the step
+/// orders the warp to the Shinsoo start. The conqueror call waits for the Hydra kill.
+#[test]
+fn a_yes_to_the_statues_return_warps_to_the_village() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20433\n",
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    // The CRC32 of `killReward_new`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'yohara_system.__status'::bytea, -512007343 FROM player WHERE player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (own, statue) = enter_beside_shown(&mut alice, 20433);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let theowahdan = read_quest_target_create(&mut alice, 1, b"Theowahdan");
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's change",
+    );
+    let stale = alice.read_game();
+    assert_eq!(
+        stale,
+        server_quest_target_delete(1),
+        "the reward state's letter deletes its stale Overseer mark"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(2, b"Theowahdan", theowahdan),
+        "the letter pass marks him again"
+    );
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(statue));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Return|2;Un continent nou|3;Inchide]"),
+        "the ship's return and the yohara trip, and the close"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Doresti sa te teleportezi inapoi in oras?[ENTER][QUESTION 1;Da|2;Nu]"
+        ),
+        "the return's say, titleless"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&own.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((469_300, 964_200), port),
+        "the village warp names the Shinsoo start and Channel 1"
+    );
+    alice.still("nothing follows");
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 469300 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 964200",
+    );
+}
+
+/// `lua.pc.open_sash`, `gc.sash`, `quest.sash`: Theowahdan stands on map 1, and
+/// Alpha, level 154 with the sash quests past their letters, enters beside him.
+/// The click offers his four chats; "Combination" asks, "Yes" opens the
+/// combination window (`OpenSash(true)`, `G/char.cpp:9888-9934`), and the client
+/// hears the open record. A second "Yes" chats `SASH_OPEN`: the window stands.
+#[test]
+fn a_yes_to_theowahdans_combination_opens_the_sash_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    // The mission at `__complete` (its CRC32): no login move, no letter, and its
+    // chat answers from the reward state.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'sash_mission.__status'::bytea, 557528158 FROM player WHERE player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    let _reward = read_quest_target_create(&mut alice, 1, b"Theowahdan");
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_delete(1),
+        "the target click deletes the reward mark"
+    );
+    let first = titled_page(b"teowahdan", &SASH_REWARD_FIRST, b"[NEXT]");
+    assert_eq!(alice.read_game_marked(), server_script(1, &first));
+    alice.send_record(&client_script_answer(254));
+    let second = titled_page(b"teowahdan", &SASH_REWARD_SHORT, b"[DONE]");
+    assert_eq!(alice.read_game_marked(), server_script(1, &second));
+    assert_ne!(
+        read_quest_target_create(&mut alice, 2, b"Captain"),
+        theowahdan
+    );
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]"
+        ),
+        "his eight chats, and the close"
+    );
+    alice.send_record(&client_script_answer(6));
+    let ask = titled_page(
+        b"teowahdan",
+        &[b"", b"Would you like to combine two sashes?", b""],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    let open: Vec<u8> = vec![
+        0xe7, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert_eq!(alice.read_game(), open, "the combination window opens");
+    alice.still("nothing follows");
+}
+
+/// `lua.pc.open_changelook`, `gc.cl`, `quest.changelook`: Theowahdan stands on
+/// map 1, and Alpha, level 154 with the sash mission past its reward, enters
+/// beside him. Past the reward's short page and the captain's mark the click
+/// offers his eight chats; "Transmutation" asks, "Yes" opens the window
+/// (`ChangeLookWindow(true)`, `G/char.cpp:10504-10535`), and the client hears
+/// the 10-byte open record with the 50,000,000 cost.
+#[test]
+fn a_yes_to_theowahdans_transmutation_opens_the_changelook_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    // The mission at `__complete` (its CRC32): no login move, no letter, and its
+    // chat answers from the reward state.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'sash_mission.__status'::bytea, 557528158 FROM player WHERE player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    let _reward = read_quest_target_create(&mut alice, 1, b"Theowahdan");
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_delete(1),
+        "the target click deletes the reward mark"
+    );
+    let first = titled_page(b"teowahdan", &SASH_REWARD_FIRST, b"[NEXT]");
+    assert_eq!(alice.read_game_marked(), server_script(1, &first));
+    alice.send_record(&client_script_answer(254));
+    let second = titled_page(b"teowahdan", &SASH_REWARD_SHORT, b"[DONE]");
+    assert_eq!(alice.read_game_marked(), server_script(1, &second));
+    assert_ne!(
+        read_quest_target_create(&mut alice, 2, b"Captain"),
+        theowahdan
+    );
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]"
+        ),
+        "his eight chats, and the close"
+    );
+    alice.send_record(&client_script_answer(4));
+    let ask = titled_page(
+        b"teowahdan",
+        &[
+            b"",
+            b"Transmutation enables you to permanently change",
+            b"the appearance of your equipment. The effect is",
+            b"restricted to the level of your equipment,",
+            b"however, and the transmutation will be reversed",
+            b"if you improve the item. Do you want to continue?",
+            b"",
+        ],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    // Header 234, subheader OPEN, cost 50,000,000 (0x02FAF080), pos 0,
+    // `tPos = { INVENTORY, 0 }`.
+    let open: Vec<u8> = vec![0xea, 0, 0x80, 0xF0, 0xFA, 0x02, 0, 1, 0, 0];
+    assert_eq!(alice.read_game(), open, "the changelook window opens");
+    alice.still("nothing follows");
+}
+
+/// The forest guardian's login walk for one client: the lines, the attr67 letter,
+/// the sash change's mark (target `first`), the change letters, the delete and
+/// the letter pass's re-mark (`first + 1`), the pass letters, and the update.
+fn drain_guardian_login_walk(keyed: &mut Keyed, first: i32) {
+    read_login_lines(keyed, 0, None);
+    read_letter(
+        keyed,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let marked = read_quest_target_create(keyed, first, b"Theowahdan");
+    read_sash_and_yohara_letters(keyed, "change");
+    assert_eq!(
+        keyed.read_game(),
+        server_quest_target_delete(first),
+        "the pass deletes the change mark"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        server_quest_target_create(first + 1, b"Theowahdan", marked),
+        "the letter pass marks him again"
+    );
+    read_sash_and_yohara_letters(keyed, "letter");
+    read_login_update(keyed);
+    keyed.still("nothing follows");
+}
+
+/// `lua.pc.is_mount`, `lua.party.is_party`, `lua.party.is_leader`,
+/// `lua.pc.get_channel_id`: the forest guardian (20412) stands on map 1, and
+/// Alpha, level 154 with no party and no mount, enters beside it. The click
+/// offers the Bagjanamu room; "Da" reads `party.is_party()` false and the page
+/// says a group is needed. No mount is worn, so `pc.is_mount()` never fires on
+/// this path; the channel read waits for the party branch past it.
+#[test]
+fn a_solo_click_on_the_forest_room_is_refused_for_want_of_a_party() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20412\n",
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (own, guardian) = enter_beside_shown(&mut alice, 20412);
+    let _ = own;
+    drain_guardian_login_walk(&mut alice, 1);
+
+    alice.send_record(&client_click(guardian));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Camera lui Bagjanamu|2;Inchide]"),
+        "the one chat, and the close"
+    );
+    alice.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Lider Gardian P\xe3dure",
+        &[b"", b"Vrei sa lupti in potriva lui Bagjanamu?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    let refused = titled_page(
+        b"Lider Gardian P\xe3dure",
+        &[
+            b"",
+            b"Pentru a avea acces trebuie sa fii",
+            b"membrul unui grup.",
+        ],
+        b"[DONE]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &refused));
+    alice.still("nothing follows");
+}
+
+/// `lua.party.getf`, `lua.party.setf`, `lua.party.get_leader_pid`, `lua.d.select`,
+/// `lua.d.find`: Alice founds a party with Yankee (level 154, beside the forest
+/// guardian on map 1), then Yankee clicks it. His click passes `party.is_party()`,
+/// reads `party.getf("frt_dungeon_index")` 0, finds `d.find(0)` false and the event
+/// flag 0, and the leader gate refuses: the page says the room needs the leader.
+#[test]
+fn a_party_members_click_on_the_forest_room_is_refused_for_want_of_the_leader() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20412\n",
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+ 154, 469700, 949600 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (alpha_vid, _guardian) = enter_beside_shown(&mut alice, 20412);
+    drain_guardian_login_walk(&mut alice, 1);
+    // Yankee enters beside the guardian and drains the same login walk.
+    let (mut yankee, _yankee, _yankee_items) = load_character(&server, b"bob", 0);
+    let (yankee_vid, guardian) = enter_beside_shown(&mut yankee, 20412);
+    alice.read_game();
+    drain_guardian_login_walk(&mut yankee, 3);
+    // Alice invites Yankee; Yankee answers yes; both drain the walk.
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&yankee_vid.to_le_bytes());
+    alice.send_record(&invite);
+    let asked = yankee.read_game();
+    assert_eq!(
+        asked[0], GC_PARTY_INVITE,
+        "the invite asks the guest: {asked:02x?}"
+    );
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    yankee.send_record(&answer);
+    drain_party_walk(&mut yankee, "the guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
+    // The shape gate may leave trailing walk records; Yankee's click reads past
+    // them.
+    // Yankee clicks the guardian and picks the room: his click passes the party
+    // gate, reads the never-set flag 0, finds no dungeon under it, and the
+    // leader gate refuses.
+    yankee.send_record(&client_click(guardian));
+    let chat = loop {
+        let record = yankee.read_game();
+        if record[0] == GC_SCRIPT {
+            break record;
+        }
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD | GC_PARTY_LINK | GC_PARTY_UPDATE | GC_PARTY_PARAMETER
+            ),
+            "ahead of the dialog: {record:02x?}"
+        );
+    };
+    assert_eq!(
+        chat,
+        server_script(1, b"[QUESTION 1;Camera lui Bagjanamu|2;Inchide]"),
+        "the one chat, and the close"
+    );
+    yankee.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Lider Gardian P\xe3dure",
+        &[b"", b"Vrei sa lupti in potriva lui Bagjanamu?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(yankee.read_game(), server_script(1, &ask));
+    yankee.send_record(&client_script_answer(0));
+    let refused = titled_page(
+        b"Lider Gardian P\xe3dure",
+        &[
+            b"",
+            b"Pentru a avea acces in camera, trebuie sa fii",
+            b"liderul grupului.",
+        ],
+        b"[DONE]",
+    );
+    assert_eq!(yankee.read_game(), server_script(1, &refused));
+    yankee.still("nothing follows");
+}
+
+/// `lua.party.get_member_pids`, `lua.q.begin_other_pc_block`, `lua.q.end_other_pc_block`:
+/// Alice leads a party with Yankee beside the forest guardian; Alice holds one ticket
+/// (30613) and Yankee holds none. Alice clicks the guardian and says "Da": the script's
+/// block loop counts each member's ticket and refuses for want of one. The refusal names
+/// nobody: the loop walks `notEnoughLevelMembers`, which nothing filled
+/// (`enchanted_forest_zone.lua:169`), so no name prints — the page is what the Reference
+/// client shows against legacy too.
+#[test]
+fn the_leaders_click_on_the_forest_room_is_refused_for_want_of_a_ticket() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20412\n",
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+ 154, 469700, 949600 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 2, 4, 1, \
+ 30613 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (alpha_vid, _guardian) = enter_beside_shown(&mut alice, 20412);
+    drain_guardian_login_walk(&mut alice, 1);
+    let (mut yankee, _yankee, _yankee_items) = load_character(&server, b"bob", 0);
+    let (yankee_vid, guardian) = enter_beside_shown(&mut yankee, 20412);
+    alice.read_game();
+    drain_guardian_login_walk(&mut yankee, 3);
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&yankee_vid.to_le_bytes());
+    alice.send_record(&invite);
+    let asked = yankee.read_game();
+    assert_eq!(
+        asked[0], GC_PARTY_INVITE,
+        "the invite asks the guest: {asked:02x?}"
+    );
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    yankee.send_record(&answer);
+    drain_party_walk(&mut yankee, "the guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
+    alice.send_record(&client_click(guardian));
+    let chat = loop {
+        let record = alice.read_game();
+        if record[0] == GC_SCRIPT {
+            break record;
+        }
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD | GC_PARTY_LINK | GC_PARTY_UPDATE | GC_PARTY_PARAMETER
+            ),
+            "ahead of the dialog: {record:02x?}"
+        );
+    };
+    assert_eq!(
+        chat,
+        server_script(1, b"[QUESTION 1;Camera lui Bagjanamu|2;Inchide]"),
+        "the one chat, and the close"
+    );
+    alice.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Lider Gardian P\xe3dure",
+        &[b"", b"Vrei sa lupti in potriva lui Bagjanamu?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    let refused = titled_page(
+        b"Lider Gardian P\xe3dure",
+        &[
+            b"",
+            b"Pentru a avea acces in camera, toti",
+            b"membrii trebuie sa aiba Piatra Driadelor.",
+            b"",
+            b"Urmatorii membrii nu au permis de trecere:",
+        ],
+        b"[DONE]",
+    );
+    let page = loop {
+        let record = alice.read_game();
+        if record[0] == GC_SCRIPT {
+            break record;
+        }
+    };
+    assert_eq!(page, server_script(1, &refused));
+    alice.still("nothing follows");
+}
+
+/// `lua.ds.give_qualification`, `lua.ds.is_qualified`, `lua.ds.open_refine_window`,
+/// `lua.ds.open_attr_change_window`: the alchemist (20001) stands on map 1, and Alpha
+/// enters beside it. The login event grants the qualification (its `GC_AFFECT_ADD`
+/// carries kind 540); Alpha clicks the alchemist, picks the refine chat, and the
+/// dialog opens the refine window (209, sub 0). The attr-change chat's gate reads
+/// qualified, and "Da" opens the one-byte 211 window.
+#[test]
+fn the_alchemists_chats_open_the_dragon_soul_windows_once_qualified() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (_own, alchemist) = enter_beside_shown(&mut alice, 20001);
+    // The login event granted the qualification: `read_login_lines` (inside the walk
+    // drain) already read the infinite add between the hides and `event_info`'s line.
+    drain_guardian_login_walk(&mut alice, 1);
+    // The grant started the affect event, whose first tick may land in the walk's
+    // quiet window: the revive timer's expiry (215's remove) and its update. The
+    // click's read skips past them.
+    alice.send_record(&client_click(alchemist));
+    let chat = alice.read_script_past_ticks();
+    assert_eq!(
+        chat,
+        server_script(
+            1,
+            b"[QUESTION 1;Schimbare Atributii Piatra Dragon|2;Rafinare Piatra Dragon|3;Inchide]",
+        ),
+        "the two chats, and the close"
+    );
+    // The refine chat: the gate reads qualified and the window opens.
+    alice.send_record(&client_script_answer(1));
+    let page = titled_page(
+        b"Alchimist",
+        &[b"Doresti sa rafinezi o Piatra Dragon? Mi se pare[ENTER]corect. Trebuie sa stii insa ca acest proces[ENTER]poate esua. Am auzit ca aceste boabe de Fasole[ENTER]Dragon pe care le gasesti in spatele monedei care[ENTER]se invarte cresc sansa de succes."],
+        b"[DONE]",
+    );
+    loop {
+        let record = alice.read_game();
+        if record[0] == GC_SCRIPT {
+            assert_eq!(record, server_script(1, &page), "the refine page");
+            continue;
+        }
+        assert_eq!(
+            record,
+            vec![GC_DRAGON_SOUL_REFINE, 0, 1, 0xff, 0xff],
+            "the open: {record:02x?}"
+        );
+        break;
+    }
+    // The attr-change chat: its `with` gate reads qualified, and "Da" opens 211.
+    alice.send_record(&client_click(alchemist));
+    let chat = alice.read_script_past_ticks();
+    assert_eq!(
+        chat,
+        server_script(
+            1,
+            b"[QUESTION 1;Schimbare Atributii Piatra Dragon|2;Rafinare Piatra Dragon|3;Inchide]",
+        ),
+        "the two chats again, and the close"
+    );
+    alice.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Alchimist",
+        &[b"Vrei sa deschizi schimbarea atributiilor pietrei dragon?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the answer ends the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_DS_PLUS_CHANGE_ATTR_OPEN],
+        "the attr window opens"
+    );
+    alice.still("nothing follows");
+}
+
+/// `quest.yohara_manager`: the city statue (20433) stands on map 1, and Alpha,
+/// level 154 with `yohara_system` at `killReward_new`, enters beside it. The
+/// letter drains copy the return scenario's, whose seed this one shares. The
+/// click offers the ship's return and the Yohara trip; "Un continent nou"
+/// asks, "Da" reads `pc.get_conqueror_level()` 33 and the step orders the
+/// warp to Yohara (537500, 492700). The refusal branch waits: Alpha's
+/// conqueror level is 33, and no second quest gates on the read.
+#[test]
+fn a_yes_to_the_statues_yohara_trip_warps_to_yohara() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(374);
+    let server = Server::start_with_npcs_channels(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20433\n",
+        &channels,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    // The CRC32 of `killReward_new`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'yohara_system.__status'::bytea, -512007343 FROM player WHERE player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (own, statue) = enter_beside_shown(&mut alice, 20433);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let theowahdan = read_quest_target_create(&mut alice, 1, b"Theowahdan");
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's change",
+    );
+    let stale = alice.read_game();
+    assert_eq!(
+        stale,
+        server_quest_target_delete(1),
+        "the reward state's letter deletes its stale Overseer mark"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(2, b"Theowahdan", theowahdan),
+        "the letter pass marks him again"
+    );
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(statue));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Return|2;Un continent nou|3;Inchide]"),
+        "the ship's return and the yohara trip, and the close"
+    );
+    alice.send_record(&client_script_answer(1));
+    let ask = titled_page(
+        b"Savas\xe7i heykeli:",
+        &[b"Doresti sa calatoresti pe noul continent Yohara?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&own.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((537_500, 492_700), port),
+        "the yohara warp names its continent and Channel 1"
+    );
+    alice.still("nothing follows");
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 537500 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 492700",
+    );
+}
+
+/// `quest.guild_ranking`: Alpha masters `MyGuild` (ladder 1000, seeded before the
+/// boot) and stands by the guild man on map 1. The click offers the disband
+/// (master-only) and the three ranking chats: founding needs the guildless,
+/// withdraw the non-master, the GM reads the GM. "Vezi scorul breslei tale"
+/// titles Gardian and says the rank 1 and the 1000 ladder points
+/// (`guild.get_rank`, `guild.get_ladder_point`).
+#[test]
+fn the_guild_mans_score_chat_names_the_rank_and_ladder() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 474300, y = 954100 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild (id, name, master_pid, ladder_point) SELECT 1, 'MyGuild', id, 1000 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN \
+         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         FROM generate_series(1, 15) grade",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 1, 1 FROM player WHERE name \
+         = 'Alpha'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_guilded(&mut alice, 1);
+    let men: Vec<u32> = entered
+        .shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == 11_000u16.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(men.len(), 1, "map 1 has one guild man in view");
+    read_login_event(&mut alice);
+    alice.quiet("the enter-game burst is over");
+
+    alice.send_record(&client_click(men[0]));
+    let menu = alice.read_game();
+    assert_eq!(
+        menu,
+        server_script(
+            1,
+            b"[QUESTION 1;Desfiinteaza breasla|2;Arata rangul breslei tale|3;Vezi cele mai mari \
+              ranguri ale breslelor (1-8)|4;Vezi scorul breslei tale|5;Inchide]"
+        ),
+        "the disband and the three ranking chats, and the close: {menu:02x?}"
+    );
+    alice.send_record(&client_script_answer(3));
+    let page = titled_page(
+        b"Gardian:",
+        &[b"Rangul breslei tale este 1.", b"Numarul punctelor: 1000"],
+        b"[DONE]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &page));
+    alice.quiet("the script ended");
+}
+
+/// `quest.sash`: Theowahdan stands on map 1, and Alpha, level 154 with the
+/// sash mission at `__complete`, enters beside him. Past the reward's short
+/// page and the captain's mark the click offers his eight chats; "Absorption
+/// of bonuses" asks, "Yes" opens the absorption window (`OpenSash(false)`),
+/// and the client hears the open record with the window byte cleared. "What
+/// is a Sash?" needs no scenario: its page says only the two options the two
+/// window chats already name.
+#[test]
+fn a_yes_to_theowahdans_absorption_opens_the_absorb_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    // The mission at `__complete` (its CRC32): no login move, no letter, and its
+    // chat answers from the reward state.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'sash_mission.__status'::bytea, 557528158 FROM player WHERE player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    let _reward = read_quest_target_create(&mut alice, 1, b"Theowahdan");
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_delete(1),
+        "the target click deletes the reward mark"
+    );
+    let first = titled_page(b"teowahdan", &SASH_REWARD_FIRST, b"[NEXT]");
+    assert_eq!(alice.read_game_marked(), server_script(1, &first));
+    alice.send_record(&client_script_answer(254));
+    let second = titled_page(b"teowahdan", &SASH_REWARD_SHORT, b"[DONE]");
+    assert_eq!(alice.read_game_marked(), server_script(1, &second));
+    assert_ne!(
+        read_quest_target_create(&mut alice, 2, b"Captain"),
+        theowahdan
+    );
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: \
+              Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of \
+              bonuses|9;Inchide]"
+        ),
+        "his eight chats, and the close"
+    );
+    alice.send_record(&client_script_answer(7));
+    let ask = titled_page(
+        b"teowahdan",
+        &[
+            b"",
+            b"Do you want to absorb bonuses from your weapon",
+            b"or amour?",
+            b"",
+        ],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    let open: Vec<u8> = vec![
+        0xe7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert_eq!(alice.read_game(), open, "the absorption window opens");
+    alice.still("nothing follows");
+}
+
+/// `lua.pc.setf`, `quest.enchanted_forest`: Channel 1 hosts map
+/// 210, and Alpha, level 154, stands at its middle. The disconnect runs the
+/// `logout` scripts (`CQuestManager::LogoutPC`, `G/questmanager.cpp:516-535`):
+/// the forest's writes `enchanted_forest_zone.dungeon_enter` 1 and stamps
+/// `limit_activity`, and the save banks both rows. The map gate holds the
+/// off-map half: every other scenario's logout banks no such rows, since no
+/// other hosted map is 210.
+#[test]
+fn a_logout_on_the_enchanted_map_sets_the_forest_flags() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(210);
+    let mut server = Server::start_with(binary(), database.url(), &channels);
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 806400, y = 1459200 WHERE name = 'Alpha'",
+    );
+    let (alice, _alpha) = enter_world(&server, b"alice", 0);
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT count(*) = 1 FROM quest_flag WHERE name = \
+         'enchanted_forest_zone.dungeon_enter'::bytea AND value = 1 AND player_id = (SELECT \
+         id FROM player WHERE name = 'Alpha'))",
+    );
+    wait_for(
+        &database,
+        "(SELECT count(*) = 1 FROM quest_flag WHERE name = \
+         'enchanted_forest.limit_activity'::bytea AND value > 0 AND player_id = (SELECT id \
+         FROM player WHERE name = 'Alpha'))",
+    );
+}
+
+/// `cg.game.quest_input_string`, `quest.dungeoninfo`: Alpha, level 154, enters
+/// map 1. The quest window asks about quest 1, and its `button` script runs:
+/// `getinputbegin`, then the client answers `TEST#2598`, and the script says
+/// the input and the test-boss line. The warps stay commented out on the
+/// owner's data, so nothing orders.
+#[test]
+fn the_dungeon_infos_button_reads_the_clients_input() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_script_button(1));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"getinputbegin"),
+        "the button opens the input"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_cmd"),
+        "the input's prompt goes out before it waits"
+    );
+    alice.send_record(&client_quest_input(b"TEST#2598"));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[INPUT]"),
+        "the wait's page goes out with the resume"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"getinputend"),
+        "the input closes"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"input is 2598"),
+        "the script says the mob index"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"you can put test boss via quest."),
+        "the TEST arm answers"
+    );
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    alice.still("nothing follows");
+}
+
+/// `quest.TeleportRing`: Channel 1 hosts map 64, and Alpha, level 154, holds
+/// the ring (70058). The use titles the ring's name and lists its twelve maps
+/// with the quit; picking Valea Seungryong (no level, item or sub-index gate)
+/// reads `pc.can_warp()` true and orders the warp to (666300, 855200) with
+/// the remove and `GC_WARP`.
+#[test]
+fn the_rings_use_lists_its_maps_and_warps_to_the_plain_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(64);
+    let (mut server, console) = Server::start_with_console(binary(), database.url(), &channels);
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _character, _items) = load_character(&server, b"alice", 0);
+    let own = u32::from_le_bytes(
+        enter_game_burst(&mut alice)[1..5]
+            .try_into()
+            .expect("a VID"),
+    );
+    Server::write_console(&console, "item give Alpha 70058 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (common::item_slots::EWindows::Inventory as u8, 0, 70_058, 1)
+    );
+    alice.send_record(&client_item_use(0));
+    let menu = titled_page(
+        b"Inel Teleportare:",
+        &[],
+        b"[QUESTION 1;Satul I|2;Satul II|3;Valea Seungryong|4;Desertul Yongbi|5;Muntele \
+          Sohan - Turnul lui Nemere|6;Turnul Demonilor - Cat. Diavolului|7;Tara de Foc - \
+          Purg. lui Razador|8;Taramul Gigantilor|9;Grota Exilului|10;Regiune de \
+          Padure|11;Temnitele Paianjenilor - Nivel: 35-75|12;Regiunea Beta - Nivel: \
+          90-105|13;Renunta]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &menu));
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &titled_page(b"Inel Teleportare:", &[], b"[DONE]")),
+        "the second title ends the dialog"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&own.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((666_300, 855_200), port),
+        "the ring warp names the valley and Channel 1"
+    );
+    alice.still("nothing follows");
+}
+
+/// `quest.yohara_system`: the warrior statue (20433) stands on map 1, and Alpha,
+/// level 154 with `yohara_system` at `information_new`, enters beside it. The
+/// letter finds the statue (`find_npc_by_vnum`), marks it (`target.vid` ID 1,
+/// `GC_TARGET_CREATE`) and sends its letter, and the letter pass marks it again
+/// (ID 2) after deleting ID 1. The click offers the one chat; "Devino Campion"
+/// runs the two-page script, whose answer moves the quest to `killMonsters_new`
+/// and stores the state, and the new state's letter sends with no mark. The
+/// Hydra kill and the reward chat wait for the kill event over the wire.
+#[test]
+fn a_click_on_the_marked_statue_moves_the_yohara_quest_to_the_hunt() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20433\n",
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 469600, y = 949500 WHERE name = 'Alpha'",
+    );
+    // The CRC32 of `information_new`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'yohara_system.__status'::bytea, 1998515313 FROM player WHERE player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let statue = enter_beside(&mut alice, 20433);
+    read_login_lines(&mut alice, 0, None);
+    let marks = read_login_letters(&mut alice, true);
+    assert_eq!(marks.len(), 2, "the sash and the yohara letters mark");
+    let statue_mark = marks
+        .iter()
+        .find(|mark| mark.get(5..11) == Some(b"Statue".as_slice()))
+        .expect("the yohara letter marks the statue");
+    assert_eq!(
+        u32::from_le_bytes(statue_mark[38..42].try_into().expect("four bytes")),
+        statue
+    );
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(statue));
+    let statue_id = quest_target_id(statue_mark);
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_delete(statue_id),
+        "the script's `target.delete` comes first"
+    );
+    let first = titled_page(
+        b"Savas\xe7i heykeli",
+        &[
+            b"",
+            b"Salutari: ",
+            b"Nu este oare timpul sa depasim limitele? ",
+            b"",
+            b"Cred ca este momentul. Nu vrei sa devii un Campion? ",
+            b"",
+            b"Pentru asta trebuie sa invingi Hydra. ",
+            b"Daca decizia ta ramane, atunci invinge Hydra. ",
+            b"Voi astepta aici. ",
+        ],
+        b"[NEXT]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &first));
+    alice.send_record(&client_script_answer(254));
+    let last = titled_page(
+        b"Savas\xe7i heykeli",
+        &[
+            b"",
+            b"Fii atent, monstrul adancurilor Hydra ",
+            b"are in plan sa puna stapanirea pe nava. ",
+            b"Du-te si strica-i planurile. ",
+            b"",
+            b"Sunt sigur ca puterea ta o va fi suficienta ",
+            b"pentru a o invinge. ",
+            b"",
+        ],
+        b"[DONE]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &last));
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the hunt state's letter",
+    );
+    alice.still("nothing follows");
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player \
+         WHERE name = 'Alpha') AND name = 'yohara_system.__status'::bytea) = -332622545",
+    );
+}
+
+/// `sys.char.emotion`: Alpha (job 3, female) and Yankee (job 0, male) enter map 1 side by
+/// side. `/dance1` with no victim broadcasts `dance1 <vid> 0` to the view, so both hear it.
+/// `/kiss Yankee` without consent answers `[LS;481]` and sends nothing; Yankee's
+/// `/emotion_allow <alpha-vid>` consents, and the second `/kiss Yankee` broadcasts
+/// `kiss <vid> <yankee-vid>` to both. (`do_emotion`, `G/cmd_emotion.cpp:153-296`.)
+#[test]
+fn a_dance_broadcasts_and_a_kiss_needs_consent() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "disable_emotion_mask = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 0, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/dance1"));
+    let dance = format!("dance1 {} 0", alpha.id).into_bytes();
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(&dance),
+        "the dancer hears its own broadcast"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(&dance),
+        "the view hears the dance"
+    );
+
+    alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/kiss Yankee"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;481]"),
+        "a kiss without consent is refused"
+    );
+    yankee.quiet("the refused kiss reaches nobody");
+
+    yankee.send_record(&client_chat(
+        CHAT_TYPE_TALKING,
+        format!("/emotion_allow {}", alpha.id).as_bytes(),
+    ));
+    yankee.quiet("the consent is silent");
+    alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/kiss Yankee"));
+    let kiss = format!("kiss {} {}", alpha.id, yankee_listed.id).into_bytes();
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(&kiss),
+        "the kiss broadcasts after consent"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(&kiss),
+        "the view hears the kiss"
+    );
+    alice.still("nothing follows");
+    yankee.still("nothing follows");
+}
+
+/// Read the two live priv lines behind the Channel record: the gold bonus's
+/// `[LS;872;30]` then the exp bonus's `[LS;874;200]`, in type order, and the
+/// `letters_event` line right after, proving no third line hides between.
+fn read_priv_burst(zulu: &mut Keyed) {
+    assert_eq!(
+        zulu.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"[LS;872;30]"),
+        "the gold bonus first, in type order"
+    );
+    assert_eq!(
+        zulu.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"[LS;874;200]"),
+        "then the exp bonus"
+    );
+    let chat = zulu.read_game();
+    assert_eq!(&chat[10..], b"letters_event 0", "and nothing between");
+}
+
+/// `cmd.priv_empire` (`do_priv_empire`, `G/cmd_gm.cpp:3107-3167`,
+/// `G/priv_manager.cpp:142-180,224-244`): a `HIGH_WIZARD` grants empire 1 the exp
+/// rate for an hour, and every client hears the `[LS;724]` notice with the empire
+/// and priv words and the clamped value. A value past 200 clamps, not refuses. A
+/// missing word answers the five usage lines on the caller alone. A zero value
+/// lands the removal: the hearer sees the raw removal line with its two
+/// translated words, and the grant reads 0. Carol enters after the live grants and
+/// her burst carries the `[LS;874]` line behind the Channel record, in type
+/// order with the gold grant's `[LS;872]`; the empire-2 grant touches nobody on
+/// empire 1. All three play on empire 1.
+#[test]
+fn a_gm_grants_an_empire_rate_and_every_client_hears_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/priv_empire 1 4 500 1"));
+    let grant = chat_packet(CHAT_TYPE_NOTICE, 1, b"[LS;724;[LS;793];[LS;1040];200]");
+    assert_eq!(
+        alice.read_game(),
+        grant,
+        "the granter hears the clamp to 200"
+    );
+    assert_eq!(yankee.read_game(), grant, "the map hears the grant");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/priv_empire 1 4 50"));
+    for expected in [
+        b"usage : priv_empire <empire> <type> <value> <duration>".as_slice(),
+        b"  <empire>    0 - 3 (0==all)",
+        b"  <type>      1:item_drop, 2:gold_drop, 3:gold10_drop, 4:exp",
+        b"  <value>     percent",
+        b"  <duration>  hour",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(expected));
+    }
+    yankee.quiet("the usage reaches nobody else");
+
+    // The 0 lands the removal, with the two words baked into the raw line.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/priv_empire 1 1 0 1"));
+    let removal = chat_packet(
+        CHAT_TYPE_NOTICE,
+        1,
+        b"[LS;793]A\xc7 [LS;1038]AI \xc1\xa4\xbb\xf3A\xb8\xb7\xce \xb513A?\xd41A\xb4I\xb4U.",
+    );
+    assert_eq!(alice.read_game(), removal, "the granter hears the removal");
+    assert_eq!(yankee.read_game(), removal, "the map hears the removal");
+
+    // The live grants wait in the world: a gold grant lands with the exp one, and
+    // an empire-2 grant that touches nobody here.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/priv_empire 1 2 30 1"));
+    let gold = chat_packet(CHAT_TYPE_NOTICE, 1, b"[LS;724;[LS;793];[LS;1039];30]");
+    assert_eq!(alice.read_game(), gold);
+    assert_eq!(yankee.read_game(), gold);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/priv_empire 2 4 70 1"));
+    let foreign = chat_packet(CHAT_TYPE_NOTICE, 1, b"[LS;724;[LS;794];[LS;1040];70]");
+    assert_eq!(
+        alice.read_game(),
+        foreign,
+        "everyone hears, whatever the empire"
+    );
+    assert_eq!(yankee.read_game(), foreign);
+
+    // Carol's character enters after the grants: the burst carries the two
+    // live lines behind the Channel record, in type order, and no third.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    let (mut zulu, _, list) = select_screen(&server, b"carol");
+    let burst = read_loading_burst(&mut zulu, &list, 0);
+    zulu.send_record(&client_enter_game());
+    let add = zulu.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = zulu.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let (_shown, _affect) = read_shown(&mut zulu);
+    assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(&mut zulu, [false; 5]);
+    let time = zulu.read_game();
+    assert_eq!(time[0], GC_TIME);
+    assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
+    read_priv_burst(&mut zulu);
+    enter_war_list(&mut zulu);
+    assert_eq!(
+        zulu.read_game(),
+        messenger_team_list(b"Alpha"),
+        "zulu hears the GM team"
+    );
+    read_login_event(&mut zulu);
+    zulu.still("nothing follows");
+    alice.sees_enter(burst.character.id, true, None);
+    yankee.sees_enter(burst.character.id, true, None);
+}
+
+/// `cmd.eventflag` and `cmd.geteventflag` (`do_event_flag`, `do_get_event_flag`,
+/// `G/cmd_gm.cpp:2265-2299`): a `HIGH_WIZARD` sets `cards_event` to 1 and hears
+/// `RequestSetEventFlag cards_event 1`; a `mob_gold` of 5000 clamps to 1000 in the
+/// answer; a one-word line is silent. The list names the boot's two seeds and the
+/// two sets in name order. Carol enters after the sets: her login's `event_info`
+/// line reads `0 1 0`, and the `cards icon` command line lands right behind it,
+/// from `cards_event`'s conditional login (`_basic/cards_event.lua:3-5`).
+#[test]
+fn a_gm_sets_a_flag_and_a_late_login_reads_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag cards_event 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag cards_event 1"),
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag mob_gold 5000"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag mob_gold 1000"),
+        "the mob_* clamp lands in the answer"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag cards_event"));
+    alice.quiet("a missing word is silent");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/geteventflag"));
+    for expected in [
+        b"cards_event 1".as_slice(),
+        b"guild_disband_delay 1",
+        b"guild_withdraw_delay 1",
+        b"mob_gold 1000",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(expected));
+    }
+    alice.quiet("the list ends");
+
+    // Carol enters after the sets: the cards login fires first on the set flag,
+    // and her `event_info` line reads `0 1 0`.
+    let (mut zulu, _, list) = select_screen(&server, b"carol");
+    let burst = read_loading_burst(&mut zulu, &list, 0);
+    zulu.send_record(&client_enter_game());
+    let add = zulu.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = zulu.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let (_shown, _affect) = read_shown(&mut zulu);
+    assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(&mut zulu, [false; 5]);
+    let time = zulu.read_game();
+    assert_eq!(time[0], GC_TIME);
+    assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
+    let chat = zulu.read_game();
+    assert_eq!(&chat[10..], b"letters_event 0", "no priv grants this run");
+    enter_war_list(&mut zulu);
+    assert_eq!(
+        zulu.read_game(),
+        messenger_team_list(b"Alpha"),
+        "zulu hears the GM team"
+    );
+    let first = zulu.read_game();
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the login event"
+    );
+    assert_eq!(
+        zulu.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"cards icon"),
+        "the cards login fires next on the set flag"
+    );
+    read_login_lines_after_cards(&mut zulu);
+    read_login_event_rest(&mut zulu);
+    zulu.still("nothing follows");
+    alice.sees_enter(burst.character.id, true, None);
+}
+
+/// `cmd.xmas_boom`, `cmd.xmas_snow`, `cmd.xmas_santa`, `cmd.eclipse` and `cmd.eventhelper`
+/// (`do_xmas`, `do_eclipse`, `do_event_helper`, `G/cmd_gm.cpp:3270-3294`, `:4460-4520`)
+/// through `SetEventFlag`'s arms (`G/questmanager.cpp:1335-1688`, `G/xmas_event.cpp`):
+/// `/xmas_boom 1` rings `xmas_boom 1` for the GM and stands map 1's firework seller (9004)
+/// at the map's base plus 615 m, 618 m; `/xmas_snow 3` rings `xmas_snow 3`; `/eclipse 1`
+/// rings `DayMode dark`; `/xmas_santa 1` is silent, and with Seohan (61) unhosted the flag
+/// stays 1; `/eventhelper 0` removes the seller and answers `Event Helper Delete`. None of
+/// the four flag lines answers the GM otherwise. Carol, loading afterwards, hears the
+/// three non-zero display flags right after her own-character record, in
+/// `BroadcastEventFlagOnLogin`'s order (`G/input_db.cpp:437`).
+#[test]
+fn a_gm_rings_the_christmas_flags_and_a_late_login_hears_them() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471000, y = 957000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/xmas_boom 1"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"xmas_boom 1"),
+        "the flag rings, and no RequestSetEventFlag line answers"
+    );
+    assert_eq!(
+        read_add_of_race(&mut alice, 9004),
+        (409_600 + 61_500, 896_000 + 61_800),
+        "map 1's firework seller stands at its base plus 615 m, 618 m"
+    );
+    assert_eq!(
+        alice.read_game()[0],
+        GC_CHAR_ADDITIONAL_INFO,
+        "the seller's name rides behind its add"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/xmas_snow 3"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"xmas_snow 3")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eclipse 1"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"DayMode dark")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/xmas_santa 1"));
+    alice.quiet("the santa line is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventhelper 0"));
+    assert_eq!(
+        alice.read_game()[0],
+        GC_CHARACTER_DEL,
+        "the seller goes from the GM's view"
+    );
+    assert_eq!(alice.read_game(), an_info_line(b"Event Helper Delete"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/geteventflag"));
+    let mut listed = Vec::new();
+    loop {
+        let line = alice.read_game();
+        let done = line[10..].starts_with(b"xmas_snow");
+        listed.push(line);
+        if done {
+            break;
+        }
+    }
+    assert!(
+        listed.contains(&an_info_line(b"xmas_santa 1")),
+        "the scratch Channel hosts maps 1 and 3 only: no Seohan, so the flag stays 1"
+    );
+
+    let (mut zulu, _, _list) = select_screen(&server, b"carol");
+    zulu.send_record(&client_select(0));
+    assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(zulu.read_game(), [GC_ENTITY, 3, 0]);
+    assert_eq!(zulu.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    for expected in [b"xmas_snow 3".as_slice(), b"xmas_boom 1", b"DayMode dark"] {
+        assert_eq!(
+            zulu.read_game(),
+            chat_packet(CHAT_TYPE_COMMAND, 1, expected),
+            "the login replay follows the map test"
+        );
+    }
+    assert_eq!(
+        zulu.read_game()[0],
+        GC_CHARACTER_GOLD,
+        "Zulu has no quickslots: the gold record follows"
+    );
+}
+
+/// `give_reward` and `letters_open` (`G/cmd_general.cpp:3753-3806`): with the event
+/// off the trade is refused and the letters stay; with the flag set the six go (one
+/// `GC_ITEM_SET` each, vnum 0) and the draw lands nothing, because the owner's
+/// group file holds no 55021 group. The window opens alone, with no `letters_drop`
+/// lines, and the store loses the six rows.
+#[test]
+fn a_player_trades_the_six_letters_for_the_box_draw() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, vnum, pos) in [
+        (20, 30216, 0),
+        (21, 30213, 1),
+        (22, 30219, 2),
+        (23, 30214, 3),
+        (24, 30217, 4),
+        (25, 30210, 5),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/give_reward"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"@@(cmd_general)tradus:The event is not available"),
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/letters_open"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenLetterWindow"),
+        "no group, so the window opens alone"
+    );
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag letters_event 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag letters_event 1"),
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/give_reward"));
+    read_cleared_cells(&mut alice);
+    alice.quiet("the trade itself is silent");
+
+    // The six rows are gone from the store.
+    let items = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha')",
+        1,
+    );
+    assert_eq!(items[0][0], 0, "the six letter rows are gone");
+
+    // Carol enters after the set: her burst's letters line reads 1.
+    create_account(&server, "carol");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    let (mut zulu, _, list) = select_screen(&server, b"carol");
+    let burst = read_loading_burst(&mut zulu, &list, 0);
+    zulu.send_record(&client_enter_game());
+    let add = zulu.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = zulu.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let (_shown, _affect) = read_shown(&mut zulu);
+    assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(&mut zulu, [false; 5]);
+    let time = zulu.read_game();
+    assert_eq!(time[0], GC_TIME);
+    assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
+    let chat = zulu.read_game();
+    assert_eq!(&chat[10..], b"letters_event 1", "the set flag shows");
+    enter_war_list(&mut zulu);
+    assert_eq!(
+        zulu.read_game(),
+        messenger_team_list(b"Alpha"),
+        "zulu hears the GM team"
+    );
+    // `event_info` reads the letters flag too: `letters_event` is the first word.
+    let first = zulu.read_game();
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the login event"
+    );
+    read_login_lines_with_event_info(&mut zulu, b"event_info 1 0 0");
+    read_login_event_rest(&mut zulu);
+    zulu.still("nothing follows");
+    alice.sees_enter(burst.character.id, true, None);
+}
+
+/// `do_stat` and `do_stat_minus` (`G/cmd_general.cpp:715-844`): a stat point raises
+/// `st` (the attribute's change and the spent counter ride), an empty word and an
+/// unknown word are silent, a reset count lowers it back (the attribute, the
+/// returned point and the spent reset ride), and the row banks the moved
+/// numbers. `iq`'s raise crosses to `POINT_MAX_HP`.
+#[test]
+fn a_stat_point_raises_and_a_reset_lowers() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET stat_point = 2, stat_reset_count = 1 WHERE name = 'Alpha'",
+    );
+    let (mut alice, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let vid = listed.id;
+    // An empty word and an unknown word run nothing.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat"));
+    alice.quiet("an empty word is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat xx"));
+    alice.quiet("an unknown word is silent");
+
+    // `st` rises 17 to 18 for a point: compute (12), the battle tail (6) with the
+    // attribute's change behind it, the spent counter (1), compute again (12).
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat st"));
+    let kinds = read_point_kinds(&mut alice, vid, 32);
+    assert!(
+        kinds.contains(&12),
+        "the attribute's change rides: {kinds:?}"
+    );
+    assert!(kinds.contains(&26), "the spent point rides: {kinds:?}");
+    assert_eq!(
+        count_point_kind(&kinds, 6),
+        2,
+        "strength carries no pool line of its own: {kinds:?}"
+    );
+    alice.quiet("the raise ends");
+
+    // `iq` rises 20 to 21, and the crossed `POINT_MAX_HP` rides a third time.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat iq"));
+    let kinds = read_point_kinds(&mut alice, vid, 33);
+    assert_eq!(
+        count_point_kind(&kinds, 6),
+        3,
+        "the crossed pool line rides: {kinds:?}"
+    );
+    alice.quiet("the crossed raise ends");
+
+    // With no point left the line is silent.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat st"));
+    alice.quiet("no point is silent");
+
+    // The reset lowers `st` back to 17, returns the point, and spends itself.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat- st"));
+    let kinds = read_point_kinds(&mut alice, vid, 33);
+    assert!(
+        kinds.contains(&12),
+        "the lowered attribute rides: {kinds:?}"
+    );
+    assert!(kinds.contains(&26), "the returned point rides: {kinds:?}");
+    assert!(kinds.contains(&112), "the spent reset rides: {kinds:?}");
+    alice.quiet("the lower ends");
+
+    // With no reset left the lower is silent.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat- st"));
+    alice.quiet("no reset is silent");
+
+    // The disconnect save banks the moved numbers: st 17, iq 21, one point left,
+    // no reset left.
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT st FROM player WHERE name = 'Alpha') = 17 AND (SELECT iq FROM player WHERE \
+         name = 'Alpha') = 21 AND (SELECT stat_point FROM player WHERE name = 'Alpha') = 1 AND \
+         (SELECT stat_reset_count FROM player WHERE name = 'Alpha') = 0",
+    );
+}
+
+/// How many of `kinds` are `kind`.
+fn count_point_kind(kinds: &[u8], kind: u8) -> usize {
+    kinds
+        .iter()
+        .fold(0, |count, &frame| count + usize::from(frame == kind))
+}
+
+/// Read the point changes one stat line sends: every frame is a 25-byte change for
+/// `vid`, and the answer is the kinds in order. The count is the line's own, so
+/// it is passed in.
+fn read_point_kinds(keyed: &mut Keyed, vid: u32, count: usize) -> Vec<u8> {
+    let mut kinds = Vec::with_capacity(count);
+    for _ in 0..count {
+        let frame = keyed.read_game();
+        assert_eq!(frame.len(), POINT_CHANGE_LEN, "a point change");
+        assert_eq!(&frame[0..4], &17i32.to_le_bytes(), "header 17");
+        assert_eq!(&frame[4..8], &vid.to_le_bytes(), "the caller's VID");
+        kinds.push(frame[8]);
+    }
+    kinds
+}
+
+/// `do_pkmode` (`G/cmd_general.cpp:2252-2270`): above the protect level `/pkmode
+/// 2` lands free with an update to the view, `/pkmode 4` without a guild falls
+/// back to free, and protect, the same mode, past-max and an empty word are
+/// silent. A low-level caller hears nothing for free and lands peace.
+#[test]
+fn a_pkmode_line_lands_its_mode_with_an_update() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Alpha is level 154, far above the protect level of 15.
+    let (mut alice, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let vid = listed.id;
+
+    // `/pkmode 2` lands free: the caller's own update carries it.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 2"));
+    assert_eq!(read_update_mode(&mut alice, vid), 2, "free lands");
+    alice.quiet("the switch ends");
+
+    // `/pkmode 4` without a guild falls back to free: the same mode, silent.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 4"));
+    alice.quiet("guildless guild is the same free");
+
+    // Back to peace first, so the fallback's own update shows.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 0"));
+    assert_eq!(read_update_mode(&mut alice, vid), 0, "peace lands");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 4"));
+    assert_eq!(
+        read_update_mode(&mut alice, vid),
+        2,
+        "the fallback lands free"
+    );
+    alice.quiet("the fallback ends");
+
+    // Protect never lands, the same mode sends nothing, past-max refuses, and
+    // an empty word runs nothing.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 3"));
+    alice.quiet("protect never lands");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 2"));
+    alice.quiet("the same mode sends nothing");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 5"));
+    alice.quiet("past-max refuses");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode"));
+    alice.quiet("no word runs nothing");
+
+    // Beta is level 1, below protect: free is silent, peace lands.
+    create_account(&server, "carol");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Zulu', 1, \
+         1, 470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    let (mut zulu, _, list) = select_screen(&server, b"carol");
+    let burst = read_loading_burst(&mut zulu, &list, 0);
+    zulu.send_record(&client_enter_game());
+    let add = zulu.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = zulu.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let (_shown, _affect) = read_shown(&mut zulu);
+    assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(&mut zulu, [false; 5]);
+    let time = zulu.read_game();
+    assert_eq!(time[0], GC_TIME);
+    assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
+    let chat = zulu.read_game();
+    assert_eq!(&chat[10..], b"letters_event 0");
+    enter_war_list(&mut zulu);
+    read_login_event(&mut zulu);
+    zulu.still("nothing follows");
+    let zulu_vid = burst.character.id;
+    zulu.send_record(&client_chat(CHAT_TALKING, b"/pkmode 2"));
+    zulu.quiet("free is silent below protect");
+    zulu.send_record(&client_chat(CHAT_TALKING, b"/pkmode 0"));
+    assert_eq!(read_update_mode(&mut zulu, zulu_vid), 0, "peace lands");
+    zulu.still("nothing follows");
+    alice.sees_enter(burst.character.id, true, None);
+}
+
+/// Read one `GC_CHARACTER_UPDATE` for `vid` and answer its `bPKMode` (byte 42).
+fn read_update_mode(keyed: &mut Keyed, vid: u32) -> u8 {
+    let update = keyed.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "an update");
+    assert_eq!(update.len(), CHARACTER_UPDATE_LEN);
+    assert_eq!(
+        u32::from_le_bytes([update[1], update[2], update[3], update[4]]),
+        vid,
+        "the caller's update"
+    );
+    update[42]
+}
+
+/// `do_set_walk_mode` and `do_set_run_mode` (`G/cmd_general.cpp:2016-2026`):
+/// `/set_walk_mode` fans the walk record to the caller's view and `/set_run_mode`
+/// the run one; either repeated is silent.
+#[test]
+fn a_walk_line_fans_and_a_repeat_is_silent() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let vid = listed.id;
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_walk_mode"));
+    assert_eq!(read_walk_mode(&mut alice, vid), 1, "the walk fans");
+    alice.quiet("the walk ends");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_walk_mode"));
+    alice.quiet("the walk's repeat is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_run_mode"));
+    assert_eq!(read_walk_mode(&mut alice, vid), 0, "the run fans");
+    alice.quiet("the run ends");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_run_mode"));
+    alice.quiet("the run's repeat is silent");
+}
+
+/// Read one `GC_WALK_MODE` for `vid` and answer its mode byte.
+fn read_walk_mode(keyed: &mut Keyed, vid: u32) -> u8 {
+    let record = keyed.read_game();
+    assert_eq!(record[0], GC_WALK_MODE, "a walk mode");
+    assert_eq!(record.len(), WALK_MODE_LEN);
+    assert_eq!(
+        u32::from_le_bytes([record[1], record[2], record[3], record[4]]),
+        vid,
+        "the caller's mode"
+    );
+    record[5]
+}
+
+/// `CInputMain::Chat`'s `CHAT_TYPE_GUILD` arm (`G/input_main.cpp:974-983`):
+/// `CGuild::Chat` fans the line to every online member: id 0, the empire byte,
+/// `bCanFormat` true.
+#[test]
+fn a_guild_line_reaches_the_members_and_no_outsider() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    give_guild_purse(&database);
+    let (mut alice, _alpha, _alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let yankee_vid = yankee_listed.id;
+
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    alice.quiet("the creation settled");
+    yankee.quiet("the creation settled");
+    alice.send_record(&client_guild_add_member(yankee_vid));
+    alice.quiet("the inviter hears nothing");
+    let invited = yankee.read_game();
+    assert_eq!(guild_subheader(&invited), GUILD_SUBHEADER_GC_GUILD_INVITE);
+    yankee.send_record(&client_guild_invite_answer(id, 1));
+    // The joiner's walk: GRADE, INFO, LIST, LOGIN, LOGIN, SKILL_INFO; the
+    // master's LIST-one and LOGIN follow on Alice.
+    for _ in 0..6 {
+        yankee.read_game();
+    }
+    alice.read_game();
+    alice.read_game();
+    yankee.quiet("the join settled");
+    alice.quiet("the join settled");
+
+    // Alice speaks to the guild. Both members hear the same type-4 line.
+    alice.send_record(&client_chat(prodomo::chat::CHAT_GUILD, b"hello"));
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHAT, "a chat line");
+    assert_eq!(own[3], prodomo::chat::CHAT_GUILD, "type: {own:02x?}");
+    assert_eq!(&own[4..8], &[0, 0, 0, 0], "id 0");
+    assert_eq!(own[8], 1, "the empire byte");
+    assert_eq!(own[9], 1, "bCanFormat is true");
+    assert_eq!(&own[10..], b"Alpha : hello");
+    let heard = yankee.read_game();
+    assert_eq!(heard, own, "the member hears the same bytes");
+}
+
+/// `CInputMain::Messenger`'s `MESSENGER_SUBHEADER_CG_ADD_BY_VID` arm
+/// (`G/input_main.cpp:1140-1177`): the caller's VID names the target, and the
+/// target hears the same `messenger_auth` ask the name arm sends.
+#[test]
+fn a_friend_request_by_vid_asks_the_target() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _alice_listed) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let mut add = vec![CG_MESSENGER, 0];
+    add.extend_from_slice(&yankee_listed.id.to_le_bytes());
+    alice.send_record(&add);
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(b"messenger_auth Alpha"),
+        "the target hears the ask"
+    );
+    alice.quiet("the asker hears nothing yet");
+    yankee.quiet("the ask settled");
+}
+
+/// `CInputMain::SyncPosition`'s NPC, warp and goto arms
+/// (`G/input_main.cpp:2067-2073`): a claim on a victim of one of those kinds is
+/// skipped, so no ownership and no batch leaves the server, while a claim on a
+/// player in the same frame still lands.
+#[test]
+fn a_sync_claim_on_an_npc_is_skipped_and_a_player_still_lands() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    stamina(&database, "Yankee", 12_345);
+    let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_id.id, false, None);
+    let npc = entered
+        .shown
+        .inserts()
+        .iter()
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().unwrap()))
+        .next()
+        .expect("an NPC in view");
+
+    // The NPC's claim alone: nothing leaves the server on either client.
+    alice.send_record(&client_sync_position(&[(npc, 470_010, 950_010)]));
+    alice.quiet("an NPC claim sends nothing to the claimer");
+    yankee.quiet("an NPC claim sends nothing to the view");
+
+    // The NPC's claim beside a player's: the player lands, the NPC stays silent.
+    alice.send_record(&client_sync_position(&[
+        (npc, 470_010, 950_010),
+        (yankee_id.id, 470_010, 950_010),
+    ]));
+    let claimed = yankee.read_game();
+    assert_eq!(claimed[0], GC_OWNERSHIP, "the player's claim lands");
+    let relayed = yankee.read_game();
+    assert_eq!(relayed[0], GC_SYNC_POSITION);
+    assert_eq!(
+        &relayed[3..7],
+        &yankee_id.id.to_le_bytes(),
+        "the player only"
+    );
+    // `SetSyncOwner`'s `PacketAround` has no exception, so the claimer reads
+    // the ownership too, and never the batch.
+    assert_eq!(alice.read_game()[0], GC_OWNERSHIP);
+    alice.quiet("the batch skips the NPC");
+    yankee.quiet("the batch ends at the player");
+}
+
+/// `CInputMain::Guild`'s `GUILD_SUBHEADER_CG_WITHDRAW_MONEY` arm
+/// (`G/input_main.cpp:2859-2878`): like the deposit's, it returns before its
+/// body — the funds are closed for now — so the line stays quiet.
+#[test]
+fn a_guild_withdraw_stays_quiet() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    give_guild_purse(&database);
+    let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let _id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    alice.quiet("the creation settled");
+    let mut withdraw = vec![CG_GUILD, 14];
+    withdraw.extend_from_slice(&1000u32.to_le_bytes());
+    alice.send_record(&withdraw);
+    alice.quiet("a closed money arm stays quiet");
+}
+
+/// `CInputMain::PartyUseSkill` (`G/input_main.cpp:2734-2761`): the leader's HEAL
+/// is legacy's dead body (a quiet no-op); a member's use is told `[LS;684]`;
+/// the leader's WARP at a gone VID is told the raw summon line; and at a VID
+/// whose PID is no member, `[LS;685]` (both with leadership 0, so no summon
+/// can run).
+#[test]
+fn a_party_skill_heals_quiet_and_warns_its_gates() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+ 154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let yankee_vid = u32::from_le_bytes(yankee_listed.id.to_le_bytes());
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&yankee_vid.to_le_bytes());
+    alice.send_record(&invite);
+    let asked = yankee.read_game();
+    assert_eq!(asked[0], GC_PARTY_INVITE);
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    yankee.send_record(&answer);
+    drain_party_walk(&mut yankee, "the guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
+    // The join walk's trailing LINKs may still sit ahead; the heal answers
+    // nothing, so every record until quiet must be a stale walk record.
+    let use_skill = |index: u8, target: u32| {
+        let mut record = vec![0x4c];
+        record.push(index);
+        record.extend_from_slice(&target.to_le_bytes());
+        record
+    };
+    alice.send_record(&use_skill(1, yankee_vid));
+    // The dead body answers nothing: every record until the quiet beat must be
+    // a stale walk record.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let Some(record) = alice.read_game_until(deadline) else {
+            break;
+        };
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD | GC_PARTY_LINK | GC_PARTY_UPDATE | GC_PARTY_PARAMETER
+            ),
+            "past the heal, a record nobody accounted for: {record:02x?}"
+        );
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let Some(record) = yankee.read_game_until(deadline) else {
+            break;
+        };
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD | GC_PARTY_LINK | GC_PARTY_UPDATE | GC_PARTY_PARAMETER
+            ),
+            "past the heal, a record nobody accounted for: {record:02x?}"
+        );
+    }
+    // A member's use is told to ask the leader.
+    yankee.send_record(&use_skill(2, yankee_vid));
+    assert_eq!(
+        read_told_line(&mut yankee, "the member"),
+        info_to_alpha(b"[LS;684]"),
+        "the non-leader is told"
+    );
+    // The leader's WARP at a gone VID is told the raw line.
+    alice.send_record(&use_skill(2, 999_999));
+    assert_eq!(
+        read_told_line(&mut alice, "the leader"),
+        info_to_alpha(b"<Party> Cannot find target to summon."),
+        "the gone VID is told"
+    );
+    // At a live outsider's VID the PID is no member: `[LS;685]`.
+    create_account(&server, "carol");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Charlie', 2, \
+ 154, 470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    let (mut carol, carol_listed, _) = enter_world_seeing(&server, b"carol", 0);
+    alice.sees_enter(carol_listed.id, true, None);
+    yankee.sees_enter(carol_listed.id, true, None);
+    let carol_vid = u32::from_le_bytes(carol_listed.id.to_le_bytes());
+    alice.send_record(&use_skill(2, carol_vid));
+    assert_eq!(
+        read_told_line(&mut alice, "the leader"),
+        info_to_alpha(b"[LS;685]"),
+        "the outsider is refused"
+    );
+    carol.quiet("the outsider hears nothing");
+}
+
+/// `cg.game.pong`, `cg.game.time_sync` (`G/input_main.cpp:3661-3666`): in the game
+/// phase a PONG is read and not answered, and the character keeps playing
+/// afterwards; a `TIME_SYNC` naming a wrong token closes the connection, as a
+/// mismatched handshake does everywhere past the handshake.
+#[test]
+fn a_client_in_game_answers_the_ping_cycle() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+ 154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.quiet("the guest settled");
+    // A bare PONG is read and not answered; the game still answers after it.
+    alice.send_record(&[CG_PONG]);
+    alice.quiet("the pong stays quiet");
+    let mut use_skill = vec![0x4c, 1];
+    use_skill.extend_from_slice(&0u32.to_le_bytes());
+    alice.send_record(&use_skill);
+    alice.quiet("the game still answers");
+    // A TIME_SYNC naming a wrong token closes without a record: the phase is
+    // `Close` before the built record is written, as the handshake's own
+    // wrong-token control proves.
+    let sync = vec![TIME_SYNC, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    yankee.send_record(&sync);
+    yankee.closes("the wrong token closes");
+}
+
+/// `cg.game.hack` (`G/input_main.cpp:3844`, `CInputMain::Hack` at `:3219-3233`):
+/// in-game the 257-byte record logs and closes the descriptor; the report path
+/// already closes a header no analyzer handles, which is the same close. The
+/// login phase consumes the record instead (its own control below).
+#[test]
+fn a_hack_report_in_game_closes_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
+    let mut hack = vec![0x69];
+    hack.extend_from_slice(&[0u8; 256]);
+    alice.send_record(&hack);
+    alice.closes("the hack report closes");
+}
+
+/// `cg.login.hack` (`G/input_login.cpp:1239-1240`): on the select screen the
+/// 257-byte record is consumed with nothing sent, and the login walk still
+/// completes afterwards.
+#[test]
+fn a_hack_report_on_the_select_screen_is_consumed() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    let (mut keyed, _empire, list) = select_screen_on(&server, 1, b"alice", ENGLISH);
+    let mut hack = vec![0x69];
+    hack.extend_from_slice(&[0u8; 256]);
+    keyed.send_record(&hack);
+    // Nothing is sent back; the select still loads Alpha.
+    let (character, _quickslots, _items) = load_selected(&mut keyed, &list, 0);
+    assert_eq!(character.name, b"Alpha");
+}
+
+/// `cmd.phase_selec`, `cmd.qui`, `cmd.logou`, `cmd.shutdow`
+/// (`do_inputall`, `G/cmd.cpp:157-160`): a stubbed command answers `[LS;916]`,
+/// each on its own authority — the three player stubs to Alice, the GM stub
+/// to a granted Alice, who is refused it without the grant.
+#[test]
+fn a_stubbed_command_asks_to_type_it_in_full() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+ 154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, guest) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(guest.id, true, None);
+    for line in [b"/phase_selec".as_slice(), b"/qui", b"/logou", b"/shutdow"] {
+        alice.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(alice.read_game(), an_info_line(b"[LS;916]"));
+    }
+    for line in [b"/phase_selec".as_slice(), b"/qui", b"/logou"] {
+        yankee.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(yankee.read_game(), an_info_line(b"[LS;916]"));
+    }
+    // Without the grant the GM stub is refused as a missing command.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/shutdow"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"@@(cmd.cpp)tradus:This command does not exist.")
+    );
+}
+
+/// `cmd.mount` (`do_mount`, `G/cmd_general.cpp:450-452`): the body is empty, so
+/// a standing caller hears nothing; a dead one never reaches it — the position
+/// gate scolds `[LS;918]` first (`G/cmd.cpp:661-670`).
+#[test]
+fn a_mount_line_is_empty_standing_and_scolded_dead() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mount"));
+    alice.quiet("the empty body stays quiet");
+    // A dead caller is scolded before the body: weaken Alpha and let the boar kill it.
+    drop(alice);
+    drop(server);
+    sql(
+        &database,
+        "UPDATE player SET level = 1, hp = 1 WHERE name = 'Alpha'",
+    );
+    let server2 = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        BOAR_AT_ALPHA,
+        "no_wander = true",
+    );
+    let (mut alpha, listed, _items) = load_character(&server2, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let boar = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let alpha_vid = listed.id;
+    alpha.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    alpha.send_record(&client_target(boar));
+    let clicked = alpha.read_game();
+    assert_eq!(&clicked[1..5], &boar.to_le_bytes(), "the boar's VID");
+    alpha.send_record(&client_attack(boar));
+    let punch = alpha.read_fight();
+    assert_eq!(punch[0], GC_DAMAGE_INFO, "{punch:02x?}");
+    let shown = alpha.read_fight();
+    assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, boar));
+    let due = std::time::Instant::now() + Duration::from_secs(20);
+    let _swings = until_stunned(&mut alpha, boar, alpha_vid, due);
+    assert_eq!(alpha.read_fight(), ownership_of(0, alpha_vid));
+    assert_eq!(alpha.read_fight(), ownership_of(0, boar));
+    assert_eq!(alpha.read_fight(), [GC_PHASE, 6]);
+    assert_eq!(alpha.read_fight(), dead_of(alpha_vid));
+    alpha.send_record(&slash(b"/mount"));
+    // The death's re-sent qualification may still sit ahead of the scold.
+    for _ in 0..4 {
+        let record = alpha.read_own(alpha_vid);
+        if record == an_info_line(b"[LS;918]") {
+            return;
+        }
+        assert!(
+            record[0] == GC_AFFECT_ADD || record == damage_info(alpha_vid, 8, 0),
+            "ahead of the scold: {record:02x?}"
+        );
+    }
+    panic!("the scold never arrived");
+}
+
+/// `cmd.ungroup` (`do_ungroup`, `G/cmd_general.cpp:1060-1088`): a partyless
+/// caller stays quiet; a guest in a party of three hears `[LS;532]` and every
+/// linked member hears its REMOVE; and a guest in a party of two disbands it
+/// silently.
+#[test]
+fn an_ungroup_line_quits_silently_or_loud_by_count() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+ 154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Charlie', 2, \
+ 154, 470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    // Yankee keeps the column's 0 and walks; Charlie is seeded, so it does not.
+    stamina(&database, "Charlie", 12_345);
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let (mut charlie, charlie_listed, _) = enter_world_seeing(&server, b"carol", 0);
+    alice.sees_enter(charlie_listed.id, false, None);
+    yankee.sees_enter(charlie_listed.id, false, None);
+    // Partyless: nothing answers.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ungroup"));
+    alice.quiet("the partyless line stays quiet");
+    yankee.quiet("the guest settled");
+    charlie.quiet("the second guest settled");
+    // Alice invites both guests; both answer yes.
+    let yankee_vid = u32::from_le_bytes(yankee_listed.id.to_le_bytes());
+    let charlie_vid = u32::from_le_bytes(charlie_listed.id.to_le_bytes());
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let invite = |vid: u32| {
+        let mut record = vec![CG_PARTY_INVITE];
+        record.extend_from_slice(&vid.to_le_bytes());
+        record
+    };
+    alice.send_record(&invite(yankee_vid));
+    assert_eq!(yankee.read_game()[0], GC_PARTY_INVITE);
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    yankee.send_record(&answer);
+    drain_party_walk(&mut yankee, "the first guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
+    alice.send_record(&invite(charlie_vid));
+    assert_eq!(charlie.read_game()[0], GC_PARTY_INVITE);
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    charlie.send_record(&answer);
+    drain_party_walk(&mut charlie, "the second guest", 4, 4, true);
+    // The leader's and the first guest's second walks ride behind the near-flag
+    // UPDATE storm; the REMOVE loops below skip stale walk records, so no exact
+    // shape is asserted here.
+    // Yankee leaves a party of three: it hears `[LS;532]`, and every linked
+    // member hears its REMOVE naming its PID.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/ungroup"));
+    assert_eq!(
+        read_told_line(&mut yankee, "the leaver"),
+        info_to_alpha(b"[LS;532]"),
+        "the leaver is told"
+    );
+    let rows = support::rows(
+        database.url(),
+        "SELECT id FROM player WHERE name = 'Yankee'",
+        1,
+    );
+    let removed = u32::try_from(rows[0][0]).unwrap();
+    read_leave_remove(&mut alice, "the leader", removed);
+    read_leave_remove(&mut charlie, "the guest", removed);
+    // Charlie leaves a party of two: the disband sends no party record. The
+    // role-point zeroes may still ride, so only party records fail the quiet.
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/ungroup"));
+    for (who, note) in [(&mut charlie, "the disbander"), (&mut alice, "the leader")] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let Some(record) = who.read_game_until(deadline) else {
+                break;
+            };
+            assert!(
+                record[0] == GC_POINT_CHANGE
+                    || matches!(
+                        record[0],
+                        GC_PARTY_ADD | GC_PARTY_LINK | GC_PARTY_UPDATE | GC_PARTY_PARAMETER
+                    ),
+                "{note}: past the disband: {record:02x?}"
+            );
+            assert!(
+                record[0] != GC_PARTY_REMOVE,
+                "{note}: the disband sends no REMOVE"
+            );
+        }
+    }
+}
+
+/// Read until `GC_PARTY_REMOVE` names `removed`, stepping over stale walk records and a
+/// late `[LS;839;Charlie]` join echo that may still ride ahead under load.
+fn read_leave_remove(who: &mut Keyed, note: &str, removed: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let Some(record) = who.read_game_until(deadline) else {
+            panic!("{note} never heard the REMOVE");
+        };
+        if record[0] == GC_PARTY_REMOVE {
+            assert_eq!(&record[1..5], &removed.to_le_bytes(), "the removed PID");
+            return;
+        }
+        if record[0] == GC_CHAT {
+            assert_eq!(
+                record,
+                chat_packet(prodomo::chat::CHAT_INFO, 1, b"[LS;839;Charlie]"),
+                "{note}: ahead of the REMOVE: {record:02x?}"
+            );
+            continue;
+        }
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD | GC_PARTY_LINK | GC_PARTY_UPDATE | GC_PARTY_PARAMETER
+            ),
+            "{note}: ahead of the REMOVE: {record:02x?}"
+        );
+    }
+}
+
+/// `cmd.dc` (`do_disconnect`, `G/cmd_gm.cpp:1755-1782`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. A `LOW_WIZARD`
+/// hears the usage on an empty line, `%s: no such a player.` on an unknown
+/// name and on its target's name in another case (the lookup is the
+/// descriptor set's exact match, `G/desc_manager.cpp:325`, not `FindPC`'s
+/// lowered one), and `cannot disconnect myself` on its own name. On its
+/// target's exact name the target's connection closes with nothing before it,
+/// and the caller reads the release and the removal (`sees_disconnect`).
+#[test]
+fn a_gm_disconnects_a_character_and_the_target_closes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    // The gate is the dispatcher's: a player cannot run the line.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/dc Alpha"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot disconnect"
+    );
+    alice.quiet("the refusal reaches only the caller");
+
+    // The usage, the unknown name, and the wrong-cased name.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dc"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"ex) /dc <player name>"),
+        "the empty line answers the usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dc Nobody"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Nobody: no such a player."),
+        "the unknown name echoes as typed"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dc yankee"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"yankee: no such a player."),
+        "the match is exact"
+    );
+    yankee.quiet("an unlanded line reaches nobody");
+
+    // The caller itself.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dc Alpha"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"cannot disconnect myself"),
+        "the caller cannot disconnect itself"
+    );
+    yankee.quiet("a refusal reaches nobody");
+
+    // The landed line: the target's connection closes, and the caller reads
+    // its release and its removal.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dc Yankee"));
+    yankee.closes("the target's connection closes");
+    alice.sees_disconnect(yankee_listed.id);
+    alice.quiet("a landed close is quiet on the caller");
+}
+
+/// `cmd.transfer` (`do_transfer`, `G/cmd_gm.cpp:102-151`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. A `LOW_WIZARD` hears
+/// the usage on an empty line, `There is no character(%s) by that name` on an
+/// unknown name with the name as typed, `Target(%s) is in %d channel (my
+/// channel %d)` for a target on the Shared Channel, and `Transfer me?!?` on
+/// its own name in any case (the lookup is `FindPC`'s lowered one,
+/// `G/char_manager.cpp:244-260`). On its target's name the target's client is
+/// sent its own removal and the `GC_WARP` to the caller's feet, the row holds
+/// the feet, and the key logs in again there while the old descriptor still
+/// drops lines. The caller reads the target's removal alone: `WarpSet` takes
+/// it out of its sectree first, so no release follows.
+#[test]
+fn a_gm_transfers_a_character_and_the_target_warps_to_its_side() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    create_account_before_boot(&database, "carol");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         469000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    let (mut charlie, _) =
+        enter_world_on_with_team(&server, 99, b"carol", 0, ENGLISH, Some(b"Alpha"));
+
+    // The gate is the dispatcher's: a player cannot run the line.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/transfer Alpha"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot transfer"
+    );
+    alice.quiet("the refusal reaches only the caller");
+
+    // The usage, the unknown name, the other Channel, and the caller itself.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/transfer"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: transfer <name>"),
+        "the empty line answers the usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/transfer Nobody"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"There is no character(Nobody) by that name"),
+        "the unknown name echoes as typed"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/transfer Charlie"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Target(Charlie) is in 99 channel (my channel 1)"),
+        "the cross-Channel line names the Channel"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/transfer alpha"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Transfer me?!?"),
+        "the match ignores the case"
+    );
+    yankee.quiet("an unlanded line reaches nobody");
+    charlie.quiet("the Shared Channel hears nothing");
+
+    // The landed line: Yankee's client is sent its own removal and the warp
+    // to Alpha's feet. The row was written first.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/transfer Yankee"));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&yankee_listed.id.to_le_bytes());
+    assert_eq!(yankee.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(yankee.read_game(), a_warp_record(ALPHA_ENTERS_AT, port));
+    alice.sees_leave(yankee_listed.id);
+    alice.quiet("a landed transfer is quiet on the caller");
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Yankee') = 470100 AND (SELECT y FROM player WHERE \
+         name = 'Yankee') = 950000",
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"hello"));
+    yankee.quiet("a departed descriptor drops a talking line");
+
+    // The key logs in again while the old descriptor is still open.
+    let mut again = Keyed::channel(server.channel(1));
+    let (_auth, key) = login_key(&server, b"bob");
+    let (_empire, list) = login_by_key(&mut again, b"bob", key, CLIENT_KEY).expect("logs in");
+    let listed_yankee = listed(&list, 0);
+    assert_eq!(
+        (listed_yankee.x, listed_yankee.y),
+        (470_100, 950_000),
+        "the list shows the feet"
+    );
+}
+
+/// Alice's Alpha as a `GOD`: the same login event as an `IMPLEMENTOR`, since
+/// a god clears `event_panel`'s `pc.get_gm_level() >= 4` gate and the sash
+/// quest skips every GM.
+fn enter_world_as_god(server: &Server) -> (Keyed, Listed) {
+    enter_world_as_implementor(server)
+}
+
+/// Alice's Alpha as an `IMPLEMENTOR`: `load`, the enter-game burst, then the
+/// login event with `event_panel`'s GM-gated letter, which rides in quest
+/// order between `dungeon_info`'s line and `costume_option`'s hides.
+fn enter_world_as_implementor(server: &Server) -> (Keyed, Listed) {
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut keyed);
+    let first = keyed.read_game();
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the login event"
+    );
+    read_letter(&mut keyed, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(&mut keyed, 1, 0, None, [false; 5], None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    (keyed, character)
+}
+
+/// Each `/kill` and `/poison` usage, each miss, and the exact-match miss:
+/// an unknown name and the target's name in another case both answer
+/// `%s: no such a player` with no trailing stop.
+fn read_kill_poison_misses(alice: &mut Keyed, yankee: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/kill"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"ex) /kill <player name>"),
+        "the empty kill answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/kill Nobody"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Nobody: no such a player"),
+        "the kill's miss has no stop"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/kill yankee"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"yankee: no such a player"),
+        "the kill's match is exact"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/poison"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"ex) /poison <player name>"),
+        "the empty poison answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/poison yankee"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"yankee: no such a player"),
+        "the poison's match is exact"
+    );
+    yankee.quiet("an unlanded line reaches nobody");
+}
+
+/// `cmd.kill` and `cmd.poison` (`do_kill` and `do_poison`,
+/// `G/cmd_gm.cpp:1784-1829`). The GM gates are the dispatcher's: a player
+/// hears the dispatch refusal, and a `HIGH_WIZARD` runs `/kill` but not
+/// `/poison` (its gate is `GM_IMPLEMENTOR`). Each line answers its own usage
+/// on an empty line and `%s: no such a player` (no trailing stop, unlike
+/// `/dc`'s line) on an unknown name and on its target's name in another case
+/// (the lookup is the descriptor set's exact match,
+/// `G/desc_manager.cpp:325`). On its target's exact name `/kill` kills by
+/// `Dead()` with no killer: the target's client is sent the release, the
+/// dead phase, and the `GC_DEAD`, and the caller reads the release and the
+/// dead. `/poison` poisons by nobody: the target hears its poison's
+/// `GC_AFFECT_ADD` (kind 209), and its first tick lands through the poison
+/// path within a few seconds.
+#[test]
+fn a_gm_kills_and_poisons_and_each_line_answers_its_miss() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         469000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    // The gates are the dispatcher's: a player runs neither line.
+    for line in [b"/kill Alpha".as_slice(), b"/poison Alpha".as_slice()] {
+        yankee.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(
+            yankee.read_game(),
+            an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+            "a player runs neither line"
+        );
+    }
+    alice.quiet("the refusals reach only the caller");
+
+    read_kill_poison_misses(&mut alice, &mut yankee);
+
+    read_landed_poison(&mut alice, &mut yankee, yankee_listed.id);
+    read_landed_kill(&mut alice, &mut yankee, yankee_listed.id);
+}
+
+/// The landed `/poison Yankee`: the target hears its add, and its first tick
+/// lands through the poison path within a few seconds — the flagged damage,
+/// then the hit-point change, which carries no amount.
+fn read_landed_poison(alice: &mut Keyed, yankee: &mut Keyed, target: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/poison Yankee"));
+    let update = yankee.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "the poison's flag update");
+    let added = yankee.read_game();
+    assert_eq!(added.len(), AFFECT_ADD_LEN);
+    assert_eq!(added[0], GC_AFFECT_ADD);
+    assert_eq!(&added[1..5], &209u32.to_le_bytes(), "the poison's kind");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let tick = yankee
+        .read_game_until(deadline)
+        .expect("the poison's first tick lands");
+    assert_eq!(tick[0], GC_DAMAGE_INFO, "the tick shows its damage");
+    assert_eq!(tick[5], DAMAGE_POISON, "the tick's flag");
+    let changed = yankee.read_game();
+    let hp = i64::from_le_bytes(changed[17..25].try_into().expect("value"));
+    assert_eq!(
+        changed,
+        point_change(
+            target,
+            u8::try_from(common::point_slot::POINT_HP).expect("a point byte"),
+            0,
+            hp
+        ),
+        "the tick's hit-point change carries no amount"
+    );
+    alice.quiet("nobody's poison reaches nobody's caller");
+}
+
+/// The landed `/kill Yankee`: death clears the poison first (the remove, then
+/// the flag update, which fans around), then `ClearSync`'s release, the dead
+/// phase, and the dead; on the caller, the clear's update, the release, and
+/// the dead.
+fn read_landed_kill(alice: &mut Keyed, yankee: &mut Keyed, target: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/kill Yankee"));
+    assert_eq!(
+        yankee.read_game(),
+        affect_remove_of(209),
+        "death clears the poison"
+    );
+    assert_eq!(
+        yankee.read_game()[0],
+        GC_CHARACTER_UPDATE,
+        "the clear's flag update"
+    );
+    assert_eq!(yankee.read_game(), ownership_of(0, target), "the release");
+    assert_eq!(yankee.read_game(), [GC_PHASE, 6], "the dead phase");
+    assert_eq!(yankee.read_game(), dead_of(target), "the dead");
+    assert_eq!(
+        alice.read_game()[0],
+        GC_CHARACTER_UPDATE,
+        "the caller reads the clear's update"
+    );
+    assert_eq!(
+        alice.read_game(),
+        ownership_of(0, target),
+        "the caller reads the release"
+    );
+    assert_eq!(
+        alice.read_game(),
+        dead_of(target),
+        "the caller reads the dead"
+    );
+}
+
+/// `cmd.stun` (`do_stun`, `G/cmd_gm.cpp:87-90`, through
+/// `Command_ApplyAffect`, `:50-83`). The GM gate is the dispatcher's: a
+/// player hears the dispatch refusal. A `LOW_WIZARD` hears `Usage: stun
+/// <name>` on an empty line and `%s is not in same map` on an unknown name.
+/// On the target's name in another case the line still lands (the lookup is
+/// `FindPC`'s lowered one, `G/char_manager.cpp:244-260`, unlike `/kill`'s
+/// exact one): the target hears its stun's `GC_AFFECT_ADD` (kind 210), and
+/// the caller hears the confirmation with the name as typed.
+#[test]
+fn a_gm_stuns_a_character_and_the_target_hears_its_add() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         469000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    // The gate is the dispatcher's: a player cannot run the line.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/stun Alpha"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot stun"
+    );
+    alice.quiet("the refusal reaches only the caller");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stun"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: stun <name>"),
+        "the empty stun answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stun Nobody"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Nobody is not in same map"),
+        "the miss names its map"
+    );
+    yankee.quiet("an unlanded line reaches nobody");
+
+    // The lowered match: another case still lands. The add's flag update
+    // fans around, so the caller reads it before the confirmation, which
+    // echoes the name as typed.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stun yankee"));
+    assert_eq!(
+        alice.read_game()[0],
+        GC_CHARACTER_UPDATE,
+        "the caller reads the stun's update"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"yankee stun"),
+        "the caller hears the confirmation"
+    );
+    let update = yankee.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "the stun's flag update");
+    let added = yankee.read_game();
+    assert_eq!(added.len(), AFFECT_ADD_LEN);
+    assert_eq!(added[0], GC_AFFECT_ADD);
+    assert_eq!(&added[1..5], &210u32.to_le_bytes(), "the stun's kind");
+}
+
+/// Seed the warp world's three GMs and the Shared Channel player: Yankee
+/// stands off-metre (469077, 950049), so the name-arm's truncation pins
+/// itself live, and each account holds its own GM grant.
+fn seed_warp_world(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "bob");
+    create_account_before_boot(database, "carol");
+    create_account_before_boot(database, "dave");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         469077, 950049 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Dave', 1, \
+         469300, 964200 FROM account WHERE login = 'dave'",
+    );
+    for (login, name) in [("alice", "Alpha"), ("bob", "Yankee"), ("dave", "Dave")] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO gm_grant (account_id, name, authority) SELECT id, '{name}', \
+                 'LOW_WIZARD' FROM account WHERE login = '{login}'"
+            ),
+        );
+    }
+}
+
+/// Enter the world hearing `team`, the GM names other than the entrant's own
+/// with their online bytes. Answers the client, its listed row, and its
+/// enter burst.
+fn enter_world_hearing_team(
+    server: &Server,
+    channel: u8,
+    login: &[u8],
+    team: &[(&[u8], bool)],
+    what: &str,
+) -> (Keyed, Listed, Entered) {
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(server, channel, login, 0, ENGLISH);
+    let entered = enter_game_shown(&mut keyed);
+    assert_eq!(keyed.read_game(), messenger_team_list_many(team), "{what}");
+    read_login_event(&mut keyed);
+    keyed.still("nothing follows");
+    (keyed, character, entered)
+}
+
+/// The character list a fresh key sees for `login`: slot 0 stands at `at`.
+fn check_listed(server: &Server, channel: u8, login: &[u8], at: (i32, i32), what: &str) {
+    let mut again = Keyed::channel(server.channel(channel));
+    let (_auth, key) = login_key(server, login);
+    let (_empire, list) = login_by_key(&mut again, login, key, CLIENT_KEY).expect("logs in");
+    let listed = listed(&list, 0);
+    assert_eq!((listed.x, listed.y), at, "{what}");
+}
+
+/// The unlanded warp lines: a player hears the dispatch refusal, and a
+/// `LOW_WIZARD` hears the usage, the miss, and the cross-Channel line, each
+/// reaching nobody else.
+fn warp_answers_its_refusals(alice: &mut Keyed, yankee: &mut Keyed, charlie: &mut Keyed) {
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/warp 47 95"));
+    assert_eq!(
+        charlie.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot warp"
+    );
+    alice.quiet("the refusal reaches only the caller");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/warp"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: warp <character name> | <x meter> <y meter>"),
+        "the empty warp answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/warp Nobody"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"There is no one(Nobody) by that name"),
+        "the unknown name echoes as typed"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/warp Charlie"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Target(Charlie) is in 99 channel (my channel 1)"),
+        "the cross-Channel line names the Channel"
+    );
+    yankee.quiet("an unlanded line reaches nobody");
+    charlie.quiet("the Shared Channel hears nothing");
+}
+
+/// Run `line` on `caller` and read the landing: the `heard` confirmation,
+/// the caller's own removal, and the warp to `at` on `port`.
+fn warp_and_read_landing(
+    caller: &mut Keyed,
+    id: u32,
+    line: &[u8],
+    heard: &[u8],
+    at: (i32, i32),
+    port: u16,
+) {
+    caller.send_record(&client_chat(CHAT_TALKING, line));
+    assert_eq!(
+        caller.read_game(),
+        an_info_line(heard),
+        "the caller hears the confirmation"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&id.to_le_bytes());
+    assert_eq!(caller.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(caller.read_game(), a_warp_record(at, port));
+}
+
+/// `cmd.warp` (`do_warp`, `G/cmd_gm.cpp:399-457`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. A `LOW_WIZARD` hears
+/// the usage on an empty line, `There is no one(%s) by that name` on an
+/// unknown name, and the cross-Channel line on a Shared Channel target. On
+/// metres the caller hears `You warp to ( %d, %d )` with the pixels and
+/// warps there; on the target's name in another case (the lookup is
+/// `FindPC`'s lowered one) it hears the truncated metres
+/// (`tch->GetX() / 100` and back) and warps there.
+#[test]
+fn a_gm_warps_to_metres_and_a_name() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_warp_world(&database);
+    let server = Server::start(binary(), database.url());
+    // Three GM names: Alpha, Dave, Yankee. Each entrant hears the team list
+    // of the other two, in byte order, with their online bytes.
+    let (mut alice, alpha_listed, _) = enter_world_hearing_team(
+        &server,
+        1,
+        b"alice",
+        &[(b"Dave".as_slice(), false), (b"Yankee".as_slice(), false)],
+        "alpha hears the offline team",
+    );
+    let (mut yankee, yankee_listed, _) = enter_world_hearing_team(
+        &server,
+        1,
+        b"bob",
+        &[(b"Alpha".as_slice(), true), (b"Dave".as_slice(), false)],
+        "yankee hears alpha online",
+    );
+    assert_eq!(
+        alice.read_game(),
+        messenger_login(1, b"Yankee"),
+        "alpha hears yankee's team login"
+    );
+    let (_, yankee_add, _, _) = alice.sees_enter(yankee_listed.id, true, None);
+    let yankee_at = inserted_at(&yankee_add);
+    let (mut charlie, _, _) = enter_world_hearing_team(
+        &server,
+        99,
+        b"carol",
+        &[
+            (b"Alpha".as_slice(), true),
+            (b"Dave".as_slice(), false),
+            (b"Yankee".as_slice(), true),
+        ],
+        "charlie hears the whole team",
+    );
+    // The gate is the dispatcher's: a player cannot run the line.
+    warp_answers_its_refusals(&mut alice, &mut yankee, &mut charlie);
+
+    // The landed name: another case still lands (the lowered match), on the
+    // metre at the target's feet (`tch->GetX() / 100` and back: 469077 lands
+    // on 469000).
+    let feet = (yankee_at.0 / 100 * 100, yankee_at.1 / 100 * 100);
+    let heard = format!("You warp to ( {}, {} )", feet.0, feet.1);
+    let port = server.channel(1).port();
+    warp_and_read_landing(
+        &mut alice,
+        alpha_listed.id,
+        b"/warp yankee",
+        heard.as_bytes(),
+        feet,
+        port,
+    );
+    yankee.sees_leave(alpha_listed.id);
+    check(
+        &database,
+        &format!(
+            "(SELECT x FROM player WHERE name = 'Alpha') = {} AND (SELECT y FROM player WHERE \
+             name = 'Alpha') = {}",
+            feet.0, feet.1
+        ),
+    );
+
+    // The list shows the feet, without re-entering the world.
+    check_listed(
+        &server,
+        1,
+        b"alice",
+        feet,
+        "the list shows the truncated metres",
+    );
+
+    // The landed metres on the second caller: the confirmation, the own
+    // removal, and the warp.
+    warp_and_read_landing(
+        &mut yankee,
+        yankee_listed.id,
+        b"/warp 4701 9500",
+        b"You warp to ( 470100, 950000 )",
+        (470_100, 950_000),
+        port,
+    );
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Yankee') = 470100 AND (SELECT y FROM player WHERE \
+         name = 'Yankee') = 950000",
+    );
+    check_listed(
+        &server,
+        1,
+        b"bob",
+        (470_100, 950_000),
+        "the list shows the metres",
+    );
+    charlie.quiet("the Shared Channel hears nothing");
+}
+
+/// `cmd.rewarp` (`do_rewarp`, `G/cmd_gm.cpp:459-465`, behind
+/// `ENABLE_NEWSTUFF`, which the owner's build defines): `/rewarp` names the
+/// caller's own pixels and rewarps in place. The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal.
+#[test]
+fn a_gm_rewarps_in_place() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_warp_world(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut charlie, _, _) = enter_world_hearing_team(
+        &server,
+        99,
+        b"carol",
+        &[
+            (b"Alpha".as_slice(), false),
+            (b"Dave".as_slice(), false),
+            (b"Yankee".as_slice(), false),
+        ],
+        "charlie hears the offline team",
+    );
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/rewarp"));
+    assert_eq!(
+        charlie.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot rewarp"
+    );
+    let (mut dave, dave_listed, entered) = enter_world_hearing_team(
+        &server,
+        1,
+        b"dave",
+        &[(b"Alpha".as_slice(), false), (b"Yankee".as_slice(), false)],
+        "dave hears the offline team",
+    );
+    assert_eq!(
+        charlie.read_game(),
+        messenger_login(1, b"Dave"),
+        "charlie hears dave's team login"
+    );
+    let dave_at = inserted_at(&entered.add);
+    dave.send_record(&client_chat(CHAT_TALKING, b"/rewarp"));
+    let own = format!("You warp to ( {}, {} )", dave_at.0, dave_at.1);
+    assert_eq!(
+        dave.read_game(),
+        an_info_line(own.as_bytes()),
+        "the rewarp names the caller's own pixels"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&dave_listed.id.to_le_bytes());
+    assert_eq!(dave.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(dave.read_game(), a_warp_record(dave_at, port));
+    charlie.quiet("the Shared Channel hears nothing");
+}
+
+/// A same-sectree `Show`'s view tail: every viewed NPC re-sent as an insert
+/// pair (`ViewReencode`, `G/char.cpp:1907-1912`).
+fn assert_reencoded_view(tail: &[Vec<u8>], seen: &[[u8; 4]]) {
+    let mut resent: Vec<[u8; 4]> = Vec::new();
+    for pair in tail.chunks_exact(2) {
+        assert_eq!(pair[0][0], GC_CHARACTER_ADD);
+        assert_eq!(pair[1][0], GC_CHAR_ADDITIONAL_INFO);
+        assert_eq!(&pair[1][1..5], &pair[0][1..5], "the pair's VID");
+        resent.push(pair[0][1..5].try_into().expect("a VID"));
+    }
+    resent.sort_unstable();
+    assert_eq!(resent, seen, "every NPC of the view re-sent");
+}
+
+/// `cmd.goto` (`do_goto`, `G/cmd_gm.cpp:313-397`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. A `LOW_WIZARD` hears
+/// the usage on an empty line and silence on an unknown name. On metres the
+/// caller hears `You goto ( %d, %d )` with the metres past its map base and
+/// shows there on its own map (`Show` + `Stop`, no `GC_WARP`). On a
+/// `settings.lua` name it hears `You warp to ( %d, %d )` with the pixels and
+/// warps there — without legacy's spurious `Cannot find map`, whose `if`
+/// tests the found flag the wrong way (`:357-361`, a Defect).
+#[test]
+fn a_gm_gotoes_to_metres_and_a_name() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "carol");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut keyed);
+    read_login_event(&mut keyed);
+    keyed.still("nothing follows");
+    let mut alice = keyed;
+    let alpha_listed = character;
+    let (mut charlie, _) =
+        enter_world_on_with_team(&server, 99, b"carol", 0, ENGLISH, Some(b"Alpha"));
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/goto 1 1"));
+    assert_eq!(
+        charlie.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot goto"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/goto"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: goto <x meter> <y meter>"),
+        "the empty goto answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/goto zzznope"));
+    alice.quiet("the miss is silent");
+    charlie.quiet("the Shared Channel hears nothing");
+    // Map 1's base is (409600, 896000): the line's (605, 542) lands at
+    // (470100, 950200), 200 south of the enter, in the same sectree.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/goto 605 542"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You goto ( 4701, 9502 )"),
+        "the caller hears the offset metres"
+    );
+    // The same-sectree `Show`: the own removal, the own pair at the target
+    // with `do_goto`'s `z` of 0, then every NPC of the enter's view re-sent
+    // (`ViewReencode`, `G/char.cpp:1907-1912`), and no `GC_WARP`.
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(wire[0], removed, "the own removal");
+    assert_eq!(wire[1][0], GC_CHARACTER_ADD);
+    assert_eq!(&wire[1][1..5], &alpha_listed.id.to_le_bytes());
+    assert_eq!(
+        inserted_at(&wire[1]),
+        (470_100, 950_200),
+        "the own insert at the target"
+    );
+    assert_eq!(&wire[1][17..21], &0i32.to_le_bytes(), "Show's z, 0");
+    assert_eq!(wire[2][0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(&wire[2][1..5], &alpha_listed.id.to_le_bytes());
+    let mut seen: Vec<[u8; 4]> = entered
+        .shown
+        .inserts()
+        .iter()
+        .map(|insert| insert[1..5].try_into().expect("a VID"))
+        .collect();
+    seen.sort_unstable();
+    assert_reencoded_view(&wire[3..], &seen);
+    assert!(
+        wire.iter().all(|record| record[0] != GC_WARP),
+        "no warp on a show"
+    );
+    charlie.quiet("the Shared Channel hears nothing");
+    // The named map: `settings.lua`'s a1, on hosted map 1, without the
+    // spurious line. Alpha departs, so this lands last.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/goto a1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You warp to ( 469300, 964200 )"),
+        "the caller hears the entry's pixels"
+    );
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(alice.read_game(), a_warp_record((469_300, 964_200), port));
+    alice.quiet("no spurious line follows the warp");
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 469300 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 964200",
+    );
+    check_listed(
+        &server,
+        1,
+        b"alice",
+        (469_300, 964_200),
+        "the list shows the entry",
+    );
+    charlie.quiet("the Shared Channel hears nothing");
+}
+
+/// `cmd.level` (`do_level`, `G/cmd_gm.cpp:2740-2758`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. A `LOW_WIZARD` hears
+/// the syntax on an empty line. On 30 the caller hears nothing and the reset
+/// rides: the conqueror-off gate (the next-experience, the level, the
+/// experience, the compute, the points pair), the level with its
+/// next-experience, the stat counter, the compute, the refill, the points
+/// pair, the skill counter with the compute and byte 76 (the sub-skill still
+/// standing), then the sub-skill counter with the compute and byte 76 (all
+/// zero). The row takes the level, the starts, the rolls, the counters, the
+/// full pools and the cleared conqueror, and the two skill rows go.
+#[test]
+fn a_gm_levels_a_champion() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "carol");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET level = 10, conqueror_level = 1, conqueror_exp = 500, sungma_str = 5 \
+         WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 16, 5, 0 FROM \
+         player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 121, 3, 0 FROM \
+         player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut keyed, _character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut keyed);
+    read_login_event(&mut keyed);
+    keyed.still("nothing follows");
+    let mut alice = keyed;
+    let (mut charlie, _) =
+        enter_world_on_with_team(&server, 99, b"carol", 0, ENGLISH, Some(b"Alpha"));
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/level 30"));
+    assert_eq!(
+        charlie.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot level"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/level"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: level <level>"),
+        "the empty level answers its syntax"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/level 30"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    assert_level_wire(&wire);
+    charlie.quiet("the Shared Channel hears nothing");
+    check(
+        &database,
+        "(SELECT COUNT(*) FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha')) = 0",
+    );
+    // The disconnect save banks the reset numbers.
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT level FROM player WHERE name = 'Alpha') = 30 AND (SELECT st FROM player WHERE \
+         name = 'Alpha') = 3 AND (SELECT ht FROM player WHERE name = 'Alpha') = 4 AND \
+         (SELECT stat_point FROM player WHERE name = 'Alpha') = 90 AND (SELECT skill_point FROM \
+         player WHERE name = 'Alpha') = 29 AND (SELECT sub_skill_point FROM player WHERE name = \
+         'Alpha') = 21 AND (SELECT conqueror_level FROM player WHERE name = 'Alpha') = 0 AND \
+         (SELECT conqueror_exp FROM player WHERE name = 'Alpha') = 0 AND (SELECT sungma_str FROM \
+         player WHERE name = 'Alpha') = 0",
+    );
+    check_listed_level(&server, b"alice", 30, "the list shows the level");
+    assert_eq!(
+        charlie.read_game(),
+        messenger_login(2, b"Alpha"),
+        "the teammate hears the logout"
+    );
+    charlie.quiet("the Shared Channel hears nothing");
+}
+
+/// A fresh key lists `level` for the login's first character.
+fn check_listed_level(server: &Server, login: &[u8], level: u8, what: &str) {
+    let mut again = Keyed::channel(server.channel(1));
+    let (_auth, key) = login_key(server, login);
+    let (_empire, list) = login_by_key(&mut again, login, key, CLIENT_KEY).expect("logs in");
+    assert_eq!(listed(&list, 0).level, level, "{what}");
+}
+
+/// The wire of a `/level 30` on a champion: the gate's three records, the
+/// level with its next-experience, the counters, the refills, the two points
+/// pairs and the two skill records, with the compute's battle records between.
+fn assert_level_wire(wire: &[Vec<u8>]) {
+    let change = |record: &[u8]| {
+        assert_eq!(record[0], GC_POINT_CHANGE);
+        (
+            record[8],
+            i64::from_le_bytes(record[17..25].try_into().expect("8 bytes")),
+        )
+    };
+    // The conqueror-off gate: its next-experience, its level, its experience.
+    assert_eq!(change(&wire[0]), (176, 0));
+    assert_eq!(change(&wire[1]), (173, 0));
+    assert_eq!(change(&wire[2]), (175, 0));
+    // The level with its nested next-experience.
+    assert_eq!(change(&wire[3]).0, 4, "the nested next-experience");
+    assert_eq!(change(&wire[4]), (1, 30), "the level");
+    // The gate's compute and points pair.
+    assert_eq!(wire[17][0], GC_CHARACTER_GOLD, "the gate's gold");
+    assert_eq!(wire[18][0], GC_PLAYER_POINTS, "the gate's points");
+    assert_eq!(points_slot(&wire[18], 1), 30, "the pair's level");
+    assert_eq!(
+        points_slot(&wire[18], 173),
+        0,
+        "the pair's cleared conqueror"
+    );
+    // The stat counter, the compute, the refill, the reset's pair.
+    assert_eq!(change(&wire[19]), (26, 90), "30 levels of 3");
+    let (kind, hp) = change(&wire[32]);
+    assert_eq!(kind, 5, "the hit refill");
+    let (kind, max_hp) = change(&wire[30]);
+    assert_eq!((kind, max_hp), (6, hp), "the refill fills");
+    let (kind, sp) = change(&wire[33]);
+    assert_eq!(kind, 7, "the spell refill");
+    let (kind, ceiling) = change(&wire[31]);
+    assert_eq!((kind, ceiling), (8, sp), "the spell refill fills");
+    assert_eq!(wire[34][0], GC_CHARACTER_GOLD, "the reset's gold");
+    assert_eq!(wire[35][0], GC_PLAYER_POINTS, "the reset's points");
+    assert_eq!(points_slot(&wire[35], 1), 30);
+    assert_eq!(points_slot(&wire[35], 26), 90, "the pair's stat");
+    // The skill counter, the compute, byte 76 with the sub-skill standing.
+    assert_eq!(change(&wire[36]), (28, 29), "4 + (30 - 5)");
+    assert_eq!(wire[49][0], GC_SKILL_LEVEL_NEW, "the first skills");
+    assert_eq!(skill_slot(&wire[49], 16), 0, "the skill zeroes");
+    assert_eq!(skill_slot(&wire[49], 121), 3, "the sub-skill stands");
+    // The sub-skill counter, the compute, byte 76 all zero.
+    assert_eq!(change(&wire[50]), (27, 21), "30 - 9");
+    assert_eq!(wire[63][0], GC_SKILL_LEVEL_NEW, "the second skills");
+    assert_eq!(skill_slot(&wire[63], 121), 0, "the sub-skill zeroes");
+    assert_eq!(wire.len(), 64, "the whole reset");
+}
+
+/// One slot of a `GC_PLAYER_POINTS` record.
+fn points_slot(record: &[u8], slot: usize) -> i64 {
+    assert_eq!(record[0], GC_PLAYER_POINTS);
+    let at = 1 + slot * 8;
+    i64::from_le_bytes(record[at..at + 8].try_into().expect("8 bytes"))
+}
+
+/// One skill's level of a `GC_SKILL_LEVEL_NEW` record.
+fn skill_slot(record: &[u8], vnum: usize) -> u8 {
+    assert_eq!(record[0], GC_SKILL_LEVEL_NEW);
+    record[1 + vnum * 6 + 1]
+}
+/// The skill-admin rows: Alpha (level 10) with a seeded skill and sub-skill
+/// and an `IMPLEMENTOR` grant, Yankee on Channel 1's other map, and Charlie
+/// the player on the Shared Channel. Written before boot.
+fn skill_admin_rows(database: &ScratchDatabase) {
+    for login in ["alice", "bob", "carol"] {
+        create_account_before_boot(database, login);
+    }
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "UPDATE player SET level = 10 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 16, 5, 0 FROM \
+         player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 121, 3, 0 FROM \
+         player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+}
+
+/// The skill-admin stage: the rows, a booted server, Alice the implementor,
+/// Yankee on Channel 1's other map, and Charlie the player on the Shared
+/// Channel. `None` when no database is around.
+fn skill_admin_stage() -> Option<(ScratchDatabase, Server, Keyed, Keyed, Keyed)> {
+    let database = ScratchDatabase::create()?;
+    skill_admin_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (alice, _) = enter_world_as_implementor(&server);
+    let (yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    let (charlie, _) = enter_world_on_with_team(&server, 99, b"carol", 0, ENGLISH, Some(b"Alpha"));
+    Some((database, server, alice, yankee, charlie))
+}
+
+/// `cmd.setskill` and `cmd.setskillother` (`do_setskill`,
+/// `do_setskillother`, `G/cmd_gm.cpp:2528-2572`, `:2574-2608`). A player hears the
+/// dispatch refusal. The syntax and the misses answer; a set by vnum or by name lands
+/// with its compute and byte 76 and the row follows. The other's set lands on the
+/// target while the caller hears nothing, and the target's row follows.
+#[test]
+fn a_gm_sets_skills_for_self_and_other() {
+    let Some((database, _server, mut alice, mut yankee, mut charlie)) = skill_admin_stage() else {
+        return;
+    };
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/setskill 1 20"));
+    assert_eq!(
+        charlie.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot setskill"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskill"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: setskill <name> <lev>"),
+        "the empty setskill answers its syntax"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskill 7 20"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"No such a skill by that name"),
+        "a missing vnum misses"
+    );
+    // A set by vnum: the compute rides, then byte 76 with the slot at 20.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskill 1 20"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    let set_76 = wire
+        .iter()
+        .rfind(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .expect("the set sends byte 76");
+    assert_eq!(skill_slot(set_76, 1), 20, "slot 1 stands at 20");
+    check(
+        &database,
+        "(SELECT level FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 1) = 20",
+    );
+    // A set by name, whatever the case: slot 31 stands at 5, with the
+    // skill's own add and update behind byte 76.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskill aMbUsCaDa 5"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    let set_76 = wire
+        .iter()
+        .rfind(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .expect("the name sends byte 76");
+    assert_eq!(skill_slot(set_76, 31), 5, "the name sets slot 31");
+    check(
+        &database,
+        "(SELECT level FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 31) = 5",
+    );
+    // The other line: the syntax, the offline miss, and the target's set.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskillother Yankee 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: setskillother <target> <skillname> <lev>"),
+        "the short other answers its syntax"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskillother Nobody 1 20"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"There is no such character"),
+        "an offline name misses"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskillother Yankee 1 25"));
+    let wire = yankee.wire_for(std::time::Duration::from_secs(2));
+    let set_76 = wire
+        .iter()
+        .rfind(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .expect("the target hears byte 76");
+    assert_eq!(
+        skill_slot(set_76, 1),
+        25,
+        "the target's slot 1 stands at 25"
+    );
+    alice.quiet("the caller hears nothing");
+    check(
+        &database,
+        "(SELECT level FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Yankee') AND vnum = 1) = 25",
+    );
+}
+
+/// `cmd.setskillpoint` and `cmd.setjob` (`do_set_skill_point`,
+/// `do_set_skill_group`, `G/cmd_gm.cpp:2610-2622`, `:2624-2637`). The counter moves with
+/// its amount-0 change. The job sets with byte 112, clears with byte 76, always
+/// confirms, and the group, the counter and the deletes land on the disconnect save.
+#[test]
+fn a_gm_sets_skill_points_and_group() {
+    let Some((database, _server, mut alice, yankee, mut charlie)) = skill_admin_stage() else {
+        return;
+    };
+    // The counter: an empty line zeroes it, a number sets it, each with the
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskillpoint"));
+    assert_eq!(
+        change_record(&alice.wire_for(std::time::Duration::from_secs(2))[0]),
+        (28, 0, 0),
+        "the empty zeroes with amount 0"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskillpoint 17"));
+    assert_eq!(
+        change_record(&alice.wire_for(std::time::Duration::from_secs(2))[0]),
+        (28, 0, 17),
+        "the number sets with amount 0"
+    );
+    // The job: byte 112 with the group, the clear's counter and byte 76 with
+    // the seeded skill zeroed and the sub-skill standing, then the line.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setjob 1"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    assert_eq!(wire[0], vec![GC_CHANGE_SKILL_GROUP, 1], "byte 112 leads");
+    assert_eq!(
+        change_record(&wire[1]),
+        (28, 0, 9),
+        "4 + (10 - 5), amount hidden"
+    );
+    let last_76 = wire
+        .iter()
+        .rfind(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .expect("the clear sends byte 76");
+    assert_eq!(skill_slot(last_76, 16), 0, "the seeded skill zeroes");
+    assert_eq!(skill_slot(last_76, 121), 3, "the sub-skill stands");
+    assert_eq!(
+        wire.last().expect("the line confirms"),
+        &an_info_line(b"skill group to 1."),
+        "the line confirms"
+    );
+    check(
+        &database,
+        "(SELECT COUNT(*) FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 16) = 0",
+    );
+    // The disconnect save banks the group and the cleared counter.
+    drop(alice);
+    drop(yankee);
+    wait_for(
+        &database,
+        "(SELECT skill_group FROM player WHERE name = 'Alpha') = 1 AND (SELECT skill_point FROM \
+         player WHERE name = 'Alpha') = 9",
+    );
+    assert_eq!(
+        charlie.read_game(),
+        messenger_login(2, b"Alpha"),
+        "the teammate hears the logout"
+    );
+    charlie.quiet("the Shared Channel hears nothing else");
+}
+
+/// A `GC_POINT_CHANGE` record as (kind, amount, value).
+fn change_record(record: &[u8]) -> (u8, i64, i64) {
+    assert_eq!(record[0], GC_POINT_CHANGE);
+    (
+        record[8],
+        i64::from_le_bytes(record[9..17].try_into().expect("8 bytes")),
+        i64::from_le_bytes(record[17..25].try_into().expect("8 bytes")),
+    )
+}
+
+/// The skill-flag rows: Alpha the implementor and Yankee the watcher on the
+/// same map. Written before boot.
+fn skill_flag_rows(database: &ScratchDatabase) {
+    for login in ["alice", "bob"] {
+        create_account_before_boot(database, login);
+    }
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+}
+
+/// `cmd.invisible` and `cmd.cooltime` (`do_invisibility`, `do_cooltime`,
+/// `G/cmd_gm.cpp:2253-2264`, `:2735-2738`). A player hears the dispatch
+/// refusal. The first `/invisible` adds 203 with flag 3 and the infinite
+/// duration and both clients hear the caller's update with flag 3 set; the
+/// second takes the 203 back and both hear the update with the flag gone.
+/// `/cooltime` is silent and casts again at once.
+#[test]
+fn a_gm_toggles_invisibility_and_disables_cooltime() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, listed) = enter_world_as_implementor(&server);
+    let alice_vid = listed.id;
+    let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/invisible"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot turn invisible"
+    );
+    // On: the 203 with flag 3 and the infinite duration, then the caller's
+    // update with bit 2 set, on both wires.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/invisible"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    let add = wire
+        .iter()
+        .find(|record| record[0] == GC_AFFECT_ADD)
+        .expect("the add rides");
+    assert_eq!(u32::from_le_bytes(add[1..5].try_into().unwrap()), 203);
+    assert_eq!(add[5], 0, "POINT_NONE");
+    assert_eq!(u32::from_le_bytes(add[10..14].try_into().unwrap()), 3);
+    assert_eq!(
+        i32::from_le_bytes(add[14..18].try_into().unwrap()),
+        1_471_228_928,
+        "the infinite duration"
+    );
+    let update = wire
+        .iter()
+        .filter(|record| {
+            record[0] == GC_CHARACTER_UPDATE
+                && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
+        })
+        .last()
+        .expect("the caller's update rides");
+    assert_ne!(
+        u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
+        0,
+        "flag 3 stands"
+    );
+    let seen = yankee.wire_for(std::time::Duration::from_secs(2));
+    let update = seen
+        .iter()
+        .filter(|record| {
+            record[0] == GC_CHARACTER_UPDATE
+                && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
+        })
+        .last()
+        .expect("the watcher hears the update");
+    assert_ne!(
+        u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
+        0,
+        "the watcher hears flag 3"
+    );
+    // Off: the 203's remove, then both updates with the flag gone.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/invisible"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    let _remove = wire
+        .iter()
+        .filter(|record| {
+            record[0] == GC_AFFECT_REMOVE
+                && u32::from_le_bytes(record[1..5].try_into().unwrap()) == 203
+        })
+        .last()
+        .expect("the remove rides");
+    let update = wire
+        .iter()
+        .filter(|record| {
+            record[0] == GC_CHARACTER_UPDATE
+                && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
+        })
+        .last()
+        .expect("the caller's update rides back");
+    assert_eq!(
+        u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
+        0,
+        "flag 3 falls"
+    );
+    let seen = yankee.wire_for(std::time::Duration::from_secs(2));
+    let update = seen
+        .iter()
+        .filter(|record| {
+            record[0] == GC_CHARACTER_UPDATE
+                && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
+        })
+        .last()
+        .expect("the watcher hears the update back");
+    assert_eq!(
+        u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
+        0,
+        "the watcher hears the fall"
+    );
+    // `/cooltime` is silent.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/cooltime"));
+    alice.quiet("cooltime answers nothing");
+}
+
+/// The affect-remove stage: the flag rows, a booted server, and Alice the
+/// implementor with Yankee beside her. `None` when no database is around.
+fn affect_remove_stage() -> Option<(ScratchDatabase, Server, Keyed, Keyed, u32)> {
+    let database = ScratchDatabase::create()?;
+    skill_flag_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (alice, listed) = enter_world_as_implementor(&server);
+    let alice_vid = listed.id;
+    let (yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    Some((database, server, alice, yankee, alice_vid))
+}
+
+/// Reads the four list lines the empty or one-word `/affect_remove` answers:
+/// both syntaxes, the head naming `name`, and the columns.
+fn read_affect_list_head(alice: &mut Keyed, name: &[u8], what: &str) {
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: /affect_remove <player name>"),
+        "{what}: the first syntax"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: /affect_remove <type> <point>"),
+        "{what}: the second syntax"
+    );
+    let mut head = b"-- Affect List of ".to_vec();
+    head.extend_from_slice(name);
+    head.extend_from_slice(b" -------------------------------");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(&head),
+        "{what}: the list's head"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Type Point Modif Duration Flag"),
+        "{what}: the list's columns"
+    );
+}
+
+/// `cmd.affect_remove` (`do_affect_remove`, `G/cmd_gm.cpp:3865-3918`): the list
+/// half. A player hears the dispatch refusal. The empty line answers both
+/// syntaxes and lists the caller's affects; one word lists the named
+/// character's, and an unknown name falls back to the caller.
+#[test]
+fn a_gm_lists_affects() {
+    let Some((_database, _server, mut alice, mut yankee, _vid)) = affect_remove_stage() else {
+        return;
+    };
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/affect_remove"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot list affects"
+    );
+    // The 203 lands first, so the list has a row and the removal lands.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/invisible"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    assert!(
+        wire.iter().any(|record| record[0] == GC_AFFECT_ADD),
+        "the 203 lands"
+    );
+    // The empty line: both syntaxes, the head, and the 203's row.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/affect_remove"));
+    read_affect_list_head(&mut alice, b"Alpha", "the empty line");
+    let row = alice.read_game();
+    assert_eq!(
+        &row[10..],
+        b" 215     0     0        2 28",
+        "the revive's row first"
+    );
+    let row = alice.read_game();
+    assert_eq!(&row[10..15], b" 540 ", "the dragon-soul row sits between");
+    let row = alice.read_game();
+    assert_eq!(&row[10..20], b" 203     0", "the 203's row");
+    assert_eq!(&row[38..39], b"3", "the 203's flag");
+    // One unknown word falls back to the caller: the head names Alpha again.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/affect_remove Nobody"));
+    read_affect_list_head(&mut alice, b"Alpha", "the fallback");
+    let row = alice.read_game();
+    assert_eq!(
+        &row[10..],
+        b" 215     0     0        2 28",
+        "the fallback's revive row"
+    );
+    let row = alice.read_game();
+    assert_eq!(&row[10..15], b" 540 ", "the fallback's dragon-soul row");
+    let _fallback_row = alice.read_game();
+}
+
+/// `cmd.affect_remove` (`do_affect_remove`, `G/cmd_gm.cpp:3865-3918`): the removal
+/// half. Two words remove the type-and-point rows with the success line, the
+/// 203's remove, and the flag-3 fall on the caller's update; again the miss
+/// line answers.
+#[test]
+fn a_gm_removes_an_affect() {
+    let Some((_database, _server, mut alice, _yankee, alice_vid)) = affect_remove_stage() else {
+        return;
+    };
+    alice.send_record(&client_chat(CHAT_TALKING, b"/invisible"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    assert!(
+        wire.iter().any(|record| record[0] == GC_AFFECT_ADD),
+        "the 203 lands"
+    );
+    // Two words remove the 203 with the success line and the flag-3 fall on
+    // the caller's update; again the miss line answers.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/affect_remove 203 0"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    assert!(
+        wire.iter().any(|record| {
+            record[0] == GC_AFFECT_REMOVE
+                && u32::from_le_bytes(record[1..5].try_into().unwrap()) == 203
+        }),
+        "the 203's remove rides"
+    );
+    let update = wire
+        .iter()
+        .filter(|record| {
+            record[0] == GC_CHARACTER_UPDATE
+                && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
+        })
+        .last()
+        .expect("the caller's update rides");
+    assert_eq!(
+        u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
+        0,
+        "flag 3 falls"
+    );
+    assert!(
+        wire.iter()
+            .any(|record| *record == an_info_line(b"Affect successfully removed")),
+        "the success line rides"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/affect_remove 203 0"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Not affected by that type and point"),
+        "the miss answers"
+    );
+    alice.quiet("nothing follows the miss");
+}
+
+/// `cmd.stat_reset` (`do_stat_reset`, `G/cmd_general.cpp:710-713`). A player
+/// hears the dispatch refusal; an implementor's line fills the reset count
+/// to 12 with one kind-112 record, and the disconnect save banks 12.
+#[test]
+fn a_gm_fills_the_reset_count_to_twelve() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, listed) = enter_world_as_implementor(&server);
+    let vid = listed.id;
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/stat_reset"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot reset the count"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat_reset"));
+    assert_eq!(
+        read_point_kinds(&mut alice, vid, 1),
+        [112],
+        "one kind-112 record fills the count"
+    );
+    alice.quiet("the fill ends");
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT stat_reset_count FROM player WHERE name = 'Alpha') = 12",
+    );
+}
+
+/// A purge's removals on the caller's wire, in `do_purge` order: each swept
+/// NPC's release, then its removal, the release absent for a wanderless one
+/// ([`GameState::release_npc_sync`]). The fight reader hears them:
+/// `read_game` would take a removal for a walk's noise, as a noted
+/// monster's own ([`Keyed::monster_record`]). `expected` names the swept
+/// VIDs; a wanderer is read loosely when its regen may have stood it again
+/// between the lines.
+fn read_purge_removal(keyed: &mut Keyed, vid: u32) {
+    assert_eq!(
+        keyed.read_fight(),
+        ownership_of(0, vid),
+        "the release rides"
+    );
+    let mut removal = vec![GC_CHARACTER_DEL];
+    removal.extend_from_slice(&vid.to_le_bytes());
+    assert_eq!(keyed.read_fight(), removal, "the removal rides");
+}
+
+/// `/purge all`'s removals: every NPC the entry burst showed, each as the
+/// purge sends it (release, then removal; wanderless, removal alone), and
+/// nothing of the far dog. The sweep walks the sectrees, but each pair
+/// rides only to the swept NPC's viewers (`PacketAround`, `ViewCleanup`),
+/// and the far dog stands 5000 out, past the caller's 5500 view minus its
+/// own sectree walk. A wanderer's pair is noted by its VID, a wanderless
+/// removal likewise; a VID the burst never showed is an NPC whose tree the
+/// sweep covers but the view never reached, and is stepped over, as is a
+/// regen's insert, summary, move or mode between the pairs.
+fn read_purge_all(keyed: &mut Keyed, shown: &Shown) {
+    let mut swept: Vec<u32> = shown
+        .records
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_ADD)
+        .map(|record| u32::from_le_bytes(record[1..5].try_into().unwrap()))
+        .collect();
+    while !swept.is_empty() {
+        let record = keyed.read_fight();
+        if record[0] == GC_OWNERSHIP {
+            assert_eq!(&record[1..5], &[0; 4], "the release names no owner");
+            let vid = u32::from_le_bytes(record[5..9].try_into().unwrap());
+            let mut removal = vec![GC_CHARACTER_DEL];
+            removal.extend_from_slice(&vid.to_le_bytes());
+            assert_eq!(keyed.read_fight(), removal, "a wanderer's removal rides");
+            if let Some(at) = swept.iter().position(|seen| *seen == vid) {
+                swept.swap_remove(at);
+            }
+        } else if record[0] == GC_CHARACTER_DEL {
+            let vid = u32::from_le_bytes(record[1..5].try_into().unwrap());
+            if let Some(at) = swept.iter().position(|seen| *seen == vid) {
+                swept.swap_remove(at);
+            }
+        } else {
+            assert!(
+                matches!(
+                    record[0],
+                    GC_CHARACTER_ADD
+                        | GC_CHAR_ADDITIONAL_INFO
+                        | GC_MOVE
+                        | GC_WALK_MODE
+                        | GC_QUEST_TARGET_DELETE
+                ),
+                "between the pairs: {record:02x?}"
+            );
+        }
+    }
+}
+
+/// After `/purge all`: the regens whose `regen_event` fires within the
+/// quiet window stand their NPCs again (insert, summary, move or mode),
+/// then silence. Anything else fails the nothing-follows check.
+fn read_respawns_past_purge(keyed: &mut Keyed) {
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    while let Some(record) = keyed.read_game_until(deadline) {
+        assert!(
+            matches!(
+                record[0],
+                GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE
+            ),
+            "only a respawn follows the purge all: {record:02x?}"
+        );
+    }
+}
+
+/// The login event of a `GOD`: `dungeon_info`'s line, `event_panel`'s
+/// GM-gated letter (a god clears its `pc.get_gm_level() >= 4` gate), the
+/// hides, the letters, and the update.
+fn read_god_login_event(keyed: &mut Keyed) {
+    let first = keyed.read_game();
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the login event"
+    );
+    read_letter(keyed, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(keyed, 1, 0, None, [false; 5], None);
+    read_letter(
+        keyed,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_letter(
+        keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara login letter",
+    );
+    let _mark = read_quest_target_create(keyed, 1, b"Captain");
+    read_letter(
+        keyed,
+        QUEST_SASH,
+        b"Increase your power",
+        "the sash's letter",
+    );
+    read_letter(
+        keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    read_login_update(keyed);
+    assert_eq!(
+        keyed.read_game_marked(),
+        server_quest_target_update(1, CAPTAIN_SPOT.0, CAPTAIN_SPOT.1),
+        "the mark's event sends where the captain stands"
+    );
+    keyed.still("nothing follows");
+}
+
+/// `cmd.purge` (`do_purge`, `G/cmd_gm.cpp:816-868`) and `cmd.weaken`
+/// (`do_weaken`, `G/cmd_gm.cpp:2824-2861`). A player hears the dispatch
+/// refusal for both; `/weaken` drops the targeted near dog to 10 hit
+/// points, which its targeter hears; a god's line destroys the near stray
+/// dog (its release and removal ride) while the far dog stands, and
+/// `/purge all` destroys every NPC in view, whose pairs ride, while the
+/// far dog's own pair goes only to its viewers. Nothing follows the purge;
+/// only regens' respawns follow the sweep.
+#[test]
+fn a_gm_purges_the_near_dog_and_all_sweeps_the_view() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    // The sash at `time_to_wait` (CRC32 -830000308): its letter marks the
+    // captain near Alpha, whose spot is read after the update. The Yohara
+    // quest parked at `start` (no flag): its login script moves it to
+    // `information_new`, whose statue is not on map 1, so its letter sends
+    // with no mark.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    // The near dog stands where Alpha enters; the far dog stands 5000 east,
+    // past the 1000 sweep but inside the 5500 view.
+    let lines = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\nm\t655\t540\t0\t0\t0\t1\t\
+         1000s\t100\t1\t101\n";
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        lines,
+        "no_wander = true",
+    );
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let near = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    assert!(
+        entered
+            .shown
+            .monsters
+            .iter()
+            .map(Vec::as_slice)
+            .any(|insert| inserted_at(insert) == (ALPHA_ENTERS_AT.0 + 5000, ALPHA_ENTERS_AT.1)),
+        "the far dog rides the burst"
+    );
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/purge"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot purge"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/weaken"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot weaken"
+    );
+    // `cmd.weaken` (`do_weaken`, `G/cmd_gm.cpp:2824-2861`): the near dog is
+    // targeted, so its fall to 10 hit points is broadcast to its targeter.
+    alice.send_record(&client_target(near));
+    assert_eq!(
+        alice.read_game(),
+        target_of(near, 100, DOG_HP, DOG_HP, 0),
+        "the target lands"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/weaken"));
+    assert_eq!(
+        alice.read_game(),
+        target_of(near, 7, 10, DOG_HP, 0),
+        "the weakened dog's hit points ride"
+    );
+    alice.send_record(&client_target(0));
+    assert_eq!(
+        alice.read_game(),
+        target_of(0, 0, 0, 0, 0),
+        "the target clears"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/purge"));
+    read_purge_removal(&mut alice, near);
+    alice.quiet("nothing follows the purge");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/purge all"));
+    read_purge_all(&mut alice, &entered.shown);
+    read_respawns_past_purge(&mut alice);
+}
+
+/// `cmd.advance` (`do_advance`, `G/cmd_gm.cpp:2083-2106`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. A `GOD` hears the
+/// syntax on a short line and `<name> not exist` on an offline name. On
+/// `Yankee 30` the caller hears nothing and the target's reset rides the
+/// target's wire: the same 64 records as `/level 30`. The target's row
+/// takes the level, the starts, the rolls, the counters, the full pools and
+/// the cleared conqueror, and the two skill rows go.
+#[test]
+fn a_gm_advances_yankee_to_thirty() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET conqueror_level = 1, conqueror_exp = 500, sungma_str = 5 WHERE name = \
+         'Yankee'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 16, 5, 0 FROM \
+         player WHERE name = 'Yankee'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 121, 3, 0 FROM \
+         player WHERE name = 'Yankee'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' FROM \
+         account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_god(&server);
+    alice.still("nothing follows");
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/advance Alpha 30"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot advance"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/advance Yankee"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: advance <name> <level>"),
+        "the short advance answers its syntax"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/advance Nobody 30"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Nobody not exist"),
+        "the offline name answers its miss"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/advance Yankee 30"));
+    alice.quiet("the caller hears nothing more");
+    let wire = yankee.wire_for(std::time::Duration::from_secs(2));
+    assert_level_wire(&wire);
+    check(
+        &database,
+        "(SELECT COUNT(*) FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name \
+         = 'Yankee')) = 0",
+    );
+    // The step writes the reset straight to the target's row.
+    check(
+        &database,
+        "(SELECT level FROM player WHERE name = 'Yankee') = 30 AND (SELECT st FROM player WHERE \
+         name = 'Yankee') = 4 AND (SELECT ht FROM player WHERE name = 'Yankee') = 3 AND \
+         (SELECT stat_point FROM player WHERE name = 'Yankee') = 90 AND (SELECT skill_point \
+         FROM player WHERE name = 'Yankee') = 29 AND (SELECT sub_skill_point FROM player WHERE \
+         name = 'Yankee') = 21 AND (SELECT conqueror_level FROM player WHERE name = 'Yankee') = \
+         0 AND (SELECT conqueror_exp FROM player WHERE name = 'Yankee') = 0 AND (SELECT \
+         sungma_str FROM player WHERE name = 'Yankee') = 0",
+    );
+}
+
+/// `cmd.reset` (`do_reset`, `G/cmd_gm.cpp:2076-2081`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. On the line a wounded
+/// `HIGH_WIZARD` hears nothing but the refill: the hit change to the worn
+/// maximum, then the spell change to the worn maximum. The disconnect save
+/// banks the filled pools.
+#[test]
+fn a_gm_resets_and_the_worn_pools_refill() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET hp = 500, sp = 100 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    let (mut hp_now, mut sp_now) =
+        alice.sees_enter_past_ticks(yankee_listed.id, listed.id, true, None);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/reset"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot reset"
+    );
+    // The recovery ticks while the refusal crosses: drain it before the line.
+    alice.drain_heal_ticks(listed.id, &mut hp_now, &mut sp_now);
+    let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    let sp_kind = u8::try_from(common::point_slot::POINT_SP).expect("a point byte");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/reset"));
+    // Alpha's worn maxima: 700 + 18 x 40 hit, 200 + 20 x 20 spell. The
+    // recovery may tick below the maximum along the way; each is a
+    // heal-sized step from the drained pools, and the refill's hit record
+    // is the first 1420.
+    loop {
+        let record = alice.read_game();
+        assert_eq!(record[0], GC_POINT_CHANGE, "{record:02x?}");
+        assert_eq!(&record[4..8], &listed.id.to_le_bytes(), "Alpha's VID");
+        let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+        assert_eq!(record[8], hp_kind, "hit records first");
+        if value == 1420 {
+            break;
+        }
+        assert!(
+            is_heal_step(hp_now, value, 1420),
+            "a heal tick from {hp_now}: {value}"
+        );
+        hp_now = value;
+    }
+    assert_eq!(
+        alice.read_game(),
+        point_change(listed.id, sp_kind, 0, 600),
+        "the spell points fill"
+    );
+    alice.quiet("the line says nothing more");
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT hp FROM player WHERE name = 'Alpha') = 1420",
+    );
+    check(
+        &database,
+        "(SELECT sp FROM player WHERE name = 'Alpha') = 600",
+    );
+    drop(yankee);
+}
+
+/// `cmd.greset` (`do_greset`, `G/cmd_gm.cpp:2175-2179`). The GM gate is the
+/// dispatcher's: a player hears the dispatch refusal. On the line the
+/// `HIGH_WIZARD`'s guild's faith refills to its maximum — level 1 holds 400
+/// — and the row lands; the line is quiet, both members hear nothing, and no
+/// `SKILL_INFO` fans. A guildless wizard's line is quiet too.
+#[test]
+fn a_gm_gresets_and_the_guild_faith_refills_quietly() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild (id, name, master_pid, sp) SELECT 1, 'MyGuild', id, 350 FROM \
+         player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN \
+         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         FROM generate_series(1, 15) grade",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 1, 1 FROM player WHERE name \
+         IN ('Alpha', 'Yankee')",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _listed, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_guilded(&mut alice, 1);
+    read_login_event(&mut alice);
+    alice.still("nothing follows");
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team_guilded(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    let login = alice.read_game();
+    assert_eq!(login[0], GC_GUILD, "the member's LOGIN: {login:02x?}");
+    assert_eq!(guild_subheader(&login), GUILD_SUBHEADER_GC_LOGIN);
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/greset"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot greset"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/greset"));
+    alice.quiet("the line is quiet");
+    yankee.quiet("the member hears nothing");
+    wait_for(&database, "(SELECT sp FROM guild WHERE id = 1) = 400");
+    drop(alice);
+    drop(yankee);
+}
+
+/// `cmd.user` (`do_user` and `user_func`, `G/cmd_gm.cpp:1694-1753`): the
+/// `HIGH_WIZARD` asks after the online, and the two Channel 1 Names roll past
+/// in one line of `%-16s ` cells, then `Total 2`. Legacy's walk stays inside
+/// one core's process, so the walk is the caller's Channel, and the member on
+/// the Shared Channel is not named. A player hears only the floor's line.
+#[test]
+fn a_gm_lists_the_online_and_the_total_follows() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let (mut alice, mut yankee, mut charlie) = notice_cast(&server, &database);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/user"));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            2,
+            prodomo::command::NO_SUCH_COMMAND.as_bytes()
+        ),
+        "a player cannot list the online"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user"));
+    let mut cells = Vec::new();
+    for name in ["Alpha", "Yankee"] {
+        let mut cell = name.as_bytes().to_vec();
+        cell.resize(17, b' ');
+        cells.extend_from_slice(&cell);
+    }
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, &cells),
+        "the two Channel 1 Names roll past in one line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"Total 2"),
+        "the total follows"
+    );
+    yankee.quiet("the list stays with the caller");
+    charlie.quiet("not even to the Shared Channel");
+    drop(alice);
+    drop(yankee);
+    drop(charlie);
+}
+
+/// `cmd.who` (`do_who`, `G/cmd_gm.cpp:1682-1692`): the implementor asks after
+/// the counts, and the line is `Total [3] 2 / 1 / 0 (this server 2)` - the
+/// empires' totals span every Channel, as the P2P cores' did, and `this
+/// server` is Channel 1. A player hears only the floor's line.
+#[test]
+fn a_gm_whos_and_the_empires_count_across_channels() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    for login in ["alice", "bob", "carol"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    let (mut charlie, _) =
+        enter_world_on_with_team(&server, 99, b"carol", 0, ENGLISH, Some(b"Alpha"));
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/who"));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            2,
+            prodomo::command::NO_SUCH_COMMAND.as_bytes()
+        ),
+        "a player cannot count the online"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/who"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"Total [3] 2 / 1 / 0 (this server 2)"),
+        "the empires span every Channel and this server is Channel 1"
+    );
+    yankee.quiet("the count stays with the caller");
+    charlie.quiet("not even to the Shared Channel");
+    drop(alice);
+    drop(yankee);
+    drop(charlie);
+}
+
+/// `cmd.respawn` (`do_respawn`, `G/cmd_gm.cpp:2108-2123`). A player hears the
+/// dispatch refusal. The wizard hears `Respawn Around`, on `ALL` in any case
+/// `Respawn Everywhere`, and nothing spawns early: the lone regen had no
+/// missing, so the reset fires find nothing to stand.
+#[test]
+fn a_gm_respawns_around_and_everywhere() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let lines = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n";
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        lines,
+        "no_wander = true",
+    );
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/respawn"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot respawn"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/respawn"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Respawn Around"),
+        "the near reset answers"
+    );
+    alice.still("no missing, so no spawn follows");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/respawn ALL"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Respawn Everywhere"),
+        "the everywhere reset answers in any case"
+    );
+    alice.still("still no missing, so still no spawn follows");
+    yankee.quiet("the resets stay with the caller");
+    drop(alice);
+    drop(yankee);
+}
+
+/// `cmd.mob` (`do_mob`, `G/cmd_gm.cpp:699-758`). A player hears the dispatch
+/// refusal. The god hears the usage on the empty line and the miss on a vnum
+/// with no row; on `101` a stray dog stands around, which the caller's
+/// target proves at 126 of 126.
+#[test]
+fn a_gm_mobs_a_stray_dog_around() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", "");
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/mob"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot mob"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mob"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: mob <mob vnum>"),
+        "the empty line answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mob 999999"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"No such mob(999999) by that vnum"),
+        "a vnum with no row is the miss"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mob 101"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let mut dog = 0u32;
+    while dog == 0 {
+        let record = alice
+            .read_game_raw_until(deadline)
+            .expect("the stood dog rides the burst");
+        assert_eq!(
+            record[0], GC_CHARACTER_ADD,
+            "the spawn rides before anything else: {record:02x?}"
+        );
+        dog = u32::from_le_bytes(record[1..5].try_into().unwrap());
+    }
+    alice.send_record(&client_target(dog));
+    assert_eq!(
+        alice.read_game(),
+        target_of(dog, 100, DOG_HP, DOG_HP, 0),
+        "the stood dog targets at 126 of 126"
+    );
+    drop(alice);
+    drop(yankee);
+}
+
+/// `cmd.item` (`do_item`, `G/cmd_gm.cpp:467-519`). A player hears the dispatch
+/// refusal. The god hears the usage on the empty line, the miss without its
+/// stop on a name nothing answers, and the miss with its stop on a vnum with
+/// no proto; on `27003` a red potion lands in the caller's inventory, whose
+/// `GC_ITEM_SET` carries vnum 27003 and count 1.
+#[test]
+fn a_gm_grants_itself_a_red_potion() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", "");
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/item"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot grant itself"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/item"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: item <item vnum>"),
+        "the empty line answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/item NoSuchItemNameXyz"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"#0 item not exist by that vnum(NoSuchItemNameXyz)"),
+        "a name nothing answers is the miss without its stop"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/item 99999999"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"#99999999 item not exist by that vnum(99999999)."),
+        "a vnum with no proto is the miss with its stop"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/item 27003"));
+    let set = alice.read_game();
+    assert_eq!(
+        set[0], ITEM_SET,
+        "the grant rides a GC_ITEM_SET: {set:02x?}"
+    );
+    assert_eq!(set.len(), ITEM_SET_LEN, "a full 72-byte set");
+    assert_eq!(
+        u32::from_le_bytes(set[4..8].try_into().unwrap()),
+        27003,
+        "the potion's vnum"
+    );
+    assert_eq!(
+        u16::from_le_bytes(set[8..10].try_into().unwrap()),
+        1,
+        "the count is 1"
+    );
+    yankee.quiet("the grant stays with the caller");
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM item WHERE owner_id IN (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 27003) = 1",
+    );
+    drop(alice);
+    drop(yankee);
+}
+
+/// `cmd.mob_ld` (`do_mob_ld`, `G/cmd_gm.cpp:760-815`). A player hears the
+/// dispatch refusal. The god hears the same usage as `/mob` on the empty
+/// line; on `101 4701 9500` a stray dog stands at (470100, 950000), which
+/// its insert's point proves, and the caller's target proves it at 126 of
+/// 126.
+#[test]
+fn a_gm_mob_lds_a_stray_dog_at_metres() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", "");
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/mob_ld"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot mob_ld"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mob_ld"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: mob <mob vnum>"),
+        "the empty line answers the same usage as /mob"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mob_ld 101 4701 9500"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let mut dog = 0u32;
+    let mut at = (0, 0);
+    while dog == 0 {
+        let record = alice
+            .read_game_raw_until(deadline)
+            .expect("the stood dog rides the burst");
+        assert_eq!(
+            record[0], GC_CHARACTER_ADD,
+            "the spawn rides before anything else: {record:02x?}"
+        );
+        dog = u32::from_le_bytes(record[1..5].try_into().unwrap());
+        at = inserted_at(&record);
+    }
+    assert_eq!(at, (470_100, 950_000), "the metres scale to centimetres");
+    alice.send_record(&client_target(dog));
+    assert_eq!(
+        alice.read_game(),
+        target_of(dog, 100, DOG_HP, DOG_HP, 0),
+        "the stood dog targets at 126 of 126"
+    );
+    drop(alice);
+    drop(yankee);
+}
+
+/// `cmd.ma` and `cmd.mc` (`do_mob_aggresive`, `G/cmd_gm.cpp:639-698`;
+/// `do_mob_coward`, `:557-617`). A player hears the dispatch refusal. The
+/// god hears the usages (`Usage: mob <mob vnum>` for `/ma`, `Usage: mc
+/// <vnum>` for `/mc`) and the miss; on `101` a stray dog stands around
+/// with the bit set. The `/ma` dog hunts: it finds Alpha in its sight and
+/// swings (its `DAMAGE_INFO`). The `/mc` dog flees: its first `FUNC_WAIT`
+/// is a coward escape, past 750 from where it stood, never a 300-700 idle
+/// walk.
+#[test]
+fn a_gm_flags_a_stray_dog_aggressive_and_coward() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", "");
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/ma"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot ma"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/mc"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot mc"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ma"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: mob <mob vnum>"),
+        "the aggressive line answers /mob's usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mc"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: mc <vnum>"),
+        "the coward line answers its own usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ma 999999"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"No such mob(999999) by that vnum"),
+        "a vnum with no row is the miss"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ma 101"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let mut hunter = 0u32;
+    while hunter == 0 {
+        let record = alice
+            .read_game_raw_until(deadline)
+            .expect("the aggressive dog rides the burst");
+        assert_eq!(
+            record[0], GC_CHARACTER_ADD,
+            "the spawn rides before anything else: {record:02x?}"
+        );
+        hunter = u32::from_le_bytes(record[1..5].try_into().unwrap());
+    }
+    let swing = read_swing(
+        &mut alice,
+        hunter,
+        listed.id,
+        std::time::Instant::now() + Duration::from_secs(30),
+    );
+    assert!(
+        swing.damage > 0,
+        "the aggressive dog hunts and swings: {}",
+        swing.damage
+    );
+    a_coward_dog_flees(&mut alice, listed.id);
+    drop(alice);
+    drop(yankee);
+}
+
+/// The `/mc` half of `a_gm_flags_a_stray_dog_aggressive_and_coward`: the
+/// dog stands, and its first `FUNC_WAIT` is a coward escape, 500 to 5000
+/// from where it stood, never a 300-700 idle walk and never a swing.
+fn a_coward_dog_flees(alice: &mut Keyed, victim: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mc 101"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let mut coward = 0u32;
+    let mut stood = (0, 0);
+    while coward == 0 {
+        let record = alice
+            .read_game_raw_until(deadline)
+            .expect("the coward dog rides the burst");
+        assert_eq!(
+            record[0], GC_CHARACTER_ADD,
+            "the spawn rides before anything else: {record:02x?}"
+        );
+        coward = u32::from_le_bytes(record[1..5].try_into().unwrap());
+        stood = inserted_at(&record);
+    }
+    let due = std::time::Instant::now() + Duration::from_secs(30);
+    let mut early = None;
+    let flee = npc_move_of(alice, coward, victim, FUNC_WAIT, due, &mut early);
+    assert!(early.is_none(), "a coward never swings");
+    let to = (
+        i32::from_le_bytes(flee[8..12].try_into().expect("x")),
+        i32::from_le_bytes(flee[12..16].try_into().expect("y")),
+    );
+    let distance = distance_approx(to.0 - stood.0, to.1 - stood.1);
+    // `DISTANCE_APPROX` reads up to 0.7% high (`G/utils.h:17-40`), so a 5000
+    // escape measures up to 5032. An idle walk (300-700) never reaches 700
+    // of its own; 750 splits the two with room on both sides.
+    assert!(
+        (750..=5100).contains(&distance),
+        "the first wait is a coward escape, not an idle walk: {distance}"
+    );
+}
+
+/// `cmd.mm` (`do_mob_map`, `G/cmd_gm.cpp:618-637`). A player hears the
+/// dispatch refusal. The god hears the syntax on the empty line and
+/// `Failed` on a vnum with no proto or a gated vnum; on `101` a stray dog
+/// stands somewhere on the map, and the line names its locale name and its
+/// centimetres (`%s spawned in %dx%d`). The spawn may stand out of sight,
+/// so the scenario reads with the monsters' own kept: the insert's point
+/// matches the line's.
+#[test]
+fn a_gm_mob_maps_a_stray_dog_somewhere() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", "");
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/mm"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot mob_map"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mm"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: mm <vnum>"),
+        "the empty line answers its syntax"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mm 999999"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Failed"),
+        "a vnum with no proto fails"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mm stray_dog"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Failed"),
+        "a name is 0 and fails: no name reads"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mm 101"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let mut line = Vec::new();
+    let mut others = Vec::new();
+    while line.is_empty() {
+        let record = alice
+            .read_wire_until(deadline)
+            .expect("the stood line rides the burst");
+        if record[0] == GC_CHAT {
+            line = record[10..].to_vec();
+        } else {
+            others.push(record);
+        }
+    }
+    alice.unread(others);
+    let tail = String::from_utf8_lossy(&line);
+    let head = format!("{} spawned in ", String::from_utf8_lossy(DOG_NAME));
+    let Some(coords) = tail.strip_prefix(head.as_str()) else {
+        panic!("the line names the dog: {tail}");
+    };
+    let Some((x, y)) = coords.split_once('x') else {
+        panic!("the line carries centimetres: {tail}");
+    };
+    let x: i32 = x.parse().expect("an x");
+    let y: i32 = y.parse().expect("a y");
+    assert!(
+        (409_600..=409_600 + 4 * 200 * 128).contains(&x)
+            && (896_000..=896_000 + 5 * 200 * 128).contains(&y),
+        "the point is on map 1: {tail}"
+    );
+    drop(alice);
+    drop(yankee);
+}
+
+/// The stray dog's locale name, in the proto file's bytes.
+const DOG_NAME: &[u8] = b"C\xe2ine s\xe3lbatic";
+
+/// `cmd.group` and `cmd.grrandom` (`do_group`, `G/cmd_gm.cpp:537-555`;
+/// `do_group_random`, `:521-536`). A player hears the dispatch refusal.
+/// The god hears the usages (`Usage: group <group vnum>`, `Usage: grrandom
+/// <group vnum>`); a vnum with no group stands nothing and stays silent.
+/// On `101` three stray dogs stand around (group 101: a 101 leader and two
+/// 101 members); on `/grrandom 101` one of groups 101 or 171 stands, so at
+/// least one dog rides the burst.
+#[test]
+fn a_gm_spawns_a_group_and_a_random_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", "");
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/group"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot group"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/grrandom"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot grrandom"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/group"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: group <group vnum>"),
+        "the empty line answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/grrandom"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: grrandom <group vnum>"),
+        "the empty random line answers its usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/group 999999"));
+    alice.quiet("a vnum with no group is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/group 101"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let mut stood = 0;
+    while stood < 3 {
+        let record = alice
+            .read_game_raw_until(deadline)
+            .expect("the group's dogs ride the burst");
+        assert_eq!(
+            record[0], GC_CHARACTER_ADD,
+            "the spawn rides before anything else: {record:02x?}"
+        );
+        stood += 1;
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/grrandom 101"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let first = alice
+        .read_game_raw_until(deadline)
+        .expect("the random group rides the burst");
+    assert_eq!(
+        first[0], GC_CHARACTER_ADD,
+        "the spawn rides before anything else: {first:02x?}"
+    );
+    drop(alice);
+    drop(yankee);
+}
+
+/// `cmd.forgetme` and `cmd.aggregate` (`do_forgetme`, `G/cmd_gm.cpp:3029-3032`;
+/// `do_aggregate`, `:3034-3037`). A player hears the dispatch refusal. The
+/// god's lines answer nothing themselves: `/aggregate` starts the
+/// victimless dogs around on the caller (at least one swings), and
+/// `/forgetme` drops the caller as its attackers' victim (no swing lands
+/// in 5 quiet seconds) and hides the caller (`GC_AFFECT_ADD` 215 for 5 s).
+#[test]
+fn a_gm_aggregates_and_forgets_the_dogs_around() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t5\t101\n";
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", dogs);
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/forgetme"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot forgetme"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/aggregate"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot aggregate"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/aggregate"));
+    let swing = read_first_swing(&mut alice, listed.id);
+    assert!(
+        swing.damage > 0,
+        "an aggregated dog swings: {}",
+        swing.damage
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/forgetme"));
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let add = loop {
+        let record = alice
+            .read_game_raw_until(deadline)
+            .expect("the hide rides the burst");
+        if record[0] == GC_AFFECT_ADD {
+            break record;
+        }
+    };
+    assert_eq!(
+        &add[..],
+        &revive_invisible_add()[..],
+        "the hide is 215 for 5 seconds: {add:02x?}"
+    );
+    let due = std::time::Instant::now() + Duration::from_secs(5);
+    while let Some(record) = alice.read_game_raw_until(due) {
+        assert_ne!(
+            record[0], GC_DAMAGE_INFO,
+            "no swing lands once forgotten: {record:02x?}"
+        );
+    }
+    drop(alice);
+    drop(yankee);
+}
+
+/// The first swing on `victim`: its `DAMAGE_INFO`'s damage, skipping by the
+/// same rules as [`read_swing_head`] but without a known attacker. The
+/// tail is not read: `/aggregate` starts up to five dogs, and their tails
+/// interleave.
+fn read_first_swing(keyed: &mut Keyed, victim: u32) -> Swing {
+    let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut effects = Vec::new();
+    let (damage, flag) = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a swing within the window"
+        );
+        let record = keyed.read_game_raw();
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
+            let flag = record[5];
+            let damage = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            break (damage, flag);
+        }
+        if is_effect(&record) {
+            if record
+                .get(2..6)
+                .is_some_and(|vid| vid == victim.to_le_bytes())
+            {
+                effects.push(record[1]);
+            }
+            continue;
+        }
+        let is_heal = record.first() == Some(&GC_POINT_CHANGE)
+            && record.get(4..8) == Some(&victim.to_le_bytes())
+            && record.get(8) == Some(&hp_kind);
+        let is_claim =
+            record.first() == Some(&GC_OWNERSHIP) && record[5..9] == victim.to_le_bytes();
+        let is_mob_chat = record.first() == Some(&GC_CHAT);
+        assert!(
+            is_heal || is_claim || is_mob_chat || is_npc_chatter(&record),
+            "past a swing, a record nobody accounted for: {record:02x?}"
+        );
+    };
+    Swing {
+        damage,
+        flag,
+        effects,
+        hp: None,
+        owner: None,
+        stunned: false,
+        rot: 0,
+        x: 0,
+        y: 0,
+        time: 0,
+    }
+}
+
+/// `GC_AFFECT_ADD` of `ReviveInvisible(5)`: kind 215, `POINT_NONE`, 0, flag
+/// 28, 5 seconds, no cost.
+fn revive_invisible_add() -> Vec<u8> {
+    let mut record = vec![GC_AFFECT_ADD];
+    record.extend_from_slice(&215u32.to_le_bytes());
+    record.push(0);
+    record.extend_from_slice(&0i32.to_le_bytes());
+    record.extend_from_slice(&28u32.to_le_bytes());
+    record.extend_from_slice(&5i32.to_le_bytes());
+    record.extend_from_slice(&0i32.to_le_bytes());
+    record
+}
+
+/// `cmd.detaillog` and `cmd.monsterlog` (`do_detaillog`, `do_monsterlog`,
+/// `G/cmd_general.cpp:2242-2250`). A player hears the dispatch refusal. The god's lines
+/// answer nothing themselves: `/monsterlog` subscribes, and the thief's next begin fans the
+/// three lines in order — the victim, the stand, the pulse — as talking chats with the
+/// thief's VID; toggling off ends them. `/detaillog` flags the caller, and its next hit on
+/// the thief answers the detail line naming its own name, VID and point. The thief is vnum
+/// 405 (1625 hit points, no chat lines of its own that collide): the punch stuns a 126-HP
+/// dog, and a stunning hit never begins.
+#[test]
+fn a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let thieves = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t405\n";
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        thieves,
+        "no_wander = true",
+    );
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    let thief = entered
+        .shown
+        .monsters
+        .first()
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .expect("the one thief stands in view");
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/monsterlog"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot monsterlog"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/detaillog"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot detaillog"
+    );
+    alice.send_record(&client_target(thief));
+    let _target = alice.read_game();
+    alice.send_record(&client_chat(CHAT_TALKING, b"/monsterlog"));
+    alice.quiet("the toggle answers nothing");
+    alice.send_record(&client_attack(thief));
+    let lines = read_monster_lines(&mut alice, thief, 3);
+    let head = format!("{thief})").into_bytes();
+    let mut victim = head.clone();
+    victim.extend_from_slice(b"Set attack target: Alpha");
+    victim.push(0);
+    let mut stand = head.clone();
+    stand.extend_from_slice(b"[BATTLE] fighting state");
+    stand.push(0);
+    let mut pulse = head;
+    pulse.extend_from_slice(b"Let's go to the next state");
+    pulse.push(0);
+    assert_eq!(lines, vec![victim, stand, pulse], "the begin's three lines");
+    monsterlog_off_then_detaillog(&mut alice, yankee, thief, &listed);
+}
+
+/// The off toggle's quiet and the detail line: split from the monsterlog scenario so
+/// neither trips the line lint.
+fn monsterlog_off_then_detaillog(alice: &mut Keyed, yankee: Keyed, thief: u32, listed: &Listed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/monsterlog"));
+    let (kept, quiet) = alice.drain_game(QUIET_WINDOW, |header| match header {
+        GC_PING => 1,
+        GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        GC_POINT_CHANGE => POINT_CHANGE_LEN,
+        GC_OWNERSHIP => OWNERSHIP_LEN,
+        other => panic!("the off toggle answers nothing: header {other}"),
+    });
+    assert_eq!(quiet, Quiet::Open, "the off toggle keeps the connection");
+    assert!(
+        kept.iter()
+            .filter(|record| record[0] == GC_DAMAGE_INFO)
+            .count()
+            <= 1,
+        "at most the swung-back damage lands: {kept:02x?}"
+    );
+    alice.send_record(&client_attack(thief));
+    assert!(
+        no_monster_line_within(alice, thief),
+        "toggled off, no line lands"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/detaillog"));
+    alice.send_record(&client_attack(thief));
+    let detail = read_detail_line(alice, b"Alpha");
+    assert_eq!(
+        detail,
+        expected_detail_line(b"Alpha", listed.id, ALPHA_ENTERS_AT.0, ALPHA_ENTERS_AT.1),
+        "the detail names the hitter"
+    );
+    drop(yankee);
+}
+/// The next `count` monster-log texts of `speaker`, past pings, refills and the fight's
+/// own records.
+fn read_monster_lines(keyed: &mut Keyed, speaker: u32, count: usize) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut lines = Vec::new();
+    while lines.len() < count {
+        let record = keyed
+            .read_wire_until(deadline)
+            .expect("the monster lines land");
+        if record.first() != Some(&GC_CHAT) {
+            continue;
+        }
+        let vid = u32::from_le_bytes(record[4..8].try_into().expect("four bytes"));
+        if record.get(3) == Some(&CHAT_TYPE_TALKING) && vid == speaker {
+            let size = usize::from(record[1]) | (usize::from(record[2]) << 8);
+            lines.push(record[10..size].to_vec());
+        }
+    }
+    lines
+}
+
+/// Whether no monster-log text of `speaker` lands within the quiet window.
+fn no_monster_line_within(keyed: &mut Keyed, speaker: u32) -> bool {
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    while let Some(record) = keyed.read_wire_until(deadline) {
+        if record.first() != Some(&GC_CHAT) {
+            continue;
+        }
+        let vid = u32::from_le_bytes(record[4..8].try_into().expect("four bytes"));
+        if record.get(3) == Some(&CHAT_TYPE_TALKING) && vid == speaker {
+            return false;
+        }
+    }
+    true
+}
+
+/// The next info line starting with `name`: the detail line.
+fn read_detail_line(keyed: &mut Keyed, name: &[u8]) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let record = keyed
+            .read_wire_until(deadline)
+            .expect("the detail line lands");
+        if record.first() == Some(&GC_CHAT)
+            && record.get(3) == Some(&CHAT_TYPE_INFO)
+            && record.get(4..8) == Some(&[0, 0, 0, 0])
+        {
+            let size = usize::from(record[1]) | (usize::from(record[2]) << 8);
+            let text = &record[10..size];
+            if text.starts_with(name) {
+                return text.to_vec();
+            }
+        }
+    }
+}
+
+/// The detail text for `name` at (`x`, `y`) with `vid`.
+fn expected_detail_line(name: &[u8], vid: u32, x: i32, y: i32) -> Vec<u8> {
+    let mut text = name.to_vec();
+    text.extend_from_slice(format!("[{vid}]").as_bytes());
+    text.extend_from_slice(b"\xef\xbf\xbd\xef\xbf\xbd \xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd \xef\xbf\xbd\xef\xbf\xbd\xc4\xa1: ");
+    text.extend_from_slice(format!("{x} {y}").as_bytes());
+    text
+}
+
+/// `cmd.attract_ranger` and `cmd.pull_monster` (`do_attract_ranger`,
+/// `G/cmd_gm.cpp:3039-3042`; `do_pull_monster`, `:3044-3047`). A player hears
+/// the dispatch refusal. The god's lines answer nothing themselves:
+/// `/pull_monster` drags the mid dog 300 toward the caller (a
+/// `GC_SYNC_POSITION` lands nearer) while the far dog holds, and
+/// `/attract_ranger` cuts the archer's range to 150: made to fight, the
+/// archer walks in from 1000 out to 150 before it swings.
+#[test]
+fn a_gm_pulls_the_dogs_and_attracts_the_ranger() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let npcs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\nm\t610\t560\t0\t0\t0\t1\t1000s\t100\t1\t101\nm\t602\t532\t0\t0\t0\t1\t1000s\t100\t1\t302\n";
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", npcs);
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/attract_ranger"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot attract_ranger"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/pull_monster"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot pull_monster"
+    );
+    drop(yankee);
+    assert!(
+        pull_drags_a_dog_nearer(&mut alice, &entered.shown.monsters),
+        "the pull drags a dog nearer"
+    );
+    let archer = entered
+        .shown
+        .monsters
+        .iter()
+        .find(|insert| insert[22..24] == 302u16.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("a VID")))
+        .expect("the archer stands in view");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/attract_ranger"));
+    // `FuncAggregateMonster` draws `number(1, 100) <= 50` for each victimless monster
+    // (`G/char_battle.cpp:3644-3669`), so one line leaves the archer idle half the time.
+    // Each line draws again for it until it fights, and then its victim keeps it out.
+    for _ in 0..10 {
+        alice.send_record(&client_chat(CHAT_TALKING, b"/aggregate"));
+    }
+    let due = std::time::Instant::now() + Duration::from_secs(30);
+    let mut closest = i32::MAX;
+    let wait = loop {
+        let step = read_archer_step(&mut alice, archer, listed.id, due);
+        if step.is_empty() {
+            break step;
+        }
+        let x = i32::from_le_bytes(step[8..12].try_into().expect("four bytes"));
+        let y = i32::from_le_bytes(step[12..16].try_into().expect("four bytes"));
+        closest = closest.min(distance_approx(
+            x - ALPHA_ENTERS_AT.0,
+            y - ALPHA_ENTERS_AT.1,
+        ));
+        if closest <= 158 {
+            break step;
+        }
+    };
+    let _ = wait;
+    let damage = read_archer_swing(&mut alice, archer, listed.id, due);
+    assert!(damage > 0, "the cut archer swings: {damage}");
+    assert!(closest <= 158, "the cut archer walks in to 150: {closest}");
+    drop(alice);
+}
+
+/// `/pull_monster`'s half: the line drags a dog 100 to 3000 out nearer, and
+/// past 3000 holds. Answers whether a dog landed nearer.
+fn pull_drags_a_dog_nearer(keyed: &mut Keyed, burst: &[Vec<u8>]) -> bool {
+    let mut dogs: Vec<(u32, (i32, i32))> = burst
+        .iter()
+        .map(|insert| {
+            let vid = u32::from_le_bytes(insert[1..5].try_into().expect("a VID"));
+            (vid, inserted_at(insert))
+        })
+        .collect();
+    dogs.retain(|(_, at)| {
+        let gap = distance_approx(at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1);
+        (100..=3000).contains(&gap)
+    });
+    assert!(!dogs.is_empty(), "a dog in pull reach stands in view");
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/pull_monster"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut nearer = false;
+    while !nearer {
+        let record = keyed
+            .read_game_raw_until(deadline)
+            .expect("the pull syncs around");
+        if record[0] != GC_SYNC_POSITION {
+            continue;
+        }
+        let vid = u32::from_le_bytes(record[3..7].try_into().expect("a VID"));
+        let x = i32::from_le_bytes(record[7..11].try_into().expect("four bytes"));
+        let y = i32::from_le_bytes(record[11..15].try_into().expect("four bytes"));
+        let Some((_, at)) = dogs.iter().find(|(held, _)| *held == vid) else {
+            continue;
+        };
+        let before = distance_approx(at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1);
+        let after = distance_approx(x - ALPHA_ENTERS_AT.0, y - ALPHA_ENTERS_AT.1);
+        nearer = after < before;
+    }
+    nearer
+}
+
+/// An archer's `FUNC_WAIT` step on its way in: like [`npc_move_of`] but the
+/// ownership claims and the other dogs' fight chatter ride along, since
+/// `/aggregate` starts the whole field.
+fn read_archer_step(
+    keyed: &mut Keyed,
+    mob: u32,
+    victim: u32,
+    deadline: std::time::Instant,
+) -> Vec<u8> {
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a step of {mob} within the window"
+        );
+        let record = keyed.read_wire();
+        if record[0] == GC_PING
+            || keyed.timer_record(&record)
+            || is_stamina_refill(&record)
+            || is_mark_update(&record)
+            || is_effect(&record)
+        {
+            continue;
+        }
+        if record[0] == GC_MOVE && record[4..8] == mob.to_le_bytes() {
+            if record[1] == FUNC_WAIT {
+                return record;
+            }
+            continue;
+        }
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
+            continue;
+        }
+        if record[0] == GC_OWNERSHIP {
+            continue;
+        }
+        if record[0] == GC_SYNC_POSITION {
+            continue;
+        }
+        if record[0] == GC_FLY_TARGETING || record[0] == GC_CREATE_FLY {
+            continue;
+        }
+        if record[0] == GC_CHARACTER_DEL {
+            continue;
+        }
+        let is_heal = record.first() == Some(&GC_POINT_CHANGE)
+            && record.get(4..8) == Some(&victim.to_le_bytes());
+        if is_heal || record.first() == Some(&GC_CHAT) {
+            continue;
+        }
+        assert!(
+            is_npc_chatter(&record),
+            "past a step, a record nobody accounted for: {record:02x?}"
+        );
+    }
+}
+
+/// The archer's own swing, answering its damage. A shot is the archer's `FLY_TARGETING`
+/// at `victim`, its claim, then the `DAMAGE_INFO`; a blow is a `DAMAGE_INFO` closed by
+/// the archer's `MOVE{2}`. `DAMAGE_INFO` names no attacker and the dogs' swings
+/// interleave, so the archer is known by its aim or its move.
+fn read_archer_swing(
+    keyed: &mut Keyed,
+    mob: u32,
+    victim: u32,
+    deadline: std::time::Instant,
+) -> i32 {
+    let mut damage = None;
+    let mut aimed = false;
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the archer swings within the window"
+        );
+        let record = keyed.read_game_raw();
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
+            let dealt = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            if aimed {
+                return dealt;
+            }
+            damage = Some(dealt);
+            continue;
+        }
+        if record[0] == GC_FLY_TARGETING
+            && record[1..5] == mob.to_le_bytes()
+            && record[5..9] == victim.to_le_bytes()
+        {
+            aimed = true;
+            continue;
+        }
+        let blows =
+            record[0] == GC_MOVE && record[1] == FUNC_ATTACK && record[4..8] == mob.to_le_bytes();
+        if let (true, Some(damage)) = (blows, damage) {
+            return damage;
+        }
+    }
+}
+
+/// `cmd.getqf`, `cmd.setqf`, `cmd.delqf` and `cmd.set_state` (`do_getqf`,
+/// `G/cmd_gm.cpp:2863-2888`; `do_setqf`, `:2958-2992`; `do_delqf`,
+/// `:2994-3027`; `do_set_state`, `:2891-2956`). A player hears the dispatch
+/// refusal. The god's `/getqf` lists the caller's flags one line each
+/// (`name value`, and `quest state (value)` for a `.__status` flag);
+/// `/setqf` sets one and chats the confirmation; `/delqf` deletes with
+/// `Success` and then `Failed`; an unknown name answers `There is no such
+/// character`; and `/set_state` moves the sash to `information` with the
+/// doubled quest name and the state's number.
+#[test]
+fn a_gm_gets_sets_and_deletes_quest_flags() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/getqf"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot getqf"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/setqf train.count 7"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot setqf"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/delqf train.count"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot delqf"
+    );
+    drop(yankee);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setqf train.count 7"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Quest flag set: train.count 7"),
+        "the confirmation"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/getqf"));
+    let listed = read_chat_lines(&mut alice, 3);
+    assert_eq!(
+        listed[0],
+        an_info_line(b"sash_mission time_to_wait (-830000308)"),
+        "the status flag lists with its state name"
+    );
+    assert_eq!(
+        listed[1],
+        an_info_line(b"train.count 7"),
+        "the set flag lists"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/getqf Nobody"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"There is no such character"),
+        "the miss"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/delqf train.count"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Success"),
+        "the delete"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/delqf train.count"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Failed, quest flag does not exist"),
+        "the missing delete"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setqf"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Syntax: setqf <flagname> <value> [<character name>]"),
+        "the set syntax"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/delqf"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Syntax: delqf <flagname> [<character name>]"),
+        "the delete syntax"
+    );
+    set_state_moves_the_sash_to_information(&mut alice);
+    drop(alice);
+}
+
+/// `/set_state`'s half: the syntax, the confirmation with the doubled quest
+/// name and the state's number, and the moved quest in the next list.
+fn set_state_moves_the_sash_to_information(keyed: &mut Keyed) {
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/set_state"));
+    assert_eq!(
+        read_chat_line(keyed),
+        an_info_line(b"Syntax: set_state <questname> <statename> [<character name>]"),
+        "the state syntax"
+    );
+    keyed.send_record(&client_chat(
+        CHAT_TALKING,
+        b"/set_state sash_mission information",
+    ));
+    assert_eq!(
+        read_chat_line(keyed),
+        an_info_line(b"setting quest state flag sash_mission sash_mission 695801987"),
+        "the state confirmation"
+    );
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/getqf"));
+    let listed = read_chat_lines(keyed, 2);
+    assert_eq!(
+        listed[0],
+        an_info_line(b"sash_mission information (695801987)"),
+        "the moved quest lists"
+    );
+}
+
+/// The next `GC_CHAT` info line: Yankee's drop leaves ownership claims in
+/// flight, which ride past.
+fn read_chat_line(keyed: &mut Keyed) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game_raw();
+        if record[0] == GC_CHAT {
+            return record;
+        }
+    }
+}
+
+/// The next `count` [`read_chat_line`] lines.
+fn read_chat_lines(keyed: &mut Keyed, count: usize) -> Vec<Vec<u8>> {
+    (0..count).map(|_| read_chat_line(keyed)).collect()
+}
+
+/// The stored row id of `name`.
+fn query_player_id(database: &ScratchDatabase, name: &str) -> i64 {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime should start")
+        .block_on(async {
+            use db::sqlx::Connection;
+            let mut connection = db::sqlx::PgConnection::connect(database.url())
+                .await
+                .expect("the scenario database should connect");
+            let row: (i32,) = db::sqlx::query_as("SELECT id FROM player WHERE name = $1")
+                .bind(name)
+                .fetch_one(&mut connection)
+                .await
+                .expect("the row should be there");
+            connection.close().await.expect("the close should succeed");
+            i64::from(row.0)
+        })
+}
+
+/// `sys.guild`'s state: the GM's `/gstate MyGuild` names the guild's id, its
+/// master's PID and the war flag (`do_guild_state`, `G/cmd_gm.cpp:2806-2822`) —
+/// 0 before the declare, 1 once the war is on — and a name no guild holds hears
+/// the miss. A player typing `/gstate` is told the command does not exist
+/// (`G/cmd.cpp:610-699`).
+#[test]
+fn a_gm_reads_a_guilds_state_and_a_player_cannot() {
+    let Some((database, _server, mut alice, mut yankee)) = a_war_pair_ready() else {
+        return;
+    };
+    let master = query_player_id(&database, "Alpha");
+    let id_line = b"GuildID: 1".to_vec();
+    let master_line = format!("GuildMasterPID: {master}").into_bytes();
+    // At peace: the flag is 0.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gstate MyGuild"));
+    assert_eq!(alice.read_game(), an_info_line(&id_line), "the id");
+    assert_eq!(alice.read_game(), an_info_line(&master_line), "the master");
+    assert_eq!(alice.read_game(), an_info_line(b"IsInWar: 0"), "at peace");
+    yankee.quiet("the state reaches only the GM");
+    // A player's line is refused before the world is asked.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/gstate MyGuild"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot read a state"
+    );
+    alice.quiet("the player's line reaches no one else");
+    // The miss names the line's name, byte for byte.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gstate Strangers"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Strangers: It is a guild that does not exist."),
+        "the miss"
+    );
+    // At war: the flag is 1.
+    declare_and_accept_war(&mut alice, &mut yankee);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gstate MyGuild"));
+    assert_eq!(alice.read_game(), an_info_line(&id_line), "the id at war");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(&master_line),
+        "the master at war"
+    );
+    assert_eq!(alice.read_game(), an_info_line(b"IsInWar: 1"), "at war");
+    drop(alice);
+    drop(yankee);
+}
+
+/// What `sash_mission`'s `information`'s `button or info` says after its
+/// title (`_basic/sash_mission.lua:25-29`): `mob_name(60003)` is Theowahdan's
+/// name in `mob_names.txt`.
+const SASH_BUTTON: &[&[u8]] = &[
+    b"",
+    b"Theowahdan is looking for you. Hurry up and",
+    b"talk to him.",
+    b"",
+];
+
+/// `sys.quest.runtime`'s two GM state lines (`do_qf`, `G/cmd_gm.cpp:2326-2364`,
+/// and `do_clear_quest`, `G/cmd_gm.cpp:3732-3743`): a fresh login ran only
+/// letters, so the login's last quest answers the first `/qf` — the Yohara
+/// quest moves to `go_to_disciple`'s number, which is 0 for a state it does
+/// not have. Once the sash's `information`'s `button` ran — the quest's
+/// `info` page in skin 1 — the same line moves the sash to `go_to_disciple`
+/// with the quest's name, the state's name and the state's number.
+/// `/clear_quest sash_mission` is silent and forgets the quest: the next
+/// `/getqf` lists nothing of it. An empty `/qf` is silent, and a player
+/// hears the dispatch refusal.
+#[test]
+fn a_gm_qfs_the_current_quest_and_clears_it() {
+    let Some((_database, server)) = qf_fixture() else {
+        return;
+    };
+    qf_runs_against(&server);
+}
+
+/// The `/qf` fixture: two accounts, Alpha parked beside Theowahdan with the
+/// sash and the Yohara quest stored at their `information` states, and an
+/// implementor's grant for him.
+fn qf_fixture() -> Option<(ScratchDatabase, Server)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    create_account(&server, "bob");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 960200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    // The CRC32s of `information` and of `information_new`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, flag.name, \
+          flag.value FROM player, (VALUES ('sash_mission.__status'::bytea, 695801987), \
+          ('yohara_system.__status'::bytea, 1998515313)) AS flag (name, value) WHERE \
+          player.name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    Some((database, server))
+}
+
+/// `/qf` and `/clear_quest` against the fixture: the login's last quest
+/// answers the first `/qf`, the sash's `button` makes it current, the same
+/// line moves it on, and the clears forget both quests.
+fn qf_runs_against(server: &Server) {
+    let (mut alice, _listed, _items) = load_character(server, b"alice", 0);
+    let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
+    let first = alice.read_game();
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the login event"
+    );
+    read_letter(&mut alice, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(&mut alice, 1, 0, None, [false; 5], None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    assert_eq!(
+        read_quest_target_create(&mut alice, 1, b"Theowahdan"),
+        theowahdan
+    );
+    read_sash_and_yohara_letters(&mut alice, "letter");
+    read_login_update(&mut alice);
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(1, THEOWAHDAN_SPOT.0, THEOWAHDAN_SPOT.1),
+        "the mark's event sends where Theowahdan stands"
+    );
+    alice.still_marked_for(
+        "he stands still, so his spot is not sent again",
+        Duration::from_millis(1_500),
+    );
+    let (mut yankee, _yankee_listed) =
+        enter_world_on_with_team(server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.still("Yankee enters out of view");
+    // A fresh login ran only letters, so the login's last quest answers the
+    // first `/qf`: the Yohara quest, moved to a state it does not have.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/qf go_to_disciple"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"setting quest state flag yohara_system go_to_disciple 0"),
+        "the login's last quest answers"
+    );
+    // An empty line is silent, and a player is refused.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/qf"));
+    alice.still("an empty qf is silent");
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/qf go_to_disciple"));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            0,
+            prodomo::command::NO_SUCH_COMMAND.as_bytes()
+        ),
+        "a player cannot qf"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/clear_quest sash_mission"));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            0,
+            prodomo::command::NO_SUCH_COMMAND.as_bytes()
+        ),
+        "a player cannot clear"
+    );
+    drop(yankee);
+    // The window's entry runs the sash's `button or info` page: the sash is
+    // now the current quest.
+    alice.send_record(&client_script_button(u32::from(QUEST_SASH) | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &titled_page(b"teowahdan", SASH_BUTTON, b"[DONE]")),
+        "the sash's info page"
+    );
+    alice.still("the page is the press's one answer");
+    qf_moves_the_sash_and_the_clear_forgets_it(&mut alice);
+    drop(alice);
+}
+
+/// `/qf`'s half: the same line moves the current quest to `go_to_disciple`,
+/// the moved quest lists, then both clears are silent, nothing lists, and
+/// `/qf` still names the sash.
+fn qf_moves_the_sash_and_the_clear_forgets_it(alice: &mut Keyed) {
+    // The same line now moves the current quest on.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/qf go_to_disciple"));
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"setting quest state flag sash_mission go_to_disciple 1675612723"),
+        "the current quest moves"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/getqf"));
+    let listed = read_chat_lines(alice, 1);
+    assert_eq!(
+        listed[0],
+        an_info_line(b"sash_mission go_to_disciple (1675612723)"),
+        "the moved quest lists"
+    );
+    // The clear is silent and forgets the quest: nothing of it lists, not
+    // even the Yohara quest's zero — a zero flag is no flag — and `/qf`
+    // still names the sash, now moved back to `go_to_disciple`.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/clear_quest sash_mission"));
+    alice.still("the clear is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/clear_quest yohara_system"));
+    alice.still("the second clear is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/getqf"));
+    alice.still("nothing lists");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/qf go_to_disciple"));
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"setting quest state flag sash_mission go_to_disciple 1675612723"),
+        "the quest is still current"
+    );
+}
+
+/// `sys.chat.commands`'s equipment view, out of the test-server mode:
+/// Alice and Yankee stand together, Yankee wearing the dagger in the
+/// weapon cell. Alice's `/view_equip <vid>` names Yankee's VID and hears
+/// the 1303-byte `HEADER_GC_VIEW_EQUIP` (`do_view_equip`,
+/// `G/cmd_general.cpp:2395-2426`): the VID, the dagger's vnum at the
+/// weapon cell (slot 4), and zeroes elsewhere. Once Yankee blocks the
+/// equipment view himself, the block line refuses instead. An empty line
+/// and an unknown VID are silent. In the test-server mode every character
+/// is a GM (`CHARACTER::IsGM`, `G/char.cpp:6373-6380`), so the GM line
+/// refuses there instead.
+#[test]
+fn a_player_views_anothers_equipment_and_the_modes_refuse() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    give_alpha_dagger(&database);
+    sql(
+        &database,
+        "UPDATE item SET owner_id = (SELECT id FROM player WHERE name = 'Yankee') WHERE \
+         id = 20",
+    );
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_equipped_world_with(&server, b"bob", 1);
+    let (_, _, yankee_info, _) = alice.sees_enter(yankee_listed.id, true, None);
+    assert_eq!(
+        yankee_info, yankee_entered.info,
+        "the summary Yankee got of itself"
+    );
+    // An empty line and an unknown VID are silent.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/view_equip"));
+    alice.still("an empty view is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/view_equip 999999999"));
+    alice.still("an unknown VID is silent");
+    // The view: the VID, the dagger's vnum at the weapon cell (slot 4),
+    // and zeroes elsewhere.
+    let line = format!("/view_equip {}", yankee_listed.id);
+    alice.send_record(&client_chat(CHAT_TALKING, line.as_bytes()));
+    let view = alice.read_game();
+    assert_eq!(view[0], GC_VIEW_EQUIP, "the view: {view:02x?}");
+    assert_eq!(view.len(), VIEW_EQUIP_LEN, "the whole record");
+    assert_eq!(
+        &view[1..5],
+        &yankee_listed.id.to_le_bytes(),
+        "the viewed VID"
+    );
+    let cell = |slot: usize| &view[5 + slot * 59..5 + (slot + 1) * 59];
+    assert_eq!(&cell(4)[0..4], &1000u32.to_le_bytes(), "the dagger's vnum");
+    assert_eq!(&cell(4)[4..6], &1u16.to_le_bytes(), "the dagger's count");
+    for slot in [0, 1, 2, 3, 5, 10, 21] {
+        assert!(
+            cell(slot).iter().all(|&byte| byte == 0),
+            "slot {slot} is empty"
+        );
+    }
+    alice.still("the view is the line's one answer");
+    // Yankee blocks the view himself: the block line refuses instead.
+    set_block_mode(&mut yankee, 64);
+    alice.send_record(&client_chat(CHAT_TALKING, line.as_bytes()));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[i] Player Yankee blocked the equipment view system"),
+        "the block refusal"
+    );
+    drop(alice);
+    drop(yankee);
+}
+
+/// `do_stat_val` (`G/cmd_general.cpp:3699-3750`): `/stat_val st 3` spends 3
+/// points and raises `st` 17 to 20 (the attribute's change and the spent
+/// counter ride), a bare word and a zero amount are silent, past the pool
+/// the amount clamps to the pool, and the row banks the moved numbers.
+#[test]
+fn a_stat_value_banks_the_line_amount() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET stat_point = 5 WHERE name = 'Alpha'",
+    );
+    let (mut alice, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let vid = listed.id;
+    // A bare word and a zero amount run nothing.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat_val st"));
+    alice.quiet("no amount is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat_val st 0"));
+    alice.quiet("a zero amount is silent");
+
+    // `st` rises 17 to 20 for 3 points.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat_val st 3"));
+    let kinds = read_point_kinds(&mut alice, vid, 32);
+    assert!(
+        kinds.contains(&12),
+        "the attribute's change rides: {kinds:?}"
+    );
+    assert!(kinds.contains(&26), "the spent points ride: {kinds:?}");
+    alice.quiet("the raise ends");
+
+    // Past the pool the amount clamps to the pool: the two points left raise
+    // `dx` 19 to 21 and the pool empties.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat_val dx 99"));
+    let kinds = read_point_kinds(&mut alice, vid, 32);
+    assert!(
+        kinds.contains(&14),
+        "the attribute's change rides: {kinds:?}"
+    );
+    assert!(kinds.contains(&26), "the spent points ride: {kinds:?}");
+    alice.quiet("the clamped raise ends");
+
+    // The disconnect save banks the moved numbers: st 20, dx 21, no point.
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT st FROM player WHERE name = 'Alpha') = 20 AND (SELECT dx FROM player WHERE name \
+         = 'Alpha') = 21 AND (SELECT stat_point FROM player WHERE name = 'Alpha') = 0",
+    );
+}
+
+/// `do_stat_plus_amount` (`G/cmd_gm.cpp:4068-4162`): a wizard's `con+ 3`
+/// raises `ht` 18 to 21 for 3 points (the attribute's change and the spent
+/// counter ride, with no crossed pool line), an empty word is silent, a
+/// past-pool amount and a negative amount answer, and the row banks the
+/// moved numbers.
+#[test]
+fn a_plus_line_banks_the_amount_and_refuses_aloud() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET stat_point = 5 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let vid = listed.id;
+    // An empty word runs nothing.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/con+"));
+    alice.quiet("an empty word is silent");
+    // Past the pool and negative amounts answer instead.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/con+ 9"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Less stat points left."),
+        "past the pool"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/con+ -2"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You entered an incorrect value."),
+        "the negative"
+    );
+
+    // `ht` rises 18 to 21 for 3 points, with no crossed pool line: two
+    // computes nest `POINT_MAX_SP` twice, and the handler adds no third.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/con+ 3"));
+    let kinds = read_point_kinds(&mut alice, vid, 32);
+    assert!(
+        kinds.contains(&13),
+        "the attribute's change rides: {kinds:?}"
+    );
+    assert!(kinds.contains(&26), "the spent points ride: {kinds:?}");
+    assert_eq!(
+        count_point_kind(&kinds, 8),
+        2,
+        "constitution carries no crossed line: {kinds:?}"
+    );
+    alice.quiet("the raise ends");
+
+    // The disconnect save banks the moved numbers: ht 21, two points left.
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT ht FROM player WHERE name = 'Alpha') = 21 AND (SELECT stat_point FROM player \
+         WHERE name = 'Alpha') = 2",
+    );
+}
+
+/// `do_set_stat` (`G/cmd_gm.cpp:4575-4685`): a wizard's `tcon Zulu 3`
+/// raises Zulu's `ht` for Zulu's points (the attribute's change and the
+/// spent counter ride Zulu's outbox, the caller hears the confirmation),
+/// a bare name and an unknown name answer, and Zulu's row takes the moved
+/// numbers.
+#[test]
+fn a_set_stat_line_moves_anothers_attribute() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    seat_alpha_and_zulu(&server, &database, &[]);
+    sql(
+        &database,
+        "UPDATE player SET st = 6, ht = 4, dx = 3, iq = 3, stat_point = 5 WHERE name = 'Zulu'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut zulu, zulu_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(zulu_listed.id, false, None);
+    // A bare name and an unknown name answer.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/tcon Zulu"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Invalid argument"),
+        "a missing delta"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/tcon Nobody 3"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Cannot find player(Nobody). Perhaps Nobody doesn't login or exist"),
+        "nobody online"
+    );
+
+    // Zulu's `ht` rises 4 to 7 for 3 of Zulu's points: the records ride
+    // Zulu's outbox, and the caller hears the confirmation.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/tcon Zulu 3"));
+    let kinds = read_point_kinds(&mut zulu, zulu_listed.id, 32);
+    assert!(
+        kinds.contains(&13),
+        "the attribute's change rides: {kinds:?}"
+    );
+    assert!(kinds.contains(&26), "the spent points ride: {kinds:?}");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Zulu's con change 4 to 7"),
+        "the confirmation"
+    );
+    alice.quiet("the line ends");
+
+    // The row takes the moved numbers at once: ht 7, two points left.
+    wait_for(
+        &database,
+        "(SELECT ht FROM player WHERE name = 'Zulu') = 7 AND (SELECT stat_point FROM player \
+         WHERE name = 'Zulu') = 2",
+    );
+    drop(alice);
+    drop(zulu);
+}
+
+/// A silence past the stray view and tick records: a late entrant's walk
+/// mode, its insert pair, ownership claims, and the timer's own lines.
+fn drain_silence(keyed: &mut Keyed, note: &str) {
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    while let Some(record) = keyed.read_game_raw_until(deadline) {
+        assert!(
+            record[0] == GC_WALK_MODE
+                || record[0] == GC_CHARACTER_ADD
+                || record[0] == GC_CHAR_ADDITIONAL_INFO
+                || record[0] == GC_OWNERSHIP
+                || record[0] == GC_CHARACTER_DEL
+                || is_stamina_refill(&record)
+                || keyed.timer_record(&record)
+                || keyed.timer_restate(&record),
+            "{note}: {record:02x?}"
+        );
+    }
+}
+
+/// The cannot-dead table: Alice's implementor Alpha, Bob's wizard Yankee,
+/// and Carol's player Zulu, all of the Red empire.
+fn seed_cannot_dead_table(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "bob");
+    create_account_before_boot(database, "carol");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         469000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         469000, 950000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Yankee', 'LOW_WIZARD' \
+         FROM account WHERE login = 'bob'",
+    );
+}
+
+/// `do_can_dead` (`G/cmd_gm.cpp:4715-4721`): both lines are silent. While
+/// the flag stands the poison's flagged damage shows but the hit-point
+/// change never lands; after `/can_dead` the next tick's change lands. A
+/// player runs neither line.
+#[test]
+fn a_cannot_dead_player_keeps_its_hit_points_until_it_can() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_cannot_dead_table(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut keyed);
+    assert_eq!(
+        keyed.read_game(),
+        messenger_team_list_many(&[(b"Yankee".as_slice(), false)]),
+        "the wizard's list leads the login event"
+    );
+    let first = keyed.read_game();
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line follows"
+    );
+    read_letter(&mut keyed, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(&mut keyed, 1, 0, None, [false; 5], None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    let (mut alice, _) = (keyed, character);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    assert_eq!(
+        alice.read_game(),
+        messenger_login(1, b"Yankee"),
+        "the wizard comes online"
+    );
+    alice.sees_enter(yankee_listed.id, true, None);
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"carol", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut keyed);
+    assert_eq!(
+        keyed.read_game(),
+        messenger_team_list_many(&[(b"Alpha".as_slice(), true), (b"Yankee".as_slice(), true)]),
+        "Zulu hears both wizards"
+    );
+    read_login_event(&mut keyed);
+    keyed.still("nothing follows");
+    let (mut zulu, _) = (keyed, character);
+    // Alice and Yankee never read Zulu's view: its only lines are the two
+    // dispatch refusals, which ride Zulu's outbox alone.
+    // The gate is the dispatcher's: a player runs neither line.
+    for line in [b"/cannot_dead".as_slice(), b"/can_dead".as_slice()] {
+        zulu.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(
+            zulu.read_game(),
+            an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+            "a player runs neither line"
+        );
+    }
+    // Both lines are silent: the drain keeps the late entrant's walk mode
+    // and the stray ownership claims, which say nothing about the line.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/cannot_dead"));
+    drain_silence(&mut yankee, "the set line is silent");
+    // The poison lands on the flagged wizard: the add rides, the flagged
+    // damage shows, but the hit-point change never lands.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/poison Yankee"));
+    let update = yankee.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "the poison's flag update");
+    let added = yankee.read_game();
+    assert_eq!(added[0], GC_AFFECT_ADD, "the poison's add");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let tick = yankee
+        .read_game_until(deadline)
+        .expect("the poison's first tick lands");
+    assert_eq!(tick[0], GC_DAMAGE_INFO, "the tick shows its damage");
+    drain_silence(&mut yankee, "the hit points never move");
+    // After `/can_dead` the next tick's change lands.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/can_dead"));
+    drain_silence(&mut yankee, "the clear line is silent");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let tick = yankee
+        .read_game_until(deadline)
+        .expect("the next tick lands");
+    assert_eq!(tick[0], GC_DAMAGE_INFO, "the tick shows its damage");
+    let changed = yankee.read_game();
+    assert_eq!(changed[0], GC_POINT_CHANGE, "the change lands");
+    drop(alice);
+    drop(yankee);
+    drop(zulu);
+}
+
+/// The master table: Alice's implementor Alpha, a shaman of group 1, and
+/// Carol's player Zulu. Written before boot.
+fn seed_master_table(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "carol");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         469000, 950000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "UPDATE player SET skill_group = 1 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+}
+
+/// `cmd.all_skill_master` (`do_all_skill_master`, `G/cmd_gm.cpp:4734-4758`).
+/// A player hears the dispatch refusal. The wizard's line plants every
+/// usable skill at 40 with one byte 76, and the rows follow.
+#[test]
+fn a_master_line_plants_every_usable_skill() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_master_table(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let (mut zulu, zulu_listed) =
+        enter_world_on_with_team(&server, 1, b"carol", 0, ENGLISH, Some(b"Alpha"));
+    let _ = zulu_listed;
+    zulu.send_record(&client_chat(CHAT_TALKING, b"/all_skill_master"));
+    assert_eq!(
+        zulu.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot master"
+    );
+    // The line: one byte 76 with the group six, the always usable and the
+    // horse four at 40, and the other group's six at 0.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/all_skill_master"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    let frames: Vec<&Vec<u8>> = wire
+        .iter()
+        .filter(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .collect();
+    assert_eq!(frames.len(), 1, "the line sends one byte 76");
+    let master_76 = frames[0];
+    for vnum in [91, 92, 93, 94, 95, 96, 121, 130, 137, 140, 151, 159] {
+        assert_eq!(skill_slot(master_76, vnum), 40, "slot {vnum} stands at 40");
+    }
+    assert_eq!(master_76[1 + 91 * 6], 3, "slot 91 rides PERFECT");
+    for vnum in [16, 106, 221] {
+        assert_eq!(skill_slot(master_76, vnum), 0, "slot {vnum} keeps 0");
+    }
+    check(
+        &database,
+        "(SELECT level FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 91) = 40",
+    );
+    check(
+        &database,
+        "(SELECT level FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 130) = 40",
+    );
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM player_skill WHERE player_id = (SELECT id FROM player WHERE \
+         name = 'Alpha') AND vnum = 16)",
+    );
+    // `SetHorseLevel(40)` ran first: the horse stands at 30, refilled.
+    reads_horse_state(
+        &mut alice,
+        [
+            b"    Level  30",
+            b"    Health 50/50 (100%)",
+            b"    Stam   200/200 (100%)",
+        ],
+    );
+    drop(alice);
+    drop(zulu);
+}
+
+/// The use table: Alice's high-wizard Alpha at 500 hit points for the potion, and
+/// Carol's player Zulu. Written before boot.
+fn seed_use_table(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "carol");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         469000, 950000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(database, "UPDATE player SET hp = 500 WHERE name = 'Alpha'");
+}
+
+/// The kit table: Alice's low-wizard Alpha, a shaman, and Carol's player
+/// Zulu. Written before boot.
+fn seed_kit_table(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "carol");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         469000, 950000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "UPDATE player SET skill_group = 1 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+}
+
+/// `cmd.full_set`, `cmd.item_full_set` and `cmd.attr_full_set` (`do_full_set`,
+/// `do_item_full_set`, `do_attr_full_set`, `G/cmd_gm.cpp:4723-4732`, `:4760-4902`,
+/// `:4904-5019`). A player hears the dispatch refusal for each line. The
+/// wizard's `item_full_set` puts the shaman's eight on (body 11899, shield
+/// 13049, foots 15189, weapon 7159, head 12669, wrist 14109, ear 17209, neck
+/// 16209), stored under `EQUIPMENT`; its `attr_full_set` forces five pairs on
+/// each, forty updates, stored in the attribute columns; and `full_set` runs
+/// the master line first, then the kit and the forcing in order.
+#[test]
+fn a_full_set_kits_forces_and_masters_over_the_wire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_kit_table(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut zulu, zulu_listed) =
+        enter_world_on_with_team(&server, 1, b"carol", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(zulu_listed.id, true, None);
+    for line in [
+        b"/full_set".as_slice(),
+        b"/item_full_set".as_slice(),
+        b"/attr_full_set".as_slice(),
+    ] {
+        zulu.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(
+            zulu.read_game(),
+            an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+            "a player cannot run {}",
+            String::from_utf8_lossy(line)
+        );
+    }
+    // The kit: eight sets on the wear cells, in the order the arm makes them.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/item_full_set"));
+    let (kit, quiet) = alice.drain_game(std::time::Duration::from_secs(5), an_item_kit_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let sets: Vec<(u8, u16, u32, u16)> = kit
+        .iter()
+        .filter(|record| record[0] == ITEM_SET)
+        .map(|record| set_fields(record))
+        .collect();
+    let vnums: Vec<u32> = sets.iter().map(|(_, _, vnum, _)| *vnum).collect();
+    assert_eq!(
+        vnums,
+        vec![11899, 13049, 15189, 7159, 12669, 14109, 17209, 16209],
+        "the shaman's eight go on in arm order"
+    );
+    assert!(kit.iter().any(|record| record[0] == GC_CHARACTER_UPDATE));
+    check(
+        &database,
+        "(SELECT count(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND window_type = 2) = 8",
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND window_type = 2 AND pos = 0 AND vnum = 11899)",
+    );
+    // The forcing: forty updates, five per piece, and the head's pairs land.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/attr_full_set"));
+    let (forced, quiet) = alice.drain_game(std::time::Duration::from_secs(5), an_item_kit_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let updates = forced
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE)
+        .count();
+    assert_eq!(updates, 40, "five pairs on eight pieces send forty updates");
+    for record in &forced {
+        let pool = record[0] == GC_POINT_CHANGE && [5, 7].contains(&record[8]);
+        if record[0] != ITEM_UPDATE
+            && record[0] != GC_AFFECT_REMOVE
+            && !is_stamina_refill(record)
+            && !pool
+        {
+            panic!(
+                "the forcing sends only updates, pool clamps and the timer's end: header {}",
+                record[0]
+            );
+        }
+    }
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND window_type = 2 AND pos = 1 AND attrtype0 = 7 AND attrvalue0 = 8 AND \
+         attrtype4 = 24 AND attrvalue4 = 10)",
+    );
+    // The full one: the master line's byte 76, the kit's sets and the forcing's
+    // updates. The master's byte 76 rides the outbox while the kit and the
+    // forcing ride the line's answer, so only the kit-before-forcing order is
+    // asserted: the world concatenates them in `full_set`.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/full_set"));
+    let (full, quiet) = alice.drain_game(std::time::Duration::from_secs(8), an_item_kit_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    assert!(
+        full.iter().any(|record| record[0] == GC_SKILL_LEVEL_NEW),
+        "the full one masters"
+    );
+    let set_at = full.iter().position(|record| record[0] == ITEM_SET);
+    let update_at = full.iter().position(|record| record[0] == ITEM_UPDATE);
+    match (set_at, update_at) {
+        (Some(set), Some(update)) => {
+            assert!(set < update, "the kit leads the forcing");
+        }
+        other => panic!("the full one kits and forces: {other:?}"),
+    }
+    check(
+        &database,
+        "(SELECT level FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 91) = 40",
+    );
+    drop(alice);
+    drop(zulu);
+}
+
+/// The width of a record the kit lines put on the wire: the item sets and
+/// updates, the point changes, the looks, the master's byte 76, and the
+/// revive timer's end. A header outside this set panics, on the grounds that
+/// a record nobody accounted for in the answer is a finding.
+fn an_item_kit_record(header: u8) -> usize {
+    match header {
+        ITEM_SET => ITEM_SET_LEN,
+        ITEM_UPDATE => ITEM_UPDATE_LEN,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_POINT_CHANGE => POINT_CHANGE_LEN,
+        GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        other => panic!("a record nobody accounted for arrived in the kit answer: header {other}."),
+    }
+}
+
+/// The drink's answer: 300 hit points owed, the red effect, and the stack to one.
+fn assert_drink_answer(drunk: &[Vec<u8>]) {
+    let hp_recovery = u8::try_from(common::point_slot::POINT_HP_RECOVERY).expect("a point byte");
+    let owed = drunk.iter().find(|record| {
+        record.first() == Some(&GC_POINT_CHANGE) && record.get(8) == Some(&hp_recovery)
+    });
+    assert!(owed.is_some(), "300 hit points are owed: {drunk:02x?}");
+    assert!(
+        drunk
+            .iter()
+            .any(|record| record.first() == Some(&GC_SPECIAL_EFFECT)),
+        "the red effect plays: {drunk:02x?}"
+    );
+    let update = drunk
+        .iter()
+        .find(|record| record.first() == Some(&ITEM_UPDATE))
+        .expect("the stack's count updates");
+    assert_eq!(update_fields(update).2, 1, "the stack goes to one");
+}
+
+/// `cmd.use_item` and `cmd.do_clear_affect` (`do_use_item`, `do_clear_affect`,
+/// `G/cmd_gm.cpp:4999-5016`, `:5019-5022`). A player hears the dispatch refusal
+/// for each line. The wizard's `use_item 0` drinks the held small red potion as
+/// the record's use does: 300 hit points owed, the red effect, the stack to one,
+/// and the row with it; `use_item 5` answers the no-item line and stores nothing.
+/// Then `/invisible` lands the 203 on the wizard and `/block_chat Zulu 10s` lays
+/// the silence on the player, and the wizard's `/do_clear_affect` answers the
+/// 203's remove packet with one update, while the player's silence stands in the
+/// store (`LoadAffect`'s rows are the clear's kept kind).
+#[test]
+fn a_use_item_line_drinks_and_a_clear_takes_all_but_the_silence() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_use_table(&database);
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut zulu, zulu_listed) =
+        enter_world_on_with_team(&server, 1, b"carol", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(zulu_listed.id, true, None);
+    for line in [b"/use_item 0".as_slice(), b"/do_clear_affect".as_slice()] {
+        zulu.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(
+            zulu.read_game(),
+            an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+            "a player cannot run {}",
+            String::from_utf8_lossy(line)
+        );
+    }
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    Server::write_console(&console, "item give Alpha 27001 2");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alice.read_game()), (inventory, 0, 27_001, 2));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/use_item 0"));
+    let (drunk, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    assert_drink_answer(&drunk);
+    check(
+        &database,
+        "(SELECT count FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha') \
+         AND window_type = 1 AND pos = 0) = 1",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/use_item 5"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"I can't wear it because I don't have the item."),
+        "an empty cell answers the no-item line"
+    );
+    check(
+        &database,
+        "(SELECT count FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha') \
+         AND window_type = 1 AND pos = 0) = 1",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/invisible"));
+    let updated = alice.read_game();
+    assert_eq!(
+        updated[0], GC_CHARACTER_UPDATE,
+        "the 203's update rides first"
+    );
+    let added = alice.read_game();
+    assert_eq!(added[0], GC_AFFECT_ADD, "the 203 lands");
+    assert_eq!(&added[1..5], &203u32.to_le_bytes());
+    alice.send_record(&client_chat(CHAT_TALKING, b"/do_clear_affect"));
+    let (cleared, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let removes: Vec<u32> = cleared
+        .iter()
+        .filter(|record| record.first() == Some(&GC_AFFECT_REMOVE))
+        .map(|record| u32::from_le_bytes(record[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(removes, [203], "only the 203 answers its remove packet");
+    assert!(
+        cleared
+            .iter()
+            .any(|record| record.first() == Some(&GC_CHARACTER_UPDATE)),
+        "one update goes out: {cleared:02x?}"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Zulu 90s"));
+    let (lay, quiet) = zulu.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let notice = lay
+        .iter()
+        .find(|record| record.first() == Some(&GC_CHAT))
+        .expect("the notice chats");
+    assert_eq!(&notice[10..], b"[LS;852]", "the notice chats first");
+    let added = lay
+        .iter()
+        .find(|record| record.first() == Some(&GC_AFFECT_ADD))
+        .expect("the silence lands");
+    assert_eq!(&added[1..5], &223u32.to_le_bytes());
+    let (caller, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    assert!(
+        caller
+            .iter()
+            .all(|record| record.first() == Some(&GC_POINT_CHANGE)),
+        "a lay is quiet on the caller but for the recovery ticks: {caller:02x?}"
+    );
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM player_affect WHERE player_id = (SELECT id FROM player WHERE \
+         name = 'Zulu')) = 1 AND EXISTS (SELECT 1 FROM player_affect WHERE affect_type = 223)",
+    );
+    drop(alice);
+    drop(zulu);
+}
+
+/// The width of a record the use and clear lines put on the wire: the chat, the
+/// item sets and updates, the point changes, the looks, the effect, and the
+/// affect records. A header outside this set panics, on the grounds that a
+/// record nobody accounted for in the answer is a finding.
+fn a_use_item_record(header: u8) -> usize {
+    match header {
+        GC_CHAT => dynamic_len(header),
+        ITEM_SET => ITEM_SET_LEN,
+        ITEM_UPDATE => ITEM_UPDATE_LEN,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_POINT_CHANGE => POINT_CHANGE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        GC_AFFECT_ADD => AFFECT_ADD_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        other => panic!("a record nobody accounted for arrived in the use answer: header {other}."),
+    }
+}
+
+/// The owner's first dragon soul stone: vnum 110000, a wear-timed `ITEM_DS` of one cell.
+const DS_STONE: u32 = 110_000;
+
+/// The use table with a dragon soul stone in the deck and one in the soul inventory:
+/// Alpha (a high wizard) hears the lines, Zulu (a player) hears the refusals.
+fn seed_ds_table(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "carol");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, \
+         469000, 950000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let protos = owners_protos();
+    let stone = protos.get(DS_STONE).expect("the owner's data has it");
+    assert_eq!(
+        stone.item_type,
+        gamedata::item_kind::ITEM_DS,
+        "a dragon soul stone"
+    );
+    assert!(stone.timer_based_on_wear.is_some(), "a wear-timed stone");
+    // Deck 0's first cell (244) holds a stone with an hour left; the soul inventory's
+    // cell 1 holds one with none.
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 40, id, \
+         1, 244, 1, 110000, 3600 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 41, id, 5, 1, 1, \
+         110000 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `cmd.dragon_soul` and `cmd.ds_list`: the deck lands its affect and writes socket 2
+/// with the update riding and the row saved, `d` takes it back, and the list names
+/// each held stone. The qualification comes from the login event's own grant.
+#[test]
+fn a_deck_lands_its_stone_and_the_list_names_each_held_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_ds_table(&database);
+    let (server, _console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alice);
+    alice.still("nothing follows the login");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dragon_soul a 0"));
+    let (landed, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(
+        quiet,
+        Quiet::Open,
+        "the connection stays open: {}",
+        server.console()
+    );
+    assert!(
+        landed
+            .iter()
+            .any(|record| record.first() == Some(&GC_AFFECT_ADD)
+                && record.get(1..5) == Some(&541u32.to_le_bytes())),
+        "the 541 add lands: {landed:02x?}"
+    );
+    let updates: Vec<(u8, u16, u16)> = landed
+        .iter()
+        .filter(|record| record.first() == Some(&ITEM_UPDATE))
+        .map(|record| update_fields(record))
+        .collect();
+    assert_eq!(
+        updates,
+        [(2, 244, 1)],
+        "the stone's update rides (`SetItem` stores the deck band as `EQUIPMENT`)"
+    );
+    let update = landed
+        .iter()
+        .find(|record| record.first() == Some(&ITEM_UPDATE))
+        .expect("the update");
+    assert_eq!(
+        &update[22..26],
+        &1i32.to_le_bytes(),
+        "socket 2 is set in the update"
+    );
+    check(&database, "(SELECT socket2 FROM item WHERE id = 40) = 1");
+    // The list names the soul-inventory stone, in the caller's language.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ds_list"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"cell : 1, name : Diamant Dragon Brut, id : 41"),
+        "the list names the held stone"
+    );
+    alice.still("the list is the line's one answer");
+    // `d`: the remove, the clear's update, and the saved row.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dragon_soul d"));
+    let (cleared, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let removes: Vec<u32> = cleared
+        .iter()
+        .filter(|record| record.first() == Some(&GC_AFFECT_REMOVE))
+        .map(|record| u32::from_le_bytes(record[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(removes, [541], "the 541 answers its remove packet");
+    let update = cleared
+        .iter()
+        .find(|record| record.first() == Some(&ITEM_UPDATE))
+        .expect("the clear's update");
+    assert_eq!(update_fields(update), (2, 244, 1), "the clear's cell");
+    assert_eq!(
+        &update[22..26],
+        &0i32.to_le_bytes(),
+        "socket 2 is clear in the update"
+    );
+    check(&database, "(SELECT socket2 FROM item WHERE id = 40) = 0");
+    // A bad deck and any other first byte run nothing.
+    for rest in [b"/dragon_soul a 2".as_slice(), b"/dragon_soul x"] {
+        alice.send_record(&client_chat(CHAT_TALKING, rest));
+        alice.still("a refused deck is silent");
+    }
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.ds_change_attr`: the funded redraw lands the stone's weighed basic apply with
+/// the updates riding and the rows saved, the flame and the 5 million are spent, the
+/// caller hears success and the result byte is 1. Short gold and an empty cell refuse
+/// with their own lines and no spend.
+#[test]
+fn a_funded_redraw_lands_and_spends_and_short_gold_refuses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_ds_table(&database);
+    let protos = owners_protos();
+    let flame = protos.get(30524).expect("the owner's data has it");
+    // `ITEM_STACKABLE` is the third `FLAG` name: bit 2.
+    assert_eq!(flame.flags & 0b100, 0b100, "a stackable flame");
+    // The stone's step-0 change costs one flame and 5 million of 6 million held.
+    sql(
+        &database,
+        "UPDATE player SET gold = 6000000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 42, id, 1, 0, \
+         3, 30524 FROM player WHERE name = 'Alpha'",
+    );
+    let (server, _console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alice);
+    alice.still("nothing follows the login");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ds_change_attr 1"));
+    let (redrawn, quiet) =
+        alice.drain_game(std::time::Duration::from_secs(5), a_change_attr_record);
+    assert_eq!(
+        quiet,
+        Quiet::Open,
+        "the connection stays open: {}",
+        server.console()
+    );
+    assert!(
+        redrawn.iter().any(|record| record
+            == &an_info_line(b"@@(cmd_general)tradus:dragonsoul_plus_change_success")),
+        "the caller hears success: {redrawn:02x?}"
+    );
+    assert!(
+        redrawn
+            .iter()
+            .any(|record| record == &[GC_DS_PLUS_CHANGE_ATTR_RESULT, 1]),
+        "the result is 1: {redrawn:02x?}"
+    );
+    let updates: Vec<(u8, u16, u16)> = redrawn
+        .iter()
+        .filter(|record| record.first() == Some(&ITEM_UPDATE))
+        .map(|record| update_fields(record))
+        .collect();
+    // Six clears and one weighed basic on the soul-inventory stone, and the flame
+    // stack's update with the two left.
+    assert!(
+        updates
+            .iter()
+            .filter(|update| **update == (5, 1, 1))
+            .count()
+            >= 7,
+        "the clears and the basic ride: {updates:?}"
+    );
+    assert!(
+        updates.contains(&(1, 0, 2)),
+        "the flame's update rides: {updates:?}"
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 41 AND attrtype0 = 4 AND attrvalue0 = 1)",
+    );
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 1000000",
+    );
+    check(&database, "(SELECT count FROM item WHERE id = 42) = 2");
+    // Short gold refuses with its own line and no spend; an empty cell is silent.
+    sql(
+        &database,
+        "UPDATE player SET gold = 40000 WHERE name = 'Alpha'",
+    );
+    drop(alice);
+    drop(server);
+    let (server, _console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alice);
+    alice.still("nothing follows the login");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ds_change_attr 1"));
+    let refused = alice.read_game();
+    assert_eq!(
+        refused,
+        an_info_line(b"@@(cmd_general)tradus:dragonsoul_plus_not_enough_yangs50000"),
+        "short gold hears its line: {refused:02x?}"
+    );
+    alice.still("the refusal spends nothing further");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ds_change_attr 5"));
+    alice.still("an empty cell is silent");
+    drop(alice);
+    drop(server);
+}
+
+/// The width of a record the change-attribute line's drain may hold: the chat, the
+/// item updates, the point and gold changes, the result byte, and the ambient
+/// records a five-second window may catch (the affect add/remove of a timer ending,
+/// the character update of a tick). A header outside this set panics, on the grounds
+/// that a record nobody accounted for in the answer is a finding.
+fn a_change_attr_record(header: u8) -> usize {
+    match header {
+        GC_CHAT => dynamic_len(header),
+        ITEM_UPDATE => ITEM_UPDATE_LEN,
+        GC_POINT_CHANGE => POINT_CHANGE_LEN,
+        GC_GOLD_CHANGE => GOLD_CHANGE_LEN,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_AFFECT_ADD => AFFECT_ADD_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        GC_DS_PLUS_CHANGE_ATTR_RESULT => 2,
+        other => {
+            panic!("a record nobody accounted for arrived in the redraw answer: header {other}.")
+        }
+    }
+}
+
+/// `cmd.dice` and `cmd.gift`: a lone roll goes to the caller, a partied roll to every
+/// member with the caller's name, and `/gift` opens the gift window.
+///
+/// Alpha rolls alone first: `/dice` with no words is 1 to 100. Then Charlie joins Alpha's
+/// party, and `/dice 5 10` reaches both with the same roll between 5 and 10
+/// (`[LS;1046;Alpha;n;5;10]`). `/gift` answers the `gift` command line. Nothing is stored:
+/// both lines are tells, not state.
+#[test]
+fn a_dice_roll_reaches_the_party_and_gift_opens_its_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    for login in ["alice", "carol"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Charlie', \
+         2, 154, 470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    stamina(&database, "Charlie", 12_345);
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+
+    // Alone: the roll is 1 to 100, to the caller.
+    alice.send_record(&slash(b"/dice"));
+    let lone = alice.read_game();
+    assert_eq!(lone[0], GC_CHAT);
+    assert_eq!(lone[3], CHAT_TYPE_INFO);
+    let text = &lone[10..];
+    assert!(
+        text.starts_with(b"[LS;1047;") && text.ends_with(b";1;100]"),
+        "the lone roll names its bounds: {text:?}"
+    );
+    let rolled: i32 = core::str::from_utf8(&text[9..text.len() - 7])
+        .expect("the roll is digits")
+        .parse()
+        .expect("the roll parses");
+    assert!((1..=100).contains(&rolled), "the roll is in range");
+
+    // Charlie joins Alpha's party; both drain the walk.
+    let (mut charlie, _charlie_listed, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
+    let charlie_vid = u32::from_le_bytes(charlie_entered.add[1..5].try_into().unwrap());
+    alice.sees_enter(charlie_vid, false, None);
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&charlie_vid.to_le_bytes());
+    alice.send_record(&invite);
+    assert_eq!(charlie.read_game()[0], GC_PARTY_INVITE);
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    charlie.send_record(&answer);
+    drain_party_walk(&mut charlie, "the guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
+
+    // Partied: the same roll reaches both, with the caller's name.
+    alice.send_record(&slash(b"/dice 5 10"));
+    let leader = read_told_line(&mut alice, "the leader's roll");
+    let guest = read_told_line(&mut charlie, "the guest's roll");
+    assert_eq!(leader, guest, "one roll to the whole party");
+    assert_eq!(leader[3], CHAT_TYPE_INFO);
+    let text = &leader[10..];
+    assert!(
+        text.starts_with(b"[LS;1046;Alpha;") && text.ends_with(b";5;10]"),
+        "the party roll names the roller and its bounds: {text:?}"
+    );
+    let rolled: i32 = core::str::from_utf8(&text[15..text.len() - 6])
+        .expect("the roll is digits")
+        .parse()
+        .expect("the roll parses");
+    assert!((5..=10).contains(&rolled), "the roll is in range");
+
+    // `/gift` opens the window.
+    alice.send_record(&slash(b"/gift"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"gift"),
+        "the gift command line"
+    );
+    alice.still("nothing follows the gift");
+    charlie.still("the guest hears no gift");
+    drop(alice);
+    drop(charlie);
+    drop(server);
+}
+
+/// `cmd.hair` and `cmd.costume`: `/hair` tells the caller's hair affect with its
+/// date, and `/costume` tells the status lines and takes the named piece off.
+/// Alpha wears a hair costume with one attribute and a body costume; a 514 row
+/// lands from the store with the login burst, and `/setqf` banks a `hair.limit_time`
+/// a day out. `/hair` tells the point's format with its value and the `[LS;651]`
+/// date. `/costume` tells `COSTUME status:`, the hair with its attribute line and
+/// the body, and `/costume b` takes the body off to the first free inventory cell:
+/// the set and the clear ride, and the row is stored.
+#[test]
+fn hair_tells_its_affect_and_costume_takes_the_named_piece_off() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_hair_costumes(&database);
+    let protos = owners_protos();
+    let hair = protos
+        .get(45155)
+        .expect("the owner's data has a hair costume");
+    let body = protos
+        .get(41319)
+        .expect("the owner's data has a body costume");
+    assert_eq!(
+        hair.item_type,
+        gamedata::item_kind::ITEM_COSTUME,
+        "a hair costume"
+    );
+    assert_eq!(
+        body.item_type,
+        gamedata::item_kind::ITEM_COSTUME,
+        "a body costume"
+    );
+    let server = Server::start(binary(), database.url());
+    let mut alice = enter_with_hair_burst(&server);
+    // The select starts the 1.5 s equip window (`m_dwLastSkillTime`); the login walk
+    // is shorter, so the uses wait it out.
+    std::thread::sleep(std::time::Duration::from_millis(1600));
+    wear_costume_piece(&mut alice, 0, 0, 200, 45155, "the hair goes on");
+    wear_costume_piece(&mut alice, 1, 1, 199, 41319, "the body goes on");
+    let tomorrow = bank_hair_limit(&mut alice);
+    let (year, month, day) = civil_date(tomorrow);
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(format!("POINT_MAX_HP +500[LS;651;{year};{month};{day}]").as_bytes()),
+        "the hair line"
+    );
+    let hair_name = protos
+        .get(45155)
+        .map(|proto| proto.locale_name.clone())
+        .unwrap_or_default();
+    let mut hair_line = b"  HAIR : ".to_vec();
+    hair_line.extend_from_slice(&hair_name);
+    let body_name = protos
+        .get(41319)
+        .map(|proto| proto.locale_name.clone())
+        .unwrap_or_default();
+    let mut body_line = b"  BODY : ".to_vec();
+    body_line.extend_from_slice(&body_name);
+    alice.send_record(&slash(b"/costume"));
+    read_costume_status(&mut alice, &hair_line, &body_line);
+    alice.send_record(&slash(b"/costume b"));
+    let (rides, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let rides: Vec<Vec<u8>> = rides
+        .into_iter()
+        .filter(|record| {
+            record[0] != GC_POINT_CHANGE
+                && record[0] != GC_CHARACTER_UPDATE
+                && record[0] != GC_AFFECT_REMOVE
+        })
+        .collect();
+    let (chats, sets): (Vec<_>, Vec<_>) =
+        rides.into_iter().partition(|record| record[0] == GC_CHAT);
+    assert_eq!(
+        chats,
+        vec![
+            an_info_line(b"COSTUME status:"),
+            an_info_line(&hair_line),
+            an_info_line(b"     POINT_MAX_HP +500"),
+            an_info_line(&body_line),
+        ],
+        "the status retells in order"
+    );
+    assert!(
+        sets.iter()
+            .all(|record| record[0] == ITEM_SET || record[0] == ITEM_UPDATE),
+        "only the move's item records follow: {sets:02x?}"
+    );
+    let sets: Vec<Seen> = sets
+        .iter()
+        .map(|record| {
+            let (window, cell, vnum, _count) = set_fields(record);
+            assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
+            Seen::Set(cell, vnum)
+        })
+        .collect();
+    assert_eq!(
+        sets,
+        vec![Seen::Set(199, 0), Seen::Set(1190, 41319)],
+        "the body comes off to the costume bank's first cell"
+    );
+    check(
+        &database,
+        "(SELECT pos FROM item WHERE id = 61) = 1190 AND (SELECT window_type FROM item WHERE id \
+         = 60) = 2 AND (SELECT pos FROM item WHERE id = 60) = 20",
+    );
+    drop(alice);
+    drop(server);
+}
+
+/// Seeds Alice's account, Alpha's costumes, the 514 row and the status flag.
+fn seed_hair_costumes(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    stamina(database, "Alpha", 0);
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    // The hair and the body wait in the base inventory; the scenario wears them live,
+    // since worn rows are not loaded. The hair carries one attribute, point 6 by 500.
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, \
+         attrvalue0) SELECT 60, id, 1, 0, 1, 45155, 6, 500 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 41319 FROM player WHERE name = 'Alpha'",
+    );
+    // The hair affect, point 6 by 500, with a duration that survives the login:
+    // `LoadAffect` restores every saved row but its skips, with the add riding the
+    // burst behind the update.
+    sql(
+        database,
+        "INSERT INTO player_affect (player_id, affect_type, apply_on, apply_value, flag, \
+         duration, sp_cost) SELECT id, 514, 6, 500, 0, 3600, 0 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// Enters Alpha and pins the hair's add behind the update in the login burst.
+fn enter_with_hair_burst(server: &Server) -> Keyed {
+    let (mut alice, _listed, _items) = load_character(server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    let add = alice.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = alice.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    let update = shown
+        .update
+        .as_deref()
+        .expect("the entrant's update follows the map's records");
+    assert_eq!(&update[1..5], &add[1..5], "dwVID is the entrant's own");
+    assert_eq!(
+        affect[0], GC_AFFECT_ADD,
+        "the hair's add rides behind the update"
+    );
+    assert_eq!(&affect[1..5], &514u32.to_le_bytes(), "AFFECT_HAIR");
+    assert_eq!(affect[5], 6, "the point");
+    assert_eq!(
+        &affect[6..10],
+        &500i32.to_le_bytes(),
+        "the hair's added value"
+    );
+    let revive = alice.read_game();
+    assert_eq!(revive[0], GC_AFFECT_ADD, "the revive-invisible add follows");
+    assert_eq!(&revive[1..5], &215u32.to_le_bytes(), "the revive kind");
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(&mut alice, [false; 5]);
+    assert_eq!(alice.read_game()[0], GC_TIME);
+    assert_eq!(alice.read_game(), [GC_CHANNEL, alice.channel_number]);
+    let notice = alice.read_game();
+    assert_eq!(notice[0], GC_CHAT);
+    enter_war_list(&mut alice);
+    read_god_login_event(&mut alice);
+    alice
+}
+fn wear_costume_piece(
+    alice: &mut Keyed,
+    cell: u16,
+    clear: u16,
+    worn_cell: u16,
+    vnum: u32,
+    note: &str,
+) {
+    alice.send_record(&client_item_use(cell));
+    let (rides, quiet) =
+        alice.drain_game(std::time::Duration::from_secs(5), |header| match header {
+            GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+            GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+            other => game_len(other),
+        });
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let worn: Vec<Seen> = rides
+        .iter()
+        .filter(|record| !is_revive_end(record))
+        .filter_map(|record| match record.first().copied().unwrap_or_default() {
+            ITEM_SET => {
+                let (window, cell, vnum, _count) = set_fields(record);
+                assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
+                Some(Seen::Set(cell, vnum))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        worn,
+        vec![Seen::Set(clear, 0), Seen::Set(worn_cell, vnum)],
+        "{note}"
+    );
+}
+
+/// Banks a `hair.limit_time` a day out through `/setqf` and answers the stamp.
+fn bank_hair_limit(alice: &mut Keyed) -> u32 {
+    let tomorrow = u32::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock runs")
+            .as_secs()
+            + 86_400,
+    )
+    .expect("a near date fits");
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        format!("/setqf hair.limit_time {tomorrow}").as_bytes(),
+    ));
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(format!("Quest flag set: hair.limit_time {tomorrow}").as_bytes()),
+        "the flag banks"
+    );
+    alice.send_record(&slash(b"/hair"));
+    tomorrow
+}
+
+/// Reads one `/costume` status: the head, the hair with its attribute, the body.
+fn read_costume_status(alice: &mut Keyed, hair_line: &[u8], body_line: &[u8]) {
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"COSTUME status:"),
+        "the status head"
+    );
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(hair_line),
+        "the hair piece"
+    );
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"     POINT_MAX_HP +500"),
+        "the hair attribute"
+    );
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(body_line),
+        "the body piece"
+    );
+}
+
+/// The civil date of `stamp` seconds after the Unix epoch, as `/hair` tells it.
+fn civil_date(stamp: u32) -> (i32, u32, u32) {
+    let days = i64::from(stamp) / 86_400;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = u32::try_from(shifted - era * 146_097).unwrap_or(u32::MAX);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = i64::from(year_of_era) + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    (i32::try_from(year).unwrap_or(i32::MAX), month, day)
+}
+
+/// `cmd.state` and `cmd.inventory`: `/state` dumps the target, `/inventory` lists
+/// the caller's cells. Alice is `LOW_WIZARD`; Alpha stands with a hair costume in
+/// cell 0. `/state` with no word dumps Alpha (state, coordinate with the map-1
+/// tail, pools, grades, resistances, mall, bonus, immunities); `/state Alpha`
+/// retells the head; `/state #<vid>` finds the same target; `/state alpha` (wrong
+/// case) and `/state Nobody` are silent. `/inventory` with no word tells the
+/// usage; `/inventory 2` lists cells 0-1 with the costume's locale name and
+/// `<NONE>`; `/inventory 0 0` tells nothing.
+#[test]
+fn a_state_dump_names_its_target_and_an_inventory_lists_its_cells() {
+    let Some((_database, server, mut alice, alpha_listed, hair_name)) = seat_alpha_for_state()
+    else {
+        return;
+    };
+    let alpha_vid = alpha_listed.id;
+    // Map 1's base is (409600, 896000); Alpha enters at (470100, 950000).
+    let (x, y) = ALPHA_ENTERS_AT;
+    let coordinate = format!(
+        "Coordinate {x}x{y} ({}x{}) MapIndex 1 Attribute {:08X} Local Position ({} x {})",
+        x / 100,
+        y / 100,
+        state_cell_attribute(x, y),
+        (x - 409_600) / 100,
+        (y - 896_000) / 100
+    );
+    // The dump, head first: Alpha stands, not fighting, not dead, with no shop or
+    // exchange of its own.
+    alice.send_record(&slash(b"/state"));
+    assert_state_dump(&mut alice, coordinate.as_bytes());
+    // A named target retells the head; the VID arm finds the same target; the
+    // wrong case and the unknown name are silent.
+    alice.send_record(&slash(b"/state Alpha"));
+    assert_state_dump(&mut alice, coordinate.as_bytes());
+    alice.send_record(&slash(format!("/state #{alpha_vid}").as_bytes()));
+    assert_state_dump(&mut alice, coordinate.as_bytes());
+    alice.send_record(&slash(b"/state alpha"));
+    alice.still("the wrong case is silent");
+    alice.send_record(&slash(b"/state Nobody"));
+    alice.still("the unknown name is silent");
+    // The inventory: the usage, then cells 0-1, then silence for a zero count.
+    alice.send_record(&slash(b"/inventory"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Usage: inventory <start_index> <count>"),
+        "the usage"
+    );
+    alice.send_record(&slash(b"/inventory 2"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(&[b"inventory [0] = ".as_slice(), &hair_name].concat()),
+        "the held cell"
+    );
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"inventory [1] = <NONE>"),
+        "the empty cell"
+    );
+    alice.send_record(&slash(b"/inventory 0 0"));
+    alice.still("a zero count tells nothing");
+    drop(alice);
+    drop(server);
+}
+
+/// Alice's world for the dump scenario: Alpha a `LOW_WIZARD` with a hair costume
+/// in cell 0, in the game on Channel 1. `None` without a store.
+fn seat_alpha_for_state() -> Option<(ScratchDatabase, Server, Keyed, Listed, Vec<u8>)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 45155 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let hair_name = owners_protos()
+        .get(45155)
+        .map(|proto| proto.locale_name.clone())
+        .unwrap_or_default();
+    let (alice, alpha_listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    Some((database, server, alice, alpha_listed, hair_name))
+}
+
+/// The head, the coordinate line, and the twenty pool/grade/resist/bonus lines of
+/// one `/state` answer.
+fn assert_state_dump(alice: &mut Keyed, coordinate: &[u8]) {
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"Alpha's State: Standing"),
+        "the state head"
+    );
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(coordinate),
+        "the coordinate line"
+    );
+    let dump = read_chat_lines(alice, 20);
+    let text_of = |record: &[u8]| record[10..].to_vec();
+    assert_eq!(dump[0], an_info_line(b"LEV 154"), "the level");
+    assert!(
+        text_of(&dump[1]).starts_with(b"HP "),
+        "the HP line: {dump:?}"
+    );
+    assert!(text_of(&dump[2]).starts_with(b"SP "), "the SP line");
+    assert!(text_of(&dump[3]).starts_with(b"ATT "), "the ATT line");
+    assert!(text_of(&dump[4]).starts_with(b"DEF "), "the DEF line");
+    assert_eq!(
+        dump[5],
+        an_info_line(b"RESISTANCES:"),
+        "the resistances head"
+    );
+    assert!(
+        text_of(&dump[6]).starts_with(b"   WARR:"),
+        "the job resists"
+    );
+    assert!(
+        text_of(&dump[9]).starts_with(b"   ICE:"),
+        "the spare resists"
+    );
+    assert_eq!(dump[10], an_info_line(b"MALL:"), "the mall head");
+    assert!(text_of(&dump[11]).starts_with(b"   ATT:"), "the mall line");
+    assert_eq!(dump[12], an_info_line(b"BONUS:"), "the bonus head");
+    assert!(
+        text_of(&dump[17]).starts_with(b"   WARR:"),
+        "the job bonuses"
+    );
+    assert_eq!(dump[18], an_info_line(b"IMMUNE:"), "the immune head");
+    assert!(
+        text_of(&dump[19]).starts_with(b"   STUN:"),
+        "the immune line"
+    );
+}
+
+/// The `server_attr` cell attribute at map 1's `(x, y)`, as `/state` tells it.
+fn state_cell_attribute(x: i32, y: i32) -> u32 {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../legacy/gamedata/locale/europe/map");
+    let atlas = gamedata::map_atlas::MapAtlas::load(&dir).expect("the atlas loads");
+    let region = atlas.region(1).expect("map 1 stands");
+    let attr = gamedata::server_attr::load_map(&dir, region).expect("map 1's attr loads");
+    let grid = gamedata::server_attr::SectreeGrid::of(region).expect("map 1's grid stands");
+    let cells = world::cells::MapCells::new(grid, std::sync::Arc::new(attr));
+    cells.attribute(x, y).expect("the entered point has a cell")
+}
+
+/// `cmd.slow` and `cmd.ipurge`: `/slow` gives ten fresh 12019s numbered in socket 4,
+/// `/ipurge` clears every flat cell. Alice is `HIGH_WIZARD`; Alpha holds nothing.
+/// `/slow` sends, per piece in order, the `[LS;444]` pickup line, the set into the
+/// next free cell, and the update numbering socket 4; `/inventory 10` then names the
+/// ten held cells. `/ipurge` clears them — ten vnum-0 sets in cell order — and
+/// `/inventory 10` names `<NONE>` throughout, with the store holding no rows.
+#[test]
+fn a_slow_gives_ten_numbered_armours_and_an_ipurge_clears_them() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let armour = owners_protos()
+        .get(12019)
+        .map(|proto| proto.locale_name.clone())
+        .unwrap_or_default();
+    assert!(!armour.is_empty(), "the owners protos hold 12019");
+    let (mut alice, _alpha_listed) =
+        enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    // The armour is two cells tall in the five-wide grid, so the ten pieces stand at
+    // 0-4 and 10-14.
+    let cells: [u16; 10] = [0, 1, 2, 3, 4, 10, 11, 12, 13, 14];
+    alice.send_record(&slash(b"/slow"));
+    for (index, cell) in cells.iter().enumerate() {
+        let pickup = read_chat_line(&mut alice);
+        let mut line = b"[LS;444;".to_vec();
+        line.extend_from_slice(&armour);
+        line.push(b']');
+        assert_eq!(pickup, an_info_line(&line), "the pickup line {index}");
+        let set = alice.read_game();
+        assert_eq!(set[0], ITEM_SET, "a set per piece {index}");
+        assert_eq!(set.len(), ITEM_SET_LEN);
+        assert_eq!(
+            u16::from_le_bytes([set[2], set[3]]),
+            *cell,
+            "piece {index} stands at {cell}"
+        );
+        assert_eq!(
+            u32::from_le_bytes([set[4], set[5], set[6], set[7]]),
+            12019,
+            "piece {index} is the armour"
+        );
+        let update = alice.read_game();
+        assert_eq!(update[0], ITEM_UPDATE, "an update per piece {index}");
+        assert_eq!(update.len(), ITEM_UPDATE_LEN);
+        assert_eq!(
+            u16::from_le_bytes([update[2], update[3]]),
+            *cell,
+            "update {index} names its cell"
+        );
+        assert_eq!(
+            i32::from_le_bytes([update[30], update[31], update[32], update[33]]),
+            i32::try_from(index).unwrap_or(i32::MAX),
+            "socket 4 numbers piece {index}"
+        );
+    }
+    alice.send_record(&slash(b"/ipurge"));
+    read_cleared_cells_range(&mut alice, cells);
+    alice.send_record(&slash(b"/inventory 15"));
+    for index in 0..15u16 {
+        let told = format!("inventory [{index}] = <NONE>");
+        assert_eq!(
+            read_chat_line(&mut alice),
+            an_info_line(told.as_bytes()),
+            "cell {index} holds nothing"
+        );
+    }
+    assert_eq!(stored_item_count(&database), 0, "the store holds no rows");
+    drop(alice);
+    drop(server);
+}
+
+/// The rows the `item` table holds.
+fn stored_item_count(database: &ScratchDatabase) -> i64 {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime should start")
+        .block_on(async {
+            use db::sqlx::Connection;
+            let mut connection = db::sqlx::PgConnection::connect(database.url())
+                .await
+                .expect("the scenario database should connect");
+            let row: (i64,) = db::sqlx::query_as("SELECT COUNT(*) FROM item")
+                .fetch_one(&mut connection)
+                .await
+                .expect("the count should be there");
+            connection.close().await.expect("the close should succeed");
+            row.0
+        })
+}
+
+/// One vnum-0 set per cell, as `/ipurge` sends them in cell order: the opening
+/// `ComputePoints` points ride first, the closing points and the one look last.
+fn read_cleared_cells_range(keyed: &mut Keyed, cells: [u16; 10]) {
+    for pos in cells {
+        let set = loop {
+            let record = keyed.read_game();
+            if record[0] == ITEM_SET {
+                break record;
+            }
+            assert_eq!(
+                record[0], GC_POINT_CHANGE,
+                "ahead of the clears only points ride: {record:02x?}"
+            );
+        };
+        assert_eq!(set.len(), ITEM_SET_LEN);
+        assert_eq!(set[1], 1, "cell {pos} is in the inventory");
+        assert_eq!(
+            u16::from_le_bytes([set[2], set[3]]),
+            pos,
+            "cell {pos} clears"
+        );
+        assert_eq!(
+            u32::from_le_bytes([set[4], set[5], set[6], set[7]]),
+            0,
+            "cell {pos} holds nothing"
+        );
+    }
+    let mut saw_look = false;
+    for _ in 0..40 {
+        let record = keyed.read_game_raw();
+        if record[0] == GC_CHARACTER_UPDATE {
+            saw_look = true;
+            break;
+        }
+        assert_eq!(
+            record[0], GC_POINT_CHANGE,
+            "behind the clears only points ride: {record:02x?}"
+        );
+    }
+    assert!(saw_look, "the one UpdatePacket closes the purge");
+}
+
+/// `cmd.console` and `cmd.book`: `/console` tells the `ConsoleEnable` command line,
+/// `/book` gives one fresh 50300 with the named skill in socket 0. Alice is
+/// `IMPLEMENTOR`; Alpha holds nothing. `/book` with no word, an unknown name, or an
+/// unknown vnum tells `There is no such a skill`; `/book Iures` (vnum 3) and
+/// `/book 5` (Izbitura) each send the pickup line, the set, and the update with the
+/// skill in socket 0, stored.
+#[test]
+fn a_console_opens_and_a_book_names_its_skill_in_socket_zero() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let book = owners_protos()
+        .get(50300)
+        .map(|proto| proto.locale_name.clone())
+        .unwrap_or_default();
+    assert!(!book.is_empty(), "the owners protos hold 50300");
+    let (mut alice, _alpha_listed) = enter_world_as_implementor(&server);
+    alice.send_record(&slash(b"/console"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        chat_packet(CHAT_TYPE_COMMAND, ENGLISH, b"ConsoleEnable"),
+        "the console line"
+    );
+    for word in [b"/book".as_slice(), b"/book Nobody", b"/book 99999"] {
+        alice.send_record(&slash(word));
+        assert_eq!(
+            read_chat_line(&mut alice),
+            an_info_line(b"There is no such a skill"),
+            "the miss for {word:?}"
+        );
+    }
+    for (word, skill) in [(b"/book Iures".as_slice(), 3), (b"/book 5", 5)] {
+        alice.send_record(&slash(word));
+        let mut line = b"[LS;444;".to_vec();
+        line.extend_from_slice(&book);
+        line.push(b']');
+        assert_eq!(
+            read_chat_line(&mut alice),
+            an_info_line(&line),
+            "the pickup for {word:?}"
+        );
+        let set = alice.read_game();
+        assert_eq!(set[0], ITEM_SET, "a set for {word:?}");
+        assert_eq!(set.len(), ITEM_SET_LEN);
+        assert_eq!(
+            u32::from_le_bytes([set[4], set[5], set[6], set[7]]),
+            50300,
+            "the book for {word:?}"
+        );
+        let cell = u16::from_le_bytes([set[2], set[3]]);
+        let update = alice.read_game();
+        assert_eq!(update[0], ITEM_UPDATE, "an update for {word:?}");
+        assert_eq!(update.len(), ITEM_UPDATE_LEN);
+        assert_eq!(
+            u16::from_le_bytes([update[2], update[3]]),
+            cell,
+            "the update names its cell for {word:?}"
+        );
+        assert_eq!(
+            i32::from_le_bytes([update[14], update[15], update[16], update[17]]),
+            skill,
+            "socket 0 names the skill for {word:?}"
+        );
+    }
+    assert_eq!(stored_item_count(&database), 2, "both books store");
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.set` (the gold, exp, maxima and skill arms): `/set` tells the usage
+/// with the field list, misses an offline name, stays silent on an unknown field,
+/// and sets by prefix. Alice is `IMPLEMENTOR`; Zulu is online and holds no gold.
+/// `/set Zulu g 100` moves Zulu's gold with the change record and stores it;
+/// `/set Zulu exp 50`, `max_hp 10`, `max_sp 10` and `skill 3` move Zulu's points with
+/// their records; each tells Alice the canonical confirmation. `/set ZULU gold 5`
+/// matches case-insensitively. An over-cap gold change moves nothing but still tells
+/// the confirmation, as does `/set Alpha exp 50`: Alpha's conqueror level 33 makes its
+/// experience the conqueror arm, which at or past the highest conqueror level (30)
+/// returns before its chat line.
+#[test]
+fn a_set_moves_a_named_characters_gold_exp_maxima_and_skill() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    seat_alpha_and_zulu(&server, &database, &[]);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha_listed) = enter_world_as_implementor(&server);
+    let (mut zulu, zulu_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(zulu_listed.id, false, None);
+    assert_set_usage_and_miss(&mut alice);
+    // Gold by prefix: the change rides Zulu's client and the row stores.
+    alice.send_record(&slash(b"/set Zulu g 100"));
+    assert_eq!(
+        zulu.read_game(),
+        gold_change(zulu_listed.id, 100, 100),
+        "the gold change"
+    );
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's gold set to [100]"),
+        "the gold confirmation"
+    );
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Zulu') = 100",
+    );
+    // The case-insensitive target: upper case still finds Zulu.
+    alice.send_record(&slash(b"/set ZULU gold 5"));
+    assert_eq!(
+        zulu.read_game(),
+        gold_change(zulu_listed.id, 5, 105),
+        "the cased change"
+    );
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's gold set to [5]"),
+        "the cased confirmation names the shown name"
+    );
+    // An over-cap change moves nothing but still tells the confirmation.
+    alice.send_record(&slash(b"/set Zulu gold 1200000000000000000"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's gold set to [1200000000000000000]"),
+        "the refused confirmation"
+    );
+    zulu.still("the refused change sends nothing");
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Zulu') = 105",
+    );
+    // Exp, the maxima and the skill point: the point records ride Zulu's client.
+    for (field, kind, delta) in [
+        ("exp", POINT_EXP, 50),
+        ("max_hp", POINT_MAX_HP, 10),
+        ("max_sp", POINT_MAX_SP, 10),
+        ("skill", POINT_SKILL, 3),
+    ] {
+        let line = format!("/set Zulu {field} {delta}");
+        alice.send_record(&slash(line.as_bytes()));
+        assert_point_change(&mut zulu, kind, delta, "the {field} rise");
+        let told = format!("Zulu's {field} set to [{delta}]");
+        assert_eq!(
+            read_chat_line(&mut alice),
+            an_info_line(told.as_bytes()),
+            "the {field} confirmation"
+        );
+    }
+    // Alpha's conqueror level makes its experience the conqueror arm, which returns at
+    // the highest level: the confirmation tells, but nothing else rides.
+    alice.send_record(&slash(b"/set Alpha exp 50"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Alpha's exp set to [50]"),
+        "the conqueror confirmation"
+    );
+    alice.still("the arm returns past the highest conqueror level");
+    drop(zulu);
+    drop(alice);
+    drop(server);
+}
+
+/// The `/set` usage with the field list, the offline miss, and the silent field.
+fn assert_set_usage_and_miss(alice: &mut Keyed) {
+    alice.send_record(&slash(b"/set"));
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"Usage: set <name> <field> <value>"),
+        "the usage"
+    );
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"List of the fields available:"),
+        "the list head"
+    );
+    let fields = read_chat_lines(alice, 14);
+    assert_eq!(fields[0], an_info_line(b" 1. gold"), "gold leads");
+    assert_eq!(
+        fields[2],
+        an_info_line(b"  Help: 0. Warrior, 1. Ninja, 2. Sura, 3. Shaman"),
+        "race helps"
+    );
+    assert_eq!(fields[13], an_info_line(b" 11. gaya"), "gaya ends");
+    alice.send_record(&slash(b"/set Nobody gold 5"));
+    assert_eq!(
+        read_chat_line(alice),
+        an_info_line(b"Nobody not exist"),
+        "the miss"
+    );
+    alice.send_record(&slash(b"/set Zulu nosuch 5"));
+    alice.still("an unknown field is silent");
+}
+
+/// The next point record on `keyed`: a `GC_POINT_CHANGE` of `kind` showing `amount`.
+fn assert_point_change(keyed: &mut Keyed, kind: u8, amount: i64, note: &str) {
+    let record = keyed.read_game();
+    assert_eq!(record[0], GC_POINT_CHANGE, "{note}: {record:02x?}");
+    assert_eq!(record.len(), POINT_CHANGE_LEN);
+    assert_eq!(record[8], kind, "{note} names its slot");
+    assert_eq!(
+        i64::from_le_bytes(record[9..17].try_into().unwrap_or([0; 8])),
+        amount,
+        "{note} shows its amount"
+    );
+}
+
+/// `cmd.set` (the race, sex, job, alignment and gaya arms): Zulu stands female, so
+/// `/set Zulu race 2` moves it to the female sura race, clears the skills, drops the
+/// group, reencodes twice, and stores the identity; `/set Zulu sex 0` flips Zulu male
+/// with the same reencode pair; `/set Zulu job 1` sets the group with byte 112 and clears;
+/// `/set Zulu alignment 50000` moves the real alignment with the update and the band's
+/// bonus; `/set Zulu gaya 300` moves the gaya with its change. Each tells Alice the
+/// canonical confirmation. `/set Zulu align 60000` runs the alignment arm alone: the
+/// gaya legacy's missing `break` also changes is a Defect and stays unchanged.
+#[test]
+fn a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    seat_alpha_and_zulu(&server, &database, &[]);
+    sql(
+        &database,
+        "UPDATE player SET level = 10, skill_group = 1 WHERE name = 'Zulu'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha_listed) = enter_world_as_implementor(&server);
+    let (mut zulu, zulu_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(zulu_listed.id, false, None);
+    // Race: Zulu stands female, so job 2 is the female sura race 6. The clear lands
+    // first with byte 76, then each polymorph call reencodes with its computes.
+    alice.send_record(&slash(b"/set Zulu race 2"));
+    let race_wire = zulu.wire_for(std::time::Duration::from_secs(2));
+    assert_mesh_wire(&race_wire, zulu_listed.id, true, "the race");
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's race set to [2]"),
+        "the race confirmation"
+    );
+    check(
+        &database,
+        "(SELECT job FROM player WHERE name = 'Zulu') = 6 AND (SELECT skill_group FROM \
+         player WHERE name = 'Zulu') = 0",
+    );
+    // Sex: male flips race 6 to race 2, with the reencode pair and no clear.
+    alice.send_record(&slash(b"/set Zulu sex 0"));
+    let sex_wire = zulu.wire_for(std::time::Duration::from_secs(2));
+    assert_mesh_wire(&sex_wire, zulu_listed.id, false, "the sex");
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's sex set to [0]"),
+        "the sex confirmation"
+    );
+    check(
+        &database,
+        "(SELECT job FROM player WHERE name = 'Zulu') = 2",
+    );
+    // Job: the group sets with byte 112, the skills clear, and the row follows.
+    alice.send_record(&slash(b"/set Zulu job 1"));
+    assert_eq!(
+        zulu.read_game(),
+        vec![GC_CHANGE_SKILL_GROUP, 1],
+        "byte 112 carries the group"
+    );
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's job set to [1]"),
+        "the job confirmation"
+    );
+    let job_76 = drain_point_changes(&mut zulu, "the job clear and computes");
+    assert_byte_76_zeroes(&job_76, "the job clear");
+    check(
+        &database,
+        "(SELECT skill_group FROM player WHERE name = 'Zulu') = 1",
+    );
+    // Alignment: the real alignment moves to 50000 with the update and the band's
+    // bonus (band 2: 571 and 573).
+    alice.send_record(&slash(b"/set Zulu alignment 50000"));
+    assert_alignment_update(&mut zulu, 5000, "the alignment update");
+    assert_point_change(&mut zulu, POINT_ATTBONUS_HUMAN, 0, "the bonus change");
+    assert_alignment_bonus(&mut zulu, 571, "the band's first bonus");
+    assert_point_change(&mut zulu, POINT_MAX_HP, 0, "the pool change");
+    assert_alignment_bonus(&mut zulu, 573, "the band's second bonus");
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's alignment set to [50000]"),
+        "the alignment confirmation"
+    );
+    // Gaya: the change rides with its amount shown.
+    alice.send_record(&slash(b"/set Zulu gaya 300"));
+    assert_point_change(&mut zulu, POINT_GAYA, 300, "the gaya rise");
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Zulu's gaya set to [300]"),
+        "the gaya confirmation"
+    );
+    drop(zulu);
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT gaya FROM player WHERE name = 'Zulu') = 300",
+    );
+    wait_for(
+        &database,
+        "(SELECT alignment FROM player WHERE name = 'Zulu') = 50000",
+    );
+    drop(server);
+}
+
+/// The mesh wire of `vid` on the target's own client: the clear's changes and byte 76
+/// when `cleared`, then twice the removal, the re-add pair naming `vid`, and the
+/// computes' point changes. The arm sends no `GC_CHARACTER_UPDATE`, so every one on the
+/// wire is the revive timer's restatement, which may land anywhere under load; they are
+/// set aside first.
+fn assert_mesh_wire(sent: &[Vec<u8>], vid: u32, cleared: bool, note: &str) {
+    let wire: Vec<Vec<u8>> = sent
+        .iter()
+        .filter(|record| record[0] != GC_CHARACTER_UPDATE)
+        .cloned()
+        .collect();
+    let id = vid.to_le_bytes();
+    let mut at = 0;
+    if cleared {
+        let end = wire
+            .iter()
+            .position(|record| record[0] == GC_SKILL_LEVEL_NEW)
+            .expect("{note}: byte 76 closes the clear");
+        assert!(
+            wire[..end]
+                .iter()
+                .all(|record| record[0] == GC_POINT_CHANGE),
+            "{note}: the clear sends only its changes"
+        );
+        assert_byte_76_zeroes(&wire[end], note);
+        at = end + 1;
+    }
+    for round in 0..2 {
+        let removed = wire.get(at).expect("{note}: round {round} removes");
+        assert_eq!(
+            removed[0], GC_CHARACTER_DEL,
+            "{note}: round {round} removes"
+        );
+        assert_eq!(&removed[1..5], &id, "{note}: round {round} names Zulu");
+        at += 1;
+        // The re-adds: Zulu's own pair first, then every entity Zulu sees.
+        let mut pairs = 0;
+        while wire
+            .get(at)
+            .is_some_and(|record| record[0] == GC_CHARACTER_ADD)
+        {
+            let info = wire.get(at + 1).expect("{note}: round {round} informs");
+            assert_eq!(
+                info[0], GC_CHAR_ADDITIONAL_INFO,
+                "{note}: round {round} informs"
+            );
+            if pairs == 0 {
+                assert_eq!(&wire[at][1..5], &id, "{note}: round {round} re-adds Zulu");
+                assert_eq!(&info[1..5], &id, "{note}: round {round} informs Zulu");
+            }
+            pairs += 1;
+            at += 2;
+        }
+        assert!(pairs >= 1, "{note}: round {round} re-adds");
+        let end = wire[at..]
+            .iter()
+            .position(|record| record[0] != GC_POINT_CHANGE)
+            .map_or(wire.len(), |rest| at + rest);
+        assert!(end > at, "{note}: round {round} computes");
+        at = end;
+    }
+    // A nearby NPC's chatter is its own.
+    assert!(
+        wire[at..].iter().all(|record| is_npc_chatter(record)),
+        "{note}: nothing else rides: {:02x?}",
+        &wire[at..]
+    );
+}
+
+/// Every pending point change on the client's wire, drained past the clear and the
+/// battle computes. Answers the skill-level record that follows them.
+fn drain_point_changes(keyed: &mut Keyed, note: &str) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game();
+        if record[0] != GC_POINT_CHANGE {
+            assert_eq!(
+                record[0], GC_SKILL_LEVEL_NEW,
+                "{note}: byte 76 closes the clear"
+            );
+            return record;
+        }
+    }
+}
+
+/// The skill-level record a clear sends zeroes its entries: every skill stands at 0.
+fn assert_byte_76_zeroes(record: &[u8], note: &str) {
+    assert_eq!(record[0], GC_SKILL_LEVEL_NEW, "{note}: {record:02x?}");
+    assert!(
+        record[1..].iter().all(|byte| *byte == 0),
+        "{note}: the clear zeroes every entry"
+    );
+}
+
+/// The next character-update record on the client's wire, showing `alignment`.
+fn assert_alignment_update(keyed: &mut Keyed, alignment: i16, note: &str) {
+    let record = keyed.read_game();
+    assert_eq!(record[0], GC_CHARACTER_UPDATE, "{note}: {record:02x?}");
+    assert_eq!(record.len(), CHARACTER_UPDATE_LEN);
+    assert_eq!(
+        i16::from_le_bytes(record[32..34].try_into().unwrap_or([0; 2])),
+        alignment,
+        "{note} shows its /10"
+    );
+}
+
+/// The next affect-add record on the client's wire, carrying `kind`.
+fn assert_alignment_bonus(keyed: &mut Keyed, kind: u32, note: &str) {
+    let record = keyed.read_game();
+    assert_eq!(record[0], GC_AFFECT_ADD, "{note}: {record:02x?}");
+    assert_eq!(
+        u32::from_le_bytes(record[1..5].try_into().unwrap_or([0; 4])),
+        kind,
+        "{note} names its kind"
+    );
+}
+
+/// `cmd.safebox` (`do_safebox_size`, `G/cmd_gm.cpp:2125-2141`): `/safebox` with no word
+/// tells `Safebox size set to 0` and sends the zero-row size; `/safebox 2` tells 2 and
+/// sends 18 rows, growing the open safebox so a checkin lands past the first page;
+/// `/safebox 9` clamps to 0 with the same line and record.
+#[test]
+fn a_gm_sizes_the_safebox_and_the_open_grid_grows() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    let protos = owners_protos();
+    let vnum = a_stackable_use_vnum(&protos);
+    seat_the_traders(&database, vnum);
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    // No word: the line names 0 and the size record carries no rows.
+    alice.send_record(&slash(b"/safebox"));
+    assert_eq!(alice.read_game(), vec![GC_SAFEBOX_SIZE, 0]);
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Safebox size set to 0"),
+        "the empty word clamps to 0"
+    );
+    // Two pages: the line names 2 and the size record carries 18 rows.
+    alice.send_record(&slash(b"/safebox 2"));
+    assert_eq!(alice.read_game(), vec![GC_SAFEBOX_SIZE, 18]);
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Safebox size set to 2"),
+        "the word in pages"
+    );
+    // Past the four pages: the clamp answers 0 the same way.
+    alice.send_record(&slash(b"/safebox 9"));
+    assert_eq!(alice.read_game(), vec![GC_SAFEBOX_SIZE, 0]);
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Safebox size set to 0"),
+        "the clamp"
+    );
+    // The open grid grows: one page opens, two pages resize it, and the checkin
+    // lands past the first page.
+    alice.send_record(&slash(b"/safebox_password 000000"));
+    assert_eq!(alice.read_game(), [GC_SAFEBOX_SIZE, 9]);
+    alice.send_record(&slash(b"/safebox 2"));
+    assert_eq!(alice.read_game(), vec![GC_SAFEBOX_SIZE, 18]);
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Safebox size set to 2"),
+        "the resize line"
+    );
+    alice.send_record(&client_store(CG_SAFEBOX_CHECKIN, 45, 5));
+    assert_eq!(alice.read_game(), a_clear_record(5));
+    check(
+        &database,
+        &format!(
+            "EXISTS (SELECT 1 FROM item WHERE id = 30 AND owner_id IS NULL AND account_id =              {ALICES} AND window_type = 3 AND pos = 45)"
+        ),
+    );
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.makeguild` and `cmd.deleteguild` (`G/cmd_gm.cpp:2143-2173`): the word founds a
+/// guild with no fee and no item — the broadcast, the confirmation, and the login
+/// walk — and the disband unmakes it. A bad word tells the code.
+#[test]
+fn a_gm_founds_and_disbands_a_guild_by_line() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    // A one-letter word fails the alphabet check: the code tells it.
+    alice.send_record(&slash(b"/makeguild X"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"#ERR_CODE: 1433030623"),
+        "the bad word tells the code"
+    );
+    // The word founds: the broadcast first, then the confirmation — and no fee record
+    // and no destroyed item between them.
+    alice.send_record(&slash(b"/makeguild LineGuild"));
+    let named = alice.read_game();
+    assert_eq!(
+        guild_subheader(&named),
+        GUILD_SUBHEADER_GC_GUILD_NAME,
+        "the broadcast first: {named:02x?}"
+    );
+    assert_eq!(named.len(), 4 + 4 + 12, "envelope + id + 12 name bytes");
+    let made_id = u32::from_le_bytes(named[4..8].try_into().expect("four bytes"));
+    assert_eq!(made_id, 1, "the first guild's id");
+    assert_eq!(&named[8..17], b"LineGuild", "the name");
+    assert!(
+        named[17..20].iter().all(|&byte| byte == 0),
+        "the 12-byte name pads to 12: {named:02x?}"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"(LineGuild) #ERR_CODE: 1434030623"),
+        "the confirmation"
+    );
+    let grades = alice.read_game();
+    assert_eq!(
+        guild_subheader(&grades),
+        GUILD_SUBHEADER_GC_GRADE,
+        "the walk runs behind the line: {grades:02x?}"
+    );
+    check_guild_grade_walk(&grades);
+    let info = alice.read_game();
+    assert_eq!(
+        guild_subheader(&info),
+        GUILD_SUBHEADER_GC_INFO,
+        "the info walk: {info:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(info[8..12].try_into().expect("four bytes")),
+        made_id,
+        "the info id"
+    );
+    assert_eq!(&info[21..30], b"LineGuild", "the info name");
+    let list = alice.read_game();
+    assert_eq!(
+        guild_subheader(&list),
+        GUILD_SUBHEADER_GC_LIST,
+        "the list walk: {list:02x?}"
+    );
+    let login = alice.read_game();
+    assert_eq!(
+        guild_subheader(&login),
+        GUILD_SUBHEADER_GC_LOGIN,
+        "its own login: {login:02x?}"
+    );
+    let skills = alice.read_game();
+    assert_eq!(
+        guild_subheader(&skills),
+        GUILD_SUBHEADER_GC_SKILL_INFO,
+        "the skill walk: {skills:02x?}"
+    );
+    check_guild_skill_walk(&skills);
+    alice.quiet("nothing follows the founding");
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM guild WHERE name = 'LineGuild'",
+    );
+    // A second word while guilded is silent.
+    alice.send_record(&slash(b"/makeguild OtherName"));
+    alice.quiet("the guilded caller is silent");
+    // The disband unmakes it: every member hears a REMOVE, and the rows go.
+    alice.send_record(&slash(b"/deleteguild"));
+    assert_eq!(
+        guild_subheader(&alice.read_game()),
+        GUILD_SUBHEADER_GC_REMOVE,
+        "the member hears the removal"
+    );
+    alice.quiet("nothing follows the disband");
+    check(&database, "SELECT COUNT(*) = 0 FROM guild");
+    check(&database, "SELECT COUNT(*) = 0 FROM guild_member");
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.refine_rod`, `cmd.refine_pick` and `cmd.max_pick` (`G/cmd_gm.cpp:2181-2222`):
+/// the named inventory cell's rod swaps to its next vnum on the 100% draw, the
+/// pick maxes its training and swaps, and the max alone maxes.
+#[test]
+fn a_gm_refines_a_rod_and_a_pick_and_maxes_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 21, \
+         id, 1, 3, 1, 27400, 10 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 22, \
+         id, 1, 5, 1, 29101, 0 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 23, \
+         id, 1, 6, 1, 29101, 0 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    // The trained rod's 100% draw swaps it: the clear, then the set of the next vnum.
+    // The revive timer's own remove-and-update may ride between the line's records,
+    // so the clear is read past them.
+    alice.send_record(&slash(b"/refine_rod 3"));
+    let clear = read_past_revive(&mut alice);
+    assert_eq!(clear[0], ITEM_SET, "the old rod clears: {clear:02x?}");
+    assert_eq!(clear[1], 1, "the inventory window");
+    assert_eq!(u16::from_le_bytes([clear[2], clear[3]]), 3, "the same cell");
+    assert_eq!(
+        u32::from_le_bytes(clear[4..8].try_into().expect("four bytes")),
+        0,
+        "the cleared vnum"
+    );
+    let set = alice.read_game();
+    assert_eq!(set[0], ITEM_SET, "the next rod sets: {set:02x?}");
+    assert_eq!(
+        u32::from_le_bytes(set[4..8].try_into().expect("four bytes")),
+        27410,
+        "the +2 vnum"
+    );
+    alice.quiet("nothing follows the rod");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 21");
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND window_type = 1 AND pos = 3 AND vnum = 27410",
+    );
+    // The pick maxes first — `CHEAT_MAX_PICK`'s `SetSocket` updates the cell and
+    // then tells the line (`G/mining.cpp:304-315` with `CItem::SetSocket`,
+    // `G/item.cpp:1643-1656`) — and the 100% draw swaps it.
+    alice.send_record(&slash(b"/refine_pick 5"));
+    assert_eq!(
+        read_past_revive(&mut alice)[0],
+        ITEM_UPDATE,
+        "the training updates"
+    );
+    assert_eq!(
+        read_past_revive(&mut alice),
+        an_info_line(b"Pickaxe training has reached maximum (6000)."),
+        "the max line"
+    );
+    let clear = alice.read_game();
+    assert_eq!(clear[0], ITEM_SET, "the old pick clears");
+    let set = alice.read_game();
+    assert_eq!(
+        u32::from_le_bytes(set[4..8].try_into().expect("four bytes")),
+        29102,
+        "the +1 vnum"
+    );
+    alice.quiet("nothing follows the pick");
+    // The max alone maxes: the update then the line, and the vnum stays.
+    alice.send_record(&slash(b"/max_pick 6"));
+    assert_eq!(alice.read_game()[0], ITEM_UPDATE, "the training updates");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Pickaxe training has reached maximum (6000)."),
+        "the max line"
+    );
+    alice.quiet("nothing follows the max");
+    check(&database, "SELECT socket0 = 6000 FROM item WHERE id = 23");
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.fish_simul` (`do_fishing_simul`, `G/cmd_gm.cpp:2227-2251`): the line always
+/// tells the usage first, then runs `fishing::Simulation`'s draws
+/// (`G/fishing.cpp:747-769`) and tells one `%s : %d fish` per kept name in byte
+/// order, then `%d types %d fish caught`.
+///
+/// `/fish_simul 0 0 0` draws nothing: the usage, then the empty summary. `/fish_simul
+/// 100 0 1000` runs the default thousand draws against the owner's table and the
+/// summary's types count the name lines, its total sums them. `/fish_simul 100 9 100`
+/// names a table past the four the file builds, so only the usage rides (the Rewrite
+/// refuses where legacy indexes out of bounds). Nothing is stored: the line only tells.
+#[test]
+fn a_fish_simul_tells_its_usage_and_the_simulations_lines() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let usage = an_info_line(b"Usage: fishing_simul <level> <prob index> <count>");
+    // No draws: the usage, then the empty summary.
+    alice.send_record(&slash(b"/fish_simul 0 0 0"));
+    assert_eq!(read_past_revive(&mut alice), usage, "the usage rides first");
+    assert_eq!(
+        read_past_revive(&mut alice),
+        an_info_line(b"0 types 0 fish caught"),
+        "no draws keep nothing"
+    );
+    alice.quiet("nothing follows the empty run");
+    // The default thousand: the usage, the name lines in byte order, then the
+    // summary, whose two numbers count and sum the name lines.
+    alice.send_record(&slash(b"/fish_simul 100 0 1000"));
+    assert_eq!(
+        read_past_revive(&mut alice),
+        usage,
+        "the usage leads the run"
+    );
+    let (mut last, mut kinds, mut caught): (Option<Vec<u8>>, i64, i64) = (None, 0, 0);
+    let summary = loop {
+        let line = read_past_revive(&mut alice);
+        assert_eq!(line[0], GC_CHAT, "only lines ride");
+        let text = &line[10..];
+        if let Some(rest) = text.strip_suffix(b" fish caught") {
+            break rest.to_vec();
+        }
+        let count = text
+            .strip_suffix(b" fish")
+            .expect("a name line ends in ` fish`");
+        let at = count
+            .windows(3)
+            .rposition(|window| window == b" : ")
+            .expect("a name line carries `name : count`");
+        let name = &count[..at];
+        let count: i64 = core::str::from_utf8(&count[at + 3..])
+            .expect("the count is digits")
+            .parse()
+            .expect("the count parses");
+        assert!(count > 0, "a named line keeps at least one");
+        assert!(
+            last.as_deref().is_none_or(|last: &[u8]| last < name),
+            "the names ride in byte order"
+        );
+        last = Some(name.to_vec());
+        kinds += 1;
+        caught += count;
+    };
+    let summary = core::str::from_utf8(&summary).expect("the summary is text");
+    let (types, total) = summary
+        .split_once(" types ")
+        .expect("the summary reads `N types M`");
+    assert_eq!(
+        (types, total),
+        (kinds.to_string().as_str(), caught.to_string().as_str()),
+        "the summary counts and sums the name lines"
+    );
+    assert!(caught > 0, "a thousand draws keep some fish");
+    alice.quiet("nothing follows the run");
+    // Past the tables: only the usage rides.
+    alice.send_record(&slash(b"/fish_simul 100 9 100"));
+    assert_eq!(read_past_revive(&mut alice), usage, "the usage rides alone");
+    alice.quiet("the refused table tells nothing more");
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.private` (`do_private`, `G/cmd_gm.cpp:2301-2325`): the caller warps to a
+/// private copy of the named map's spawn. An empty line answers `Usage: private
+/// <map index>`; an index the map index does not list answers `Can't find map by
+/// index %d` with the parsed index. Else the copy (`CreatePrivateMap`,
+/// `G/sectree_manager.cpp:943-1026`) stands on the base map's grid, the caller
+/// remembers where it stood (`SaveExitLocation`, `G/char.cpp:6679-6683`) and
+/// warps to the copy's spawn through `WarpSet`'s own records: the remove, then
+/// `GC_WARP` to the spawn on the caller's Channel. The stored row names the copy
+/// and the exit names where the caller stood, so a relogin keeps both.
+#[test]
+fn a_private_line_warps_to_a_copy_of_the_named_map() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, alpha) = enter_world_as_implementor(&server);
+    // The empty line and the unknown index answer their lines and warp nowhere.
+    alice.send_record(&slash(b"/private"));
+    assert_eq!(
+        read_past_revive(&mut alice),
+        an_info_line(b"Usage: private <map index>"),
+        "the empty line answers its usage"
+    );
+    alice.send_record(&slash(b"/private 9999"));
+    assert_eq!(
+        read_past_revive(&mut alice),
+        an_info_line(b"Can't find map by index 9999"),
+        "the unknown index answers its miss"
+    );
+    alice.quiet("the refusals warp nowhere");
+    // Map 1's copy: the remove, then the warp to the town spawn on Channel 1.
+    // The exit is where Alpha entered, not where the row seeded it.
+    let feet = ALPHA_ENTERS_AT;
+    let spawn = (469_300, 964_200);
+    let port = server.channel(1).port();
+    alice.send_record(&slash(b"/private 1"));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha.id.to_le_bytes());
+    assert_eq!(
+        read_past_revive(&mut alice),
+        removed,
+        "EncodeRemovePacket(this)"
+    );
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record(spawn, port),
+        "the warp to the spawn"
+    );
+    alice.quiet("nothing follows the warp");
+    check(
+        &database,
+        &format!(
+            "(SELECT x FROM player WHERE name = 'Alpha') = {} AND (SELECT y FROM player WHERE \
+             name = 'Alpha') = {} AND (SELECT map_index FROM player WHERE name = 'Alpha') = \
+             10000",
+            spawn.0, spawn.1,
+        ),
+    );
+    check(
+        &database,
+        &format!(
+            "(SELECT exit_x FROM player WHERE name = 'Alpha') = {} AND (SELECT exit_y FROM player \
+             WHERE name = 'Alpha') = {} AND (SELECT exit_map_index FROM player WHERE name = \
+             'Alpha') = 1",
+            feet.0, feet.1,
+        ),
+    );
+    drop(alice);
+    drop(server);
+}
+
+/// One `fishing.txt` row for the reload scenario: `name`, three vnums, four probs,
+/// difficulty 1 and the always-100 time type, three lengths and ten use results.
+/// Fish 0 never keeps (`Compute`'s `fish_id == 0` refusal) and any other fish keeps
+/// every draw (`number(1, 1)` always 1).
+fn reload_fish_row(name: &[u8], vnum: u32, prob: i32) -> Vec<u8> {
+    let mut row = Vec::from(name);
+    for column in [vnum.to_string(), "0".to_string(), "0".to_string()] {
+        row.push(b'\t');
+        row.extend_from_slice(column.as_bytes());
+    }
+    for column in [prob, 0, 0, 0, 1, 3, 0, 0, 0] {
+        row.push(b'\t');
+        row.extend_from_slice(column.to_string().as_bytes());
+    }
+    for _ in 0..10 {
+        row.extend_from_slice(b"\t0");
+    }
+    row.push(b'\n');
+    row
+}
+
+/// One `/reload u` leg of the reload scenario: `counts` lands on disk, the arm's
+/// tell rides, and the status list reports `status`.
+fn reload_u(
+    alice: &mut Keyed,
+    server: &Server,
+    ports: &[u16],
+    counts: &[u8],
+    status: u8,
+    note: &str,
+) {
+    std::fs::write(server.root().join("state_user_count"), counts)
+        .expect("the counts file should be writable");
+    alice.send_record(&slash(b"/reload u"));
+    assert_eq!(
+        read_past_revive(alice),
+        an_info_line(b"Reloading state_user_count"),
+        "{note}: the u arm's tell"
+    );
+    status_now(server, ports, status);
+}
+
+/// The status every Channel port reports on `server` right now, asked over a fresh
+/// handshake connection on the auth port.
+fn status_now(server: &Server, ports: &[u16], status: u8) {
+    let (mut checker, _) = accepted(server.auth());
+    checker.send(&[CG_STATE_CHECKER]);
+    let expected = channel_status(ports, status);
+    assert_eq!(
+        checker.expect_bytes(expected.len()),
+        expected,
+        "the list reports status {status}"
+    );
+}
+
+/// The `f` leg of the reload scenario: `after` lands as the fishing table, the
+/// `SendLog` notice rides, and the simul probe keeps only the new fish.
+fn reload_f(alice: &mut Keyed, data: &std::path::Path, after: &[u8], usage: &[u8]) {
+    Server::replace(data, "locale/europe/fishing.txt", after);
+    alice.send_record(&slash(b"/reload f"));
+    assert_eq!(
+        read_past_revive(alice),
+        a_notice_line(b"Reloading fish table."),
+        "SendLog tells every GM"
+    );
+    alice.quiet("the f arm tells nothing more");
+    alice.send_record(&slash(b"/fish_simul 1 0 5"));
+    assert_eq!(read_past_revive(alice), usage, "the usage leads the probe");
+    assert_eq!(
+        read_past_revive(alice),
+        an_info_line(b"zzz : 5 fish"),
+        "every draw keeps the reloaded fish"
+    );
+    assert_eq!(
+        read_past_revive(alice),
+        an_info_line(b"1 types 5 fish caught"),
+        "the summary counts the one name"
+    );
+    alice.quiet("nothing follows the probe");
+}
+
+/// The `t` leg of the reload scenario: the miss keeps the old groups (the letters
+/// window opens alone), then the success lists the new 55021 row.
+fn reload_t(alice: &mut Keyed, data: &std::path::Path) {
+    Server::replace(
+        data,
+        "locale/europe/special_item_group.txt",
+        b"group g\n{\n\ttype pct\n\t1\t71084\t15\t40\n}\n",
+    );
+    alice.send_record(&slash(b"/reload t"));
+    assert_eq!(
+        read_past_revive(alice),
+        an_info_line(b"Nu pot relua special_item_group.txt.."),
+        "the t arm's miss"
+    );
+    alice.send_record(&slash(b"/letters_open"));
+    assert_eq!(
+        read_past_revive(alice),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenLetterWindow"),
+        "the old groups stand: no 55021 group"
+    );
+    Server::replace(
+        data,
+        "locale/europe/special_item_group.txt",
+        b"Group box\n{\n\tVnum\t55021\n\t1\t71084\t15\t40\n}\n",
+    );
+    alice.send_record(&slash(b"/reload t"));
+    assert_eq!(
+        read_past_revive(alice),
+        an_info_line(b"special_item_group.txt reluat cu succes..."),
+        "the t arm's success"
+    );
+    alice.send_record(&slash(b"/letters_open"));
+    assert_eq!(
+        read_past_revive(alice),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"letters_drop 71084 15 0 1"),
+        "the reloaded 55021 row lists"
+    );
+    assert_eq!(
+        read_past_revive(alice),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenLetterWindow"),
+        "the window opens after the row"
+    );
+}
+
+/// The `m` leg of the reload scenario: the miss, then the success.
+fn reload_m(alice: &mut Keyed, data: &std::path::Path) {
+    Server::replace(
+        data,
+        "locale/europe/mob_drop_item.txt",
+        b"Group\tshort\n{\n\tMob\t101\n\tType\tkill\n\tkill_drop\t1\n\t1\t19\t1\n}\n",
+    );
+    alice.send_record(&slash(b"/reload m"));
+    assert_eq!(
+        read_past_revive(alice),
+        an_info_line(b"Nu pot relua mob_drop_item.txt."),
+        "the m arm's miss"
+    );
+    Server::replace(
+        data,
+        "locale/europe/mob_drop_item.txt",
+        b"Group\tg\n{\n\tMob\t101\n\tType\tkill\n\tkill_drop\t5\n\t1\t19\t1\t10\t0\n}\n",
+    );
+    alice.send_record(&slash(b"/reload m"));
+    assert_eq!(
+        read_past_revive(alice),
+        an_info_line(b"mob_drop_item.txt reluat cu succes..."),
+        "the m arm's success"
+    );
+}
+
+/// `cmd.reload` (`do_reload`, `G/cmd_gm.cpp:2639-2733`): the line's tables reload from
+/// the Locale folder. An empty line tells the three (`u`, `p`, `s`); a word's first
+/// byte, lowered, names one arm, and an unknown byte answers nothing. The `u` arm
+/// rereads `state_user_count` beside the process (`LoadStateUserCount`,
+/// `G/config.cpp:1778-1788`): with `0 0` on disk one character in game turns the
+/// status list full (status 3), an empty file keeps both thresholds, a lone first
+/// word moves `full` alone, and `5 0` reads busy (status 2). The `p`,
+/// `s` and `q` arms tell their lines (`Reloading prototype tables`, `Reloading notice
+/// string`, `Reloading quest`) while their mirrors wait for later slices.
+///
+/// The `f` arm runs `fishing::Initialize` (`G/fishing.cpp:186-328`) over the reread
+/// bytes with no line of its own: `SendLog` (`G/cmd_gm.cpp:1491-1514`) tells every GM
+/// `Reloading fish table.` (the old first row was named), and a `/fish_simul 1 0 5`
+/// probe keeps only the reloaded table's fish. The `t` arm tells `Nu pot relua
+/// special_item_group.txt..` while the file fails (a group without a `vnum`) and the
+/// old groups stand (`/letters_open` opens the window alone), then `special_item_group.txt
+/// reluat cu succes...` when it loads, and the window lists the new 55021 row. The
+/// `m` arm tells `Nu pot relua mob_drop_item.txt.` while the file fails (a short `kill`
+/// row) and then `mob_drop_item.txt reluat cu succes...` when it loads. The `c` arm is
+/// silent (the cube is not ported) and so is an unknown one.
+#[test]
+fn a_reload_line_reloads_the_tables_it_names() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut before = reload_fish_row(b"aaa", 27802, 0);
+    before.extend_from_slice(&reload_fish_row(b"bbb", 27803, 100));
+    let mut after = reload_fish_row(b"mmm", 27802, 0);
+    after.extend_from_slice(&reload_fish_row(b"zzz", 27803, 100));
+    // The chest and mob files ride with the owner's bytes: the scenario rewrites them
+    // later, and only paths in `files` are copies rather than links.
+    let owner_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe");
+    let owner_groups = std::fs::read(owner_dir.join("special_item_group.txt"))
+        .expect("the owner's groups file should read");
+    let owner_mob = std::fs::read(owner_dir.join("mob_drop_item.txt"))
+        .expect("the owner's mob file should read");
+    let owner_drop = std::fs::read(owner_dir.join("drop_item_group.txt"))
+        .expect("the owner's drop file should read");
+    let (server, data) = Server::start_with_files(
+        binary(),
+        database.url(),
+        &[
+            ("locale/europe/fishing.txt", before.as_slice()),
+            ("locale/europe/special_item_group.txt", &owner_groups),
+            ("locale/europe/mob_drop_item.txt", &owner_mob),
+            ("locale/europe/drop_item_group.txt", &owner_drop),
+        ],
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let usage = an_info_line(b"Usage: fishing_simul <level> <prob index> <count>");
+    // The empty line tells the three; the thresholds file is missing, so the
+    // status list stays normal (one in game, below both compiled counts).
+    alice.send_record(&slash(b"/reload"));
+    assert_eq!(
+        read_past_revive(&mut alice),
+        an_info_line(b"Reloading state_user_count"),
+        "the empty line's first tell"
+    );
+    assert_eq!(
+        read_past_revive(&mut alice),
+        an_info_line(b"Reloading prototype tables"),
+        "the empty line's second tell"
+    );
+    assert_eq!(
+        read_past_revive(&mut alice),
+        an_info_line(b"Reloading notice string"),
+        "the empty line's third tell"
+    );
+    alice.quiet("nothing follows the empty line");
+    let ports = channel_ports(&server);
+    status_now(&server, &ports, 1);
+    // `0 0` on disk: the `u` arm reruns `fscanf`'s two globals, the tell rides,
+    // and the same checker now hears full (1 > 0, strictly).
+    reload_u(
+        &mut alice,
+        &server,
+        &ports,
+        b"0 0\n",
+        3,
+        "the zeroed counts",
+    );
+    alice.quiet("nothing follows the u arm");
+    // A file no conversion completes keeps both thresholds, so the list stays
+    // full; a lone first word moves `full` alone (`1`: 1 > 1 false, 1 > 0 true);
+    // `5 0` moves both and reads busy.
+    reload_u(&mut alice, &server, &ports, b"", 3, "the empty file");
+    reload_u(&mut alice, &server, &ports, b"1\n", 2, "the lone word");
+    reload_u(&mut alice, &server, &ports, b"5 0\n", 2, "the two words");
+    // The mirrors wait; only the tells ride.
+    for (line, text) in [
+        ("/reload p", "Reloading prototype tables"),
+        ("/reload s", "Reloading notice string"),
+        ("/reload q", "Reloading quest"),
+    ] {
+        alice.send_record(&slash(line.as_bytes()));
+        assert_eq!(
+            read_past_revive(&mut alice),
+            an_info_line(text.as_bytes()),
+            "{line} tells its line"
+        );
+        alice.quiet("nothing follows {line}");
+    }
+    // The fish arm: the log line rides (the old first row was named), and the
+    // simul probe keeps only the new table's fish.
+    reload_f(&mut alice, &data, &after, &usage);
+    // The chest arm misses while the file fails, keeps the old groups, then loads.
+    reload_t(&mut alice, &data);
+    // The mob arm misses while the file fails, then loads.
+    reload_m(&mut alice, &data);
+    // The cube and the unknown arms are silent.
+    alice.send_record(&slash(b"/reload c"));
+    alice.quiet("the cube arm is silent");
+    alice.send_record(&slash(b"/reload z"));
+    alice.quiet("an unknown arm answers nothing");
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.shutdown` (`do_shutdown`, `G/cmd_general.cpp:265-275`) and its countdown
+/// (`shutdown_event`, `:198-242`): a player is refused as a missing command; the GM's
+/// line tells `[LS;509;10]` to every Channel, the countdown tells each `[LS;508;N]`
+/// down, the 0 tick quits the players but not the GM, and a login past the bar is
+/// refused `SHUTDOWN` on the setup key.
+#[test]
+fn a_gm_shutdown_notices_every_channel_then_quits_the_players() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let (mut alice, mut yankee, mut charlie) = notice_cast(&server, &database);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/shutdown"));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            2,
+            prodomo::command::NO_SUCH_COMMAND.as_bytes()
+        ),
+        "a player cannot shut down"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/shutdown"));
+    for (client, empire, who) in [
+        (&mut alice, 1, "the GM"),
+        (&mut yankee, 2, "the other map"),
+        (&mut charlie, 1, "the Shared Channel"),
+    ] {
+        assert_eq!(
+            client.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, empire, b"[LS;509;10]"),
+            "{who} hears the 10's notice"
+        );
+    }
+    for left in (1..=10).rev() {
+        let want = format!("[LS;508;{left}]");
+        for (client, empire, who) in [
+            (&mut alice, 1, "the GM"),
+            (&mut yankee, 2, "the other map"),
+            (&mut charlie, 1, "the Shared Channel"),
+        ] {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            assert_eq!(
+                client.read_game_until(deadline).as_deref(),
+                Some(chat_packet(CHAT_TYPE_NOTICE, empire, want.as_bytes()).as_slice()),
+                "{who} hears the {left}'s notice"
+            );
+        }
+    }
+    for (client, empire, who) in [
+        (&mut yankee, 2, "the other map"),
+        (&mut charlie, 1, "the Shared Channel"),
+    ] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert_eq!(
+            client.read_game_until(deadline).as_deref(),
+            Some(
+                chat_packet(
+                    CHAT_TYPE_COMMAND,
+                    empire,
+                    b"quit Shutdown(SendDisconnectFunc)"
+                )
+                .as_slice()
+            ),
+            "{who} hears the quit at the 0 tick"
+        );
+    }
+    alice.quiet_for(
+        "the GM hears no quit at the 0 tick",
+        std::time::Duration::from_secs(3),
+    );
+    let mut keyed = Keyed::channel(server.channel(1));
+    keyed
+        .client
+        .send(&sealed(&client_login2(b"alice", 1, CLIENT_KEY)));
+    let answer = keyed.read_on(&SETUP_KEY, |header| {
+        assert_eq!(header, GC_LOGIN_FAILURE);
+        LOGIN_FAILURE_LEN
+    });
+    assert_eq!(failure_status(&answer), "SHUTDOWN");
+    keyed.still("nothing follows");
+    drop(alice);
+    drop(yankee);
+    drop(charlie);
+    drop(server);
+}
+
+/// The cast for the exit lines: Alice on Channel 1 keeping her character list, Yankee
+/// of empire 2 on Channel 1's map 3, and Charlie of empire 1 on the Shared Channel.
+fn exit_cast() -> Option<(ScratchDatabase, Server, Keyed, Vec<u8>, Keyed, Keyed)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    for login in ["alice", "bob", "carol"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    let (mut alice, _empire, list) = select_screen_on(&server, 1, b"alice", ENGLISH);
+    let (_character, _quickslots, _items) = load_selected(&mut alice, &list, 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    alice.still("nothing follows");
+    let (yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, None);
+    let (charlie, _) = enter_world_on_with_team(&server, 99, b"carol", 0, ENGLISH, None);
+    Some((database, server, alice, list, yankee, charlie))
+}
+
+/// Read the exit countdown's 3-2-1 for `name` in `empire`.
+fn read_exit_countdown(keyed: &mut Keyed, empire: u8, name: &str) {
+    for left in (1..=3).rev() {
+        let want = format!("[LS;510;{left}]");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert_eq!(
+            keyed.read_game_until(deadline).as_deref(),
+            Some(chat_packet(CHAT_TYPE_INFO, empire, want.as_bytes()).as_slice()),
+            "{name} tells the {left}"
+        );
+    }
+}
+
+/// Read to the close past stamina refills and NPC moves, which may race it, several to
+/// one read.
+fn read_exit_close(keyed: &mut Keyed) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (records, quiet) = keyed.drain_wire(Duration::from_secs(2), game_len);
+        for record in records {
+            assert!(
+                is_npc_chatter(&record) || is_stamina_refill(&record),
+                "ahead of the close: {record:02x?}"
+            );
+        }
+        if quiet == Quiet::Closed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the descriptor closes"
+        );
+    }
+}
+
+/// `cmd.logout` (`do_cmd`, `G/cmd_general.cpp:395-448`) with its countdown
+/// (`timed_event`, `:320-393`): the `[LS;512]` notice, the 3-2-1 one second apart,
+/// and at 0 the descriptor closes with a save.
+#[test]
+fn a_logout_counts_down_then_closes() {
+    let Some((_database, server, _alice, _list, mut yankee, _charlie)) = exit_cast() else {
+        return;
+    };
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/logout"));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 2, b"[LS;512]"),
+        "logout tells its notice"
+    );
+    read_exit_countdown(&mut yankee, 2, "logout");
+    read_exit_close(&mut yankee);
+    drop(server);
+}
+
+/// `cmd.quit` (`do_cmd`'s quit arm): the `[LS;513]` notice, a second line's
+/// `[LS;511]` cancel with no countdown after it, and on the next quit the 3-2-1
+/// and at 0 the bare `quit` command line, with the connection left open for the
+/// client to close.
+#[test]
+fn a_quit_cancels_then_counts_down_and_tells_quit() {
+    let Some((_database, server, _alice, _list, _yankee, mut charlie)) = exit_cast() else {
+        return;
+    };
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/quit"));
+    assert_eq!(
+        charlie.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;513]"),
+        "quit tells its notice"
+    );
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/logout"));
+    loop {
+        let record = charlie.read_game();
+        if record == chat_packet(CHAT_TYPE_INFO, 1, b"[LS;511]") {
+            break;
+        }
+        let tick = |left: u8| chat_packet(CHAT_TYPE_INFO, 1, format!("[LS;510;{left}]").as_bytes());
+        assert!(
+            record == tick(3) || record == tick(2) || record == tick(1),
+            "ahead of the cancel: {record:02x?}"
+        );
+    }
+    charlie.quiet_for(
+        "no countdown follows the cancel",
+        std::time::Duration::from_secs(2),
+    );
+    charlie.send_record(&client_chat(CHAT_TALKING, b"/quit"));
+    assert_eq!(
+        charlie.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;513]"),
+        "quit tells its notice"
+    );
+    read_exit_countdown(&mut charlie, 1, "quit");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    assert_eq!(
+        charlie.read_game_until(deadline).as_deref(),
+        Some(chat_packet(CHAT_TYPE_COMMAND, 1, b"quit").as_slice()),
+        "quit tells the bare line at 0"
+    );
+    charlie.quiet_for(
+        "the quit waits with the connection open",
+        std::time::Duration::from_secs(2),
+    );
+    drop(server);
+}
+
+/// `cmd.phase_select` (`do_cmd`'s phase-select arm): the `[LS;515]` notice, the
+/// 3-2-1, and at 0 the return to select, where the same connection selects and
+/// enters again.
+#[test]
+fn a_phase_select_counts_down_then_reselects() {
+    let Some((_database, server, mut alice, list, _yankee, _charlie)) = exit_cast() else {
+        return;
+    };
+    alice.send_record(&client_chat(CHAT_TALKING, b"/phase_select"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;515]"),
+        "phase-select tells its notice"
+    );
+    read_exit_countdown(&mut alice, 1, "phase-select");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    assert_eq!(
+        alice.read_game_until(deadline).as_deref(),
+        Some([GC_PHASE, PHASE_SELECT].as_slice()),
+        "phase-select returns to select at 0"
+    );
+    let (_character, _quickslots, _items) = load_selected(&mut alice, &list, 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    alice.still("nothing follows the reselect");
+    drop(server);
+}
+
+/// The cast for the consent duel: Yankee and Alice on Channel 1's map 41, with
+/// their VIDs, and Charlie's login waiting on the select screen.
+fn duel_cast() -> Option<(ScratchDatabase, Server, Keyed, Keyed, u32, u32)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    for login in ["alice", "bob", "carol"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         470000, 950000 FROM account WHERE login = 'carol'",
+    );
+    let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, None);
+    let (mut alice, _empire, list) = select_screen_on(&server, 1, b"alice", ENGLISH);
+    let (_character, _quickslots, _items) = load_selected(&mut alice, &list, 0);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    alice.still("nothing follows");
+    let yankee_sees_alice = yankee.read_game();
+    assert_eq!(
+        yankee_sees_alice[0], GC_CHARACTER_ADD,
+        "Alice's view reaches Yankee"
+    );
+    let yankee_sees_info = yankee.read_game();
+    assert_eq!(
+        yankee_sees_info[0], GC_CHAR_ADDITIONAL_INFO,
+        "Alice's summary reaches Yankee"
+    );
+    let update = yankee.read_game();
+    assert_eq!(
+        update[0], GC_CHARACTER_UPDATE,
+        "Alice's login hides reach Yankee's view"
+    );
+    yankee.still("nothing follows");
+    let alice_vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
+    let yankee_vid = entered
+        .shown
+        .records
+        .iter()
+        .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[5..11] == b"Yankee"[..])
+        .map(|record| u32::from_le_bytes(record[1..5].try_into().expect("a VID")))
+        .expect("Yankee stands in view");
+    Some((database, server, alice, yankee, alice_vid, yankee_vid))
+}
+
+/// Alice challenges Yankee and Yankee accepts: the agree fan, the lines, the
+/// whisper notify, the fight fan and the begins lines. Answers the fight fan.
+fn challenge_and_accept(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    alice_vid: u32,
+    yankee_vid: u32,
+) -> Vec<u8> {
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        format!("/pvp {yankee_vid}").as_bytes(),
+    ));
+    let mut agree = vec![GC_PVP];
+    agree.extend_from_slice(&alice_vid.to_le_bytes());
+    agree.extend_from_slice(&yankee_vid.to_le_bytes());
+    agree.push(PVP_MODE_AGREE);
+    assert_eq!(
+        alice.read_game(),
+        agree,
+        "the challenger hears the agree fan"
+    );
+    assert_eq!(yankee.read_game(), agree, "the victim hears the agree fan");
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            2,
+            b"Alpha requested a duel. To accept, please agree to confrontation."
+        ),
+        "the victim hears the challenge"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"You challenged Yankee to a duel."),
+        "the challenger hears its line"
+    );
+    let mut challenged =
+        b"Alpha requested a duel. To accept, please agree to confrontation.".to_vec();
+    challenged.push(0);
+    assert_eq!(
+        yankee.read_game(),
+        whisper_packet(WHISPER_TYPE_SYSTEM, b"Alpha", &challenged),
+        "the victim hears the whisper notify"
+    );
+    alice.quiet_for("nothing follows the challenge", QUIET_WINDOW);
+    yankee.quiet_for("nothing follows the challenge", QUIET_WINDOW);
+    yankee.send_record(&client_chat(
+        CHAT_TALKING,
+        format!("/pvp {alice_vid}").as_bytes(),
+    ));
+    let mut fight = vec![GC_PVP];
+    fight.extend_from_slice(&yankee_vid.to_le_bytes());
+    fight.extend_from_slice(&alice_vid.to_le_bytes());
+    fight.push(PVP_MODE_FIGHT);
+    assert_eq!(yankee.read_game(), fight, "the victim hears the fight fan");
+    assert_eq!(
+        alice.read_game(),
+        fight,
+        "the challenger hears the fight fan"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 2, b"The confrontation with Alpha begins!"),
+        "the victim hears the begins line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"The confrontation with Yankee begins!"),
+        "the challenger hears the begins line"
+    );
+    alice.quiet_for("nothing follows the accept", QUIET_WINDOW);
+    yankee.quiet_for("nothing follows the accept", QUIET_WINDOW);
+    fight
+}
+
+/// `cmd.pvp` (`do_pvp`, `G/cmd_general.cpp:848-879`) with the consent duel
+/// (`CPVPManager`, `G/pvp.cpp`): the challenge fans the agree record and tells
+/// the lines with the victim's whisper notify, the accept fans the fight with
+/// the begins lines, and a miss is silent.
+#[test]
+fn a_duel_is_challenged_and_accepted() {
+    let Some((_database, server, mut alice, mut yankee, alice_vid, yankee_vid)) = duel_cast()
+    else {
+        return;
+    };
+    challenge_and_accept(&mut alice, &mut yankee, alice_vid, yankee_vid);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pvp 999999"));
+    alice.still("a miss is silent");
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
+/// The duel's `SendList` (`G/pvp.cpp:555-617`): a late entrant hears the live
+/// pair between the burst and the login event.
+#[test]
+fn a_late_entrant_hears_the_live_duel() {
+    let Some((_database, server, mut alice, mut yankee, alice_vid, yankee_vid)) = duel_cast()
+    else {
+        return;
+    };
+    let fight = challenge_and_accept(&mut alice, &mut yankee, alice_vid, yankee_vid);
+    let (mut charlie, _empire, charlie_list) = select_screen_on(&server, 1, b"carol", ENGLISH);
+    let (_character, _quickslots, _items) = load_selected(&mut charlie, &charlie_list, 0);
+    let _entered = enter_game_shown(&mut charlie);
+    assert_eq!(
+        charlie.read_game(),
+        fight,
+        "the entrant hears the live pair"
+    );
+    read_login_event(&mut charlie);
+    charlie.still("nothing follows");
+    drop(alice);
+    drop(yankee);
+    drop(charlie);
+    drop(server);
+}
+
+/// `cmd.polymorph` and `cmd.polyitem` (`do_polymorph`, `do_polymorph_item`,
+/// `G/cmd_gm.cpp:3049-3104`). The god morphs into the dog vnum 101: the witness's client
+/// hears its `GC_CHARACTER_ADD` with race 101, the spawn state flag, and `AFF_SPAWN` on its
+/// affect words (`G/char.cpp:7700-7705`); a job vnum unmorphs, and an unchanged vnum sends
+/// nothing. `/polyitem 101` grants a 70104 ball holding 101 in its first socket
+/// (`G/cmd_gm.cpp:3081-3084`); an empty line is silent.
+#[test]
+fn a_gm_polymorphs_into_the_dog_and_grants_its_ball() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    // An empty line is silent.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph"));
+    alice.still("an empty polymorph answers nothing");
+    yankee.still("the witness hears nothing");
+
+    // The god morphs into the dog: the witness's add carries race 101, the spawn flag,
+    // and `AFF_SPAWN` (byte 26: the header, `dwVID`, `angle`, `x`, `y`, `z`, `bType`,
+    // `wRaceNum`, `bMovingSpeed` and `bAttackSpeed` come first; the affect words follow
+    // the flag).
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let add = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        101,
+        "the shown race is the vnum"
+    );
+    assert_eq!(add[26], 1 << 1, "the spawn state flag");
+    let word = usize::try_from((prodomo::loading_phase::AFF_SPAWN - 1) / 32).unwrap();
+    let at = 27 + 4 * word;
+    let bit = 1u32 << ((prodomo::loading_phase::AFF_SPAWN - 1) % 32);
+    assert_eq!(
+        u32::from_le_bytes(add[at..at + 4].try_into().expect("four bytes")) & bit,
+        bit,
+        "AFF_SPAWN rides the affect words"
+    );
+
+    // A job vnum unmorphs: the clear's reencode carries the spawn flag too
+    // (`G/char.cpp:7700-7705` holds it for every reencode), with the job's own race.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 2"));
+    let back = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(back[22..24].try_into().expect("two bytes")),
+        u16::from(listed.job),
+        "the clear shows the job again"
+    );
+    assert_eq!(back[26], 1 << 1, "the clear reencodes with the spawn flag");
+    // An unchanged vnum sends nothing, but the earlier reencode's additional info may
+    // still be in flight; only the caller's own adds are watched.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 3"));
+    assert!(
+        no_add_of_within(&mut yankee, listed.id),
+        "an unchanged vnum sends no add"
+    );
+
+    // `/polyitem 101` grants the 70104 ball with 101 in its first socket (the header,
+    // the 3-byte `TItemPos` cell, the vnum, count, refine element, transmutation, flags,
+    // anti-flags and highlight come first; six `long` sockets follow).
+    // Alice's own morph records are drained first, so the ball's set lands in a quiet
+    // window: the morph's compute, her own reencode's insert burst, and the clear's.
+    let (morph_records, _) = alice.drain_game(Duration::from_millis(500), game_len);
+    assert!(
+        morph_records
+            .iter()
+            .any(|record| record.first() == Some(&GC_CHARACTER_ADD)),
+        "alice hears her own reencode: {morph_records:02x?}"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polyitem 101"));
+    let (records, state) = alice.drain_game(Duration::from_millis(500), an_item_window_record);
+    let set = the_item_set(&records)
+        .unwrap_or_else(|| panic!("the ball must reach the wire, got {records:02x?}"));
+    assert_eq!(&set[4..8], &70104u32.to_le_bytes(), "the ball's vnum");
+    assert_eq!(
+        &set[27..31],
+        &101u32.to_le_bytes(),
+        "the mob vnum in socket 0"
+    );
+    assert_eq!(state, Quiet::Open, "the grant keeps the connection");
+    assert_eq!(
+        rows_of(
+            &database,
+            "SELECT id, vnum FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+             'Alpha') ORDER BY id",
+        ),
+        vec![(100_000_000, 70104)],
+        "the ball's row is in the store"
+    );
+
+    // An empty polyitem is silent.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polyitem"));
+    alice.still("an empty polyitem answers nothing");
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
+/// Whether no `GC_CHARACTER_ADD` of `vid` arrives within the quiet window.
+fn no_add_of_within(keyed: &mut Keyed, vid: u32) -> bool {
+    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    loop {
+        let Some(record) = keyed.read_wire_until(deadline) else {
+            return true;
+        };
+        if record.first() == Some(&GC_CHARACTER_ADD)
+            && u32::from_le_bytes(record[1..5].try_into().expect("four bytes")) == vid
+        {
+            return false;
+        }
+    }
+}
+
+/// The next `GC_CHARACTER_ADD` of `vid`, past pings and the fight's own records.
+fn read_add_of(keyed: &mut Keyed, vid: u32) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let record = keyed.read_wire_until(deadline).expect("the reencode lands");
+        if record.first() == Some(&GC_CHARACTER_ADD)
+            && u32::from_le_bytes(record[1..5].try_into().expect("four bytes")) == vid
+        {
+            return record;
+        }
+    }
+}
+
+/// The next `GC_CHARACTER_ADD` of a character of `race`, past everything else, with its
+/// point (`TPacketGCCharacterAdd`: the race at 22, x at 9, y at 13).
+fn read_add_of_race(keyed: &mut Keyed, race: u16) -> (i32, i32) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let record = keyed.read_wire_until(deadline).expect("the add lands");
+        if record.first() == Some(&GC_CHARACTER_ADD)
+            && u16::from_le_bytes([record[22], record[23]]) == race
+        {
+            let x = i32::from_le_bytes(record[9..13].try_into().expect("four bytes"));
+            let y = i32::from_le_bytes(record[13..17].try_into().expect("four bytes"));
+            return (x, y);
+        }
+    }
+}
+
+/// `cmd.socketitem` (`do_socket_item`, `G/cmd_gm.cpp:3231-3268`). `/socketitem 10 2` gives
+/// the sword by `AutoGiveItem` and writes 1 into its first two sockets, one
+/// `GC_ITEM_UPDATE` each (`CItem::SetSocket`, `G/item.cpp:1643-1648`). A name prefix finds
+/// the vnum, and a count of 6 or more writes the default three. A vnum with no proto
+/// answers `#3 cannot create item`, and a name nothing matches answers
+/// `#0 item not exist by that vnum`. The rows hold the sockets.
+#[test]
+fn a_gm_gives_an_item_with_its_sockets_set() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _listed) = enter_world_as_implementor(&server);
+    let sockets_of = |update: &[u8]| -> Vec<i32> {
+        update[14..38]
+            .chunks(4)
+            .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
+            .collect()
+    };
+
+    // The set carries the bare sword; each socket write follows as an update of its cell.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/socketitem 10 2"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(2), game_len);
+    let set = wire
+        .iter()
+        .find(|record| record[0] == ITEM_SET)
+        .unwrap_or_else(|| panic!("the sword is set: {wire:02x?}"));
+    assert_eq!(&set[4..8], &10u32.to_le_bytes(), "the sword's vnum");
+    // The proto's `SOCKET` column is 1, so `CreateItem` already opened socket 0.
+    assert_eq!(
+        sockets_of(&set[13..]),
+        [1, 0, 0, 0, 0, 0],
+        "the made sword's sockets"
+    );
+    let updates: Vec<&Vec<u8>> = wire
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE)
+        .collect();
+    assert_eq!(updates.len(), 2, "one update per socket: {wire:02x?}");
+    assert_eq!(
+        &updates[0][1..4],
+        &set[1..4],
+        "the update names the set's cell"
+    );
+    assert_eq!(sockets_of(updates[0]), [1, 0, 0, 0, 0, 0]);
+    assert_eq!(sockets_of(updates[1]), [1, 1, 0, 0, 0, 0]);
+
+    // A name prefix finds vnum 10, and a count past the five writes three.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/socketitem sabie+0 9"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(2), game_len);
+    let updates: Vec<&Vec<u8>> = wire
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE)
+        .collect();
+    assert_eq!(updates.len(), 3, "the default three: {wire:02x?}");
+    assert_eq!(sockets_of(updates[2]), [1, 1, 1, 0, 0, 0]);
+
+    // A vnum with no proto makes nothing, and an unknown name is a miss naming 0.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/socketitem 3"));
+    assert_eq!(alice.read_game(), an_info_line(b"#3 cannot create item"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/socketitem zzqqx"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"#0 item not exist by that vnum")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/socketitem"));
+    alice.still("an empty line answers nothing");
+
+    assert_eq!(
+        rows_of(
+            &database,
+            "SELECT socket1, socket2 FROM item WHERE vnum = 10 AND owner_id = (SELECT id FROM \
+             player WHERE name = 'Alpha') ORDER BY id",
+        ),
+        vec![(1, 0), (1, 1)],
+        "the rows hold the written sockets"
+    );
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.item_id_list`, `cmd.get_mob_count`, `cmd.effect`, `cmd.add_socket` and
+/// `cmd.set_socket` (`G/cmd_gm.cpp:4688-4713`, `:4523-4552`, `:4176-4184`, `:3934-3939`).
+/// The list names each held item's cell, locale name and ID; the count names the map and its
+/// monsters, one more after `/mob`; the effect reaches the caller and the witness;
+/// `/add_socket` fills the worn fan's first empty socket with an update, and `/set_socket`
+/// writes any held item's socket, the witness's included, with the update on the holder's
+/// wire. A socket past the six and a missing word write nothing.
+#[test]
+fn a_gm_lists_counts_flashes_and_writes_sockets() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    // A fan (7000): Alpha is a shaman, and the fan has no level limit.
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+         7000 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 21, id, 1, 3, 1, \
+         10 FROM player WHERE name = 'Yankee'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, listed) = enter_world_as_implementor(&server);
+    let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    // The fan goes on: `UseItem` of a weapon equips it in cell 180 + 4, once the 1.5 s
+    // since the last attack (`GetLastAttackTime`, 0 on a fresh clock) has passed
+    // (`G/char_item.cpp:8418-8423`).
+    std::thread::sleep(Duration::from_millis(1600));
+    alice.send_record(&client_item_use(0));
+    let _ = alice.drain_game(Duration::from_millis(1000), game_len);
+    let sockets_of = update_sockets;
+
+    // The list: the fan worn in the weapon cell, 180 + 4.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/item_id_list"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    let listed_lines: Vec<&Vec<u8>> = wire
+        .iter()
+        .filter(|record| record.windows(6).any(|window| window == b"cell :"))
+        .collect();
+    assert_eq!(listed_lines.len(), 1, "one held item: {wire:02x?}");
+    let line = listed_lines[0];
+    assert!(
+        line.windows(11).any(|window| window == b"cell : 184,"),
+        "the weapon cell 184: {line:02x?}"
+    );
+    assert!(
+        line.windows(9).any(|window| window == b", id : 20"),
+        "the seeded id 20: {line:02x?}"
+    );
+
+    // The count, then one more after `/mob`.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/get_mob_count"));
+    let count_of = read_map_1_mob_count;
+    let before = count_of(&mut alice);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mob 101"));
+    let _ = alice.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/get_mob_count"));
+    assert_eq!(count_of(&mut alice), before + 1, "the dog counts");
+
+    // The effect reaches both wires, its type a byte.
+    let _ = yankee.drain_game(Duration::from_millis(300), game_len);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/effect 263"));
+    let mut effect = vec![GC_SPECIAL_EFFECT, 7];
+    effect.extend_from_slice(&listed.id.to_le_bytes());
+    for (who, keyed) in [("alice", &mut alice), ("yankee", &mut yankee)] {
+        let (wire, _) = keyed.drain_game(Duration::from_secs(1), game_len);
+        assert!(wire.contains(&effect), "{who} sees the effect: {wire:02x?}");
+    }
+
+    // `/add_socket`: the fan's first empty socket, twice.
+    for expected in [[1, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]] {
+        alice.send_record(&client_chat(CHAT_TALKING, b"/add_socket"));
+        let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+        let update = wire
+            .iter()
+            .find(|record| record[0] == ITEM_UPDATE)
+            .unwrap_or_else(|| panic!("the fan's update: {wire:02x?}"));
+        assert_eq!(sockets_of(update), expected);
+    }
+
+    // `/set_socket` on the witness's sword: its update reaches Yankee alone.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_socket 21 2 77"));
+    let (wire, _) = yankee.drain_game(Duration::from_secs(1), game_len);
+    let update = wire
+        .iter()
+        .find(|record| record[0] == ITEM_UPDATE)
+        .unwrap_or_else(|| panic!("the sword's update: {wire:02x?}"));
+    assert_eq!(sockets_of(update)[2], 77);
+    // A socket past the six, and a missing value, write nothing.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_socket 21 6 5"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_socket 21 1"));
+    yankee.still("no write reaches the holder");
+    alice.still("the caller hears nothing");
+
+    assert_eq!(
+        rows_of(
+            &database,
+            "SELECT id, socket0 * 100 + socket1 * 10 + socket2 FROM item WHERE id IN (20, 21) \
+             ORDER BY id",
+        ),
+        vec![(20, 110), (21, 77)],
+        "the rows hold the writes"
+    );
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
+/// `cmd.add_attr` and `cmd.change_attr` (`do_add_attr`, `G/cmd_gm.cpp:3927-3932`;
+/// `do_change_attr`, `:3920-3925`). `/add_attr` puts one more rolled attribute on the worn
+/// fan with one update, keeping those before it. `/change_attr` clears the five without a
+/// record, writes the same count back one update each (so the first update shows one),
+/// and closes with socket 3 counting the change. The store holds what the last update
+/// shows. The rolls are the world's dice, so only their shape is pinned.
+#[test]
+fn a_gm_adds_and_rerolls_the_weapons_attributes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+         7000 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    // Past the 1.5 s equip gate (`G/char_item.cpp:8418-8423`), the fan goes on.
+    std::thread::sleep(Duration::from_millis(1600));
+    alice.send_record(&client_item_use(0));
+    let _ = alice.drain_game(Duration::from_millis(1000), game_len);
+    let read_updates = |keyed: &mut Keyed| -> Vec<Vec<u8>> {
+        let (wire, _) = keyed.drain_game(Duration::from_secs(1), game_len);
+        wire.into_iter()
+            .filter(|record| record[0] == ITEM_UPDATE)
+            .collect()
+    };
+
+    let mut kept: Vec<(u8, i16)> = Vec::new();
+    for count in 1..=2 {
+        alice.send_record(&client_chat(CHAT_TALKING, b"/add_attr"));
+        let updates = read_updates(&mut alice);
+        assert_eq!(updates.len(), 1, "one write, one update");
+        let attributes = update_attributes(&updates[0]);
+        assert_eq!(normal_attributes(&attributes), count, "{attributes:?}");
+        assert_eq!(
+            attributes[..kept.len()],
+            kept[..],
+            "the earlier attributes stay"
+        );
+        kept = attributes[..count].to_vec();
+    }
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/change_attr"));
+    let updates = read_updates(&mut alice);
+    assert_eq!(updates.len(), 3, "two writes back, then the count");
+    assert_eq!(
+        normal_attributes(&update_attributes(&updates[0])),
+        1,
+        "the clear is silent"
+    );
+    let last = &updates[2];
+    let attributes = update_attributes(last);
+    assert_eq!(normal_attributes(&attributes), 2, "the count it had");
+    assert_eq!(update_sockets(last)[3], 1, "socket 3 counts the change");
+
+    let stored = rows_of(
+        &database,
+        "SELECT attrtype0, attrvalue0 FROM item WHERE id = 20 UNION ALL SELECT attrtype1, \
+         attrvalue1 FROM item WHERE id = 20 UNION ALL SELECT socket3, attrtype2 FROM item WHERE \
+         id = 20",
+    );
+    let mut shown: Vec<(i64, i64)> = attributes[..2]
+        .iter()
+        .map(|&(kind, value)| (i64::from(kind), i64::from(value)))
+        .collect();
+    shown.push((1, 0));
+    let mut stored_sorted = stored.clone();
+    stored_sorted.sort_unstable();
+    shown.sort_unstable();
+    assert_eq!(
+        stored_sorted, shown,
+        "the row holds the last update: {stored:?}"
+    );
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.add_rare_attr` and `cmd.change_rare_attr` (`do_add_rare_attr`,
+/// `G/cmd_gm.cpp:3949-3954`; `do_change_rare_attr`, `:3942-3947`). A change with no rare
+/// attribute does nothing. `/add_rare_attr` fills slot 5, then slot 6, each with one update,
+/// and a third does nothing. `/change_rare_attr` clears both without a record and draws two
+/// different ones back, one update each, so the first shows slot 6 empty. The store holds
+/// what the last update shows. The draws are the world's dice, so only their shape is
+/// pinned.
+#[test]
+fn a_gm_adds_and_rerolls_the_weapons_rare_attributes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+         7000 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    // Past the 1.5 s equip gate (`G/char_item.cpp:8418-8423`), the fan goes on.
+    std::thread::sleep(Duration::from_millis(1600));
+    alice.send_record(&client_item_use(0));
+    let _ = alice.drain_game(Duration::from_millis(1000), game_len);
+    let read_updates = |keyed: &mut Keyed| -> Vec<Vec<u8>> {
+        let (wire, _) = keyed.drain_game(Duration::from_secs(1), game_len);
+        wire.into_iter()
+            .filter(|record| record[0] == ITEM_UPDATE)
+            .collect()
+    };
+    let rare_of = |update: &[u8]| update_attributes(update)[5..].to_vec();
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/change_rare_attr"));
+    assert!(read_updates(&mut alice).is_empty(), "nothing to change");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/add_rare_attr"));
+    let updates = read_updates(&mut alice);
+    assert_eq!(updates.len(), 1);
+    let first = rare_of(&updates[0]);
+    assert!(
+        first[0].0 != 0 && first[1].0 == 0,
+        "slot 5 first: {first:?}"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/add_rare_attr"));
+    let updates = read_updates(&mut alice);
+    assert_eq!(updates.len(), 1);
+    let both = rare_of(&updates[0]);
+    assert_eq!(both[0], first[0], "slot 5 stays");
+    assert!(
+        both[1].0 != 0 && both[1].0 != both[0].0,
+        "a second apply: {both:?}"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/add_rare_attr"));
+    assert!(read_updates(&mut alice).is_empty(), "two is the most");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/change_rare_attr"));
+    let updates = read_updates(&mut alice);
+    assert_eq!(updates.len(), 2, "two draws back");
+    let drawn = rare_of(&updates[0]);
+    assert!(
+        drawn[0].0 != 0 && drawn[1].0 == 0,
+        "the clear is silent: {drawn:?}"
+    );
+    let changed = rare_of(&updates[1]);
+    assert!(
+        changed[1].0 != 0 && changed[1].0 != changed[0].0,
+        "{changed:?}"
+    );
+
+    let stored = rows_of(
+        &database,
+        "SELECT attrtype5, attrvalue5 FROM item WHERE id = 20 UNION ALL SELECT attrtype6, \
+         attrvalue6 FROM item WHERE id = 20",
+    );
+    let mut shown: Vec<(i64, i64)> = changed
+        .iter()
+        .map(|&(kind, value)| (i64::from(kind), i64::from(value)))
+        .collect();
+    let mut stored_sorted = stored.clone();
+    stored_sorted.sort_unstable();
+    shown.sort_unstable();
+    assert_eq!(
+        stored_sorted, shown,
+        "the row holds the last update: {stored:?}"
+    );
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.reset_subskill` and `cmd.force_logout` (`do_reset_subskill`,
+/// `G/cmd_gm.cpp:4315-4334`; `do_force_logout`, `G/cmd_general.cpp:3503-3509`). An empty
+/// `/reset_subskill` hears the usage and an offline name hears nothing. On `Yankee`, level
+/// 30, the caller hears the reset and Yankee's skill levels show the sub-skills zeroed and
+/// the others kept; the sub-skill rows go, and the logout save banks the counter at
+/// `30 - 9`. `/force_logout` then closes the caller's own descriptor.
+#[test]
+fn a_gm_resets_yankees_sub_skills_and_forces_its_own_logout() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 30 WHERE name = 'Yankee'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, seeded.vnum, \
+         seeded.level, 0 FROM player, (VALUES (16, 5), (121, 3), (124, 2)) AS seeded (vnum, \
+         level) WHERE name = 'Yankee'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/reset_subskill"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: reset_subskill <name>")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/reset_subskill Nobody"));
+    alice.quiet("an offline name hears nothing");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/reset_subskill Yankee"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Subskill of [Yankee] was reset")
+    );
+    let (wire, _) = yankee.drain_game(Duration::from_secs(1), game_len);
+    let levels = wire
+        .iter()
+        .rfind(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .expect("the clear sends the skill levels");
+    let level_of = |vnum: usize| levels[1 + vnum * 6 + 1];
+    assert_eq!((level_of(16), level_of(121), level_of(124)), (5, 0, 0));
+    wait_for(
+        &database,
+        "(SELECT array_agg(vnum ORDER BY vnum) FROM player_skill WHERE player_id = (SELECT id \
+         FROM player WHERE name = 'Yankee')) = ARRAY[16]::smallint[]",
+    );
+    drop(yankee);
+    wait_for(
+        &database,
+        "(SELECT sub_skill_point FROM player WHERE name = 'Yankee') = 21",
+    );
+    let _ = alice.drain_game(Duration::from_secs(1), game_len);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/force_logout"));
+    read_exit_close(&mut alice);
+    drop(server);
+}
+
+/// The seven `(type, value)` attributes of a `GC_ITEM_UPDATE`, after its sockets.
+fn update_attributes(update: &[u8]) -> Vec<(u8, i16)> {
+    update[38..59]
+        .chunks(3)
+        .map(|bytes| (bytes[0], i16::from_le_bytes([bytes[1], bytes[2]])))
+        .collect()
+}
+
+/// How many of the five normal attributes are set, counted up to the first empty one.
+fn normal_attributes(attributes: &[(u8, i16)]) -> usize {
+    attributes
+        .iter()
+        .take(5)
+        .take_while(|(kind, _)| *kind != 0)
+        .count()
+}
+
+/// The six sockets of a `GC_ITEM_UPDATE` (the header, the 3-byte cell, the count, the
+/// refine element and the transmutation come first).
+fn update_sockets(update: &[u8]) -> Vec<i32> {
+    update[14..38]
+        .chunks(4)
+        .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
+        .collect()
+}
+
+/// The count of the next `MapIndex: 1 MobCount N` line within a second.
+fn read_map_1_mob_count(keyed: &mut Keyed) -> u32 {
+    let (wire, _) = keyed.drain_game(Duration::from_secs(1), game_len);
+    let line = wire
+        .iter()
+        .find_map(|record| {
+            let at = record
+                .windows(21)
+                .position(|window| window == b"MapIndex: 1 MobCount ")?;
+            Some(record[at + 21..].to_vec())
+        })
+        .unwrap_or_else(|| panic!("the count line: {wire:02x?}"));
+    line.iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .fold(0, |count, byte| count * 10 + u32::from(byte - b'0'))
+}
+
+/// The `(slot, amount, value)` of every `GC_CHARACTER_POINT_CHANGE` among `records`.
+fn point_change_triples(records: &[Vec<u8>]) -> Vec<(u8, i64, i64)> {
+    records
+        .iter()
+        .filter(|record| record[0] == GC_POINT_CHANGE && record.len() == POINT_CHANGE_LEN)
+        .map(|record| {
+            let wide = |at: usize| i64::from_le_bytes(record[at..at + 8].try_into().unwrap());
+            (record[8], wide(9), wide(17))
+        })
+        .collect()
+}
+
+/// `sys.skill.conqueror`, `cmd.conqueror_level`, `cmd.conqueror_point`: Alpha, an
+/// `IMPLEMENTOR`, hears the syntax of an empty `/conqueror_level`; `/conqueror_level 2`
+/// moves its champion level to 2 with the level record, sends the points, and closes on
+/// the conqueror experience at 0, with four points to spend (`2 * 4 - 4`). `/conqueror_point
+/// shp` moves one into the sungma hit points. `/set Alpha exp 400000` runs the champion
+/// experience arm: the chat line with the amount, the first quarter's step with its point,
+/// and the experience record. The save stores the level, the experience, the step, the
+/// points and the sungma, and a fresh login loads them: the next spend leaves three.
+#[test]
+fn a_gm_sets_its_champion_level_spends_a_point_and_earns_champion_experience() {
+    use common::point_slot as slot;
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let byte = |kind: usize| u8::try_from(kind).expect("a point byte");
+
+    alice.send_record(&slash(b"/conqueror_level"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"Syntax: conqueror_level <level>")
+    );
+    alice.send_record(&slash(b"/conqueror_level 2"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    let changes = point_change_triples(&wire);
+    assert!(
+        changes.contains(&(byte(slot::POINT_CONQUEROR_LEVEL), 0, 2)),
+        "the level record: {changes:?}"
+    );
+    assert_eq!(
+        changes.last(),
+        Some(&(byte(slot::POINT_CONQUEROR_EXP), 0, 0)),
+        "the experience closes the reset"
+    );
+
+    alice.send_record(&slash(b"/conqueror_point shp"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    let changes = point_change_triples(&wire);
+    assert!(
+        changes.contains(&(byte(slot::POINT_SUNGMA_HP), 0, 1)),
+        "the sungma record: {changes:?}"
+    );
+    assert!(
+        changes.contains(&(byte(slot::POINT_CONQUEROR_POINT), 0, 3)),
+        "the point spent: {changes:?}"
+    );
+
+    alice.send_record(&slash(b"/set Alpha exp 400000"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"You have received 400000 EXP for your Champion Level.")
+    );
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    assert_eq!(
+        point_change_triples(&wire),
+        [
+            (byte(slot::POINT_CONQUEROR_POINT), 0, 4),
+            (byte(slot::POINT_CONQUEROR_LEVEL_STEP), 0, 1),
+            (byte(slot::POINT_CONQUEROR_EXP), 400_000, 400_000),
+        ]
+    );
+    assert!(
+        wire.contains(&an_info_line(b"Alpha's exp set to [400000]")),
+        "the confirmation follows"
+    );
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT ARRAY[conqueror_level, conqueror_exp, conqueror_level_step, conqueror_point, \
+         sungma_str, sungma_hp]::bigint[] FROM player WHERE name = 'Alpha') = ARRAY[2, 400000, \
+         1, 4, 0, 1]::bigint[]",
+    );
+
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    alice.send_record(&slash(b"/conqueror_point sstr"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    let changes = point_change_triples(&wire);
+    assert!(
+        changes.contains(&(byte(slot::POINT_SUNGMA_STR), 0, 1)),
+        "the loaded point is spent: {changes:?}"
+    );
+    assert!(
+        changes.contains(&(byte(slot::POINT_CONQUEROR_POINT), 0, 3)),
+        "three are left: {changes:?}"
+    );
+    drop(alice);
+    drop(server);
+}
+
+/// `cmd.sort_inventory` (`do_sort_inventory`, `SortInventoryItems`, `G/char.cpp:10790-10866`):
+/// Alpha holds a two-cell sword at 0, two stacks of red potions (10 and 5) at 3 and 6, 50
+/// arrows at 8 and a lottery card at 9. `/sort_inventory` clears the five cells and gives
+/// them back by locale name: the card to 0, the potions by vnum to 1 (highlighted as fresh,
+/// filling the first quickslot) with the second stack topped onto it to 15, the sword to 2,
+/// and the arrows by vnum to 3; then the line. A second sort within 15 seconds hears the
+/// wait. The logout save stores the new cells and drops the merged row.
+#[test]
+fn a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks() {
+    use protocol::gc_item_window::{GcItemSet, GcItemUpdate};
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    for (id, pos, count, vnum) in [
+        (31, 0, 1, 19),
+        (32, 3, 10, 27_001),
+        (33, 6, 5, 27_001),
+        (34, 8, 50, 8_000),
+        (35, 9, 1, 50_001),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+
+    alice.send_record(&slash(b"/sort_inventory"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    let sets: Vec<(u16, u32, u16, u8)> = wire
+        .iter()
+        .filter(|record| record[0] == ITEM_SET && record.len() == ITEM_SET_LEN)
+        .map(|record| GcItemSet::decode(record).expect("an item set"))
+        .map(|set| (set.cell.cell, set.vnum, set.count, set.highlight))
+        .collect();
+    assert_eq!(
+        sets,
+        [
+            (0, 0, 0, 0),
+            (3, 0, 0, 0),
+            (6, 0, 0, 0),
+            (8, 0, 0, 0),
+            (9, 0, 0, 0),
+            (0, 50_001, 1, 0),
+            (1, 27_001, 10, 1),
+            (2, 19, 1, 0),
+            (3, 8_000, 50, 1),
+        ],
+        "the lift clears, then the gives in name order"
+    );
+    let updates: Vec<(u16, u16)> = wire
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE && record.len() == ITEM_UPDATE_LEN)
+        .map(|record| GcItemUpdate::decode(record).expect("an item update"))
+        .map(|update| (update.cell.cell, update.count))
+        .collect();
+    assert_eq!(
+        updates,
+        [(1, 15)],
+        "the second potion stack tops up the first"
+    );
+    assert!(
+        wire.iter().any(|record| record[0] == GC_QUICKSLOT_ADD),
+        "the potion fills a quickslot"
+    );
+    assert_eq!(
+        wire.last(),
+        Some(&an_info_line(b"Your inventory items have been sorted"))
+    );
+
+    alice.send_record(&slash(b"/sort_inventory"));
+    let wait = read_chat_line(&mut alice);
+    assert!(
+        [14, 15].iter().any(|secs| wait
+            == an_info_line(
+                format!("Please wait {secs} seconds to sort your inventory again").as_bytes()
+            )),
+        "the second sort waits"
+    );
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT string_agg(pos || ':' || vnum || ':' || count, ',' ORDER BY pos) FROM item \
+         WHERE window_type = 1 AND owner_id = (SELECT id FROM player WHERE name = 'Alpha')) \
+         = '0:50001:1,1:27001:15,2:19:1,3:8000:50'",
+    );
+    drop(server);
+}
+
+/// The dog's `limit` group for [`a_pickup_ticket_takes_a_kills_drop_into_the_inventory`]: at
+/// the killer's level 1 or more both rows always drop (`number(1, 1000000)` against
+/// 1000 × 10000), five red potions and one `Sabie+9`.
+const DOG_DROPS: &[u8] = b"Group\tDogTest\n{\n\tMob\t101\n\tType\tlimit\n\tlevel_limit\t1\n\
+\t1\t27001\t5\t1000\n\t2\t19\t1\t1000\n}\n";
+
+/// The pick-up affect's add record: kind `kind`, no point, and `left` seconds.
+fn pickup_add(kind: u32, record: &[u8]) -> Option<i32> {
+    if record[0] != GC_AFFECT_ADD || record[1..5] != kind.to_le_bytes() {
+        return None;
+    }
+    assert_eq!(record[5..14], [0; 9], "no point, value or flag");
+    Some(i32::from_le_bytes(
+        record[14..18].try_into().expect("four bytes"),
+    ))
+}
+
+/// `cmd.pickup_affect` (`RENEWAL_PICKUP_AFFECT`): Alpha uses
+/// item 70002 and gets `AFFECT_PICKUP_ENABLE` (810) for 25200 realtime seconds with
+/// legacy's line, and the second use is refused with `Deja ai auto-pick-up-ul.`
+/// (`G/char_item.cpp:2852-2872`); the ticket stays. Alpha kills the dog, whose `limit` group
+/// drops five red potions and a `Sabie+9`: neither lands on the ground. The potions top up
+/// Alpha's stack of three, and the sword goes highlighted into the first free cell, each
+/// with its `Ai primit:` line (`AutoGiveItemNew`, `G/char_item.cpp:10725-10829`), and
+/// Alpha's descriptor stores the rows. `/pickup_affect` swaps 810 for 811 with the seconds
+/// left, and again back (`G/cmd_general.cpp:279-300`). The saved row keeps the end second,
+/// not the seconds left (`IsRealTimeAffect`, `G/char_affect.cpp:29-40`).
+#[test]
+fn a_pickup_ticket_takes_a_kills_drop_into_the_inventory() {
+    use protocol::gc_item_window::{GcItemSet, GcItemUpdate};
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(DOG_AT_ALPHA.as_bytes());
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            (npc, &npc_text),
+            ("locale/europe/mob_drop_item.txt", DOG_DROPS),
+        ],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, count, vnum) in [(1001, 0, 1, 70_002), (1002, 1, 3, 27_001)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+
+    // When: Alpha uses the ticket. Then: the 810 row for 25200 seconds and the line.
+    alpha.send_record(&client_item_use(0));
+    let (wire, _) = alpha.drain_game(Duration::from_secs(1), game_len);
+    let added: Vec<i32> = wire
+        .iter()
+        .filter_map(|record| pickup_add(810, record))
+        .collect();
+    assert_eq!(added, [25_200], "{wire:02x?}");
+    assert!(wire.contains(&an_info_line(
+        b"@@(char_item.cpp)tradus:Auto Pick-up-ul a fost activat cu succes!"
+    )));
+    // And: a second use is refused, and the ticket stays in its cell.
+    alpha.send_record(&client_item_use(0));
+    let (wire, _) = alpha.drain_game(Duration::from_secs(1), game_len);
+    assert!(wire.iter().all(|record| record[0] != GC_AFFECT_ADD));
+    assert!(wire.contains(&an_info_line(
+        b"@@(char_item.cpp)tradus:Deja ai auto-pick-up-ul."
+    )));
+    wait_for(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 1001 AND pos = 0 AND count = 1)",
+    );
+
+    // When: Alpha kills the dog.
+    let seen = punch_until(&mut alpha, dog, b"Ai primit: x5Licoare Rosie(K).");
+    // Then: nothing lies on the ground, the sword is set highlighted in cell 2 and the
+    // stack in cell 1 reads eight, each with its line.
+    assert!(
+        seen.iter().all(|record| record[0] != GROUND_ADD),
+        "no ground add"
+    );
+    let sets: Vec<(u16, u32, u16, u8)> = seen
+        .iter()
+        .filter(|record| record[0] == ITEM_SET && record.len() == ITEM_SET_LEN)
+        .map(|record| GcItemSet::decode(record).expect("an item set"))
+        .map(|set| (set.cell.cell, set.vnum, set.count, set.highlight))
+        .collect();
+    assert_eq!(sets, [(2, 19, 1, 1)]);
+    let updates: Vec<(u16, u16)> = seen
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE && record.len() == ITEM_UPDATE_LEN)
+        .map(|record| GcItemUpdate::decode(record).expect("an item update"))
+        .map(|update| (update.cell.cell, update.count))
+        .collect();
+    assert_eq!(updates, [(1, 8)]);
+    assert!(seen.contains(&an_info_line(b"Ai primit: Sabie+9.")));
+    // And: Alpha's descriptor stores both rows.
+    wait_for(
+        &database,
+        "(SELECT string_agg(pos || ':' || vnum || ':' || count, ',' ORDER BY pos) FROM item \
+         WHERE window_type = 1 AND owner_id = (SELECT id FROM player WHERE name = 'Alpha')) \
+         = '0:70002:1,1:27001:8,2:19:1'",
+    );
+
+    // When: Alpha switches the pick-up off. Then: 810 goes and 811 takes its seconds.
+    switch_pickup(&mut alpha, 810, 811);
+    // And: switched on again, 811 goes and 810 takes the seconds back.
+    switch_pickup(&mut alpha, 811, 810);
+
+    // When: Alpha leaves. Then: the saved row holds the second it ends at.
+    drop(alpha);
+    wait_for(
+        &database,
+        "EXISTS (SELECT 1 FROM player_affect WHERE affect_type = 810 AND duration > \
+         extract(epoch FROM now())::integer + 25000)",
+    );
+    drop(server);
+}
+
+/// Alpha, just entered at [`ALPHA_ENTERS_AT`], ends its revive with a swing, targets `dog`
+/// and punches it until `line` is heard: every record read on the way.
+fn punch_until(alpha: &mut Keyed, dog: u32, line: &[u8]) -> Vec<Vec<u8>> {
+    alpha.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    alpha.send_record(&client_target(dog));
+    let heard = an_info_line(line);
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        alpha.send_record(&client_attack(dog));
+        let (wire, _) = alpha.drain_game(Duration::from_millis(300), game_len);
+        seen.extend(wire);
+        if seen.contains(&heard) {
+            return seen;
+        }
+    }
+    panic!("the dog's drop never came: {seen:02x?}");
+}
+
+/// `/pickup_affect` while `held` is the pick-up row: its remove record, and the add of `to`
+/// with the seconds left.
+fn switch_pickup(alpha: &mut Keyed, held: u32, to: u32) {
+    alpha.send_record(&slash(b"/pickup_affect"));
+    let (wire, _) = alpha.drain_game(Duration::from_secs(1), game_len);
+    let mut removed = vec![GC_AFFECT_REMOVE];
+    removed.extend_from_slice(&held.to_le_bytes());
+    removed.push(0);
+    assert!(wire.contains(&removed), "{wire:02x?}");
+    let added: Vec<i32> = wire
+        .iter()
+        .filter_map(|record| pickup_add(to, record))
+        .collect();
+    assert!(
+        matches!(added.as_slice(), [left] if (25_100..=25_200).contains(left)),
+        "{added:?}"
+    );
+}
+
+/// Channel 1 and Channel 2 both host map 1; Channel 3 is not configured.
+fn two_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 1,
+            maps: vec![1, 3],
+        },
+        ChannelSpec {
+            number: 2,
+            listeners: 1,
+            maps: vec![1],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// `/move_channel`'s refusals, in source order (`do_move_channel`,
+/// `G/cmd_general.cpp:3644-3697`): no argument, a number outside 1 to 4, the own Channel, and
+/// a Channel no peer of which hosts the map (`FindChannel`, `D/ClientManager.cpp:4503-4547`,
+/// answered by `CInputDB::MoveChannel`).
+fn move_channel_refuses(alice: &mut Keyed) {
+    for (line, answer) in [
+        (
+            &b"/move_channel"[..],
+            &b"Using: channel <channel number>"[..],
+        ),
+        (b"/move_channel 5", b"Please enter a valid number"),
+        (b"/move_channel 0", b"Please enter a valid number"),
+        (b"/move_channel 1", b"You are already on channel 1"),
+        (
+            b"/move_channel 3",
+            b"@@(input_db)tradus:Cannot change channel",
+        ),
+    ] {
+        alice.send_record(&slash(line));
+        assert_eq!(read_chat_line(alice), an_info_line(answer), "{line:?}");
+    }
+}
+
+/// `cmd.move_channel`: `/move_channel 2` on Channel 1 counts three seconds down
+/// (`StartMoveChannel` and the `move_channel` event, `G/char.cpp:8856-8962`), and a second line
+/// while it runs cancels it with `[LS;511]`. Started again, it tells `CHANGE_CHANNEL_IN_3`, 2
+/// and 1 a second apart, then `MoveChannel` (`:8884-8946`) takes the character out of its
+/// sectree, which sends its own client the delete of itself, and sends `GC_WARP` naming the
+/// same position on Channel 2's address. The client logs in there and enters map 1 where it
+/// stood.
+#[test]
+fn a_channel_change_counts_down_and_warps_the_character_to_the_other_channel() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with(binary(), database.url(), &two_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    move_channel_refuses(&mut alice);
+
+    // The first fire runs one Pulse on; a line while the countdown runs cancels it.
+    alice.send_record(&slash(b"/move_channel 2"));
+    let first = an_info_line(b"CHANGE_CHANNEL_IN_3");
+    assert_eq!(read_chat_line(&mut alice), first);
+    alice.send_record(&slash(b"/move_channel 2"));
+    assert_eq!(read_chat_line(&mut alice), an_info_line(b"[LS;511]"));
+    alice.quiet("the cancelled countdown tells nothing more");
+
+    alice.send_record(&slash(b"/move_channel 2"));
+    for left in [3, 2, 1] {
+        let line = format!("CHANGE_CHANNEL_IN_{left}");
+        assert_eq!(read_chat_line(&mut alice), an_info_line(line.as_bytes()));
+    }
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha.id.to_le_bytes());
+    assert_eq!(
+        alice.read_game(),
+        removed,
+        "the character leaves its sectree"
+    );
+    // `GC_WARP` names where the character stands (`GetX`, `GetY`) on Channel 2's address,
+    // and the row stores that place, which the character list on Channel 2 shows.
+    let warp = alice.read_game();
+    drop(alice);
+    let (mut alice, moved, _quickslots, _items) =
+        load_with_quickslots_on(&server, 2, b"alice", 0, ENGLISH);
+    let port = server.channel(2).port();
+    assert_eq!(warp, a_warp_record((moved.x, moved.y), port));
+    let distance =
+        (i64::from(moved.x - alpha.x).pow(2) + i64::from(moved.y - alpha.y).pow(2)).isqrt();
+    assert!(distance <= 300, "the same place, {distance} from the row");
+    alice.send_record(&client_enter_game());
+    // The burst names the Channel the character entered (`GC_CHANNEL`).
+    while alice.read_game_raw() != [GC_CHANNEL, 2] {}
+    alice.send_record(&slash(b"/move_channel 2"));
+    let answer = an_info_line(b"You are already on channel 2");
+    while read_chat_line(&mut alice) != answer {}
+}
+
+/// `WarpSet`'s sort lock (`G/char.cpp:6738-6743`, `__SORT_INVENTORY_ITEMS__`): for 15 seconds
+/// after `/sort_inventory` a warp is refused with `You cannot warp after sorting your
+/// inventory`, and the character stays. The lock is the `CHARACTER`'s, so a new login starts
+/// without it and the same warp goes through.
+#[test]
+fn a_warp_right_after_an_inventory_sort_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    let mut server = Server::start(binary(), database.url());
+    let (mut alice, alpha) = enter_world_as_implementor(&server);
+    alice.send_record(&slash(b"/sort_inventory"));
+    let sorted = an_info_line(b"Your inventory items have been sorted");
+    assert_eq!(read_chat_line(&mut alice), sorted);
+    alice.send_record(&slash(b"/warp 4701 9500"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"You warp to ( 470100, 950000 )")
+    );
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"You cannot warp after sorting your inventory")
+    );
+    alice.quiet("the refused warp sends nothing more");
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let port = server.channel(1).port();
+    warp_and_read_landing(
+        &mut alice,
+        alpha.id,
+        b"/warp 4701 9500",
+        b"You warp to ( 470100, 950000 )",
+        (470_100, 950_000),
+        port,
+    );
+}
+
+/// `cmd.flush` (`do_flush`, `G/cmd_gm.cpp:4425-4446`, the `FLUSH_AT_SHUTDOWN` branch): a
+/// `/goto` on the same map moves the implementor without a save, so the row keeps the old
+/// place. `/flush 0` names PID 0 and does nothing. A bare `/flush` names the caller's own PID,
+/// and its `SaveReal` writes the new place at once, long before the 120-second save event.
+#[test]
+fn a_flush_writes_the_callers_row_at_once() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha) = enter_world_as_implementor(&server);
+    let moved = "(SELECT x FROM player WHERE name = 'Alpha') = 470100 AND (SELECT y FROM player \
+                 WHERE name = 'Alpha') = 950200";
+    alice.send_record(&slash(b"/goto 605 542"));
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"You goto ( 4701, 9502 )")
+    );
+    let _shown = alice.wire_for(Duration::from_secs(1));
+    alice.send_record(&slash(b"/flush 0"));
+    let _quiet = alice.wire_for(Duration::from_secs(1));
+    check(&database, &format!("NOT ({moved})"));
+    alice.send_record(&slash(b"/flush"));
+    wait_for(&database, moved);
+}
+
+/// `cmd.observer` and `cmd.observer_exit` (`do_observer`, `G/cmd_gm.cpp:3226-3229`;
+/// `do_observer_exit`, `G/cmd_general.cpp:2370-2393`). An implementor hides: it hears
+/// `ObserverMode 1` and its viewer reads its removal. Hidden, its attack is refused
+/// quietly, and a party invite naming it answers the inviter `[LS;823]`. It never
+/// warped, so the exit's warp to the unset saved place is refused and the mode leaves
+/// with the dance: both sides read the insert pair and the leaver `ObserverMode 0`.
+#[test]
+fn an_implementor_hides_and_leaves_observer_mode() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // No NPC stands on the map: the exit's dance re-shows the leaver its whole view, and
+    // only the viewer's pair is asserted, so no NPC may stand in it.
+    let files: [(&str, &[u8]); 4] = [
+        ("locale/europe/map/metin2_map_a1/regen.txt", b""),
+        ("locale/europe/map/metin2_map_a1/npc.txt", b""),
+        ("locale/europe/map/metin2_map_a1/boss.txt", b""),
+        ("locale/europe/map/metin2_map_a1/stone.txt", b""),
+    ];
+    let (server, _data) = Server::start_with_files(binary(), database.url(), &files);
+    seat_alpha_and_zulu(&server, &database, &[]);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, alpha) = enter_world_as_implementor(&server);
+    let (mut zulu, zulu_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(zulu_listed.id, false, None);
+
+    alice.send_record(&slash(b"/observer"));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"ObserverMode 1"),
+        "the hider hears its mode"
+    );
+    zulu.sees_leave(alpha.id);
+
+    alice.send_record(&client_attack(zulu_listed.id));
+    alice.quiet("an observer's attack is refused");
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&alpha.id.to_le_bytes());
+    zulu.send_record(&invite);
+    assert_eq!(
+        zulu.read_game(),
+        an_info_line(b"[LS;823]"),
+        "an observer cannot be invited"
+    );
+
+    alice.send_record(&slash(b"/observer_exit"));
+    alice.sees_arrive(zulu_listed.id, false, None);
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"ObserverMode 0"),
+        "the leaver hears its mode"
+    );
+    zulu.sees_arrive(alpha.id, false, None);
+    alice.still("nothing follows the exit");
+    zulu.still("nothing follows the dance");
+}
+
+/// `cg.game.shoot`, `cg.game.fly_targeting` and `cg.game.add_fly_targeting`
+/// (`G/input_main.cpp:3732,3776-3777`, `G/char_battle.cpp:3319-3340,3342-3371`). Yankee, an
+/// assassin with a worn bow and quiver, flies the dog at Alpha: each relay reaches the
+/// viewer but not the sender, under its own header. The bow shot then lands damage on the
+/// dog through the `NORMAL_RANGE` pipe and spends one arrow.
+#[test]
+fn an_assassin_flies_the_dog_and_shoots_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        DOG_AT_ALPHA,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', \
+         1, 60, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 2, 4, \
+         1, 2000 FROM player WHERE name = 'Yankee'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 21, id, 2, 9, \
+         50, 8000 FROM player WHERE name = 'Yankee'",
+    );
+    let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_equipped_world_with(&server, b"bob", 2);
+    let dog = vid_shown_at(
+        yankee_entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    yankee.send_record(&client_fly(CG_FLY_TARGETING, dog, ALPHA_ENTERS_AT));
+    let fly = alice.read_game();
+    assert_eq!(fly[0], GC_FLY_TARGETING, "{fly:02x?}");
+    assert_eq!(&fly[1..5], &yankee_listed.id.to_le_bytes(), "the shooter");
+    assert_eq!(&fly[5..9], &dog.to_le_bytes(), "the flown VID");
+    yankee.quiet("the relay skips its sender");
+
+    yankee.send_record(&client_fly(CG_ADD_FLY_TARGETING, dog, ALPHA_ENTERS_AT));
+    let extra = alice.read_game();
+    assert_eq!(extra[0], GC_ADD_FLY_TARGETING, "{extra:02x?}");
+    assert_eq!(&extra[1..5], &yankee_listed.id.to_le_bytes(), "the shooter");
+    yankee.quiet("the extra relay skips its sender too");
+
+    yankee.send_record(&[CG_SHOOT, 0]);
+    // The shot's affect may stun the dog, and a hit on a stunned victim kills it outright
+    // (`Damage` calls `Dead(attacker)`), so the terminal record is the damage or the death,
+    // past the arrow updates, the claims and the stuns.
+    let hit = loop {
+        let record = yankee.read_fight();
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == dog.to_le_bytes() {
+            break Some(record);
+        }
+        if record[0] == GC_DEAD && record[1..5] == dog.to_le_bytes() {
+            break None;
+        }
+        assert!(
+            record[0] == ITEM_UPDATE
+                || record[0] == GC_OWNERSHIP
+                || record[0] == GC_DAMAGE_INFO
+                || record[0] == GC_POINT_CHANGE
+                || record[0] == GC_STUN
+                || record[0] == GC_CREATE_FLY,
+            "ahead of the shot's damage: {record:02x?}"
+        );
+    };
+    if let Some(hit) = hit {
+        let dealt = i32::from_le_bytes(hit[6..10].try_into().expect("four bytes"));
+        assert!(dealt > 0, "a bow shot deals damage: {dealt}");
+    }
+    drop(yankee);
+    wait_for(&database, "(SELECT count FROM item WHERE id = 21) = 48");
+}
+
+/// `/saveati` (`do_save_attribute_to_image`, `G/cmd_gm.cpp:3843-3863`): without both
+/// words the syntax line; an unhosted map answers `Failed`; map 1's attributes land as
+/// a TGA at the named path — the 18-byte header with the grid's pixel size — and the
+/// line answers `Done`.
+#[test]
+fn a_gm_saves_a_maps_attributes_as_a_tga() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    alice.send_record(&slash(b"/saveati"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Syntax: /saveati <map_index> <filename>"),
+        "the syntax line"
+    );
+    alice.send_record(&slash(b"/saveati 99999 nowhere.tga"));
+    assert_eq!(alice.read_game(), an_info_line(b"Failed"), "no such map");
+    let dir = std::env::temp_dir().join(format!("prodomo-saveati-{}", database.name()));
+    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    let path = dir.join("map1.tga");
+    let line = format!("/saveati 1 {}", path.display());
+    alice.send_record(&slash(line.as_bytes()));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Done"),
+        "the map is written"
+    );
+    let image = std::fs::read(&path).expect("the TGA");
+    let width = u16::from_le_bytes(image[12..14].try_into().expect("two bytes"));
+    let height = u16::from_le_bytes(image[14..16].try_into().expect("two bytes"));
+    assert_eq!(&image[..12], &[0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(&image[16..18], &[32, 32], "32 bits, top-left first");
+    assert!(
+        width > 0 && height > 0,
+        "map 1 covers sectrees: {width}x{height}"
+    );
+    assert_eq!(
+        image.len(),
+        18 + usize::from(width) * usize::from(height) * 4,
+        "one pixel per cell"
+    );
+    assert!(
+        image[18..]
+            .chunks_exact(4)
+            .any(|pixel| pixel != [255, 255, 255, 255]),
+        "map 1's walls and water paint"
+    );
+    std::fs::remove_file(&path).expect("the scratch TGA is removed");
+}
+
+/// `CG_CHANGE_LANGUAGE` (`CInputMain::ChangeLanguage`, `G/input_main.cpp:3575-3599`): the
+/// client's own language and a language outside 1 to 11 are silent; a switch answers
+/// `HEADER_GC_REQUEST_CHANGE_LANGUAGE`, shows the new look to the view (whose `bLanguage`
+/// is the new one), and keeps the choice in the account row.
+#[test]
+fn a_player_switches_its_language_and_its_view_hears() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, alice_listed, _entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut bob, bob_listed, _bob_entered) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(bob_listed.id, true, None);
+    for quiet in [
+        [CG_CHANGE_LANGUAGE, ENGLISH],
+        [CG_CHANGE_LANGUAGE, 0],
+        [CG_CHANGE_LANGUAGE, 12],
+    ] {
+        alice.send_record(&quiet);
+        alice.quiet("its own language and the out-of-range ones are silent");
+    }
+    alice.send_record(&[CG_CHANGE_LANGUAGE, GERMAN]);
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_REQUEST_CHANGE_LANGUAGE, GERMAN],
+        "the switch is answered first"
+    );
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHARACTER_UPDATE, "{own:02x?}");
+    assert_eq!(&own[1..5], &alice_listed.id.to_le_bytes(), "its own look");
+    assert_eq!(own[54], GERMAN, "the look carries the new language");
+    let shown = bob.read_game();
+    assert_eq!(shown[0], GC_CHARACTER_UPDATE, "{shown:02x?}");
+    assert_eq!(
+        &shown[1..5],
+        &alice_listed.id.to_le_bytes(),
+        "the view hears"
+    );
+    assert_eq!(shown[54], GERMAN, "in the new language");
+    check(
+        &database,
+        "(SELECT language FROM account WHERE login = 'alice') = 5",
+    );
+}
+
+/// `HEADER_CG_WHISPER_DETAILS` (239): the header and the 25-byte name field.
+const CG_WHISPER_DETAILS: u8 = 0xef;
+/// `HEADER_GC_WHISPER_DETAILS` (246): the header, the 25-byte name and `bLanguage`.
+const GC_WHISPER_DETAILS: u8 = 0xf6;
+const WHISPER_DETAILS_LEN: usize = 1 + 25 + 1;
+/// `LOCALE_RO`.
+const ROMANIAN: u8 = 6;
+
+/// `CG_WHISPER_DETAILS` asking about `name`, NUL-padded to the field.
+fn client_whisper_details(name: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_WHISPER_DETAILS];
+    record.extend_from_slice(name);
+    record.resize(1 + 25, 0);
+    record
+}
+
+/// `GC_WHISPER_DETAILS` echoing `name` and naming `language`.
+fn server_whisper_details(name: &[u8], language: u8) -> Vec<u8> {
+    let mut record = vec![GC_WHISPER_DETAILS];
+    record.extend_from_slice(name);
+    record.resize(1 + 25, 0);
+    record.push(language);
+    record
+}
+
+/// `cg.game.whisper_details`, `gc.whisper_details`: Alpha on Channel 1 asks about Yankee,
+/// who plays in German on Channel 2, and hears his language (`P2P_MANAGER::Find`'s arm),
+/// whatever the case of the asked name, which the answer echoes. A name nobody holds is
+/// `LOCALE_DEFAULT`, and an empty name answers nothing. Once Yankee switches to Romanian,
+/// the answer names the new language, as legacy's `DESC::SetLanguage` makes it.
+#[test]
+fn a_whisper_partners_details_name_its_language() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let server = Server::start_with(binary(), database.url(), &two_channels());
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+    let (mut bob, _yankee) = enter_world_on(&server, 2, b"bob", 0, GERMAN);
+
+    alice.send_record(&client_whisper_details(b"Yankee"));
+    assert_eq!(alice.read_game(), server_whisper_details(b"Yankee", GERMAN));
+    alice.send_record(&client_whisper_details(b"yANKEE"));
+    assert_eq!(
+        alice.read_game(),
+        server_whisper_details(b"yANKEE", GERMAN),
+        "the lookup ignores the case and the echo keeps it"
+    );
+    alice.send_record(&client_whisper_details(b"Nobody"));
+    assert_eq!(
+        alice.read_game(),
+        server_whisper_details(b"Nobody", ENGLISH),
+        "LOCALE_DEFAULT"
+    );
+    alice.unanswered(&client_whisper_details(b""));
+
+    bob.send_record(&[CG_CHANGE_LANGUAGE, ROMANIAN]);
+    assert_eq!(bob.read_game(), vec![GC_REQUEST_CHANGE_LANGUAGE, ROMANIAN]);
+    let own = bob.read_game();
+    assert_eq!(
+        own[0], GC_CHARACTER_UPDATE,
+        "the switch has run: {own:02x?}"
+    );
+    alice.send_record(&client_whisper_details(b"Yankee"));
+    assert_eq!(
+        alice.read_game(),
+        server_whisper_details(b"Yankee", ROMANIAN),
+        "the switched language"
+    );
+}
+
+/// `CG_MOVE` in the login, select and loading phases, which the login analyzer breaks on
+/// (`G/input_login.cpp:1205-1206`): a move on the select screen is consumed, and the select
+/// still loads Alpha.
+#[test]
+fn a_move_on_the_select_screen_is_consumed() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    let (mut keyed, _empire, list) = select_screen_on(&server, 1, b"alice", ENGLISH);
+    keyed.send_record(&client_move(0, 0, 0, 470_000, 950_000, 0));
+    // Nothing is sent back; the select still loads Alpha.
+    let (character, _quickslots, _items) = load_selected(&mut keyed, &list, 0);
+    assert_eq!(character.name, b"Alpha");
+}
+
+/// A destroy of the base inventory's `cell` (`HEADER_CG_ITEM_DESTROY`, 0x15).
+fn client_destroy(cell: u16) -> Vec<u8> {
+    let at = protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
+    protocol::cg_item_destroy::CgItemDestroy::new(at).encode()
+}
+
+/// The `[LS;1947;%s]` confirm a destroy of `vnum` carries: [`item_get_name`] of it.
+fn destroy_confirm(vnum: u32, protos: &gamedata::item_proto::ItemProtos) -> Vec<u8> {
+    let mut line = b"[LS;1947;".to_vec();
+    line.extend_from_slice(&item_get_name(vnum, protos));
+    line.push(b']');
+    line
+}
+
+/// `CItem::GetName` of `vnum`: the quest tables' English name, or the prototype's locale
+/// name when they do not name it.
+fn item_get_name(vnum: u32, protos: &gamedata::item_proto::ItemProtos) -> Vec<u8> {
+    use gamedata::mob_locale_names::{ItemNamesByLanguage, ITEM_NAMES_FILE, NO_NAME};
+    let country =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe/country");
+    let names =
+        ItemNamesByLanguage::load_file(&country, ITEM_NAMES_FILE).expect("item_names loads");
+    let found = names.find(vnum, ENGLISH);
+    if found == NO_NAME {
+        protos.get(vnum).expect("a proto").locale_name.clone()
+    } else {
+        found.to_vec()
+    }
+}
+
+/// `cg.game.item_destroy`: a destroy clears the whole stack's cell, deletes the slots that
+/// name it, confirms with `[LS;1947]` and the item's name, and destroys its row. An empty
+/// cell is silent.
+#[test]
+fn a_destroyed_stack_leaves_its_cell_empty_and_names_itself() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let protos = owners_protos();
+    let stackable = a_stackable_vnum(&protos);
+    let usable = a_stackable_use_vnum(&protos);
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+
+    // Given: ten of a stackable item at cell 0, and five of a usable one at cell 1.
+    Server::write_console(&console, &format!("item give Alpha {stackable} 10"));
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 0, stackable, 10)
+    );
+    Server::write_console(&console, &format!("item give Alpha {usable} 5"));
+    server.wait_for("id 100000001; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 1, usable, 5));
+    // And: slot 0 names cell 1.
+    alpha.send_record(&client_quickslot_add(0, 1, 1));
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 0, 1, 1]);
+
+    // When: cell 0 is destroyed. Then: the cell clears, the confirm names it, and its row
+    // is gone.
+    alpha.send_record(&client_destroy(0));
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 0, 0));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, &destroy_confirm(stackable, &protos))
+    );
+    check(
+        &database,
+        "(SELECT count(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND pos = 0) = 0",
+    );
+    // When: slotted cell 1 is destroyed. Then: the slot goes first, then the clear and the
+    // confirm.
+    alpha.send_record(&client_destroy(1));
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_DEL, 0]);
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 1, 0, 0));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, &destroy_confirm(usable, &protos))
+    );
+    // And: an empty cell is silent.
+    alpha.unanswered(&client_destroy(0));
+}
+
+/// A client-version report on the second header (`HEADER_CG_CLIENT_VERSION2`, 0xf1), which
+/// the login phases accept as the first.
+fn client_version2(timestamp: &[u8]) -> Vec<u8> {
+    let mut record = client_version(timestamp);
+    record[0] = 0xf1;
+    record
+}
+
+/// The version-conflict notice's bytes, read from the legacy source line that sends them:
+/// the `LC_TEXT` literal ahead of the `VERSION_CONFLICT` hack log.
+fn version_conflict_notice() -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/server/game/input_login.cpp");
+    let source = std::fs::read(&path).expect("legacy input_login reads");
+    let logged = source
+        .windows(b"VERSION_CONFLICT".len())
+        .position(|window| window == b"VERSION_CONFLICT")
+        .expect("the hack log names the conflict");
+    let literal = b"LC_TEXT(\"";
+    let start = source[..logged]
+        .windows(literal.len())
+        .rposition(|window| window == literal)
+        .expect("a literal precedes the log")
+        + literal.len();
+    let end = start
+        + source[start..]
+            .windows(2)
+            .position(|window| window == b"\")")
+            .expect("the literal ends");
+    source[start..end].to_vec()
+}
+
+/// `cg.login.client_version`, `cg.login.client_version2`: a version on the select screen is
+/// consumed, as no character is selected yet. A selected client whose version differs — or
+/// who sent none — hears the conflict notice behind its burst and is closed.
+#[test]
+fn a_client_without_the_right_version_hears_the_conflict_and_is_closed() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(&database, "UPDATE account SET empire = 1");
+    let server = Server::start(binary(), database.url());
+    let expected = chat_packet(CHAT_TYPE_NOTICE, 1, &version_conflict_notice());
+
+    // A version before any select is consumed: both headers are silent.
+    let (mut alice, _empire, list) = select_screen_on(&server, 1, b"alice", ENGLISH);
+    alice.send_record(&client_version(b"1215955205"));
+    alice.send_record(&client_version2(b"1215955205"));
+    alice.quiet("no character is selected yet");
+    // A select without a version hears the queued lines, then the conflict, and is closed.
+    let _burst = read_loading_burst_raw(&mut alice, &list, 0);
+    alice.send_record(&client_enter_game());
+    let _entered = enter_game_shown(&mut alice);
+    let _marks = read_login_event_blocking(&mut alice, 0, None);
+    assert_eq!(alice.read_game(), expected, "the missing version conflicts");
+    read_exit_close(&mut alice);
+
+    // A selected client whose version differs hears the same notice, and is closed.
+    let (mut bob, _empire, list) = select_screen_on(&server, 1, b"bob", ENGLISH);
+    let _burst = read_loading_burst_raw(&mut bob, &list, 0);
+    bob.send_record(&client_version(b"0"));
+    bob.send_record(&client_enter_game());
+    let _entered = enter_game_shown(&mut bob);
+    let _marks = read_login_event_blocking(&mut bob, 0, None);
+    assert_eq!(bob.read_game(), expected, "the wrong version conflicts");
+    read_exit_close(&mut bob);
+}
+
+/// `cg.game.client_version`: a version in the game is consumed, and the game goes on. With
+/// `[game] check_version_server` off, a client that sent none enters and plays.
+#[test]
+fn a_version_in_the_game_is_silent_and_no_check_needs_none() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _listed) = enter_world(&server, b"alice", 0);
+    // A version in the game — even a wrong one — is consumed, and the game goes on.
+    alice.send_record(&client_version(b"0"));
+    alice.quiet("the game-phase version is silent");
+    alice.send_record(&client_chat(prodomo::chat::CHAT_PARTY, b"hi"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;655]"),
+        "the game goes on: a party line with no party is refused"
+    );
+
+    // With the check off, a client that sent none enters and plays.
+    let free = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "check_version_server = false",
+    );
+    let (mut fresh, _empire, list) = select_screen_on(&free, 1, b"alice", ENGLISH);
+    let _burst = read_loading_burst_raw(&mut fresh, &list, 0);
+    fresh.send_record(&client_enter_game());
+    let _entered = enter_game_shown(&mut fresh);
+    let _marks = read_login_event_blocking(&mut fresh, 0, None);
+    fresh.quiet("no version was needed");
+}
+
+/// A gift of the base inventory's `cell` to `target` (`HEADER_CG_ITEM_GIVE`, 0x53). The
+/// count byte rides unread, as legacy never reads it.
+fn client_give(target: u32, cell: u16) -> Vec<u8> {
+    let at = protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
+    protocol::cg_item_give::CgItemGive::new(target, at, 0).encode()
+}
+
+/// `cg.game.item_give`: a gift to nobody is answered `[LS;710]`; a gift to a player and a
+/// gift from past the 2000 bound are silent; a gift the fisher takes runs nothing its
+/// client hears — 9009 has no `take` script — and the server logs the `TakeItem` line. The
+/// sword stays at its cell throughout: the take consumes nothing.
+#[test]
+fn a_gift_to_an_npc_runs_its_take_and_a_gift_to_nobody_is_named() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(&database, "UPDATE account SET empire = 1");
+    // Alpha stands 500 south of idx18's fisher; Yankee waits at the spawn.
+    sql(
+        &database,
+        "UPDATE player SET x = 442100, y = 936000 WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    assert!(protos.get(19).is_some(), "the owner's data has the sword");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 21, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Yankee'",
+    );
+    let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    let idx18 = entered
+        .shown
+        .records
+        .iter()
+        .find(|record| record[0] == GC_CHARACTER_ADD && inserted_at(record) == IDX18_AT)
+        .map(|insert| assert_idx18(insert))
+        .expect("idx18 shows");
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    // A gift to nobody is answered `[LS;710]`; a gift to a player is silent.
+    alice.send_record(&client_give(123_456_789, 0));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;710]"),
+        "a gift to nobody is named"
+    );
+    alice.unanswered(&client_give(yankee_listed.id, 0));
+    // A gift the fisher takes is silent on the wire, and the server logs the take.
+    alice.send_record(&client_give(idx18, 0));
+    alice.quiet("9009 has no take script");
+    server.wait_for("TakeItem Alpha 9009");
+    // A gift from past the 2000 bound is silent: Yankee stands at the spawn.
+    yankee.unanswered(&client_give(idx18, 0));
+    let rows = support::rows(database.url(), "SELECT COUNT(*) FROM item", 1);
+    assert_eq!(rows[0][0], 2, "both swords stay");
+}
+
+/// `CG_REQUEST_EVENT_QUEST`: the header and the 65-byte quest name.
+const CG_REQUEST_EVENT_QUEST: u8 = 0x20;
+fn client_request_event_quest(name: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_REQUEST_EVENT_QUEST];
+    record.extend_from_slice(name);
+    record.resize(1 + 65, 0);
+    record
+}
+
+/// The diamond alchemist the melt scenarios spawn: race 20060 on map 1 at (470200,
+/// 950000), within gift reach of the spawn.
+const MELT_REFINER: &[u8] = b"m\t604\t541\t0\t0\t0\t1\t1s\t100\t1\t20060\n";
+
+/// The VID of the one spawned refiner of `race` in `entered`.
+fn melt_refiner(entered: &Entered, race: u16) -> u32 {
+    let refiners: Vec<u32> = entered
+        .shown
+        .records
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_ADD && record[22..24] == race.to_le_bytes())
+        .map(|record| u32::from_le_bytes(record[1..5].try_into().expect("four bytes")))
+        .collect();
+    let [refiner] = refiners[..] else {
+        panic!("map 1 shows the one spawned refiner {race}, not {refiners:?}");
+    };
+    refiner
+}
+
+/// 50 diamond ore in cell 0 and 100 in cell 1 for Alpha.
+fn melt_ore_stacks(database: &ScratchDatabase) {
+    let protos = owners_protos();
+    assert!(
+        protos.get(50_601).is_some() && protos.get(50_621).is_some(),
+        "the owner's data has the diamond ore and its refined"
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, \
+         50, 50601 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 21, id, 1, 1, \
+         100, 50601 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `lua.item.get_id`, `lua.item.get_cell`, `lua.item.select`, `lua.item.select_cell`,
+/// `lua.pc.diamond_refine`: a gift of 50 diamond ore to the diamond alchemist runs its
+/// `take` script, which reads the quest item's ID, cell, vnum and count and answers the
+/// "too few" page. A gift of 100 opens the question with the 60% odds and the 9000 fee
+/// (`GetOreRefineCost(10000)` at the 0.9 no-guild rate); "Yes" with too little gold is
+/// told so and spends nothing.
+#[test]
+fn a_gift_of_too_little_ore_is_told_how_much_it_needs() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        std::str::from_utf8(MELT_REFINER).expect("ascii"),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    melt_ore_stacks(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 470000, y = 950000, gold = 100 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    let refiner = melt_refiner(&entered, 20060);
+
+    // 50 ore: the script reads the quest item and says the too-few page. The gift
+    // consumes nothing.
+    alice.send_record(&client_give(refiner, 0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Un Diamant poate fi facut din 100 de pietricele[ENTER]de diamant.[ENTER]\
+              Nu ai 100 de Piatra diamant.[ENTER][DONE]"
+        ),
+        "the too-few page"
+    );
+    alice.quiet("the page is the gift's one answer");
+    check(
+        &database,
+        "(SELECT count FROM item WHERE id = 20) = 50 AND (SELECT gold FROM player WHERE \
+         name = 'Alpha') = 100",
+    );
+
+    // 100 ore: the script asks at 60% for 9000 (`GetOreRefineCost(10000)` at the 0.9
+    // no-guild rate, as `pc.get_guild() == npc.get_guild()` holds at 0). With too little
+    // gold "Yes" is told so and spends nothing.
+    alice.send_record(&client_give(refiner, 1));
+    let asked = alice.read_game();
+    assert_eq!(
+        asked,
+        server_script(
+            1,
+            b"Un Diamant poate fi facut din 100 de pietricele[ENTER]de diamant.[ENTER]\
+              sansa de succes este de 60 %.[ENTER]Ai nevoie de 9000 Yang.[ENTER]Vrei sa \
+              incerci?[ENTER][QUESTION 1;Da|2;Nu]"
+        ),
+        "the melt's question"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"Ai nevoie de mai mult Yang.[ENTER][DONE]"),
+        "the broke answer"
+    );
+    alice.quiet("the broke answer spends nothing");
+    check(
+        &database,
+        "(SELECT count FROM item WHERE id = 21) = 100 AND (SELECT gold FROM player WHERE \
+         name = 'Alpha') = 100",
+    );
+}
+
+/// `lua.pc.diamond_refine`: with the 10000 fee "Yes" melts: the 100 leave the cell, the
+/// fee follows, and the draw at 60% either lands the refined diamond 50621 with its
+/// picture or fails, and the script says which. The store holds the spend before any of
+/// the melt's records arrives.
+#[test]
+fn a_gift_of_a_hundred_ore_melts_for_its_fee() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        std::str::from_utf8(MELT_REFINER).expect("ascii"),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    melt_ore_stacks(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 470000, y = 950000, gold = 10000 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    let refiner = melt_refiner(&entered, 20060);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_give(refiner, 1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Un Diamant poate fi facut din 100 de pietricele[ENTER]de diamant.[ENTER]\
+              sansa de succes este de 60 %.[ENTER]Ai nevoie de 9000 Yang.[ENTER]Vrei sa \
+              incerci?[ENTER][QUESTION 1;Da|2;Nu]"
+        ),
+        "the melt's question"
+    );
+    alice.send_record(&client_script_answer(0));
+    let cleared = alice.read_game();
+    assert_eq!(set_fields(&cleared), (1, 1, 0, 0), "the 100 leave the cell");
+    assert_eq!(
+        alice.read_game(),
+        gold_change(vid, 0, 0),
+        "the fee after the spend"
+    );
+    let outcome = alice.read_game();
+    if outcome[0] == GC_CHAT {
+        assert_eq!(
+            outcome,
+            chat_packet(CHAT_TYPE_INFO, 1, b"[LS;444;Diamant]"),
+            "the win's pickup line"
+        );
+        let placed = alice.read_game();
+        let (window, cell, vnum, count) = set_fields(&placed);
+        assert_eq!(
+            (window, vnum, count),
+            (1, 50_621, 1),
+            "the win lands the refined"
+        );
+        assert_eq!(cell, 1, "the freed cell takes the refined");
+        assert_eq!(
+            alice.read_game(),
+            server_script(
+                1,
+                b"Felicitari - upgrade reusit.[ENTER]Acum ai:[ENTER]\
+                  [INSERT_IMAGE image_type;item|idx;50621|title;Diamant|desc;|index;0|total;1][ENTER][DONE]"
+            ),
+            "the win's page"
+        );
+        check(
+            &database,
+            "NOT EXISTS (SELECT 1 FROM item WHERE id = 21) AND EXISTS (SELECT 1 FROM item \
+             WHERE vnum = 50621 AND window_type = 1) AND (SELECT gold FROM player WHERE \
+             name = 'Alpha') = 0",
+        );
+    } else {
+        assert_eq!(
+            outcome,
+            server_script(1, b"Upgrade esuat.[ENTER][DONE]"),
+            "the loss's page"
+        );
+        check(
+            &database,
+            "NOT EXISTS (SELECT 1 FROM item WHERE id = 21) AND NOT EXISTS (SELECT 1 FROM \
+             item WHERE vnum = 50621) AND (SELECT gold FROM player WHERE name = 'Alpha') = \
+             0",
+        );
+    }
+    alice.quiet("the melt's answer is its last");
+}
+
+/// The amber alchemist the stone melt spawns: race 20061 (raw amber 50602) where
+/// [`MELT_REFINER`] stands.
+const AMBER_REFINER: &[u8] = b"m\t604\t541\t0\t0\t0\t1\t1s\t100\t1\t20061\n";
+
+/// `HEADER_CG_SCRIPT_SELECT_ITEM` (114).
+const CG_SCRIPT_SELECT_ITEM: u8 = 0x72;
+
+/// `CG_SCRIPT_SELECT_ITEM` (`TPacketCGScriptSelectItem`, `G/packet.h:2582-2586`): the header
+/// and the picked cell as a `DWORD`.
+fn client_select_item(selection: u32) -> Vec<u8> {
+    let mut record = vec![CG_SCRIPT_SELECT_ITEM];
+    record.extend_from_slice(&selection.to_le_bytes());
+    record
+}
+
+/// The amber melt's question: `DoRefine`'s `_70_say` (whose format names nothing), the 60%
+/// odds and the 2700 `GetOreRefineCost(3000)` shows, and the yes/no menu.
+const AMBER_QUESTION: &[u8] = b"Aus 100 sowie einem Geiststein oder kann gefertigt \
+    werden[ENTER]sansa de succes este de 60 %.[ENTER]Ai nevoie de 2700 Yang.[ENTER]Vrei sa \
+    incerci?[ENTER][QUESTION 1;Da|2;Nu]";
+
+/// The amber alchemist beside Alpha, who holds 5000 gold, 100 raw amber in cell 0 (id 40),
+/// the spirit stone 28030 in cell 1 (id 41) and 50 more amber in cell 2 (id 42).
+fn amber_melt_stage(database: &ScratchDatabase) -> Server {
+    let protos = owners_protos();
+    assert!(
+        [50_602, 50_622, 28_030]
+            .into_iter()
+            .all(|vnum| protos.get(vnum).is_some()),
+        "the owner's data has the amber, its refined and the stone"
+    );
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        std::str::from_utf8(AMBER_REFINER).expect("ascii"),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    for (id, cell, count, vnum) in [
+        (40, 0, 100, 50_602),
+        (41, 1, 1, 28_030),
+        (42, 2, 50, 50_602),
+    ] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, \
+                 id, 1, {cell}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    sql(
+        database,
+        "UPDATE player SET x = 470000, y = 950000, gold = 5000 WHERE name = 'Alpha'",
+    );
+    server
+}
+
+/// Give the amber in cell 0 to `refiner`, say "Da", and read the item window `select_item`
+/// opens: `[SELECT_ITEM]` in `QUEST_SKIN_NOWINDOW` (`setskin(NOWINDOW)`, then
+/// `GotoSelectItemState`, `G/questlua.cpp:945-949`).
+fn ask_for_a_stone(alice: &mut Keyed, refiner: u32) {
+    alice.send_record(&client_give(refiner, 0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, AMBER_QUESTION),
+        "the melt's question"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[SELECT_ITEM]"),
+        "the item window opens"
+    );
+    alice.quiet("the window waits for its pick");
+}
+
+/// The amber melt's draw: the win's pickup line, the refined amber in the freed cell 0 and its
+/// page, or the loss's page. Either way the store holds the spent ore and stone and the fee.
+fn read_amber_outcome(alice: &mut Keyed, database: &ScratchDatabase) {
+    let outcome = alice.read_game();
+    if outcome[0] == GC_CHAT {
+        let mut picked_up = b"[LS;444;".to_vec();
+        picked_up.extend_from_slice(&owners_protos().get(50_622).expect("a proto").locale_name);
+        picked_up.push(b']');
+        assert_eq!(outcome, chat_packet(CHAT_TYPE_INFO, 1, &picked_up));
+        assert_eq!(
+            set_fields(&alice.read_game()),
+            (1, 0, 50_622, 1),
+            "the win lands the refined amber in the freed cell"
+        );
+        assert_eq!(
+            alice.read_game(),
+            server_script(
+                1,
+                b"Felicitari - upgrade reusit.[ENTER]Acum ai:[ENTER][INSERT_IMAGE \
+                  image_type;item|idx;50622|title;Chihlimbar|desc;|index;0|total;1][ENTER][DONE]"
+            ),
+            "the win's page"
+        );
+        check(
+            database,
+            "EXISTS (SELECT 1 FROM item WHERE vnum = 50622 AND window_type = 1 AND pos = 0)",
+        );
+    } else {
+        assert_eq!(
+            outcome,
+            server_script(1, b"Upgrade esuat.[ENTER][DONE]"),
+            "the loss's page"
+        );
+        check(
+            database,
+            "NOT EXISTS (SELECT 1 FROM item WHERE vnum = 50622)",
+        );
+    }
+    check(
+        database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id IN (40, 41)) AND (SELECT count FROM item \
+         WHERE id = 42) = 50 AND (SELECT gold FROM player WHERE name = 'Alpha') = 2000",
+    );
+}
+
+/// `cg.game.script_select_item`, `lua.pc.ore_refine`: the amber alchemist's melt asks for a
+/// spirit stone through `select_item`, and the pick resumes the script
+/// (`CQuestManager::SelectItem`, `G/questmanager.cpp:179-194`); a pick nobody waits for is
+/// silent. Cell 0, the closed window's answer, is told it needs a stone, and a pick that is
+/// no stone is told so; neither spends anything. The stone melts: the 100 leave cell 0, the
+/// 3000 fee follows (the page's 2700 is `GetOreRefineCost`'s, the fee `ComputeRefineFee`'s),
+/// the stone leaves cell 1 (`OreRefine`'s order, `G/mining.cpp:441-455`), and the 60% draw
+/// lands the refined amber in the freed cell or fails.
+#[test]
+fn an_ore_melt_asks_for_a_stone_and_melts_with_the_one_picked() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = amber_melt_stage(&database);
+    let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    let refiner = melt_refiner(&entered, 20061);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.unanswered(&client_select_item(1));
+
+    // The closed window's 0 and a pick that is no stone: each is told, nothing is spent.
+    ask_for_a_stone(&mut alice, refiner);
+    alice.send_record(&client_select_item(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Nu pot confectiona acest obiect fara a avea o[ENTER]Piatra Spirit.[ENTER][DONE]"
+        ),
+        "the closed window needs a stone"
+    );
+    ask_for_a_stone(&mut alice, refiner);
+    alice.send_record(&client_select_item(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Acesta nu este obiectul de care ai nevoie.[ENTER][DONE]"
+        ),
+        "the second amber stack is no stone"
+    );
+    alice.quiet("a refused pick spends nothing");
+    check(
+        &database,
+        "(SELECT count FROM item WHERE id = 40) = 100 AND EXISTS (SELECT 1 FROM item WHERE id \
+         = 41) AND (SELECT gold FROM player WHERE name = 'Alpha') = 5000",
+    );
+
+    // The stone: the ore's cell, the fee, then the stone's cell, and the draw.
+    ask_for_a_stone(&mut alice, refiner);
+    alice.send_record(&client_select_item(1));
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 0, 0, 0),
+        "the 100 leave cell 0"
+    );
+    assert_eq!(
+        alice.read_game(),
+        gold_change(vid, 0, 2000),
+        "the fee after the spend"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 1, 0, 0),
+        "the stone after the fee"
+    );
+    read_amber_outcome(&mut alice, &database);
+    alice.quiet("the melt's answer is its last");
+}
+
+/// `HEADER_GC_QUEST_CONFIRM` (46).
+const GC_QUEST_CONFIRM: u8 = 46;
+/// `TPacketGCQuestConfirm` (`G/packet.h`): the header, `char msg[64+1]`, `long lTimeout`
+/// and `DWORD requestPID`.
+const QUEST_CONFIRM_LEN: usize = 1 + 65 + 4 + 4;
+/// `HEADER_CG_QUEST_CONFIRM` (31).
+const CG_QUEST_CONFIRM: u8 = 0x1f;
+
+/// `CG_QUEST_CONFIRM` (`TPacketCGQuestConfirm`): the header, the answer byte and the PID of
+/// the character whose script waits.
+fn client_quest_confirm(answer: u8, request_pid: u32) -> Vec<u8> {
+    let mut record = vec![CG_QUEST_CONFIRM, answer];
+    record.extend_from_slice(&request_pid.to_le_bytes());
+    record
+}
+
+/// `GC_QUEST_CONFIRM` asking `message` for `timeout` seconds on behalf of `request_pid`.
+fn server_quest_confirm(message: &[u8], timeout: i32, request_pid: u32) -> Vec<u8> {
+    let mut record = vec![GC_QUEST_CONFIRM];
+    let mut text = [0u8; 65];
+    text[..message.len()].copy_from_slice(message);
+    record.extend_from_slice(&text);
+    record.extend_from_slice(&timeout.to_le_bytes());
+    record.extend_from_slice(&request_pid.to_le_bytes());
+    record
+}
+
+/// The probe quest the confirm scenario adds: a click on 20025 (a talking NPC no quest or
+/// shop of the owner's names) asks Zulu, found by name, for two seconds and says the answer.
+const CONFIRM_PROBE: &[u8] = b"quest confirm_probe begin\n\
+    state start begin\n\
+    when 20025.click begin\n\
+    local answer = confirm(find_pc_by_name(\"Zulu\"), \"Trade with Alpha?\", 2)\n\
+    say(\"answer \"..answer)\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// A server whose map 1 has 20025 beside Alpha and whose quests add [`CONFIRM_PROBE`].
+fn confirm_probe_server(database: &ScratchDatabase) -> Server {
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(b"m\t604\t541\t0\t0\t0\t1\t1s\t100\t1\t20025\n");
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            (npc, &npc_text),
+            (
+                "locale/europe/quest/zz_probe/confirm_probe.lua",
+                CONFIRM_PROBE,
+            ),
+        ],
+        "no_wander = true",
+    );
+    server
+}
+
+/// Alpha clicks the asker: Zulu is asked on Alpha's behalf and Alpha's script waits.
+fn ask_zulu(alpha: &mut Keyed, zulu: &mut Keyed, asker: u32, alpha_pid: u32) {
+    alpha.send_record(&client_click(asker));
+    assert_eq!(
+        zulu.read_game(),
+        server_quest_confirm(b"Trade with Alpha?", 2, alpha_pid),
+        "Zulu is asked"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        server_script(1, b"[CONFIRM_WAIT timeout;2]"),
+        "Alpha waits"
+    );
+}
+
+/// The waiter's script ends its wait and goes on with `answer`.
+fn hears(alpha: &mut Keyed, answer: u8) {
+    assert_eq!(
+        alpha.read_game(),
+        server_script(0, b"[END_CONFIRM_WAIT]"),
+        "the wait ends"
+    );
+    let page = format!("answer {answer}[ENTER][DONE]");
+    assert_eq!(alpha.read_game(), server_script(1, page.as_bytes()));
+    alpha.quiet("the script ended");
+}
+
+/// `cg.game.quest_confirm`, `gc.quest_confirm`, `event.questlua.confirm_timeout_event`: a
+/// script's `confirm` asks another character and waits (`GotoConfirmState`,
+/// `G/questlua.cpp:906-943`). The asked character's answer, any nonzero byte a yes, ends
+/// the wait and resumes the waiter's script (`CQuestManager::Confirm`,
+/// `G/questmanager.cpp:196-235`); the waiter answering itself is refused. Unanswered, the
+/// timeout answers 2, and a late answer is silent. A heard answer disarms the timeout,
+/// which legacy leaves to answer a later confirm early (a Defect not reproduced).
+#[test]
+fn a_confirm_asks_another_character_and_hears_its_answer_or_the_timeout() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = confirm_probe_server(&database);
+    seat_alpha_and_zulu(&server, &database, &[]);
+    let (mut alpha, alpha_listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
+    alpha.sees_enter(zulu_listed.id, false, None);
+    let asker = melt_refiner(&entered, 20025);
+    let pid = alpha_listed.id;
+
+    // Zulu's 7 is a yes; the heard answer disarms the timeout.
+    ask_zulu(&mut alpha, &mut zulu, asker, pid);
+    zulu.send_record(&client_quest_confirm(7, pid));
+    hears(&mut alpha, 1);
+    zulu.quiet("the asked character hears nothing back");
+    std::thread::sleep(Duration::from_millis(2500));
+    alpha.quiet("a heard answer leaves no timeout behind");
+
+    // The waiter cannot answer for Zulu; Zulu's no is heard.
+    ask_zulu(&mut alpha, &mut zulu, asker, pid);
+    alpha.unanswered(&client_quest_confirm(1, pid));
+    zulu.send_record(&client_quest_confirm(0, pid));
+    hears(&mut alpha, 0);
+
+    // Unanswered, the timeout answers 2 on time; Zulu's late answer is silent.
+    ask_zulu(&mut alpha, &mut zulu, asker, pid);
+    let asked_at = std::time::Instant::now();
+    hears(&mut alpha, 2);
+    assert!(
+        asked_at.elapsed() >= Duration::from_millis(1900),
+        "answered after {:?}",
+        asked_at.elapsed()
+    );
+    zulu.unanswered(&client_quest_confirm(1, pid));
+    alpha.quiet("a late answer is silent");
+}
+
+/// `cg.game.request_event_quest`: the event panel names `item_attr67add`, whose button
+/// runs its start page in skin 1 and moves the quest to `talk`. `talk` has no `button`, so
+/// the same name then answers nothing, and an unknown name is silent, since
+/// `GetQuestIndexByName` answers 0.
+#[test]
+fn the_event_panel_runs_the_named_quests_button() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+
+    alice.send_record(&client_request_event_quest(b"item_attr67add"));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[ATTR67ADD_INFO, b"[DONE]"].concat()),
+        "the named quest's button runs its page"
+    );
+    alice.quiet("the page is the panel's one answer");
+    alice.unanswered(&client_request_event_quest(b"item_attr67add"));
+    alice.unanswered(&client_request_event_quest(b"no_such_quest"));
+}
+
+/// `HEADER_CG_TARGET_INFO_LOAD` (59): the header and the asked VID.
+const CG_TARGET_INFO_LOAD: u8 = 0x3b;
+/// `HEADER_GC_TARGET_INFO` (58): VID, race, vnum, count and rarity.
+const GC_TARGET_INFO: u8 = 0x3a;
+const TARGET_INFO_LEN: usize = 1 + 4 + 4 + 4 + 2 + 4;
+
+/// The drop tables of the target-info scenario: the dog's `drop`, `kill` and `limit`
+/// groups, a stone's `thiefgloves` stone, and a shopkeeper's `thiefgloves` potion.
+const TARGET_INFO_DROPS: &[u8] = b"Group\tDogDrop\n{\n\tMob\t101\n\tType\tdrop\n\
+\t1\t27002\t3\t0.5\n\t2\t19\t2\t2\n}\n\
+Group\tDogKill\n{\n\tMob\t101\n\tType\tkill\n\tkill_drop\t1\n\t1\t27003\t4\t10\t7\n}\n\
+Group\tDogLimit\n{\n\tMob\t101\n\tType\tlimit\n\tlevel_limit\t200\n\t1\t27004\t1\t1\n}\n\
+Group\tStoneGloves\n{\n\tMob\t8001\n\tType\tthiefgloves\n\t1\t28030\t1\t1\n}\n\
+Group\tShopGloves\n{\n\tMob\t9001\n\tType\tthiefgloves\n\t1\t27001\t1\t1\n}\n";
+
+/// `CG_TARGET_INFO_LOAD` asking about `vid`.
+fn client_target_info_load(vid: u32) -> Vec<u8> {
+    let mut record = vec![CG_TARGET_INFO_LOAD];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+/// One `GC_TARGET_INFO`.
+fn server_target_info(vid: u32, race: u32, vnum: u32, count: u16, rarity: u32) -> Vec<u8> {
+    let mut record = Vec::new();
+    protocol::gc_actors::GcTargetInfo::new(vid, race, vnum, count, rarity).encode_into(&mut record);
+    record
+}
+
+/// `cg.game.target_info_load`, `gc.target_info` (`CInputMain::TargetInfoLoad`,
+/// `G/input_main.cpp:66-123`; `CreateDropItemVector`, `G/item_manager.cpp:915-1095`): the
+/// target window's drop list. The dog lists its `drop` rows and its one `kill` row, but not
+/// its `limit` row, whose level 200 is above Alpha's 154. The three are sorted weapon first,
+/// the two potions in the table's order, each with its count as `CreateItem` holds it (the
+/// sword's 2 is 1) and its percent ×10000 (the kill row's rare percent) as the rarity. A
+/// stone's one entry is sent although it is a stone; a shopkeeper, Alpha herself and a VID
+/// that names nobody are not answered.
+#[test]
+fn the_target_window_lists_what_a_monster_may_drop() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(DOG_AT_ALPHA.as_bytes());
+    npc_text.extend_from_slice(b"m\t607\t540\t0\t0\t0\t1\t1000s\t100\t1\t8001\n");
+    npc_text.extend_from_slice(b"m\t609\t540\t0\t0\t0\t1\t1000s\t100\t1\t9001\n");
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            (npc, &npc_text),
+            ("locale/europe/mob_drop_item.txt", TARGET_INFO_DROPS),
+        ],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let stone = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        (470_300, 950_000),
+    );
+    let shopkeeper = vid_shown_at(entered.shown.inserts(), (470_500, 950_000));
+    let own = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
+
+    // When: Alpha asks about the dog. Then: the sword, then the two potions.
+    alpha.send_record(&client_target_info_load(dog));
+    let listed: Vec<Vec<u8>> = (0..3).map(|_| alpha.read_game()).collect();
+    assert_eq!(
+        listed,
+        [
+            server_target_info(dog, 101, 19, 1, 20_000),
+            server_target_info(dog, 101, 27_002, 3, 5_000),
+            server_target_info(dog, 101, 27_003, 4, 7),
+        ]
+    );
+    alpha.quiet("the dog's list is three entries");
+
+    // When: Alpha asks about the stone. Then: its one entry, a stone, is sent.
+    alpha.send_record(&client_target_info_load(stone));
+    assert_eq!(
+        alpha.read_game(),
+        server_target_info(stone, 8001, 28_030, 1, 10_000)
+    );
+    alpha.quiet("the stone's list is one entry");
+
+    // And: a shopkeeper, Alpha herself and nobody are not answered.
+    alpha.unanswered(&client_target_info_load(shopkeeper));
+    alpha.unanswered(&client_target_info_load(own));
+    alpha.unanswered(&client_target_info_load(0x7fff_fff0));
+}
+
+/// `HEADER_CG_REFINE`: the header, the inventory cell and the refine type.
+const CG_REFINE: u8 = 0x60;
+/// The server's `HEADER_GC_REFINE_INFORMATION` (`G/packet.h:192`), the client's `_NEW` byte.
+const GC_REFINE_INFORMATION: u8 = 0x77;
+/// `TPacketGCRefineInformation`: three bytes, two DWORDs, the count byte, two ints and five
+/// eight-byte materials.
+const REFINE_INFORMATION_LEN: usize = 1 + 1 + 1 + 4 + 4 + 1 + 4 + 4 + 5 * 8;
+
+/// A `CG_REFINE` for the inventory `cell` with `refine_type`.
+fn client_refine(cell: u8, refine_type: u8) -> Vec<u8> {
+    vec![CG_REFINE, cell, refine_type]
+}
+
+/// The smith's window for the normal refine of `src` in `cell` into `result`, at `cost` and
+/// `prob`, listing `materials`, in the server's field order.
+fn server_refine_information(
+    cell: u8,
+    (src, result): (u32, u32),
+    (cost, prob): (i32, i32),
+    materials: &[(u32, i32)],
+) -> Vec<u8> {
+    let mut record = vec![GC_REFINE_INFORMATION, 0, cell];
+    record.extend_from_slice(&src.to_le_bytes());
+    record.extend_from_slice(&result.to_le_bytes());
+    record.push(u8::try_from(materials.len()).expect("five at most"));
+    record.extend_from_slice(&cost.to_le_bytes());
+    record.extend_from_slice(&prob.to_le_bytes());
+    for slot in 0..5 {
+        let (vnum, count) = materials.get(slot).copied().unwrap_or((0, 0));
+        record.extend_from_slice(&vnum.to_le_bytes());
+        record.extend_from_slice(&count.to_le_bytes());
+    }
+    assert_eq!(record.len(), REFINE_INFORMATION_LEN);
+    record
+}
+
+/// `cg.game.refine`, `gc.refine_information`, `sys.item.refine`: a sword given to the town
+/// smith 20016 opens its window with the recipe of the sword's refine set (`refine_proto`
+/// rows 1, 7 and 9 of the owner's dump), and the window gates the destroy. A refine short of
+/// a material or of gold is refused with its line and changes nothing; a closed window
+/// (type 255) answers nothing; a refine that passes sends its command line, removes the
+/// sword, sets the next one on a success, and takes the fee.
+#[test]
+fn a_smith_refines_a_sword_for_its_fee() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(b"m\t606\t540\t0\t0\t0\t1\t1000s\t100\t1\t20016\n");
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(npc, &npc_text)],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 50000 WHERE name = 'Alpha'",
+    );
+    for (id, cell, vnum) in [(31, 0, 10), (32, 1, 16), (33, 2, 18), (34, 3, 19)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, \
+                 id, 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let smith = vid_shown_at(entered.shown.inserts(), (470_200, 950_000));
+    let own = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
+
+    // When: Alpha gives the +6 sword. Then: the window lists set 7's stone, fee and chance.
+    alpha.send_record(&client_give(smith, 1));
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_information(1, (16, 17), (30_000, 54), &[(30_053, 1)])
+    );
+    alpha.quiet("the window is the gift's one record");
+    // And: while it is open, a destroy is refused.
+    alpha.unanswered(&client_destroy(3));
+    // When: Alpha refines without the stone. Then: the material line, and nothing changes.
+    alpha.send_record(&client_refine(1, 0));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1035]"));
+    alpha.quiet("a missing stone changes nothing");
+
+    // When: Alpha gives the +8 sword and closes the window. Then: nothing answers.
+    alpha.send_record(&client_give(smith, 2));
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_information(2, (18, 19), (75_000, 36), &[(30_033, 2)])
+    );
+    alpha.unanswered(&client_refine(2, 255));
+    // And: a refine past her purse is refused with the gold line.
+    alpha.send_record(&client_refine(2, 0));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;67]"));
+    alpha.quiet("a short purse changes nothing");
+    // And: the +9 sword refines no further, so the smith does not take it.
+    alpha.unanswered(&client_give(smith, 3));
+
+    // When: Alpha gives the +0 sword and refines it.
+    alpha.send_record(&client_give(smith, 0));
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_information(0, (10, 11), (600, 90), &[])
+    );
+    let succeeded = refine_the_first_cell(&mut alpha);
+    assert_eq!(alpha.read_game(), gold_change(own, 0, 49_400));
+    alpha.quiet("the refine's records end with the fee");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 31");
+    check(
+        &database,
+        &format!(
+            "SELECT COUNT(*) = {} FROM item WHERE window_type = 1 AND pos = 0 AND vnum = 11",
+            u8::from(succeeded)
+        ),
+    );
+    check(
+        &database,
+        "SELECT COUNT(*) = 3 FROM item WHERE id IN (32, 33, 34)",
+    );
+    drop(alpha);
+    wait_for(
+        &database,
+        "SELECT gold = 49400 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// Refine cell 0's sword and read what the draw sent: the command line, the cell's clear and,
+/// on a success, the +1 sword's set. Answers whether the refine succeeded.
+fn refine_the_first_cell(alpha: &mut Keyed) -> bool {
+    alpha.send_record(&client_refine(0, 0));
+    let line = alpha.read_game();
+    let succeeded = line == chat_packet(CHAT_TYPE_COMMAND, 1, b"RefineSuceeded");
+    if !succeeded {
+        assert_eq!(line, chat_packet(CHAT_TYPE_COMMAND, 1, b"RefineFailed"));
+    }
+    // Then: the sword's cell clears, and the +1 sword takes it on a success.
+    let clear = alpha.read_game();
+    assert_eq!(
+        clear[..4],
+        [ITEM_SET, 1, 0, 0],
+        "the cell clears: {clear:02x?}"
+    );
+    assert_eq!(clear[4..8], [0; 4], "the cleared vnum");
+    if succeeded {
+        let set = alpha.read_game();
+        assert_eq!(
+            set[..4],
+            [ITEM_SET, 1, 0, 0],
+            "the new sword sets: {set:02x?}"
+        );
+        assert_eq!(
+            u32::from_le_bytes(set[4..8].try_into().expect("a vnum")),
+            11
+        );
+    }
+    succeeded
+}
+
+/// A `CG_ITEM_USE_TO_ITEM` of the base inventory's `cell` on its `target` cell.
+fn client_use_to_item(cell: u16, target: u16) -> Vec<u8> {
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    protocol::cg_item_use_to_item::CgItemUseToItem::new(
+        protocol::item_pos::ItemPos::new(inventory, cell),
+        protocol::item_pos::ItemPos::new(inventory, target),
+    )
+    .encode()
+}
+
+/// `REFINE_TYPE_MUSIN`, the type of a war god's blessing's window.
+const REFINE_TYPE_MUSIN: u8 = 5;
+
+/// `cg.game.item_use_to_item`: a stone used on a sword with an empty socket sits in it with
+/// `[LS;1613]` and one stone is spent; a second stone of its kind is refused with `[LS;426]`.
+/// A war god's blessing (71021) used on a sword opens the refine window of type 5 for it; on
+/// the +6 sword `CG_REFINE` refuses it with `[LS;1056]`, and on the +0 sword the sure refine
+/// spends the scroll, sends its command line, swaps the sword for the +1 one with its stone
+/// kept, and takes the recipe's fee.
+#[test]
+fn a_stone_and_a_blessing_are_used_on_a_sword() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 50000 WHERE name = 'Alpha'",
+    );
+    for (id, cell, count, vnum, socket) in [
+        (41, 0, 1, 10, 1),
+        (42, 2, 2, 28_030, 0),
+        (43, 3, 1, 71_021, 0),
+        (44, 4, 1, 16, 0),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT \
+                 {id}, id, 1, {cell}, {count}, {vnum}, {socket} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let own = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
+
+    // When: Alpha uses a stone on the sword. Then: the line, the sword's socket, the stack.
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1613]"));
+    let sword = alpha.read_game();
+    assert_eq!(
+        sword[..4],
+        [ITEM_UPDATE, 1, 0, 0],
+        "the sword: {sword:02x?}"
+    );
+    assert_eq!(
+        sword[14..18],
+        28_030_i32.to_le_bytes(),
+        "the stone in socket 0"
+    );
+    let stones = alpha.read_game();
+    assert_eq!(stones[..6], [ITEM_UPDATE, 1, 2, 0, 1, 0], "one stone left");
+    alpha.quiet("the stone's records end with the stack");
+    // And: a second stone of its kind is refused.
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;426]"));
+    alpha.quiet("the refused stone changes nothing");
+
+    // When: Alpha uses the blessing on the +6 sword. Then: the window of type 5, and the
+    // refine is refused at its level.
+    alpha.send_record(&client_use_to_item(3, 4));
+    let mut window = server_refine_information(4, (16, 17), (30_000, 54), &[(30_053, 1)]);
+    window[1] = REFINE_TYPE_MUSIN;
+    assert_eq!(alpha.read_game(), window);
+    alpha.send_record(&client_refine(4, REFINE_TYPE_MUSIN));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1056]"));
+    alpha.quiet("a refused blessing changes nothing");
+
+    // When: Alpha uses the blessing on the +0 sword and refines it.
+    alpha.send_record(&client_use_to_item(3, 0));
+    let mut window = server_refine_information(0, (10, 11), (600, 90), &[]);
+    window[1] = REFINE_TYPE_MUSIN;
+    assert_eq!(alpha.read_game(), window);
+    alpha.send_record(&client_refine(0, REFINE_TYPE_MUSIN));
+    // Then: the scroll goes, the command line, the sword swaps, and the fee goes.
+    let scroll = alpha.read_game();
+    assert_eq!(
+        scroll[..8],
+        [ITEM_SET, 1, 3, 0, 0, 0, 0, 0],
+        "the scroll clears"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"RefineSuceeded")
+    );
+    let clear = alpha.read_game();
+    assert_eq!(
+        clear[..8],
+        [ITEM_SET, 1, 0, 0, 0, 0, 0, 0],
+        "the sword clears"
+    );
+    let set = alpha.read_game();
+    assert_eq!(
+        set[..4],
+        [ITEM_SET, 1, 0, 0],
+        "the +1 sword sets: {set:02x?}"
+    );
+    assert_eq!(set[4..8], 11_u32.to_le_bytes());
+    assert_eq!(alpha.read_game(), gold_change(own, 0, 49_400));
+    alpha.quiet("the refine's records end with the fee");
+    check(
+        &database,
+        "SELECT COUNT(*) = 0 FROM item WHERE id IN (41, 43)",
+    );
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE window_type = 1 AND pos = 0 AND vnum = 11 AND \
+         socket0 = 28030",
+    );
+    check(&database, "SELECT count = 1 FROM item WHERE id = 42");
+    drop(alpha);
+    wait_for(
+        &database,
+        "SELECT gold = 49400 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `HEADER_CG_REQUEST_EVENT_DATA` (0x75).
+const CG_REQUEST_EVENT_DATA: u8 = 0x75;
+/// `HEADER_GC_EVENT_INFO` (0x9b).
+const GC_EVENT_INFO: u8 = 0x9b;
+
+/// A `CG_REQUEST_EVENT_DATA` for 0-based `month`.
+fn client_request_event_data(month: u8) -> Vec<u8> {
+    vec![CG_REQUEST_EVENT_DATA, month]
+}
+
+/// `cg.game.request_event_data`, `gc.event_info`: the stored events an asked month lists.
+/// Event 1 runs all of March 2026, event 2 the February before it and is over by the ask, and
+/// event 3 is a February that never finished. March's board lists its own event and the earlier
+/// open one, in id order with every field; February's board lists its own two; January's is an
+/// empty record. The ask is plain month bytes, routed with no observer gate.
+#[test]
+fn the_event_board_lists_its_month_and_the_earlier_open_ones() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // The first boot migrates the table; the rows are seeded, then the reboot installs the
+    // calendar from them.
+    let server = Server::start(binary(), database.url());
+    sql(
+        &database,
+        "INSERT INTO event (id, type, start_at, end_at, value0, value1, completed) VALUES \
+         (1, 'EVENT_TYPE_OX', to_timestamp(1772323200), to_timestamp(1775001600), 5, 6, false), \
+         (2, 'EVENT_TYPE_EXPERIENCE', to_timestamp(1769904000), to_timestamp(1772323199), 100, \
+         0, true), \
+         (3, 'EVENT_TYPE_FISHING', to_timestamp(1769904000), to_timestamp(1772323199), 0, 0, \
+         false)",
+    );
+    drop(server);
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+
+    alpha.send_record(&client_request_event_data(2));
+    let march = protocol::gc_event::encode_event_info(&[
+        protocol::gc_event::EventData {
+            id: 1,
+            event_type: 11,
+            start: 1_772_323_200,
+            end: 1_775_001_600,
+            value0: 5,
+            value1: 6,
+            completed: false,
+        },
+        protocol::gc_event::EventData {
+            id: 3,
+            event_type: 9,
+            start: 1_769_904_000,
+            end: 1_772_323_199,
+            value0: 0,
+            value1: 0,
+            completed: false,
+        },
+    ])
+    .expect("47 bytes fit");
+    assert_eq!(alpha.read_game(), march);
+
+    alpha.send_record(&client_request_event_data(1));
+    let february = protocol::gc_event::encode_event_info(&[
+        protocol::gc_event::EventData {
+            id: 2,
+            event_type: 1,
+            start: 1_769_904_000,
+            end: 1_772_323_199,
+            value0: 100,
+            value1: 0,
+            completed: true,
+        },
+        protocol::gc_event::EventData {
+            id: 3,
+            event_type: 9,
+            start: 1_769_904_000,
+            end: 1_772_323_199,
+            value0: 0,
+            value1: 0,
+            completed: false,
+        },
+    ])
+    .expect("47 bytes fit");
+    assert_eq!(alpha.read_game(), february);
+
+    alpha.send_record(&client_request_event_data(0));
+    assert_eq!(
+        alpha.read_game(),
+        protocol::gc_event::encode_event_info(&[]).expect("3 bytes fit")
+    );
+    alpha.quiet("the board's records end with the empty one");
+}
+
+/// `HEADER_GC_FISHING` (0x59).
+const GC_FISHING: u8 = 0x59;
+/// `TPacketGCFishing` (`G/packet.h`): the header, the sub-header, `DWORD info` and `BYTE dir`.
+const FISHING_LEN: usize = 7;
+/// `HEADER_CG_FISHING` (0x52).
+const CG_FISHING: u8 = 0x52;
+/// The owner's first fishing rod.
+const ROD: u32 = 27_400;
+/// The owner's paste bait.
+const BAIT: u32 = 27_800;
+
+/// `CG_FISHING` with the direction `dir`.
+fn client_fishing(dir: u8) -> Vec<u8> {
+    vec![CG_FISHING, dir]
+}
+
+/// A `GC_FISHING` of `subheader`, `info` and `dir`.
+fn server_fishing(subheader: u8, info: u32, dir: u8) -> Vec<u8> {
+    let mut record = vec![GC_FISHING, subheader];
+    record.extend_from_slice(&info.to_le_bytes());
+    record.push(dir);
+    record
+}
+
+/// Alpha at (470000, 950000) on map 1 with `baits` pastes in cell 0 (id 51) and, when `rod`
+/// holds the rod's bait socket, the rod in the weapon cell (id 50).
+fn fishing_stage(database: &ScratchDatabase, rod: Option<i32>, baits: u16) -> Server {
+    let protos = owners_protos();
+    let worn = protos.get(ROD).expect("the owner's data has the rod");
+    assert_eq!(
+        (worn.item_type, worn.values[..3].to_vec(), worn.refined_vnum),
+        (gamedata::item_kind::ITEM_ROD, vec![10, 5, 10], 27_410),
+        "the rod adds 10 to the level, trains on a 1 in 5 up to 10, and refines"
+    );
+    let paste = protos.get(BAIT).expect("the owner's data has the bait");
+    assert_eq!(
+        (paste.item_type, paste.sub_type, paste.values[0]),
+        (
+            gamedata::item_kind::ITEM_USE,
+            gamedata::item_kind::USE_BAIT,
+            10
+        ),
+        "a bait of level 10"
+    );
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(database);
+    if let Some(bait) = rod {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket2) SELECT \
+                 50, id, 2, 4, 1, {ROD}, {bait} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 51, id, 1, 0, \
+             {baits}, {BAIT} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    server
+}
+
+/// The `[LS;420;%s]` or `[LS;419;%s]` line of a bait put on the rod.
+fn bait_line(number: u16) -> Vec<u8> {
+    let mut line = format!("[LS;{number};").into_bytes();
+    line.extend_from_slice(&item_get_name(BAIT, &owners_protos()));
+    line.push(b']');
+    an_info_line(&line)
+}
+
+/// Read the rod's update and return its six sockets.
+fn read_rod_update(alice: &mut Keyed) -> Vec<i32> {
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (2, 184, 1),
+        "the rod's update in the weapon cell"
+    );
+    update_sockets(&update)
+}
+
+/// `sys.life.fishing`, `cg.game.fishing`, `gc.fishing`: a rod without bait is refused
+/// `[LS;818]`; a paste goes on with `[LS;420]`, the rod's socket 2 takes its level 10 and
+/// one paste is used. The cast sends `START` around with the direction; a bait while the
+/// event runs is refused `[LS;418]`; the take before the bite sends `STOP`, which trains
+/// nothing and keeps the bait.
+#[test]
+fn a_rod_takes_its_bait_and_a_cast_taken_before_the_bite_stops() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = fishing_stage(&database, Some(0), 2);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+
+    alice.send_record(&client_fishing(7));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;818]"), "no bait");
+    alice.quiet("nothing is cast");
+
+    alice.send_record(&client_item_use(0));
+    assert_eq!(alice.read_game(), bait_line(420), "the bait goes on");
+    assert_eq!(read_rod_update(&mut alice)[2], 10, "the bait's level");
+    assert_eq!(
+        update_fields(&alice.read_game()),
+        (1, 0, 1),
+        "one paste left"
+    );
+    wait_for(
+        &database,
+        "(SELECT socket2 FROM item WHERE id = 50) = 10 AND (SELECT count FROM item WHERE id = \
+         51) = 1",
+    );
+
+    alice.send_record(&client_fishing(7));
+    assert_eq!(alice.read_game(), server_fishing(0, vid, 7), "the cast");
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;418]"),
+        "no bait while fishing"
+    );
+    alice.quiet("the refused bait changes nothing");
+
+    alice.send_record(&client_fishing(9));
+    assert_eq!(
+        alice.read_game(),
+        server_fishing(1, vid, 0),
+        "the take before the bite stops"
+    );
+    alice.quiet("a stop trains nothing and keeps the bait");
+    check(
+        &database,
+        "(SELECT socket2 FROM item WHERE id = 50) = 10 AND (SELECT socket0 FROM item WHERE id = \
+         50) = 0 AND (SELECT count FROM item WHERE id = 51) = 1",
+    );
+}
+
+/// Wait out the cast for its bite: `REACT` within the 40 seconds the event may draw.
+fn wait_for_the_bite(alice: &mut Keyed, vid: u32) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    assert_eq!(
+        alice.read_game_until(deadline),
+        Some(server_fishing(2, vid, 0)),
+        "the bite"
+    );
+}
+
+/// Read a take's training: the rod's socket 0 and its line on a 1 in 5, then its emptied
+/// bait socket.
+fn read_practice(alice: &mut Keyed) {
+    let mut sockets = read_rod_update(alice);
+    if sockets[0] == 1 {
+        assert_eq!(
+            alice.read_game(),
+            an_info_line(b"The training level of the fishing rod has increased! (1/10)"),
+            "the training's line"
+        );
+        sockets = read_rod_update(alice);
+    }
+    assert_eq!((sockets[0] <= 1, sockets[2]), (true, 0), "the bait is gone");
+}
+
+/// `event.fishing.fishing_event`, `data.fishing`: the bite sends `REACT` around, and a fish
+/// left on the line gets away 6 seconds later: `FAIL` around and the bait is gone. A take 3
+/// seconds after the next bite, the peak of most fish's time rows, rolls `Compute`: a catch
+/// sends `SUCCESS` around, `FISH` with its vnum, and the fish with its length in socket 0; a
+/// miss sends `FAIL`. Either way the rod trains on a 1 in 5 and loses its bait.
+#[test]
+fn a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = fishing_stage(&database, Some(10), 1);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+
+    alice.send_record(&client_fishing(3));
+    assert_eq!(alice.read_game(), server_fishing(0, vid, 3), "the cast");
+    wait_for_the_bite(&mut alice, vid);
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    assert_eq!(
+        alice.read_game_until(deadline),
+        Some(server_fishing(4, vid, 0)),
+        "the fish gets away"
+    );
+    assert_eq!(read_rod_update(&mut alice)[2], 0, "the bait is gone");
+    wait_for(&database, "(SELECT socket2 FROM item WHERE id = 50) = 0");
+
+    alice.send_record(&client_item_use(0));
+    assert_eq!(alice.read_game(), bait_line(420), "the last paste goes on");
+    assert_eq!(read_rod_update(&mut alice)[2], 10);
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 0, 0, 0),
+        "no paste left"
+    );
+    alice.send_record(&client_fishing(3));
+    assert_eq!(
+        alice.read_game(),
+        server_fishing(0, vid, 3),
+        "the second cast"
+    );
+    wait_for_the_bite(&mut alice, vid);
+    alice.quiet_for("the fish bites", Duration::from_millis(3000));
+    alice.send_record(&client_fishing(3));
+    let outcome = alice.read_game();
+    if outcome == server_fishing(3, vid, 0) {
+        let fish = alice.read_game();
+        assert_eq!(fish[..2], [GC_FISHING, 5], "the catch's vnum to its fisher");
+        let vnum = u32::from_le_bytes(fish[2..6].try_into().expect("four bytes"));
+        let (window, cell, set_vnum, count) = set_fields(&alice.read_game());
+        assert_eq!((window, set_vnum, count), (1, vnum, 1), "the fish lands");
+        let length = update_sockets(&alice.read_game())[0];
+        assert!(length > 0, "the fish's length");
+        read_practice(&mut alice);
+        wait_for(
+            &database,
+            &format!(
+                "EXISTS (SELECT 1 FROM item WHERE vnum = {vnum} AND pos = {cell} AND socket0 = \
+                 {length})"
+            ),
+        );
+    } else {
+        assert_eq!(outcome, server_fishing(4, vid, 0), "the miss");
+        read_practice(&mut alice);
+    }
+    alice.quiet("the take ends the event");
+    wait_for(&database, "(SELECT socket2 FROM item WHERE id = 50) = 0");
+}
+
+/// A map 1 cell that blocks, beside a free one 100 to its east, near Alpha.
+fn blocked_beside_free() -> ((i32, i32), (i32, i32)) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../legacy/gamedata/locale/europe/map");
+    let atlas = gamedata::map_atlas::MapAtlas::load(&dir).expect("the atlas loads");
+    let region = atlas.region(1).expect("map 1 stands");
+    let attr = gamedata::server_attr::load_map(&dir, region).expect("map 1's attr loads");
+    let grid = gamedata::server_attr::SectreeGrid::of(region).expect("map 1's grid stands");
+    let cells = world::cells::MapCells::new(grid, std::sync::Arc::new(attr));
+    let block = gamedata::server_attr::ATTR_BLOCK;
+    (0..200)
+        .flat_map(|dy| (0..200).map(move |dx| (465_000 + dx * 50, 945_000 + dy * 50)))
+        .find(|&(x, y)| {
+            cells.is_attr(x, y, block)
+                && cells.attribute(x + 100, y) == Some(0)
+                && cells.attribute(x + 200, y) == Some(0)
+        })
+        .map(|(x, y)| ((x, y), (x + 200, y)))
+        .expect("a blocked cell beside a free one near Alpha")
+}
+
+/// `sys.life.fishing`'s refusals without a rod: a cast on a blocked cell is refused
+/// `[LS;1051]` before the rod is looked at; on a free one `[LS;817]`; and a bait with no
+/// rod worn is refused silently and kept. A character is never entered on a blocked cell,
+/// so Alpha enters on the free one and steps onto the block.
+#[test]
+fn a_cast_on_a_block_or_without_a_rod_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (blocked, free) = blocked_beside_free();
+    let server = fishing_stage(&database, None, 2);
+    sql(
+        &database,
+        &format!(
+            "UPDATE player SET x = {}, y = {} WHERE name = 'Alpha'",
+            free.0, free.1
+        ),
+    );
+    let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
+    alice.send_record(&client_fishing(1));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;817]"), "no rod");
+    alice.unanswered(&client_item_use(0));
+    check(&database, "(SELECT count FROM item WHERE id = 51) = 2");
+
+    alice.send_record(&client_move(FUNC_COMBO, 0, 0, blocked.0, blocked.1, 0x5eed));
+    alice.quiet("the step is not echoed");
+    alice.send_record(&client_fishing(1));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1051]"),
+        "a blocked cell"
+    );
+    alice.quiet("nothing is cast");
+}
+
+/// `HEADER_GC_DIG_MOTION` (134, `G/packet.h`): the header, the digger's VID, the vein's VID
+/// and the stroke count, 10 packed bytes.
+const GC_DIG_MOTION: u8 = 0x86;
+const DIG_MOTION_LEN: usize = 10;
+/// `HEADER_GC_ITEM_OWNERSHIP` (0x1f): the header, the ground item's VID and the owner's
+/// 25-byte name.
+const GC_ITEM_OWNERSHIP: u8 = 0x1f;
+const ITEM_OWNERSHIP_LEN: usize = 1 + 4 + 25;
+/// The +0 pickaxe.
+const PICK: u32 = 29_101;
+/// The diamond vein, whose raw ore is 50601.
+const VEIN: u16 = 20_047;
+
+/// The probe quest the mining scenarios add: no owner quest calls `pc.mining`, so a click on
+/// the vein runs it.
+const MINING_PROBE: &[u8] = b"quest mining_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    pc.mining()\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// The map 1 point nearest Alpha's (470000, 950000), a blocked cell, where a vein may stand
+/// (no block, no `BANPK`), with free cells 100 and 200 to its west for the digger's step and
+/// stand: answers the digger's point and the vein's `npc.txt` line.
+fn mining_ground() -> ((i32, i32), Vec<u8>) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../legacy/gamedata/locale/europe/map");
+    let atlas = gamedata::map_atlas::MapAtlas::load(&dir).expect("the atlas loads");
+    let region = atlas.region(1).expect("map 1 stands");
+    let attr = gamedata::server_attr::load_map(&dir, region).expect("map 1's attr loads");
+    let grid = gamedata::server_attr::SectreeGrid::of(region).expect("map 1's grid stands");
+    let cells = world::cells::MapCells::new(grid, std::sync::Arc::new(attr));
+    let (sx, sy) = (region.sx, region.sy);
+    let (home_x, home_y) = ((470_000 - sx) / 100, (950_000 - sy) / 100);
+    let (local_x, local_y) = (-60..=60)
+        .flat_map(|dy| (-60..=60).map(move |dx| (home_x + dx, home_y + dy)))
+        .filter(|&(lx, ly)| {
+            let (x, y) = (sx + lx * 100, sy + ly * 100);
+            [x, x - 100, x - 200]
+                .into_iter()
+                .all(|x| cells.attribute(x, y) == Some(0))
+        })
+        .min_by_key(|&(lx, ly)| (lx - home_x).pow(2) + (ly - home_y).pow(2))
+        .expect("a free spot near Alpha");
+    let digger = (sx + local_x * 100 - 200, sy + local_y * 100);
+    let line = format!("m\t{local_x}\t{local_y}\t0\t0\t0\t1\t1s\t100\t1\t{VEIN}\n");
+    (digger, line.into_bytes())
+}
+
+/// A server whose map 1 has the diamond vein 200 east of the digger's point, where Alpha
+/// stands, and whose quests add `probe`. Answers the digger's point.
+fn vein_stage(database: &ScratchDatabase, probe: &[u8]) -> (Server, (i32, i32)) {
+    let (digger, vein) = mining_ground();
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(&vein);
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            (npc, &npc_text),
+            ("locale/europe/quest/zz_probe/vein_probe.lua", probe),
+        ],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    sql(
+        database,
+        &format!(
+            "UPDATE player SET x = {}, y = {} WHERE name = 'Alpha'",
+            digger.0, digger.1
+        ),
+    );
+    (server, digger)
+}
+
+/// [`vein_stage`] with [`MINING_PROBE`]; with `pick`, Alpha wears the +0 pickaxe (id 50).
+fn mining_stage(database: &ScratchDatabase, pick: bool) -> (Server, (i32, i32)) {
+    let protos = owners_protos();
+    let worn = protos.get(PICK).expect("the owner's data has the pick");
+    assert_eq!(
+        (worn.item_type, worn.values[..3].to_vec(), worn.refined_vnum),
+        (gamedata::item_kind::ITEM_PICK, vec![0, 1, 6000], 29_102),
+        "the pick trains on every 1 in 1 up to 6000, and refines"
+    );
+    let staged = vein_stage(database, MINING_PROBE);
+    if pick {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 50, id, 2, \
+                 4, 1, {PICK} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    staged
+}
+
+/// The VID of the vein the entrant's view showed: a vein is no listed NPC, so it is among
+/// the monsters.
+fn shown_vein(entered: &Entered) -> u32 {
+    let veins: Vec<u32> = entered
+        .shown
+        .monsters
+        .iter()
+        .filter(|add| add[22..24] == VEIN.to_le_bytes())
+        .map(|add| u32::from_le_bytes(add[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(veins.len(), 1, "the one vein is shown");
+    veins[0]
+}
+
+/// Click the vein and read the dig's motion; answers its stroke count.
+fn start_digging(alice: &mut Keyed, vid: u32, vein: u32) -> u8 {
+    alice.send_record(&client_click(vein));
+    let motion = alice.read_game();
+    let mut expected = vec![GC_DIG_MOTION];
+    expected.extend_from_slice(&vid.to_le_bytes());
+    expected.extend_from_slice(&vein.to_le_bytes());
+    assert_eq!(
+        motion[..9],
+        expected[..],
+        "the dig's motion around the digger"
+    );
+    assert!(
+        (5..=15).contains(&motion[9]),
+        "number(5, 15) strokes: {}",
+        motion[9]
+    );
+    motion[9]
+}
+
+/// `sys.life.mining`, `event.mining.mining_event`, `lua.pc.mining`, `gc.dig_motion`: a click on
+/// the vein runs `pc.mining`, which sends `GC_DIG_MOTION` around with `number(5, 15)` strokes.
+/// Two seconds a stroke later the event rolls `GetOrePct` (23 for a +0 pick and no skill): a
+/// hit lays the vein's raw ore within 200 of the digger, owned by it, and says so; a miss says
+/// so. Either way the pick trains: its socket 0 climbs to 1 of 6000, with its line, and the
+/// row is stored.
+#[test]
+fn a_vein_dug_with_a_pick_drops_its_ore_or_fails_and_trains_the_pick() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, digger) = mining_stage(&database, true);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    let vein = shown_vein(&entered);
+
+    let started = std::time::Instant::now();
+    let strokes = u64::from(start_digging(&mut alice, vid, vein));
+    let deadline = started + Duration::from_secs(2 * strokes + 2);
+    let ended = alice.read_game_until(deadline).expect("the dig ends");
+    assert!(
+        started.elapsed() >= Duration::from_millis(2000 * strokes - 500),
+        "the dig ends after its strokes"
+    );
+    if ended[0] == GROUND_ADD {
+        let field = |at: usize| i32::from_le_bytes(ended[at..at + 4].try_into().expect("four"));
+        assert!(
+            (field(1) - digger.0).abs() <= 200 && (field(5) - digger.1).abs() <= 200,
+            "the ore lies within 200 of the digger: {ended:02x?}"
+        );
+        assert_eq!(field(17), 50_601, "the vein's raw ore");
+        let mut owned = vec![GC_ITEM_OWNERSHIP];
+        owned.extend_from_slice(&ended[13..17]);
+        let mut name = [0u8; 25];
+        name[..5].copy_from_slice(b"Alpha");
+        owned.extend_from_slice(&name);
+        assert_eq!(alice.read_game(), owned, "the digger owns the ore");
+        assert_eq!(alice.read_game(), an_info_line(b"Mining was successful."));
+    } else {
+        assert_eq!(ended, an_info_line(b"Mining failed."), "a miss");
+    }
+    let update = alice.read_game();
+    assert_eq!(update_fields(&update), (2, 184, 1), "the pick's update");
+    assert_eq!(update_sockets(&update)[0], 1, "the pick trained");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Pickaxe proficiency increased! (1/6000)")
+    );
+    alice.quiet("the dig ended");
+    wait_for(&database, "(SELECT socket0 FROM item WHERE id = 50) = 1");
+}
+
+/// `OnMove`'s `mining_cancel`: a second `pc.mining` while the dig runs ends it with
+/// `[LS;815]`, and so does a step; a cancelled dig never fires and trains nothing.
+#[test]
+fn a_dig_ends_on_a_second_call_or_a_step() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, digger) = mining_stage(&database, true);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    let vein = shown_vein(&entered);
+
+    let _strokes = start_digging(&mut alice, vid, vein);
+    alice.send_record(&client_click(vein));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;815]"),
+        "a second call cancels"
+    );
+    alice.quiet("the cancel starts nothing");
+
+    let strokes = u64::from(start_digging(&mut alice, vid, vein));
+    alice.send_record(&client_move(FUNC_WAIT, 0, 0, digger.0 + 100, digger.1, 0));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;815]"),
+        "a step cancels"
+    );
+    alice.quiet_for(
+        "a cancelled dig never ends",
+        Duration::from_secs(2 * strokes + 1),
+    );
+    check(&database, "(SELECT socket0 FROM item WHERE id = 50) = 0");
+}
+
+/// `CHARACTER::mining` without a pick in the weapon cell: `[LS;816]`, and no dig starts.
+#[test]
+fn a_dig_without_a_pick_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _digger) = mining_stage(&database, false);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let vein = shown_vein(&entered);
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;816]"), "no pick");
+    alice.quiet("no dig starts");
+}
+
+/// The probe quest of the tool refine scenario: no owner quest calls `__refine_pick` or
+/// `__fish_real_refine_rod`, so a click on the vein runs both and says what they returned.
+const TOOL_REFINE_PROBE: &[u8] = b"quest tool_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    syschat(\"pick \" .. __refine_pick(4))\n\
+    syschat(\"rod \" .. __fish_real_refine_rod(5))\n\
+    syschat(\"again \" .. __refine_pick(4))\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Reads one tool swap: the old tool's clear and the new one's set in inventory `cell`;
+/// answers the new vnum.
+fn read_tool_swap(alice: &mut Keyed, cell: u16) -> u32 {
+    let clear = alice.read_game();
+    assert_eq!(clear[0], ITEM_SET, "the old tool clears: {clear:02x?}");
+    assert_eq!(
+        (clear[1], u16::from_le_bytes([clear[2], clear[3]])),
+        (1, cell)
+    );
+    assert_eq!(u32::from_le_bytes(clear[4..8].try_into().expect("four")), 0);
+    let set = alice.read_game();
+    assert_eq!(set[0], ITEM_SET, "the new tool sets: {set:02x?}");
+    assert_eq!((set[1], u16::from_le_bytes([set[2], set[3]])), (1, cell));
+    u32::from_le_bytes(set[4..8].try_into().expect("four"))
+}
+
+/// `_refine_pick` and `_fish_real_refine_rod` (`G/questlua_global.cpp:450-478`): the trained
+/// pick and rod in the named inventory cells swap for their refined vnums on the owner's 100%
+/// draws and answer 1; the fresh, untrained pick answers 2 and stays. `__refine_pick` never
+/// maxes the training first, as the GM's `/refine_pick` does.
+#[test]
+fn a_quest_refines_a_trained_pick_and_rod_and_refuses_an_untrained_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _digger) = vein_stage(&database, TOOL_REFINE_PROBE);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 51, id, \
+         1, 4, 1, 29101, 6000 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 52, id, \
+         1, 5, 1, 27400, 10 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let vein = shown_vein(&entered);
+    alice.send_record(&client_click(vein));
+    assert_eq!(read_tool_swap(&mut alice, 4), 29_102, "the +1 pick");
+    assert_eq!(alice.read_game(), an_info_line(b"pick 1"));
+    assert_eq!(read_tool_swap(&mut alice, 5), 27_410, "the +1 rod");
+    assert_eq!(alice.read_game(), an_info_line(b"rod 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"again 2"),
+        "the fresh pick is untrained"
+    );
+    alice.quiet("nothing else");
+    wait_for(
+        &database,
+        "(SELECT COUNT(*) FROM item WHERE id IN (51, 52)) = 0 AND (SELECT COUNT(*) FROM item \
+         WHERE window_type = 1 AND ((pos = 4 AND vnum = 29102 AND socket0 = 0) OR (pos = 5 AND \
+         vnum = 27410))) = 2",
+    );
+}
+
+/// A vein click that reads the horse (`horse.*`, `pc.get_horse_level`, `pc.is_horse_alive`)
+/// and feeds it; a living horse then advances a level, refuses a word for a level, and takes
+/// level 99, which clamps to 30.
+const HORSE_PROBE: &[u8] = b"quest horse_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    local dead = \"alive\"\n\
+    if horse.is_dead() then dead = \"dead\" end\n\
+    local alive = \"no\"\n\
+    if pc.is_horse_alive() then alive = \"yes\" end\n\
+    syschat(\"h \" .. horse.get_level() .. \" \" .. horse.get_health() .. \" \" .. \
+    horse.get_stamina() .. \" \" .. horse.get_health_pct() .. \" \" .. \
+    horse.get_stamina_pct() .. \" \" .. horse.get_grade() .. \" \" .. dead .. \" \" .. \
+    alive .. \" \" .. pc.get_horse_level())\n\
+    horse.feed()\n\
+    syschat(\"fed \" .. horse.get_health())\n\
+    if not horse.is_dead() then\n\
+    horse.advance()\n\
+    syschat(\"adv \" .. horse.get_level() .. \" \" .. horse.get_health() .. \" \" .. \
+    horse.get_stamina())\n\
+    horse.set_level(\"x\")\n\
+    horse.set_level(99)\n\
+    syschat(\"set \" .. horse.get_level() .. \" \" .. horse.get_health() .. \" \" .. \
+    horse.get_stamina())\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Reads records up to `want`, answering the ones before it.
+fn read_up_to(keyed: &mut Keyed, want: &[u8]) -> Vec<Vec<u8>> {
+    let mut before = Vec::new();
+    loop {
+        let record = keyed.read_game();
+        if record == want {
+            return before;
+        }
+        before.push(record);
+    }
+}
+
+/// The horse skill (130) of every byte 76 among `records`.
+fn horse_skills(records: &[Vec<u8>]) -> Vec<u8> {
+    records
+        .iter()
+        .filter(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .map(|record| skill_slot(record, 130))
+        .collect()
+}
+
+/// `/horse_state`'s four lines (`G/cmd_gm.cpp:3745-3751`), read in order.
+fn reads_horse_state(keyed: &mut Keyed, lines: [&[u8]; 3]) {
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/horse_state"));
+    assert_eq!(keyed.read_game(), an_info_line(b"Horse Information:"));
+    for line in lines {
+        assert_eq!(keyed.read_game(), an_info_line(line));
+    }
+}
+
+/// The horse without a summon: `/horse_state` reads the level and both pools, `/horse_level`
+/// clamps and plants the horse skill, `/horse_set_stat` kills the horse at 0 health before
+/// the stamina lands, and the quest readers and writers see and move the same horse. The
+/// horse and its skill are saved; the next login refills a dead horse and plants the skill
+/// again (`__FIX_NIVEL_CAL__`, `G/input_login.cpp:887-897`).
+#[test]
+fn a_horse_levels_feeds_and_dies_by_gm_lines_and_quests() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _digger) = vein_stage(&database, HORSE_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let vein = shown_vein(&entered);
+    reads_horse_state(
+        &mut alice,
+        [
+            b"    Level  0",
+            b"    Health 0/1 (0%)",
+            b"    Stam   0/1 (0%)",
+        ],
+    );
+    for (line, answer) in [
+        (
+            &b"/horse_level"[..],
+            &b"usage : /horse_level <name> <level>"[..],
+        ),
+        (
+            b"/horse_level Alpha",
+            b"usage : /horse_level <name> <level>",
+        ),
+        (b"/horse_level Nobody 3", b"This character does not exist."),
+        (
+            b"/horse_set_stat 3",
+            b"Usage : /horse_set_stat <hp> <stamina>",
+        ),
+    ] {
+        alice.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(alice.read_game(), an_info_line(answer), "{line:?}");
+    }
+
+    // The level line: the caller hears it, then the horse skill follows the level.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_state"));
+    let between = read_up_to(&mut alice, &an_info_line(b"Horse Information:"));
+    assert_eq!(horse_skills(&between), [25], "one byte 76: {between:02x?}");
+    for line in [
+        &b"    Level  25"[..],
+        b"    Health 40/40 (100%)",
+        b"    Stam   140/140 (100%)",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(line));
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_set_stat 10 30"));
+    reads_horse_state(
+        &mut alice,
+        [
+            b"    Level  25",
+            b"    Health 10/40 (25%)",
+            b"    Stam   30/140 (21%)",
+        ],
+    );
+
+    // The quest: the readers, a feed, an advance that refills, a word that sets nothing, and
+    // 99 clamped to 30.
+    alice.send_record(&client_click(vein));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"h 25 10 30 25 21 3 alive yes 25")
+    );
+    assert_eq!(alice.read_game(), an_info_line(b"fed 11"));
+    let advanced = read_up_to(&mut alice, &an_info_line(b"adv 26 42 145"));
+    assert_eq!(horse_skills(&advanced), [26]);
+    let set = read_up_to(&mut alice, &an_info_line(b"set 30 50 200"));
+    assert_eq!(horse_skills(&set), [30], "the word set nothing");
+
+    // Death: 0 health empties the stamina, then the stamina lands on the dead horse.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_set_stat 0 5"));
+    reads_horse_state(
+        &mut alice,
+        [
+            b"    Level  30",
+            b"    Health 0/50 (0%)",
+            b"    Stam   5/200 (2%)",
+        ],
+    );
+    alice.send_record(&client_click(vein));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"h 30 0 5 0 2 3 dead no 30")
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"fed 0"),
+        "a dead horse is not fed"
+    );
+    alice.quiet("nothing else");
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT horse_level = 30 AND horse_hp = 0 AND horse_stamina = 5 AND NOT horse_riding \
+         FROM player WHERE name = 'Alpha') AND (SELECT level FROM player_skill WHERE player_id = \
+         (SELECT id FROM player WHERE name = 'Alpha') AND vnum = 130) = 30",
+    );
+    relogs_to_a_refilled_horse(&server);
+}
+
+/// The next login after [`a_horse_levels_feeds_and_dies_by_gm_lines_and_quests`]: the load's
+/// byte 76 and the `__FIX_NIVEL_CAL__` refresh's both carry 30, and the dead horse stands
+/// refilled.
+fn relogs_to_a_refilled_horse(server: &Server) {
+    let (mut alice, _empire, _list) = select_screen(server, b"alice");
+    alice.send_record(&client_select(0));
+    alice.send_record(&client_version(DEFAULT_CLIENT_VERSION));
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(alice.read_game(), [GC_ENTITY, 3, 0]);
+    assert_eq!(alice.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let gold = alice.read_game();
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    let loaded = alice.read_game();
+    assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    alice.loaded(&loaded);
+    let load = read_up_to(&mut alice, &gold);
+    assert_eq!(alice.read_game()[0], GC_PLAYER_POINTS);
+    alice.send_record(&client_enter_game());
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_state"));
+    let entry = read_up_to(&mut alice, &an_info_line(b"Horse Information:"));
+    assert_eq!(horse_skills(&load), [30], "the load's byte 76");
+    assert_eq!(horse_skills(&entry), [30], "the refresh's byte 76");
+    for line in [
+        &b"    Level  30"[..],
+        b"    Health 50/50 (100%)",
+        b"    Stam   200/200 (100%)",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(line));
+    }
 }

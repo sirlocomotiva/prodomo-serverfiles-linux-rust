@@ -1,14 +1,18 @@
 //! Bounded runtime character state and lifecycle management.
 
 mod apply;
+mod auto_give_new;
+mod bait;
 mod combat;
 mod death_penalty;
 mod dice;
 mod drop_item;
 mod equip;
 mod equipment;
+mod give;
 mod grant;
 mod ground;
+mod horse;
 mod inventory;
 mod item_move;
 mod items;
@@ -17,14 +21,20 @@ pub(crate) mod legacy_source;
 mod manager;
 mod model;
 mod points;
+mod polymorph;
 mod potion;
+mod purge;
 mod quickslot;
 mod recovery;
 mod safebox;
 mod shop;
+mod smith_refine;
+mod sort_inventory;
 mod specify_item;
 mod state;
+mod tool_refine;
 mod trade;
+mod use_to_item;
 
 pub use apply::{
     ApplyArm, APPLY_ATTBONUS_BOSS, APPLY_ATTBONUS_HUMAN, APPLY_ATTBONUS_METIN,
@@ -33,6 +43,8 @@ pub use apply::{
     APPLY_MAGIC_ATT_GRADE, APPLY_MAGIC_DEF_GRADE, APPLY_MAX_HP, APPLY_MAX_HP_PCT, APPLY_MAX_SP,
     APPLY_MAX_SP_PCT, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
 };
+pub use auto_give_new::{auto_give_item_new, GivenNew};
+pub use bait::{is_bait, use_bait, Baited, ROD_BAIT_SOCKET, WEAPON_CELL};
 pub use combat::{
     attack_rating, battle_damage_floor, calc_arrow_damage, calc_arrow_skill_atk, calc_melee_damage,
     calc_melee_damage_on_player, calc_melee_skill_atk, damage_magic, damage_melee,
@@ -44,28 +56,41 @@ pub use combat::{
     MeleeVictim, MobStriker, NpcVictim, PcHitEnd, PcStrike, PcVictim, PkActor, PkDenial,
     PkEligibility, PkMode, PlayerVictim, PvAction, PvAttacker, PvEnd, PvKind, PvStrike, PvVictim,
     Strike, Striker, Struck, DAMAGE_CRITICAL, DAMAGE_DODGE, DAMAGE_NORMAL, DAMAGE_PENETRATE,
-    DAMAGE_POISON, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, IMMUNE_REFLECT, SE_CRITICAL,
-    SE_EFFECT_HEALER, SE_PENETRATE,
+    DAMAGE_POISON, FLY_CONQUEROR_EXP, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, IMMUNE_REFLECT,
+    SE_CRITICAL, SE_EFFECT_HEALER, SE_PENETRATE,
 };
 pub use death_penalty::{death_penalty_loss, exp_loss_percent};
-pub use dice::{number, Dice, Pcg32};
+pub use dice::{number, Dice, FixedDraw, Pcg32};
 pub use drop_item::{
-    attribute_set_index, gauss_random, make_drop_item, unported_drop, DropAsk, DropMade,
-    DropRefused, Gauss, UnportedDrop,
+    add_rare_attribute, add_rolled_attribute, attribute_set_index, change_attribute,
+    change_rare_attribute, gauss_random, make_drop_item, unported_drop, DropAsk, DropMade,
+    DropRefused, Gauss, UnportedDrop, ITEM_FLAG_MAKECOUNT,
 };
 pub use equip::{
     find_equip_cell, is_equipable, is_female, is_skill_book, look_of, recompute_points,
-    unequip_points, use_item, wear_of, wear_pos, worn_system_not_ported, CharacterLook, Gear,
-    WornSystem,
+    unequip_points, use_checks, use_item, use_source, wear_full_set, wear_of, wear_pos,
+    worn_system_not_ported, CharacterLook, Gear, WornSystem, PICKUP_AFFECT_ITEM,
 };
 pub use equipment::{
     accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, PartChange,
     Worn, PARTS,
 };
+pub use give::{
+    can_receive, unported_of, GiveAnswer, GiveUnported, ALCHEMIST_MOB, BLACKSMITH2_MOB,
+    BLACKSMITH_ACCESSORY_MOB, BLACKSMITH_ARMOR_MOB, BLACKSMITH_MOB, BLACKSMITH_WEAPON_MOB,
+    CAMPFIRE_MOB, DEVILTOWER_BLACKSMITH_ACCESSORY_MOB, DEVILTOWER_BLACKSMITH_ARMOR_MOB,
+    DEVILTOWER_BLACKSMITH_WEAPON_MOB, FISHER_MOB, GIVE_DISTANCE, HORSE_FEED_LINE,
+    HORSE_REVIVE_LINE, HORSE_VNUMS, ITEM_HORSE_FOOD_1, ITEM_HORSE_FOOD_2, ITEM_HORSE_FOOD_3,
+    ITEM_REVIVE_HORSE_1, ITEM_REVIVE_HORSE_2, ITEM_REVIVE_HORSE_3, MELEY_STATUE_VNUM,
+};
 pub use grant::{grant, GrantRefused, Granted, GRANT_WINDOW};
 pub use ground::{
-    auto_give_item, drop_gold, drop_item, drop_penalty_item, pickup_gold, pickup_item, AutoGiven,
-    DropAt, GroundItem, Picker, DROPPED_NOTICE, GOLD_DROPPED_NOTICE,
+    auto_give_item, destroy_item, drop_gold, drop_item, drop_penalty_item, pickup_gold,
+    pickup_item, AutoGiven, DropAt, GroundItem, Picker, DROPPED_NOTICE, GOLD_DROPPED_NOTICE,
+};
+pub use horse::{
+    Horse, HorseInfo, HorseInfoLine, HorseStat, HorseTimer, HORSE_HEALTH_DROP_INTERVAL,
+    HORSE_MAX_LEVEL, HORSE_STAMINA_CONSUME_INTERVAL, HORSE_STAMINA_REGEN_INTERVAL, HORSE_STATS,
 };
 pub use inventory::{
     character_cell_bound, custom_inventory_category_of, custom_inventory_position,
@@ -80,17 +105,24 @@ pub use item_move::{
     MoveRefused, MoveRequest, MoveRules, Unported, AUTO_FIND_CELL,
 };
 pub use items::{
-    belt_cell_is_available, CharacterItems, CountRefused, Lookup, Rejected, SocketRefused,
-    ATTR67_SLOTS,
+    belt_cell_is_available, AttributeRefused, CharacterItems, CountRefused, Lookup, Rejected,
+    SocketRefused, ATTR67_SLOTS,
 };
 pub use manager::{CharacterManager, CharacterManagerError, UpdateReport};
 pub use model::{Character, CharacterKind};
 pub use points::{
-    apply_is_ported, quarter_cost, race_to_job, sungma_will, ExpLimits, GainOutcome,
-    PassiveBonuses, PointChangeRefused, PointRecord, Points, PointsRow, SungmaWill, IMMUNE_FALL,
-    IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
+    apply_is_ported, quarter_cost, race_to_job, sungma_will, ConquerorEvent, ExpLimits,
+    GainOutcome, PassiveBonuses, PointChangeRefused, PointRecord, Points, PointsRow, SungmaWill,
+    IMMUNE_FALL, IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
+};
+pub use polymorph::{
+    polymorph_power, POLYMORPH_MAX_LEVEL, POLYMORPH_POWER_BY_LEVEL, SKILL_POLYMORPH,
 };
 pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
+pub use purge::{
+    book_give, purge_all, slow_give, BOOK_SOCKET, BOOK_VNUM, DRAGON_SOUL_SLOTS, SLOW_COUNT,
+    SLOW_SOCKET, SLOW_VNUM,
+};
 pub use quickslot::{
     add_from_client, chains_when_used_up, find_specify_item, sync_quickslots, Quickslot,
     QuickslotRecord, QuickslotSync, Quickslots, SyncTo, QUICKSLOT_MAX_NUM,
@@ -102,15 +134,24 @@ pub use safebox::{
     UNIQUE_ITEM_SAFEBOX_EXPAND, WRONG_BANK_NOTICE,
 };
 pub use shop::{
-    buy_item, sale_price, sell_item, unported_creation, ShopRefused, UnportedCreation,
+    buy_item, sale_price, sell_item, unported_creation, ShopRefused, UnportedCreation, GAYA_MAX,
     GOLD_MAX_MAX, SALE_TAX_NOTICE, WORN_NOTICE,
 };
-pub use specify_item::{count_specify_item, remove_specify_item, set_item_socket};
+pub use smith_refine::{refined_item, swap_refined};
+pub use sort_inventory::{sort_inventory, Sorted, SORT_KEPT_WHOLE, SUMMON_ITEMS};
+pub use specify_item::{
+    count_specify_item, force_worn_attribute, remove_specify_item, set_item_socket,
+};
 pub use state::{Activity, CoreState, Posture};
+pub use tool_refine::{refine_cell, refine_tool, ToolOutcome, ToolRefine};
 pub use trade::{
     settle, Accepted, Offered, Said, Settled, Side, Trade, TradeRecord, Trader, Unsettled,
     COMPLETED_NOTICE, EXCHANGE_ITEM_MAX_NUM, EXCHANGE_MAX_DISTANCE, FULL_NOTICE,
     GIVE_REFUSED_NOTICE, OTHER_TRANSACTION_NOTICE, OUT_OF_PLACE_NOTICE, PARTNER_BUSY_NOTICE,
     PARTNER_FULL_NOTICE, PARTNER_OUT_OF_PLACE_NOTICE, PARTNER_QUESTING_NOTICE, QUESTING_NOTICE,
     YANG_LIMIT_NOTICE,
+};
+pub use use_to_item::{
+    put_stone, spend_one, use_target, NOT_BODY_STONE_NOTICE, NOT_WEAPON_STONE_NOTICE,
+    NO_SOCKET_NOTICE, SAME_STONE_NOTICE, STONE_SET_NOTICE,
 };

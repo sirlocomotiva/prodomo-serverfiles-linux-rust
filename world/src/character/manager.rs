@@ -215,6 +215,17 @@ impl CharacterManager {
             .ok_or_else(|| CharacterManagerError::UnknownPlayerName(name.to_owned()))?;
         self.find_by_vid(vid)
     }
+    /// Every online PC's shown name and VID, for a quest step's `find_pc_by_name`: the
+    /// step borrows the characters mutably, so the session carries this snapshot instead
+    /// of a lookup. The names are the shown ones; the caller matches case-insensitively,
+    /// as [`CharacterManager::find_player_by_name`] does.
+    pub fn player_names(&self) -> Vec<(&str, Vid)> {
+        self.by_player_name
+            .values()
+            .filter_map(|vid| self.characters.get(vid))
+            .map(|character| (character.name(), character.vid()))
+            .collect()
+    }
 
     /// Finds a player character by name for mutation.
     ///

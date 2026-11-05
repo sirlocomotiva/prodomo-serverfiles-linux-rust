@@ -59,6 +59,9 @@ use crate::item::{gc_item_clear, Item, ItemIds, ITEM_ANTIFLAG_SELL, ITEM_FLAG_ST
 /// `GOLD_MAX_MAX` (`common/length.h:100`): the gold `ChangeGold` never lets a character reach.
 pub const GOLD_MAX_MAX: u64 = 1_200_000_000_000_000_000;
 
+/// `GAYA_MAX` (`common/length.h:104`): the gaya total the `POINT_GAYA` arm refuses at.
+pub const GAYA_MAX: i32 = 999_999;
+
 /// `[LS;881;%d]` with the sale tax of 3 (`G/shop_manager.cpp:571`).
 pub const SALE_TAX_NOTICE: &str = "[LS;881;3]";
 

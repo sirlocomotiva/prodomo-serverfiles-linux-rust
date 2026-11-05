@@ -87,7 +87,9 @@
 //!   so the client cannot observe either.
 
 use common::item_slots::{
-    EWindows, BELT_INVENTORY_SLOT_COUNT, BELT_INVENTORY_SLOT_START, INVENTORY_MAX_NUM, WEAR_MAX_NUM,
+    EWindows, BELT_INVENTORY_SLOT_COUNT, BELT_INVENTORY_SLOT_START, DRAGON_SOUL_DECK_MAX_NUM,
+    DRAGON_SOUL_EQUIP_SLOT_END, DRAGON_SOUL_EQUIP_SLOT_START, DS_SLOT_MAX, INVENTORY_MAX_NUM,
+    WEAR_MAX_NUM,
 };
 use db::items::ItemRow;
 use gamedata::item_kind::{ITEM_DS, LIMIT_LEVEL};
@@ -368,8 +370,29 @@ fn wear_position(
     storage: &CharacterItems,
 ) -> Result<Option<ItemPos>, Refused> {
     let proto = protos.get(item.vnum).ok_or(Refused::UnknownVnum)?;
+    // A dragon soul stone rides its deck cell (`EquipTo`'s DS arm,
+    // `G/item.cpp:1410-1418`, allows 64..76): the load trusts the row, as it does for
+    // any other worn item, and the deck it lands on stays inactive until the line
+    // activates it. `EquipTo`'s DS arm starts no wear timer (`G/item.cpp:1458-1469`),
+    // so the timer check exempts it; any other unported system still refuses.
     if proto.item_type == ITEM_DS {
-        return Err(Refused::WornNotPorted(WornSystem::DragonSoul));
+        let deck = WEAR_MAX_NUM..WEAR_MAX_NUM + DS_SLOT_MAX * DRAGON_SOUL_DECK_MAX_NUM;
+        let Some(wear) = u16::try_from(row.pos)
+            .ok()
+            .filter(|wear| deck.contains(wear))
+        else {
+            return Ok(None);
+        };
+        let pos = ItemPos::new(EWindows::Inventory as u8, INVENTORY_MAX_NUM + wear);
+        if storage.item_at(pos).is_some() || !meets_level_limit(proto, level) {
+            return Ok(None);
+        }
+        if let Some(system) = worn_system_not_ported(item, proto, protos)
+            .filter(|system| *system != WornSystem::DragonSoul && *system != WornSystem::Timer)
+        {
+            return Err(Refused::WornNotPorted(system));
+        }
+        return Ok(Some(pos));
     }
     let Some(wear) = u16::try_from(row.pos)
         .ok()
@@ -403,7 +426,11 @@ fn load_position(row: &ItemRow) -> Result<ItemPos, Refused> {
     match EWindows::try_from(row.window_type) {
         Ok(EWindows::Inventory) => {
             let cell = cell(row.pos)?;
-            if (INVENTORY_MAX_NUM..BELT_INVENTORY_SLOT_START).contains(&cell) {
+            // `IsDragonSoulEquipPosition` reads the same flat array: a deck cell
+            // (244..256) holds its stone under `INVENTORY`.
+            let deck = DRAGON_SOUL_EQUIP_SLOT_START..DRAGON_SOUL_EQUIP_SLOT_END;
+            let worn = INVENTORY_MAX_NUM..BELT_INVENTORY_SLOT_START;
+            if worn.contains(&cell) && !deck.contains(&cell) {
                 return Err(Refused::WearCell);
             }
             Ok(ItemPos::new(row.window_type, cell))
@@ -732,13 +759,15 @@ mod tests {
             row(11, 11, 0, small),
             row(12, INVENTORY, 179, small),
             row(13, INVENTORY, 274, small),
+            row(14, INVENTORY, 244, small),
+            row(15, INVENTORY, 255, small),
         ];
         let load = plan_item_load(&rows, &protos, 0, 1);
         let placed: Vec<u32> = load.placed.iter().map(|placed| placed.item.id).collect();
         assert_eq!(
             placed,
-            [12, 13],
-            "the cells either side of the wear range load"
+            [12, 13, 14, 15],
+            "the cells either side of the wear range load, and the deck band's ends with them"
         );
         let refused: Vec<(u32, &Refused)> = load
             .refused
@@ -954,7 +983,6 @@ mod tests {
             value: 5,
         };
         let protos = ItemProtos::from_rows(vec![
-            shaped(100, ITEM_DS, 0),
             shaped(101, ITEM_COSTUME, COSTUME_AURA),
             shaped(102, ITEM_COSTUME, COSTUME_MOUNT),
             shaped(103, ITEM_COSTUME, COSTUME_PET),
@@ -970,10 +998,10 @@ mod tests {
             energy,
             shaped(110, ITEM_ARMOR, ARMOR_NECK),
         ]);
-        let mut accessory = row(11, EQUIPMENT, 10, 110);
+        let mut accessory = row(10, EQUIPMENT, 10, 110);
         accessory.sockets = [1, 3, 0, 0, 0, 0];
-        let rows: Vec<ItemRow> = (0..10)
-            .map(|index| row(index + 1, EQUIPMENT, index + 1, 100 + index))
+        let rows: Vec<ItemRow> = (0..9)
+            .map(|index| row(index + 1, EQUIPMENT, index + 1, 101 + index))
             .chain([accessory])
             .collect();
         let load = plan_item_load(&rows, &protos, 0, 1);
@@ -984,7 +1012,6 @@ mod tests {
             .map(|refusal| (refusal.id, refusal.why.clone()))
             .collect();
         let expected = [
-            WornSystem::DragonSoul,
             WornSystem::Aura,
             WornSystem::Mount,
             WornSystem::Pet,
@@ -1032,15 +1059,25 @@ mod tests {
     }
 
     #[test]
-    fn a_dragon_soul_stone_in_the_equipment_window_is_refused_before_its_cell_is_read() {
+    fn a_dragon_soul_stone_in_a_deck_cell_loads_and_any_other_cell_sets_it_aside() {
         let protos = ItemProtos::from_rows(vec![shaped(100, ITEM_DS, 0)]);
-        for pos in [0, 63, 64, 70_000] {
+        // Deck cells 64..76 ride the inventory window at 180 plus the cell.
+        for (pos, cell) in [(64, 244), (69, 249), (75, 255)] {
             let load = plan_item_load(&[row(1, EQUIPMENT, pos, 100)], &protos, 0, 1);
-            assert!(load.placed.is_empty(), "pos {pos}");
+            assert!(load.refused.is_empty(), "pos {pos}: {:?}", load.refused);
+            assert_eq!(load.placed.len(), 1, "pos {pos}");
+            assert_eq!(load.placed[0].pos.cell, cell, "pos {pos}");
+        }
+        // Any other cell sets the stone aside, into the first free base cell.
+        for pos in [0, 63, 76, 70_000] {
+            let load = plan_item_load(&[row(1, EQUIPMENT, pos, 100)], &protos, 0, 1);
+            assert!(load.refused.is_empty(), "pos {pos}: {:?}", load.refused);
+            assert_eq!(load.placed.len(), 1, "pos {pos}");
+            assert_eq!(load.placed[0].pos.cell, 0, "pos {pos} lands in cell 0");
             assert_eq!(
-                load.refused[0].why,
-                Refused::WornNotPorted(WornSystem::DragonSoul),
-                "pos {pos}"
+                load.placed[0].moved_from,
+                Some((EQUIPMENT, pos)),
+                "pos {pos} moved"
             );
         }
     }

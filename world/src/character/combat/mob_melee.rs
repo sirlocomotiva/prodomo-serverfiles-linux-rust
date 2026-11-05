@@ -1138,11 +1138,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         })
     }
 
@@ -1433,11 +1436,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         });
         points.set_point(point::POINT_NORMAL_HIT_DEFEND_BONUS, 60);
         points.set_point(point::POINT_RESIST_COMBAT, 60);
@@ -1621,11 +1627,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         });
         points.set_point(point::POINT_RESIST_COMBAT, 10);
         let mut dice = Script::new(&[0]);
@@ -1742,11 +1751,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         });
         points.set_point(point::POINT_RESIST_COMBAT, 60);
         let proto = wind_proto();

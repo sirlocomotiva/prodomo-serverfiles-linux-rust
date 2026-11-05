@@ -125,7 +125,7 @@ const SKILL_CHUNKEON: u32 = 19;
 const AFF_CHEONGEUN_WITH_FALL: u32 = 34;
 /// `IMMUNE_STUN` (`C/length.h:715`). `IMMUNE_SLOW` has no reader: SLOW's only hosted
 /// row (80) is refused, so the SLOW affect arm is documented, not ported (230e).
-const IMMUNE_STUN: u32 = 1 << 0;
+pub(super) const IMMUNE_STUN: u32 = 1 << 0;
 /// `AFFECT_FIRE` (`G/affect.h:41`): 216, counting from `AFFECT_MOV_SPEED = 200`.
 const AFFECT_FIRE: u32 = 216;
 /// `AFF_FIRE` (`G/affect.h:244`): flag 30, counting from `AFF_NONE`.
@@ -157,10 +157,11 @@ const GRAND_READ_DELAY_MAX: i32 = 43200;
 /// `AFFECT_SKILL_BOOK_BONUS` (`G/affect.h:75`): 512. No item grants it (only
 /// the book arms consume it), so the consume arm is coded and dead.
 pub(super) const AFFECT_SKILL_BOOK_BONUS: u32 = 512;
-/// `AFFECT_SKILL_NO_BOOK_DELAY` (`G/affect.h:76`): 513, likewise ungranted.
-const AFFECT_SKILL_NO_BOOK_DELAY: u32 = 513;
+/// `AFFECT_SKILL_NO_BOOK_DELAY` (`G/affect.h:76`): 513, likewise ungranted, which the two
+/// `pc.*_skill_book_no_delay` calls read and remove.
+pub(super) const AFFECT_SKILL_NO_BOOK_DELAY: u32 = 513;
 /// `SKILL_LEADERSHIP` (`G/skill.h:142`): 121.
-const SKILL_LEADERSHIP: u32 = 121;
+pub(super) const SKILL_LEADERSHIP: u32 = 121;
 /// `SKILL_COMBO` (`G/skill.h:143`): 122.
 const SKILL_COMBO: u32 = 122;
 /// `SKILL_CREATE` (`G/skill.h:144`): 123.
@@ -294,6 +295,9 @@ pub(super) struct PcSkillState {
     affected_eunhyung: u32,
     /// `m_bComboIndex` (`G/char.h:1431`): the combo toggle's level, 0 while off.
     combo_index: u8,
+    /// `m_bDisableCooltime` (`G/char.h:1522`): `/cooltime` sets it and it never
+    /// clears; a set flag skips the cooling gates.
+    no_cooltime: bool,
 }
 
 impl Default for PcSkillState {
@@ -307,6 +311,7 @@ impl Default for PcSkillState {
             fly_extra: Vec::new(),
             affected_eunhyung: 0,
             combo_index: 0,
+            no_cooltime: false,
         }
     }
 }
@@ -414,6 +419,14 @@ impl GameState {
     #[must_use]
     pub fn with_pc_skills(mut self, skills: Arc<gamedata::pc_skill_data::PcSkills>) -> Self {
         self.pc_skill_tables = skills;
+        self
+    }
+
+    /// Share the skill name index boot loaded. Without it every `/setskill`
+    /// line answers no such skill.
+    #[must_use]
+    pub fn with_skill_names(mut self, names: Arc<gamedata::pc_skill_data::SkillNames>) -> Self {
+        self.skill_names = names;
         self
     }
 
@@ -1198,7 +1211,7 @@ impl GameState {
     }
     /// `get_global_time()`: the wall clock in seconds, as the quest bridge
     /// reads it (the uptime gap waits — see `global_time` in `main.rs`).
-    fn global_time() -> u32 {
+    pub(super) fn global_time() -> u32 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| {
@@ -1238,7 +1251,7 @@ impl GameState {
 
     /// `SkillLevelPacket` (`G/char_skill.cpp:170-181`): byte 76 with all 255 slots
     /// — the stored level, the ladder's master type, and the stored read time.
-    fn send_skill_levels(&self, vid: Vid) {
+    pub(super) fn send_skill_levels(&self, vid: Vid) {
         use protocol::gc_nested::{GcSkill, GcSkillLevelNew};
         let state = self.pc_skills.get(&vid.raw());
         let mut skills = crate::loading_phase::skill_levels();
@@ -1300,9 +1313,12 @@ impl GameState {
         if !gamedata::pc_skill_data::can_use(job, group, false, skill_vnum) {
             return false;
         }
-        // `g_bSkillDisable`, the observer mode, `CanMove`, the polymorph: only
-        // the stun arm of `CanMove` is ported (no shop, riding, polymorph,
-        // or observer mode).
+        // `g_bSkillDisable`, the observer mode, `CanMove`, the polymorph: the middle arm
+        // (`G/char_skill.cpp:2914`) refuses, though every caller gates first; only the stun
+        // arm of `CanMove` is ported (no shop, riding, or polymorph).
+        if self.is_observing(vid) {
+            return false;
+        }
         if self.affect_flags_of(vid)[0] & AFF_STUN_WORD != 0 {
             return false;
         }
@@ -1423,9 +1439,9 @@ impl GameState {
             .ok()
             .and_then(|character| character.points())
             .map_or(0, |points| points.get_point(point::POINT_CASTING_SPEED));
-        // `SKILL_TERROR`'s cooling check (`:3032-3037`): 64 alone refuses before
-        // the charge; every other row's cooling refusal comes from the stamp
-        // after it.
+        // `SKILL_TERROR`'s cooling check (`:3032-3037`, outside the disable
+        // flag's `if`): even `/cooltime`d, 64 alone refuses before the charge;
+        // every other row's cooling refusal comes from the stamp after it.
         if skill_vnum == SKILL_TERROR {
             let cooling = self
                 .pc_skills
@@ -1464,19 +1480,28 @@ impl GameState {
             }
         };
         self.send_point_records(vid, &records);
-        let cool_millis = calculate_duration(casting, cool_secs.saturating_mul(1000));
-        let cool = (cool_millis > 0).then(|| ms_to_pulses(cool_millis));
-        let now = self.last_pulse;
-        let stamped = self
-            .pc_skill_state(vid.raw())
-            .uses
-            .entry(skill_vnum)
-            .or_default()
-            .stamp(now, target_vid, cool, hit_count, true);
-        if !stamped {
-            return false;
+        // The stamp (`:3097-3117`, inside the disable flag's `if`): `/cooltime`d
+        // casts skip the stamp row and the last-skill stamp both, so no `UseSkill`
+        // both writes, and a cooling row casts again at once.
+        if !self
+            .pc_skills
+            .get(&vid.raw())
+            .is_some_and(|state| state.no_cooltime)
+        {
+            let cool_millis = calculate_duration(casting, cool_secs.saturating_mul(1000));
+            let cool = (cool_millis > 0).then(|| ms_to_pulses(cool_millis));
+            let now = self.last_pulse;
+            let stamped = self
+                .pc_skill_state(vid.raw())
+                .uses
+                .entry(skill_vnum)
+                .or_default()
+                .stamp(now, target_vid, cool, hit_count, true);
+            if !stamped {
+                return false;
+            }
+            self.pc_skill_state(vid.raw()).last_skill = Some(now);
         }
-        self.pc_skill_state(vid.raw()).last_skill = Some(now);
         // The dispatch tail (`:3119-3130`): SELFONLY computes on the caster, PARTY
         // fans to the near members (`ComputeSkillParty`, `:2430-2440`), else a
         // non-ATTACK row computes on the target; ATTACK rows wait for their
@@ -1501,6 +1526,11 @@ impl GameState {
             self.compute_charge_self(vid, skill_vnum, k, level);
         }
         true
+    }
+    /// `ACMD(do_cooltime)` (`G/cmd_gm.cpp:2735-2738`): `DisableCooltime`
+    /// (`G/char_skill.cpp:3317-3320`) sets the flag, which never clears.
+    pub(super) fn disable_cooltime(&mut self, vid: Vid) {
+        self.pc_skill_state(vid.raw()).no_cooltime = true;
     }
     /// `CHARACTER::RemoveAffect(dwType)` (`G/char_affect.cpp:864-884`): every affect
     /// of `kind` is uncomputed and its remove packet sent; true when any was.
@@ -1536,10 +1566,8 @@ impl GameState {
     }
 
     /// `CHARACTER::OnMove(true)` (`G/char.cpp:6148-6179`): the last move and
-    /// attack times stamp, revive-invisible, if held, goes, and the Eunhyung
-    /// flag arm fires: 34 goes and the affected level stamps, else the level
-    /// clears. (The hide itself waits: monsters still see the cloaked.) Mining
-    /// is unported, so its cancel is vacuous.
+    /// attack times stamp, revive-invisible, if held, goes, the Eunhyung flag arm
+    /// fires, and a running dig is cancelled.
     fn on_move_attack(&mut self, vid: Vid) {
         let now = self.clock.now();
         if let Some(body) = self.bodies.get_mut(&vid) {
@@ -1547,6 +1575,14 @@ impl GameState {
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(vid);
+        self.eunhyung_on_attack(vid);
+        self.cancel_mining(vid);
+    }
+
+    /// `OnMove(true)`'s Eunhyung arm (`G/char.cpp:6159-6167`): with flag 19 held, 34 goes
+    /// and the affected level stamps, else the level clears. (The hide itself waits:
+    /// monsters still see the cloaked.)
+    fn eunhyung_on_attack(&mut self, vid: Vid) {
         // Flag 19 is bit 18 of word 0.
         if self.affect_flags_of(vid)[0] & (1 << 18) != 0 {
             let _cloaked = self.remove_pc_affect(vid, SKILL_EUNHYUNG);
@@ -1703,6 +1739,7 @@ impl GameState {
             body.last_move = now_ms;
             body.last_attack = Some(now_ms);
         }
+        self.cancel_mining(vid);
         // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`G/char_battle.cpp:219-223`).
         let (nx, ny) = self
             .npc_by_vid(target_vid)
@@ -2840,9 +2877,9 @@ impl GameState {
     /// `CInputMain::Attack`'s `CG_SHOOT` arm + `CHARACTER::Shoot` (`G/input_main.cpp:2000-2007`,
     /// `G/char_battle.cpp:3319-3340`): the stun gate, then `CFuncShoot` over the main VID
     /// first (cleared) and every extra (cleared after). Answers the stolen gold, as the
-    /// plain bow arm lands through the `NORMAL_RANGE` pipe; `m_bSucceed` stays
-    /// false and
-    /// the input arm ignores the answer, so no other answer is kept.
+    /// plain bow arm lands through the `NORMAL_RANGE` pipe, with the row changes the
+    /// arrow spends made (`m_bSucceed` stays false, and the input arm ignores the rest of
+    /// the answer).
     pub(super) fn shoot(&mut self, vid: Vid, btype: u8) -> crate::game_loop_messages::AttackAnswer {
         use crate::game_loop_messages::AttackAnswer;
         // `!CanMove()` (`:3323-3326`): only the stun arm is ported.
@@ -2856,6 +2893,7 @@ impl GameState {
             (main, extras)
         };
         let mut stolen = None;
+        let mut spent = Vec::new();
         if main != 0 {
             // Past type 1 the functor stamps the main VID (`:3041-3042`); the commented
             // `ResetHitCount` never runs.
@@ -2868,7 +2906,9 @@ impl GameState {
                     info.main_vid = main;
                 }
             }
-            stolen = self.shoot_one(vid, btype, main).or(stolen);
+            let (gold, rows) = self.shoot_one(vid, btype, main);
+            stolen = gold.or(stolen);
+            spent.extend(rows);
         }
         for target in extras {
             if btype > 1 {
@@ -2880,25 +2920,38 @@ impl GameState {
                     info.main_vid = target;
                 }
             }
-            stolen = self.shoot_one(vid, btype, target).or(stolen);
+            let (gold, rows) = self.shoot_one(vid, btype, target);
+            stolen = gold.or(stolen);
+            spent.extend(rows);
         }
-        AttackAnswer { gold: stolen }
+        AttackAnswer {
+            gold: stolen,
+            spent,
+        }
     }
 
     /// One `CFuncShoot` run (`G/char_battle.cpp:3035-3317`): the victim must exist and be
     /// attackable (the NPC shooter's 5000 range never fires for a player). Answers the
-    /// stolen gold for the plain bow arm, `None` for the skill arms.
-    fn shoot_one(&mut self, vid: Vid, btype: u8, target: u32) -> Option<i64> {
+    /// stolen gold for the plain bow arm, `None` for the skill arms, with the row changes the
+    /// spends made.
+    fn shoot_one(
+        &mut self,
+        vid: Vid,
+        btype: u8,
+        target: u32,
+    ) -> (Option<i64>, Vec<db::items::RowChange>) {
         let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
-            return None;
+            return (None, Vec::new());
         };
-        let npc_snapshot = self.npc_on(target, place)?.clone();
+        let Some(npc_snapshot) = self.npc_on(target, place).cloned() else {
+            return (None, Vec::new());
+        };
         if !self.is_attackable(vid, (place.1, spot.x, spot.y), &npc_snapshot) {
-            return None;
-        }
+            return (None, Vec::new());
+        };
         match btype {
             0 => self.shoot_bow(vid, target),
-            1 => None,
+            1 => (None, Vec::new()),
             vnum if u32::from(vnum) == SKILL_YEONSA
                 || u32::from(vnum) == SKILL_KWANKYEOK
                 || u32::from(vnum) == SKILL_HWAJO
@@ -2908,7 +2961,9 @@ impl GameState {
                 // The arrow skills (`:3149-3230`): `== iUseArrow` needs 1 arrow, then the
                 // `OnMove`s, `BeginFight`, `ComputeSkill` and `UseArrow(1)`. Only vnum 47
                 // is hosted; the others refuse as unknown rows in `compute_skill`.
-                self.arrow_and_bow(vid)?;
+                if self.arrow_and_bow(vid).is_none() {
+                    return (None, Vec::new());
+                }
                 self.on_move_pair(vid, target);
                 if self
                     .npc_by_vid(target)
@@ -2918,8 +2973,8 @@ impl GameState {
                     self.begin_fight(target, vid);
                 }
                 self.compute_skill(vid, u32::from(vnum), target);
-                self.use_arrow(vid, 1);
-                None
+                let spent = self.use_arrow(vid, 1);
+                (None, spent)
             }
             vnum if matches!(u32::from(vnum), 76 | 80 | 81 | 106 | 20 | 35 | 91 | 33) => {
                 // The MELEE/MAGIC skill arms (`:3232-3289`): `MARYUNG/TUSOK/MAHWAN/BIPABU/`
@@ -2936,7 +2991,7 @@ impl GameState {
                     self.begin_fight(target, vid);
                 }
                 self.compute_skill(vid, u32::from(vnum), target);
-                None
+                (None, Vec::new())
             }
             vnum if u32::from(vnum) == SKILL_CHAIN => {
                 // `CHAIN` (`:3282-3289`): the `OnMove`s, `BeginFight` and `ComputeSkill`;
@@ -2950,7 +3005,7 @@ impl GameState {
                     self.begin_fight(target, vid);
                 }
                 self.compute_skill(vid, u32::from(vnum), target);
-                None
+                (None, Vec::new())
             }
             vnum if u32::from(vnum) == SKILL_YONGBI => {
                 // `OnMove(true)` only (`:3290-3295`): no hosted caller, kept for the shape.
@@ -2959,9 +3014,10 @@ impl GameState {
                     body.last_move = now;
                     body.last_attack = Some(now);
                 }
-                None
+                self.cancel_mining(vid);
+                (None, Vec::new())
             }
-            _ => None,
+            _ => (None, Vec::new()),
         }
     }
 
@@ -2970,37 +3026,49 @@ impl GameState {
     /// then `CalcArrowDamage`, `UseArrow(1)`, `NormalAttackAffect`, `RESIST_BOW`,
     /// the `OnMove`s, `BeginFight`, and `Damage(NORMAL_RANGE)`. The speed-hack
     /// gate reads keys no configuration sets, so refused attacks never fire.
-    /// Answers the stolen gold (`NORMAL_RANGE` steals gold).
-    fn shoot_bow(&mut self, vid: Vid, target: u32) -> Option<i64> {
+    /// Answers the stolen gold (`NORMAL_RANGE` steals gold) with the row changes the
+    /// arrow spend made.
+    fn shoot_bow(&mut self, vid: Vid, target: u32) -> (Option<i64>, Vec<db::items::RowChange>) {
         let (job, group) = match self.bodies.get(&vid) {
             Some(body) => (body.card.job, body.card.skill_group),
-            None => return None,
+            None => return (None, Vec::new()),
         };
         if job != JOB_ASSASSIN {
-            return None;
+            return (None, Vec::new());
         }
-        let (bow, arrow) = self.arrow_and_bow(vid)?;
+        let Some((bow, arrow)) = self.arrow_and_bow(vid) else {
+            return (None, Vec::new());
+        };
         if group != 0 && group != 2 {
-            let points = self.pc_points_mut(vid.raw())?;
+            let Some(points) = self.pc_points_mut(vid.raw()) else {
+                return (None, Vec::new());
+            };
             if points.sp() < BOW_SHOT_SP {
-                return None;
+                return (None, Vec::new());
             }
-            let records = points
-                .point_change(point::POINT_SP, -BOW_SHOT_SP, false, false)
-                .ok()?;
+            let Ok(records) = points.point_change(point::POINT_SP, -BOW_SHOT_SP, false, false)
+            else {
+                return (None, Vec::new());
+            };
             self.send_point_records(vid, &records);
         }
-        let spot = self.spot_of(vid.raw())?;
-        let npc_snapshot = self.npc_by_vid(target)?.clone();
+        let (Some(spot), Some(npc_snapshot)) =
+            (self.spot_of(vid.raw()), self.npc_by_vid(target).cloned())
+        else {
+            return (None, Vec::new());
+        };
         let distance = f32_to_i32(distance_sqrt(
             npc_snapshot.x - spot.x,
             npc_snapshot.y - spot.y,
         ));
-        let points_snapshot = self
+        let Some(points_snapshot) = self
             .characters
             .find_by_vid(vid)
             .ok()
-            .and_then(|character| character.points().cloned())?;
+            .and_then(|character| character.points().cloned())
+        else {
+            return (None, Vec::new());
+        };
         let mut damage = world::character::calc_arrow_damage(
             &mut self.dice,
             &points_snapshot,
@@ -3009,7 +3077,7 @@ impl GameState {
             &npc_snapshot,
             distance,
         );
-        self.use_arrow(vid, 1);
+        let spent = self.use_arrow(vid, 1);
         let landed =
             world::character::normal_attack_affect(&mut self.dice, &points_snapshot, &npc_snapshot);
         self.apply_npc_affect(vid, target, landed);
@@ -3051,16 +3119,17 @@ impl GameState {
         let _owner = self.set_npc_sync_owner(vid, (spot.x, spot.y), &victim_pos, now_ms);
         // The plain hit answers `None` with no steal (`fight.rs`'s `steal_gold` gate);
         // a bow shot with no steal answers the same silence.
-        if stolen == 0 {
+        let gold = if stolen == 0 {
             None
         } else {
             Some(i64::from(stolen))
-        }
+        };
+        (gold, spent)
     }
 
     /// The caster's `OnMove(true)` plus the victim's `OnMove()`: stamps the caster's move
-    /// and attack times and clears the revive-invisible (`G/char.cpp:6148-6179`); the
-    /// victim's holds nothing for a non-player.
+    /// and attack times, clears the revive-invisible and cancels a running dig
+    /// (`G/char.cpp:6148-6179`); the victim's holds nothing for a non-player.
     fn on_move_pair(&mut self, vid: Vid, _target: u32) {
         let now = self.clock.now();
         if let Some(body) = self.bodies.get_mut(&vid) {
@@ -3068,6 +3137,7 @@ impl GameState {
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(vid);
+        self.cancel_mining(vid);
     }
 
     /// `GetArrowAndBow(vid, 1)`: the bow and arrow protos when `WEAR_WEAPON` holds an
@@ -3100,8 +3170,13 @@ impl GameState {
     /// first stack of the same vnum in the base inventory (`FindSpecifyItem`,
     /// `INVENTORY_MAX_NUM` = 180 — the custom band is not what the Rewrite ports) is
     /// equipped into the arrow slot; with none found the slot keeps a 0-count item worn
-    /// (`SetCount(0)` — the legacy quirk, kept).
-    fn use_arrow(&mut self, vid: Vid, n: u32) {
+    /// (`SetCount(0)` — the legacy quirk, kept). Answers the row changes the spend made,
+    /// for the descriptor's Transfer: a `Count` for a stack that still holds arrows, a
+    /// `Destroyed` for one the shot emptied plus the restack arm's `Moved` when a
+    /// replacement arrives. The store has no 0-count row, so the quirk's worn stack is
+    /// not stored (the client still sees it); the restack runs in the world first, and a
+    /// found replacement is what is kept.
+    fn use_arrow(&mut self, vid: Vid, n: u32) -> Vec<db::items::RowChange> {
         use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
         use protocol::item_pos::ItemPos;
         let arrow_pos = ItemPos::new(
@@ -3115,7 +3190,7 @@ impl GameState {
             .and_then(|character| character.items().item_at(arrow_pos))
             .map(|item| (item.id, item.vnum, item.count))
         else {
-            return;
+            return Vec::new();
         };
         let left = u32::from(count).saturating_sub(n.min(u32::from(count)));
         if left == 0 {
@@ -3128,28 +3203,28 @@ impl GameState {
                 .ok()
                 .and_then(|character| character.items().item_at(arrow_pos).cloned());
             let Some(mut held) = held else {
-                return;
+                return Vec::new();
             };
             held.count = 0;
             let Ok(character) = self.characters.find_by_vid_mut(vid) else {
-                return;
+                return Vec::new();
             };
             let probe = held.clone();
             if character.items_mut().remove(arrow_pos, &probe).is_err() {
-                return;
+                return Vec::new();
             }
             if character.items_mut().set(arrow_pos, &held).is_err() {
-                return;
+                return Vec::new();
             }
             // The quirk's `UpdatePacket` too: the client sees the 0-count stack.
             let update = held.gc_item_update();
             let _sent = self.write_to_client(vid, update.encode());
         } else {
             let Ok(character) = self.characters.find_by_vid_mut(vid) else {
-                return;
+                return Vec::new();
             };
             if character.items_mut().set_count(id, left).is_err() {
-                return;
+                return Vec::new();
             }
             // `SetCount`'s `UpdatePacket` (`G/item.cpp:296-348`): the new count.
             let update = self
@@ -3161,9 +3236,12 @@ impl GameState {
             if let Some(update) = update {
                 let _sent = self.write_to_client(vid, update.encode());
             }
-            return;
+            let Ok(left) = u16::try_from(left) else {
+                return Vec::new();
+            };
+            return vec![db::items::RowChange::Count { id, count: left }];
         }
-        self.restack_arrow(vid, arrow_pos, vnum);
+        self.restack_arrow(vid, arrow_pos, vnum, id)
     }
 
     /// `UseArrow`'s restack arm (`G/char_battle.cpp:3009-3017`): the first stack of the
@@ -3171,7 +3249,17 @@ impl GameState {
     /// worn stack out first (`:8512-8524`); the swap needs a free inventory cell, so the
     /// 0-count stack is removed and the client is told the arrow cell holds the new
     /// stack (`GC_ITEM_SET`, byte 21) and the old cell is empty (a cleared `GC_ITEM_SET`).
-    fn restack_arrow(&mut self, vid: Vid, arrow_pos: protocol::item_pos::ItemPos, vnum: u32) {
+    /// Answers the Transfer's changes: the emptied stack's `Destroyed`, then the
+    /// replacement's `Moved` into the arrow slot; a refusal along the way, or no
+    /// replacement, answers nothing — the quirk's worn stack is not stored, and a stack
+    /// the move put back is one the store never saw leave.
+    fn restack_arrow(
+        &mut self,
+        vid: Vid,
+        arrow_pos: protocol::item_pos::ItemPos,
+        vnum: u32,
+        emptied: u32,
+    ) -> Vec<db::items::RowChange> {
         use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
         use protocol::item_pos::ItemPos;
         let found = (0..INVENTORY_MAX_NUM).find_map(|cell| {
@@ -3184,7 +3272,7 @@ impl GameState {
                 .map(|item| (pos, item.clone()))
         });
         let Some((from, item)) = found else {
-            return;
+            return Vec::new();
         };
         let probe = self
             .characters
@@ -3192,14 +3280,14 @@ impl GameState {
             .ok()
             .and_then(|character| character.items().item_at(arrow_pos).cloned());
         let Some(probe) = probe else {
-            return;
+            return Vec::new();
         };
         let Ok(character) = self.characters.find_by_vid_mut(vid) else {
-            return;
+            return Vec::new();
         };
         let worn = item.clone();
         if character.items_mut().remove(arrow_pos, &probe).is_err() {
-            return;
+            return Vec::new();
         }
         if character
             .items_mut()
@@ -3208,7 +3296,7 @@ impl GameState {
         {
             // The replacement did not fit: put the quirk's stack back and keep it worn.
             let _ = character.items_mut().set(arrow_pos, &probe);
-            return;
+            return Vec::new();
         }
         let (equipped, from_cell) = (
             self.characters
@@ -3223,7 +3311,17 @@ impl GameState {
             let mut cleared = protocol::gc_item_window::GcItemDel::default_record();
             cleared.cell = from_cell;
             let _sent = self.write_to_client(vid, cleared.encode());
+            let (window_type, pos) = crate::item_load::stored_row_position(arrow_pos);
+            return vec![
+                db::items::RowChange::Destroyed { id: emptied },
+                db::items::RowChange::Moved {
+                    id: worn.id,
+                    window_type,
+                    pos,
+                },
+            ];
         }
+        Vec::new()
     }
 }
 
@@ -3699,6 +3797,11 @@ mod tests {
             "the dog took the arrow: {before} -> {after}"
         );
         assert_eq!(answer.gold, None);
+        assert_eq!(
+            answer.spent,
+            vec![db::items::RowChange::Count { id: 12, count: 9 }],
+            "the Transfer's spend"
+        );
         let worn = world
             .characters
             .find_by_vid(Vid::new(1))
@@ -3734,6 +3837,98 @@ mod tests {
         world.fly_target(Vid::new(1), true, ME, 0, 0);
         world.shoot(Vid::new(1), 0);
         assert_eq!(world.npc_by_vid(ME).unwrap().hp, hp);
+    }
+    /// The last arrow of the stack: the shot empties it and the restack arm equips the
+    /// first stack of the same vnum, answering the emptied stack's `Destroyed` and the
+    /// replacement's `Moved` into the worn slot. With no spare stack the answer is empty
+    /// and the slot keeps the quirk's 0-count stack.
+    #[test]
+    fn the_last_arrow_restacks_and_the_spend_survives() {
+        use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
+        use gamedata::item_kind::WEAPON_ARROW;
+        use protocol::item_pos::ItemPos;
+        use world::item::Item;
+
+        for spare in [true, false] {
+            let clock = TestClock::default();
+            clock.set(T0);
+            let npc = a_fighter(ME, 101, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
+            let mut world =
+                stand_field(&clock, vec![npc], open_cells(), true).with_pc_skills(dumps());
+            let bow_vnum = world
+                .protos
+                .rows()
+                .iter()
+                .find(|proto| {
+                    proto.item_type == gamedata::item_kind::ITEM_WEAPON
+                        && proto.sub_type == gamedata::item_kind::WEAPON_BOW
+                })
+                .unwrap()
+                .vnum;
+            let arrow_vnum = world
+                .protos
+                .rows()
+                .iter()
+                .find(|proto| {
+                    proto.item_type == gamedata::item_kind::ITEM_WEAPON
+                        && proto.sub_type == WEAPON_ARROW
+                })
+                .unwrap()
+                .vnum;
+            let mut bow = Item::new(11, bow_vnum);
+            bow.set_size(1).unwrap();
+            let mut worn = Item::new(12, arrow_vnum);
+            worn.set_size(1).unwrap();
+            worn.count = 1;
+            let weapon_cell = INVENTORY_MAX_NUM + EWearPositions::Weapon as u16;
+            let arrow_cell = INVENTORY_MAX_NUM + EWearPositions::Arrow as u16;
+            let mut loaded = vec![
+                (ItemPos::new(EWindows::Inventory as u8, weapon_cell), bow),
+                (ItemPos::new(EWindows::Inventory as u8, arrow_cell), worn),
+            ];
+            if spare {
+                let mut rest = Item::new(13, arrow_vnum);
+                rest.set_size(1).unwrap();
+                rest.count = 7;
+                loaded.push((ItemPos::new(EWindows::Inventory as u8, 0), rest));
+            }
+            let (mut inbox, _shown) =
+                enter_seeing_with(&mut world, PLACE, 1, NEAR, 12_345, &loaded);
+            world.bodies.get_mut(&Vid::new(1)).unwrap().card.job = JOB_ASSASSIN;
+            world.process_pulse(P0);
+            std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+            world.dice = world::character::Pcg32::new(7, 0);
+            world.fly_target(Vid::new(1), true, ME, 0, 0);
+            let answer = world.shoot(Vid::new(1), 0);
+            let slot = world
+                .characters
+                .find_by_vid(Vid::new(1))
+                .unwrap()
+                .items()
+                .item_at(ItemPos::new(EWindows::Inventory as u8, arrow_cell))
+                .unwrap()
+                .clone();
+            if spare {
+                assert_eq!(slot.id, 13, "the spare stack is worn");
+                assert_eq!(slot.count, 7);
+                assert_eq!(
+                    answer.spent,
+                    vec![
+                        db::items::RowChange::Destroyed { id: 12 },
+                        db::items::RowChange::Moved {
+                            id: 13,
+                            window_type: EWindows::Equipment as u8,
+                            pos: u32::from(EWearPositions::Arrow as u16),
+                        },
+                    ],
+                    "the Transfer's restack"
+                );
+            } else {
+                assert_eq!(slot.id, 12, "the quirk's stack stays worn");
+                assert_eq!(slot.count, 0);
+                assert!(answer.spent.is_empty(), "no row stores a 0 count");
+            }
+        }
     }
     /// Vnum 47 (`KWANKYEOK`) needs its arrow: with bow + arrow the `CG_SHOOT` lands
     /// RANGE damage through the shoot arm; without the arrow it refuses. Vnum 20
@@ -3791,7 +3986,12 @@ mod tests {
         assert!(world.use_skill(Vid::new(1), 47, ME));
         world.fly_target(Vid::new(1), true, ME, 0, 0);
         let before = world.npc_by_vid(ME).unwrap().hp;
-        world.shoot(Vid::new(1), 47);
+        let answer = world.shoot(Vid::new(1), 47);
+        assert_eq!(
+            answer.spent,
+            vec![db::items::RowChange::Count { id: 12, count: 9 }],
+            "the skill's arrow spend"
+        );
         let after = world.npc_by_vid(ME).unwrap().hp;
         assert!(
             after < before,
@@ -4330,6 +4530,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
             skill_group: 0,
             alignment: 0,
+            voice: 0,
         };
         world.place_body(
             Vid::new(1),
@@ -4547,6 +4748,7 @@ mod tests {
             pc_skills,
             affect_events,
             pc_skill_tables,
+            bodies,
             ..
         } = world;
         let points = characters
@@ -4570,11 +4772,25 @@ mod tests {
             card,
             pc_level,
             caller: None,
+            gold: 0,
+            empire: 0,
+            char_name: Vec::new(),
+            position: (0, 0, 0, 0),
+            leadership: 0,
+            guild_id: 0,
+            is_guild_master: false,
             slots: pc_skills.entry(reader.raw()).or_default(),
             affects: affect_events.get_mut(&reader),
+            alignment: bodies.get(&reader).map_or(0, |body| body.card.alignment),
+            alignment_changes: Vec::new(),
+            gold_changes: Vec::new(),
+            hides: Vec::new(),
             points,
             climbs: Vec::new(),
             guild_ops: Vec::new(),
+            test_server: true,
+            pcs: Vec::new(),
+            online: std::collections::HashMap::new(),
             guilds: super::super::guild::GuildShadow::default(),
             records: Vec::new(),
             block_mode: None,
@@ -4584,12 +4800,34 @@ mod tests {
             giver: None,
             item_rows: Vec::new(),
             laid: Vec::new(),
+            gates: super::super::quests::WarpGates::armed(),
+            conqueror_level: 0,
+            party: super::super::quests::PartyFlags::default(),
+            party_leader: None,
+            party_member_pids: Vec::new(),
+            blocked: Vec::new(),
+            switched: false,
+            confirm_records: Vec::new(),
+            confirm_timeouts: Vec::new(),
+            party_flags: std::collections::HashMap::new(),
+            party_sets: Vec::new(),
+            channel: 1,
+            warps: Vec::new(),
+            drops: Vec::new(),
+            villages: 0,
+            conquerors: 0,
+            sash_opens: Vec::new(),
+            changelooks: 0,
+            minings: Vec::new(),
+            ds_gives: 0,
+            ds_refines: 0,
+            ds_attrs: 0,
         };
         let climbed = session.learn_grand_master_skill(vnum, total);
         let super::super::quests::Session {
             records, climbs, ..
         } = session;
-        (climbed, (records, climbs, Vec::new(), Vec::new()))
+        (climbed, (records, climbs, Vec::new(), Vec::new(), None))
     }
 
     /// The GRAND read climbs past its max: vnum 1 at 30, the count already at 6 (max 5
@@ -4601,7 +4839,7 @@ mod tests {
         world.bodies.get_mut(&Vid::new(1)).unwrap().card.skill_group = 1;
         world.set_pc_skill_level(1, 1, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _)) = grand_read(&mut world, 1, 6);
+        let (climbed, (records, climbs, _, _, _)) = grand_read(&mut world, 1, 6);
         assert!(climbed);
         assert_eq!(world.pc_skill_level(1, 1), 31);
         assert_eq!(climbs.len(), 1, "the climb is queued for the store");
@@ -4638,9 +4876,27 @@ mod tests {
         let (mut world, mut inbox) = a_reader(50301, 25_000);
         world.set_pc_skill_level(1, SKILL_LEADERSHIP, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _)) = grand_read(&mut world, SKILL_LEADERSHIP, 1);
+        let (climbed, (records, climbs, _, _, _)) = grand_read(&mut world, SKILL_LEADERSHIP, 1);
         assert!(!climbed);
         assert!(climbs.is_empty(), "no climb, no store");
         assert_eq!(texts(&records), [b"[LS;949]".to_vec()]);
+    }
+
+    /// `/cooltime` sets the flag and a flagged cast charges twice with no
+    /// stamp row: legacy's stamp block is inside the disable flag's `if`.
+    #[test]
+    fn a_cooltime_cast_charges_twice_and_stamps_nothing() {
+        let (_clock, mut world, _inbox) = a_cast();
+        world.set_pc_skill_level(1, 1, 1);
+        world.disable_cooltime(Vid::new(1));
+        let before = sp_of(&world, 1);
+        assert!(world.use_skill(Vid::new(1), 1, ME));
+        assert_eq!(sp_of(&world, 1), before - 45);
+        assert!(
+            !world.pc_skills.get(&1).unwrap().uses.contains_key(&1),
+            "no stamp row under the flag"
+        );
+        assert!(world.use_skill(Vid::new(1), 1, ME));
+        assert_eq!(sp_of(&world, 1), before - 90);
     }
 }

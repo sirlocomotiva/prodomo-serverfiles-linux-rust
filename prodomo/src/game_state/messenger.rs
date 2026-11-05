@@ -580,8 +580,8 @@ impl GameState {
     /// `CInputMain::Messenger`'s `ADD_BY_VID` arm (`G/input_main.cpp:1140-1178`):
     /// `RequestToAdd` runs past the arm's gates. `Find` answers quiet for a VID nobody
     /// holds; the manager only ever holds players (`enter_world_with_items` is the only
-    /// insert path), so both `IsPC` arms pass; the observer arm passes (this build has
-    /// no observer mode); the target's `BLOCK_MESSENGER_INVITE` answers `[LS;657]`;
+    /// insert path), so both `IsPC` arms pass; a caller that observes stays quiet
+    /// (`:1151`); the target's `BLOCK_MESSENGER_INVITE` answers `[LS;657]`;
     /// a companion with no outbox is quiet (the desc the arm asks
     /// for); a player may not add a GM (`[LS;659]`); the caller may not add itself.
     pub(super) fn answer_messenger_add_by_vid(&mut self, caller: Vid, target: Vid) {
@@ -592,9 +592,13 @@ impl GameState {
         {
             return;
         }
+        // `if (ch->IsObserverMode()) return` (`:1151`): an observing caller may not
+        // invite; quiet, unlike the target's block two gates down.
+        if self.is_observing(caller) {
+            return;
+        }
         // `if (ch_companion->IsBlockMode(BLOCK_MESSENGER_INVITE))`
         // (`:1157-1160`): the target blocks friend requests, so the caller hears
-        // `[LS;657]` and the request never runs.
         if self.is_block_mode(target, crate::game_state::whisper::BLOCK_MESSENGER_INVITE) {
             if let Some(mover) = self.own_mover(caller) {
                 let line = chat_packet(

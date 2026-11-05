@@ -387,7 +387,7 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some((answer, (records, _, _, block_mode))) =
+        let Some((answer, (records, _, _, block_mode, _, _, _))) =
             self.run_quests(place, mover, level, pid, op)
         else {
             return R::default();

@@ -63,7 +63,7 @@ use common::item_slots::{
     EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START, INVENTORY_MAX_NUM,
     ITEM_COUNT_LIMIT,
 };
-use protocol::gc_item_window::{GcItemSet, GcItemUpdate};
+use protocol::gc_item_window::{GcItemSet, GcItemUpdate, ItemAttribute};
 use protocol::item_pos::ItemPos;
 
 use super::equip::{find_equip_cell, CharacterLook, Equipper, Gear, Trail, WornSystem};
@@ -167,6 +167,17 @@ pub enum MoveKind {
     QuestUsed,
     /// A quest wrote one socket of a held item (`CItem::SetSocket`, `G/item.cpp:1643-1656`).
     Socketed,
+    /// The GM's kit landed: `UnequipItem` took the six first cells and the shield off,
+    /// and fresh pieces went on through `EquipTo` (`do_item_full_set`,
+    /// `G/cmd_gm.cpp:4760-4902`).
+    FullSet,
+    /// One attribute of a held item was forced (`CItem::SetForceAttribute`,
+    /// `G/item_attribute.cpp:357-378`).
+    Attributed,
+    /// The GM's rod or pick line refined the named cell's tool: the old tool is
+    /// destroyed and its next vnum stands in the same cell (`fishing::RealRefineRod`,
+    /// `G/fishing.cpp:861-928`, `mining::RealRefinePick`, `G/mining.cpp:234-303`).
+    Refined,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -277,6 +288,14 @@ pub enum ItemChange {
         /// Its sockets now.
         sockets: [i32; crate::item::SOCKETS],
     },
+    /// The item's attributes changed: `do_attr_full_set` forced them
+    /// (`CItem::SetForceAttribute`, `G/item_attribute.cpp:357-378`).
+    Attributes {
+        /// The item.
+        id: ItemId,
+        /// Its attributes now.
+        attributes: [ItemAttribute; crate::item::ATTRIBUTES],
+    },
     /// A trade gave the item to another character, which stores it here.
     Given {
         /// The item.
@@ -338,6 +357,8 @@ pub enum Unported {
     UseSubType(i32),
     /// `CG_ITEM_USE` on an `ITEM_USE` item whose vnum has an arm of its own that is not ported.
     UseVnum(u32),
+    /// A gift an NPC takes through a system this build does not have.
+    Give(super::give::GiveUnported),
 }
 
 /// Why a move changed nothing.
@@ -452,6 +473,8 @@ pub enum MoveRefused {
     UsedWhileQuesting,
     /// `DropItem`: a script of the character waits for its client.
     DroppedWhileQuesting,
+    /// `DestroyItem`: a script of the character waits for its client.
+    DestroyedWhileQuesting,
     /// `PickupItem` (`@fixme150`): a quest item, and a script of the character waits for its
     /// client.
     PickedUpWhileQuesting,
@@ -464,6 +487,10 @@ pub enum MoveRefused {
     DroppedWhileDead,
     /// `PickupItem`: the character is dead (D10).
     PickedUpWhileDead,
+    /// `DestroyItem`: the character is dead (`G/char_item.cpp:7415`).
+    DestroyedWhileDead,
+    /// `DestroyItem`: `CanHandleItem` refuses — a window this build has stands open.
+    WindowOpen,
     /// `PickupItem`: `IsOwnership` refused (`G/item.cpp:1696-1702`) — another character's
     /// ownership event still runs. Legacy sends nothing and returns false (`:8160`).
     OwnedByOther,
@@ -619,6 +646,9 @@ impl core::fmt::Display for MoveRefused {
             Self::Exchanging => f.write_str("the item is offered in a trade"),
             Self::UsedWhileQuesting => f.write_str("an item is used while a script waits"),
             Self::DroppedWhileQuesting => f.write_str("an item is dropped while a script waits"),
+            Self::DestroyedWhileQuesting => {
+                f.write_str("an item is destroyed while a script waits")
+            }
             Self::PickedUpWhileQuesting => {
                 f.write_str("a quest item is picked up while a script waits")
             }
@@ -626,6 +656,8 @@ impl core::fmt::Display for MoveRefused {
             Self::UsedWhileDown => f.write_str("an item is used while stunned or dead"),
             Self::DroppedWhileDead => f.write_str("an item is dropped while dead"),
             Self::PickedUpWhileDead => f.write_str("an item is picked up while dead"),
+            Self::DestroyedWhileDead => f.write_str("an item is destroyed while dead"),
+            Self::WindowOpen => f.write_str("a window holds the character's items"),
             Self::OwnedByOther => f.write_str("another character owns the ground item"),
             Self::GoldOverflow => f.write_str("the gold pile would reach the gold cap"),
         }

@@ -228,16 +228,20 @@ impl<'a> Equipment<'a> {
         narrow(sum)
     }
 
-    /// The parts after `ComputePoints`: `base` is the character's base part (`bBasePart`)
-    /// and `current` the parts before the computation.
+    /// The parts after `ComputePoints`: `base` is the character's base part (`bBasePart`),
+    /// `current` the parts before the computation, and `hidden` the costume-hide mask
+    /// (`pc_hide_costume`, `G/char.cpp:5386-5414`): bit 0 hides the body, 1 the hair, 2 the
+    /// sash, 3 the aura, 4 the weapon.
     ///
     /// `ComputePoints` sets each part to `GetOriginalPart` (`char.cpp:2917-2926`), which is
     /// the base part for the body, the current part for the weapon, hair and sash, and 0 for
     /// the head and the aura (`char.cpp:5424-5462`). The worn loop then runs each worn item's
     /// parts switch in wear-cell order. `SetPart` stores a `WORD`, so each value keeps its low
-    /// 16 bits.
+    /// 16 bits. A hidden part whose costume cell is worn then shows what the costume
+    /// covered: the armor's look for the body, the weapon's look for the weapon (0 with no
+    /// armor or weapon), and 0 for hair, sash and aura.
     #[must_use]
-    pub fn parts(&self, base: u16, current: [u16; PARTS]) -> [u16; PARTS] {
+    pub fn parts(&self, base: u16, current: [u16; PARTS], hidden: u8) -> [u16; PARTS] {
         let mut parts = [0; PARTS];
         parts[EParts::Main as usize] = base;
         for part in [EParts::Weapon, EParts::Hair, EParts::Sash] {
@@ -248,7 +252,47 @@ impl<'a> Equipment<'a> {
                 parts[part as usize] = word(value);
             }
         }
+        self.apply_hidden(&mut parts, hidden);
         parts
+    }
+
+    /// The costume-hide overrides of `GetPart` (`G/char.cpp:5386-5414`): each hidden part
+    /// whose costume cell is worn shows what the costume covered.
+    fn apply_hidden(&self, parts: &mut [u16; PARTS], hidden: u8) {
+        // (mask bit, costume cell, shown part, fallback cell): the body falls back to the
+        // armor's look, the weapon to the weapon's look, the rest to 0.
+        const HIDES: [(u8, EWearPositions, EParts, Option<EWearPositions>); 5] = [
+            (
+                0,
+                EWearPositions::CostumeBody,
+                EParts::Main,
+                Some(EWearPositions::Body),
+            ),
+            (1, EWearPositions::CostumeHair, EParts::Hair, None),
+            (2, EWearPositions::CostumeSash, EParts::Sash, None),
+            (3, EWearPositions::CostumeAura, EParts::Aura, None),
+            (
+                4,
+                EWearPositions::CostumeWeapon,
+                EParts::Weapon,
+                Some(EWearPositions::Weapon),
+            ),
+        ];
+        for (bit, costume, part, fallback) in HIDES {
+            if hidden & (1 << bit) != 0 && self.wear(costume as u16).is_some() {
+                parts[part as usize] = fallback.and_then(|wear| self.look_of(wear)).unwrap_or(0);
+            }
+        }
+    }
+
+    /// The worn look of `wear`, through its transmutation (`G/char.cpp:5316-5384`).
+    fn look_of(&self, wear: EWearPositions) -> Option<u16> {
+        let worn = self.wear(wear as u16)?;
+        Some(word(if worn.item.transmutation == 0 {
+            worn.item.vnum
+        } else {
+            worn.item.transmutation
+        }))
     }
 
     /// The part one worn item's `ModifyPoints(true)` sets, if any.
@@ -1442,7 +1486,7 @@ mod tests {
     fn the_parts_start_from_the_base_and_the_kept_parts() {
         let current = [9, 0x0405, 7, 0x0607, 0x0809, 11];
         assert_eq!(
-            Equipment::default().parts(0x0203, current),
+            Equipment::default().parts(0x0203, current, 0),
             [0x0203, 0x0405, 0, 0x0607, 0x0809, 0]
         );
     }
@@ -1461,7 +1505,7 @@ mod tests {
         let protos = ItemProtos::from_rows(rows);
         let parts_of = |worn: &[(u16, &Item)]| {
             let items = wearing(worn);
-            Equipment::of(&items, &protos).parts(0x0203, [0; PARTS])
+            Equipment::of(&items, &protos).parts(0x0203, [0; PARTS], 0)
         };
         let main = EParts::Main as usize;
         let weapon_part = EParts::Weapon as usize;
@@ -1505,6 +1549,58 @@ mod tests {
         assert_eq!(parts, [0x0203, 0, 0, 0, 0, 0]);
         let parts = parts_of(&[(BODY, &body), (COSTUME_BODY_CELL, &item(9, 12_210))]);
         assert_eq!(parts, [0x0203, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_hidden_costume_shows_what_it_covered() {
+        let rows = vec![
+            proto(0x0001_0203, ITEM_WEAPON, 0),
+            proto(11_210, ITEM_ARMOR, ARMOR_BODY),
+            proto(41_001, ITEM_COSTUME, COSTUME_BODY),
+            proto(45_001, ITEM_COSTUME, COSTUME_HAIR),
+            proto(85_001, ITEM_COSTUME, COSTUME_SASH),
+            proto(49_001, ITEM_COSTUME, COSTUME_AURA),
+            proto(40_100, ITEM_COSTUME, COSTUME_WEAPON),
+        ];
+        let protos = ItemProtos::from_rows(rows);
+        let parts_of = |worn: &[(u16, &Item)], hidden: u8| {
+            let items = wearing(worn);
+            Equipment::of(&items, &protos).parts(0x0203, [0; PARTS], hidden)
+        };
+        let main = EParts::Main as usize;
+        let weapon_part = EParts::Weapon as usize;
+        let hair = EParts::Hair as usize;
+        let mut body = item(5, 11_210);
+        body.transmutation = 11_299;
+        let costume = item(7, 41_001);
+        // Hidden with the costume worn: the body shows the armor's look.
+        let parts = parts_of(&[(BODY, &body), (COSTUME_BODY_CELL, &costume)], 0b00001);
+        assert_eq!(parts[main], 11_299);
+        // Hidden with no costume worn: the hide changes nothing.
+        let parts = parts_of(&[(BODY, &body)], 0b00001);
+        assert_eq!(parts[main], 11_299);
+        // Hidden with the costume but no armor: 0.
+        let parts = parts_of(&[(COSTUME_BODY_CELL, &costume)], 0b00001);
+        assert_eq!(parts[main], 0);
+        // Hair, sash and aura hide to 0.
+        let parts = parts_of(
+            &[
+                (COSTUME_HAIR_CELL, &item(10, 45_001)),
+                (COSTUME_SASH_CELL, &item(11, 85_001)),
+                (COSTUME_AURA_CELL, &item(12, 49_001)),
+            ],
+            0b01110,
+        );
+        assert_eq!(parts[hair], 0);
+        assert_eq!(parts[EParts::Sash as usize], 0);
+        assert_eq!(parts[EParts::Aura as usize], 0);
+        // The weapon shows the worn weapon's look.
+        let sword = item(1, 0x0001_0203);
+        let parts = parts_of(
+            &[(WEAPON, &sword), (COSTUME_WEAPON_CELL, &item(2, 40_100))],
+            0b10000,
+        );
+        assert_eq!(parts[weapon_part], 0x0203);
     }
 
     #[test]
@@ -1699,7 +1795,7 @@ mod tests {
         let protos = ItemProtos::from_rows(rows);
         let parts_of = |worn: &[(u16, &Item)]| {
             let items = wearing(worn);
-            Equipment::of(&items, &protos).parts(0, [0, 0, 0, 0x0102, 0x0304, 0])
+            Equipment::of(&items, &protos).parts(0, [0, 0, 0, 0x0102, 0x0304, 0], 0)
         };
         let hair = EParts::Hair as usize;
         let sash = EParts::Sash as usize;

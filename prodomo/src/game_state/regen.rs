@@ -194,9 +194,20 @@ impl Regens {
         self.cells.get(index).cloned()
     }
 
+    /// The region of the map boot stood up on `channel`: its edges and its base
+    /// point (`iBaseX`/`iBaseY`), which the `/state` coordinate line reads.
+    pub(super) fn region_of(&self, channel: u8, map: i32) -> Option<MapRegion> {
+        self.regions.get(&(channel, map)).cloned()
+    }
+
     /// The spawner the regens spawn from, once boot has handed it over.
     pub(super) fn respawner_mut(&mut self) -> Option<&mut Respawner> {
         self.respawner.as_mut()
+    }
+
+    /// The spawner's mob prototypes, once boot has handed them over.
+    pub(super) fn respawner(&self) -> Option<&Respawner> {
+        self.respawner.as_ref()
     }
 }
 
@@ -232,10 +243,16 @@ impl GameState {
     /// `SECTREE::IsAttr(x, y, ATTR_BANPK)` on the cells boot handed over: false on a map it
     /// handed none of.
     pub(super) fn is_banpk(&self, map: i32, x: i32, y: i32) -> bool {
+        self.is_attr(map, (x, y), ATTR_BANPK)
+    }
+
+    /// `SECTREE::IsAttr(x, y, flags)` on the cells boot handed over: false on a map it handed
+    /// none of, and where the map has no sectree.
+    pub(super) fn is_attr(&self, map: i32, (x, y): (i32, i32), flags: u32) -> bool {
         self.regens
             .cells
             .get(map)
-            .is_some_and(|cells| cells.is_attr(x, y, ATTR_BANPK))
+            .is_some_and(|cells| cells.is_attr(x, y, flags))
     }
 
     /// Schedules the events of a map boot stood up on `pulse`: each regen's first run and each
@@ -431,6 +448,682 @@ impl GameState {
             self.schedule_vein(vid, lifetime, pulse);
         }
         self.deliver(&effects, None);
+    }
+
+    /// `ACMD(do_purge)` and `ACMD(do_weaken)` (`G/cmd_gm.cpp:816-868`,
+    /// `:2824-2861`): every NPC of the sectrees around the caller is destroyed
+    /// (`purge`) or set to 10 hit points (`weaken`), `all` or within
+    /// `DISTANCE_APPROX` 1000. An NPC is `char_type != CHAR_TYPE_PC`; the
+    /// pet, mount, auto-shaman and rider gates are dead (no ported path sets
+    /// them). With no sectree legacy logs and destroys nothing (`:857-861`).
+    /// `weaken`'s set is `PointChange(POINT_HP)`: dead or stunned refuses,
+    /// the change caps at the maximum, and the targeters hear it.
+    pub(super) fn purge_around(&mut self, vid: Vid, all: bool, weaken: bool) {
+        let Some(place) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return;
+        };
+        if spot.tree.is_none() {
+            return;
+        }
+        let Some(index) = self.maps.get(&place) else {
+            return;
+        };
+        let around = index.around_of(EntityKey::Character(vid.raw()));
+        let mut swept: Vec<u32> = Vec::new();
+        for key in around {
+            let EntityKey::Npc(npc) = key else {
+                continue;
+            };
+            let Some(found) = self.npc_by_vid(npc) else {
+                continue;
+            };
+            if found.char_type == gamedata::mob_proto::CHAR_TYPE_PC {
+                continue;
+            };
+            if !all
+                && crate::sync_position::distance_approx(found.x - spot.x, found.y - spot.y) >= 1000
+            {
+                continue;
+            }
+            swept.push(npc);
+        }
+        for npc in swept {
+            if weaken {
+                self.weaken_npc(npc);
+            } else {
+                self.destroy_npc(npc);
+            }
+        }
+    }
+
+    /// `regen_reset(x, y)` (`G/regen.cpp:737-757`): every regen with an event
+    /// fires one Pulse on - those holding the point when one is named, every
+    /// regen when it is not. The caller's own Channel is the walk, as
+    /// `/user` walks it: legacy's list is one core's.
+    ///
+    /// A regen with no due event is skipped, as one with no `event` is. A
+    /// regen whose rectangle holds the caller fires even when its map is not
+    /// the caller's, because the legacy test is only the rectangle.
+    pub(super) fn respawn_around(&mut self, vid: Vid, all: bool) {
+        let when = self.last_pulse.saturating_add(1);
+        if all {
+            let due: Vec<(u64, Due)> = self
+                .regens
+                .due
+                .iter()
+                .copied()
+                .filter(|&(_, what)| matches!(what, Due::Regen { .. }))
+                .collect();
+            for (old, what) in due {
+                self.regens.due.remove(&(old, what));
+                self.regens.due.insert((when, what));
+            }
+            return;
+        }
+        let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
+            return;
+        };
+        let due: Vec<(u64, Due)> = self
+            .regens
+            .due
+            .iter()
+            .copied()
+            .filter(|&(_, what)| match what {
+                Due::Regen { channel, map, at } => {
+                    channel == place.0
+                        && self
+                            .npcs
+                            .get(&(channel, map))
+                            .and_then(|list| list.regens.get(at))
+                            .is_some_and(|regen| {
+                                spot.x >= regen.entry.sx
+                                    && spot.x <= regen.entry.ex
+                                    && spot.y >= regen.entry.sy
+                                    && spot.y <= regen.entry.ey
+                            })
+                }
+                _ => false,
+            })
+            .collect();
+        for (old, what) in due {
+            self.regens.due.remove(&(old, what));
+            self.regens.due.insert((when, what));
+        }
+    }
+
+    /// `do_mob` (`G/cmd_gm.cpp:699-758`): `count` of `vnum` stand around the
+    /// caller, each in a box `number(200, 750)` past the caller on every
+    /// side, or the usage or the miss answers. The proto answers with the
+    /// spawn motion when it is a stone; the count caps at 40 on the test
+    /// server, 20 elsewhere.
+    ///
+    /// The vnum-or-name split is legacy's: a leading digit reads a vnum, any
+    /// other first byte reads a locale-name prefix. A vnum with no row, or a
+    /// prefix no locale name starts with, is the miss.
+    pub(super) fn mob_around(&mut self, vid: Vid, rest: &[u8]) {
+        self.mob_around_inner(vid, rest);
+    }
+
+    /// `do_group` (`G/cmd_gm.cpp:537-555`): the group in the 500-box around
+    /// the caller, or the usage answers. The word is a bare `str_to_number`.
+    /// A vnum with no group stands nothing and stays silent, as legacy's
+    /// null return does.
+    pub(super) fn group_around(&mut self, vid: Vid, rest: &[u8]) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let (first, _) = crate::command::one_argument(rest);
+        if first.is_empty() {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Usage: group <group vnum>",
+                &[],
+            );
+            return;
+        }
+        let vnum = Self::mob_vnum(&first);
+        let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
+            return;
+        };
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        let area = (
+            spot.x.saturating_sub(500),
+            spot.y.saturating_sub(500),
+            spot.x.saturating_add(500),
+            spot.y.saturating_add(500),
+        );
+        match respawner.spawn_group_line((&region, &cells), vnum, area, &mut self.dice) {
+            Ok(stood) => self.stand_runtime(place, stood, pulse),
+            Err(error) => {
+                warn!(?place, %error, "a group line outnumbered the VIDs left");
+            }
+        }
+    }
+
+    /// `do_group_random` (`G/cmd_gm.cpp:521-536`): `/group`'s spawn with one
+    /// group drawn uniformly from the group-group, or the usage answers. A
+    /// vnum with no group-group stands nothing and stays silent.
+    pub(super) fn group_random_around(&mut self, vid: Vid, rest: &[u8]) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let (first, _) = crate::command::one_argument(rest);
+        if first.is_empty() {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Usage: grrandom <group vnum>",
+                &[],
+            );
+            return;
+        }
+        let vnum = Self::mob_vnum(&first);
+        let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
+            return;
+        };
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        let area = (
+            spot.x.saturating_sub(500),
+            spot.y.saturating_sub(500),
+            spot.x.saturating_add(500),
+            spot.y.saturating_add(500),
+        );
+        match respawner.spawn_group_random_line((&region, &cells), vnum, area, &mut self.dice) {
+            Ok(stood) => self.stand_runtime(place, stood, pulse),
+            Err(error) => {
+                warn!(?place, %error, "a grrandom line outnumbered the VIDs left");
+            }
+        }
+    }
+
+    /// `do_mob_map` (`G/cmd_gm.cpp:618-637`): the numbered mob at a random
+    /// point of the caller's map, or the syntax, the stood line, or the
+    /// failure answers. The word is a bare `str_to_number`: no name reads,
+    /// so a name is 0 and fails. A vnum with no proto, a gated vnum, or 2000
+    /// tries with no cell is `Failed`; the stood line names the mob's locale
+    /// name and its centimetres (`%s spawned in %dx%d`).
+    pub(super) fn mob_somewhere(&mut self, vid: Vid, rest: &[u8]) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let (first, _) = crate::command::one_argument(rest);
+        if first.is_empty() {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"Syntax: mm <vnum>", &[]);
+            return;
+        }
+        let vnum = Self::mob_vnum(&first);
+        let Some(place) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        match respawner.spawn_random_line((&region, &cells), vnum, &mut self.dice) {
+            Ok(Some(stood)) => {
+                let name = String::from_utf8_lossy(&stood.name).into_owned();
+                let line = format!("{name} spawned in {}x{}", stood.x, stood.y);
+                self.stand_runtime(place, vec![stood], pulse);
+                self.tell(vid, mover, CHAT_TYPE_INFO, line.as_bytes(), &[]);
+            }
+            Ok(None) => {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"Failed", &[]);
+            }
+            Err(error) => {
+                warn!(?place, %error, "a mob_map line outnumbered the VIDs left");
+            }
+        }
+    }
+
+    /// The places of `map` this process hosts (`map_allow_find`), one per Channel world, in
+    /// Channel order. Legacy runs an event arm on every core that hosts the map; a Channel
+    /// world is one core's worth of maps here, so the arm runs once per place.
+    pub(super) fn places_hosting(&self, map: i32) -> Vec<(u8, i32)> {
+        self.regens
+            .regions
+            .keys()
+            .filter(|&&(_, hosted)| hosted == map)
+            .copied()
+            .collect()
+    }
+
+    /// `GetMapBasePositionByMapIndex`: the map's top-left corner in centimetres.
+    pub(super) fn map_base(&self, place: (u8, i32)) -> Option<(i32, i32)> {
+        self.regens
+            .regions
+            .get(&place)
+            .map(|region| (region.sx, region.sy))
+    }
+
+    /// `SpawnMob(vnum, map, x, y, 0, spawn_motion, dir)` on `place` for an event arm: the
+    /// point is absolute, `-1` draws the facing. A point no sectree holds, a cell that
+    /// refuses, or a missing proto stands nothing, as legacy's null return does.
+    pub(super) fn spawn_event_mob(
+        &mut self,
+        place: (u8, i32),
+        vnum: u32,
+        at: (i32, i32),
+        dir: i32,
+        spawn_motion: bool,
+    ) {
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        match respawner.spawn_directed(
+            (&region, &cells),
+            vnum,
+            at,
+            dir,
+            spawn_motion,
+            &mut self.dice,
+        ) {
+            Ok(Some(stood)) => self.stand_runtime(place, vec![stood], pulse),
+            Ok(None) => {}
+            Err(error) => warn!(?place, %error, "an event spawn outnumbered the VIDs left"),
+        }
+    }
+
+    /// `SpawnMobRandomPosition(vnum, map)` on `place` for an event arm.
+    pub(super) fn spawn_event_mob_randomly(&mut self, place: (u8, i32), vnum: u32) {
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        match respawner.spawn_random_line((&region, &cells), vnum, &mut self.dice) {
+            Ok(Some(stood)) => self.stand_runtime(place, vec![stood], pulse),
+            Ok(None) => {}
+            Err(error) => warn!(?place, %error, "an event spawn outnumbered the VIDs left"),
+        }
+    }
+    /// `do_mob_ld` (`G/cmd_gm.cpp:760-815`): the named mob at the named
+    /// metres on the caller's map, facing `dir`, or the usage or the miss
+    /// answers. The parse is `/mob`'s: a leading digit reads a vnum, any
+    /// other first byte a locale-name prefix. The metres scale to
+    /// centimetres; the missing words are 0, 0 and 1. A point no sectree
+    /// holds, or a cell that refuses, stands nothing and stays silent, as
+    /// legacy's `SpawnMob` returning null does.
+    pub(super) fn mob_ld_at(&mut self, vid: Vid, rest: &[u8]) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let (first, back) = crate::command::one_argument(rest);
+        let (second, back) = crate::command::one_argument(back);
+        let (third, back) = crate::command::one_argument(back);
+        let (fourth, _) = crate::command::one_argument(back);
+        if first.is_empty() {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"Usage: mob <mob vnum>", &[]);
+            return;
+        }
+        let Some(respawner) = self.regens.respawner.as_ref() else {
+            return;
+        };
+        let (vnum, stone) = if first[0].is_ascii_digit() {
+            let vnum = Self::mob_vnum(&first);
+            let Some(row) = respawner.mob(vnum) else {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"No such mob(%s) by that vnum",
+                    &[crate::chat_line::Arg::Text(&first)],
+                );
+                return;
+            };
+            (vnum, row.mob_type == gamedata::mob_proto::CHAR_TYPE_STONE)
+        } else {
+            let Some(row) = respawner.mob_by_name(&first) else {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"No such mob(%s) by that vnum",
+                    &[crate::chat_line::Arg::Text(&first)],
+                );
+                return;
+            };
+            (
+                row.vnum,
+                row.mob_type == gamedata::mob_proto::CHAR_TYPE_STONE,
+            )
+        };
+        let x = if second.is_empty() {
+            0
+        } else {
+            Self::mob_count(&second).saturating_mul(100)
+        };
+        let y = if third.is_empty() {
+            0
+        } else {
+            Self::mob_count(&third).saturating_mul(100)
+        };
+        let dir = if fourth.is_empty() {
+            1
+        } else {
+            Self::mob_count(&fourth)
+        };
+        let Some(place) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        match respawner.spawn_directed((&region, &cells), vnum, (x, y), dir, stone, &mut self.dice)
+        {
+            Ok(Some(stood)) => self.stand_runtime(place, vec![stood], pulse),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(?place, %error, "a mob_ld line outnumbered the VIDs left");
+            }
+        }
+    }
+
+    /// `str_to_number` on a `DWORD` (`common/utils.h:44-50`): `strtoul` base 10
+    /// cast to `u32`, garbage answering 0. The wrap matches `parse_war_type`'s.
+    fn mob_vnum(word: &[u8]) -> u32 {
+        let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+            return 0;
+        };
+        let rest = &word[offset..];
+        let (digits, negative) = match rest.first() {
+            Some(b'-') => (&rest[1..], true),
+            Some(b'+') => (&rest[1..], false),
+            _ => (rest, false),
+        };
+        let mut value: u32 = 0;
+        for byte in digits {
+            if !byte.is_ascii_digit() {
+                break;
+            }
+            value = value.wrapping_mul(10).wrapping_add(u32::from(byte - b'0'));
+        }
+        if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        }
+    }
+
+    /// `str_to_number` on an `int` (`common/utils.h:38-43`): `strtol` base 10
+    /// cast to `i32`, garbage answering 0.
+    fn mob_count(word: &[u8]) -> i32 {
+        let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+            return 0;
+        };
+        let rest = &word[offset..];
+        let (digits, negative) = match rest.first() {
+            Some(b'-') => (&rest[1..], true),
+            Some(b'+') => (&rest[1..], false),
+            _ => (rest, false),
+        };
+        let mut value: i32 = 0;
+        for byte in digits {
+            if !byte.is_ascii_digit() {
+                break;
+            }
+            value = value.wrapping_mul(10).wrapping_add(i32::from(byte - b'0'));
+        }
+        if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        }
+    }
+
+    fn mob_around_inner(&mut self, vid: Vid, rest: &[u8]) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        use world::character::number;
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let (first, back) = crate::command::one_argument(rest);
+        let (second, _) = crate::command::one_argument(back);
+        if first.is_empty() {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"Usage: mob <mob vnum>", &[]);
+            return;
+        }
+        let Some(respawner) = self.regens.respawner.as_ref() else {
+            return;
+        };
+        let (vnum, stone) = if first[0].is_ascii_digit() {
+            let vnum = Self::mob_vnum(&first);
+            let Some(row) = respawner.mob(vnum) else {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"No such mob(%s) by that vnum",
+                    &[crate::chat_line::Arg::Text(&first)],
+                );
+                return;
+            };
+            (vnum, row.mob_type == gamedata::mob_proto::CHAR_TYPE_STONE)
+        } else {
+            let Some(row) = respawner.mob_by_name(&first) else {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"No such mob(%s) by that vnum",
+                    &[crate::chat_line::Arg::Text(&first)],
+                );
+                return;
+            };
+            (
+                row.vnum,
+                row.mob_type == gamedata::mob_proto::CHAR_TYPE_STONE,
+            )
+        };
+        let mut count = if second.is_empty() {
+            1
+        } else {
+            Self::mob_count(&second)
+        };
+        count = count.min(if self.test_server { 40 } else { 20 });
+        let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
+            return;
+        };
+        let pulse = self.last_pulse;
+        while count > 0 {
+            count -= 1;
+            let (low_x, low_y) = (
+                spot.x.saturating_sub(number(&mut self.dice, 200, 750)),
+                spot.y.saturating_sub(number(&mut self.dice, 200, 750)),
+            );
+            let (high_x, high_y) = (
+                spot.x.saturating_add(number(&mut self.dice, 200, 750)),
+                spot.y.saturating_add(number(&mut self.dice, 200, 750)),
+            );
+            let (Some(region), Some(cells), Some(respawner)) = (
+                self.regens.regions.get(&place).cloned(),
+                self.regens.cells.get(place.1).cloned(),
+                self.regens.respawner.as_mut(),
+            ) else {
+                return;
+            };
+            match respawner.spawn_mob_line(
+                (&region, &cells),
+                vnum,
+                (low_x, low_y, high_x, high_y),
+                stone,
+                &mut self.dice,
+            ) {
+                Ok(Some(stood)) => self.stand_runtime(place, vec![stood], pulse),
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(?place, %error, "a mob line outnumbered the VIDs left");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `do_mob_aggresive` and `do_mob_coward` (`G/cmd_gm.cpp:557-617`,
+    /// `:639-698`): `/mob`'s spawn with the aggressive or the coward bit set
+    /// on each (`SetAggressive`, `SetCoward`, `G/char_state.cpp:242-255`).
+    /// The counts cap at 20 on either server, with no test-server 40: the
+    /// lines never learned `/mob`'s branch. The usages differ (`Usage: mob
+    /// <mob vnum>` for the aggressive, `Usage: mc <vnum>` for the coward);
+    /// the miss is `/mob`'s.
+    pub(super) fn mob_flagged(&mut self, vid: Vid, rest: &[u8], coward: bool) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        use world::character::number;
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let (first, back) = crate::command::one_argument(rest);
+        let (second, _) = crate::command::one_argument(back);
+        if first.is_empty() {
+            let usage = if coward {
+                b"Usage: mc <vnum>".as_slice()
+            } else {
+                b"Usage: mob <mob vnum>".as_slice()
+            };
+            self.tell(vid, mover, CHAT_TYPE_INFO, usage, &[]);
+            return;
+        }
+        let Some(respawner) = self.regens.respawner.as_ref() else {
+            return;
+        };
+        let (vnum, stone) = if first[0].is_ascii_digit() {
+            let vnum = Self::mob_vnum(&first);
+            let Some(row) = respawner.mob(vnum) else {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"No such mob(%s) by that vnum",
+                    &[crate::chat_line::Arg::Text(&first)],
+                );
+                return;
+            };
+            (vnum, row.mob_type == gamedata::mob_proto::CHAR_TYPE_STONE)
+        } else {
+            let Some(row) = respawner.mob_by_name(&first) else {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"No such mob(%s) by that vnum",
+                    &[crate::chat_line::Arg::Text(&first)],
+                );
+                return;
+            };
+            (
+                row.vnum,
+                row.mob_type == gamedata::mob_proto::CHAR_TYPE_STONE,
+            )
+        };
+        let mut count = if second.is_empty() {
+            1
+        } else {
+            Self::mob_count(&second)
+        };
+        count = count.min(20);
+        let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
+            return;
+        };
+        let pulse = self.last_pulse;
+        let bit = if coward {
+            gamedata::mob_proto::AIFLAG_COWARD
+        } else {
+            gamedata::mob_proto::AIFLAG_AGGRESSIVE
+        };
+        while count > 0 {
+            count -= 1;
+            let (low_x, low_y) = (
+                spot.x.saturating_sub(number(&mut self.dice, 200, 750)),
+                spot.y.saturating_sub(number(&mut self.dice, 200, 750)),
+            );
+            let (high_x, high_y) = (
+                spot.x.saturating_add(number(&mut self.dice, 200, 750)),
+                spot.y.saturating_add(number(&mut self.dice, 200, 750)),
+            );
+            let (Some(region), Some(cells), Some(respawner)) = (
+                self.regens.regions.get(&place).cloned(),
+                self.regens.cells.get(place.1).cloned(),
+                self.regens.respawner.as_mut(),
+            ) else {
+                return;
+            };
+            match respawner.spawn_mob_line(
+                (&region, &cells),
+                vnum,
+                (low_x, low_y, high_x, high_y),
+                stone,
+                &mut self.dice,
+            ) {
+                Ok(Some(mut stood)) => {
+                    stood.ai_flags |= bit;
+                    self.stand_runtime(place, vec![stood], pulse);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(?place, %error, "a flagged mob line outnumbered the VIDs left");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `FuncWeaken`'s set (`G/cmd_gm.cpp:2845-2846`): the NPC's hit points
+    /// become 10 through `PointChange(POINT_HP)`.
+    fn weaken_npc(&mut self, vid: u32) {
+        let Some(npc) = self.npc_by_vid(vid) else {
+            return;
+        };
+        if npc.dead || npc.stunned {
+            return;
+        }
+        let amount = 10i32
+            .saturating_sub(npc.hp)
+            .min(npc.max_hp.saturating_sub(npc.hp));
+        let Some(npc) = self.npc_mut(vid) else {
+            return;
+        };
+        npc.hp = npc.hp.saturating_add(amount);
+        self.broadcast_npc_target(vid);
     }
 
     /// `M2_DESTROY_CHARACTER` of the non-player under `vid`. A VID that names none is
@@ -956,6 +1649,120 @@ mod tests {
                 Due::PcDead(2),
                 Due::PcRecovery(1)
             ]
+        );
+    }
+
+    /// A purge destroys the near monster and leaves the far one: the
+    /// removal rides, the regen counts one fewer, and the list drops it.
+    #[test]
+    fn a_purge_destroys_the_near_monster_and_keeps_the_far_one() {
+        let near = a_character(FIRST_NPC_VID, 101, Some(0));
+        let mut far = a_character(FIRST_NPC_VID + 1, 101, None);
+        far.x = 5000;
+        far.y = 5000;
+        let regen = Regen {
+            entry: at_a_point(101, 2, 60),
+            count: 1,
+            first_fire: 3600,
+        };
+        let (mut world, mut inbox) = a_map(vec![near, far], vec![regen]);
+        world.purge_around(Vid::new(1), false, false);
+        assert_eq!(
+            drained(&mut inbox),
+            [remove_record(FIRST_NPC_VID)],
+            "the near one's removal rides"
+        );
+        assert!(world.npc_by_vid(FIRST_NPC_VID).is_none());
+        assert!(world.npc_by_vid(FIRST_NPC_VID + 1).is_some());
+        assert_eq!(
+            list(&world).regens[0].count,
+            0,
+            "the held regen counts down"
+        );
+    }
+
+    /// `all` destroys the far one too; a player-typed row is never an NPC.
+    #[test]
+    fn a_purge_all_destroys_the_far_one_but_no_player_row() {
+        let mut far = a_character(FIRST_NPC_VID, 101, None);
+        far.x = 5000;
+        far.y = 5000;
+        let mut pc = a_character(FIRST_NPC_VID + 1, 101, None);
+        pc.char_type = gamedata::mob_proto::CHAR_TYPE_PC;
+        let (mut world, mut inbox) = a_map(vec![far, pc], vec![]);
+        world.purge_around(Vid::new(1), true, false);
+        assert_eq!(
+            drained(&mut inbox),
+            [remove_record(FIRST_NPC_VID)],
+            "only the far monster's removal rides"
+        );
+        assert!(world.npc_by_vid(FIRST_NPC_VID).is_none());
+        assert!(world.npc_by_vid(FIRST_NPC_VID + 1).is_some());
+    }
+
+    /// A weaken sets the near monster to 10 hit points; the far one keeps 100.
+    #[test]
+    fn a_weaken_sets_the_near_monster_to_ten() {
+        let near = a_character(FIRST_NPC_VID, 101, None);
+        let mut far = a_character(FIRST_NPC_VID + 1, 101, None);
+        far.x = 5000;
+        far.y = 5000;
+        let (mut world, _inbox) = a_map(vec![near, far], vec![]);
+        world.purge_around(Vid::new(1), false, true);
+        assert_eq!(world.npc_by_vid(FIRST_NPC_VID).unwrap().hp, 10);
+        assert_eq!(world.npc_by_vid(FIRST_NPC_VID + 1).unwrap().hp, 100);
+    }
+
+    /// A respawn fires the holding regen one Pulse on; the far regen keeps
+    /// its due, and `all` moves both.
+    #[test]
+    fn a_respawn_moves_only_the_holding_regen_unless_all() {
+        let held = Regen {
+            entry: RegenEntry {
+                sx: 0,
+                sy: 0,
+                ex: 1000,
+                ey: 1000,
+                ..at_a_point(101, 3, 1000)
+            },
+            count: 3,
+            first_fire: 1000,
+        };
+        let mut far_entry = at_a_point(101, 3, 1000);
+        far_entry.sx = 50_000;
+        far_entry.ex = 51_000;
+        far_entry.sy = 50_000;
+        far_entry.ey = 51_000;
+        let far = Regen {
+            entry: far_entry,
+            count: 3,
+            first_fire: 1000,
+        };
+        let (mut world, _inbox) = a_map(Vec::new(), vec![held, far]);
+        world.process_pulse(1);
+        let held_due = Due::Regen {
+            channel: PLACE.0,
+            map: PLACE.1,
+            at: 0,
+        };
+        let far_due = Due::Regen {
+            channel: PLACE.0,
+            map: PLACE.1,
+            at: 1,
+        };
+        world.respawn_around(Vid::new(1), false);
+        assert!(
+            world.regens.due.contains(&(2, held_due)),
+            "the holding regen fires one Pulse on"
+        );
+        assert!(
+            !world.regens.due.contains(&(2, far_due)),
+            "the far regen keeps its due"
+        );
+        world.respawn_around(Vid::new(1), true);
+        assert!(
+            world.regens.due.contains(&(2, far_due)),
+            "`all` moves the far regen too"
         );
     }
 }

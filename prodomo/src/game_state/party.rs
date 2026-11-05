@@ -95,14 +95,17 @@ fn narrow(value: i32) -> i16 {
     i16::try_from(value).unwrap_or(if value < 0 { i16::MIN } else { i16::MAX })
 }
 
-/// `CParty::TMember` (`G/party.h:95-102`) for a PC: the link, the role, the shown level,
-/// the name, the near flag.
+/// `CParty::TMember` (`G/party.h:95-102`) for a PC: the link, the role, the level, the
+/// name, the near flag.
 #[derive(Debug, Clone)]
 struct Member {
     /// `pCharacter`'s VID while linked, `None` while offline.
     vid: Option<Vid>,
     /// `bRole`.
     role: u8,
+    /// `bLevel`: the member's level, which the 30-level window and the exp min/max
+    /// read. Never rides the wire (`BuildUpdatePartyPacket` sends no level).
+    level: u8,
     /// `strName`.
     name: String,
     /// `bNear`, recomputed by the Update.
@@ -135,6 +138,8 @@ struct Party {
     start_ms: u32,
     /// `m_iExpDistributionMode`.
     mode: u8,
+    /// `m_map_iFlag`: the quest flags, by name.
+    flags: std::collections::HashMap<Vec<u8>, i32>,
 }
 
 /// `CPartyManager` (`G/party.h:37-75`) narrowed to PCs: parties by leader PID, the
@@ -155,6 +160,82 @@ pub(super) struct Parties {
     requests: HashMap<CharacterId, (CharacterId, u64)>,
 }
 
+impl Parties {
+    /// The leader PID of `pid`'s party, if any.
+    pub(super) fn leader_of(&self, pid: CharacterId) -> Option<CharacterId> {
+        self.of.get(&pid).copied()
+    }
+
+    /// `CParty::GetFlag` (`G/party.cpp:1485-1497`): the flag `name` of `pid`'s
+    /// party, 0 with no party or no such flag.
+    #[cfg(test)]
+    pub(super) fn flag_of(&self, pid: CharacterId, name: &[u8]) -> i32 {
+        self.leader_of(pid)
+            .and_then(|leader| self.by_leader.get(&leader))
+            .and_then(|party| party.flags.get(name).copied())
+            .unwrap_or(0)
+    }
+
+    /// The flags of the party led by `leader`, cloned for a quest step's snapshot.
+    pub(super) fn flags_of(
+        &self,
+        leader: CharacterId,
+    ) -> Option<std::collections::HashMap<Vec<u8>, i32>> {
+        self.by_leader.get(&leader).map(|party| party.flags.clone())
+    }
+
+    /// The linked members' VIDs of the party led by `leader`, in PID order, for a line
+    /// every member hears (`ChatPacketToAllMember`, `G/party.cpp:350-373`). Empty with no
+    /// such party.
+    pub(super) fn linked_vids(&self, leader: CharacterId) -> Vec<Vid> {
+        self.by_leader
+            .get(&leader)
+            .map(|party| {
+                party
+                    .members
+                    .values()
+                    .filter_map(|member| member.vid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// `ForEachOnMapMember`'s PIDs for the party led by `leader`
+    /// (`G/party.h:295-309`): the linked members standing on `map`, in ascending
+    /// PID order, cloned for a quest step's snapshot. `None` with no such party.
+    pub(super) fn on_map_members(
+        &self,
+        leader: CharacterId,
+        map: i32,
+        bodies: &std::collections::HashMap<Vid, super::motion::Body>,
+    ) -> Option<Vec<CharacterId>> {
+        let party = self.by_leader.get(&leader)?;
+        let mut pids: Vec<CharacterId> = party
+            .members
+            .iter()
+            .filter(|(_, member)| {
+                member
+                    .vid
+                    .is_some_and(|vid| bodies.get(&vid).is_some_and(|body| body.map == map))
+            })
+            .map(|(pid, _)| *pid)
+            .collect();
+        pids.sort_unstable();
+        Some(pids)
+    }
+
+    /// `CParty::SetFlag` (`G/party.cpp:1499-1511`): `name` of `pid`'s party
+    /// becomes `value`. Quiet with no party.
+    pub(super) fn set_flag(&mut self, pid: CharacterId, name: Vec<u8>, value: i32) {
+        let Some(leader) = self.leader_of(pid) else {
+            return;
+        };
+        if let Some(party) = self.by_leader.get_mut(&leader) {
+            party.flags.insert(name, value);
+        }
+    }
+}
+
 /// `CHARACTER::PartyJoinErrCode` (`G/char.h:1106-1118`), without the separator and max.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JoinErr {
@@ -164,6 +245,8 @@ enum JoinErr {
     Server,
     /// `PERR_LVBOUNDARY`: the levels differ by more than 30.
     LevelBoundary,
+    /// `PERR_OBSERVER`: the guest observes.
+    Observer,
     /// `PERR_ALREADYJOIN`: the guest already has a party.
     AlreadyJoin,
     /// `PERR_PARTYISFULL`: the leader's party holds 8.
@@ -176,6 +259,20 @@ impl GameState {
     /// The leader PID of `pid`'s party, if any.
     pub(super) fn party_leader_of(&self, pid: CharacterId) -> Option<CharacterId> {
         self.parties.of.get(&pid).copied()
+    }
+    /// `CParty::P2PSetMemberLevel` (`G/party.cpp:609-620`): the member row of `pid`
+    /// carries `level`. The DB packet is the retired peer's, and no client record
+    /// follows on the leveler's own process. Quiet with no party or no such
+    /// member, as the `m_memberMap.end()` return is.
+    pub(super) fn set_party_member_level(&mut self, pid: CharacterId, level: u8) {
+        let Some(leader) = self.parties.of.get(&pid).copied() else {
+            return;
+        };
+        if let Some(party) = self.parties.by_leader.get_mut(&leader) {
+            if let Some(member) = party.members.get_mut(&pid) {
+                member.level = level;
+            }
+        }
     }
     /// `ch->GetParty() != NULL` for the character online under `vid`
     /// (`G/input_main.cpp:959`): its PID holds a party. The descriptor asks before
@@ -242,12 +339,12 @@ impl GameState {
         self.joinable_mutable(leader, guest)
     }
 
-    /// `IsPartyJoinableMutableCondition` (`G/char.cpp:6045-6066`): the level, joined and
-    /// full checks. The enabled arm passes (always enabled), and the dungeon and observer
-    /// arms pass (no dungeons, no observer mode — see the module doc), so no `JoinErr`
-    /// names them and the `[LS;822]`/`[LS;823]`/`[LS;835]` lines have no sender yet.
-    /// `PERR_LOWLEVEL`/`PERR_HILEVEL` never return — legacy's checker has no arm that
-    /// yields them either (the answer switches still list them).
+    /// `IsPartyJoinableMutableCondition` (`G/char.cpp:6045-6066`): the observer, level,
+    /// joined and full checks. The enabled arm passes (always enabled) and the dungeon arm
+    /// passes (no dungeons — see the module doc), so no `JoinErr` names them and the
+    /// `[LS;822]`/`[LS;835]` lines have no sender yet. `PERR_LOWLEVEL`/`PERR_HILEVEL`
+    /// never return — legacy's checker has no arm that yields them either (the answer
+    /// switches still list them).
     fn joinable_mutable(&self, leader: CharacterId, guest: CharacterId) -> JoinErr {
         let level_of = |pid: CharacterId| {
             self.vid_of_pid(pid)
@@ -257,6 +354,13 @@ impl GameState {
         let (Some(leader_level), Some(guest_level)) = (level_of(leader), level_of(guest)) else {
             return JoinErr::Server;
         };
+        // `pchGuest->IsObserverMode()` (`G/char.cpp:6051`), before the level arm.
+        if self
+            .vid_of_pid(guest)
+            .is_some_and(|vid| self.is_observing(vid))
+        {
+            return JoinErr::Observer;
+        }
         if leader_level.abs_diff(guest_level) > JOIN_LEVEL_WINDOW {
             return JoinErr::LevelBoundary;
         }
@@ -301,6 +405,7 @@ impl GameState {
                 longtime_bonus: 0,
                 start_ms,
                 mode: DISTRIBUTION_NON_PARITY,
+                flags: std::collections::HashMap::new(),
             },
         );
         self.join_party(leader, leader);
@@ -333,10 +438,12 @@ impl GameState {
                     ROLE_NORMAL
                 }
             });
-        let name = self
+        let (name, joined_level) = self
             .vid_of_pid(pid)
             .and_then(|vid| self.bodies.get(&vid))
-            .map_or_else(String::new, |body| body.card.name.clone());
+            .map_or((String::new(), 1), |body| {
+                (body.card.name.clone(), body.card.level)
+            });
         let Some(party) = self.parties.by_leader.get_mut(&leader) else {
             return;
         };
@@ -345,6 +452,7 @@ impl GameState {
             Member {
                 vid: None,
                 role,
+                level: joined_level,
                 name,
                 near: false,
             },
@@ -916,7 +1024,7 @@ impl GameState {
 
     /// `SendPartyInfoOneToAll` (`G/party.cpp:785-834`): `pid`'s UPDATE to every online
     /// member — the built packet while linked, the zeroed 255-HP one while offline.
-    fn send_party_info_one_to_all(&self, leader: CharacterId, pid: CharacterId) {
+    pub(super) fn send_party_info_one_to_all(&self, leader: CharacterId, pid: CharacterId) {
         let packet = self.build_party_update(leader, pid);
         let Some(party) = self.parties.by_leader.get(&leader) else {
             return;
@@ -1088,6 +1196,10 @@ impl GameState {
                 self.info_to(inviter, b"[LS;821]", &[]);
                 return;
             }
+            JoinErr::Observer => {
+                self.info_to(inviter, b"[LS;823]", &[]);
+                return;
+            }
             JoinErr::LevelBoundary => {
                 self.info_to(inviter, b"[LS;824]", &[]);
                 return;
@@ -1163,6 +1275,10 @@ impl GameState {
             JoinErr::None => {}
             JoinErr::Server => {
                 self.info_to(guest, b"[LS;530]", &[]);
+                return;
+            }
+            JoinErr::Observer => {
+                self.info_to(guest, b"[LS;823]", &[]);
                 return;
             }
             JoinErr::LevelBoundary => {
@@ -1277,6 +1393,10 @@ impl GameState {
                 self.info_to(guest, b"[LS;821]", &[]);
                 return false;
             }
+            JoinErr::Observer => {
+                self.info_to(guest, b"[LS;823]", &[]);
+                return false;
+            }
             JoinErr::LevelBoundary => {
                 self.info_to(guest, b"[LS;824]", &[]);
                 return false;
@@ -1354,6 +1474,7 @@ impl GameState {
                 return;
             }
             JoinErr::Server => self.info_to(member, b"[LS;530]", &[]),
+            JoinErr::Observer => self.info_to(member, b"[LS;823]", &[]),
             JoinErr::LevelBoundary => self.info_to(member, b"[LS;824]", &[]),
             // Legacy's switch has no `PERR_DIFFEMPIRE` arm: the default logs and falls
             // through to the denial, with no info line.
@@ -1511,6 +1632,35 @@ impl GameState {
             self.info_to(sender, b"[LS;677]", &[]);
             return;
         }
+        let count = self
+            .parties
+            .by_leader
+            .get(&leader)
+            .map_or(0, |party| party.members.len());
+        if count == 2 {
+            self.delete_party(leader);
+            return;
+        }
+        self.info_to(sender, b"[LS;532]", &[]);
+        self.quit_party(self_pid);
+    }
+
+    /// `do_ungroup` (`G/cmd_general.cpp:1060-1088`): the caller `pid` names leaves its
+    /// party. The PC-party and dungeon gates pass (always enabled, no dungeons); a
+    /// partyless caller stays quiet; a caller in a party of two disbands it
+    /// silently; else it hears `[LS;532]` and quits. Like `PartyRemove`, a leader
+    /// and a member run the same self-leave: the record arm's leader/member split
+    /// only matters when the target differs from the sender.
+    pub(super) fn ungroup(&mut self, sender: Vid, pid: CharacterId) {
+        let Some(self_pid) = self.pid_of(sender) else {
+            return;
+        };
+        if pid != self_pid {
+            return;
+        }
+        let Some(leader) = self.party_leader_of(self_pid) else {
+            return;
+        };
         let count = self
             .parties
             .by_leader

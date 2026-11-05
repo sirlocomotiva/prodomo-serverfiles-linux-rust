@@ -107,20 +107,23 @@ fn framed(encode: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
 }
 
 /// `EncodeInsertPacket` of the player `vid` (`G/char.cpp:1060-1254`). `recipient` is the
-/// receiving player's VID and whether it walks; `now` is `get_dword_time()`. `guild` is
-/// the pair [`GameState::view_guild`] computes for `vid`'s guild fields.
+/// receiving player's VID, whether it walks, and its `m_bNowWalking` flag; `now` is
+/// `get_dword_time()`. `guild` is the pair [`GameState::view_guild`] computes for
+/// `vid`'s guild fields.
 ///
 /// A body whose destination is not its spot reports the destination once the move's time is
 /// up, and is sent with its move while time is left. `iDur` is the `DWORD` arithmetic read as
 /// an `int` (`:1099-1101`); legacy then sends the move for any non-zero `iDur`, so a negative
 /// one becomes a duration near 2^32 (D2). The Rewrite sends it only for a positive one.
+/// The move's walk mode reads `of`'s flag, and the reverse record the recipient's, while
+/// the reverse gate reads `IsWalking` (`:1217-1234`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_pc_insert(
     vid: u32,
     body: &Body,
     spot: Spot,
     points: &Points,
-    recipient: Option<(u32, bool)>,
+    recipient: Option<(u32, bool, bool)>,
     now: u32,
     insert: impl Into<InsertState>,
     guild: (u32, u8),
@@ -134,19 +137,24 @@ pub(super) fn encode_pc_insert(
     };
     let (at, i_dur) = mid_move(at, body.motion, now);
     let mut to_records = vec![
-        framed(|out| character_add(&body.card, points, vid, at, insert).encode_into(out)),
+        framed(|out| character_add(points, vid, at, insert).encode_into(out)),
         framed(|out| character_additional(&body.card, points, vid, guild).encode_into(out)),
     ];
+    let mode = if body.now_walking {
+        WALKMODE_WALK
+    } else {
+        WALKMODE_RUN
+    };
     to_records.extend(move_records(
         vid,
         body.rotation,
         body.motion,
         (i_dur, now),
-        WALKMODE_RUN,
+        mode,
     ));
     let reverse = recipient
-        .filter(|&(_, walking)| walking)
-        .map(|(other, _)| walk_mode(other, WALKMODE_RUN));
+        .filter(|&(_, walking, _)| walking)
+        .map(|(other, _, flag)| walk_mode(other, if flag { WALKMODE_WALK } else { WALKMODE_RUN }));
     Encoded {
         to_records,
         reverse,
@@ -243,18 +251,23 @@ pub(super) fn encode_npc_insert(
 
 impl GameState {
     /// The points of the player online under `vid`, once loaded.
-    fn points_of(&self, vid: u32) -> Option<&Points> {
+    pub(super) fn points_of(&self, vid: u32) -> Option<&Points> {
         self.characters
             .find_by_vid(Vid::new(vid))
             .ok()
             .and_then(Character::points)
     }
 
-    /// Whether the player under `vid` walks (V3).
-    fn walks(&self, vid: u32) -> bool {
+    /// Whether the player under `vid` walks (V3): its `m_bNowWalking` flag or a
+    /// spent stamina (`IsWalking`, `G/char.h:951`).
+    pub(super) fn walks(&self, vid: u32) -> bool {
+        let flag = self
+            .bodies
+            .get(&Vid::new(vid))
+            .is_some_and(|body| body.now_walking);
         self.characters
             .find_by_vid(Vid::new(vid))
-            .is_ok_and(is_walking)
+            .is_ok_and(|character| is_walking(character, flag))
     }
 
     /// Writes `record` to the player `to`: into `reply` when `to` is the entrant it holds the
@@ -311,16 +324,21 @@ impl GameState {
                     return;
                 };
                 let guild = self.view_guild_of_vid(of);
+                let flag = self
+                    .bodies
+                    .get(&Vid::new(to))
+                    .is_some_and(|body| body.now_walking);
                 let encoded = encode_pc_insert(
                     of,
                     body,
                     spot,
                     points,
-                    Some((to, self.walks(to))),
+                    Some((to, self.walks(to), flag)),
                     self.clock.now(),
                     InsertState {
                         flags: self.affect_flags_of(Vid::new(of)),
                         dead: self.is_dead(of),
+                        spawn: body.add_spawn,
                     },
                     guild,
                 );
@@ -444,14 +462,19 @@ impl GameState {
 
     /// `CEntity::PacketAround` (`G/entity.cpp:88-105`): `record` to every player `me` sees, in
     /// key order, then to `me` itself, skipping `except`. An entity in no sectree sends
-    /// nothing, not even its own copy (`:95`).
+    /// nothing, not even its own copy (`:95`). An observer sends only to itself (`:98-103`):
+    /// nobody sees it move or speak, but it still sees everything around it.
     pub(super) fn packet_around(&self, me: EntityKey, record: &[u8], except: Option<EntityKey>) {
+        let observer = self
+            .map_key_of(me)
+            .and_then(|place| self.maps.get(&place))
+            .is_some_and(|index| index.is_observer(me));
         let Some(viewers) = self.viewers_of(me) else {
             return;
         };
         let mut none = None;
         for viewer in viewers {
-            if Some(viewer) == except {
+            if observer || Some(viewer) == except {
                 continue;
             }
             if let EntityKey::Character(vid) = viewer {
@@ -489,6 +512,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             skill_group: 0,
             alignment: 0,
+            voice: 0,
         }
     }
 
@@ -515,7 +539,7 @@ mod tests {
         let points = points(stamina);
         let at = InsertAt { angle, x, y, z };
         vec![
-            framed(|out| character_add(&a_card(), &points, vid, at, [0; 2]).encode_into(out)),
+            framed(|out| character_add(&points, vid, at, [0; 2]).encode_into(out)),
             framed(|out| character_additional(&a_card(), &points, vid, (0, 0)).encode_into(out)),
         ]
     }
@@ -648,18 +672,31 @@ mod tests {
             &body,
             spot,
             &points(820),
-            Some((8, true)),
+            Some((8, true, true)),
             0,
             [0; 2],
             (0, 0),
         );
-        assert_eq!(walking.reverse, Some(walk_mode(8, WALKMODE_RUN)));
+        assert_eq!(walking.reverse, Some(walk_mode(8, WALKMODE_WALK)));
+        // A spent stamina walks the recipient but leaves the flag clear, so the
+        // reverse record says run (`G/char.cpp:1228-1234`).
+        let spent = encode_pc_insert(
+            7,
+            &body,
+            spot,
+            &points(820),
+            Some((8, true, false)),
+            0,
+            [0; 2],
+            (0, 0),
+        );
+        assert_eq!(spent.reverse, Some(walk_mode(8, WALKMODE_RUN)));
         let running = encode_pc_insert(
             7,
             &body,
             spot,
             &points(820),
-            Some((8, false)),
+            Some((8, false, false)),
             0,
             [0; 2],
             (0, 0),
@@ -823,7 +860,6 @@ mod tests {
             ],
             Some((7, &mut reply)),
         );
-        let card = |vid: u32| world.bodies[&Vid::new(vid)].card.clone();
         let mut shown_eight = Vec::new();
         let at_eight = InsertAt {
             angle: 0.0,
@@ -831,7 +867,7 @@ mod tests {
             y: 3200,
             z: 0,
         };
-        character_add(&card(8), &points(0), 8, at_eight, [0; 2]).encode_into(&mut shown_eight);
+        character_add(&points(0), 8, at_eight, [0; 2]).encode_into(&mut shown_eight);
         assert_eq!(
             reply.len(),
             3,

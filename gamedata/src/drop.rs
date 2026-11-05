@@ -747,6 +747,47 @@ fn read_mob_group(
     Ok(())
 }
 
+impl DropGroups {
+    /// Read one `drop_item_group.txt` (`ReadDropItemGroup`,
+    /// `item_manager_read_tables.cpp:672-830`) into `groups`: the standing map the
+    /// `m` arm's mob `drop` groups then append to. `protos` is the already-read
+    /// `item_proto.txt`.
+    ///
+    /// # Errors
+    ///
+    /// The same errors [`DropTables::load`] reports for this file.
+    pub fn read_group_bytes(
+        data: &[u8],
+        protos: &ItemProtos,
+        groups: &mut DropGroups,
+    ) -> Result<(), DropError> {
+        read_group_file(data, protos, groups)
+    }
+}
+
+impl MobDropGroups {
+    /// Read one `mob_drop_item.txt` (`ReadMonsterDropItemGroup`,
+    /// `item_manager_read_tables.cpp:519-832`): the `kill`, `limit` and
+    /// `thiefgloves` groups this file names, with its `drop` groups appended
+    /// to `groups` (`m_map_pkDropItemGroup`, which the boot read of
+    /// `drop_item_group.txt` shares). `protos` is the already-read
+    /// `item_proto.txt`.
+    ///
+    /// `/reload m` reads it after destroying the mob tables; a failure keeps
+    /// the old tables (see the reload notes there).
+    ///
+    /// # Errors
+    ///
+    /// The same errors [`DropTables::load`] reports for this file.
+    pub fn read_mob_file(
+        data: &[u8],
+        protos: &ItemProtos,
+        groups: &mut DropGroups,
+    ) -> Result<Self, DropError> {
+        read_mob_file(data, protos, groups)
+    }
+}
+
 impl DropTables {
     /// Read the four drop files from the Locale folder (`G/input_db.cpp:899-942`).
     ///

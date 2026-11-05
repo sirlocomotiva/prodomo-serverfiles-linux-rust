@@ -163,6 +163,12 @@ test_server = true
 # them from the state_user_count file, which was empty, so the compiled-in values applied.
 busy_user_count = 650
 full_user_count = 1200
+# CHECK_VERSION_SERVER / CHECK_VERSION_VALUE: the owner's legacy CONFIG files never set either,
+# so the compiled-in values applied (config.cpp:86-87). With the check on, a character whose
+# client reports a different version is answered with the conflict notice and closed at
+# enter-game; a version in the game is consumed.
+check_version_server = true
+check_version_value = "1215955205"
 # Empty disables the admin page. Legacy defaulted to a well-known password.
 adminpage_ips = []
 adminpage_password = ""

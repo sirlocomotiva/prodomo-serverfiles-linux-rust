@@ -274,6 +274,64 @@ pub fn drop_item(
     Ok((done, ground))
 }
 
+/// `CHARACTER::DestroyItem` (`G/char_item.cpp:7407-7441`): the whole stack leaves the
+/// character, its slots are deleted, and its row is destroyed. The `[LS;1947;%s]` confirm
+/// names the item's default-locale name, which the caller renders: the name table is not a
+/// character's.
+///
+/// `CanHandleItem`, the dead gate, the lock and the secured gate are the caller's: the
+/// windows and states are not a character's. A worn cell is refused like a drop's
+/// (`Unported::Equipment`): legacy destroys it, but no step unports worn items yet.
+/// A zero-count stack cannot be built here, so the `GetCount() <= 0` arm never fires.
+///
+/// # Errors
+///
+/// [`MoveRefused::InvalidSource`] for a position that holds no item, [`MoveRefused::Empty`]
+/// for an empty cell, [`MoveRefused::Exchanging`] for an item offered in a trade, and
+/// [`MoveRefused::DestroyedWhileQuesting`] while a script waits for the character's client,
+/// each silent as legacy's is. Nothing changes on any of them.
+pub fn destroy_item(
+    items: &mut CharacterItems,
+    at: ItemPos,
+    questing: bool,
+) -> Result<(MoveDone, u32), MoveRefused> {
+    if !is_valid_item_position(at) {
+        return Err(MoveRefused::InvalidSource);
+    }
+    if !is_flat_window(at.window_type) {
+        return Err(MoveRefused::NotPorted(Unported::SourceWindow(
+            at.window_type,
+        )));
+    }
+    let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
+    if items.is_exchanging(item.id) {
+        return Err(MoveRefused::Exchanging);
+    }
+    // `G/char_item.cpp:7426-7427`, silently.
+    if questing {
+        return Err(MoveRefused::DestroyedWhileQuesting);
+    }
+    if is_equip_position(at) {
+        return Err(MoveRefused::NotPorted(Unported::Equipment));
+    }
+    // `SyncQuickslot(QUICKSLOT_TYPE_ITEM, Cell.cell, 255)` runs before the remove, and
+    // `RemoveItem` clears the cell; the confirm is the caller's.
+    let sync = QuickslotSync {
+        from: at.cell,
+        to: SyncTo::Delete,
+    };
+    let pos = items.release(item.id).map_err(MoveRefused::Storage)?;
+    let done = MoveDone {
+        kind: MoveKind::Removed,
+        records: vec![
+            MoveRecord::QuickslotSync(sync),
+            MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))),
+        ],
+        changes: vec![ItemChange::Destroyed { id: item.id }],
+    };
+    Ok((done, item.vnum))
+}
+
 /// `ItemDropPenalty`'s drop (`G/char_battle.cpp:1074-1153`): the whole item leaves the
 /// character for the ground.
 ///
@@ -912,6 +970,49 @@ mod tests {
         assert_eq!(items, before);
         assert!(items.set_exchanging(8, false));
         assert!(drop_item(&mut items, None, inv(4), 0, TO).is_ok());
+    }
+    /// `DestroyItem` (`G/char_item.cpp:7407-7441`): the whole stack leaves, its slots are
+    /// deleted, and its row is destroyed; the vnum answers for the confirm's name.
+    #[test]
+    fn a_destroyed_stack_leaves_nothing_and_names_its_vnum() {
+        let mut items = holding(&[(4, arrows(8, 20)), (5, Item::new(9, SWORD))]);
+        let (done, vnum) = destroy_item(&mut items, inv(4), false).expect("stack destroys");
+        assert_eq!(vnum, ARROW);
+        assert_eq!(done.kind, MoveKind::Removed);
+        assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 8 }]);
+        assert_eq!(done.records.len(), 2, "the sync and the clear");
+        assert!(matches!(
+            done.records[0],
+            MoveRecord::QuickslotSync(QuickslotSync { from: 4, .. })
+        ));
+        assert!(matches!(
+            done.records[1],
+            MoveRecord::Item(ItemRecord::Set(_))
+        ));
+        assert_eq!(
+            destroy_item(&mut items, inv(4), false),
+            Err(MoveRefused::Empty)
+        );
+        assert!(destroy_item(&mut items, inv(5), false).is_ok());
+    }
+
+    /// `DestroyItem` (`G/char_item.cpp:7418-7427`): an offered item and a waiting script
+    /// refuse silently, in that order.
+    #[test]
+    fn an_offered_item_and_a_waiting_script_are_not_destroyed() {
+        let mut items = holding(&[(4, Item::new(8, SWORD)), (5, Item::new(9, SWORD))]);
+        assert!(items.set_exchanging(9, true));
+        let before = items.clone();
+        assert_eq!(
+            destroy_item(&mut items, inv(5), true),
+            Err(MoveRefused::Exchanging)
+        );
+        assert_eq!(
+            destroy_item(&mut items, inv(4), true),
+            Err(MoveRefused::DestroyedWhileQuesting)
+        );
+        assert_eq!(MoveRefused::DestroyedWhileQuesting.notice(), None);
+        assert_eq!(items, before);
     }
 
     /// `DropItem` (`G/char_item.cpp:7473-7486`): while a script waits nothing is dropped, silently,

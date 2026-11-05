@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-10-29, after ledger section 266 (`pc.give_item2_select` and
-`item.set_socket`). Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 267
+Last reviewed: 2026-11-05, after ledger section 392 (the horse's state).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 393
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -31,9 +31,351 @@ GRAND climb, so the boost and ward books teach their chosen skill through `selec
 already ran through the `select` wait) and the reset book forgets it. Since 266
 `pc.give_item2_select` gives and makes the given item the quest item, and `item.set_socket`
 writes its socket (`G/questlua_item.cpp:125-136`, `CItem::SetSocket`); their one caller, the sash
-quest's reward, stays unreachable while 85000 has no proto. The next slice is the GRAND book's
-alignment names (`pc.get_real_alignment`, `pc.change_alignment`, `pc.is_skill_book_no_delay`,
-`pc.remove_skill_book_no_delay`).
+quest's reward, stays unreachable while 85000 has no proto. Since 267 a quest reads the
+real alignment, moves it with the bands following (`UpdateAlignment`,
+`G/char_battle.cpp:3477-3565`, the exact-equality removals, `ALIGNMENT_BONUS` 570-577), and
+reads and removes the no-delay book affect, all through the GRAND book 50525's live `use`
+script, whose failed read moves the alignment; the kill's alignment routes through the
+same update. Since 268 the whole flow runs over the wire: Alpha is refused at the rest
+gate, and Zulu's failed read moves the alignment, which the disconnect banks beside the
+`next_time` flag. The five alignment rows are `ported`. Since 269 a quest reads its
+reader back (gold, empire, HP/SP, exp, race, name, VID, leadership, the positions, the worn
+vnums, the shown alignment, the guild triad, the NPC's empire) and asks the client to make
+the guild (`game.request_make_guild`); the guild man's founding chat runs over the wire.
+Since 270 a quest names another quest's flags (`pc.getf`/`pc.setf`), deletes its own
+(`pc.delqf`), and moves the gold (`pc.change_money` under four names, with the below-0
+and cap refusals); the sash quest's `__complete` deletes its wait flags over the wire.
+Since 271 a quest hides a costume part (`pc.hide_costume`), `/hide_costume` hides it with
+the 1.5-second move gate, and the enter-game restore plus the `costume_option` login script
+Since 272 a quest reads its held item's socket, proto value, count and type
+(`item.get_socket`, `item.get_value`, `item.get_count`, `item.get_type`,
+`item.get_sub_type`), checks the room (`pc.enough_inventory`), and reads the GM gate
+and level (`pc.is_gm`, `pc.get_gm_level`, over the stored level: the test-server
+silence is V26); the Time Spiral shortens the attr67add wait over the wire. Since 273
+a quest parts (`pc.remove_from_guild`) and disbands (`pc.destroy_guild`) past the war
+line and the master and leader gates, finds a PC by name (`find_pc_by_name`), reads
+the test-server mode (`is_test_server`) and stamps (`time_to_str`); the guild man's
+chats part Yankee and disband `MyGuild` over the wire. Since 274 a quest warps
+(`pc.warp`, past `IsHack`, on the Channel hosting the target), drops an owned item at
+the reader's feet (`game.drop_item_with_ownership`) and reads the conqueror level
+(`pc.get_conqueror_level`); the temple guardian's "Da" warps to map 209 over the wire.
+Since 275 a quest warps to the village (`warp_to_village`, to the empire start), asks
+the warp gate (`pc.can_warp`) and makes a conqueror (`pc.set_conqueror`, with the
+already and marble lines or the level-1 transition); the statue's Return "Da" warps to
+the Shinsoo start over the wire, and the four rows are `ported`. Since 276 a quest
+opens the sash (`pc.open_sash`, only a boolean, with the `SASH_OPEN`/`SASH_CLOSE`/
+`COMBINE_CLOSE` key chats) and the changelook call is bridged; Theowahdan's
+Combination "Yes" opens the 23-byte window over the wire, and `open_sash` plus
+`gc.sash` are `ported`. Since 277 a quest opens the changelook window
+(`pc.open_changelook`, no argument read, with the already-open line); Theowahdan's
+Transmutation "Yes" opens the 10-byte window with the 50,000,000 cost over the
+wire, and `open_changelook`, `gc.cl` and `quest.changelook` are `ported`. Since
+278 a quest reads the party (`party.is_party`, `party.is_leader`), the mount
+(`pc.is_mount`, false: no ported path mounts) and the Channel
+(`pc.get_channel_id`); the forest room's solo click refuses over the wire, and
+`is_party` is `ported`. Since 279 a quest reads and sets the party flags
+(`party.getf`, `party.setf`), reads the leader PID (`party.get_leader_pid`, -1
+with none) and finds no dungeon under any map index (`d.select`, `d.find`,
+false: no dungeon manager exists); a party member's click on the forest room
+passes the party gate and the leader gate refuses over the wire, and the five
+plus `is_leader` are `ported`. Since 280 a quest pushes the on-map member PIDs
+(`party.get_member_pids`) and runs a block for another online PC
+(`q.begin_other_pc_block`/`q.end_other_pc_block`, with the level, name, VID,
+points, count and removal running against the blocked PC and a block's removals
+applied after the step); the leader's click on the forest room runs the ticket
+loop and refuses for want of a ticket over the wire, and the three are `ported`.
+The refusal names nobody, as legacy's own loop walks the level list
+(`enchanted_forest_zone.lua:169`). Since 281 a quest grants the dragon-soul
+qualification (`ds.give_qualification`, in the call, as legacy's `AddAffect`), reads
+it (`ds.is_qualified`, 1/0) and opens the refine (209/sub 0 with
+`INVENTORY`/`WORD_MAX`, only with the qualification) and attr-change (the one-byte
+211) windows; the alchemist's chats open both over the wire, 540 survives the death
+as no-clear, and the four names, the two records and the three quest scripts are
+`ported`. Since 282 the statue's Yohara trip is scenario-covered (no new
+bridge: the 17-line quest's six calls were already ported): the click offers
+Return, the trip and the close, "Da" reads the conqueror level 33 and the step
+orders the warp to (537500, 492700) on map 374, and the quest is `ported`.
+Since 283 the guild man's score chat is scenario-covered (no new bridge: the
+19-line quest's four names were already ported): the master-only click offers
+the disband and the three ranking chats, the score page says rank 1 and 1000
+points, and the quest is `ported`. Since 284 the sash's Absorption chat is
+scenario-covered (no new bridge: `open_sash(false)` rode with combination):
+the second click offers the eight chats, "Yes" opens the absorb window with
+the window byte 0, and the quest is `ported`. Since 285 the disconnect runs
+the `logout` scripts (`LogoutPC` before the flag taking, `DisconnectPC`
+after): the forest's sets `dungeon_enter` 1 and stamps `limit_activity` over
+the wire, and `pc.setf` and the quest are `ported`. Since 286 the dungeon
+info's button runs over the wire (no new bridge: the only reached `input()`):
+`getinputbegin`, the prompt, `TEST#2598` answered, the `[INPUT]` page with the
+resume, `getinputend` and the two lines, and the record and the quest are
+`ported`. Since 287 the ring's plain warp runs over the wire (no new bridge:
+the 7-line quest's six calls were already ported): the use lists the twelve
+maps and the quit, Valea Seungryong reads `can_warp` true and warps to
+(666300, 855200) on map 64, and the quest is `ported`. Since 288 the statue's
+marked click runs over the wire (no new bridge: the find, the mark, the
+target click, the pages, the state move and its letter were already ported):
+the login's letters mark the statue, the click deletes the mark and says the
+two pages, the quest moves to `information_hunt` and letters, and the logout
+banks the state; the quest stays `partial`. Since 289 the emotions run over the
+wire: the ride, mask, woman, victim, distance, sex and consent gates, the
+`CHAT_TYPE_COMMAND` broadcast to the view, and the silent consent insert; the 40
+command rows and the system are `ported`. Since 290 `/priv_empire` grants the
+empire rate over the wire: the double clamp (0..1000, then 0..200), the week, the
+five usage lines, the `[LS;724]` notice (or the raw removal line) to every
+client, the `[LS;871-874]` lines in the enter burst, and the exp, gold and drop
+terms; `cmd.priv_empire` is `ported` and `cmd.priv_guild` is `unused` (its empty
+buffer runs nothing). Since 291 `/eventflag` sets the quest table's flag over
+the wire (the `strtol` value, the nine `mob_*` clamps, the raw
+`RequestSetEventFlag` answer) and `/geteventflag` lists it in name order, so a
+late login's `cards icon` fires and its `event_info` reads the set flag; the
+two command rows and `lua.game.get_event_flag` are `ported`. Since 292
+`/give_reward` trades the six letters (the busy gates, the `letters_event` flag,
+the missing-letter line, the six removals, the one draw of group 55021) and
+`/letters_open` opens the window (`letters_drop` per group row, then
+`OpenLetterWindow`); the owner's file holds no 55021 group, so no drop lines
+run and the draw lands nothing, and a late login's burst reads `letters_event 1`.
+The two command rows are `ported`. Since 293 `/stat` raises the named attribute
+by 1 for a stat point (both arrays, compute, the change with its battle tail,
+the crossed pool line, the spent counter, compute again) and `/stat-` lowers it
+back for a reset count (the point returns, the reset spends, each pool's own
+line), and the disconnect save banks the four and both counters; the two
+command rows are `ported`. Since 294 `/pkmode` lands the line's number as the
+caller's mode (the unsigned low byte, the protect and level gates, the same-mode
+silence, the max refusal, the Meley force to guild, the guildless fallback to
+free) with an update to its view; the row is `ported`. Since 295 `/set_walk_mode`
+and `/set_run_mode` walk and run the caller (both flags land, only the second's
+change fans the walk-mode record to the view), and the flag feeds `IsWalking`
+records read it; the two rows are `ported`. Since 296 the guild line fans over
+the wire (id 0, the empire byte, `bCanFormat` true, to every online member),
+rows are `ported`. Since 297 the friend ask by VID runs over the wire (the
+target hears the same `messenger_auth` ask the name arm sends), and the name
+`ported`. Since 298 a sync claim on an NPC is skipped over the wire (no
+ownership, no batch, while a player's claim in the same frame lands), and the
+rows and the three Position rows are `ported`. Since 299 the guild withdraw
+stays quiet over the wire (both money arms return before their bodies), and
+`ported`. Since 300 the leader's HEAL stays quiet over the wire (legacy's dead
+body), a member's use is told `[LS;684]`, a gone VID the raw summon line and
+an outsider `[LS;685]`, so both `PartyUseSkill` rows are `ported`. Since 301
+a game-phase PONG is read and not answered over the wire (the character keeps
+playing), and a `TIME_SYNC` naming a wrong token closes silently, so both rows
+are `ported`. Since 302 a game-phase hack report closes over the wire, and a
+select-screen one is consumed with the `@fixme120` pair, so both hack rows are
+`ported`. Since 303 the four stubs answer `[LS;916]` over the wire (the GM one
+only to a granted caller), so all four `do_inputall` rows are `ported`. Since
+304 `/mount` stays quiet standing over the wire (the body is empty) and is
+scolded `[LS;918]` dead, so the row is `ported`. Since 305 `/ungroup` runs
+over the wire (quiet partyless, `[LS;532]` and REMOVE from three, silent
+disband from two), so the row is `ported`. Since 306 `/vote_block_chat`
+stays quiet over the wire (the body returns first) and `/block_chat_list`
+lists one `%s %s sec` line per silence past the lay's gate (whose refusal is
+`there is no such command`, as written), so both rows are `ported`. Since
+307 `/dc` runs over the wire (the usage, the no-such-player line with the
+name as typed, the exact-match miss, the self refusal, and the target's
+close), so the row is `ported`. Since 308 `/transfer` runs over the wire
+(the usage, the no-character line, the cross-Channel line, the self refusal
+in another case, and the target's warp to the caller's feet), so the row is
+`ported`. Since 309 `/kill` and `/poison` run over the wire (the usages, the
+misses with no stop, the exact-match misses, the poison's add and first tick,
+and the kill's death through the poison), so both rows are `ported`. Since
+310 `/stun` runs over the wire (the usage, the miss, the lowered landing with
+the confirmation, and the target's add), so the row is `ported`. Since 311
+`/warp` and `/rewarp` run over the wire (the usage, the miss, the
+cross-Channel line, the lowered landing on the truncated metres, the metres'
+warp, and the rewarp's own pixels), so both rows are `ported`. Since 312
+`/goto` runs over the wire (the usage, the silent miss, the metres' `Show`
+with the view re-sent and no warp, and the name's warp without the spurious
+line, a Defect), so the row is `ported`. Since 313 `/level` runs over the
+wire (the syntax, the reset's 64 records with the conqueror-off gate first,
+the two skill bytes, the row's starts/counters/pools, and the disconnect
+save), so the row is `ported`. Since 314 `/setskill`, `/setskillother`,
+`/setskillpoint` and `/setjob` run over the wire (the syntaxes, the misses,
+the vnum and name sets with their compute and byte 76, the other's silent
+caller, the counter's amount-0 change, the job's byte 112 with its clear and
+confirming line, and the disconnect save), so all four rows are `ported`.
+Since 315 `/invisible` and `/cooltime` run over the wire (the refusal, the
+203's add and remove with the flag-3 updates on both wires, and the silent
+cooltime), so both rows are `ported`. Since 316 `/affect_remove` runs over
+the wire (the refusal, both syntaxes with the three-row list, the unknown-name
+fallback, the 203's remove with the flag-3 fall, the success and the miss), so
+the row is `ported`. Since 317 `/stat_reset` runs over the wire (the refusal,
+the one kind-112 record, and the disconnect save banking 12), so the row is
+`ported`. Since 318 `/purge` and `/weaken` run over the wire (both refusals,
+the weaken's 10-HP broadcast to the targeter, the near dog's release and
+removal, and `/purge all`'s sweep of every NPC in view with the far dog's
+pair to its viewers only), so both rows are `ported`. Since 319 `/advance`
+runs over the wire (the refusal, the syntax, the miss, the caller's
+silence, the target's 64-record reset, and the row written straight to the
+target), so the row is `ported`. Since 320 `/reset` runs over the wire (the
+refusal, the hit refill, the spell refill, and the save banking the filled
+pools), so the row is `ported`. Since 321 `/greset` runs over the wire (the
+refusal, the quiet refill to the maximum, and the row standing at 400), so
+the row is `ported`. Since 322 `/user` runs over the wire (the refusal, the
+caller's Channel in cells of 17, and the total), so the row is `ported`.
+Since 323 `/who` runs over the wire (the refusal, the empires across every
+Channel, and this server the caller's), so the row is `ported`. Since 324
+`/respawn` runs over the wire (the refusal, the around and the everywhere,
+and the holding regen's due moved), so the row is `ported`. Since 325 `/mob`
+runs over the wire (the refusal, the usage, the miss, and the stood dog at
+126 of 126), so the row is `ported`. Since 326 `/item` runs over the wire
+(the refusal, the usage, the two misses, and the potion's set and row), so
+the row is `ported`. Since 327 `/mob_ld` runs over the wire (the refusal,
+the same usage, and the dog at the metres), so the row is `ported`. Since
+328 `/ma` and `/mc` run over the wire (the refusals, the two usages, the
+miss, the hunting dog's swing, and the coward's escape), so both rows are
+`ported`. Since 329 `/mm` runs over the wire (the refusal, the syntax, the
+two failures, and the stood line's name and centimetres), so the row is
+`ported`. Since 330 `/group` and `/grrandom` run over the wire (the
+refusals, the two usages, the silence, and the stood dogs), so both rows
+are `ported`. Since 331 `/forgetme` and `/aggregate` run over the wire
+(the refusals, the swing, the 5 quiet seconds, and the hide), so both
+rows are `ported`. Since 332 `/attract_ranger` and `/pull_monster` run
+over the wire (the refusals, the nearer sync, the held far dog, and the
+archer's walk in to 150), so both rows are `ported`. Since 333 `/getqf`,
+`/setqf` and `/delqf` run over the wire (the refusals, the named state,
+the confirmation, the miss, the success and the failure, and both
+list), so both rows are `ported`. Since 337 `/view_equip` runs over the
+wire (the 1303-byte record with the dagger at slot 4, the empty silence,
+the unknown silence, and the block refusal), so both rows are `ported`.
+Since 338 `/stat_val` runs over the wire (the banked amount, the clamps,
+and the silences), so the row is `ported`. Since 339 the four `*+` lines
+run over the wire (the banked amount, the 90 clamp, and the loud refusals),
+so the four rows are `ported`. Since 340 the four `t*` lines run over the
+wire (the moved other, the cannot-find arms, and the confirmation), so the
+four rows are `ported`. Since 341 `/cannot_dead` and `/can_dead` run over the
+wire (the silent lines, the flagged damage without the change, and the change
+after the clear), so both rows are `ported`. Since 342 `/all_skill_master` runs
+over the wire (the one byte 76 with every usable skill at 40, and the rows),
+so the row is `ported`. Since 343 `/full_set`, `/item_full_set` and
+`/attr_full_set` run over the wire (the eight fresh pieces per job with the
+looks, the forty forced pairs with the updates, and the master line first),
+so the three rows are `ported`. Since 344 `/use_item` and `/do_clear_affect`
+run over the wire (the named cell's drink with its store, the no-item line, the
+203's remove packet with one update, and the kept silence standing), so both
+rows are `ported`. Since 345 `/dragon_soul` and `/ds_list` run over the wire (the
+deck's affect with its stones' points and socket-2 updates, stored, and the held stones'
+lines), so both rows are `ported`. Since 346 `/dice` and `/gift` run over the wire (the
+roll to the caller alone or the party with the name, and the `gift` command line), so
+format with its value and the `[LS;651]` date, the status with the hair's attribute, and
+the named piece's takeoff through `use_item`, stored), so both rows are `ported`. Since 348
+`/state` and `/inventory` run over the wire (the dump with its target and the cells'
+lines), so both rows are `ported`. Since 349 `/slow` and `/ipurge` run over the wire (the
+ten numbered armours and the purge's clear), so both rows are `ported`. Since 350 `/console`
+and `/book` run over the wire (the console's line and the book's skill in socket 0), so both
+rows are `ported`. Since 351 `/set` moves a named character's gold, exp, maxima and skill over
+the wire, so the row is `ported`. Since 352 `/set` moves race, sex, job, alignment and gaya over
+the wire, so the row stays `ported`. Since 353 `/safebox` sizes over the wire (the empty word,
+the 2-page grow, and the past-3 clamp), so the row is `ported`. Since 354 `/makeguild` and
+`/deleteguild` run over the wire (the fee-less founding with its codes and the disband's REMOVE),
+so both rows are `ported`. Since 355 `/refine_rod`, `/refine_pick` and `/max_pick` run over the
+wire (the rod's swap, the pick's max-then-swap, and the max alone), so the three rows are
+`ported`. Since 356 `/fish_simul` runs over the wire (the usage, the byte-ordered name
+lines with their summary, and the past-end table's usage alone), so the row is `ported`.
+Since 357 `/private` warps over the wire (the usage, the miss, and the copy's spawn with
+the row naming the copy and the exit), so the row is `ported`. Since 358 `/reload` runs
+over the wire (the empty line's three tells, the `u` arm's `state_user_count` reread feeding
+the status list's signed rule over the registry's fresh count, the `p`/`s`/`q` tells, the
+`f` arm's fish swap with the GM notice, the `t`/`m` arms' read-first swap with the Romanian
+miss/success lines, and the silent `c` and unknown arms), so the row is `ported`. Since 359
+`/ds_change_attr` redraws over the wire (the clears, the weighed basic and drawn additional
+applies with the updates riding and the rows saved, the step's flames and 5 million spent,
+the success line and the result byte, and the gates' own lines and silences), so the row is
+`ported`. Since 360 `/shutdown` counts down over the wire (the `[LS;509;10]` to every
+Channel, each `[LS;508;N]`, the 0 tick's `quit` to the players with the `SHUTDOWN` bar at
+auth and login, and the -10 tick's force-close; a line after the bar restarts nothing, and
+a line mid-countdown restarts at 10), so the three rows are `ported`. Since 361
+`/logout`, `/quit` and `/phase_select` count down over the wire (each notice, the silent
+`IsHack` gate skipped on SungZi and war maps, the second line's `[LS;511]` cancel, each
+`[LS;510;N]`, and at 0 the close with a save, the bare `quit` line, and the return to
+select with the reselect on the same connection), so the five rows are `ported`. Since 362
+`/pvp` duels over the wire (the challenge with its fan, lines and whisper notify, the
+accept with its fight fan and begins lines, the miss's silence, the won fight's revenge
+fan with the agreed death skipping the item-drop penalty, and the late entrant's list),
+so the two rows are `ported`. Since 363 `/detaillog` and `/monsterlog` log over the
+wire (both silent toggles, the begin's three lines in order with the thief's VID, the
+off toggle's silence, and the detail line naming the hitter's name, VID and enter
+point), so the two rows are `ported`. Since 364 `/polymorph` and `/polyitem` work over
+the wire (the reencode with the morph race, the spawn state bit and `AFF_SPAWN`, the clear's
+job race, an unchanged vnum's silence, and the 70104 ball with the vnum in socket 0 and its
+row), so the two rows are `ported` and `sys.char.polymorph` is `partial`. Since 365 an event
+flag's set runs `SetEventFlag`'s arms (the six rates, 0 included; the Christmas, `newyear_boom`,
+`eclipse` and `day` lines to every in-game character; the firework sellers, the tree, the Santa,
+`pre_event_hc`'s and `new_xmas_event`'s NPCs), a loading character hears the non-zero display
+flags (`BroadcastEventFlagOnLogin`), and `/xmas_boom`, `/xmas_snow`, `/xmas_santa`,
+`/eclipse` and `/eventhelper` work over the wire, so the five rows are `ported` and
+`sys.event.xmas` is `partial`. Since 366 `/socketitem` gives its item by `AutoGiveItem` and
+writes its leading sockets over the wire, so the row is `ported`. Since 367 `/item_id_list`,
+`/get_mob_count`, `/effect` and `/add_socket` work over the wire, so the four rows are
+`ported`, and `/set_socket` writes a held or lying item's socket, so its row is `partial`
+(an open safebox's or mall's item is not found). Since 368 `/change_attr` and `/add_attr`
+roll the worn weapon's attributes over the wire, so both rows are `ported`. Since 369 the
+boot loads the `item_attr_rare` rows, and `/add_rare_attr` and `/change_rare_attr` draw the
+worn weapon's rare pair over the wire, so both rows are `ported`. Since 370
+`/reset_subskill` clears a named character's sub-skills and `/force_logout` closes the
+caller's own descriptor, so both rows are `ported`. Since 371 a conqueror's kill on a
+new-world map pays champion experience, whose steps grant conqueror points and raise the
+champion level; `/conqueror_level`, `/conqueror_point` and `/set exp` drive it over the wire,
+the step and point are stored, and the quest reads `pc.get_conqueror_exp` and
+`pc.get_conqueror_next_exp` answer, so `sys.skill.conqueror`, both command rows and both
+quest rows are `ported`. Since 372 `/sort_inventory` lifts the base inventory and gives it
+back by locale name, merging plain stacks, so its row is `ported`. Since 373 item 70002
+grants the realtime pick-up affect, `/pickup_affect` switches it off and on, and while it is
+on a kill's drop goes straight into its owner's inventory, so `cmd.pickup_affect` and
+`sys.item.pickup_effect` are `ported`; a logout now saves the affects it holds. Since 374
+`/move_channel` counts down and warps the character to the same place on another Channel
+that hosts its map, so `cmd.move_channel` and `event.char.move_channel` are `ported`, and a
+warp within 15 seconds of an inventory sort is refused as legacy refuses it. Since 375
+`/flush` writes the caller's row at once, so `cmd.flush` is `ported`. Since 376
+`/observer` hides the caller with the view dance and `/observer_exit` warps to the saved
+place before clearing the mode, with the party, messenger, PvP, skill, pick-up, quest-item
+and war-map arms, so both rows are `ported`. Since 377 a bow shot lands over the wire and
+its arrow spend is stored as one Transfer, so `cg.game.shoot` and `cg.game.use_skill` are
+`ported`. Since 378 `/saveati` writes the named map's attributes as a TGA, so `cmd.saveati`
+is `ported`. Since 379 the client switches its language with `CG_CHANGE_LANGUAGE`, which is
+answered, stored, and shown to the view, and a login-phase move is consumed, so
+`cg.game.change_language`, `gc.request_change_language` and `cg.login.move` are `ported`. Since
+380 a destroy clears the stack's cell, deletes its slots, destroys its row and names it in
+`[LS;1947;...]`, and the enter-game step answers a missing or wrong client version with the
+conflict notice and a close, so `cg.game.item_destroy`, `cg.login.client_version`,
+`cg.login.client_version2` and `cg.game.client_version` are `ported`. Since 381 a gift runs
+an NPC's whole `CanReceiveItem` with its `TakeItem` log line and take scripts, and a warp
+within 15 seconds of an inventory sort is refused with the line, so `cg.game.item_give` is
+`ported`. Since 382 the event panel names a quest whose button runs, so
+`cg.game.request_event_quest` is `ported`. Since 383 a whisper partner's details name its
+language on any Channel, and a language switch reaches the client registry, so the shout and
+the notices follow it; `cg.game.whisper_details` and `gc.whisper_details` are `ported`. Since
+384 the target window lists what a monster or stone may drop, so `cg.game.target_info_load`
+and `gc.target_info` are `ported`. Since 385 a smith takes a refinable item, opens its
+window with the recipe and refines it for its fee, so `cg.game.refine`,
+`gc.refine_information_new` and `table.refine_proto` are `ported` and `sys.item.refine` is
+`partial`. Since 386 a stone used on a weapon or armour sits in a free socket and a
+tuning scroll used on an item opens the refine window of its type and refines with its own
+gates and odds, so `cg.game.item_use_to_item` and `sys.item.sockets` are `partial` (the
+other target arms, such as the detachment and attribute scrolls, are not ported). Since 387
+the event calendar is stored and installed at boot and a client's month ask is answered with
+the board, so `cg.game.request_event_data` and `gc.event_info` are `ported` and
+`sys.event.manager` is `partial` (the start/end queues and the state arms are not ported). Since
+388 a script's `select_item` and `confirm` wait for the client's `CG_SCRIPT_SELECT_ITEM` and
+`CG_QUEST_CONFIRM` (with `GC_QUEST_CONFIRM` and the confirm timeout), and the guild alchemists'
+diamond and stone melts (`pc.diamond_refine`, `pc.ore_refine`) run over the wire. Since 389 a
+bait goes on the worn rod, `CG_FISHING` casts and takes, and the fishing event bites and lets
+the fish get away, so `cg.game.fishing`, `gc.fishing`, `event.fishing.fishing_event` and
+`data.fishing` are `ported` and `sys.life.fishing` is `partial` (the multi-farm gate, the
+`fishevent` highscore and the premium fish mind wait for their systems). Since 390 `pc.mining`
+digs a clicked ore vein with the worn pick: `GC_DIG_MOTION` goes around, every `OnMove` and a
+second call cancel the dig, and the mining event drops the raw ore or fails and trains the
+pick, so `lua.pc.mining`, `gc.dig_motion` and `event.mining.mining_event` are `ported` and
+`sys.life.mining` is `partial` (the multi-farm gate waits). Since 391 a quest's `__refine_pick`
+and `__fish_real_refine_rod` refine the tool in a named inventory cell and return 1, 0 or 2,
+so both are `ported`. Since 392 a character's horse keeps its level, health, stamina and drop
+time on `player`, regenerates from `EnterHorse`, and is refilled at every login with its skill
+130 planted again (`__FIX_NIVEL_CAL__`, owner question 35); `/horse_state`, `/horse_level` and
+`/horse_set_stat` and the quest's horse readers, `horse.set_level`, `horse.advance` and
+`horse.feed` run over the wire, so those rows are `ported` and `sys.char.horse` is `partial`
+(the summon, riding, the consume and death events, revive and the names wait). The
+next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
+the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
+quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
+kill waits on the kill event reaching quest scripts with a target.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -401,7 +743,7 @@ owner should know about (178.5):
 | A quest's flags and state live in the store with the character (ledger 244), so a flag outlives the session that set it. `set_state` moves its quest when the script ends, whichever step called it and however the script ends (ledger 257), `pc.learn_grand_master_skill` writes its read count, and the server writes its own flags: the guild's withdraw time, the war's member flag and `/setblockmode`'s seven `game_option.block_*` flags (ledger 256). `pc.getqf` reads a flag (ledger 257) and `pc.setqf` writes one (ledger 259); the rest are "not ported". A state change runs no `leave`, `enter` or `letter` script, and until the script ends the quest's flag holds the old state, so a character that leaves while the script waits keeps the old one (ledger 257). The load brings the flags with the character, so `Loading quest. Please wait a moment.` is never said, and a save writes a character's whole set of flags at once instead of the flags that changed. A call of an API the Rewrite does not back ends the script silently, so the client sees no `[DONE]` where a script error sends one. The event flags stay in memory (ADR-0006). | The `quest` table is loaded with the character and saved with it (`D/ClientManagerPlayer.cpp:352-394`, `D/ClientManager.cpp:692-698`), a quest waits, with that line, until the load arrives (`G/questmanager.cpp:920-931`), and a save writes only the flags that changed (`quest::PC::Save`, `G/questpc.cpp:519-590`). `quest_setstate` writes the state and its flag at once (`G/questlua_quest.cpp:112-146`), and `EndRunning` runs the old state's `leave`, the new one's `enter` and its `letter` (`G/questpc.cpp:352-371`). |
 | `_basic/change_empire.lua` is not loaded: an `end` on line 132 closes its `if` chain early, so `qc` refuses it (ADR-0006, ledger 227). This goes when the owner fixes the source. | The same: legacy's `qc` aborts on it and it never reached `object/`. |
 | Only an NPC's `click` and `chat` scripts run (ledger 227), the `kill` and `levelup` events reach the no-target quests (ledger 244), a war's `letter` and the letter's `button` run (ledger 239), and the `login` event runs when a character enters the game or comes back from a Warp (ledger 257). The login runs at once, behind the enter's records and the offline lines it read. The `logout`, `timer`, `target` and every other event is raised by no ported system, and the hide-and-seek reward of `OnClick` is not ported. | Each system raises its event through `CQuestManager`, and `CHARACTER::OnClick` gives the hide-and-seek reward while that event runs (`G/char.cpp:6299-6330`). When the quest load lands before the game phase, `quest_login_event` runs the login at the first one-second tick that finds the character in the game (`G/input_db.cpp:1005-1048`, `:1104-1115`). |
-| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 87 are backed (ledger 266); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
+| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 92 are backed (ledger 267); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
 | `find_npc_by_vnum` answers the first NPC of the race that spawned on the character's map (ledger 259). | It walks the race's `unordered_set` (`G/typedef.h:33`, `G/questlua_global.cpp:792-822`), in no defined order, so a map with two NPCs of the race may answer either. |
 | A quest target's VID is read as a `DWORD` (ledger 259). | `target_vid` casts the number to `int` (`G/questlua_target.cpp:58-67`). Legacy's VIDs fit, but the Rewrite numbers NPCs from 0x8000_0000, which would not. |
 | A click on a marked character while the clicker's script waits is taken and runs nothing; the waiting script keeps its place (ledger 260). | `NPC::OnTarget` runs the target script through `ExecuteQuestScript`, whose `PC::SetQuest` overwrites the running state (`G/questnpc.cpp:206-264`, `G/questpc.cpp`), a Defect. |
@@ -435,7 +777,7 @@ owner should know about (178.5):
 | V14. A pick-up finds an item only on the picker's Channel and map (ledger 217, recorded in 229c). | `FindByVID` searches every item of the Core, and `DistanceValid` compares x and y alone (`G/char_item.cpp:7974-7982`, `G/item.cpp:586-597`), so a picker within 300 of the same coordinates on another map of the Core, such as a private copy of the map, picks it up. |
 | V16. The regen events, ore-vein ends and the fight's stun, death and recovery events due on one Pulse run by due Pulse, in the order ore-vein end, regen, stun, death, recovery (ledger 229j), then the player's stun, death, recovery and poison (the poison in 229v), then by VID or by map and entry (V1). A map keeps its non-players in a list, and a destroyed one's place is taken by the last one; only the Rewrite's own index sees the list (ledger 229h). A regen run whose VIDs are exhausted logs a warning and stands nothing. A monster's update runs after every event of its Pulse, so a stun event due on the Pulse of a swing kills first (ledger 229l, provisional). | The event heap's order (`G/regen.cpp:582-599`, `:679-689`, `G/char.cpp:2447-2462`); `m_map_pkChrByVID`, a hash map by VID (`G/char_manager.h:120`). |
 | V17. A player's first fight differs from legacy in ten ways (ledger 229j; (k) closed in 229k; (b), (g) and (i) narrowed in 229l; (a) narrowed in 229x; (d) closed in 229z; (e) closed in 230a; (h) closed in 230b; (f) narrowed in 230d re PC skills, narrowed in 230e re the arrow/magic skills and SPLASH, narrowed in 230f re skill-up, the self buffs and the grandmaster wire, narrowed in 230g re the party buffs' solo arm, the books and the GRAND training, narrowed in 230h re the combo toggle, the charge pair and the EUNHYUNG hide, narrowed in 230i re the party walk's foundation, narrowed in 230j re roles, bonuses, the parameter, narrowed in 230k re heal, warp and exp share, narrowed in 230l re the leader-unlink bonus clear and the leader-side party_kill, narrowed in 230m re the party chat fan). (a) Only a monster or a stone on the attacker's Channel and map is hit (229x: a stone is struck, the same-empire refusal with `DAMAGE_BLOCK`); a player, a door, a building, a horse and race 5001 are refused with nothing sent, and a player victim waits for PvP. (b) A hit monster fights back (229l), every battle type (229s), with the aggro (229r). (c) `Dead` pays `Reward`'s exp half (229n): the damage map, the split, the alignment, the quest `kill` and the kill recovery; and its gold half (229p): the chance, the multiplier and the branch draws, the piles at the monster's scatter with no owner. No `STACK_ATTR`, and no boss or stone log; the battle pass, the reward missions and the duel, arena and siege hooks hold nothing for a monster a player kills. A hitting drop row creates its item (229q, D5), but no hosted spawn drops on the owner's data, so every hosted kill pays gold or nothing. A gold steal draws and adds no gold (229o); a hitting row's steal pays the purse (230a). (d) A hit lands its poison, stun and slow on a monster victim (229z) and on a player victim (229v). (e) A gold steal pays the purse (230a). (f) The PC skills cast (230d: the 10 melee rows; 230e: the SPLASH walk, the RANGE/MAGIC attr arms, `CalcArrowDamage`, the RANGE/MAGIC/NORMAL_RANGE pipes, the plain bow shot, CRUSH, and the POISON/STUN/`FIRE_CONT` functor arms): `CG_USE_SKILL`'s entry gates, SP charge and cooldown stamp, a `CG_ATTACK` of a skill's type through `CheckSkillHitCount`, the 38-Pulse term gate and the damage arm, and the fly/shoot records (`CG_FLY_TARGETING`/`CG_ADD_FLY_TARGETING` store, `CG_SHOOT` shoots); skill-up, the self buffs (3 4 19 34 49 63 64 65 79) and the heal 109, and the grandmaster wire (the ladder, the grand-add cost, the master-bonus swap, the stored slots) land in 230f; the party buffs compute on the caster alone (no party ported), the books read (`ITEM_SKILLBOOK` + 17 `ITEM_USE` arms, `LearnSkillByBook`, the training count, the horse book) and the GRAND training runs inline (`pc.learn_grand_master_skill`, `pc.get_skill_level`) in 230g; the party walk's foundation lands in 230i (membership, invite, the Update's nears, the fan — dead while no hosted row is PARTY-flagged), the `EUNHYUNG` hide and the combo/MUYEONG/charge specials in 230h, and roles/bonuses/parameter land in 230j, and heal/warp and exp share in 230k. (g) A player's victim is not held; nothing ported reads it. A player's `POS_FIGHTING` is held (229l): its own hit within reach and a monster's first landed hit set it, and its kill, its death and its restart clear it. A monster's first hit (`BeginFight` on the player) takes a running player out of `StateMove`, so the server stops stepping it at its last point until its next move, and the chase does not lead it. Its other readers are not ported: the 10-second `StartMoveChannel` wait (no `cmd.move_channel`) and the `mount` command's position gate. (h) A dead monster with a living reviver in its party stands back up (230b); a hit or stunned member sends `PM_ATTACKED_BY` (229t). (i) A monster's hit points reach its targeters as the hit lands, and so do a player's under a monster's hit (229l); a player's other changes reach them at the end of the command or Pulse. (j) The `__DUNGEON_INFO__` best hit of six dungeon bosses waits for the dungeons; no regen line spawns them. | `G/battle.cpp:99-152`, `:172-210`, `:489-497`; `G/char_battle.cpp:402-548`, `:1238-1696`, `:1990-2433`, `:3342-3371`; `G/input_main.cpp:1966-2009`, `:2010-2160`; `G/char.cpp:653`, `:3172-3240`, `:5469-5575`. |
-| V18. A player's death and restart differ from legacy in eleven ways (ledger 229k). (a) The town restart and the automatic restart write their hit points, penalty and `CloseRestartWindow` records before the Warp's `GC_CHARACTER_DEL` and `GC_WARP`, because the Rewrite's Warp saves the row first. (b) The player's recovery event runs `CheckTarget`, the heal and `DistributeSP` (229l), with the poison arm (229v: a poisoned player heals nothing); `UpdateKillerMode` has no killer mode to end. (c) No pet, mount or horse: `CheckPet`, `CheckMount` and `StopRiding` are not run. (d) No guild war, three-way war, dungeon, duel, arena or siege branch and no battle pass kill mission: a death is never forked, and `restart_now`'s war-map test and `do_restart`'s war arms are not ported. (e) `ClearAffect(true)` clears the hit affects (229v: the poison, stun and slow), and the revive invisibility, the only other affect a player holds, survives a death; no affect 511 exists, so `DeathPenalty`'s `AFFECT_NO_DEATH_PENALTY` arm is not reached; the cube, sash, change-look and aura refine windows and the premium shop's panel, search and viewers have nothing to close. (f) The item drop penalty is ported (235, V21), and the quest `die` trigger is not run (no owner quest has one). (g) The descriptor learns of the death when it writes `GC_PHASE`, so a command line it reads before that write runs with the standing position (the V10 window). (h) `m_dwLastDeadTime` is not kept; only `CanSummon` reads it. (i) The production arms run: `restart_here`'s wait (allowed from 226 Pulses, 9.04 seconds) and its `IsHack`, and `restart_now`'s `IsHack`, which legacy's default `test_server` skips; the exp line and the `[TestOnly]` line are not sent (owner question 5, provisional). (j) The automatic restart takes the town penalty, which costs nothing, where legacy takes the here penalty (owner question 29, provisional). (k) `DeathPenalty` reads the flag before it rolls or speaks, so a death that owes nothing hears nothing, and a town restart neither rolls nor sends a record (owner question 32, provisional). | `G/char_battle.cpp:330-400`, `:402-548`, `:1238-1696`; `G/cmd_general.cpp:471-706`; `G/char.cpp:1779-1783`, `:3172-3284`, `:6663-6670`; `G/char_affect.cpp:247-337`, `:704-711`; `G/input_main.cpp:1804-1812`. |
+| V18. A player's death and restart differ from legacy in eleven ways (ledger 229k). (a) The town restart and the automatic restart write their hit points, penalty and `CloseRestartWindow` records before the Warp's `GC_CHARACTER_DEL` and `GC_WARP`, because the Rewrite's Warp saves the row first. (b) The player's recovery event runs `CheckTarget`, the heal and `DistributeSP` (229l), with the poison arm (229v: a poisoned player heals nothing); `UpdateKillerMode` has no killer mode to end. (c) No pet, mount or horse: `CheckPet`, `CheckMount` and `StopRiding` are not run. (d) No guild war, three-way war, dungeon, duel, arena or siege branch and no battle pass kill mission: a death is never forked, and `restart_now`'s war-map test and `do_restart`'s war arms are not ported. (e) `ClearAffect(true)` clears the hit affects (229v: the poison, stun and slow); the revive invisibility, the silence and the 500-600 no-clear band (281: the skill-book delays, the dragon-soul qualification) survive a death; no affect 511 exists, so `DeathPenalty`'s `AFFECT_NO_DEATH_PENALTY` arm is not reached; the cube, sash, change-look and aura refine windows and the premium shop's panel, search and viewers have nothing to close. (f) The item drop penalty is ported (235, V21), and the quest `die` trigger is not run (no owner quest has one). (g) The descriptor learns of the death when it writes `GC_PHASE`, so a command line it reads before that write runs with the standing position (the V10 window). (h) `m_dwLastDeadTime` is not kept; only `CanSummon` reads it. (i) The production arms run: `restart_here`'s wait (allowed from 226 Pulses, 9.04 seconds) and its `IsHack`, and `restart_now`'s `IsHack`, which legacy's default `test_server` skips; the exp line and the `[TestOnly]` line are not sent (owner question 5, provisional). (j) The automatic restart takes the town penalty, which costs nothing, where legacy takes the here penalty (owner question 29, provisional). (k) `DeathPenalty` reads the flag before it rolls or speaks, so a death that owes nothing hears nothing, and a town restart neither rolls nor sends a record (owner question 32, provisional). | `G/char_battle.cpp:330-400`, `:402-548`, `:1238-1696`; `G/cmd_general.cpp:471-706`; `G/char.cpp:1779-1783`, `:3172-3284`, `:6663-6670`; `G/char_affect.cpp:247-337`, `:704-711`; `G/input_main.cpp:1804-1812`. |
 | V19. A monster's fight differs from legacy in twelve ways (ledger 229l; (a), (b), (c) and (d) closed in 229s, 229r, 229t and 229w, mob skills out of (e) in 229u, the affect half of (i) in 229v, (l) in 229x, (i) closed in 229y, (f) in 230c). (a) RANGE and MAGIC fight (229s): a hit one shoots (`FlyTarget`, `Shoot`'s two arms), and an aggressive one searches and chases to eight tenths of its range. (b) The aggro is ported (229r): the damage map rows carry `iAggro`, a hit feeds it through `UpdateAggrPointEx`, the chase bleeds it, and `ChangeVictimByAggro` switches past the 3-second window; the party `PM_AGGRO_INCREASE` share is ported (229t), and only `DAMAGE_TYPE_NORMAL` reaches the multipliers (skills and bows wait). (c) The party fights with it (229t): a hit or stunned member sends `PM_ATTACKED_BY`, the aggro shares past `PM_AGGRO_INCREASE`, `Return` scatters past `PM_RETURN`, and the protector follows the leader in Idle and at the dead end. (d) A guard looks for the nearest monster past `noguard`, battles it on the NPC slot, and its swing stuns with `NO_REWARD` and no hit-point change (229w). (e) A fighting skill monster rolls its slots before its swing and casts (229u: the 162 self-heal, the hit events, `ComputeSkillAtPosition`'s splash-damage arm, CRUSH's slide, 263's slow, 270's refusal — proved in-memory, since no hosted spawn names a skill row); no summoner's call or god speed is used, and race 2191's jump, race 2493's battle and the Meley re-search are not ported. (f) A swing holds the monster its clip's seconds (230c, V2). (g) `FindVictim` walks the 3x3 sectrees in `around_of` order, so of two players at one distance the first met is taken (V1). No player is a building or holds `AFF_TERROR`, `AFF_EUNHYUNG` or `AFF_INVISIBILITY`. (h) The `test_server` lines are not sent, and a chaser does not switch to running (owner question 5). (i) A monster's hit lands its poison, stun and slow (229v: the level arm, the 10-tick poison event with its HP-1 floor, the heal refusal, the stun's stop and attack gates, the slow's −30), and the victim's reflect answers (229y: the pre-bonus share, thirded past `IMMUNE_REFLECT`) with the SPECIAL tail and the rewarded `NO_REWARD` split; the marriage, monarch and `mob_dam` terms take their defaults. (j) A player stunned by a monster dies by the monster's next swing, with the monster as killer. When the monster stops first, `StunEvent` kills it with no killer, which costs no exp and drops nothing (legacy, provisional). (k) A stun event due on a swing's Pulse runs first (V16, provisional). (l) A stone spawns its sons from the ten-arm Idle ladder (229x, closed): the runtime `SpawnGroup`, the son's Idle, and the half-exp feed; a 0-MaxHP stone reads 0% (legacy SIGFPEs), and a dead or missing stone reads as none in the protege, nearest-victim and feed readers (legacy reads freed memory) — both Divergences. | `G/char_state.cpp:626-1183`; `G/char.cpp:3471-3510`, `:3555-3583`, `:6848-7034`, `:7459-7471`; `G/trigger.cpp:59-174`; `G/battle.cpp:154-817`; `G/char_battle.cpp:220-328`, `:1744-2436`, `:3411-3428`, `:3835-3897`; `G/party.cpp:875-950`. |
 
 | V20. A guild symbol upload is judged as if the guild held land (ledger 230v). | `test_server` opens the land gate (`G/input_login.cpp:1230`); the owner's files run `test_server` 1 and real guilds hold land, while no land system exists yet, so a literal port would close every symbol upload. |
@@ -444,6 +786,9 @@ owner should know about (178.5):
 | V22. A guild war's member is sent to the war map before the quest that asked it closes, where legacy sends it after (ledger 239). The quest's end (`[DONE]`) is written first and the warp follows, because the quest step answers the descriptor and the warp goes through the order queue. | The `GC_WARP` is sent while the script runs, so the load comes first and the quest's end after it (`CHARACTER::WarpSet`, `G/char.cpp:6694-6792`). The two records are the same; only their order differs. |
 | V23. A guild war's map sends its members back to the place they came from, where legacy sends them back onto the war map (ledger 240). The exit's warp names the town the member came from, and the member stays connected; legacy warps to the pending warp, which the warp to the war map overwrote with the war map's own start position, so the member is sent back onto the war map and is disconnected with it a few seconds later. | The rule is `CHARACTER::ExitToSavedLocation` (`G/char.cpp:6687-6692`), which warps to `m_posWarp` and `m_lWarpMapIndex` (`G/char.cpp:6690`); the place the member came from is `m_posExit` and `m_lExitMapIndex` (`G/char.cpp:6679-6683`), which legacy forgets without reading. The end state is the same: the member is back in the town, by its next login in legacy and by the warp in the Rewrite. |
 | V24. The flag war's flags take and score are run by the war map's tick, where legacy runs them by the flag and base characters' own states (ledgers 242 and 243). The wire is the same: the nearest player that may take a flag carries it, the base scores the other team's flag, and the flags reset and come back ten seconds later. | The flag mob's state (`CHARACTER::StateFlag`, `G/char_state.cpp:1185-1216`) and the base mob's (`CHARACTER::StateFlagBase`, `:1218-1222`) run through the character state machine, which the Rewrite's characters do not have; the war map's tick runs the same two rules (`prodomo/src/game_state/guild.rs`). |
+| V26. A quest reads the character's stored GM level even in the test-server mode (ledger 272). `pc.is_gm` and `pc.get_gm_level` answer the points' level, which rode the admission; the sash quest's `not pc.is_gm()` gate opens for players and no GM panel letter lands at login, as the death penalty's and the restart's production arms already judge. | `GetGMLevel` answers `GM_IMPLEMENTOR` for every character while the mode is on (`G/char.cpp:6355-6356`), and the owner's `CONFIG` files never turn it off, so on the deployment every character was a GM, the sash quest never fired, and every login lettered the GM event panel. The `test_server` audit (owner question 5) settles the silence. |
+| `/reload`'s `t` and `m` arms read their files before they swap, so a bad file keeps the live tables (ledger 358.1). | `do_reload` destroys the live maps and groups first (`G/cmd_gm.cpp:2683-2715`), so a bad `special_item_group.txt` or `mob_drop_item.txt` empties them until the next good reload. The caller hears the same Romanian miss lines either way. |
+| V27. A `/shutdown` after the bar restarts nothing, and a `/shutdown` mid-countdown restarts it at 10 (ledger 360). The game thread must not kill the process, so the operator stops it with SIGTERM, which the graceful path already serves; the bar never clears. | `Shutdown()` past the bar calls `thecore_shutdown()` (`G/cmd_general.cpp:246-249`), exiting the process at once; mid-countdown it starts a second concurrent event, whose notices double the first's (`:250-261`). |
 
 ## Legacy defects not to reproduce
 
@@ -485,7 +830,9 @@ owner should know about (178.5):
   is one point goes to `SpawnMob` with its group vnum as a mob vnum (`G/regen.cpp:346-353`), so it
   spawns the mob of that number, if one exists, instead of the group. **D5:** `Show` with the spawn
   motion sets `AFF_SPAWN` and nothing resets it (`G/char.cpp:1886-1887`), so every boxed stone and
-  every spawn-motion monster carries it in each later insert.
+  every spawn-motion monster carries it in each later insert. `SetPolymorph` sets it on a player too
+  (`G/char.cpp:7701`), so a player who used `/polymorph` carries it in each later insert and
+  update, even after the clear (ledger 364).
 - For the first 10 seconds after the process starts, `IsHack` refuses every player a warp NPC
   finds with `[LS;850;10]`, because `m_iSafeboxLoadTime` starts at 0 and is compared with the
   Pulse (`G/char.cpp:278`, `:8234-8241`). The Rewrite refuses nothing for a timer that was never
@@ -853,6 +1200,98 @@ owner should know about (178.5):
   and nothing clears when the item is destroyed, so an `item.get_vnum` after the item is used
   up, sold or removed reads freed memory (`G/questlua_item.cpp:138-149`). The Rewrite keeps the
   item's ID and answers 0 once the character no longer holds it (ledger 264).
+- `do_goto`'s named map tests the wrong flag: `if (!bFind)` prints `There is no map named ...
+  Cannot find map %s` whenever the name IS found (`G/cmd_gm.cpp:357-361`), so every honest
+  `/goto <name>` reads a failure line for a warp that landed. The Rewrite warps and stays
+  silent (ledger 312).
+- `xmas::ProcessEventFlag`'s `xmas_santa` 1 arm tests the wrong way: its comment says it
+  makes a Santa when there is none, but it calls `SpawnMobRandomPosition` only when
+  `GetCharactersByRaceNum` finds one already standing (`G/xmas_event.cpp:75-85`), so the
+  first Santa never comes. The Rewrite stands one when none stands (ledger 365).
+- `CItem::AddSocket` writes `m_alSockets` with neither `UpdatePacket` nor `Save`
+  (`G/item.cpp:1786-1793`), so `/add_socket`'s socket is invisible to the GM's client and is
+  lost at logout unless an unrelated later save carries the item. The Rewrite sends
+  `GC_ITEM_UPDATE` and stores the row, as `SetSocket` does (ledger 367).
+- `/set_socket` hands any `int` to `CItem::SetSocket`, whose `assert` is the only bound
+  before `m_alSockets[i]` is written (`G/cmd_gm.cpp:4698-4713`, `G/item.cpp:1643-1648`), so an
+  index past 5 or below 0 writes outside the item. The Rewrite writes nothing (ledger 367).
+- `CItem::AddRareAttribute` indexes `bMaxLevelBySet` with `GetAttributeSetIndex()`, which is
+  -1 for a rod or a pick in the weapon slot, and picks `avail[number(0, avail.size() - 1)]`
+  even when no row is left, which indexes out of the vector (`G/item_attribute.cpp:422-464`).
+  The Rewrite adds nothing in both cases (ledger 369).
+- The `POINT_CONQUEROR_EXP` arm of `PointChange` answers a loss of the whole champion
+  experience with `GetExp()`, the plain experience, as the record's value
+  (`G/char.cpp:3908-3915`), and prints a smaller loss's `int` amount with `%lu`, so `/set`
+  shows a wrapped number. The Rewrite writes the 0 it stored and the signed amount
+  (ledger 371).
+- `SortInventoryItems` gives a plain stackable back through `AutoGiveItem(vnum, count)`,
+  whose top-up raises a `MAKECOUNT` stack to the proto's `value1`, and which destroys the
+  lifted item and makes a fresh one with the proto's sockets; an item whose vnum has no proto
+  is lifted and never given back (`G/char.cpp:10790-10866`). The Rewrite gives back the count
+  it lifted, gives an item with its own sockets or attributes back whole, and gives a
+  proto-less item back whole (ledger 372).
+- `AutoGiveItemNew`, when the stacks take part of a drop and no cell takes the rest, names
+  the whole count in its `Ai primit:` line (`G/char_item.cpp:10815-10819`). The Rewrite names
+  what the stacks took (ledger 373).
+- `SaveAttributeToImage`, for a sectree the attribute file does not cover, paints whatever
+  its line buffer still holds from the last covered sectree of the row — or, on a row whose
+  first sectree is uncovered, whatever the fresh buffer held — because the `!pSec` arm only
+  skips the `CopyRow` (`G/sectree_manager.cpp:1412-1440`). A map whose file is narrower than
+  its sectrees therefore smears its last covered column right, and the paint depends on the
+  heap. The Rewrite paints an uncovered sectree black (ledger 378).
+- The 10-second grace for a missing client version never fires: the arm tests
+  `!GetClientVersion()`, and a `std::string`'s `c_str()` is never null
+  (`G/input_login.cpp:744-771`). Every versionless client is answered with the conflict notice
+  and closed, as a wrong version is (ledger 380).
+- `RequestEventQuest` builds its `std::string` over the whole 65-byte field, reading past
+  its end when no NUL is stored. The Rewrite stops at the first NUL or the field's end
+  (ledger 382).
+- `WhisperDetails` reads the asked name as a C string that may run past its 25-byte field,
+  and answers with a stack record whose 25th name byte it never sets, since `strncpy` copies
+  at most 24 (`G/input_main.cpp:3603-3638`). The Rewrite reads the name within the field and
+  writes 0 there. Its `P2P_MANAGER::Find` arm answers the language another core's character
+  logged in with, because `ChangeLanguage` never tells the other cores; the Rewrite answers
+  the current one (ledger 383).
+- `TargetInfoLoad` makes a real item for each entry of the drop list, each with a new item
+  ID and, for a timed item, a running expiry event, and never destroys them, so every click
+  on a target leaks (`G/item_manager.cpp:915-1095`). A row whose percent is 0 sends the
+  item's `dwRarity`, which `CreateItem` sets only for a nonzero percent and the constructor
+  never initialises. The Rewrite makes no item and sends 0 (ledger 384).
+- A gift to a smith passes the item's cell to `RefineInformation` as an inventory cell
+  whatever its window (`G/char_item.cpp:9452-9481`), and `RefineInformation` accepts the
+  custom bank cells (290 and up) but writes the cell into the window's one-byte `pos`
+  (`:1865-1893`), so the client's refine names a different cell.
+  `DoRefine` places the refined item with `AddToCharacter` at the old cell without checking
+  that it fits, so a taller result overlaps the cells below. The Rewrite opens no window for
+  such a cell and refuses a result that would not fit before anything changes (ledger 385).
+- `CHARACTER::RefineInformation` stores the scroll cell in `m_iRefineAdditionalCell`, which
+  no constructor or `Initialize` sets and `ClearRefineMode` never resets
+  (`G/char_item.cpp:9563-9573`), so a scroll refine can read a cell left from an earlier
+  window or an indeterminate one. The Rewrite starts with no scroll cell, keeps the last one
+  as legacy keeps it, and forgets it when the character leaves (ledger 386).
+- `SendEventInfo` counts its record into a `WORD wSize`, so more than 2978 events truncate the
+  size and the client misframes (`G/event_manager.cpp:613-646`). The Rewrite refuses a calendar
+  that does not fit (ledger 387).
+- `SendEventInfo` compares the start's month but not its year, so an event of the same month in
+  another year is listed, and a December one is never a "previous month" in January (`localtime`'s
+  `tm_mon`). The Rewrite lists the same months, in UTC rather than the server's zone (ledger 387).
+- `confirm_timeout_event` is never cancelled when the confirm is answered
+  (`G/questlua.cpp:881-904`), so a script that confirms again within the first timeout hears
+  the stale timer's `CONFIRM_TIMEOUT` early. The Rewrite disarms the timer when an answer is
+  heard and a new confirm replaces it (ledger 388).
+- `CHARACTER::OreRefine` takes the 100 ore before it checks the gold (`G/mining.cpp:443-451`),
+  so a purse short of `ComputeRefineFee(cost)` loses the ore and is refused; the script checks
+  only `GetOreRefineCost`, which is 10% lower. The Rewrite checks the gold before it spends
+  anything (ledger 388).
+- `GC_FISHING` leaves `dir` uninitialised on every sub-header but `START` (`G/fishing.cpp:403-428`,
+  `498-503`, `651-655`, `733-737`), so the client hears a stack byte. The Rewrite sends 0
+  (ledger 389).
+- `CHARACTER::fishing` dereferences the sectree under the fisher without checking it exists
+  (`G/char.cpp:5263-5267`), so a cast outside every sectree crashes the core. The Rewrite reads
+  the map's attributes and refuses nothing extra (ledger 389).
+- `fishing::DetermineFish` takes `lower_bound` over the cumulative odds without checking the
+  end (`G/fishing.cpp:389-390`), so a roll past the last entry reads `fish_info[MAX_FISH]`. The
+  Rewrite treats it as the empty catch: `FISH` names vnum 0 and nothing lands (ledger 389).
 
 ## Environment
 

@@ -19,7 +19,7 @@
 //!
 //! - **A command this build does not port answers nothing.** Legacy runs its handler.
 
-use crate::game_loop_messages::RestartKind;
+use crate::game_loop_messages::{EventLine, ExitKind, GmLine, HorseLine, RestartKind};
 
 mod table;
 
@@ -118,34 +118,367 @@ impl CommandEntry {
     pub fn command(&self) -> Command {
         match self.handler {
             "do_inputall" => Command::TypeInFull,
-            "do_click_safebox" => Command::ClickSafebox,
-            "do_click_mall" => Command::ClickMall,
-            "do_safebox_close" => Command::SafeboxClose,
-            "do_safebox_password" => Command::SafeboxPassword,
-            "do_safebox_change_password" => Command::SafeboxChangePassword,
-            "do_mall_password" => Command::MallPassword,
-            "do_mall_close" => Command::MallClose,
-            "do_restart" if self.name == "restart_town" => Command::Restart(RestartKind::Town),
-            "do_restart" => Command::Restart(RestartKind::Here),
-            "do_restart_now" => Command::Restart(RestartKind::Now),
+            "do_shutdown" => Command::Shutdown,
+            "do_click_safebox"
+            | "do_click_mall"
+            | "do_safebox_close"
+            | "do_safebox_size"
+            | "do_safebox_password"
+            | "do_safebox_change_password"
+            | "do_mall_password"
+            | "do_mall_close" => Self::store_name(self.handler),
+            "do_restart" | "do_restart_now" | "do_purge" | "do_weaken" => self.restart_name(),
+            "do_cmd" => self.exit_name(),
             "do_skillup" => Command::SkillUp,
-            "do_guildskillup" => Command::GuildSkillUp,
-            "do_war" => Command::GuildWar,
-            "do_nowar" => Command::GuildNoWar,
-            "do_stop_guild_war" => Command::GuildWarStop,
-            "do_cancel_guild_war" => Command::GuildWarCancel,
-            "do_gwlist" => Command::GuildWarList,
+            "do_pvp" => Command::Pvp,
+            "do_guildskillup"
+            | "do_war"
+            | "do_nowar"
+            | "do_stop_guild_war"
+            | "do_cancel_guild_war"
+            | "do_gwlist"
+            | "do_guild_state"
+            | "do_makeguild"
+            | "do_deleteguild" => Self::guild_name(self.handler),
             "do_party_request" => Command::PartyRequest,
             "do_party_request_accept" => Command::PartyRequestAccept,
             "do_party_request_deny" => Command::PartyRequestDeny,
+            "do_ungroup" => Command::Ungroup,
             "do_messenger_auth" => Command::MessengerAuth,
             "do_notice" => Command::GlobalNotice,
             "do_map_notice" => Command::MapNotice,
             "do_big_notice" => Command::BigNotice,
             "do_setblockmode" => Command::SetBlockMode,
             "do_block_chat" => Command::BlockChat,
+            "do_block_chat_list" => Command::BlockChatList,
+            "do_vote_block_chat" => Command::VoteBlockChat,
+            "do_disconnect" | "do_transfer" | "do_kill" | "do_poison" | "do_stun" => {
+                Self::strike_name(self.handler)
+            }
+            "do_getqf" | "do_setqf" | "do_delqf" | "do_set_state" | "do_qf" | "do_clear_quest" => {
+                Self::quest_name(self.handler)
+            }
+            "do_horse_state" => Command::Horse(HorseLine::State),
+            "do_horse_level" => Command::Horse(HorseLine::Level),
+            "do_horse_set_stat" => Command::Horse(HorseLine::SetStat),
+            _ => self.mid_name(),
+        }
+    }
+
+    /// The mid-table lines from the view to the end: split out so
+    /// [`CommandEntry::command`] does not trip the line lint.
+    fn mid_name(&self) -> Command {
+        match self.handler {
+            "do_view_equip" => Command::ViewEquip,
+            "do_warp" => Command::Warp,
+            "do_observer_exit" => Command::ObserverExit,
+            "do_private" => Command::Private,
+            "do_reload" => Command::Reload,
+            "do_rewarp" => Command::Rewarp,
+            "do_goto" => Command::Goto,
+            "do_level" => Command::Level,
+            "do_advance" => Command::Advance,
+            "do_reset" => Command::Reset,
+            "do_greset" => Command::GuildReset,
+            "do_user" => Command::OnlineList,
+            "do_who" => Command::Who,
+            "do_respawn" => Command::Respawn,
+            "do_mob" => Command::Mob,
+            "do_mob_ld" => Command::MobLd,
+            "do_mob_aggresive" => Command::MobAggressive,
+            "do_mob_coward" => Command::MobCoward,
+            "do_mob_map" => Command::MobMap,
+            "do_detaillog" => Command::DetailLog,
+            "do_monsterlog" => Command::MonsterLog,
+            "do_polymorph" => Command::Polymorph,
+            "do_polymorph_item" => Command::Polyitem,
+            "do_socket_item" => Command::SocketItem,
+            "do_save_attribute_to_image" => Command::SaveAti,
+            "do_get_item_id_list" => Command::GmLine(GmLine::ItemIdList),
+            "do_get_mob_count" => Command::GmLine(GmLine::MobCount),
+            "do_effect" => Command::GmLine(GmLine::Effect),
+            "do_add_socket" => Command::GmLine(GmLine::AddSocket),
+            "do_set_socket" => Command::GmLine(GmLine::SetSocket),
+            "do_change_attr" => Command::GmLine(GmLine::ChangeAttr),
+            "do_add_attr" => Command::GmLine(GmLine::AddAttr),
+            "do_change_rare_attr" => Command::GmLine(GmLine::ChangeRareAttr),
+            "do_add_rare_attr" => Command::GmLine(GmLine::AddRareAttr),
+            "do_force_logout" => Command::GmLine(GmLine::ForceLogout),
+            "do_reset_subskill" => Command::GmLine(GmLine::ResetSubSkill),
+            "do_conqueror_level" => Command::GmLine(GmLine::ConquerorLevel),
+            "do_conqueror_point" => Command::GmLine(GmLine::ConquerorPoint),
+            "do_sort_inventory" => Command::GmLine(GmLine::SortInventory),
+            "do_pickup_affect" => Command::GmLine(GmLine::PickupAffect),
+            "do_move_channel" => Command::GmLine(GmLine::MoveChannel),
+            "do_flush" => Command::GmLine(GmLine::Flush),
+            "do_observer" => Command::GmLine(GmLine::Observer),
+            "do_forgetme" => Command::ForgetMe,
+            "do_aggregate" => Command::Aggregate,
+            "do_attract_ranger" => Command::AttractRanger,
+            "do_pull_monster" => Command::PullMonster,
+            "do_group" => Command::Group,
+            "do_group_random" => Command::GroupRandom,
+            "do_item" => Command::SelfGrant,
+            "do_setskill" => Command::SetSkill,
+            "do_setskillother" => Command::SetSkillOther,
+            "do_set_skill_point" => Command::SetSkillPoint,
+            "do_set_skill_group" => Command::SetJob,
+            "do_invisibility" => Command::Invisible,
+            "do_cooltime" => Command::Cooltime,
+            "do_affect_remove" => Command::AffectRemove,
+            "do_hide_costume" => Command::HideCostume,
+            "do_emotion_allow" | "do_emotion" => self.emotion_name(),
+            "do_priv_empire" => Command::PrivEmpire,
+            "do_event_flag" => Command::EventFlag,
+            "do_get_event_flag" => Command::GetEventFlag,
+            "do_xmas" | "do_eclipse" | "do_event_helper" => self.event_name(),
+            "give_reward" => Command::GiveReward,
+            "letters_open" => Command::LettersOpen,
+            "do_stat" => Command::Stat,
+            "do_stat_minus" => Command::StatMinus,
+            "do_stat_val" => Command::StatVal,
+            "do_stat_plus_amount" | "do_set_stat" => self.stat_line(),
+            "do_stat_reset" => Command::StatReset,
+            "do_can_dead" | "do_pkmode" => self.pk_line(),
+            "do_set_walk_mode" | "do_set_run_mode" => Self::mode_name(self.handler),
+            "do_all_skill_master"
+            | "do_full_set"
+            | "do_item_full_set"
+            | "do_attr_full_set"
+            | "do_refine_rod"
+            | "do_refine_pick"
+            | "do_max_pick"
+            | "do_use_item"
+            | "do_clear_affect"
+            | "do_dragon_soul"
+            | "do_ds_list"
+            | "do_ds_change_attr"
+            | "do_dice"
+            | "do_gift"
+            | "do_hair"
+            | "do_fishing_simul"
+            | "do_costume"
+            | "do_state"
+            | "do_inventory"
+            | "do_slow"
+            | "do_item_purge"
+            | "do_book"
+            | "do_console"
+            | "do_set" => Self::tail_name(self.handler),
             _ => Command::NotPorted(self.name),
         }
+    }
+    /// The tail lines after the walk-mode ones: split out so [`CommandEntry::command`]
+    /// does not trip the line lint.
+    fn tail_name(handler: &'static str) -> Command {
+        match handler {
+            "do_all_skill_master"
+            | "do_full_set"
+            | "do_item_full_set"
+            | "do_attr_full_set"
+            | "do_refine_rod"
+            | "do_refine_pick"
+            | "do_max_pick"
+            | "do_use_item"
+            | "do_clear_affect"
+            | "do_dragon_soul"
+            | "do_ds_list"
+            | "do_ds_change_attr"
+            | "do_dice"
+            | "do_gift"
+            | "do_hair"
+            | "do_fishing_simul"
+            | "do_costume"
+            | "do_state"
+            | "do_inventory" => Self::kit_name(handler),
+            "do_slow" | "do_item_purge" | "do_book" | "do_console" => Self::purge_name(handler),
+            "do_set" => Command::SetAttr,
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The safebox and mall lines: split out so the match does not trip the line lint.
+    fn store_name(handler: &'static str) -> Command {
+        match handler {
+            "do_click_safebox" => Command::ClickSafebox,
+            "do_click_mall" => Command::ClickMall,
+            "do_safebox_close" => Command::SafeboxClose,
+            "do_safebox_size" => Command::SafeboxSize,
+            "do_safebox_password" => Command::SafeboxPassword,
+            "do_safebox_change_password" => Command::SafeboxChangePassword,
+            "do_mall_password" => Command::MallPassword,
+            "do_mall_close" => Command::MallClose,
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The guild management lines: split out so the match does not trip the line lint.
+    fn guild_name(handler: &'static str) -> Command {
+        match handler {
+            "do_guildskillup" => Command::GuildSkillUp,
+            "do_war" => Command::GuildWar,
+            "do_nowar" => Command::GuildNoWar,
+            "do_stop_guild_war" => Command::GuildWarStop,
+            "do_cancel_guild_war" => Command::GuildWarCancel,
+            "do_gwlist" => Command::GuildWarList,
+            "do_guild_state" => Command::GuildState,
+            "do_makeguild" => Command::Makeguild,
+            "do_deleteguild" => Command::Deleteguild,
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The disconnect, transfer, kill, poison and stun lines: split out so the match does
+    /// not trip the line lint.
+    fn strike_name(handler: &'static str) -> Command {
+        match handler {
+            "do_disconnect" => Command::Dc,
+            "do_transfer" => Command::Transfer,
+            "do_kill" => Command::Kill,
+            "do_poison" => Command::Poison,
+            "do_stun" => Command::Stun,
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The restart, purge and weaken lines: split out so the match does not trip the
+    /// line lint.
+    fn restart_name(&self) -> Command {
+        match self.handler {
+            "do_restart" if self.name == "restart_town" => Command::Restart(RestartKind::Town),
+            "do_restart" => Command::Restart(RestartKind::Here),
+            "do_restart_now" => Command::Restart(RestartKind::Now),
+            "do_purge" => Command::Purge,
+            "do_weaken" => Command::Weaken,
+            _ => Command::NotPorted(self.name),
+        }
+    }
+
+    /// The event lines: `do_xmas`'s three sub-commands by name, `do_eclipse` and
+    /// `do_event_helper`.
+    fn event_name(&self) -> Command {
+        match (self.handler, self.name) {
+            ("do_xmas", "xmas_boom") => Command::EventLine(EventLine::XmasBoom),
+            ("do_xmas", "xmas_snow") => Command::EventLine(EventLine::XmasSnow),
+            ("do_xmas", "xmas_santa") => Command::EventLine(EventLine::XmasSanta),
+            ("do_eclipse", _) => Command::EventLine(EventLine::Eclipse),
+            ("do_event_helper", _) => Command::EventLine(EventLine::EventHelper),
+            _ => Command::NotPorted(self.name),
+        }
+    }
+
+    /// The exit lines: split out so the match does not trip the line lint.
+    fn exit_name(&self) -> Command {
+        match self.name {
+            "logout" => Command::Exit(ExitKind::Logout),
+            "quit" => Command::Exit(ExitKind::Quit),
+            "phase_select" => Command::Exit(ExitKind::PhaseSelect),
+            _ => Command::NotPorted(self.name),
+        }
+    }
+
+    /// The quest-flag lines: split out so the match does not trip the line lint.
+    fn quest_name(handler: &'static str) -> Command {
+        match handler {
+            "do_getqf" => Command::GetQf,
+            "do_setqf" => Command::SetQf,
+            "do_delqf" => Command::DelQf,
+            "do_set_state" => Command::SetState,
+            "do_qf" => Command::Qf,
+            "do_clear_quest" => Command::ClearQuest,
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The master, kit, use, clear, soul, dice, gift, hair, costume, state and
+    /// inventory lines: split out so the match does not trip the line lint.
+    fn kit_name(handler: &'static str) -> Command {
+        match handler {
+            "do_all_skill_master" => Command::AllSkillMaster,
+            "do_full_set" => Command::FullSet,
+            "do_item_full_set" => Command::ItemFullSet,
+            "do_refine_rod" => Command::RefineRod,
+            "do_refine_pick" => Command::RefinePick,
+            "do_max_pick" => Command::MaxPick,
+            "do_attr_full_set" => Command::AttrFullSet,
+            "do_use_item" => Command::UseItem,
+            "do_clear_affect" => Command::ClearAffect,
+            "do_dragon_soul" => Command::DragonSoul,
+            "do_ds_list" => Command::DsList,
+            "do_ds_change_attr" => Command::DsChangeAttr,
+            "do_dice" => Command::Dice,
+            "do_gift" => Command::Gift,
+            "do_hair" => Command::Hair,
+            "do_fishing_simul" => Command::FishSimul,
+            "do_costume" => Command::Costume,
+            "do_state" => Command::State,
+            "do_inventory" => Command::Inventory,
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The `*+`/`t*` and `set_stat` lines: split out so the match does not trip the
+    /// line lint.
+    fn stat_line(&self) -> Command {
+        match self.handler {
+            "do_stat_plus_amount" => Self::stat_name(self.name, Command::StatPlus),
+            "do_set_stat" => Self::stat_name(self.name, Command::SetStat),
+            _ => Command::NotPorted(self.handler),
+        }
+    }
+
+    /// The can-dead and PK-mode lines: split out so the match does not trip the line
+    /// lint.
+    fn pk_line(&self) -> Command {
+        match self.handler {
+            "do_can_dead" => Command::CanDead(self.name == "can_dead"),
+            "do_pkmode" => Command::PkMode,
+            _ => Command::NotPorted(self.handler),
+        }
+    }
+
+    /// The emotion lines: split out so the match does not trip the line lint.
+    fn emotion_name(&self) -> Command {
+        match self.handler {
+            "do_emotion_allow" => Command::EmotionAllow,
+            "do_emotion" => Command::Emotion,
+            _ => Command::NotPorted(self.handler),
+        }
+    }
+
+    /// The slow, purge, book and console lines: split out so the match does not trip
+    /// the line lint.
+    fn purge_name(handler: &'static str) -> Command {
+        match handler {
+            "do_slow" => Command::Slow,
+            "do_item_purge" => Command::ItemPurge,
+            "do_book" => Command::Book,
+            "do_console" => Command::Console,
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The walk and run lines: split out so the match does not trip the line lint.
+    fn mode_name(handler: &'static str) -> Command {
+        match handler {
+            "do_set_walk_mode" => Command::WalkMode(true),
+            "do_set_run_mode" => Command::WalkMode(false),
+            _ => Command::NotPorted(handler),
+        }
+    }
+
+    /// The `*+` and `t*` attribute the entry names: the `con`/`tcon` pair
+    /// names `Ht`, and so on. Split out so the match does not trip the line
+    /// lint.
+    fn stat_name(name: &'static str, wrap: fn(StatPlusKind) -> Command) -> Command {
+        let kind = match name {
+            "con+" | "tcon" => StatPlusKind::Ht,
+            "int+" | "tint" => StatPlusKind::Iq,
+            "str+" | "tstr" => StatPlusKind::St,
+            "dex+" | "tdex" => StatPlusKind::Dx,
+            _ => return Command::NotPorted(name),
+        };
+        wrap(kind)
     }
 }
 
@@ -154,12 +487,17 @@ impl CommandEntry {
 pub enum Command {
     /// `do_inputall`: [`TYPE_IN_FULL`].
     TypeInFull,
+    /// `do_shutdown`: the 10-second shutdown countdown starts
+    /// (`G/cmd_general.cpp:265-275`).
+    Shutdown,
     /// `do_click_safebox`: the client is told to ask for the safebox password.
     ClickSafebox,
     /// `do_click_mall`: the client is told to ask for the mall password.
     ClickMall,
     /// `do_safebox_close`.
     SafeboxClose,
+    /// `do_safebox_size`: the GM's size word.
+    SafeboxSize,
     /// `do_safebox_password`: open the safebox.
     SafeboxPassword,
     /// `do_safebox_change_password`.
@@ -171,8 +509,12 @@ pub enum Command {
     /// `do_restart` (`restart_here` and `restart_town`) and `do_restart_now`: the restart of the
     /// entry's kind.
     Restart(RestartKind),
+    /// `do_cmd` (`logout`, `quit` and `phase_select`): the exit of the entry's kind.
+    Exit(ExitKind),
     /// `do_skillup`: the `/skillup` line's vnum climbs a level when every gate passes.
     SkillUp,
+    /// `do_pvp`: the `/pvp` line's VID is challenged or agreed with.
+    Pvp,
     /// `do_guildskillup`: the `/gskillup` line's vnum climbs a level when every gate
     /// passes.
     GuildSkillUp,
@@ -186,12 +528,20 @@ pub enum Command {
     GuildWarCancel,
     /// `do_gwlist`: the GM hears each live guild war's pair and age.
     GuildWarList,
+    /// `do_guild_state`: the GM hears the named guild's id, master and war.
+    GuildState,
+    /// `do_makeguild`: the GM founds a guild under the line's word.
+    Makeguild,
+    /// `do_deleteguild`: the caller's guild disbands when it leads and no war holds.
+    Deleteguild,
     /// `do_party_request`: the requester asks the VID's party leader to take it in.
     PartyRequest,
     /// `do_party_request_accept`: the leader accepts the guest's request.
     PartyRequestAccept,
     /// `do_party_request_deny`: the leader denies the guest's request.
     PartyRequestDeny,
+    /// `do_ungroup`: the caller leaves its party (`G/cmd_general.cpp:1060-1088`).
+    Ungroup,
     /// `do_messenger_auth`: the target answers a friend request named by the line's
     /// second word (`G/cmd_general.cpp:2272-2296`).
     MessengerAuth,
@@ -207,8 +557,295 @@ pub enum Command {
     /// `do_block_chat`: the named character is silenced for the parsed time, or
     /// unsilenced when the time is `0` (`G/cmd_gm.cpp:3364-3433`).
     BlockChat,
+    /// `do_block_chat_list`: the caller hears one line per silenced character,
+    /// or `No one currently blocked` (`G/cmd_gm.cpp:3298-3310`).
+    BlockChatList,
+    /// `do_vote_block_chat`: nothing; the body returns before its first word
+    /// (`G/cmd_gm.cpp:3312-3314`).
+    VoteBlockChat,
+    /// `do_disconnect`: the named character's descriptor closes
+    /// (`G/cmd_gm.cpp:1755-1782`).
+    Dc,
+    /// `do_transfer`: the named character warps to the caller's side
+    /// (`G/cmd_gm.cpp:102-151`).
+    Transfer,
+    /// `do_kill`: the named character dies (`G/cmd_gm.cpp:1784-1805`).
+    Kill,
+    /// `do_poison`: the named character is poisoned (`G/cmd_gm.cpp:1808-1829`).
+    Poison,
+    /// `do_stun`: the named character is stunned for 30 ticks (`G/cmd_gm.cpp:87-90`,
+    /// through `Command_ApplyAffect`, `:50-83`).
+    Stun,
+    /// `do_getqf`: the target's quest flags, one line each
+    /// (`G/cmd_gm.cpp:2863-2888`).
+    GetQf,
+    /// `do_setqf`: sets the target's quest flag (`G/cmd_gm.cpp:2958-2992`).
+    SetQf,
+    /// `do_delqf`: deletes the target's quest flag (`G/cmd_gm.cpp:2994-3027`).
+    DelQf,
+    /// `do_set_state`: the target's quest moves to the named state
+    /// (`G/cmd_gm.cpp:2891-2956`).
+    SetState,
+    /// `do_qf`: the caller's current quest moves to the named state
+    /// (`G/cmd_gm.cpp:2326-2364`).
+    Qf,
+    /// `do_clear_quest`: the caller's quest forgets every flag and rests at 0
+    /// (`G/cmd_gm.cpp:3732-3743`).
+    ClearQuest,
+    /// `do_view_equip`: the caller views the VID's worn equipment
+    /// (`G/cmd_general.cpp:2395-2426`).
+    ViewEquip,
+    /// `do_warp`: the caller warps to the named character or the metres
+    /// (`G/cmd_gm.cpp:399-457`).
+    Warp,
+    /// `do_private`: the caller warps to a private copy of the named map
+    /// (`G/cmd_gm.cpp:2301-2325`).
+    Private,
+    /// `do_reload`: the named tables reload (`G/cmd_gm.cpp:2639-2733`).
+    Reload,
+    /// `do_rewarp`: the caller rewarps in place (`G/cmd_gm.cpp:459-465`).
+    Rewarp,
+    /// `do_observer_exit`: an observer leaves the mode, warping to the saved place
+    /// (`G/cmd_general.cpp:2370-2393`).
+    ObserverExit,
+    /// `do_goto`: the caller shows at the metres or warps to the named map
+    /// (`G/cmd_gm.cpp:313-397`).
+    Goto,
+    /// `do_level`: the caller's level becomes the line's, clamped to the max
+    /// (`G/cmd_gm.cpp:2740-2758`).
+    Level,
+    /// `do_advance`: the named character's level becomes the line's, clamped
+    /// to `0..=max` (`G/cmd_gm.cpp:2083-2106`).
+    Advance,
+    /// `do_reset`: the caller's hit and spell pools refill, and the filled
+    /// pools bank (`G/cmd_gm.cpp:2076-2081`).
+    Reset,
+    /// `do_greset`: the caller's guild's faith refills to its maximum
+    /// (`G/cmd_gm.cpp:2175-2179`).
+    GuildReset,
+    /// `do_user`: the online Names roll past the caller, four a line, then
+    /// the total (`G/cmd_gm.cpp:1694-1753`).
+    OnlineList,
+    /// `do_who`: the empires' totals and the caller's Channel's own count
+    /// (`G/cmd_gm.cpp:1682-1692`).
+    Who,
+    /// `do_respawn`: the regens around fire one Pulse on, everywhere with
+    /// `all` (`G/cmd_gm.cpp:2108-2123`).
+    Respawn,
+    /// `do_mob`: the named mob stands around the caller (`G/cmd_gm.cpp:699-758`).
+    Mob,
+    /// `do_mob_ld`: the named mob at the named metres (`G/cmd_gm.cpp:760-815`).
+    MobLd,
+    /// `do_mob_aggresive`: the named mob stands around the caller with the
+    /// aggressive bit (`G/cmd_gm.cpp:639-698`).
+    MobAggressive,
+    /// `do_mob_coward`: the named mob stands around the caller with the
+    /// coward bit (`G/cmd_gm.cpp:557-617`).
+    MobCoward,
+    /// `do_mob_map`: the numbered mob at a random point of the caller's map
+    /// (`G/cmd_gm.cpp:618-637`).
+    MobMap,
+    /// `do_detaillog`: the caller's detail flag flips
+    /// (`G/cmd_general.cpp:2242-2245`).
+    DetailLog,
+    /// `do_monsterlog`: the caller's monster subscription flips
+    /// (`G/cmd_general.cpp:2247-2250`).
+    MonsterLog,
+    /// `do_polymorph`: the caller shows as the named mob vnum, or unmorphs on an
+    /// empty or job vnum (`G/cmd_gm.cpp:3049-3068`).
+    Polymorph,
+    /// `do_polymorph_item`: the caller is granted a 70104 ball holding the named mob
+    /// vnum in its first socket (`G/cmd_gm.cpp:3070-3104`).
+    Polyitem,
+    /// `do_socket_item`: the caller is given one item of the named vnum with its first
+    /// sockets set to 1, three by default (`G/cmd_gm.cpp:3231-3268`).
+    SocketItem,
+    /// `do_save_attribute_to_image`: the named map's attributes are written as a TGA to
+    /// the named file (`G/cmd_gm.cpp:3843-3863`).
+    SaveAti,
+    /// `do_get_item_id_list`, `do_get_mob_count`, `do_effect`, `do_add_socket`,
+    /// `do_set_socket`, `do_change_attr`, `do_add_attr`, `do_change_rare_attr`,
+    /// `do_add_rare_attr`, `do_force_logout` and `do_reset_subskill`: the small GM lines
+    /// the world runs whole.
+    GmLine(GmLine),
+    /// `do_forgetme`: every monster around whose victim is the caller drops
+    /// it, then the caller hides for 5 seconds (`G/cmd_gm.cpp:3029-3032`).
+    ForgetMe,
+    /// `do_aggregate`: each victimless monster around within 5000, with a
+    /// one-in-two draw, begins to fight the caller (`G/cmd_gm.cpp:3034-3037`).
+    Aggregate,
+    /// `do_attract_ranger`: each monster around whose victim is none or the
+    /// caller and whose attack range is past 150 is cut to 150 for 3 minutes
+    /// (`G/cmd_gm.cpp:3039-3042`).
+    AttractRanger,
+    /// `do_pull_monster`: each monster around 100 to 3000 out is pulled 300
+    /// toward the caller (`G/cmd_gm.cpp:3044-3047`).
+    PullMonster,
+    /// `do_group`: the group in the 500-box around the caller
+    /// (`G/cmd_gm.cpp:537-555`).
+    Group,
+    /// `do_group_random`: one group drawn uniformly from the group-group,
+    /// spawned as `/group` spawns it (`G/cmd_gm.cpp:521-536`).
+    GroupRandom,
+    /// `do_item`: the named item lands in the caller's own inventory
+    /// (`G/cmd_gm.cpp:467-519`).
+    SelfGrant,
+    /// `do_setskill`: the caller's named skill becomes the line's level
+    /// (`G/cmd_gm.cpp:2574-2605`).
+    SetSkill,
+    /// `do_setskillother`: the named character's skill becomes the line's
+    /// level (`G/cmd_gm.cpp:2528-2572`).
+    SetSkillOther,
+    /// `do_purge`: every NPC around leaves, `all` or near
+    /// (`G/cmd_gm.cpp:816-868`).
+    Purge,
+    /// `do_weaken`: every NPC around falls to 10 hit points, `all` or near
+    /// (`G/cmd_gm.cpp:2824-2861`).
+    Weaken,
+    /// `do_set_skill_point`: the caller's skill counter becomes the line's
+    /// number (`G/cmd_gm.cpp:2607-2618`).
+    SetSkillPoint,
+    /// `do_set_skill_group`: the caller's skill group becomes the line's,
+    /// then the skills clear (`G/cmd_gm.cpp:2620-2631`).
+    SetJob,
+    /// `do_invisibility`: the caller's invisibility toggles
+    /// (`G/cmd_gm.cpp:2253-2264`).
+    Invisible,
+    /// `do_cooltime`: the caller's skill cooldowns stop gating
+    /// (`G/cmd_gm.cpp:2735-2738`).
+    Cooltime,
+    /// `do_affect_remove`: the caller's affect list, or the named affect's
+    /// removal (`G/cmd_gm.cpp:3865-3918`).
+    AffectRemove,
+    /// `do_hide_costume`: the line's part hides or shows its costume, the client hears
+    /// `SetXCostumeHidden`, and the `costume_option.hide_*` quest flag follows
+    HideCostume,
+    /// `do_emotion_allow`: the line's VID joins the caller's consent pairs.
+    EmotionAllow,
+    /// `do_emotion`: the entry's emotion runs against the line's named victim.
+    Emotion,
+    /// `do_priv_empire`: the line's empire takes the type's rate bonus for the hours.
+    PrivEmpire,
+    /// `do_event_flag`: the line's name takes the line's value.
+    EventFlag,
+    /// `do_get_event_flag`: every flag is listed on the caller.
+    GetEventFlag,
+    /// `do_xmas`, `do_eclipse` and `do_event_helper`: one named flag is set, or the
+    /// firework sellers stand or go.
+    EventLine(EventLine),
+    /// `do_horse_state`, `do_horse_level` and `do_horse_set_stat`: the GM horse lines.
+    Horse(HorseLine),
+    /// `give_reward`: the six letters are traded for the box's draw.
+    GiveReward,
+    /// `letters_open`: the caller hears the box's table and opens the window.
+    LettersOpen,
+    /// `do_stat`: the line's attribute rises by 1 for a stat point.
+    Stat,
+    /// `do_stat_minus`: the line's attribute falls by 1 and the point returns.
+    StatMinus,
+    /// `do_stat_val`: the line's attribute rises by the line's amount for stat
+    /// points (`G/cmd_general.cpp:3699-3750`).
+    StatVal,
+    /// `do_stat_plus_amount`: the entry's attribute rises by the line's
+    /// amount for stat points (`G/cmd_gm.cpp:4068-4162`).
+    StatPlus(StatPlusKind),
+    /// `do_set_stat`: the named character's entry attribute moves by the
+    /// line's delta for the named character's stat points
+    /// (`G/cmd_gm.cpp:4575-4685`).
+    SetStat(StatPlusKind),
+    /// `do_stat_reset`: the reset count rises to 12.
+    StatReset,
+    /// `do_can_dead`: the caller's `cannot_dead` clears (`can_dead`) or
+    /// sets (`cannot_dead`); `true` is `can_dead` (`G/cmd_gm.cpp:4715-4721`).
+    CanDead(bool),
+    /// `do_pkmode`: the caller's PK mode becomes the line's number.
+    PkMode,
+    /// `do_set_walk_mode` and `do_set_run_mode`: the caller walks or runs.
+    WalkMode(bool),
+    /// `do_all_skill_master`: every usable skill becomes 40 (`G/cmd_gm.cpp:4734-4758`).
+    AllSkillMaster,
+    /// `do_full_set`: the master line, then the kit and its attributes
+    /// (`G/cmd_gm.cpp:4723-4732`).
+    FullSet,
+    /// `do_item_full_set`: the job's eight fresh pieces go on
+    /// (`G/cmd_gm.cpp:4760-4902`).
+    ItemFullSet,
+    /// `do_attr_full_set`: five attributes are forced on each worn piece
+    /// (`G/cmd_gm.cpp:4904-5019`).
+    AttrFullSet,
+    /// `do_refine_rod`: the named inventory cell's rod refines
+    /// (`G/cmd_gm.cpp:2181-2192`, `fishing::RealRefineRod`, `G/fishing.cpp:861-928`).
+    RefineRod,
+    /// `do_refine_pick`: the named cell's pick maxes its training and refines
+    /// (`G/cmd_gm.cpp:2195-2208`, `mining::CHEAT_MAX_PICK` and
+    /// `mining::RealRefinePick`, `G/mining.cpp:234-315`).
+    RefinePick,
+    /// `do_max_pick`: the named cell's pick maxes its training
+    /// (`G/cmd_gm.cpp:2210-2222`, `mining::CHEAT_MAX_PICK`, `G/mining.cpp:304-315`).
+    MaxPick,
+    /// `do_use_item`: the cell the line names runs through `UseItem`
+    /// (`G/cmd_gm.cpp:4999-5016`).
+    UseItem,
+    /// `do_clear_affect`: `ClearAffect(true)` on the caller
+    /// (`G/cmd_gm.cpp:5019-5022`).
+    ClearAffect,
+    /// `do_dragon_soul`: the named deck activates, or every deck deactivates
+    /// (`G/cmd_gm.cpp:5024-5047`).
+    DragonSoul,
+    /// `do_ds_list`: one line per held dragon soul stone
+    /// (`G/cmd_gm.cpp:5049-5059`).
+    DsList,
+    /// `do_ds_change_attr`: the named soul-inventory stone's attributes redrawn
+    /// (`G/cmd_general.cpp:3864-3931`).
+    DsChangeAttr,
+    /// `do_dice`: a rolled number to the caller, or the party
+    /// (`G/cmd_general.cpp:3455-3489`).
+    Dice,
+    /// `do_gift`: the client opens its gift window
+    /// (`G/cmd_general.cpp:3251-3254`).
+    Gift,
+    /// `do_hair`: the caller's hair affect as one line
+    /// (`G/cmd_general.cpp:3200-3208`).
+    Hair,
+    /// `do_fishing_simul`: the usage, then the simulation's lines
+    /// (`G/cmd_gm.cpp:2227-2251`).
+    FishSimul,
+    /// `do_costume`: the costume status lines, and the named piece comes off
+    /// (`G/cmd_general.cpp:3089-3198`).
+    Costume,
+    /// `do_state`: the target's dump, told to the caller
+    /// (`G/cmd_gm.cpp:1017-1202`).
+    State,
+    /// `do_inventory`: the caller's own cells, told to the caller
+    /// (`G/cmd_general.cpp:3210-3250`).
+    Inventory,
+    /// `do_slow`: ten fresh 12019s, numbered in socket 4 (`G/cmd_gm.cpp:92-100`).
+    Slow,
+    /// `do_item_purge`: every flat and dragon soul cell cleared
+    /// (`G/cmd_gm.cpp:868-1016`).
+    ItemPurge,
+    /// `do_book`: one fresh 50300 with the named skill in socket 0
+    /// (`G/cmd_gm.cpp:2501-2526`).
+    Book,
+    /// `do_console`: the `ConsoleEnable` command line (`G/cmd_general.cpp:466-469`).
+    Console,
+    /// `do_set`: the named PC's field set (`G/cmd_gm.cpp:1862-2074`).
+    SetAttr,
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
+}
+
+/// One of the four attributes the `*+` entries name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatPlusKind {
+    /// `con+`: `POINT_HT`.
+    Ht,
+    /// `int+`: `POINT_IQ`.
+    Iq,
+    /// `str+`: `POINT_ST`.
+    St,
+    /// `dex+`: `POINT_DX`.
+    Dx,
 }
 
 /// The flood count of one character (`m_dwCmdAntiFloodPulse`, `m_dwCmdAntiFloodCount`).
@@ -363,6 +1000,14 @@ pub fn one_argument(line: &[u8]) -> (Vec<u8>, &[u8]) {
     (argument, &rest[skip(rest)..])
 }
 
+/// `two_arguments` (`G/utils.cpp:143-146`): the first two arguments, each as
+/// [`one_argument`] reads them.
+#[must_use]
+pub fn two_arguments(line: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let (first, rest) = one_argument(line);
+    let (second, _) = one_argument(rest);
+    (first, second)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +1299,44 @@ mod tests {
         let long = [b'a'; 200];
         let (word, rest) = first_cmd(&long);
         assert_eq!((word.len(), rest.len()), (WORD_MAX, 72));
+    }
+
+    #[test]
+    fn every_ported_kit_line_routes_past_not_ported() {
+        // `command()` routes by handler and `kit_name` maps the same handlers:
+        // a line dropped from the route answers nothing (ledger 355 caught
+        // `do_attr_full_set` missing from it).
+        for (handler, name) in [
+            ("do_all_skill_master", "all_skill_master"),
+            ("do_full_set", "full_set"),
+            ("do_item_full_set", "item_full_set"),
+            ("do_attr_full_set", "attr_full_set"),
+            ("do_refine_rod", "refine_rod"),
+            ("do_refine_pick", "refine_pick"),
+            ("do_max_pick", "max_pick"),
+            ("do_use_item", "use_item"),
+            ("do_clear_affect", "do_clear_affect"),
+            ("do_dragon_soul", "dragon_soul"),
+            ("do_ds_list", "ds_list"),
+            ("do_dice", "dice"),
+            ("do_gift", "gift"),
+            ("do_hair", "hair"),
+            ("do_fishing_simul", "fish_simul"),
+            ("do_costume", "costume"),
+            ("do_state", "state"),
+            ("do_inventory", "inventory"),
+        ] {
+            let entry = CommandEntry {
+                name,
+                handler,
+                position: POS_DEAD,
+                gm_level: GM_IMPLEMENTOR,
+            };
+            assert!(
+                !matches!(entry.command(), Command::NotPorted(_)),
+                "{handler} routes to a ported command"
+            );
+        }
     }
 
     #[test]

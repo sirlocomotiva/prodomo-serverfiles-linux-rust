@@ -69,8 +69,8 @@ use prodomo::client_live::{
 use prodomo::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease};
 use prodomo::client_session::ClientPhase;
 use prodomo::command::{
-    interpret, one_argument, Caller, Command as LineCommand, CommandFlood, Interpreted, GM_PLAYER,
-    POS_DEAD, POS_SITTING, POS_STANDING, TYPE_IN_FULL,
+    interpret, one_argument, Caller, Command as LineCommand, CommandEntry, CommandFlood,
+    Interpreted, StatPlusKind, GM_PLAYER, POS_DEAD, POS_SITTING, POS_STANDING, TYPE_IN_FULL,
 };
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{
@@ -94,9 +94,9 @@ use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
     enter_game_burst, entering_position, item_load_points, judge_enter_game, judge_select,
-    load_points, loading_burst, map_is_allowed, name_field, public_map_index, EnterGameBurst,
-    EnterGameVerdict, EnteringPosition, LoadingBurst, Neighbourhood, PcCard, SelectVerdict,
-    PHASE_DEAD, PHASE_GAME, PK_MODE_PEACE,
+    load_points, loading_burst, map_is_allowed, name_field, public_map_index, BurstAfter,
+    EnterGameBurst, EnterGameVerdict, EnteringPosition, LoadingBurst, Neighbourhood, PcCard,
+    SelectVerdict, PHASE_DEAD, PHASE_GAME, PK_MODE_PEACE,
 };
 use prodomo::movement::{judge_pose, PoseOutcome};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
@@ -111,54 +111,66 @@ use prodomo::ServerState;
 use protocol::cg_account::{
     CgEnterGame, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
 };
+use protocol::cg_arg_u8::CgChangeLanguage;
+use protocol::cg_arg_u8::CgRequestEventData;
 use protocol::cg_attack::CgAttack;
 use protocol::cg_chat::CgChat;
+use protocol::cg_client_version::CgClientVersion;
 use protocol::cg_exchange::CgExchange;
 use protocol::cg_fly_target::CgFlyTarget;
 use protocol::cg_guild_answer::CgAnswerMakeGuild;
 use protocol::cg_inventory::{
     HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
-    HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
-    HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_FLY_TARGETING, HEADER_CG_GUILD,
-    HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
-    HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
-    HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
-    HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
-    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
-    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_INPUT_STRING,
-    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
-    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SHOOT, HEADER_CG_SHOP,
+    HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE,
+    HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT,
+    HEADER_CG_CHAT, HEADER_CG_CLIENT_VERSION, HEADER_CG_CLIENT_VERSION2, HEADER_CG_EMPIRE,
+    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FLY_TARGETING,
+    HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY,
+    HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE,
+    HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2,
+    HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN,
+    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK,
+    HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER,
+    HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
+    HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
+    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SCRIPT_ANSWER,
+    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP,
     HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
-    HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
+    HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
+    HEADER_CG_WHISPER_DETAILS,
 };
+use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
+use protocol::cg_item_give::CgItemGive;
 use protocol::cg_item_move::CgItemMove;
 use protocol::cg_item_pickup::CgItemPickup;
 use protocol::cg_item_use::CgItemUse;
+use protocol::cg_item_use_to_item::CgItemUseToItem;
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
 use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload, CgSymbolCrc};
-use protocol::cg_micro::{CgScriptAnswer, CgWarp};
+use protocol::cg_micro::{CgFishing, CgScriptAnswer, CgWarp};
 use protocol::cg_move::CgMove;
-use protocol::cg_name::CgChangeName;
+use protocol::cg_name::{CgChangeName, CgWhisperDetails, CG_CHARACTER_NAME_FIELD_SIZE};
 use protocol::cg_party::{CgPartyInvite, CgPartyInviteAnswer, CgPartyRemove};
 use protocol::cg_party::{CgPartyParameter, CgPartySetState};
 use protocol::cg_party_skill::CgPartyUseSkill;
-use protocol::cg_pick::{CgScriptButton, CgTarget};
+use protocol::cg_pick::{CgQuestConfirm, CgScriptButton, CgScriptSelectItem, CgTarget};
 use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_quest_text::CgQuestInputString;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
 use protocol::cg_quickslot_del::CgQuickslotDel;
 use protocol::cg_quickslot_swap::CgQuickslotSwap;
+use protocol::cg_refine::CgRefine;
 use protocol::cg_safebox::{CgSafeBoxItem, SafeBoxKind};
 use protocol::cg_safebox_move::CgSafeboxItemMove;
 use protocol::cg_shoot::CgShoot;
 use protocol::cg_shop::CgShop;
 use protocol::cg_use_skill::CgUseSkill;
 use protocol::cg_variable::GuildSymbolUpload;
-use protocol::cg_vid::CgOnClick;
+use protocol::cg_vid::{CgOnClick, CgTargetInfoLoad};
 use protocol::cg_whisper::{CgWhisper, CgWhisperError};
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
@@ -168,7 +180,9 @@ use protocol::gc_chat::{
 use protocol::gc_inventory::{HEADER_GC_EMPIRE, HEADER_GC_PHASE};
 use protocol::gc_mark::{mark_block_record, mark_idxlist_record, symbol_data_record};
 use protocol::gc_small::GcHeaderAndByte;
-use protocol::gc_whisper::{GcWhisper, WHISPER_TYPE_GM, WHISPER_TYPE_NORMAL};
+use protocol::gc_whisper::{
+    GcWhisper, GcWhisperDetails, GC_WHISPER_NAME_FIELD_SIZE, WHISPER_TYPE_GM, WHISPER_TYPE_NORMAL,
+};
 use protocol::item_pos::ItemPos;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
@@ -270,6 +284,17 @@ struct Refusals {
     block_char_creation: bool,
 }
 
+/// `[game] check_version_server` and `[game] check_version_value` (`G/config.cpp:1185-1199`):
+/// whether the enter-game check runs, and the timestamp it expects. One field so the flag
+/// and the value cannot drift apart.
+#[derive(Clone)]
+struct ClientVersionCheck {
+    /// Whether the enter-game check runs.
+    check: bool,
+    /// The timestamp the check expects.
+    expected: Arc<str>,
+}
+
 /// How the server treats every character: how far a shout reaches and who is a game master.
 #[derive(Clone, Copy)]
 struct Modes {
@@ -296,6 +321,8 @@ struct ConnectionContext {
     /// `[game] shutdowned`: new logins are refused, and `[game] block_char_creation`: no new
     /// character may be created.
     refusals: Refusals,
+    /// The client-version check the enter-game step runs, if any.
+    client_version: ClientVersionCheck,
     /// `[game] block_login`.
     block_login: Arc<str>,
     /// `[game] user_limit`.
@@ -309,6 +336,9 @@ struct ConnectionContext {
     logons: Arc<LogonRegistry>,
     /// The map regions of the legacy Game data.
     atlas: Arc<MapAtlas>,
+    /// The Locale folder (`<game_data>/locale/europe`), which `/reload` rereads its
+    /// tables from.
+    locale_dir: std::path::PathBuf,
     /// The cell attributes of every hosted map, which `Entergame` places a character by.
     cells: Arc<HostedCells>,
     /// The item prototypes, shared with the game thread, which the item load at character
@@ -346,6 +376,9 @@ struct ConnectionContext {
     /// crossings (ADR-0002), and a descriptor that could not reach the game thread
     /// would be a descriptor whose character the world cannot see.
     game: GameLoopController,
+    /// The world's counters, which stay readable after the state moved into the
+    /// thread. The listeners read the shutdown bar through them.
+    metrics: Arc<prodomo::game_state::GameStateMetrics>,
 }
 
 impl ConnectionContext {
@@ -410,6 +443,16 @@ struct Held {
     /// descriptor's life. It gates the GM commands and lifts the flood limit
     /// (`interpret_command`, `G/cmd.cpp:611-616`).
     gm_level: u8,
+    /// `m_bIsObserver` (`G/entity.h:60`): the character watches without taking part. The world
+    /// owns the toggle (`SetObserverMode`, `G/entity.cpp:107-118`) and reports it back — with
+    /// the GM line's answer for `/observer`, with the enter records for a war map's watch —
+    /// and the descriptor refuses the gated records while it stands
+    /// (`CInputMain::Analyze`, `G/input_main.cpp:3690-3740`).
+    observer: bool,
+    /// `DESC::m_stClientVersion` (`G/desc.h:252`): the timestamp the client's version record
+    /// carried, up to its first NUL, once a character is selected. The enter-game check reads
+    /// it (`G/input_login.cpp:744-771`).
+    client_version: Option<Vec<u8>>,
     /// The registry entry this descriptor occupies on its map, taken when the game phase is
     /// entered and released when the descriptor ends.
     presence: Option<Lease>,
@@ -613,6 +656,9 @@ async fn leave_the_world(
     let Some(world_vid) = held.world.take() else {
         return;
     };
+    // The world drops the flag with the body; this copy goes with the entry, so a client
+    // that picks another character on the same connection starts unflagged.
+    held.observer = false;
     match context.game.leave_world(world_vid, departure).await {
         // The world's points and quickslots are the ones the save writes: the potion
         // recovery changes the points on the world's pulse, after the last step this
@@ -961,15 +1007,49 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
             i16::try_from(points.get_point(point_slot::POINT_SKILL)).unwrap_or(i16::MAX);
         held_character.sub_skill_point =
             i16::try_from(points.get_point(point_slot::POINT_SUB_SKILL)).unwrap_or(i16::MAX);
+        held_character.gaya = points.gaya();
         held_character.level_step =
             i16::try_from(points.get_point(point_slot::POINT_LEVEL_STEP)).unwrap_or(i16::MAX);
+        held_character.stat_reset_count =
+            i16::try_from(points.get_point(point_slot::POINT_STAT_RESET_COUNT)).unwrap_or(i16::MAX);
+        // `/stat` and `/stat-` move the real array, and the save writes the held row:
+        // the four follow from what the points hold, clamped to the `BYTE` row.
+        held_character.st = u8::try_from(points.real_point(point_slot::POINT_ST)).unwrap_or(0);
+        held_character.ht = u8::try_from(points.real_point(point_slot::POINT_HT)).unwrap_or(0);
+        held_character.dx = u8::try_from(points.real_point(point_slot::POINT_DX)).unwrap_or(0);
+        held_character.iq = u8::try_from(points.real_point(point_slot::POINT_IQ)).unwrap_or(0);
         held_character.hp = points.hp();
         held_character.sp = points.sp();
         held_character.stamina = points.stamina();
+        // The conqueror progress `CHARACTER::Save` writes (`G/char.cpp:1619-1628`): the level,
+        // the experience, the step and the point, and the four sungma real points.
+        held_character.conqueror_level = points.conqueror_level();
+        held_character.conqueror_exp = points.conqueror_exp();
+        held_character.conqueror_level_step =
+            i16::try_from(points.get_point(point_slot::POINT_CONQUEROR_LEVEL_STEP)).unwrap_or(0);
+        held_character.conqueror_point =
+            i16::try_from(points.get_point(point_slot::POINT_CONQUEROR_POINT)).unwrap_or(0);
+        let sungma = |slot| u8::try_from(points.real_point(slot)).unwrap_or(u8::MAX);
+        held_character.sungma_str = sungma(point_slot::POINT_SUNGMA_STR);
+        held_character.sungma_hp = sungma(point_slot::POINT_SUNGMA_HP);
+        held_character.sungma_move = sungma(point_slot::POINT_SUNGMA_MOVE);
+        held_character.sungma_immune = sungma(point_slot::POINT_SUNGMA_IMMUNE);
         let parts = points.parts();
         held_character.main_part = parts[EParts::Main as usize];
         held_character.hair_part = parts[EParts::Hair as usize];
         held_character.sash_part = parts[EParts::Sash as usize];
+        // `tab.horse = GetHorseData()` and `tab.horse_skill_point` (`G/char.cpp:1590`,
+        // `:1617`).
+        let horse = points.horse().info();
+        held_character.horse = db::players::PlayerHorse {
+            level: horse.level,
+            riding: horse.riding,
+            health: horse.health,
+            health_drop_time: horse.health_drop_time,
+            stamina: horse.stamina,
+            skill_point: i16::try_from(points.get_point(point_slot::POINT_HORSE_SKILL))
+                .unwrap_or(i16::MAX),
+        };
     }
     held.points = Some(points);
 }
@@ -1121,16 +1201,30 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// Whether `header` is `CG_ITEM_USE`, a ground step or a quickslot request.
+/// Whether `header` is `CG_ITEM_USE`, a destroy, a gift, a refine, a fishing record, a ground
+/// step or a quickslot request.
 fn is_belongings_step(header: u8) -> bool {
-    header == HEADER_CG_ITEM_USE.value() || is_ground_step(header) || is_quickslot_step(header)
+    header == HEADER_CG_ITEM_USE.value()
+        || header == HEADER_CG_ITEM_USE_TO_ITEM.value()
+        || header == HEADER_CG_ITEM_DESTROY.value()
+        || header == HEADER_CG_ITEM_GIVE.value()
+        || header == HEADER_CG_REFINE.value()
+        || header == HEADER_CG_FISHING.value()
+        || is_ground_step(header)
+        || is_quickslot_step(header)
 }
 
 /// Run a step [`is_belongings_step`] accepts:
 ///
 /// - `CG_ITEM_USE` (11): `CInputMain::ItemUse` (`G/input_main.cpp:993`).
+/// - `CG_ITEM_DESTROY` (21): `CInputMain::ItemDestroy` (`G/input_main.cpp:3703`).
+/// - `CG_ITEM_GIVE` (83): `CInputMain::ItemGive` (`G/input_main.cpp:3723`).
+/// - `CG_REFINE` (96): `CInputMain::Refine` (`G/input_main.cpp:3851-3853`).
+/// - `CG_FISHING` (82): `CInputMain::Fishing` (`G/input_main.cpp:3166-3172`).
 /// - `CG_ITEM_DROP` (12), `CG_ITEM_DROP2` (20) and `CG_ITEM_PICKUP` (15), reached when the
 ///   character is not an observer (`G/input_main.cpp:3693-3717`).
+/// - `CG_ITEM_USE_TO_ITEM` (60): `CInputMain::ItemToItem` (`G/input_main.cpp:1006-1022`),
+///   reached when the character is not an observer (`:3719-3722`).
 /// - `CG_QUICKSLOT_ADD` (16), `CG_QUICKSLOT_DEL` (17) and `CG_QUICKSLOT_SWAP` (18), which no
 ///   observer check guards (`G/input_main.cpp:3742-3755`).
 async fn belongings_step<S>(
@@ -1145,13 +1239,52 @@ where
 {
     if frame.header == HEADER_CG_ITEM_USE.value() {
         use_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_ITEM_USE_TO_ITEM.value() {
+        use_an_item_on_an_item(session, addr, context, held, frame).await
     } else if is_quickslot_step(frame.header) {
         change_a_quickslot(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ITEM_PICKUP.value() {
         pick_up_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_ITEM_DESTROY.value() {
+        destroy_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_ITEM_GIVE.value() {
+        give_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_REFINE.value() {
+        refine_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_FISHING.value() {
+        fish(session, addr, context, held, frame).await
     } else {
         drop_an_item(session, addr, context, held, frame).await
     }
+}
+
+/// `CG_FISHING` (82) in the game phase: `CInputMain::Fishing` (`G/input_main.cpp:3166-3172`),
+/// which no observer check guards. The world sends the records; the rows it changed (the
+/// rod's sockets and the fish) are stored here.
+async fn fish<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgFishing::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed FISHING; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "FISHING without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.fishing(vid, record.dir, actor).await;
+    finish_item_step(session, addr, context, held, actor, answer).await
 }
 
 /// Whether `header` is one of the three quickslot requests.
@@ -1323,6 +1456,127 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
+/// `CG_ITEM_DESTROY` (21) in the game phase: `CInputMain::ItemDestroy`
+/// (`G/input_main.cpp:1053-1058`) → `CHARACTER::DestroyItem` (`G/char_item.cpp:7407`).
+async fn destroy_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgItemDestroy::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ITEM_DESTROY; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "ITEM_DESTROY without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.destroy_item(vid, record.cell, actor).await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_ITEM_USE_TO_ITEM` (60) in the game phase: `CInputMain::ItemToItem`
+/// (`G/input_main.cpp:1006-1022`).
+async fn use_an_item_on_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgItemUseToItem::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ITEM_USE_TO_ITEM; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "ITEM_USE_TO_ITEM without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .use_item_to_item(vid, (record.from, record.to), actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_REFINE` (96) in the game phase: `CInputMain::Refine` (`G/input_main.cpp:3316-3391`),
+/// which no observer check guards.
+async fn refine_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgRefine::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed REFINE; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "REFINE without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .refine(vid, (record.pos, record.ty), actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_ITEM_GIVE` (83) in the game phase: `CInputMain::ItemGive`
+/// (`G/input_main.cpp:3174-3183`) → `CHARACTER::GiveItem` (`G/char_item.cpp:9226`).
+async fn give_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgItemGive::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ITEM_GIVE; closing");
+            return false;
+        }
+    };
+    let (Some(vid), Some(place)) = (held.world, ground_place(held)) else {
+        info!(%addr, "ITEM_GIVE without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .give_item(vid, record.target_vid, record.item_pos, place, actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
 /// Whether a game-phase header is a drop or a pick-up.
 fn is_ground_step(header: u8) -> bool {
     [
@@ -1369,7 +1623,12 @@ async fn entering_burst(
         shown.records,
         &npcs,
         shown.update,
-        shown.silence,
+        BurstAfter {
+            silence: shown.silence,
+            hide_lines: shown.hide_lines,
+            priv_lines: shown.priv_lines,
+            letters_event: shown.letters_event,
+        },
         channel,
         global_time(),
     ))
@@ -1540,6 +1799,7 @@ where
             private_map_index,
             channel,
             exit,
+            sorted_until,
         } => {
             // `SaveExitLocation` (`G/char.cpp:6679-6683`): the place the character came
             // from, which the save writes beside the position and which the war's end
@@ -1555,9 +1815,11 @@ where
                 WarpDestination {
                     private_map_index,
                     channel,
+                    sorted_until,
                 },
             )
             .await
+            .is_open()
         }
         ClientOrder::ItemRows { changes, order } => {
             write_item_rows(addr, context, held, changes, order).await
@@ -1571,6 +1833,68 @@ where
             leave_the_world(context, addr, held, Departure::Disconnect).await;
             false
         }
+        ClientOrder::ToSelect => {
+            return_phase_select(session, context, addr, held).await;
+            true
+        }
+        ClientOrder::Save => {
+            // `SaveReal` writes at once; it neither queues nor waits for the save event.
+            // A character that has left the world has nothing left to write.
+            if !held.departed && held.world.is_some() {
+                let at = std::time::Instant::now();
+                hold_world_points(context, addr, held, at).await;
+                if save_held(context, &*held, at).await {
+                    info!(%addr, "A flush wrote the character row");
+                }
+            }
+            true
+        }
+    }
+}
+
+/// Return the descriptor to the select phase (`timed_event`'s `SCMD_PHASE_SELECT`
+/// arm, `G/cmd_general.cpp:369-379`): the character disconnects with a full save
+/// (`Disconnect`), and the session moves to select (`SetPhase(PHASE_SELECT)`),
+/// keeping the login claim. Legacy sends nothing past the phase record: the client
+/// shows the select screen from its cached list.
+///
+/// The save mirrors the connection end's: the world is left first, then the row
+/// is written when the save event ran. The character's held state is dropped and
+/// only the connection's is kept, so the next select loads fresh.
+async fn return_phase_select<S>(
+    session: &mut LiveClientSession<S>,
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &mut Held,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    leave_the_world(context, addr, held, Departure::Disconnect).await;
+    if held.save.is_some() {
+        let queued = held.save.as_ref().is_some_and(|event| event.queued);
+        let written = save_held(context, held, std::time::Instant::now()).await;
+        info!(
+            %addr,
+            ?queued,
+            route = ?prodomo::save::judge_disconnect_save(queued),
+            written,
+            "Character returned to select; wrote the row"
+        );
+    }
+    if let Some(lease) = held.presence.as_ref() {
+        info!(%addr, presence = lease.id(), "Leaving the client set for select");
+    }
+    let kept = Held {
+        claim: held.claim.take(),
+        logon: held.logon.take(),
+        account: held.account.take(),
+        channel: held.channel,
+        command_flood: held.command_flood,
+        ..Held::default()
+    };
+    *held = kept;
+    if let Err(error) = session.set_phase(PostHandshakePhase::Select).await {
+        warn!(%addr, %error, "Client session stopped returning to select");
     }
 }
 
@@ -1619,6 +1943,26 @@ struct WarpDestination {
     private_map_index: i32,
     /// The Channel that serves the map, when it is not the client's own.
     channel: Option<u8>,
+    /// `GetSortInventoryPulse()`: the second the last inventory sort holds warps until.
+    sorted_until: u32,
+}
+/// How `warp_set` ended: whether `GC_WARP` went out, and whether the connection stays open.
+/// `/observer_exit` reads the warp; every other caller reads the connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WarpSettled {
+    /// `GC_WARP` went out; the descriptor waits for the client to close.
+    Warped,
+    /// The warp was refused; the character still stands and the connection stays open.
+    Refused,
+    /// The connection must close.
+    Closed,
+}
+
+impl WarpSettled {
+    /// Whether the connection stays open.
+    fn is_open(self) -> bool {
+        !matches!(self, Self::Closed)
+    }
 }
 
 /// `CHARACTER::WarpSet(x, y)` for this descriptor's character (`G/char.cpp:6694-6792`);
@@ -1630,8 +1974,9 @@ struct WarpDestination {
 /// ten of the owner's warp NPCs name such a position, and a player standing by one would
 /// otherwise fill the log. A private map that is not a child of the resolved map is refused
 /// too (`G/char.cpp:6727-6736`); a guild war's member names the war's own copy of a map, and
-/// the copy's index is a child of the map the position lies on. The sort-inventory refusal
-/// cannot be reached: the Rewrite has no inventory sort.
+/// the copy's index is a child of the map the position lies on. A warp inside the 15 seconds
+/// after an inventory sort is refused last, and that refusal alone tells its line
+/// (`G/char.cpp:6738-6743`).
 ///
 /// # The departure
 ///
@@ -1656,20 +2001,21 @@ async fn warp_set<S>(
     held: &mut Held,
     (x, y): (i32, i32),
     destination: WarpDestination,
-) -> bool
+) -> WarpSettled
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let WarpDestination {
         private_map_index,
         channel,
+        sorted_until,
     } = destination;
     if held.departed || held.world.is_none() {
-        return true;
+        return WarpSettled::Refused;
     }
     let (Some(locations), Some(map)) = (locations, held.avatar.as_ref().map(|avatar| avatar.map))
     else {
-        return true;
+        return WarpSettled::Refused;
     };
     // `CMapLocation::Get`: the atlas says which map holds the position, and the map is a
     // destination only when a Channel serves it. A warp that names the Channel itself is
@@ -1684,8 +2030,8 @@ where
         x,
         y,
         private_map_index,
-        sort_inventory_pulse: 0,
-        now_ms: 0,
+        sort_inventory_pulse: i64::from(sorted_until),
+        now_ms: i64::from(global_time()),
     };
     let outcome = prodomo::warp::judge_warp_set(&request, map, true, &resolve);
     let prodomo::warp::WarpSetOutcome::Accepted {
@@ -1695,7 +2041,13 @@ where
     } = outcome
     else {
         debug!(%addr, x, y, map, ?outcome, "WarpSet refused");
-        return true;
+        if outcome == prodomo::warp::WarpSetOutcome::RefusedSortingInventory {
+            let line = "You cannot warp after sorting your inventory";
+            if !send_line(session, addr, context, held, CHAT_TYPE_INFO, line).await {
+                return WarpSettled::Closed;
+            }
+        }
+        return WarpSettled::Refused;
     };
     // The destination: the Channel the map is served by. A warp that names a Channel goes
     // to that one — a guild war's private map stands on the Channel of the master that
@@ -1709,7 +2061,7 @@ where
         None => locations.get(resolved_map_index),
     };
     let Some((address, port)) = destination else {
-        return true;
+        return WarpSettled::Refused;
     };
     leave_the_world(context, addr, held, Departure::Warp).await;
     let target = prodomo::warp::WarpTarget {
@@ -1720,7 +2072,7 @@ where
     held.warp = Some(target);
     if !save_held(context, held, std::time::Instant::now()).await {
         warn!(%addr, x, y, "The warp could not save the character; closing without GC_WARP");
-        return false;
+        return WarpSettled::Closed;
     }
     // The row is the new descriptor's to write from here on.
     held.save = None;
@@ -1731,7 +2083,7 @@ where
     let records = prodomo::warp::departure_records(vid, &target, address, port);
     if let Err(error) = send_all(session, &records).await {
         warn!(%addr, %error, "Client session stopped while writing GC_WARP");
-        return false;
+        return WarpSettled::Closed;
     }
     // `LogManager::CharLog(this, 0, "WARP", ...)`, whose `DestMapIdx` is the private map
     // argument, which a warp NPC leaves at 0 (`G/char.cpp:6787-6789`).
@@ -1745,7 +2097,7 @@ where
         empire = held.character.as_ref().map_or(0, |character| character.empire),
         "WARP"
     );
-    true
+    WarpSettled::Warped
 }
 
 /// `CG_WARP` (65) in the game phase: `CInputMain::Warp`, whose whole body is `ch->WarpEnd()`
@@ -1768,6 +2120,167 @@ fn warp_end(addr: SocketAddr, frame: &ClientFrame) -> bool {
         }
     }
 }
+
+/// `CG_CHANGE_LANGUAGE` (238) in the game and dead phases: `CInputMain::ChangeLanguage`
+/// (`G/input_main.cpp:3575-3599`) + `CHARACTER::ChangeLanguage` (`G/char.cpp:11628-11647`).
+/// The client's current language answers itself, and a language outside 1 to 11 (`ELocale`
+/// without `LOCALE_YMIR`) is silent; else the store keeps the choice, the client hears
+/// `HEADER_GC_REQUEST_CHANGE_LANGUAGE`, the descriptor switches, and the world shows the
+/// new look to the view. `CanWarp` holds past the gate, as the move-channel line reads it.
+async fn change_language_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgChangeLanguage::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed CHANGE_LANGUAGE; closing");
+            return false;
+        }
+    };
+    let language = record.b_language;
+    let current = descriptor_language(held.account.as_ref());
+    if language == current || !(1..=11).contains(&language) {
+        return true;
+    }
+    let (Some(account), Some(world_vid)) = (held.account.as_ref(), held.world) else {
+        return true;
+    };
+    let id = account.id;
+    if let Err(error) = db::accounts::set_language(&context.store, id, language).await {
+        warn!(%addr, %error, language, "The language could not be stored; closing");
+        return false;
+    }
+    let answer = protocol::gc_small::GcHeaderAndByte::new(
+        protocol::gc_small::HEADER_GC_REQUEST_CHANGE_LANGUAGE,
+        language,
+    );
+    let mut record = Vec::with_capacity(protocol::gc_small::GcHeaderAndByte::WIRE_SIZE);
+    answer.encode_into(&mut record);
+    if let Err(error) = send_all(session, &[record]).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    if let Some(account) = held.account.as_mut() {
+        account.language = language;
+    }
+    // `DESC::SetLanguage`: every later line the registry addresses to this client (a shout,
+    // a notice, a whisper partner's details) reads the new language.
+    if let Some(lease) = held.presence.as_ref() {
+        lease.set_language(language);
+    }
+    match context.game.change_language(world_vid, language).await {
+        Ok(online) => {
+            if !online {
+                debug!(%addr, "The world no longer holds the switching character");
+            }
+            true
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the language; closing");
+            false
+        }
+    }
+}
+
+/// `CG_WHISPER_DETAILS` (239) in the game and dead phases: `CInputMain::WhisperDetails`
+/// (`G/input_main.cpp:3603-3638`). An empty name answers nothing; else
+/// `HEADER_GC_WHISPER_DETAILS` echoes the name and names the language of the character it
+/// names on any Channel (`FindPC`, then `P2P_MANAGER::Find`), or `LOCALE_DEFAULT` when
+/// nobody online holds it. A malformed record closes the connection.
+async fn whisper_details_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgWhisperDetails::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed WHISPER_DETAILS; closing");
+            return false;
+        }
+    };
+    let Some(answer) = whisper_details_answer(&record.name, |name| {
+        context
+            .clients
+            .entry_of(name)
+            .map(|(_, entry, _)| entry.language)
+    }) else {
+        return true;
+    };
+    if let Err(error) = send_all(session, &[answer.encode()]).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
+}
+
+/// The answer `CInputMain::WhisperDetails` builds for `asked`, `None` for an empty name.
+///
+/// The name is read up to its first NUL within the field, where legacy's C string may run
+/// past a field with no NUL (a Defect not reproduced). `language_of` finds the language of
+/// the online character the name holds. The echo is legacy's `strncpy` of at most 24 bytes;
+/// the 25th byte, which legacy leaves to the stack, is 0.
+fn whisper_details_answer(
+    asked: &[u8; CG_CHARACTER_NAME_FIELD_SIZE],
+    language_of: impl FnOnce(&str) -> Option<u8>,
+) -> Option<GcWhisperDetails> {
+    let end = asked
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(asked.len());
+    if end == 0 {
+        return None;
+    }
+    let mut name = [0_u8; GC_WHISPER_NAME_FIELD_SIZE];
+    let echoed = end.min(GC_WHISPER_NAME_FIELD_SIZE - 1);
+    name[..echoed].copy_from_slice(&asked[..echoed]);
+    let language = std::str::from_utf8(&asked[..end])
+        .ok()
+        .and_then(language_of)
+        .unwrap_or(common::enums::LOCALE_DEFAULT as u8);
+    Some(GcWhisperDetails { name, language })
+}
+
+/// `CG_CLIENT_VERSION` (0xfd) and `CG_CLIENT_VERSION2` (0xf1):
+/// `CInputProcessor::Version` (`G/input.cpp:161-170`). With no character selected the record
+/// is consumed; else the timestamp, up to its first NUL, is kept for the enter-game check,
+/// as `SetClientVersion` keeps it. Nothing is ever answered.
+fn version_step(addr: SocketAddr, held: &mut Held, frame: &ClientFrame) -> bool {
+    let record = match CgClientVersion::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed CLIENT_VERSION; closing");
+            return false;
+        }
+    };
+    if held.character.is_none() {
+        return true;
+    }
+    let end = record
+        .timestamp
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(record.timestamp.len());
+    held.client_version = Some(record.timestamp[..end].to_vec());
+    true
+}
+
+/// Whether `header` is one of the two client-version records.
+fn is_version_record(header: u8) -> bool {
+    header == HEADER_CG_CLIENT_VERSION.value() || header == HEADER_CG_CLIENT_VERSION2.value()
+}
+
 /// `ch->GetParty() != NULL` (`G/input_main.cpp:959`), asked lazily: only a party line
 /// pays the world round-trip. A character outside the world holds no party —
 /// `link_party` only runs on world entry. `None` closes the connection: the world
@@ -1938,6 +2451,7 @@ async fn chat_line<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
     context: &ConnectionContext,
+    locations: Option<&MapLocations>,
     held: &mut Held,
     frame: &ClientFrame,
 ) -> bool
@@ -2001,7 +2515,7 @@ where
             ChatEffect::Command { argument } => {
                 // `interpret_command(ch, buf + 1, buflen - 1)`. It costs no chat counter, so a
                 // client may send it between two normal lines.
-                if !run_command(session, addr, context, held, argument).await {
+                if !run_command(session, addr, context, locations, held, argument).await {
                     return false;
                 }
             }
@@ -2208,6 +2722,64 @@ async fn target_step(
         }
     }
     debug!(%addr, target = record.vid, "Target handed to the world");
+    true
+}
+
+/// `CInputMain::RequestEventData` (`G/input_main.cpp:5466-5475`): the world answers with the
+/// event calendar of the sent month.
+async fn event_info_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgRequestEventData::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed REQUEST_EVENT_DATA; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "REQUEST_EVENT_DATA from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.event_info(world_vid, record.b_month).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the event info; closing");
+            return false;
+        }
+    }
+    true
+}
+
+/// `CInputMain::TargetInfoLoad` (`G/input_main.cpp:66-123`): the world answers with the
+/// target's drop list.
+async fn target_info_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgTargetInfoLoad::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed TARGET_INFO_LOAD; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "TARGET_INFO_LOAD from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.target_info(world_vid, record.dw_vid).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the target info; closing");
+            return false;
+        }
+    }
     true
 }
 
@@ -3256,6 +3828,14 @@ async fn store_guild_grade_set(
             )
             .await
         }
+        GuildGradeSet::FaithRefill { power } => {
+            db::guilds::spend_power(
+                &context.store,
+                guild_id,
+                i32::try_from(*power).unwrap_or(i32::MAX),
+            )
+            .await
+        }
     }
 }
 
@@ -3513,6 +4093,12 @@ async fn messenger_step(
     };
     match record {
         CgMessenger::AddByVid { vid } => {
+            // `if (ch->IsObserverMode())` (`G/input_main.cpp:1151-1152`): an observer's
+            // invite is consumed.
+            if held.observer {
+                debug!(%addr, target = vid, "An observer's invite is refused");
+                return true;
+            }
             match context.game.messenger_add_by_vid(world_vid, vid).await {
                 Ok(settling) => held.settling = Some(settling),
                 Err(error) => {
@@ -3725,8 +4311,8 @@ async fn fly_target_step(
 
 /// `CG_SHOOT` (54) in the game phase: `CInputMain::Attack`'s shoot arm
 /// (`G/input_main.cpp:2000-2007`, `G/char_battle.cpp:3319-3340`). The world shoots the
-/// stored VIDs and sends what the shot shows; see `game_state::pc_skill`. A shot that
-/// stole gold answers the signed delta, which the store applies with no row changes.
+/// stored VIDs and sends what the shot shows; see `game_state::pc_skill`. The answer's
+/// arrow spends and stolen gold are one Transfer, because a save writes no item rows.
 async fn shoot_step(
     addr: SocketAddr,
     context: &ConnectionContext,
@@ -3751,17 +4337,24 @@ async fn shoot_step(
             return false;
         }
     };
-    // Answered, so the world has run the shot and its records are queued: nothing to settle.
+    // Answered, so the world has run the shot and its records are queued: nothing to settle
+    // past the spends.
     debug!(%addr, btype = record.shoot_type, "Shoot handed to the world");
-    let Some(gold) = answer.gold else {
+    let (gold, spent) = (answer.gold, answer.spent);
+    if gold.is_none() && spent.is_empty() {
         return true;
+    }
+    let stored = match gold {
+        Some(gold) => {
+            db::items::apply_transfer(&context.store, world_vid.raw(), &spent, gold).await
+        }
+        None => db::items::apply_row_changes(&context.store, world_vid.raw(), &spent).await,
     };
-    if let Err(error) = db::items::apply_transfer(&context.store, world_vid.raw(), &[], gold).await
-    {
-        warn!(%addr, %error, gold, "The shot's stolen gold could not be stored; closing");
+    if let Err(error) = stored {
+        warn!(%addr, %error, "The shot's spends could not be stored; closing");
         return false;
     }
-    debug!(%addr, gold, "The shot's stolen gold was stored");
+    debug!(%addr, "The shot's spends were stored");
     true
 }
 
@@ -3980,6 +4573,16 @@ where
                 None => report_step(addr, LiveStep::Record { phase, frame }),
             }
         }
+        // The two client-version records in the login, select and loading phases
+        // (`G/input_login.cpp:1246-1252`).
+        LiveStep::Record { phase, frame }
+            if matches!(
+                phase,
+                ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading
+            ) && is_version_record(frame.header) =>
+        {
+            version_step(addr, held, &frame)
+        }
         // The records a phase's analyzer consumes with nothing done, see [`is_consumed`].
         LiveStep::Record { phase, frame } if is_consumed(phase, frame.header) => {
             debug!(%addr, ?phase, header = frame.header, "consumed with nothing done");
@@ -3987,7 +4590,8 @@ where
         }
         // The main input and the dead phase's refusal, see [`main_record`].
         LiveStep::Record { phase, frame } => {
-            main_step(session, addr, context, held, phase, frame).await
+            let locations = seat.map(|seat| seat.locations);
+            main_step(session, addr, context, locations, held, phase, frame).await
         }
         step => report_step(addr, step),
     }
@@ -3998,6 +4602,7 @@ async fn main_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
     context: &ConnectionContext,
+    locations: Option<&MapLocations>,
     held: &mut Held,
     phase: ClientPhase,
     frame: ClientFrame,
@@ -4005,12 +4610,16 @@ async fn main_step<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match main_record(phase, frame.header) {
+    match main_record(phase, frame.header, held.observer) {
         Some(MainRecord::Refused) => {
             debug!(%addr, header = frame.header, "a dead player's pose is refused");
             true
         }
-        Some(MainRecord::Chat) => chat_line(session, addr, context, held, &frame).await,
+        Some(MainRecord::ObserverRefused) => {
+            debug!(%addr, header = frame.header, "an observer's record is refused");
+            true
+        }
+        Some(MainRecord::Chat) => chat_line(session, addr, context, locations, held, &frame).await,
         Some(MainRecord::Whisper) => whisper_line(addr, context, held, &frame).await,
         Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, &frame).await,
         Some(MainRecord::Belongings) => belongings_step(session, addr, context, held, &frame).await,
@@ -4028,6 +4637,13 @@ where
             transaction_record(session, addr, context, held, &frame).await
         }
         Some(MainRecord::Warp) => warp_end(addr, &frame),
+        Some(MainRecord::Language) => {
+            change_language_step(session, addr, context, held, &frame).await
+        }
+        Some(MainRecord::WhisperDetails) => {
+            whisper_details_step(session, addr, context, &frame).await
+        }
+        Some(MainRecord::Version) => version_step(addr, held, &frame),
         None => report_step(addr, LiveStep::Record { phase, frame }),
     }
 }
@@ -4039,6 +4655,9 @@ enum MainRecord {
     /// and no wait (`G/input_main.cpp:1530-1548`, `G/char.cpp:3335-3349`). Its
     /// `CG_CHARACTER_POSITION` is refused while dead.
     Refused,
+    /// An observer's gated record, consumed silently (`CInputMain::Analyze` breaks without
+    /// calling anything, `G/input_main.cpp:3690-3740`).
+    ObserverRefused,
     /// `CG_CHAT` (3) in the game and dead phases: `CInputMain::Chat` (`G/input_main.cpp:781`).
     /// `PHASE_DEAD` installs the main input as `PHASE_GAME` does (`G/desc.cpp:526-531`);
     /// `CInputDead` is never installed (B14).
@@ -4048,8 +4667,7 @@ enum MainRecord {
     /// the chat, because `PHASE_DEAD` installs the main input (B14).
     Whisper,
     /// `CG_ITEM_MOVE` (13): `CInputMain::ItemMove` (`G/input_main.cpp:1060-1066`), reached when
-    /// the character is not an observer (`:3707-3710`). The Rewrite has no observer mode, so
-    /// every character is reached.
+    /// the character is not an observer (`:3707-3710`).
     ItemMove,
     /// `CG_ITEM_USE` (11), the ground steps and the quickslot requests.
     Belongings,
@@ -4057,7 +4675,7 @@ enum MainRecord {
     /// `CG_TARGET` (61).
     World,
     /// `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29), `CG_QUEST_INPUT_STRING`
-    /// (30) and `CG_SCRIPT_BUTTON` (66).
+    /// (30), `CG_SCRIPT_BUTTON` (66) and `CG_REQUEST_EVENT_QUEST` (32).
     Npc,
     /// `CG_MESSENGER` (67): `CInputMain::Messenger` (`G/input_main.cpp:1128-1233`).
     Messenger,
@@ -4070,14 +4688,29 @@ enum MainRecord {
     /// `CG_WARP` (65): `CInputMain::Warp` (`G/input_main.cpp:2271-2274`), which
     /// `CInputMain::Analyze` calls (`:3801-3802`).
     Warp,
+    /// `CG_CHANGE_LANGUAGE` (238): `CInputMain::ChangeLanguage`
+    /// (`G/input_main.cpp:3575-3599`) in the game and dead phases, which no gate refuses.
+    Language,
+    /// `CG_WHISPER_DETAILS` (239): `CInputMain::WhisperDetails`
+    /// (`G/input_main.cpp:3603-3638`) in the game and dead phases, which no gate refuses
+    /// (`:3938-3940`).
+    WhisperDetails,
+    /// `CG_CLIENT_VERSION` (0xfd): `CInputProcessor::Version` (`G/input.cpp:161-170`) in the
+    /// game and dead phases, which no gate refuses. `CG_CLIENT_VERSION2` (0xf1) shares the
+    /// handler in the login phases only: here 0xf1 is the Gaya record.
+    Version,
 }
 
 /// Which analyzer of the main input takes a record of `header` in `phase`: the dead phase's
-/// refusal first, then the main input's records, which the game and the dead phases read alike.
-/// `None` for a record neither handles, and for every record of another phase.
-fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
+/// refusal first, then the observer's, then the main input's records, which the game and the
+/// dead phases read alike. `None` for a record none handles, and for every record of another
+/// phase.
+fn main_record(phase: ClientPhase, header: u8, observer: bool) -> Option<MainRecord> {
     if is_dead_refused(phase, header) {
         return Some(MainRecord::Refused);
+    }
+    if is_observer_refused(observer, header) {
+        return Some(MainRecord::ObserverRefused);
     }
     if !in_main_input(phase) {
         return None;
@@ -4102,6 +4735,12 @@ fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
         MainRecord::Transaction
     } else if header == HEADER_CG_WARP.value() {
         MainRecord::Warp
+    } else if header == HEADER_CG_CHANGE_LANGUAGE.value() {
+        MainRecord::Language
+    } else if header == HEADER_CG_WHISPER_DETAILS.value() {
+        MainRecord::WhisperDetails
+    } else if header == HEADER_CG_CLIENT_VERSION.value() {
+        MainRecord::Version
     } else {
         return None;
     };
@@ -4124,6 +4763,10 @@ fn is_mark_record(header: u8) -> bool {
 ///
 /// - `CG_ITEM_USE` (11) and `CG_TARGET` (61) in the login, select and loading phases, which a
 ///   client still sends for the character it left (`@fixme120`, `G/input_login.cpp:1254-1257`);
+/// - `CG_MOVE` (7) in the same three phases, which the login analyzer breaks on
+///   (`G/input_login.cpp:1205-1206`);
+/// - `CG_HACK` (105) in the same three phases, which the login analyzer breaks on
+///   (`G/input_login.cpp:1239-1240`);
 /// - `CG_ENTER_GAME` (10) in the game and dead phases: the header is in the main table
 ///   (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its `default`
 ///   consumes the record (`G/input_main.cpp:4126-4127`);
@@ -4131,7 +4774,10 @@ fn is_mark_record(header: u8) -> bool {
 fn is_consumed(phase: ClientPhase, header: u8) -> bool {
     match phase {
         ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading => {
-            header == HEADER_CG_ITEM_USE.value() || header == HEADER_CG_TARGET.value()
+            header == HEADER_CG_ITEM_USE.value()
+                || header == HEADER_CG_TARGET.value()
+                || header == HEADER_CG_MOVE.value()
+                || header == HEADER_CG_HACK.value()
         }
         ClientPhase::Game | ClientPhase::Dead => header == HEADER_CG_ENTERGAME.value(),
         _ => false,
@@ -4149,12 +4795,35 @@ fn is_dead_refused(phase: ClientPhase, header: u8) -> bool {
     phase == ClientPhase::Dead && header == HEADER_CG_CHARACTER_POSITION.value()
 }
 
+/// Whether an observer's record of `header` is refused: the item, exchange, attack and skill
+/// records `CInputMain::Analyze` guards (`G/input_main.cpp:3690-3740`). Moves, targets, the
+/// fly records, quickslots, shops, clicks, scripts, messenger and party records pass.
+/// `ENVANTER_BLACK` is guarded in legacy too, but the Rewrite has no analyzer for it yet, so
+/// the unknown-record close refuses it first.
+fn is_observer_refused(observer: bool, header: u8) -> bool {
+    observer
+        && (header == HEADER_CG_ITEM_USE.value()
+            || header == HEADER_CG_ITEM_USE_TO_ITEM.value()
+            || header == HEADER_CG_ITEM_DESTROY.value()
+            || header == HEADER_CG_ITEM_GIVE.value()
+            || header == HEADER_CG_ITEM_DROP.value()
+            || header == HEADER_CG_ITEM_DROP2.value()
+            || header == HEADER_CG_ITEM_MOVE.value()
+            || header == HEADER_CG_ITEM_PICKUP.value()
+            || header == HEADER_CG_EXCHANGE.value()
+            || header == HEADER_CG_ATTACK.value()
+            || header == HEADER_CG_SHOOT.value()
+            || header == HEADER_CG_USE_SKILL.value())
+}
+
 /// Whether `header` is a record the world answers alone: one that moves a character,
-/// `CG_TARGET`, `CG_USE_SKILL`, `CG_ATTACK`, `CG_FLY_TARGETING`,
-/// `CG_ADD_FLY_TARGETING` or `CG_SHOOT`.
+/// `CG_TARGET`, `CG_TARGET_INFO_LOAD`, `CG_REQUEST_EVENT_DATA`, `CG_USE_SKILL`, `CG_ATTACK`,
+/// `CG_FLY_TARGETING`, `CG_ADD_FLY_TARGETING` or `CG_SHOOT`.
 fn is_world_step(header: u8) -> bool {
     is_motion_step(header)
         || header == HEADER_CG_TARGET.value()
+        || header == HEADER_CG_TARGET_INFO_LOAD.value()
+        || header == HEADER_CG_REQUEST_EVENT_DATA.value()
         || header == HEADER_CG_PARTY_INVITE.value()
         || header == HEADER_CG_PARTY_INVITE_ANSWER.value()
         || header == HEADER_CG_PARTY_REMOVE.value()
@@ -4177,6 +4846,10 @@ async fn world_step(
 ) -> bool {
     if frame.header == HEADER_CG_TARGET.value() {
         target_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_TARGET_INFO_LOAD.value() {
+        target_info_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_REQUEST_EVENT_DATA.value() {
+        event_info_step(addr, context, held, frame).await
     } else if frame.header == HEADER_CG_PARTY_INVITE.value() {
         party_invite_step(addr, context, held, frame).await
     } else if frame.header == HEADER_CG_PARTY_INVITE_ANSWER.value() {
@@ -4319,9 +4992,10 @@ where
             climbs,
             guild_ops,
             items,
+            gold,
         })) => {
             info!(%addr, ?step, "A quest took the click");
-            if !store_quest_items(addr, context, held, &items).await {
+            if !store_quest_items(addr, context, held, &items, gold).await {
                 return false;
             }
             if !store_quest_climbs(addr, context, held, &climbs).await {
@@ -4338,12 +5012,17 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// Whether `header` is `CG_SCRIPT_ANSWER`, `CG_QUEST_INPUT_STRING` or `CG_SCRIPT_BUTTON`,
-/// the three records a quest's dialog is answered with.
+/// Whether `header` is one of the six records a quest's dialog is answered with and the
+/// event panel's named button: `CG_SCRIPT_ANSWER`, `CG_QUEST_INPUT_STRING`,
+/// `CG_SCRIPT_BUTTON`, `CG_QUEST_CONFIRM`, `CG_SCRIPT_SELECT_ITEM` or
+/// `CG_REQUEST_EVENT_QUEST`.
 fn is_quest_step(header: u8) -> bool {
     header == HEADER_CG_SCRIPT_ANSWER.value()
         || header == HEADER_CG_QUEST_INPUT_STRING.value()
         || header == HEADER_CG_SCRIPT_BUTTON.value()
+        || header == HEADER_CG_QUEST_CONFIRM.value()
+        || header == HEADER_CG_SCRIPT_SELECT_ITEM.value()
+        || header == HEADER_CG_REQUEST_EVENT_QUEST.value()
 }
 
 /// `CG_SCRIPT_ANSWER` (29) and `CG_QUEST_INPUT_STRING` (30) in the game phase:
@@ -4353,21 +5032,32 @@ fn is_quest_step(header: u8) -> bool {
 /// The world runs the character's quest step and answers the dialog and the chat lines its
 /// script sent; a malformed record closes the connection. A GRAND read that climbed is
 /// stored before the dialog is sent, as a book read's is.
-/// Store the item rows a quest step's gives changed, in one transaction: a failure closes, as
-/// an item step's does. Answers whether the step may be sent.
+/// Store the item rows a quest step's gives changed with the gold its moves left, in one
+/// transaction: a failure closes, as an item step's does. Answers whether the step may be
+/// sent. Only a Transfer writes the gold, as the shop's does; the save leaves the column
+/// alone.
 async fn store_quest_items(
     addr: SocketAddr,
     context: &ConnectionContext,
     held: &Held,
     items: &[db::items::RowChange],
+    gold: Option<u64>,
 ) -> bool {
-    if items.is_empty() {
+    if items.is_empty() && gold.is_none() {
         return true;
     }
     let Some(character) = held.character.as_ref() else {
         return true;
     };
-    if let Err(error) = db::items::apply_row_changes(&context.store, character.id, items).await {
+    let stored = match gold {
+        Some(gold) => {
+            let before = u64::try_from(character.gold.max(0)).unwrap_or(0);
+            let delta = prodomo::item_move::gold_delta(before, gold);
+            db::items::apply_transfer(&context.store, character.id, items, delta).await
+        }
+        None => db::items::apply_row_changes(&context.store, character.id, items).await,
+    };
+    if let Err(error) = stored {
         warn!(%addr, %error, rows = items.len(), "A quest's gives could not be stored; closing");
         return false;
     }
@@ -4493,6 +5183,44 @@ where
                     return false;
                 }
             }
+            GuildQuestStore::Leave { .. } | GuildQuestStore::Disband { .. } => {
+                if !store_quest_guild_parting(addr, context, store).await {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+/// Store one quest parting: the leave's member row or the disband's guild row with every
+/// member's stamp. Answers whether the step may be sent.
+async fn store_quest_guild_parting(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    store: &GuildQuestStore,
+) -> bool {
+    match store {
+        GuildQuestStore::Leave { pid } => {
+            if let Err(error) = db::guilds::remove_member(&context.store, *pid).await {
+                warn!(%addr, %error, "A quest leave could not be stored; closing");
+                return false;
+            }
+        }
+        GuildQuestStore::Disband {
+            guild_id,
+            members,
+            at,
+        } => {
+            if let Err(error) =
+                db::guilds::disband_guild(&context.store, *guild_id, members, *at).await
+            {
+                warn!(%addr, %error, "A quest disband could not be stored; closing");
+                return false;
+            }
+        }
+        _ => {
+            warn!(%addr, "A quest parting held no parting; closing");
+            return false;
         }
     }
     true
@@ -4568,13 +5296,18 @@ where
     true
 }
 
-/// `CG_SCRIPT_ANSWER` (29), `CG_QUEST_INPUT_STRING` (30) and `CG_SCRIPT_BUTTON` (66) in the
-/// game phase: `CInputMain::ScriptAnswer`, `QuestInputString` and `ScriptButton`
-/// (`G/input_main.cpp:2179-2234`), which no observer check guards (`:3780-3791`).
+/// `CG_SCRIPT_ANSWER` (29), `CG_QUEST_INPUT_STRING` (30), `CG_SCRIPT_BUTTON` (66),
+/// `CG_QUEST_CONFIRM` (31), `CG_SCRIPT_SELECT_ITEM` (114) and `CG_REQUEST_EVENT_QUEST`
+/// (0x20) in the game phase: `CInputMain::ScriptAnswer`, `QuestInputString`,
+/// `ScriptButton`, `QuestConfirm` (`G/input_main.cpp:2236-2248`),
+/// `ScriptSelectItem` and `RequestEventQuest`
+/// (`G/input_main.cpp:2179-2234`, `:5458-5464`), which no observer check guards
+/// (`:3780-3796`).
 ///
 /// The world runs the character's quest step and answers the dialog and the chat lines its
 /// script sent; a malformed record closes the connection. A GRAND read that climbed is
-/// stored before the dialog is sent, as a book read's is.
+/// stored before the dialog is sent, as a book read's is. A confirm is no step of the
+/// sender's: see [`quest_confirm`].
 async fn quest_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -4585,6 +5318,9 @@ async fn quest_step<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    if frame.header == HEADER_CG_QUEST_CONFIRM.value() {
+        return quest_confirm(addr, context, held, frame).await;
+    }
     let decoded = if frame.header == HEADER_CG_SCRIPT_ANSWER.value() {
         CgScriptAnswer::decode_frame(frame)
             .map(|record| QuestStep::Answer(record.answer))
@@ -4593,6 +5329,14 @@ where
         CgScriptButton::decode_frame(frame)
             .map(|record| QuestStep::Button(record.idx))
             .map_err(|error| error.to_string())
+    } else if frame.header == HEADER_CG_SCRIPT_SELECT_ITEM.value() {
+        CgScriptSelectItem::decode_frame(frame)
+            .map(|record| QuestStep::SelectItem(record.selection))
+            .map_err(|error| error.to_string())
+    } else if frame.header == HEADER_CG_REQUEST_EVENT_QUEST.value() {
+        protocol::cg_quest_text::CgRequestEventQuest::decode_frame(frame)
+            .map(|record| QuestStep::event_quest(&record))
+            .map_err(|error| format!("{error:?}"))
     } else {
         CgQuestInputString::decode_frame(frame)
             .map(|record| QuestStep::input(&record))
@@ -4609,10 +5353,9 @@ where
         info!(%addr, ?step, "Quest step without a character in the world; ignoring");
         return true;
     };
-
     match context.game.quest(vid, step, place, item_actor(held)).await {
-        Ok(Ok((records, climbs, stores, items))) => {
-            if !store_quest_items(addr, context, held, &items).await {
+        Ok(Ok((records, climbs, stores, items, gold))) => {
+            if !store_quest_items(addr, context, held, &items, gold).await {
                 return false;
             }
             if !store_quest_climbs(addr, context, held, &climbs).await {
@@ -4629,6 +5372,41 @@ where
         }
         Err(error) => {
             warn!(%addr, %error, "The world could not be asked for a quest step; closing");
+            false
+        }
+    }
+}
+
+/// `CG_QUEST_CONFIRM` (31): `CInputMain::QuestConfirm` (`G/input_main.cpp:2236-2248`). The
+/// answer folds to `CONFIRM_YES` unless it is 0, and the world gives it to the script of the
+/// character `requestPID` names, which runs as that character's own: its records go to that
+/// character's client, and this one hears nothing. A malformed record closes the connection.
+async fn quest_confirm(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgQuestConfirm::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed quest confirm; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "Quest confirm without a character in the world; ignoring");
+        return true;
+    };
+    let answer = u8::from(record.answer != 0);
+    match context
+        .game
+        .quest_confirm(vid, answer, record.request_pid)
+        .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a quest confirm; closing");
             false
         }
     }
@@ -4785,12 +5563,11 @@ where
             return false;
         }
     };
-    let no_more_clients = context.refusals.shutdowned || context.state.is_shutting_down();
-    if let Err(refusal) = admit(
-        no_more_clients,
-        context.user_limit,
-        context.channels.online(),
-    ) {
+    let no_more_clients = context.refusals.shutdowned
+        || context.state.is_shutting_down()
+        || context.metrics.bars_clients();
+    let online = u32::try_from(context.clients.len()).unwrap_or(u32::MAX);
+    if let Err(refusal) = admit(no_more_clients, context.user_limit, online) {
         return refuse_channel_login(session, addr, refusal).await;
     }
     let mut client_key = [0; 16];
@@ -5081,6 +5858,9 @@ where
         return false;
     };
     held.quickslots = quickslots;
+    if !splice_event_flag_lines(context, addr, character.empire, &mut burst).await {
+        return false;
+    }
     held.skills = skills;
     held.quest_flags = quest_flags;
     held.affects = affects;
@@ -5205,6 +5985,30 @@ async fn the_selected_character(
         return Ok(None);
     }
     Ok(Some((character, player)))
+}
+
+/// `BroadcastEventFlagOnLogin` (`G/input_db.cpp:437`): the world's lines for the non-zero
+/// event flags go at the front of the after-map-test half, ahead of the quickslots
+/// (`:439-440`). `false` when the world could not be asked, which closes the descriptor.
+async fn splice_event_flag_lines(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    empire: u8,
+    burst: &mut LoadingBurst,
+) -> bool {
+    match context.game.login_event_lines().await {
+        Ok(lines) => {
+            burst.after_map_test.splice(
+                0..0,
+                prodomo::loading_phase::event_flag_lines(empire, &lines),
+            );
+            true
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for the event lines; closing");
+            false
+        }
+    }
 }
 
 /// The map the character comes back to, with a private map folded onto its base map.
@@ -5585,6 +6389,9 @@ where
         return false;
     };
     held.world = Some(world_vid);
+    // A war map's watch sets its observers at admission, so the gate reads the flag here. A
+    // character that never warped and never watches enters unflagged.
+    held.observer = shown.observer;
     // From here a failed write closes the connection, whose close path takes the character
     // out of the world, so the characters that see it are sent its removal.
     let Some(burst) = entering_burst(context, addr, seat.number, held, shown).await else {
@@ -5624,8 +6431,78 @@ where
             queued: false,
         });
     }
+    if !check_client_version(session, addr, context, held).await {
+        return false;
+    }
     true
 }
+
+/// `CInputLogin::Entergame`'s version check (`G/input_login.cpp:744-771`): with the check
+/// off nothing happens. A version that differs — including none sent at all — is answered
+/// with the notice, and the descriptor closes (`DelayedDisconnect(0)`). The
+/// `DelayedDisconnect(10)` arm for a missing version never fires: it tests
+/// `!GetClientVersion()`, and a `std::string`'s `c_str()` is never null (a Defect).
+/// `false` closes at once. The `VERSION_CONFLICT` hack log has no Rewrite log to go to;
+/// the `info!` line below is the observable trace.
+async fn check_client_version<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if !context.client_version.check {
+        return true;
+    }
+    if held.client_version.as_deref() == Some(context.client_version.expected.as_bytes()) {
+        return true;
+    }
+    info!(%addr, "Client version differs; closing");
+    // `DelayedDisconnect(0)` fires on the next pulse, so everything `Entergame` queued still
+    // reaches the client: the lease's queue drains before the notice. The quest login lines
+    // drain with it, ahead of the notice; legacy runs them on the next pulse, behind it. The
+    // Rewrite batches them at admit, so they cannot be told apart here.
+    let mut queued = Vec::new();
+    if let Some(lease) = held.presence.as_mut() {
+        if let Some(mut inbox) = lease.take_receiver() {
+            while let Ok(record) = inbox.try_recv() {
+                queued.push(record);
+            }
+            lease.put_receiver(inbox);
+        }
+    }
+    if !queued.is_empty() {
+        if let Err(error) = send_all(session, &queued).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    let actor = item_actor(held);
+    let line = prodomo::chat_line::chat_packet(
+        actor.recipient(&context.locale),
+        protocol::gc_chat::CHAT_TYPE_NOTICE,
+        VERSION_CONFLICT_NOTICE,
+        &[],
+    );
+    if let Err(error) = send_all(session, &[line]).await {
+        warn!(%addr, %error, "Client session stopped");
+    }
+    false
+}
+
+/// The version-conflict notice (`G/input_login.cpp:756`): `LC_TEXT` of a text no table
+/// holds, which the client hears as written. The source bytes are kept exactly, mojibake
+/// and all, as legacy's compiler reads them.
+const VERSION_CONFLICT_NOTICE: &[u8] =
+    b"\xc5\xac\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xcc\xbe\xef\xbf\xbd\xc6\xae \xef\xbf\
+    \xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd \xc6\xb2\xef\xbf\
+    \xbd\xef\xbf\xbd \xef\xbf\xbd\xce\xb1\xd7\xbe\xc6\xbf\xef\xbf\xbd \xef\xbf\xbd\xcb\
+    \xb4\xcf\xb4\xef\xbf\xbd. \xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\
+    \xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd \xef\xbf\xbd\xef\
+    \xbf\xbd\xc4\xa1 \xef\xbf\xbd\xef\xbf\xbd \xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\
+    \xbf\xbd\xef\xbf\xbd\xcf\xbc\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd.";
 
 /// Move the held character to where `CInputLogin::Entergame` shows it: the first movable point
 /// around its saved position, else its empire's recall position when the map has a sectree
@@ -6470,7 +7347,11 @@ async fn send_channel_status<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let record = context.channels.respond(context.state.is_shutting_down());
+    let online = i32::try_from(context.clients.len()).unwrap_or(i32::MAX);
+    let record = context.channels.respond(
+        online,
+        context.state.is_shutting_down() || context.metrics.bars_clients(),
+    );
     match session.send(&record).await {
         Ok(_) => {
             info!(%addr, "Sent the Channel status list");
@@ -6535,7 +7416,10 @@ async fn authenticate(
     let Some(login) = login_from_field(&record.login) else {
         return Ok(Err(AuthRefusal::NoId));
     };
-    if context.refusals.shutdowned || context.state.is_shutting_down() {
+    if context.refusals.shutdowned
+        || context.state.is_shutting_down()
+        || context.metrics.bars_clients()
+    {
         return Ok(Err(AuthRefusal::Shutdown));
     }
     if context.auth.is_held(&login) {
@@ -6832,6 +7716,9 @@ async fn run_accept_loop(
                         // once the schema is up, and a world without them judges a name a
                         // concurrent boot would see as taken free.
                         install_guilds(game_loop, store).await?;
+                        // The event calendar rides the same ordering: a world without it
+                        // answers every event board empty.
+                        install_events(game_loop, store).await?;
                        ready = true;
                        ready_gate.open();
                        info!("Accepting clients");
@@ -7087,6 +7974,37 @@ fn load_pc_skills(config: &ServerConfig) -> Result<Arc<gamedata::pc_skill_data::
     Ok(Arc::new(skills))
 }
 
+/// Load the skill name index: every `skill_proto` row's vnum and name, which
+/// the `/setskill` lines resolve through (`CSkillManager::Get`, `G/skill.cpp`).
+///
+/// A dump that does not parse stops the server before any port opens.
+fn load_skill_names(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::pc_skill_data::SkillNames>, String> {
+    let player_path = config.game_tables.join("player.sql");
+    let player = std::fs::read(&player_path)
+        .map_err(|error| format!("Failed to read {}: {error}", player_path.display()))?;
+    let names = gamedata::pc_skill_data::SkillNames::from_dump(&player)
+        .map_err(|error| format!("Skill names are unusable: {error}"))?;
+    info!("Skill names loaded");
+    Ok(Arc::new(names))
+}
+
+/// Load the refine recipes: the `refine_proto` rows (`CClientManager::InitializeRefineTable`,
+/// `D/ClientManagerBoot.cpp:151-210`, then `CRefineManager::Initialize`). A dump that does not
+/// parse stops the server before any port opens.
+fn load_refine_recipes(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::refine::RefineRecipes>, String> {
+    let player_path = config.game_tables.join("player.sql");
+    let player = std::fs::read(&player_path)
+        .map_err(|error| format!("Failed to read {}: {error}", player_path.display()))?;
+    let recipes = gamedata::refine::RefineRecipes::from_dump(&player)
+        .map_err(|error| format!("Refine recipes are unusable: {error}"))?;
+    info!(count = recipes.len(), "Refine recipes loaded");
+    Ok(Arc::new(recipes))
+}
+
 /// Load the guild skill rows: the 151-162 `skill_proto` rows (`CSkillManager::
 /// Initialize` lays out the same table, `G/skill.cpp`).
 ///
@@ -7236,8 +8154,12 @@ struct GameData {
     drops: Arc<gamedata::drop::DropTables>,
     /// The `item_attr` rows, which a dropped item's magic rolls against.
     attrs: Arc<Vec<gamedata::records::ItemAttrRecord>>,
+    /// The `item_attr_rare` rows, which a rare attribute rolls against.
+    rare_attrs: Arc<Vec<gamedata::records::ItemAttrRecord>>,
     /// The vnum mask table, which a made item's shown vnum answers through.
     masks: Arc<gamedata::item_mask::ItemMasks>,
+    /// The special item groups, which the game thread holds.
+    groups: Arc<gamedata::special_item_group::SpecialItemGroups>,
     /// The player motion clips, the same table the game thread holds.
     /// The player motion clips, the same table the game thread holds.
     motions: Arc<PcMotions>,
@@ -7247,8 +8169,18 @@ struct GameData {
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
     /// The PC skill rows, the same table the game thread holds.
     pc_skills: Arc<gamedata::pc_skill_data::PcSkills>,
+    /// The skill name index, the same table the game thread holds.
+    skill_names: Arc<gamedata::pc_skill_data::SkillNames>,
     /// The guild skill rows, the same table the game thread holds.
     guild_skills: Arc<gamedata::guild_skill_data::GuildSkills>,
+    /// The refine recipes, the same table the game thread holds.
+    refine_recipes: Arc<gamedata::refine::RefineRecipes>,
+    /// The fishing table, which the game thread holds.
+    fishing: Arc<gamedata::fishing::Fishing>,
+    /// The dragon soul table, which the game thread holds.
+    dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
+    /// The SungZi map indices, which the game thread holds.
+    sungzi_maps: Arc<gamedata::forked::SungziMaps>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -7273,13 +8205,19 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let cells = load_map_cells(config, &atlas)?;
     let shops = load_npc_shops(config, &protos)?;
     let drops = load_drop_tables(config, &protos)?;
-    let attrs = load_item_attrs(config)?;
+    let (attrs, rare_attrs) = load_item_attrs(config)?;
     let masks = load_item_masks(config)?;
+    let groups = load_item_groups(config, &protos)?;
     let motions = load_pc_motions(config)?;
     let mob_skills = load_mob_skills(config)?;
     let mob_clips = load_mob_clips(config, &npcs.protos);
     let pc_skills = load_pc_skills(config)?;
+    let skill_names = load_skill_names(config)?;
     let guild_skills = load_guild_skills(config)?;
+    let refine_recipes = load_refine_recipes(config)?;
+    let fishing = load_fishing(config)?;
+    let dragon_soul_table = load_dragon_soul_table(config)?;
+    let sungzi_maps = load_sungzi_maps(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -7291,12 +8229,19 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         shops,
         drops,
         attrs,
+        rare_attrs,
         masks,
+        groups,
         motions,
         mob_skills,
         mob_clips,
         pc_skills,
+        skill_names,
         guild_skills,
+        refine_recipes,
+        fishing,
+        dragon_soul_table,
+        sungzi_maps,
     };
     Ok((data, quests))
 }
@@ -7358,25 +8303,37 @@ fn load_drop_tables(
     Ok(Arc::new(tables))
 }
 
+/// The `item_attr` and `item_attr_rare` rows of the Game data tables.
+type ItemAttrTables = (
+    Arc<Vec<gamedata::records::ItemAttrRecord>>,
+    Arc<Vec<gamedata::records::ItemAttrRecord>>,
+);
+
 /// Load the `item_attr` rows of the Game data tables, which a dropped item's magic rolls
-/// against (`CClientManager::InitializeItemAttrTable`, `DB/ClientManagerBoot.cpp:774-842`).
+/// against (`CClientManager::InitializeItemAttrTable`, `DB/ClientManagerBoot.cpp:773-845`),
+/// and the `item_attr_rare` rows the rare attributes roll against
+/// (`InitializeItemRareTable`, `:847-917`).
 ///
-/// An empty table refuses boot, as legacy's does (`no result from item_attr`); a malformed
-/// row is the same class.
-fn load_item_attrs(
-    config: &ServerConfig,
-) -> Result<Arc<Vec<gamedata::records::ItemAttrRecord>>, String> {
+/// An empty table refuses boot, as legacy's does (`no result from item_attr`, `no result
+/// from item_attr_rare`); a malformed row is the same class.
+fn load_item_attrs(config: &ServerConfig) -> Result<ItemAttrTables, String> {
     let dump_path = config.game_tables.join("player.sql");
     let dump = std::fs::read(&dump_path)
         .map_err(|error| format!("Failed to read {}: {error}", dump_path.display()))?;
-    let rows = gamedata::item_attr::attrs_from_dump(&dump).map_err(|error| {
+    let refused = |error: gamedata::item_attr::ItemAttrDumpError| {
         format!(
             "Failed to read the item attributes in {}: {error}",
             dump_path.display()
         )
-    })?;
-    info!(attrs = rows.len(), "Item attributes loaded");
-    Ok(Arc::new(rows))
+    };
+    let rows = gamedata::item_attr::attrs_from_dump(&dump).map_err(refused)?;
+    let rare = gamedata::item_attr::rare_attrs_from_dump(&dump).map_err(refused)?;
+    info!(
+        attrs = rows.len(),
+        rare = rare.len(),
+        "Item attributes loaded"
+    );
+    Ok((Arc::new(rows), Arc::new(rare)))
 }
 
 /// Load the vnum mask table from the Locale folder
@@ -7394,6 +8351,90 @@ fn load_item_masks(config: &ServerConfig) -> Result<Arc<gamedata::item_mask::Ite
     })?;
     info!(masks = masks.pairs().len(), "Item masks loaded");
     Ok(Arc::new(masks))
+}
+
+/// Load `special_item_group.txt` (`ITEM_MANAGER::ReadSpecialDropItemFile`,
+/// `G/item_manager_read_tables.cpp:119-299`): the bags `/letters_open` lists and
+/// `/give_reward` draws from.
+///
+/// A missing or malformed file stops the server, as a group boot failure stops
+/// legacy (`G/input_db.cpp:923-928`).
+fn load_item_groups(
+    config: &ServerConfig,
+    protos: &ItemProtos,
+) -> Result<Arc<gamedata::special_item_group::SpecialItemGroups>, String> {
+    let path = config.locale_dir().join("special_item_group.txt");
+    let bytes = std::fs::read(&path).map_err(|error| {
+        format!(
+            "Special item groups are unreadable in {}: {error}",
+            path.display()
+        )
+    })?;
+    let groups = gamedata::special_item_group::read(&bytes, protos).map_err(|error| {
+        format!(
+            "Special item groups are unusable in {}: {error}",
+            path.display()
+        )
+    })?;
+    info!(
+        groups = groups.special.len() + groups.quest.len(),
+        "Special item groups loaded"
+    );
+    Ok(Arc::new(groups))
+}
+
+/// Load the fishing table (`fishing::Initialize`, `G/fishing.cpp:188-328`).
+///
+/// A missing or malformed file stops the server, as legacy's boot relies on the
+/// table for every `/fish_simul` draw.
+fn load_fishing(config: &ServerConfig) -> Result<Arc<gamedata::fishing::Fishing>, String> {
+    let locale_dir = config.locale_dir();
+    let fishing = gamedata::fishing::Fishing::load(&locale_dir).map_err(|error| {
+        format!(
+            "Fishing table is unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(fish = fishing.fish().len(), "Fishing table loaded");
+    Ok(Arc::new(fishing))
+}
+
+/// Load the dragon soul table (`DSManager::ReadDragonSoulTableFile`,
+/// `G/dragon_soul_table.cpp:40-80`).
+///
+/// Legacy only logs a failure (`G/input_db.cpp:953-957`); the Rewrite stops the server, as
+/// every Game data read the world needs does, so a client is never accepted into a world
+/// whose stones cannot be redrawn.
+fn load_dragon_soul_table(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::dragon_soul_table::DragonSoulTable>, String> {
+    let locale_dir = config.locale_dir();
+    let table =
+        gamedata::dragon_soul_table::DragonSoulTable::load(&locale_dir).map_err(|error| {
+            format!(
+                "Dragon soul table is unusable in {}: {error}",
+                locale_dir.display()
+            )
+        })?;
+    info!("Dragon soul table loaded");
+    Ok(Arc::new(table))
+}
+
+/// Load the SungZi map indices (`CThreeWayWar::LoadSetting`,
+/// `G/threeway_war.cpp:137-197`).
+///
+/// A file that cannot be read stops the server, as legacy's boot does on the
+/// game server (`G/main.cpp:658-665`).
+fn load_sungzi_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::SungziMaps>, String> {
+    let locale_dir = config.locale_dir();
+    let maps = gamedata::forked::SungziMaps::load(&locale_dir).map_err(|error| {
+        format!(
+            "Forked map index is unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(maps = maps.indices().len(), "SungZi maps loaded");
+    Ok(Arc::new(maps))
 }
 
 /// Load what the NPCs are stood up from: `mob_proto.txt` with its names, the `LOCALE_YMIR` mob
@@ -7593,7 +8634,10 @@ fn connection_context(
     listeners: &Listeners,
     data: GameData,
     (clients, clock): (Arc<ChannelClients>, BootLiveClock),
-    game: GameLoopController,
+    (game, metrics): (
+        GameLoopController,
+        Arc<prodomo::game_state::GameStateMetrics>,
+    ),
 ) -> ConnectionContext {
     // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
     // auth server reported nothing (`G/desc_client.cpp:286-290`).
@@ -7621,6 +8665,10 @@ fn connection_context(
             shutdowned: config.game.shutdowned,
             block_char_creation: config.game.block_char_creation,
         },
+        client_version: ClientVersionCheck {
+            check: config.game.check_version_server,
+            expected: Arc::from(config.game.check_version_value.as_str()),
+        },
         block_login: Arc::from(config.game.block_login.as_str()),
         user_limit: config.game.user_limit,
         mark_server: MarkServer {
@@ -7632,6 +8680,7 @@ fn connection_context(
         },
         logons: LogonRegistry::new(),
         atlas: data.atlas,
+        locale_dir: config.locale_dir(),
         cells: data.cells,
         protos: data.protos,
         locale: data.locale,
@@ -7652,6 +8701,7 @@ fn connection_context(
         },
         pk_protect_level: config.game.pk_protect_level,
         game,
+        metrics,
     }
 }
 
@@ -7681,6 +8731,24 @@ async fn install_item_ids(
     match game_loop.controller().install_item_ids(range).await? {
         Ok(()) => Ok(()),
         Err(error) => Err(format!("The world refused the item id range: {error}").into()),
+    }
+}
+
+/// The stored event calendar `serve` moves into the game thread once the store is up.
+///
+/// Every failure here stops the server instead of opening the gate, as a missing
+/// allocator does: a world without its calendar answers every event board empty.
+async fn install_events(
+    game_loop: &mut GameLoopHandle,
+    store: &Store,
+) -> Result<(), Box<dyn Error>> {
+    let events = db::events::load_all(store)
+        .await
+        .map_err(|error| format!("Stored event calendar is unusable: {error}"))?;
+    info!(events = events.len(), "Stored event calendar loaded");
+    match game_loop.controller().install_events(events).await? {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!("The world refused the event calendar: {error}").into()),
     }
 }
 
@@ -7747,13 +8815,21 @@ fn build_world(
         .with_npc_shops(Arc::clone(&data.shops))
         .with_drop_tables(Arc::clone(&data.drops))
         .with_item_attrs(Arc::clone(&data.attrs))
+        .with_item_rare_attrs(Arc::clone(&data.rare_attrs))
         .with_item_masks(Arc::clone(&data.masks))
+        .with_item_groups(Arc::clone(&data.groups))
         .with_motions(Arc::clone(&data.motions))
         .with_mob_skills(Arc::clone(&data.mob_skills))
         .with_mob_clips(Arc::clone(&data.mob_clips))
         .with_pc_skills(Arc::clone(&data.pc_skills))
+        .with_skill_names(Arc::clone(&data.skill_names))
         .with_guild_skills(Arc::clone(&data.guild_skills))
+        .with_refine_recipes(Arc::clone(&data.refine_recipes))
+        .with_fishing(Arc::clone(&data.fishing))
+        .with_dragon_soul_table(Arc::clone(&data.dragon_soul_table))
+        .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
+        .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_gold_lifetime(config.game.item_destroy_time_dropgold)
@@ -7764,7 +8840,9 @@ fn build_world(
         .with_locale_strings(Arc::clone(&data.locale))
         .with_quests(quests)
         .with_max_level(config.game.max_level)
+        .with_max_conqueror_level(config.game.max_conqueror_level)
         .with_status_point_get_level_limit(config.game.status_point_get_level_limit)
+        .with_status_point_set_max_value(config.game.status_point_set_max_value)
         .with_protect_level(config.game.pk_protect_level)
         .with_recall(Arc::clone(&data.atlas), &channel_maps, &shared);
     stand_up_npcs(&mut game_state, &data.npcs, &data.cells, &data.mob_clips)?;
@@ -7839,6 +8917,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // moves read the same clock.
     let clock = BootLiveClock::new();
     let game_state = build_world(&config, &data, quests, &clients, clock)?;
+    let metrics = game_state.metrics();
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
@@ -7854,7 +8933,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             &listeners,
             data,
             (clients, clock),
-            controller.clone(),
+            (controller.clone(), metrics),
         ),
     };
     let exit = run_accept_loop(
@@ -7906,6 +8985,7 @@ async fn run_command<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
     context: &ConnectionContext,
+    locations: Option<&MapLocations>,
     held: &mut Held,
     line: &[u8],
 ) -> bool
@@ -7931,7 +9011,237 @@ where
         }
         Interpreted::Run { entry, rest } => (entry, rest),
     };
+    run_line_command(session, entry, addr, context, locations, held, rest).await
+}
+
+/// Runs the interpreted line: the dispatch half of [`run_command`], split out
+/// so neither trips the line lint.
+async fn run_line_command<S>(
+    session: &mut LiveClientSession<S>,
+    entry: CommandEntry,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    locations: Option<&MapLocations>,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     match entry.command() {
+        command @ (LineCommand::TypeInFull
+        | LineCommand::ClickSafebox
+        | LineCommand::ClickMall
+        | LineCommand::SafeboxClose
+        | LineCommand::MallClose
+        | LineCommand::SafeboxPassword
+        | LineCommand::MallPassword
+        | LineCommand::SafeboxSize
+        | LineCommand::SafeboxChangePassword) => {
+            run_line_store(command, session, addr, context, held, rest).await
+        }
+        LineCommand::Restart(kind) => restart(addr, context, held, kind).await,
+        LineCommand::SkillUp => skill_up(addr, context, held, rest).await,
+        LineCommand::GuildSkillUp => guild_skill_up_step(addr, context, held, rest).await,
+        LineCommand::GuildWar => guild_war_step(addr, context, held, rest).await,
+        LineCommand::GuildNoWar => guild_nowar_step(addr, context, held, rest).await,
+        LineCommand::GuildWarStop => guild_war_stop_step(addr, context, held, rest).await,
+        LineCommand::GuildWarCancel => guild_war_cancel_step(addr, context, held, rest).await,
+        LineCommand::GuildWarList => guild_war_list_step(session, addr, context, held).await,
+        LineCommand::GuildState => guild_state_step(session, addr, context, held, rest).await,
+        LineCommand::Makeguild => makeguild_step(session, addr, context, held, rest).await,
+        LineCommand::Deleteguild => deleteguild_step(session, addr, context, held).await,
+        command @ (LineCommand::PartyRequest
+        | LineCommand::PartyRequestAccept
+        | LineCommand::PartyRequestDeny
+        | LineCommand::Ungroup) => party_line_step(command, addr, context, held, rest).await,
+        LineCommand::MessengerAuth => messenger_auth_step(addr, context, held, rest).await,
+        LineCommand::SetBlockMode => set_block_mode_step(addr, context, held, rest).await,
+        LineCommand::HideCostume => hide_costume_step(addr, context, held, rest).await,
+        LineCommand::EmotionAllow | LineCommand::Emotion => {
+            emotion_step(addr, context, held, entry.name, rest).await
+        }
+        LineCommand::BlockChat => block_chat_step(addr, context, held, rest).await,
+        LineCommand::BlockChatList => block_chat_list_step(addr, context, held).await,
+        LineCommand::VoteBlockChat => vote_block_chat_step(addr),
+        LineCommand::Dc => dc_step(addr, context, held, rest).await,
+        LineCommand::Kill => kill_step(addr, context, held, rest, false).await,
+        LineCommand::Poison => kill_step(addr, context, held, rest, true).await,
+        LineCommand::Stun => stun_step(addr, context, held, rest).await,
+        LineCommand::GetQf => getqf_step(addr, context, held, rest).await,
+        LineCommand::SetQf => setqf_step(addr, context, held, rest).await,
+        LineCommand::DelQf => delqf_step(addr, context, held, rest).await,
+        LineCommand::SetState => set_state_step(addr, context, held, rest).await,
+        LineCommand::Qf => qf_step(addr, context, held, rest).await,
+        LineCommand::ClearQuest => clear_quest_step(addr, context, held, rest).await,
+        LineCommand::ViewEquip => view_equip_step(addr, context, held, rest).await,
+        command @ (LineCommand::Transfer
+        | LineCommand::Warp
+        | LineCommand::ObserverExit
+        | LineCommand::Private
+        | LineCommand::Rewarp
+        | LineCommand::Goto) => {
+            run_line_warp(command, session, addr, context, locations, held, rest).await
+        }
+        LineCommand::Level => level_step(addr, context, held, rest).await,
+        LineCommand::Advance => advance_step(addr, context, held, rest).await,
+        LineCommand::Reset => reset_step(addr, context, held).await,
+        LineCommand::GuildReset => guild_reset_step(session, addr, context, held).await,
+        command @ (LineCommand::Respawn
+        | LineCommand::Mob
+        | LineCommand::MobLd
+        | LineCommand::MobAggressive
+        | LineCommand::MobCoward
+        | LineCommand::MobMap
+        | LineCommand::DetailLog
+        | LineCommand::MonsterLog
+        | LineCommand::Polymorph
+        | LineCommand::Polyitem
+        | LineCommand::SocketItem
+        | LineCommand::SaveAti
+        | LineCommand::GmLine(_)
+        | LineCommand::ForgetMe
+        | LineCommand::Aggregate
+        | LineCommand::AttractRanger
+        | LineCommand::PullMonster
+        | LineCommand::Group
+        | LineCommand::GroupRandom
+        | LineCommand::SelfGrant) => {
+            run_line_spawn(command, session, addr, context, held, rest).await
+        }
+        LineCommand::SetSkill => set_skill_step(addr, context, held, rest).await,
+        LineCommand::SetSkillOther => set_skill_other_step(addr, context, held, rest).await,
+        LineCommand::SetSkillPoint => set_skill_point_step(addr, context, held, rest).await,
+        LineCommand::SetJob => set_job_step(addr, context, held, rest).await,
+        LineCommand::Invisible => invisible_step(addr, context, held).await,
+        LineCommand::Cooltime => cooltime_step(addr, context, held).await,
+        LineCommand::AffectRemove => affect_remove_step(addr, context, held, rest).await,
+        LineCommand::Purge => purge_step(addr, context, held, rest, false).await,
+        LineCommand::Weaken => purge_step(addr, context, held, rest, true).await,
+        LineCommand::PrivEmpire => priv_empire_step(addr, context, held, rest).await,
+        LineCommand::EventFlag => event_flag_step(addr, context, held, rest).await,
+        LineCommand::GetEventFlag => get_event_flag_step(addr, context, held).await,
+        LineCommand::EventLine(line) => event_line_step(addr, context, held, line, rest).await,
+        LineCommand::GiveReward => give_reward_step(session, addr, context, held).await,
+        LineCommand::LettersOpen => letters_open_step(addr, context, held).await,
+        other => run_line_command_tail(session, other, addr, context, held, rest).await,
+    }
+}
+
+/// Runs the warp lines of [`run_line_command`]: the transfer that warps the named character,
+/// the caller's own warps, and the observer's exit, which warps to its saved place. Split
+/// out so neither trips the line lint.
+async fn run_line_warp<S>(
+    command: LineCommand,
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    locations: Option<&MapLocations>,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match command {
+        LineCommand::Transfer => transfer_step(addr, context, held, rest).await,
+        LineCommand::Warp => warp_step(addr, context, held, rest).await,
+        LineCommand::ObserverExit => {
+            observer_exit_step(session, addr, context, locations, held).await
+        }
+        LineCommand::Private => private_step(addr, context, held, rest).await,
+        LineCommand::Rewarp => rewarp_step(addr, context, held).await,
+        LineCommand::Goto => goto_step(addr, context, held, rest).await,
+        _ => {
+            debug_assert!(false, "the dispatch routes only warp lines here");
+            true
+        }
+    }
+}
+
+/// Runs the tail of [`run_line_command`]: the stat, PK, walk, Armada and
+/// master lines, the notices, and the lines no build runs. Split out so
+/// neither trips the line lint.
+async fn run_line_command_tail<S>(
+    session: &mut LiveClientSession<S>,
+    command: LineCommand,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match command {
+        command @ (LineCommand::Stat
+        | LineCommand::StatMinus
+        | LineCommand::StatVal
+        | LineCommand::StatPlus(_)
+        | LineCommand::SetStat(_)
+        | LineCommand::StatReset) => stat_line_step(command, addr, context, held, rest).await,
+        LineCommand::PkMode => pkmode_step(addr, context, held, rest).await,
+        LineCommand::Horse(line) => horse_line_step(addr, context, held, line, rest).await,
+        LineCommand::WalkMode(walk) => walk_mode_step(addr, context, held, walk).await,
+        LineCommand::CanDead(can) => can_dead_step(addr, context, held, can).await,
+        LineCommand::AllSkillMaster => all_skill_master_step(addr, context, held).await,
+        LineCommand::ItemFullSet => item_full_set_step(session, addr, context, held).await,
+        LineCommand::AttrFullSet => attr_full_set_step(session, addr, context, held).await,
+        LineCommand::FullSet => full_set_step(session, addr, context, held).await,
+        LineCommand::UseItem => use_item_line_step(session, addr, context, held, rest).await,
+        command @ (LineCommand::RefineRod | LineCommand::RefinePick | LineCommand::MaxPick) => {
+            tool_refine_line_step(command, session, addr, context, held, rest).await
+        }
+        LineCommand::ClearAffect => clear_affect_step(addr, context, held).await,
+        LineCommand::DragonSoul => dragon_soul_step(session, addr, context, held, rest).await,
+        LineCommand::DsList => ds_list_step(addr, context, held).await,
+        LineCommand::DsChangeAttr => ds_change_attr_step(session, addr, context, held, rest).await,
+        LineCommand::Dice => dice_step(addr, context, held, rest).await,
+        LineCommand::Gift => gift_step(addr, context, held).await,
+        LineCommand::Hair => hair_step(addr, context, held).await,
+        LineCommand::FishSimul => fish_simul_step(addr, context, held, rest).await,
+        LineCommand::Shutdown => shutdown_step(addr, context, held).await,
+        LineCommand::Exit(kind) => do_cmd_step(addr, context, held, kind).await,
+        LineCommand::Pvp => pvp_step(addr, context, held, rest).await,
+        LineCommand::Reload => reload_step(addr, context, held, rest).await,
+        LineCommand::Costume => costume_step(session, addr, context, held, rest).await,
+        LineCommand::State => state_step(addr, context, held, &rest).await,
+        LineCommand::Inventory => inventory_step(addr, context, held, &rest).await,
+        LineCommand::Slow => slow_step(session, addr, context, held).await,
+        LineCommand::ItemPurge => item_purge_step(session, addr, context, held).await,
+        LineCommand::Book => book_step(session, addr, context, held, rest).await,
+        LineCommand::Console => console_step(addr, context, held).await,
+        LineCommand::SetAttr => set_attr_step(addr, context, held, rest).await,
+        command @ (LineCommand::GlobalNotice
+        | LineCommand::MapNotice
+        | LineCommand::BigNotice
+        | LineCommand::NotPorted(_)) => {
+            run_line_notice(session, command, addr, context, held, rest).await
+        }
+        LineCommand::OnlineList => online_list_step(session, addr, context, held).await,
+        LineCommand::Who => who_step(session, addr, context, held).await,
+        _ => {
+            debug_assert!(false, "the dispatch routes only tail lines here");
+            true
+        }
+    }
+}
+
+/// Runs the store arm of [`run_line_command`]: the type-in-full, the clicks,
+/// the closes, the passwords, and the change. Split out so neither trips
+/// the line lint.
+async fn run_line_store<S>(
+    command: LineCommand,
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match command {
         LineCommand::TypeInFull => {
             send_line(session, addr, context, held, CHAT_TYPE_INFO, TYPE_IN_FULL).await
         }
@@ -7949,6 +9259,7 @@ where
                 .await
                 .unwrap_or(true)
         }
+
         LineCommand::MallClose => {
             let step = SafeboxStep::CloseMall;
             safebox_step(session, addr, context, held, step)
@@ -7959,30 +9270,86 @@ where
             open_store(session, addr, context, held, false, &rest).await
         }
         LineCommand::MallPassword => open_store(session, addr, context, held, true, &rest).await,
+        LineCommand::SafeboxSize => {
+            let step = safebox_resize_step(&rest);
+            safebox_step(session, addr, context, held, step)
+                .await
+                .unwrap_or(true)
+        }
         LineCommand::SafeboxChangePassword => {
             change_store_password(session, addr, context, held, &rest).await
         }
-        LineCommand::Restart(kind) => restart(addr, context, held, kind).await,
-        LineCommand::SkillUp => skill_up(addr, context, held, rest).await,
-        LineCommand::GuildSkillUp => guild_skill_up_step(addr, context, held, rest).await,
-        LineCommand::GuildWar => guild_war_step(addr, context, held, rest).await,
-        LineCommand::GuildNoWar => guild_nowar_step(addr, context, held, rest).await,
-        LineCommand::GuildWarStop => guild_war_stop_step(addr, context, held, rest).await,
-        LineCommand::GuildWarCancel => guild_war_cancel_step(addr, context, held, rest).await,
-        LineCommand::GuildWarList => guild_war_list_step(session, addr, context, held).await,
-        LineCommand::PartyRequest => party_request_step(addr, context, held, rest).await,
-        LineCommand::PartyRequestAccept => {
-            party_request_accept_step(addr, context, held, rest).await
+        _ => {
+            debug_assert!(false, "the store dispatch routes only these lines here");
+            true
         }
-        LineCommand::PartyRequestDeny => party_request_deny_step(addr, context, held, rest).await,
-        LineCommand::MessengerAuth => messenger_auth_step(addr, context, held, rest).await,
-        LineCommand::SetBlockMode => set_block_mode_step(addr, context, held, rest).await,
-        LineCommand::BlockChat => block_chat_step(addr, context, held, rest).await,
+    }
+}
+
+/// Runs the spawn arm of [`run_line_command`]: the mob, the placed, the
+/// flagged, and the self-grant. Split out so neither trips the line lint.
+async fn run_line_spawn<S>(
+    command: LineCommand,
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match command {
+        LineCommand::Mob => mob_step(addr, context, held, rest).await,
+        LineCommand::MobLd => mob_ld_step(addr, context, held, rest).await,
+        LineCommand::MobAggressive => mob_flagged_step(addr, context, held, rest, false).await,
+        LineCommand::MobCoward => mob_flagged_step(addr, context, held, rest, true).await,
+        LineCommand::MobMap => mob_map_step(addr, context, held, rest).await,
+        LineCommand::DetailLog => detail_log_step(addr, context, held).await,
+        LineCommand::MonsterLog => monster_log_step(addr, context, held).await,
+        LineCommand::Polymorph => polymorph_step(addr, context, held, rest).await,
+        LineCommand::Polyitem => polyitem_step(session, addr, context, held, rest).await,
+        LineCommand::SocketItem => socket_item_step(session, addr, context, held, rest).await,
+        LineCommand::SaveAti => save_ati_step(session, addr, context, held, rest).await,
+        LineCommand::GmLine(line) => gm_line_step(addr, context, held, line, rest).await,
+        LineCommand::ForgetMe => forget_me_step(addr, context, held).await,
+        LineCommand::Aggregate => aggregate_step(addr, context, held).await,
+        LineCommand::AttractRanger => attract_ranger_step(addr, context, held).await,
+        LineCommand::PullMonster => pull_monster_step(addr, context, held).await,
+        LineCommand::Group => group_step(addr, context, held, rest, false).await,
+        LineCommand::GroupRandom => group_step(addr, context, held, rest, true).await,
+        LineCommand::SelfGrant => self_grant_step(session, addr, context, held, rest).await,
+        LineCommand::Respawn => respawn_step(session, addr, context, held, rest).await,
+        _ => {
+            debug_assert!(false, "the spawn dispatch routes only these lines here");
+            true
+        }
+    }
+}
+
+/// Runs the notice tail of [`run_line_command`]: the global, the map, the
+/// big, and the not-ported. Split out so neither trips the line lint.
+async fn run_line_notice<S>(
+    session: &mut LiveClientSession<S>,
+    command: LineCommand,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match command {
         LineCommand::GlobalNotice => global_notice_step(addr, context, held, &rest),
         LineCommand::MapNotice => map_notice_step(addr, context, held, &rest),
         LineCommand::BigNotice => big_notice_step(session, addr, context, held, &rest).await,
         LineCommand::NotPorted(handler) => {
             info!(%addr, handler, "Command not ported; ignoring");
+            true
+        }
+        _ => {
+            debug_assert!(false, "the notice dispatch routes only these lines here");
             true
         }
     }
@@ -8069,7 +9436,1221 @@ async fn skill_up(
     info!(%addr, vnum, level, "Skill up");
     true
 }
+/// `do_priv_empire` (`G/cmd_gm.cpp:3107-3167`): the world runs the line, and what the
+/// line shows rode the outbox already. Nothing is stored: the grants live in memory,
+/// as legacy's DB-process rows do within a boot.
+async fn priv_empire_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Priv without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.priv_empire(vid, rest, item_actor(held)).await {
+        warn!(%addr, %error, "The world could not be asked for a priv; closing");
+        return false;
+    }
+    info!(%addr, "Priv empire");
+    true
+}
 
+/// `do_event_flag` (`G/cmd_gm.cpp:2265-2295`): the world runs the line, and what the
+/// line shows rode the outbox already. Nothing is stored: the flags live in the
+/// quest manager's memory, as legacy's `m_mapEventFlag` does.
+async fn event_flag_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Event flag without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.event_flag(vid, rest, item_actor(held)).await {
+        warn!(%addr, %error, "The world could not be asked for a flag; closing");
+        return false;
+    }
+    info!(%addr, "Event flag");
+    true
+}
+
+/// `do_xmas`, `do_eclipse` and `do_event_helper` (`G/cmd_gm.cpp:3270-3294`,
+/// `:4460-4473`, `:4502-4520`): the world sets the named flag, or stands or removes the
+/// firework sellers, and what the line shows rode the outbox already.
+async fn event_line_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    line: prodomo::game_loop_messages::EventLine,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Event line without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context
+        .game
+        .event_line(vid, line, rest, item_actor(held))
+        .await
+    {
+        warn!(%addr, %error, "The world could not be asked for an event line; closing");
+        return false;
+    }
+    info!(%addr, ?line, "Event line");
+    true
+}
+
+/// `do_get_event_flag` (`G/cmd_gm.cpp:2296-2299`): the world lists the flags on the
+/// caller, and what the lines show rode the outbox already.
+async fn get_event_flag_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Flag list without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.get_event_flag(vid, item_actor(held)).await {
+        warn!(%addr, %error, "The world could not be asked for the flags; closing");
+        return false;
+    }
+    info!(%addr, "Flag list");
+    true
+}
+
+/// `give_reward` (`G/cmd_general.cpp:3761-3806`): the world runs the trade, the rows
+/// are stored as a transfer, and the caller hears the world's records. A refusal the
+/// caller already heard stores nothing. A store that refuses closes, as a trade's does.
+async fn give_reward_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Reward without a character in the world; ignoring");
+        return true;
+    };
+    let trade = match context.game.give_reward(vid, item_actor(held)).await {
+        Ok(trade) => trade,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a reward; closing");
+            return false;
+        }
+    };
+    let Some(trade) = trade else {
+        info!(%addr, "Reward refused");
+        return true;
+    };
+    if let Err(error) =
+        db::items::apply_transfer(&context.store, trade.pid, &trade.changes, 0).await
+    {
+        warn!(%addr, %error, "The reward could not be stored; closing");
+        return false;
+    }
+    if let Err(error) = send_all(session, &trade.records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    info!(%addr, "Reward traded");
+    true
+}
+
+/// `letters_open` (`G/cmd_general.cpp:3753-3760`): the world runs the line, and what
+/// the line shows rode the outbox already. Nothing is stored.
+async fn letters_open_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Letters window without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.letters_open(vid, item_actor(held)).await {
+        warn!(%addr, %error, "The world could not be asked for the letters; closing");
+        return false;
+    }
+    info!(%addr, "Letters window");
+    true
+}
+
+/// `do_stat_reset` (`G/cmd_general.cpp:710-713`): the world fills the reset
+/// count to 12, the record rode the outbox already, and the held row takes
+/// the moved numbers, which the save writes.
+async fn stat_reset_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Stat reset without a character in the world; ignoring");
+        return true;
+    };
+    let moved = match context.game.run_stat_reset(vid).await {
+        Ok(moved) => moved,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a stat reset; closing");
+            return false;
+        }
+    };
+    let Some(moved) = moved else {
+        info!(%addr, "Stat reset refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        character.stat_reset_count = i16::try_from(moved.reset_count).unwrap_or(i16::MAX);
+    }
+    info!(%addr, "Stat reset filled");
+    true
+}
+
+/// The six stat lines: `/stat`, `/stat-`, `/stat_val`, the `*+` lines, the
+/// `t*` lines, and `/stat_reset`. Split out so the dispatch does not trip
+/// the line lint.
+async fn stat_line_step(
+    command: LineCommand,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    match command {
+        LineCommand::Stat => stat_step(addr, context, held, rest, false).await,
+        LineCommand::StatMinus => stat_step(addr, context, held, rest, true).await,
+        LineCommand::StatVal => stat_val_step(addr, context, held, rest).await,
+        LineCommand::StatPlus(kind) => stat_plus_step(addr, context, held, rest, kind).await,
+        LineCommand::SetStat(kind) => set_stat_step(addr, context, held, rest, kind).await,
+        LineCommand::StatReset => stat_reset_step(addr, context, held).await,
+        _ => {
+            info!(%addr, "Stat line reached the wrong fan; ignoring");
+            true
+        }
+    }
+}
+
+/// `do_stat` and `do_stat_minus` (`G/cmd_general.cpp:715-844`): the world runs the
+/// line, what it shows rode the outbox already, and the held row takes the moved
+/// numbers, which the save writes.
+async fn stat_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+    lower: bool,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Stat without a character in the world; ignoring");
+        return true;
+    };
+    let moved = match context.game.run_stat(vid, rest, lower).await {
+        Ok(moved) => moved,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a stat; closing");
+            return false;
+        }
+    };
+    let Some(moved) = moved else {
+        info!(%addr, "Stat refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        // The line moves by 1, so the narrowing only guards a row a hand wrote
+        // past the slot.
+        character.st = u8::try_from(moved.st).unwrap_or(0);
+        character.ht = u8::try_from(moved.ht).unwrap_or(0);
+        character.dx = u8::try_from(moved.dx).unwrap_or(0);
+        character.iq = u8::try_from(moved.iq).unwrap_or(0);
+        character.stat_point = i16::try_from(moved.stat).unwrap_or(i16::MAX);
+        character.stat_reset_count = i16::try_from(moved.reset_count).unwrap_or(i16::MAX);
+    }
+    info!(%addr, "Stat moved");
+    true
+}
+
+/// `do_stat_val` (`G/cmd_general.cpp:3699-3750`): the world runs the line,
+/// what it shows rode the outbox already, and the held row takes the moved
+/// numbers, which the save writes.
+async fn stat_val_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Stat value without a character in the world; ignoring");
+        return true;
+    };
+    let moved = match context.game.run_stat_val(vid, rest).await {
+        Ok(moved) => moved,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a stat value; closing");
+            return false;
+        }
+    };
+    let Some(moved) = moved else {
+        info!(%addr, "Stat value refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        // The amount is clamped to the pool and the cap, so the narrowing only
+        // guards a row a hand wrote past the slot.
+        character.st = u8::try_from(moved.st).unwrap_or(0);
+        character.ht = u8::try_from(moved.ht).unwrap_or(0);
+        character.dx = u8::try_from(moved.dx).unwrap_or(0);
+        character.iq = u8::try_from(moved.iq).unwrap_or(0);
+        character.stat_point = i16::try_from(moved.stat).unwrap_or(i16::MAX);
+        character.stat_reset_count = i16::try_from(moved.reset_count).unwrap_or(i16::MAX);
+    }
+    info!(%addr, "Stat value moved");
+    true
+}
+
+/// `do_stat_plus_amount` (`G/cmd_gm.cpp:4068-4162`): the world runs the
+/// line, what it shows rode the outbox already, and the held row takes the
+/// moved numbers, which the save writes.
+async fn stat_plus_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+    kind: StatPlusKind,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Stat plus without a character in the world; ignoring");
+        return true;
+    };
+    let slot = match kind {
+        StatPlusKind::Ht => common::point_slot::POINT_HT,
+        StatPlusKind::Iq => common::point_slot::POINT_IQ,
+        StatPlusKind::St => common::point_slot::POINT_ST,
+        StatPlusKind::Dx => common::point_slot::POINT_DX,
+    };
+    let moved = match context.game.run_stat_plus(vid, rest, slot).await {
+        Ok(moved) => moved,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a stat plus; closing");
+            return false;
+        }
+    };
+    let Some(moved) = moved else {
+        info!(%addr, "Stat plus refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        character.st = u8::try_from(moved.st).unwrap_or(0);
+        character.ht = u8::try_from(moved.ht).unwrap_or(0);
+        character.dx = u8::try_from(moved.dx).unwrap_or(0);
+        character.iq = u8::try_from(moved.iq).unwrap_or(0);
+        character.stat_point = i16::try_from(moved.stat).unwrap_or(i16::MAX);
+        character.stat_reset_count = i16::try_from(moved.reset_count).unwrap_or(i16::MAX);
+    }
+    info!(%addr, "Stat plus moved");
+    true
+}
+
+/// `do_set_stat` (`G/cmd_gm.cpp:4575-4685`): the world runs the line, what
+/// it shows rode the outboxes already, and the target's row takes the
+/// moved numbers. A target deleted mid-line stores nothing, as a set skill
+/// on another does.
+async fn set_stat_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+    kind: StatPlusKind,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Set stat without a character in the world; ignoring");
+        return true;
+    };
+    let slot = match kind {
+        StatPlusKind::Ht => common::point_slot::POINT_HT,
+        StatPlusKind::Iq => common::point_slot::POINT_IQ,
+        StatPlusKind::St => common::point_slot::POINT_ST,
+        StatPlusKind::Dx => common::point_slot::POINT_DX,
+    };
+    let set = match context.game.run_set_stat(vid, rest, slot).await {
+        Ok(set) => set,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a set stat; closing");
+            return false;
+        }
+    };
+    let Some(set) = set else {
+        info!(%addr, "Set stat refused");
+        return true;
+    };
+    let target = match db::players::id_by_name(&context.store, &set.target).await {
+        Ok(target) => target,
+        Err(error) => {
+            warn!(%addr, %error, "The target's row could not be found; closing");
+            return false;
+        }
+    };
+    let Some(target) = target else {
+        info!(%addr, "Set stat target gone; storing nothing");
+        return true;
+    };
+    let columns = db::players::StatSet {
+        st: u8::try_from(set.held.st).unwrap_or(0),
+        ht: u8::try_from(set.held.ht).unwrap_or(0),
+        dx: u8::try_from(set.held.dx).unwrap_or(0),
+        iq: u8::try_from(set.held.iq).unwrap_or(0),
+        stat_point: i16::try_from(set.held.stat).unwrap_or(i16::MAX),
+    };
+    if !match db::players::save_stat_set(&context.store, target, &columns).await {
+        Ok(wrote) => wrote,
+        Err(error) => {
+            warn!(%addr, %error, "The set stat could not be stored; closing");
+            return false;
+        }
+    } {
+        info!(%addr, "Set stat target gone; storing nothing");
+        return true;
+    }
+    info!(%addr, "Stat set on another");
+    true
+}
+
+/// `do_pkmode` (`G/cmd_general.cpp:2252-2270`): the world runs the line, and what
+/// it shows rode the outbox already. Nothing is stored: the mode lives in memory,
+/// as legacy's does.
+async fn pkmode_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "PK mode without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_pkmode(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a PK mode; closing");
+        return false;
+    }
+    info!(%addr, "PK mode");
+    true
+}
+
+/// `do_set_walk_mode` and `do_set_run_mode` (`G/cmd_general.cpp:2016-2026`): the
+/// world runs the line, and what it shows rode the outbox already. Nothing is
+/// stored: the flags live in memory, as legacy's do.
+async fn walk_mode_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    walk: bool,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Walk mode without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_walk_mode(vid, walk).await {
+        warn!(%addr, %error, "The world could not be asked for a walk mode; closing");
+        return false;
+    }
+    info!(%addr, "Walk mode");
+    true
+}
+
+/// `do_all_skill_master` (`G/cmd_gm.cpp:4734-4758`): the world plants every
+/// usable skill at 40 with one compute and one byte 76, and each planted
+/// vnum's row takes 40 with its left-alone next-read. A target deleted
+/// mid-line stores nothing, as a set skill does.
+async fn all_skill_master_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Skill master without a character in the world; ignoring");
+        return true;
+    };
+    let planted = match context.game.run_all_skill_master(vid).await {
+        Ok(planted) => planted,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a skill master; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    for set in &planted {
+        let next = i32::try_from(set.next_read).unwrap_or(i32::MAX);
+        if let Err(error) =
+            db::player_skills::store_skill(&context.store, character.id, set.vnum, set.level, next)
+                .await
+        {
+            warn!(%addr, %error, vnum = set.vnum, "The mastered skill could not be stored; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Skill master");
+    true
+}
+
+/// `do_item_full_set` (`G/cmd_gm.cpp:4760-4902`): the strips and the job's kit
+/// land through the item-step finish, which stores the rows, sends the records
+/// and broadcasts the looks.
+async fn item_full_set_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Kit without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.run_item_full_set(vid, actor).await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_attr_full_set` (`G/cmd_gm.cpp:4904-5019`): the forced pairs land through
+/// the item-step finish, which stores the rows and sends the updates.
+async fn attr_full_set_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Forcing without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.run_attr_full_set(vid, actor).await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_full_set` (`G/cmd_gm.cpp:4723-4732`): the master line's planted skills
+/// store as the master's do, and the kit with its forced pairs lands through
+/// the item-step finish.
+async fn full_set_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Full one without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let moved = match context.game.run_full_set(vid, actor).await {
+        Ok(Ok((planted, moved))) => {
+            if let Some(character) = held.character.as_ref() {
+                for set in &planted {
+                    let next = i32::try_from(set.next_read).unwrap_or(i32::MAX);
+                    if let Err(error) = db::player_skills::store_skill(
+                        &context.store,
+                        character.id,
+                        set.vnum,
+                        set.level,
+                        next,
+                    )
+                    .await
+                    {
+                        warn!(%addr, %error, vnum = set.vnum, "The mastered skill could not be stored; closing");
+                        return false;
+                    }
+                }
+            }
+            Ok(moved)
+        }
+        Ok(Err(refused)) => Err(refused),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a full one; closing");
+            return false;
+        }
+    };
+    let moved = Ok(moved);
+    finish_item_step(session, addr, context, held, item_actor(held), moved).await
+}
+
+/// `do_refine_rod`, `do_refine_pick` and `do_max_pick` (`G/cmd_gm.cpp:2181-2222`):
+/// the named cell's tool refines, maxes, or both, and the item-step finish stores
+/// the rows and sends the records.
+async fn tool_refine_line_step<S>(
+    command: LineCommand,
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Tool refine without a character in the world; ignoring");
+        return true;
+    };
+    let line = match command {
+        LineCommand::RefineRod => world::character::ToolRefine::Rod,
+        LineCommand::RefinePick => world::character::ToolRefine::Pick,
+        LineCommand::MaxPick => world::character::ToolRefine::Max,
+        _ => {
+            debug_assert!(false, "the dispatch routes only tool lines here");
+            return true;
+        }
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .run_tool_refine_line(vid, rest, actor, line)
+        .await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_use_item` (`G/cmd_gm.cpp:4999-5016`): the named cell runs through the
+/// record's use and lands through the item-step finish, which stores the rows,
+/// sends the records and runs the climbed-skill and quest stores first.
+async fn use_item_line_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Use-item without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.run_use_item_line(vid, rest, actor).await;
+    if let Ok(Ok(moved)) = &answer {
+        if let Some((vnum, level, next_read)) = moved.climbed {
+            let Some(character) = held.character.as_ref() else {
+                return true;
+            };
+            if let Err(error) =
+                db::player_skills::store_skill(&context.store, character.id, vnum, level, next_read)
+                    .await
+            {
+                warn!(%addr, %error, vnum, level, "The book read could not be stored; closing");
+                return false;
+            }
+            info!(%addr, vnum, level, "Skill read from a book");
+        }
+        let (climbs, stores) = &moved.quest;
+        if !store_quest_climbs(addr, context, held, climbs).await {
+            return false;
+        }
+        if !store_quest_guild_stores(session, addr, context, held, stores).await {
+            return false;
+        }
+    }
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_clear_affect` (`G/cmd_gm.cpp:5019-5022`): `ClearAffect(true)` on the
+/// caller. Nothing rides, nothing is stored beyond the saves' rows: the world
+/// answered the remove packets and the update itself.
+async fn clear_affect_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Clear-affect without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_clear_affect(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a clear; closing");
+        return false;
+    }
+    info!(%addr, "Affects cleared");
+    true
+}
+
+/// `do_dragon_soul` (`G/cmd_gm.cpp:5024-5047`): the named deck activates, or every deck
+/// deactivates, through `finish_item_step`, so the socket updates ride with the points
+/// the stones changed and the rows are stored.
+async fn dragon_soul_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Dragon-soul without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context.game.run_dragon_soul(vid, rest).await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_ds_list` (`G/cmd_gm.cpp:5049-5059`): the caller hears one line per held dragon
+/// soul stone. Nothing rides, nothing is stored: the world told the lines itself.
+async fn ds_list_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Ds-list without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_ds_list(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a ds list; closing");
+        return false;
+    }
+    info!(%addr, "Ds listed");
+    true
+}
+
+/// `do_ds_change_attr` (`G/cmd_general.cpp:3864-3931`): the named soul-inventory stone's
+/// attributes redrawn, through `finish_item_step`, so the updates ride with the spent
+/// flames and gold and the rows are stored.
+async fn ds_change_attr_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Ds-change-attr without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context
+        .game
+        .run_ds_change_attr(vid, rest, item_actor(held))
+        .await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_dice` (`G/cmd_general.cpp:3455-3489`): the roll to the caller, or its party. Nothing
+/// rides, nothing is stored: the world told the lines itself.
+async fn dice_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Dice without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_dice(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a dice roll; closing");
+        return false;
+    }
+    info!(%addr, "Dice rolled");
+    true
+}
+
+/// `do_gift` (`G/cmd_general.cpp:3251-3254`): the caller hears the `gift` command line.
+/// Nothing rides, nothing is stored: the world told the line itself.
+async fn gift_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Gift without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_gift(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a gift; closing");
+        return false;
+    }
+    info!(%addr, "Gift told");
+    true
+}
+
+/// `do_hair` (`G/cmd_general.cpp:3200-3208`): the caller's hair affect as one line.
+/// Nothing rides, nothing is stored: the world told the line itself.
+async fn hair_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Hair without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_hair(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a hair line; closing");
+        return false;
+    }
+    info!(%addr, "Hair told");
+    true
+}
+
+/// `do_reload` (`G/cmd_gm.cpp:2639-2733`): the tables the line names reload from the Locale
+/// folder. The descriptor reads the files before it sends, so the game thread swaps tables
+/// without touching the disk; the `u` arm's thresholds land on the status board beside the
+/// command, as `LoadStateUserCount` wrote the globals beside the caller's tell
+/// (`G/config.cpp:1778-1788`). Nothing rides, nothing is stored: the world told the lines
+/// itself.
+async fn reload_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Reload without a character in the world; ignoring");
+        return true;
+    };
+    reload_counts(context, &rest);
+    let read = prodomo::game_state::ReloadRead {
+        fishing: std::fs::read(context.locale_dir.join("fishing.txt")).ok(),
+        groups: std::fs::read(context.locale_dir.join("special_item_group.txt")).ok(),
+        mob: std::fs::read(context.locale_dir.join("mob_drop_item.txt")).ok(),
+        drop_groups: std::fs::read(context.locale_dir.join("drop_item_group.txt")).ok(),
+    };
+    if let Err(error) = context.game.run_reload(vid, rest, read).await {
+        warn!(%addr, %error, "The world could not be asked for a reload; closing");
+        return false;
+    }
+    info!(%addr, "Reload told");
+    true
+}
+
+/// The `u` arm's half of [`reload_step`]: `LoadStateUserCount`
+/// (`G/config.cpp:1778-1788`) over the `state_user_count` file beside the process. Each
+/// `%d` `fscanf(fp, " %d %d ", ...)` completes writes its global in `full busy` order;
+/// a word that is missing or not a number stops its own conversion and every later
+/// one, so a missing or empty file keeps both thresholds. The empty line reloads them
+/// too; any other first byte leaves them alone.
+fn reload_counts(context: &ConnectionContext, rest: &[u8]) {
+    let (first, _) = prodomo::command::one_argument(rest);
+    let reload = match first.first() {
+        None => true,
+        Some(byte) => byte.eq_ignore_ascii_case(&b'u'),
+    };
+    if !reload {
+        return;
+    }
+    let Ok(bytes) = std::fs::read("state_user_count") else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let (full, busy) = scanf_two_ints(&text);
+    // Each completed conversion writes its own global: a lone first word moves
+    // `full` and leaves `busy` standing.
+    match (full, busy) {
+        (Some(full), Some(busy)) => context.channels.set_counts(busy, full),
+        (Some(full), None) => context.channels.set_full(full),
+        (None, _) => {}
+    }
+}
+
+/// The two `%d` conversions of `fscanf(fp, " %d %d ", ...)` over `text`: C whitespace,
+/// an optional sign, and the decimal digits after it, clamped to the `int` range. The
+/// second answer is `None` when the first conversion failed or no second number
+/// follows it; anything after a conversion's digits never stops it.
+fn scanf_two_ints(text: &str) -> (Option<i32>, Option<i32>) {
+    fn one(bytes: &[u8]) -> (Option<i32>, &[u8]) {
+        let start = bytes
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+            .unwrap_or(bytes.len());
+        let bytes = &bytes[start..];
+        let (negative, digits) = match bytes.split_first() {
+            Some((b'-', rest)) => (true, rest),
+            Some((b'+', rest)) => (false, rest),
+            _ => (false, bytes),
+        };
+        let end = digits
+            .iter()
+            .position(|byte| !byte.is_ascii_digit())
+            .unwrap_or(digits.len());
+        if end == 0 {
+            return (None, bytes);
+        }
+        let mut value: i64 = 0;
+        for digit in &digits[..end] {
+            value = value
+                .saturating_mul(10)
+                .saturating_add(i64::from(digit - b'0'));
+        }
+        if negative {
+            value = -value;
+        }
+        let value = value.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+        (
+            Some(i32::try_from(value).unwrap_or(i32::MAX)),
+            &digits[end..],
+        )
+    }
+    let (first, rest) = one(text.as_bytes());
+    let second = first.and_then(|_| one(rest).0);
+    (first, second)
+}
+
+/// `do_fishing_simul` (`G/cmd_gm.cpp:2227-2251`): the usage, then the simulation's
+/// lines. Nothing rides, nothing is stored: the world told the lines itself.
+async fn fish_simul_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Simul without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_fish_simul(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a simul; closing");
+        return false;
+    }
+    info!(%addr, "Simul told");
+    true
+}
+
+/// `do_shutdown` (`G/cmd_general.cpp:265-275`): the 10's notice goes out and its
+/// countdown starts. Nothing rides, nothing is stored: the world told the notice
+/// itself, and the countdown closes the clients it names.
+async fn shutdown_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Shutdown without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_shutdown(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a shutdown; closing");
+        return false;
+    }
+    info!(%addr, "Shutdown started");
+    true
+}
+
+/// `do_cmd` (`G/cmd_general.cpp:395-448`): the cancel or the notice, and past the
+/// gate the countdown. Nothing rides, nothing is stored: the world told the lines
+/// itself, and the arms close, quit or reselect through orders.
+async fn do_cmd_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    kind: prodomo::game_loop_messages::ExitKind,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Exit without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_do_cmd(vid, kind).await {
+        warn!(%addr, %error, "The world could not be asked for an exit; closing");
+        return false;
+    }
+    info!(%addr, ?kind, "Exit ran");
+    true
+}
+
+/// `do_pvp` (`G/cmd_general.cpp:848-879`): the challenge or the accept of the word's
+/// VID. Nothing rides, nothing is stored: the world told the lines and fanned the
+/// record itself.
+async fn pvp_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Duel without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_pvp(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a duel; closing");
+        return false;
+    }
+    info!(%addr, "Duel ran");
+    true
+}
+
+/// `do_state` (`G/cmd_gm.cpp:1017-1202`): the target's dump, told to the caller.
+/// Nothing rides, nothing is stored: the world told the lines itself.
+async fn state_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: &[u8],
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "State without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_state(vid, rest.to_vec()).await {
+        warn!(%addr, %error, "The world could not be asked for a state dump; closing");
+        return false;
+    }
+    info!(%addr, "State told");
+    true
+}
+
+/// `do_slow` (`G/cmd_gm.cpp:92-100`): ten fresh 12019s, numbered in socket 4. The
+/// item-step finish stores the rows and sends the sets, the updates and the pickup
+/// lines.
+async fn slow_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Slow without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context.game.run_slow(vid, item_actor(held)).await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_item_purge` (`G/cmd_gm.cpp:868-1016`): every flat and dragon soul cell cleared,
+/// the points recomputed either side, the look sent. The item-step finish stores the
+/// destroyed rows and sends the clears.
+async fn item_purge_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Ipurging without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context.game.run_item_purge(vid, item_actor(held)).await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_book` (`G/cmd_gm.cpp:2501-2526`): one fresh 50300 with the named skill in
+/// socket 0, or the miss line. The item-step finish stores the rows and sends the
+/// set, the update and the pickup line.
+async fn book_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Booking without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context.game.run_book(vid, rest, item_actor(held)).await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_console` (`G/cmd_general.cpp:466-469`): the `ConsoleEnable` command line. The
+/// world told the line itself; the step only reports the run.
+async fn console_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Console without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_console(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a console line; closing");
+        return false;
+    }
+    info!(%addr, "Console told");
+    true
+}
+
+/// `do_set` (`G/cmd_gm.cpp:1862-2074`): the named PC's field set. The world told the
+/// lines and ran the arm; a gold arm's delta stores here as a Transfer.
+async fn set_attr_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Set-attr without a character in the world; ignoring");
+        return true;
+    };
+    let stored = match context.game.run_set_attr(vid, rest).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a set; closing");
+            return false;
+        }
+    };
+    let Some(stored) = stored else {
+        return true;
+    };
+    if let Some(gold) = stored.gold {
+        if let Err(error) = db::items::apply_transfer(&context.store, stored.pid, &[], gold).await {
+            warn!(%addr, %error, gold, "The set gold could not be stored; closing");
+            return false;
+        }
+        info!(%addr, gold, "Set gold stored");
+    }
+    if let Some((race, group)) = stored.identity {
+        if let Err(error) =
+            db::players::store_identity(&context.store, stored.pid, race, group).await
+        {
+            warn!(%addr, %error, "The set identity could not be stored; closing");
+            return false;
+        }
+        for vnum in &stored.cleared_skills {
+            if let Err(error) =
+                db::player_skills::store_skill(&context.store, stored.pid, *vnum, 0, 0).await
+            {
+                warn!(%addr, %error, vnum, "The cleared skill could not be deleted; closing");
+                return false;
+            }
+        }
+        info!(%addr, race, group, "Set identity stored");
+    }
+    true
+}
+
+/// `do_inventory` (`G/cmd_general.cpp:3210-3250`): the caller's own cells, told to
+/// the caller. Nothing rides, nothing is stored: the world told the lines itself.
+async fn inventory_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: &[u8],
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Inventory without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_inventory(vid, rest.to_vec()).await {
+        warn!(%addr, %error, "The world could not be asked for an inventory dump; closing");
+        return false;
+    }
+    info!(%addr, "Inventory told");
+    true
+}
+
+/// `do_costume` (`G/cmd_general.cpp:3089-3198`): the costume status lines, and the
+/// named piece comes off through `finish_item_step`, so the records ride and the rows
+/// are stored as a click's are.
+async fn costume_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Costume without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context.game.run_costume(vid, rest, item_actor(held)).await;
+    finish_item_step(session, addr, context, held, item_actor(held), answer).await
+}
+
+/// `do_can_dead` (`G/cmd_gm.cpp:4715-4721`): the world sets or clears the
+/// flag. Nothing rides, nothing is stored: the flag lives in memory, as
+/// legacy's does.
+async fn can_dead_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    can: bool,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Can dead without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_can_dead(vid, can).await {
+        warn!(%addr, %error, "The world could not be asked for a can dead; closing");
+        return false;
+    }
+    info!(%addr, "Can dead");
+    true
+}
+
+/// `do_emotion_allow` and `do_emotion` (`G/cmd_emotion.cpp:112-128,153-296`): the world
+/// runs the line, and what the line shows rode the outbox already. Nothing is stored:
+/// the consent set lives in memory, as legacy's does.
+async fn emotion_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    command: &str,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Emotion without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context
+        .game
+        .emotion(vid, command.to_string(), rest, item_actor(held))
+        .await
+    {
+        warn!(%addr, %error, "The world could not be asked for an emotion; closing");
+        return false;
+    }
+    info!(%addr, command, "Emotion");
+    true
+}
+
+/// `do_hide_costume` (`G/cmd_general.cpp:3934-3976`): the world runs the line, the
+/// `SetXCostumeHidden` line and the look update rode the outbox already, and the one
+/// `costume_option.hide_*` flag write is stored (`SetQuestFlag` writes the row). An
+/// empty line, a refusal, and a part outside 1-5 answer no flag, and there is nothing
+/// to store.
+async fn hide_costume_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Hide without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.hide_costume(vid, rest).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a hide; closing");
+            return false;
+        }
+    };
+    let Some((name, value)) = answer.flag else {
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    // As `set_block_mode_step`: the flag moves into the held record first, and the
+    // whole record is stored.
+    if let Some(slot) = held.quest_flags.iter_mut().find(|(held, _)| held == &name) {
+        slot.1 = value;
+    } else {
+        held.quest_flags.push((name, value));
+    }
+    held.quest_flags.retain(|(_, value)| *value != 0);
+    let flags: Vec<db::quest_flags::StoredQuestFlag> = held
+        .quest_flags
+        .iter()
+        .map(|(name, value)| db::quest_flags::StoredQuestFlag {
+            name: name.clone(),
+            value: *value,
+        })
+        .collect();
+    if let Err(error) = db::quest_flags::save_flags(&context.store, character.id, &flags).await {
+        warn!(%addr, %error, "The hide could not be stored; closing");
+        return false;
+    }
+    info!(%addr, "Hide costume");
+    true
+}
 /// `do_setblockmode` (`G/cmd_general.cpp:2300-2309`): the world runs the line,
 /// the `setblockmode %d` command line rode the outbox already, and the seven
 /// `game_option.block_*` flag writes are stored (`SetQuestFlag` writes the
@@ -8132,6 +10713,1717 @@ async fn set_block_mode_step(
 /// usage and format lines and the privilege refusal to the caller, the
 /// `[LS;852]` to the target, and the requested line when the name named nobody
 /// online. A refused store closes the session, as a refused block mode does.
+///
+/// `do_block_chat_list` (`G/cmd_gm.cpp:3298-3310`): the world lists the silenced
+/// characters on the caller, whose lines ride its outbox.
+async fn block_chat_list_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Silence list without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.block_chat_list(vid).await {
+        warn!(%addr, %error, "The world could not be asked for the silence list; closing");
+        return false;
+    }
+    info!(%addr, "Silence list");
+    true
+}
+
+/// `do_vote_block_chat` (`G/cmd_gm.cpp:3312-3314`): the dead body answers
+/// nothing, from any caller, whatever the line carries.
+fn vote_block_chat_step(addr: SocketAddr) -> bool {
+    info!(%addr, "Vote block chat");
+    true
+}
+
+/// `do_disconnect` (`G/cmd_gm.cpp:1755-1782`): the world orders the named
+/// character's descriptor to close; the caller hears the usage, the
+/// no-such-player line, or the self refusal on the way. Every line rode the
+/// outboxes already.
+async fn dc_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Disconnect without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.dc_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a disconnect; closing");
+        return false;
+    }
+    info!(%addr, "Disconnect");
+    true
+}
+
+/// `do_transfer` (`G/cmd_gm.cpp:102-151`): the world warps the named character
+/// to the caller's side; the caller hears the usage, the no-character line,
+/// the cross-Channel line, or the self refusal on the way. Every line rode the
+/// outboxes already.
+async fn transfer_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Transfer without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.transfer_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a transfer; closing");
+        return false;
+    }
+    info!(%addr, "Transfer");
+    true
+}
+
+/// `do_kill` (`G/cmd_gm.cpp:1784-1805`) and `do_poison` (`:1808-1829`): the
+/// world kills or poisons the named character; the caller hears the usage or
+/// the no-such-player line on the way. Every line rode the outboxes already.
+async fn kill_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+    poison: bool,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Kill without a character in the world; ignoring");
+        return true;
+    };
+    let asked = if poison {
+        context.game.poison_command(vid, rest).await
+    } else {
+        context.game.kill_command(vid, rest).await
+    };
+    if let Err(error) = asked {
+        warn!(%addr, %error, "The world could not be asked for a kill; closing");
+        return false;
+    }
+    info!(%addr, poison, "Kill");
+    true
+}
+
+/// Runs one `/stun` line against the world: the named character is stunned,
+/// or the caller hears the usage, the miss, or the confirmation on the way.
+/// Every line rode the outboxes already.
+async fn stun_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Stun without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.stun_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a stun; closing");
+        return false;
+    }
+    info!(%addr, "Stun");
+    true
+}
+
+/// Runs one `/getqf` line against the world: the target's quest flags ride
+/// the caller's outbox before the answer. Every line rode already.
+async fn getqf_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Getqf without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.getqf_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a getqf; closing");
+        return false;
+    }
+    info!(%addr, "Getqf");
+    true
+}
+
+/// Runs one `/setqf` line against the world: the flag sets and the
+/// confirmation rides the caller's outbox before the answer.
+async fn setqf_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Setqf without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.setqf_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a setqf; closing");
+        return false;
+    }
+    info!(%addr, "Setqf");
+    true
+}
+
+/// Runs one `/delqf` line against the world: the flag deletes and the
+/// outcome rides the caller's outbox before the answer.
+async fn delqf_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Delqf without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.delqf_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a delqf; closing");
+        return false;
+    }
+    info!(%addr, "Delqf");
+    true
+}
+
+/// Runs one `/set_state` line against the world: the quest moves and the
+/// confirmation rides the caller's outbox before the answer.
+async fn set_state_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Set_state without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.set_state_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a set_state; closing");
+        return false;
+    }
+    info!(%addr, "Set_state");
+    true
+}
+
+/// Runs one `/qf` line against the world: the caller's current quest moves
+/// to the named state, or the caller hears the failure. What the line shows
+/// rode the outboxes already.
+async fn qf_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Qf without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.qf_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a qf; closing");
+        return false;
+    }
+    info!(%addr, "Qf");
+    true
+}
+
+/// Runs one `/clear_quest` line against the world: the caller's quest
+/// forgets every flag and rests at 0, silent. What the line shows rode the
+/// outboxes already.
+async fn clear_quest_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Clear_quest without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.clear_quest_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a clear_quest; closing");
+        return false;
+    }
+    info!(%addr, "Clear_quest");
+    true
+}
+
+/// Runs one `/view_equip` line against the world: the caller views the
+/// VID's worn equipment, or hears the refusal. What the line shows rode
+/// the outboxes already.
+async fn view_equip_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "View_equip without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.view_equip_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a view_equip; closing");
+        return false;
+    }
+    info!(%addr, "View_equip");
+    true
+}
+
+/// Runs one `/warp` line against the world: the caller warps to the named
+/// character or the metres, or hears the usage or the miss on the way.
+/// Every line rode the outboxes already.
+async fn warp_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Warp without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.warp_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a warp; closing");
+        return false;
+    }
+    info!(%addr, "Warp");
+    true
+}
+
+/// Runs one `/observer_exit` line (`do_observer_exit`, `G/cmd_general.cpp:2370-2393`): nothing
+/// when the caller observes nothing. This build has no arena, so the line always takes the
+/// plain branch: `ExitToSavedLocation` (`G/char.cpp:6685-6692`), which warps to the pending
+/// Warp (`held.warp`, unset for a character that never warped), then clears the mode.
+///
+/// After an accepted warp the character is gone, so the descriptor sends the `ObserverMode 0`
+/// line itself, after `GC_WARP`, as legacy's `SetObserverMode` does. After a refused warp the
+/// character still stands, so the world clears it back into view and tells the line there,
+/// behind the dance.
+async fn observer_exit_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    locations: Option<&MapLocations>,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if !held.observer {
+        return true;
+    }
+    let Some(vid) = held.world else {
+        info!(%addr, "Observer exit without a character in the world; ignoring");
+        return true;
+    };
+    let lock = match context.game.observer_exit(vid).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for an exit; closing");
+            return false;
+        }
+    };
+    let Some(sorted_until) = lock else {
+        // The world says the character observes nothing: trust it and come back in step.
+        held.observer = false;
+        return true;
+    };
+    let (x, y, private_map_index) = held
+        .warp
+        .map_or((0, 0, 0), |target| (target.x, target.y, target.map_index));
+    let settled = warp_set(
+        session,
+        addr,
+        context,
+        locations,
+        held,
+        (x, y),
+        WarpDestination {
+            private_map_index,
+            channel: None,
+            sorted_until,
+        },
+    )
+    .await;
+    held.observer = false;
+    match settled {
+        WarpSettled::Warped => {
+            info!(%addr, "Observer exit warped");
+            send_line(
+                session,
+                addr,
+                context,
+                held,
+                CHAT_TYPE_COMMAND,
+                "ObserverMode 0",
+            )
+            .await
+        }
+        WarpSettled::Refused => {
+            if let Err(error) = context.game.observer_settled(vid).await {
+                warn!(%addr, %error, "The world could not settle an exit; closing");
+                return false;
+            }
+            info!(%addr, "Observer exit refused its warp");
+            true
+        }
+        WarpSettled::Closed => false,
+    }
+}
+
+/// Runs one `/private` line against the world: the caller warps to a private
+/// copy of the named map, or hears the usage or the miss on the way.
+/// Every line rode the outboxes already.
+async fn private_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Private without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.private_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a private; closing");
+        return false;
+    }
+    info!(%addr, "Private");
+    true
+}
+
+/// Runs one `/rewarp` line against the world: the caller rewarps in place,
+/// having heard where. Every line rode the outboxes already.
+async fn rewarp_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Rewarp without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.rewarp_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a rewarp; closing");
+        return false;
+    }
+    info!(%addr, "Rewarp");
+    true
+}
+
+/// Runs one `/goto` line against the world: the caller shows at the metres
+/// or warps to the named map, having heard where. Every line rode the
+/// outboxes already.
+async fn goto_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Goto without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.goto_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a goto; closing");
+        return false;
+    }
+    info!(%addr, "Goto");
+    true
+}
+
+/// `do_level` (`G/cmd_gm.cpp:2740-2758`): the world runs the line, the held row
+/// takes what it reset, the cleared skills' store rows go, and a reaching 120
+/// stands its `player_top` row and takes its top-player affect.
+async fn level_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Level without a character in the world; ignoring");
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        info!(%addr, "Level without a held character; ignoring");
+        return true;
+    };
+    let (gold, voice, player) = (character.gold, character.voice, character.id);
+    let leveled = match context.game.level_command(vid, rest, gold, voice).await {
+        Ok(leveled) => leveled,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a level; closing");
+            return false;
+        }
+    };
+    let Some(leveled) = leveled else {
+        info!(%addr, "Level refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        character.level = leveled.level;
+        character.st = u8::try_from(leveled.st).unwrap_or(0);
+        character.ht = u8::try_from(leveled.ht).unwrap_or(0);
+        character.dx = u8::try_from(leveled.dx).unwrap_or(0);
+        character.iq = u8::try_from(leveled.iq).unwrap_or(0);
+        character.random_hp = i16::try_from(leveled.random_hp).unwrap_or(i16::MAX);
+        character.random_sp = i16::try_from(leveled.random_sp).unwrap_or(i16::MAX);
+        character.stat_point = i16::try_from(leveled.stat).unwrap_or(i16::MAX);
+        character.skill_point = i16::try_from(leveled.skill).unwrap_or(i16::MAX);
+        character.sub_skill_point = i16::try_from(leveled.sub_skill).unwrap_or(i16::MAX);
+        character.hp = leveled.hp;
+        character.sp = leveled.sp;
+        character.conqueror_level = leveled.conqueror_level;
+        character.conqueror_exp = leveled.conqueror_exp;
+        character.sungma_str = u8::try_from(leveled.sungma[0]).unwrap_or(0);
+        character.sungma_hp = u8::try_from(leveled.sungma[1]).unwrap_or(0);
+        character.sungma_move = u8::try_from(leveled.sungma[2]).unwrap_or(0);
+        character.sungma_immune = u8::try_from(leveled.sungma[3]).unwrap_or(0);
+    }
+    for vnum in &leveled.cleared_skills {
+        if let Err(error) =
+            db::player_skills::store_skill(&context.store, player, *vnum, 0, 0).await
+        {
+            warn!(%addr, %error, vnum, "The cleared skill could not be deleted; closing");
+            return false;
+        }
+    }
+    if leveled.reached_top {
+        let stood = match db::player_top::count(&context.store).await {
+            Ok(stood) => stood,
+            Err(error) => {
+                warn!(%addr, %error, "The top rows could not be counted; closing");
+                return false;
+            }
+        };
+        if stood < 3 {
+            if let Err(error) = db::player_top::stand(&context.store, player, leveled.level).await {
+                warn!(%addr, %error, "The top row could not stand; closing");
+                return false;
+            }
+            let rank = u8::try_from(stood + 1).unwrap_or(3);
+            if let Err(error) = context.game.grant_top_affect(vid, rank).await {
+                warn!(%addr, %error, "The world could not be asked for a top affect; closing");
+                return false;
+            }
+        }
+    }
+    info!(%addr, "Level reset");
+    true
+}
+
+/// `do_advance`: the world runs the `/advance` line on the named character,
+/// and the reset is written straight to the target's row, whose claim this
+/// descriptor never held. The cleared skills' rows go with it, and a move to
+/// 120 stands the top row and grants the affect on the target's VID.
+async fn advance_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Advance without a character in the world; ignoring");
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        info!(%addr, "Advance without a held character; ignoring");
+        return true;
+    };
+    let (gold, voice) = (character.gold, character.voice);
+    let landed = match context.game.advance_command(vid, rest, gold, voice).await {
+        Ok(landed) => landed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for an advance; closing");
+            return false;
+        }
+    };
+    let Some(landed) = landed else {
+        info!(%addr, "Advance refused");
+        return true;
+    };
+    let target = match db::players::id_by_name(&context.store, &landed.target).await {
+        Ok(target) => target,
+        Err(error) => {
+            warn!(%addr, %error, "The target's row could not be found; closing");
+            return false;
+        }
+    };
+    let Some(target) = target else {
+        info!(%addr, "Advance target gone; storing nothing");
+        return true;
+    };
+    let columns = db::players::LevelReset {
+        level: landed.held.level,
+        st: u8::try_from(landed.held.st).unwrap_or(0),
+        ht: u8::try_from(landed.held.ht).unwrap_or(0),
+        dx: u8::try_from(landed.held.dx).unwrap_or(0),
+        iq: u8::try_from(landed.held.iq).unwrap_or(0),
+        random_hp: i16::try_from(landed.held.random_hp).unwrap_or(i16::MAX),
+        random_sp: i16::try_from(landed.held.random_sp).unwrap_or(i16::MAX),
+        stat_point: i16::try_from(landed.held.stat).unwrap_or(i16::MAX),
+        skill_point: i16::try_from(landed.held.skill).unwrap_or(i16::MAX),
+        sub_skill_point: i16::try_from(landed.held.sub_skill).unwrap_or(i16::MAX),
+        hp: landed.held.hp,
+        sp: landed.held.sp,
+        conqueror_level: landed.held.conqueror_level,
+        conqueror_exp: landed.held.conqueror_exp,
+        sungma: [
+            i16::try_from(landed.held.sungma[0]).unwrap_or(0),
+            i16::try_from(landed.held.sungma[1]).unwrap_or(0),
+            i16::try_from(landed.held.sungma[2]).unwrap_or(0),
+            i16::try_from(landed.held.sungma[3]).unwrap_or(0),
+        ],
+    };
+    if !match db::players::save_level_reset(&context.store, target, &columns).await {
+        Ok(wrote) => wrote,
+        Err(error) => {
+            warn!(%addr, %error, "The reset could not be stored; closing");
+            return false;
+        }
+    } {
+        info!(%addr, "Advance target gone; storing nothing");
+        return true;
+    }
+    for vnum in &landed.held.cleared_skills {
+        if let Err(error) =
+            db::player_skills::store_skill(&context.store, target, *vnum, 0, 0).await
+        {
+            warn!(%addr, %error, vnum, "The cleared skill could not be deleted; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Advance reset");
+    true
+}
+
+/// `do_who` (`G/cmd_gm.cpp:1682-1692`): `Total [N] e1 / e2 / e3 (this server
+/// M)`. The empires' totals span every Channel, as the P2P cores' did, and
+/// `this server` is the caller's Channel, which is the nearest scope this
+/// process has to legacy's core. The GM floor holds this line before
+/// dispatch, so the handler runs ungated, as legacy's does.
+async fn who_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use prodomo::chat_line::Arg;
+    let (empires, local) = context.clients.who_counts(held.channel);
+    let total = empires[1] + empires[2] + empires[3];
+    let count = |slot: usize| Arg::Int(i64::try_from(slot).unwrap_or(i64::MAX));
+    let to = item_actor(held).recipient(&context.locale);
+    let line = prodomo::chat_line::chat_packet(
+        to,
+        CHAT_TYPE_INFO,
+        b"Total [%d] %d / %d / %d (this server %d)",
+        &[
+            count(total),
+            count(empires[1]),
+            count(empires[2]),
+            count(empires[3]),
+            count(local),
+        ],
+    );
+    if !send_shop_records(session, addr, &[line]).await {
+        warn!(%addr, "Client session stopped");
+        return false;
+    }
+    info!(%addr, total, local, "Who counted");
+    true
+}
+/// The polymorph ball `/polyitem` grants (`G/cmd_gm.cpp:3081`).
+const POLYITEM_BALL: u32 = 70104;
+
+/// `/polyitem`'s full-inventory line (`G/cmd_gm.cpp:3095`): no stop, unlike `/item`'s.
+const POLYITEM_NO_ROOM: &str = "Not enough inventory space";
+
+/// `str_to_number` on the mob vnum `/polyitem` sockets (`G/cmd_gm.cpp:3079-3080`): the
+/// same `DWORD` parse `/item` reads its vnum with.
+fn polyitem_vnum(word: &[u8]) -> u32 {
+    item_vnum(word)
+}
+
+/// `str_to_number` on a `DWORD` (`common/utils.h:44-50`): `strtoul` base 10
+/// cast to `u32`, garbage answering 0, the arithmetic wrapping as the C
+/// multiply does.
+fn item_vnum(word: &[u8]) -> u32 {
+    let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return 0;
+    };
+    let rest = &word[offset..];
+    let (digits, negative) = match rest.first() {
+        Some(b'-') => (&rest[1..], true),
+        Some(b'+') => (&rest[1..], false),
+        _ => (rest, false),
+    };
+    let mut value: u32 = 0;
+    for byte in digits {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.wrapping_mul(10).wrapping_add(u32::from(byte - b'0'));
+    }
+    if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    }
+}
+
+/// `str_to_number` on an `int` (`common/utils.h:38-43`): `strtol` base 10
+/// cast to `i32`, garbage answering 0.
+fn item_count(word: &[u8]) -> i32 {
+    let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return 0;
+    };
+    let rest = &word[offset..];
+    let (digits, negative) = match rest.first() {
+        Some(b'-') => (&rest[1..], true),
+        Some(b'+') => (&rest[1..], false),
+        _ => (rest, false),
+    };
+    let mut value: i32 = 0;
+    for byte in digits {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.wrapping_mul(10).wrapping_add(i32::from(byte - b'0'));
+    }
+    if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    }
+}
+
+/// `do_item` (`G/cmd_gm.cpp:467-519`): the named item lands in the caller's
+/// own inventory. The vnum word reads a vnum past a leading digit, else a
+/// locale-name prefix; the count clamps to 1-5000. The miss names the word
+/// (`#%u item not exist by that vnum(%s)`), with the trailing stop only when
+/// the vnum read but the proto is missing. A full inventory answers `Not
+/// enough inventory space.`
+async fn self_grant_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use prodomo::chat_line::Arg;
+    let Some(name) = held
+        .character
+        .as_ref()
+        .map(|character| character.name.clone())
+    else {
+        info!(%addr, "Item without a held character; ignoring");
+        return true;
+    };
+    let (first, back) = prodomo::command::one_argument(&rest);
+    let (second, _) = prodomo::command::one_argument(back);
+    if first.is_empty() {
+        return send_line(
+            session,
+            addr,
+            context,
+            held,
+            CHAT_TYPE_INFO,
+            "Usage: item <item vnum>",
+        )
+        .await;
+    }
+    let vnum = if first[0].is_ascii_digit() {
+        item_vnum(&first)
+    } else if let Some(vnum) = context.protos.vnum_by_locale_name(&first) {
+        vnum
+    } else {
+        let to = item_actor(held).recipient(&context.locale);
+        let line = prodomo::chat_line::chat_packet(
+            to,
+            CHAT_TYPE_INFO,
+            b"#%u item not exist by that vnum(%s)",
+            &[Arg::Int(0), Arg::Text(&first)],
+        );
+        return send_shop_records(session, addr, &[line]).await;
+    };
+    if context.protos.get(vnum).is_none() {
+        let to = item_actor(held).recipient(&context.locale);
+        let line = prodomo::chat_line::chat_packet(
+            to,
+            CHAT_TYPE_INFO,
+            b"#%u item not exist by that vnum(%s).",
+            &[Arg::Int(i64::from(vnum)), Arg::Text(&first)],
+        );
+        return send_shop_records(session, addr, &[line]).await;
+    }
+    let count = if second.is_empty() {
+        1u16
+    } else {
+        u16::try_from(item_count(&second).clamp(1, i32::from(common::item_slots::ITEM_COUNT_LIMIT)))
+            .unwrap_or(1)
+    };
+    let request = prodomo::item_grant::GrantRequest {
+        target: name,
+        vnum,
+        count: Some(count),
+        socket0: None,
+    };
+    match prodomo::item_persist::grant_and_deliver(&context.store, &context.game, &request).await {
+        prodomo::item_persist::Granted::Delivered { .. } => {
+            info!(%addr, vnum, count, "Item granted");
+            true
+        }
+        prodomo::item_persist::Granted::Stored { id, why, .. } => {
+            warn!(%addr, id, %why, "Item stored but the client was not told");
+            true
+        }
+        prodomo::item_persist::Granted::Failed { why } => {
+            if why.starts_with(prodomo::item_grant::NO_ROOM_MESSAGE) {
+                return send_line(
+                    session,
+                    addr,
+                    context,
+                    held,
+                    CHAT_TYPE_INFO,
+                    prodomo::item_grant::NO_ROOM_MESSAGE,
+                )
+                .await;
+            }
+            warn!(%addr, %why, "Item grant failed; closing");
+            false
+        }
+    }
+}
+
+/// `do_mob_ld` (`G/cmd_gm.cpp:760-815`): the world stands the named mob at
+/// the named metres, or answers the usage or the miss. The lines ride the
+/// outbox before the answer, so the step only reports the run.
+async fn mob_ld_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Mob_ld without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.mob_ld_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a mob_ld; closing");
+        return false;
+    }
+    info!(%addr, "Mob_ld stood");
+    true
+}
+
+/// `do_mob_aggresive` and `do_mob_coward` (`G/cmd_gm.cpp:557-617`,
+/// `:639-698`): the world stands the named mob around the caller with the
+/// aggressive or the coward bit, or answers the usage or the miss. The
+/// lines ride the outbox before the answer, so the step only reports the
+/// run.
+async fn mob_flagged_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+    coward: bool,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "A flagged mob without a character in the world; ignoring");
+        return true;
+    };
+    let outcome = if coward {
+        context.game.mob_coward_command(vid, rest).await
+    } else {
+        context.game.mob_aggressive_command(vid, rest).await
+    };
+    if let Err(error) = outcome {
+        warn!(%addr, %error, "The world could not be asked for a flagged mob; closing");
+        return false;
+    }
+    info!(%addr, "A flagged mob stood");
+    true
+}
+
+/// `do_mob_map` (`G/cmd_gm.cpp:618-637`): the world stands the numbered mob
+/// at a random point of the caller's map, or answers the syntax, the stood
+/// line, or the failure. The lines ride the outbox before the answer, so
+/// the step only reports the run.
+async fn mob_map_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Mob_map without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.mob_map_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a mob_map; closing");
+        return false;
+    }
+    info!(%addr, "Mob_map stood");
+    true
+}
+
+/// `do_detaillog` (`G/cmd_general.cpp:2242-2245`): the world flips the caller's detail
+/// flag. Nothing answers, so the step only reports the run.
+async fn detail_log_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Detaillog without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.detail_log_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a detaillog; closing");
+        return false;
+    }
+    info!(%addr, "Detaillog ran");
+    true
+}
+
+/// `do_monsterlog` (`G/cmd_general.cpp:2247-2250`): the world flips the caller's monster
+/// subscription. Nothing answers, so the step only reports the run.
+async fn monster_log_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Monsterlog without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.monster_log_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a monsterlog; closing");
+        return false;
+    }
+    info!(%addr, "Monsterlog ran");
+    true
+}
+
+/// `do_polymorph` (`G/cmd_gm.cpp:3049-3068`): the world morphs the caller into the
+/// named mob vnum. Nothing answers, so the step only reports the run.
+async fn polymorph_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Polymorph without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.polymorph_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a polymorph; closing");
+        return false;
+    }
+    info!(%addr, "Polymorph ran");
+    true
+}
+
+/// `do_polymorph_item` (`G/cmd_gm.cpp:3070-3104`): the caller is granted a 70104 ball
+/// holding the named mob vnum in its first socket. An empty line is silent; a full
+/// inventory answers `Not enough inventory space` (no stop, unlike `/item`'s own
+/// line); a 70104-less proto answers `#70103 item not exist by that vnum`, naming
+/// 70103 for the 70104 it could not make, as legacy does.
+async fn polyitem_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use prodomo::chat_line::Arg;
+    let Some(name) = held
+        .character
+        .as_ref()
+        .map(|character| character.name.clone())
+    else {
+        info!(%addr, "Polyitem without a held character; ignoring");
+        return true;
+    };
+    let (first, _) = prodomo::command::one_argument(&rest);
+    if first.is_empty() {
+        return true;
+    }
+    if context.protos.get(POLYITEM_BALL).is_none() {
+        let to = item_actor(held).recipient(&context.locale);
+        let line = prodomo::chat_line::chat_packet(
+            to,
+            CHAT_TYPE_INFO,
+            b"#%d item not exist by that vnum",
+            &[Arg::Int(70103)],
+        );
+        return send_shop_records(session, addr, &[line]).await;
+    }
+    let request = prodomo::item_grant::GrantRequest {
+        target: name,
+        vnum: POLYITEM_BALL,
+        count: None,
+        socket0: Some(polyitem_vnum(&first)),
+    };
+    match prodomo::item_persist::grant_and_deliver(&context.store, &context.game, &request).await {
+        prodomo::item_persist::Granted::Delivered { .. } => {
+            info!(%addr, "Polyitem granted");
+            true
+        }
+        prodomo::item_persist::Granted::Stored { id, why, .. } => {
+            warn!(%addr, id, %why, "Polyitem stored but the client was not told");
+            true
+        }
+        prodomo::item_persist::Granted::Failed { why } => {
+            if why.starts_with(prodomo::item_grant::NO_ROOM_MESSAGE) {
+                return send_line(
+                    session,
+                    addr,
+                    context,
+                    held,
+                    CHAT_TYPE_INFO,
+                    POLYITEM_NO_ROOM,
+                )
+                .await;
+            }
+            warn!(%addr, %why, "Polyitem grant failed; closing");
+            false
+        }
+    }
+}
+
+/// `do_socket_item`'s socket count (`G/cmd_gm.cpp:3241-3245`): the second word's `int`,
+/// 3 when it reads 0 or reaches `ITEM_SOCKET_MAX_NUM` (6 under `ENABLE_EXTENDED_SOCKETS`).
+/// A negative count writes no socket, as legacy's loop never runs.
+fn socket_item_count(word: &[u8]) -> usize {
+    match item_count(word) {
+        count @ 1..=5 => usize::try_from(count).unwrap_or(3),
+        count if count < 0 => 0,
+        _ => 3,
+    }
+}
+
+/// `/saveati` (`do_save_attribute_to_image`, `G/cmd_gm.cpp:3843-3863`): without both words
+/// the syntax line; else the named map's attributes as a TGA at the named path, `Done` or
+/// `Failed`. The whole line runs on the descriptor: the cells are already loaded, and the
+/// game thread never touches the filesystem. An unknown map, an unrenderable grid and an
+/// unwritable path all answer `Failed`, as legacy's `Save` answers `false`; the failures
+/// are logged, as its `sys_err`s are.
+async fn save_ati_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use std::os::unix::ffi::OsStrExt;
+    let (map_word, file_word) = prodomo::command::two_arguments(&rest);
+    if map_word.is_empty() || file_word.is_empty() {
+        return send_line(
+            session,
+            addr,
+            context,
+            held,
+            CHAT_TYPE_INFO,
+            "Syntax: /saveati <map_index> <filename>",
+        )
+        .await;
+    }
+    let index = item_count(&map_word);
+    let done = match context.cells.get(index) {
+        None => {
+            debug!(%addr, index, "Saveati names no hosted map");
+            false
+        }
+        Some(cells) => match cells.attribute_image() {
+            None => {
+                debug!(%addr, index, "Saveati cannot render the map's grid");
+                false
+            }
+            Some(image) => {
+                let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&file_word));
+                match tokio::fs::write(path, &image).await {
+                    Ok(()) => {
+                        debug!(%addr, index, bytes = image.len(), "Saveati wrote its image");
+                        true
+                    }
+                    Err(error) => {
+                        debug!(%addr, index, %error, "Saveati cannot write its file");
+                        false
+                    }
+                }
+            }
+        },
+    };
+    send_line(
+        session,
+        addr,
+        context,
+        held,
+        CHAT_TYPE_INFO,
+        if done { "Done" } else { "Failed" },
+    )
+    .await
+}
+
+/// `do_socket_item` (`G/cmd_gm.cpp:3231-3268`): an empty line is silent. The vnum is the
+/// first word's `DWORD`, else, when that reads 0, a locale-name prefix; a miss answers
+/// `#%d item not exist by that vnum` naming 0. The world gives the item and sets its
+/// sockets, and the rows are stored before the client hears of them.
+async fn socket_item_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use prodomo::chat_line::Arg;
+    let Some(vid) = held.world else {
+        info!(%addr, "Socket item without a character in the world; ignoring");
+        return true;
+    };
+    let (first, back) = prodomo::command::one_argument(&rest);
+    let (second, _) = prodomo::command::one_argument(back);
+    if first.is_empty() {
+        return true;
+    }
+    let vnum = match item_vnum(&first) {
+        0 => context.protos.vnum_by_locale_name(&first),
+        vnum => Some(vnum),
+    };
+    let Some(vnum) = vnum else {
+        let to = item_actor(held).recipient(&context.locale);
+        let line = prodomo::chat_line::chat_packet(
+            to,
+            CHAT_TYPE_INFO,
+            b"#%d item not exist by that vnum",
+            &[Arg::Int(0)],
+        );
+        return send_shop_records(session, addr, &[line]).await;
+    };
+    let sockets = socket_item_count(&second);
+    let given = match context
+        .game
+        .socket_item(vid, (vnum, sockets), item_actor(held))
+        .await
+    {
+        Ok(given) => given,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a socket item; closing");
+            return false;
+        }
+    };
+    let Some(given) = given else {
+        info!(%addr, "Socket item made nothing");
+        return true;
+    };
+    if let Err(error) =
+        db::items::apply_transfer(&context.store, given.pid, &given.changes, 0).await
+    {
+        warn!(%addr, %error, "The socket item could not be stored; closing");
+        return false;
+    }
+    if let Err(error) = send_all(session, &given.records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    info!(%addr, "Socket item given");
+    true
+}
+
+/// The small GM lines of `game_state::gm_lines`: the world runs the line and tells what
+/// it tells through the outbox; an item write's rows are stored here, and the skills a
+/// clear zeroed lose their rows.
+async fn gm_line_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    line: prodomo::game_loop_messages::GmLine,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, ?line, "GM line without a character in the world; ignoring");
+        return true;
+    };
+    // `/observer` flips both sides' flag: the world's when it runs the line, and this one
+    // before it is asked, so the records after the line are gated by the new mode. The line
+    // cannot fail, so the pure toggle cannot desync.
+    if line == prodomo::game_loop_messages::GmLine::Observer {
+        held.observer = !held.observer;
+    }
+    let rows = match context
+        .game
+        .gm_line(vid, line, rest, item_actor(held))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%addr, %error, ?line, "The world could not be asked for a GM line; closing");
+            return false;
+        }
+    };
+    if let Some(rows) = rows {
+        if !rows.changes.is_empty() {
+            if let Err(error) =
+                db::items::apply_transfer(&context.store, rows.pid, &rows.changes, 0).await
+            {
+                warn!(%addr, %error, ?line, "The GM line's item could not be stored; closing");
+                return false;
+            }
+        }
+        for vnum in &rows.cleared_skills {
+            if let Err(error) =
+                db::player_skills::store_skill(&context.store, rows.pid, *vnum, 0, 0).await
+            {
+                warn!(%addr, %error, vnum, "The cleared skill could not be deleted; closing");
+                return false;
+            }
+        }
+    }
+    info!(%addr, ?line, "GM line ran");
+    true
+}
+
+/// `do_forgetme` (`G/cmd_gm.cpp:3029-3032`): the world drops the caller as
+/// its attackers' victim and hides the caller for 5 seconds. Nothing
+/// answers, so the step only reports the run.
+async fn forget_me_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Forgetme without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.forget_me_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a forgetme; closing");
+        return false;
+    }
+    info!(%addr, "Forgetme ran");
+    true
+}
+
+/// `do_aggregate` (`G/cmd_gm.cpp:3034-3037`): the world starts the
+/// victimless monsters around on the caller. Nothing answers, so the step
+/// only reports the run.
+async fn aggregate_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Aggregate without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.aggregate_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for an aggregate; closing");
+        return false;
+    }
+    info!(%addr, "Aggregate ran");
+    true
+}
+
+/// `do_attract_ranger` (`G/cmd_gm.cpp:3039-3042`): the world cuts the rangers
+/// around to 150 for 3 minutes. Nothing answers, so the step only reports
+/// the run.
+async fn attract_ranger_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Attract_ranger without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.attract_ranger_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for an attract_ranger; closing");
+        return false;
+    }
+    info!(%addr, "Attract_ranger ran");
+    true
+}
+
+/// `do_pull_monster` (`G/cmd_gm.cpp:3044-3047`): the world pulls the monsters
+/// around 300 toward the caller. Nothing answers, so the step only reports
+/// the run.
+async fn pull_monster_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Pull_monster without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.pull_monster_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a pull_monster; closing");
+        return false;
+    }
+    info!(%addr, "Pull_monster ran");
+    true
+}
+
+/// `do_group` and `do_group_random` (`G/cmd_gm.cpp:521-555`): the world
+/// stands the group in the 500-box around the caller, or answers the
+/// usage. The lines ride the outbox before the answer, so the step only
+/// reports the run.
+async fn group_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+    random: bool,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Group without a character in the world; ignoring");
+        return true;
+    };
+    let outcome = if random {
+        context.game.group_random_command(vid, rest).await
+    } else {
+        context.game.group_command(vid, rest).await
+    };
+    if let Err(error) = outcome {
+        warn!(%addr, %error, "The world could not be asked for a group; closing");
+        return false;
+    }
+    info!(%addr, "Group stood");
+    true
+}
+
+/// `do_mob` (`G/cmd_gm.cpp:699-758`): the world stands the named mob around
+/// the caller, or answers the usage or the miss. The lines ride the outbox
+/// before the answer, so the step only reports the run.
+async fn mob_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Mob without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.mob_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a mob; closing");
+        return false;
+    }
+    info!(%addr, "Mob stood");
+    true
+}
+
+/// `do_respawn` (`G/cmd_gm.cpp:2108-2123`): the world fires the regens around
+/// one Pulse on, everywhere with `all`, and the caller hears which. The
+/// lines run through the locale, as every `ChatPacket` line does.
+async fn respawn_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Respawn without a character in the world; ignoring");
+        return true;
+    };
+    let (word, _) = prodomo::command::one_argument(&rest);
+    let all = !word.is_empty() && word.eq_ignore_ascii_case(b"all");
+    if let Err(error) = context.game.respawn_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a respawn; closing");
+        return false;
+    }
+    let text = if all {
+        "Respawn Everywhere"
+    } else {
+        "Respawn Around"
+    };
+    if !send_line(session, addr, context, held, CHAT_TYPE_INFO, text).await {
+        return false;
+    }
+    info!(%addr, all, "Respawn reset");
+    true
+}
+
+/// `do_user` (`G/cmd_gm.cpp:1694-1753`): the online Names roll past the
+/// caller, four a line, then the total. The GM floor holds this line before
+/// dispatch, so the handler runs ungated, as legacy's does.
+async fn online_list_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let to = item_actor(held).recipient(&context.locale);
+    let names = context.clients.online_names(held.channel);
+    let lines = prodomo::chat_line::user_rows(&names);
+    let records: Vec<Vec<u8>> = lines
+        .iter()
+        .map(|row| prodomo::chat_line::chat_packet(to, CHAT_TYPE_INFO, row, &[]))
+        .collect();
+    if !send_shop_records(session, addr, &records).await {
+        warn!(%addr, "Client session stopped");
+        return false;
+    }
+    info!(%addr, count = names.len(), "Online list sent");
+    true
+}
+
+/// `do_reset` (`G/cmd_gm.cpp:2076-2081`): the world refills the caller's hit
+/// and spell pools, and the held row takes the filled pools, which the save
+/// writes. That banking is `Save()`: legacy's `DelayedSave` queues the
+/// character and the main loop's `ProcessDelayedSave` writes it one Pulse
+/// later (`G/main.cpp:276-277`), so between the line and the save the pools
+/// are what the refill left, exactly as the held row holds them.
+async fn reset_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Reset without a character in the world; ignoring");
+        return true;
+    };
+    let refilled = match context.game.reset_command(vid).await {
+        Ok(refilled) => refilled,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a reset; closing");
+            return false;
+        }
+    };
+    let Some(refilled) = refilled else {
+        info!(%addr, "Reset refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        character.hp = refilled.hp;
+        character.sp = refilled.sp;
+    }
+    info!(%addr, "Reset refilled");
+    true
+}
+
+/// `do_greset` (`G/cmd_gm.cpp:2175-2179`): the world judges the caller's
+/// guild's refill, the descriptor stores the refilled power, and the world
+/// commits. A refusal is quiet, as legacy's guarded call is; a store error
+/// closes, as an unstored move does.
+async fn guild_reset_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Guild reset without a character in the world; ignoring");
+        return true;
+    };
+    let judged = match context.game.run_guild_reset(vid).await {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a guild reset; closing");
+            return false;
+        }
+    };
+    let (guild_id, set) = match judged {
+        GuildGradeAnswer::Store { guild_id, set } => (guild_id, set),
+        GuildGradeAnswer::Refused { line } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildGradeAnswer::Committed { .. } => {
+            warn!(%addr, "The world answered a judgement with a commit; closing");
+            return false;
+        }
+    };
+    if let Err(error) = store_guild_grade_set(context, guild_id, &set).await {
+        warn!(%addr, %error, "The refilled power could not be stored; closing");
+        return false;
+    }
+    if !commit_guild_grade_step(session, addr, context, vid, 0, guild_id, set).await {
+        return false;
+    }
+    info!(%addr, "Guild reset refilled");
+    true
+}
+
+/// `do_setskill`: the world runs the `/setskill` line, and a landed set's
+/// slot is stored (`Save()` writes the skills with the row).
+async fn set_skill_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Set-skill without a character in the world; ignoring");
+        return true;
+    };
+    let set = match context.game.set_skill_command(vid, rest).await {
+        Ok(set) => set,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a set-skill; closing");
+            return false;
+        }
+    };
+    let Some(set) = set else {
+        info!(%addr, "Set-skill refused");
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    let next = i32::try_from(set.next_read).unwrap_or(i32::MAX);
+    if let Err(error) =
+        db::player_skills::store_skill(&context.store, character.id, set.vnum, set.level, next)
+            .await
+    {
+        warn!(%addr, %error, vnum = set.vnum, "The set skill could not be stored; closing");
+        return false;
+    }
+    info!(%addr, vnum = set.vnum, level = set.level, "Skill set");
+    true
+}
+
+/// `do_setskillother`: the world runs the `/setskillother` line, and a landed
+/// set's slot is stored on the target's row. A target deleted mid-line stores
+/// nothing: its memory is gone with it.
+async fn set_skill_other_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Set-skill-other without a character in the world; ignoring");
+        return true;
+    };
+    let set = match context.game.set_skill_other_command(vid, rest).await {
+        Ok(set) => set,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a set-skill-other; closing");
+            return false;
+        }
+    };
+    let Some(set) = set else {
+        info!(%addr, "Set-skill-other refused");
+        return true;
+    };
+    store_other_skill(addr, context, &set).await
+}
+
+/// Store a skill another character's line planted, on the row of the character the world
+/// showed under `set.target`. A target deleted mid-line stores nothing: its memory is gone
+/// with it. `false` closes the descriptor.
+async fn store_other_skill(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    set: &prodomo::game_state::SetSkillOtherLanded,
+) -> bool {
+    let target = match db::players::id_by_name(&context.store, &set.target).await {
+        Ok(target) => target,
+        Err(error) => {
+            warn!(%addr, %error, "The target's row could not be found; closing");
+            return false;
+        }
+    };
+    let Some(target) = target else {
+        info!(%addr, "Skill target gone; storing nothing");
+        return true;
+    };
+    let next = i32::try_from(set.set.next_read).unwrap_or(i32::MAX);
+    if let Err(error) =
+        db::player_skills::store_skill(&context.store, target, set.set.vnum, set.set.level, next)
+            .await
+    {
+        warn!(%addr, %error, vnum = set.set.vnum, "The set skill could not be stored; closing");
+        return false;
+    }
+    info!(%addr, vnum = set.set.vnum, level = set.set.level, "Skill set on another");
+    true
+}
+
+/// `do_horse_state`, `do_horse_level` and `do_horse_set_stat` (`G/cmd_gm.cpp:3745-3833`):
+/// the world runs the line, and what `/horse_level` planted in the target's horse skill is
+/// stored on the target's row. The horse itself rides the target's next save.
+async fn horse_line_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    line: prodomo::game_loop_messages::HorseLine,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Horse line without a character in the world; ignoring");
+        return true;
+    };
+    let set = match context.game.horse_line(vid, line, rest).await {
+        Ok(set) => set,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a horse line; closing");
+            return false;
+        }
+    };
+    info!(%addr, ?line, "Horse line");
+    match set {
+        Some(set) => store_other_skill(addr, context, &set).await,
+        None => true,
+    }
+}
+
+/// `do_set_skill_point`: the world runs the `/setskillpoint` line, and the
+/// held counter follows, so the disconnect save banks it.
+async fn set_skill_point_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Set-skill-point without a character in the world; ignoring");
+        return true;
+    };
+    let counter = match context.game.set_skill_point_command(vid, rest).await {
+        Ok(counter) => counter,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a set-skill-point; closing");
+            return false;
+        }
+    };
+    let Some(counter) = counter else {
+        info!(%addr, "Set-skill-point refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        character.skill_point = i16::try_from(counter).unwrap_or(i16::MAX);
+    }
+    info!(%addr, "Skill counter set");
+    true
+}
+
+/// `do_set_skill_group`: the world runs the `/setjob` line; the held group
+/// and counter follow, and the clear's zeroed skills leave the store.
+async fn set_job_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Set-job without a character in the world; ignoring");
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        info!(%addr, "Set-job without a held character; ignoring");
+        return true;
+    };
+    let player = character.id;
+    let landed = match context.game.set_job_command(vid, rest).await {
+        Ok(landed) => landed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a set-job; closing");
+            return false;
+        }
+    };
+    let Some(landed) = landed else {
+        info!(%addr, "Set-job refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        if landed.set {
+            character.skill_group = landed.group;
+        }
+        character.skill_point = i16::try_from(landed.skill).unwrap_or(i16::MAX);
+    }
+    for vnum in &landed.cleared_skills {
+        if let Err(error) =
+            db::player_skills::store_skill(&context.store, player, *vnum, 0, 0).await
+        {
+            warn!(%addr, %error, vnum, "The cleared skill could not be deleted; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Skill group set");
+    true
+}
+/// `do_purge` and `do_weaken`: the world destroys or weakens the NPCs
+/// around. Both are memory-only: no row follows them.
+async fn purge_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+    weaken: bool,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Purge without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.purge_command(vid, rest, weaken).await {
+        warn!(%addr, %error, "The world could not be asked for a purge; closing");
+        return false;
+    }
+    info!(%addr, "Purge swept");
+    true
+}
+
+/// `do_invisibility`: the world toggles the caller's invisibility. The affect
+/// is memory-only: no row follows it.
+async fn invisible_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Invisible without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.invisible_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for an invisible; closing");
+        return false;
+    }
+    info!(%addr, "Invisibility toggled");
+    true
+}
+
+/// `do_cooltime`: the world sets the caller's no-cooltime flag. The flag is
+/// memory-only: no row follows it.
+async fn cooltime_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Cooltime without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.cooltime_command(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a cooltime; closing");
+        return false;
+    }
+    info!(%addr, "Cooltime disabled");
+    true
+}
+/// `do_affect_remove`: the world lists or removes the caller's affects. The
+/// affects are memory-only: no row follows them.
+async fn affect_remove_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Affect-remove without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.affect_remove_command(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for an affect-remove; closing");
+        return false;
+    }
+    info!(%addr, "Affect removed or listed");
+    true
+}
+
 async fn block_chat_step(
     addr: SocketAddr,
     context: &ConnectionContext,
@@ -8383,6 +12675,29 @@ async fn guild_war_cancel_step(
     true
 }
 
+/// The four party lines: request, accept, deny, and ungroup. Split out so
+/// the dispatch does not trip the line lint.
+async fn party_line_step(
+    command: LineCommand,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    match command {
+        LineCommand::PartyRequest => party_request_step(addr, context, held, rest).await,
+        LineCommand::PartyRequestAccept => {
+            party_request_accept_step(addr, context, held, rest).await
+        }
+        LineCommand::PartyRequestDeny => party_request_deny_step(addr, context, held, rest).await,
+        LineCommand::Ungroup => ungroup_step(addr, context, held).await,
+        _ => {
+            info!(%addr, "Party line reached the wrong fan; ignoring");
+            true
+        }
+    }
+}
+
 /// `do_party_request` (`G/cmd_general.cpp:2428-2455`): the world runs the line; the
 /// gates' info lines and the leader's `PartyRequest <VID>` command ride the outbox, so
 /// the descriptor only logs.
@@ -8404,6 +12719,31 @@ async fn party_request_step(
         }
     }
     info!(%addr, "Party request");
+    true
+}
+
+/// `do_ungroup` (`G/cmd_general.cpp:1060-1088`): the caller leaves its party.
+/// A partyless caller stays quiet; a caller in a party of two disbands it
+/// silently; else it hears `[LS;532]` and quits. The world runs the line, so
+/// the descriptor only hands it over with the caller's own PID as the target.
+async fn ungroup_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Ungroup without a character in the world; ignoring");
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        info!(%addr, "Ungroup without a loaded character; ignoring");
+        return true;
+    };
+    let pid = character.id;
+    match context.game.ungroup(vid, pid).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked to ungroup; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Ungroup");
     true
 }
 
@@ -8567,7 +12907,213 @@ where
     info!(%addr, "Guild war list sent");
     true
 }
+/// `/makeguild`'s word founds a guild (`ACMD(do_makeguild)`, `G/cmd_gm.cpp:2143-2167`):
+/// the judged name is stored, committed, and confirmed with `(%s)` and the code.
+/// The world takes no fee and no item; the gold and item halves never leave.
+async fn makeguild_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(world_vid) = held.world else {
+        info!(%addr, "Makeguild without a character in the world; ignoring");
+        return true;
+    };
+    let (word, _) = prodomo::command::one_argument(&rest);
+    let judged = match context.game.judge_makeguild(world_vid, word).await {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the makeguild; closing");
+            return false;
+        }
+    };
+    let name = match judged {
+        GuildMakeAnswer::Store { name } => name,
+        GuildMakeAnswer::Refused { line } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildMakeAnswer::Committed { .. } => {
+            warn!(%addr, "The world answered a judgement with a commit; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "Makeguild without a character; closing");
+        return false;
+    };
+    let pid = character.id;
+    let id = match store_make_guild(context, &name, pid).await {
+        Ok(id) => id,
+        Err(Some(taken)) => {
+            return answer_guild_taken(session, addr, context, held, character, taken).await;
+        }
+        Err(None) => {
+            warn!(%addr, "The guild rows could not be stored; closing");
+            return false;
+        }
+    };
+    let commit = GuildMakeCommit { id, name };
+    let committed = match context
+        .game
+        .commit_makeguild(world_vid, commit, item_actor(held))
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the guild; closing");
+            return false;
+        }
+    };
+    let GuildMakeAnswer::Committed {
+        id, own, others, ..
+    } = committed
+    else {
+        warn!(%addr, "The world answered a commit without one; closing");
+        return false;
+    };
+    if let Err(error) = send_all(session, &own).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    let own_vid = world_vid.raw();
+    let heard = match others.first() {
+        Some(record) => context
+            .clients
+            .deliver_everywhere(|entry| (entry.vid != own_vid).then(|| record.clone())),
+        None => 0,
+    };
+    info!(%addr, id, others = heard, "Guild made by a GM line");
+    true
+}
 
+/// `/deleteguild` disbands the caller's guild (`ACMD(do_deleteguild)`,
+/// `G/cmd_gm.cpp:2169-2173`): the world's judgement, then the store half.
+async fn deleteguild_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(world_vid) = held.world else {
+        info!(%addr, "Deleteguild without a character in the world; ignoring");
+        return true;
+    };
+    let judged = match context
+        .game
+        .judge_deleteguild(world_vid, global_time())
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the deleteguild; closing");
+            return false;
+        }
+    };
+    if !judged.own.is_empty() {
+        if let Err(error) = send_all(session, &judged.own).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    for store in &judged.stores {
+        let GuildQuestStore::Disband {
+            guild_id,
+            members,
+            at,
+        } = store
+        else {
+            warn!(%addr, "A deleteguild held no disband; closing");
+            return false;
+        };
+        if let Err(error) = db::guilds::disband_guild(&context.store, *guild_id, members, *at).await
+        {
+            warn!(%addr, %error, "A deleteguild could not be stored; closing");
+            return false;
+        }
+    }
+    true
+}
+
+/// `gstate`: the GM hears the named guild's id, master PID and war flag
+/// (`do_guild_state`, `G/cmd_gm.cpp:2806-2822`), or the miss when no guild
+/// answers to the name.
+async fn guild_state_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if held.world.is_none() {
+        info!(%addr, "Guild state without a character in the world; ignoring");
+        return true;
+    }
+    let (name, _) = prodomo::command::one_argument(&rest);
+    let line = match context.game.guild_state(rest).await {
+        Ok(line) => line,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for the guild state; closing");
+            return false;
+        }
+    };
+    let Some(line) = line else {
+        let args = [prodomo::chat_line::Arg::Text(&name)];
+        if !send_line_args(
+            session,
+            addr,
+            context,
+            held,
+            protocol::gc_chat::CHAT_TYPE_INFO,
+            b"%s: It is a guild that does not exist.",
+            &args,
+        )
+        .await
+        {
+            return false;
+        }
+        info!(%addr, "Guild state missed");
+        return true;
+    };
+    for (format, value) in [
+        (&b"GuildID: %d"[..], i64::from(line.id)),
+        (&b"GuildMasterPID: %d"[..], i64::from(line.master_pid)),
+        (&b"IsInWar: %d"[..], i64::from(line.in_war)),
+    ] {
+        let args = [prodomo::chat_line::Arg::Int(value)];
+        if !send_line_args(
+            session,
+            addr,
+            context,
+            held,
+            protocol::gc_chat::CHAT_TYPE_INFO,
+            format,
+            &args,
+        )
+        .await
+        {
+            return false;
+        }
+    }
+    info!(%addr, "Guild state sent");
+    true
+}
 /// `do_notice` (`G/cmd_gm.cpp:1628-1637`): `__GM_PE_N__` is defined
 /// (`common/prodomodefines.h:152`), so the line is `"<GM Name> :<argument>"`, the
 /// argument keeping the spaces after the command word. `SendNotice` (`:1389-1425`)
@@ -8883,6 +13429,26 @@ where
 
 /// Run one safebox step: `None` when the connection is to check the password and load the
 /// rows, else whether the connection lives on.
+/// `do_safebox_size`'s word as a `Resize` step: the leading number, or 0, in rows. A
+/// size past 3 pages answers 0, as the `size = 0` clamp does (`G/cmd_gm.cpp:2136`).
+fn safebox_resize_step(rest: &[u8]) -> SafeboxStep {
+    let (word, _) = prodomo::command::one_argument(rest);
+    let mut pages = 0i32;
+    for byte in word.iter().copied().take_while(u8::is_ascii_digit) {
+        pages = pages
+            .saturating_mul(10)
+            .saturating_add(i32::from(byte - b'0'));
+    }
+    let rows = if (0..=3).contains(&pages) {
+        pages * 9
+    } else {
+        0
+    };
+    SafeboxStep::Resize {
+        rows: u8::try_from(rows).unwrap_or(0),
+    }
+}
+
 async fn safebox_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -9051,6 +13617,33 @@ mod tests {
         }
     }
 
+    /// `/polyitem` grants the 70104 ball (`G/cmd_gm.cpp:3081`) with the line's mob vnum in
+    /// its first socket, parsed as the `DWORD` `/item` reads (`common/utils.h:44-50`); a
+    /// full inventory answers without the stop `/item`'s own line carries (`:3095`).
+    #[test]
+    fn polyitem_names_the_ball_and_reads_the_vnum_as_a_dword() {
+        assert_eq!(POLYITEM_BALL, 70104);
+        assert_eq!(POLYITEM_NO_ROOM, "Not enough inventory space");
+        assert_eq!(polyitem_vnum(b"101"), 101);
+        assert_eq!(polyitem_vnum(b""), 0);
+        assert_eq!(polyitem_vnum(b"junk"), 0);
+        assert_eq!(polyitem_vnum(b"101x"), 101);
+        assert_eq!(polyitem_vnum(b"-1"), u32::MAX);
+        assert_eq!(polyitem_vnum(b"4294967296"), 0);
+    }
+
+    /// `do_socket_item`'s count: 0 and anything from `ITEM_SOCKET_MAX_NUM` (6) up write the
+    /// default three, a negative count writes none, and 1-5 are taken as read.
+    #[test]
+    fn socketitem_counts_default_to_three_past_the_sockets() {
+        assert_eq!(socket_item_count(b""), 3);
+        assert_eq!(socket_item_count(b"0"), 3);
+        assert_eq!(socket_item_count(b"1"), 1);
+        assert_eq!(socket_item_count(b"5"), 5);
+        assert_eq!(socket_item_count(b"6"), 3);
+        assert_eq!(socket_item_count(b"-2"), 0);
+    }
+
     /// The dead phase reads the main input as the game phase does (`G/desc.cpp:526-531`), and
     /// consumes the same records; it alone refuses `CG_CHARACTER_POSITION` (B25).
     #[test]
@@ -9123,6 +13716,7 @@ mod tests {
             (HEADER_CG_CHAT, MainRecord::Chat),
             (HEADER_CG_ITEM_MOVE, MainRecord::ItemMove),
             (HEADER_CG_ITEM_USE, MainRecord::Belongings),
+            (HEADER_CG_ITEM_USE_TO_ITEM, MainRecord::Belongings),
             (HEADER_CG_MOVE, MainRecord::World),
             (HEADER_CG_ON_CLICK, MainRecord::Npc),
             (HEADER_CG_EXCHANGE, MainRecord::Transaction),
@@ -9132,17 +13726,75 @@ mod tests {
         let unrouted = HEADER_CG_LOGIN2.value();
         for phase in [ClientPhase::Game, ClientPhase::Dead] {
             for (header, route) in routes {
-                assert_eq!(main_record(phase, header.value()), Some(route), "{phase:?}");
+                assert_eq!(
+                    main_record(phase, header.value(), false),
+                    Some(route),
+                    "{phase:?}"
+                );
             }
-            assert_eq!(main_record(phase, unrouted), None, "{phase:?}");
+            assert_eq!(main_record(phase, unrouted, false), None, "{phase:?}");
         }
         let (dead, living) = (ClientPhase::Dead, ClientPhase::Game);
-        assert_eq!(main_record(dead, position), Some(MainRecord::Refused));
-        assert_eq!(main_record(living, position), Some(MainRecord::World));
+        assert_eq!(
+            main_record(dead, position, false),
+            Some(MainRecord::Refused)
+        );
+        assert_eq!(
+            main_record(living, position, false),
+            Some(MainRecord::World)
+        );
         for phase in [ClientPhase::Loading, ClientPhase::Close] {
             for header in [HEADER_CG_CHAT.value(), position] {
-                assert_eq!(main_record(phase, header), None, "{phase:?}");
+                assert_eq!(main_record(phase, header, false), None, "{phase:?}");
             }
+        }
+    }
+
+    /// An observer's item, exchange, attack and skill records are refused
+    /// (`CInputMain::Analyze`, `G/input_main.cpp:3690-3740`); its moves, targets, quickslots
+    /// and chats route as a player's.
+    #[test]
+    fn an_observers_gated_records_are_refused() {
+        let phase = ClientPhase::Game;
+        for header in [
+            HEADER_CG_ITEM_USE,
+            HEADER_CG_ITEM_USE_TO_ITEM,
+            HEADER_CG_ITEM_DESTROY,
+            HEADER_CG_ITEM_DROP,
+            HEADER_CG_ITEM_DROP2,
+            HEADER_CG_ITEM_MOVE,
+            HEADER_CG_ITEM_PICKUP,
+            HEADER_CG_EXCHANGE,
+            HEADER_CG_ATTACK,
+            HEADER_CG_SHOOT,
+            HEADER_CG_USE_SKILL,
+        ] {
+            assert_eq!(
+                main_record(phase, header.value(), true),
+                Some(MainRecord::ObserverRefused),
+                "{header:?}"
+            );
+        }
+        for (header, route) in [
+            (HEADER_CG_MOVE, MainRecord::World),
+            (HEADER_CG_SYNC_POSITION, MainRecord::World),
+            (HEADER_CG_CHARACTER_POSITION, MainRecord::World),
+            (HEADER_CG_TARGET, MainRecord::World),
+            (HEADER_CG_TARGET_INFO_LOAD, MainRecord::World),
+            (HEADER_CG_REQUEST_EVENT_DATA, MainRecord::World),
+            (HEADER_CG_QUICKSLOT_ADD, MainRecord::Belongings),
+            (HEADER_CG_REFINE, MainRecord::Belongings),
+            (HEADER_CG_SHOP, MainRecord::Npc),
+            (HEADER_CG_QUEST_CONFIRM, MainRecord::Npc),
+            (HEADER_CG_SCRIPT_SELECT_ITEM, MainRecord::Npc),
+            (HEADER_CG_CHAT, MainRecord::Chat),
+            (HEADER_CG_MESSENGER, MainRecord::Messenger),
+        ] {
+            assert_eq!(
+                main_record(phase, header.value(), true),
+                Some(route),
+                "{header:?}"
+            );
         }
     }
 
@@ -9254,6 +13906,7 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             st: 6,
             ht: 4,
             dx: 3,
@@ -9262,7 +13915,10 @@ mod tests {
             sp: 100,
             stamina: 800,
             gold: 0,
+            gaya: 0,
             conqueror_exp: 0,
+            conqueror_level_step: 0,
+            conqueror_point: 0,
             sungma_str: 0,
             sungma_hp: 0,
             sungma_move: 0,
@@ -9282,6 +13938,8 @@ mod tests {
             exit_map_index: 0,
             exit_x: 0,
             exit_y: 0,
+            horse: db::players::PlayerHorse::default(),
+            logoff_interval: 0,
         }
     }
 
@@ -9524,5 +14182,68 @@ maps = [1]
         assert_eq!(names.find(60_003, english), b"Simbol Eroic");
         assert_eq!(names.find(10, english), b"Sabie+0");
         assert_eq!(names.find(10, ELocale::Es as u8), b"Espada+0");
+    }
+
+    #[test]
+    fn the_counts_scan_reads_two_ints_like_fscanf() {
+        assert_eq!(scanf_two_ints("0 0\n"), (Some(0), Some(0)));
+        assert_eq!(scanf_two_ints("1200 650"), (Some(1200), Some(650)));
+        assert_eq!(scanf_two_ints(""), (None, None));
+        assert_eq!(scanf_two_ints("   "), (None, None));
+        // A lone first word converts and the second stays `None`.
+        assert_eq!(scanf_two_ints("1\n"), (Some(1), None));
+        // A first word that is not a number stops both conversions.
+        assert_eq!(scanf_two_ints("abc 5"), (None, None));
+        assert_eq!(scanf_two_ints("5 abc"), (Some(5), None));
+        // A sign converts, and trailing text never stops a conversion.
+        assert_eq!(scanf_two_ints("-3 +7x"), (Some(-3), Some(7)));
+        assert_eq!(scanf_two_ints("12x34 5"), (Some(12), None));
+        // Past the `int` range clamps, as glibc's `%d` does.
+        assert_eq!(
+            scanf_two_ints("99999999999999999999 -99999999999999999999"),
+            (Some(i32::MAX), Some(i32::MIN))
+        );
+    }
+
+    /// `CInputMain::WhisperDetails` (`G/input_main.cpp:3603-3638`): an empty name answers
+    /// nothing; the lookup reads the name to its first NUL or the field's end, a name nobody
+    /// holds is `LOCALE_DEFAULT`, and the echo keeps at most 24 bytes with a 0 after them.
+    #[test]
+    fn a_whisper_details_answer_echoes_24_bytes_and_names_the_language() {
+        let field = |text: &[u8]| {
+            let mut name = [0_u8; CG_CHARACTER_NAME_FIELD_SIZE];
+            name[..text.len()].copy_from_slice(text);
+            name
+        };
+        assert_eq!(
+            whisper_details_answer(&field(b""), |_| panic!("no lookup")),
+            None
+        );
+        // Bytes after the first NUL are neither looked up nor echoed.
+        let mut asked = field(b"Yankee");
+        asked[7] = b'x';
+        let answer = whisper_details_answer(&asked, |name| (name == "Yankee").then_some(6));
+        assert_eq!(
+            answer,
+            Some(GcWhisperDetails {
+                name: field(b"Yankee"),
+                language: 6
+            })
+        );
+        let answer = whisper_details_answer(&field(b"Nobody"), |_| None);
+        assert_eq!(
+            answer.map(|answer| answer.language),
+            Some(1),
+            "LOCALE_DEFAULT"
+        );
+        // A field with no NUL is looked up whole and echoed to 24 bytes.
+        let full = [b'A'; CG_CHARACTER_NAME_FIELD_SIZE];
+        let answer = whisper_details_answer(&full, |name| {
+            assert_eq!(name.len(), 25);
+            None
+        })
+        .expect("a name");
+        assert_eq!(answer.name[..24], [b'A'; 24]);
+        assert_eq!(answer.name[24], 0);
     }
 }

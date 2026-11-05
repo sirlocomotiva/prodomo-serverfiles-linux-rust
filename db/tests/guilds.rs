@@ -170,6 +170,67 @@ async fn a_member_row_round_trips_through_add_and_remove() {
         "a second delete finds nothing"
     );
 }
+/// `disband_guild` deletes the guild, which cascades the grade, member, comment, mark
+/// and symbol rows, and stamps every member's disband flag. A second disband finds no
+/// row but still stamps.
+#[tokio::test]
+async fn a_guild_row_cascades_and_stamps_through_disband() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let master = account(store, "bandmaster").await;
+    let guest = account(store, "bandguest").await;
+    let master_pid = created(store, master, 0, "BandMaster").await;
+    let guest_pid = created(store, guest, 0, "BandGuest").await;
+    let id = create_guild(store, "BandGuild", master_pid, &grades())
+        .await
+        .expect("the creation should store");
+    add_member(store, id, guest_pid, 15)
+        .await
+        .expect("the join should store");
+    post_comment(store, id, "BandMaster", "hello")
+        .await
+        .expect("the comment should store");
+    save_mark(store, id, 9, &[1; 768])
+        .await
+        .expect("the mark should store");
+    save_symbol(store, id, &[2; 8])
+        .await
+        .expect("the symbol should store");
+    assert!(
+        db::guilds::disband_guild(store, id, &[master_pid, guest_pid], 10_000_000)
+            .await
+            .expect("the disband runs")
+    );
+    let stored = load_all(store).await.expect("the load should read");
+    assert!(stored.guilds.is_empty(), "the guild row is gone");
+    assert!(stored.grades.is_empty(), "the grade rows cascade");
+    assert!(stored.members.is_empty(), "the member rows cascade");
+    let board = board(store, id, 10).await.expect("the board reads");
+    assert!(board.is_empty(), "the comment row cascades");
+    let marks = load_marks(store).await.expect("the marks read");
+    assert!(marks.is_empty(), "the mark row cascades");
+    let symbols = load_symbols(store).await.expect("the symbols read");
+    assert!(symbols.is_empty(), "the symbol row cascades");
+    let flags = db::quest_flags::load_flags(store, guest_pid)
+        .await
+        .expect("the flags read");
+    assert_eq!(
+        flags
+            .iter()
+            .find(|flag| flag.name == b"guild_manage.new_disband_time")
+            .map(|flag| flag.value),
+        Some(10_000_000),
+        "the guest's disband stamp"
+    );
+    assert!(
+        !db::guilds::disband_guild(store, id, &[master_pid], 10_000_001)
+            .await
+            .expect("the disband runs"),
+        "a second disband finds no row"
+    );
+}
 
 #[tokio::test]
 async fn grade_and_member_rows_round_trip_through_the_setters() {

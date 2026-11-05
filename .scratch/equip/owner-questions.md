@@ -238,7 +238,10 @@ owner answers.
     state flag), so every boxed stone and spawn-motion monster carries the flag in each later
     insert. The Rewrite sends it the same way. How the Reference client draws a late viewer's
     flagged insert is checked in the play test. The other choice is to reset the flag after the
-    first show. Waits on it: nothing blocks.
+    first show. `SetPolymorph` sets it on a player the same way (`G/char.cpp:7701`; only the
+    `__FIX_CHANGE_SEX_WITHOUT_RELOG__` path resets it, `:2171`), so a GM who used `/polymorph`
+    carries it in each later insert and update, even after the clear, until it leaves; ledger
+    364 reproduces that too. Waits on it: nothing blocks.
 
 25. **One dice stream for the whole process (provisional, ledger 229f).** Legacy's boot draws come
     from one `thecore_random` stream per Core process, so each Core's maps drew from their own stream.
@@ -306,3 +309,29 @@ owner answers.
     for a later death (`G/char_battle.cpp:347-363`). The Rewrite checks first, clears the debt
     on every path and says nothing when nothing is owed (V18k). The other choice is legacy's
     chatter with the debt cleared. Waits on it: nothing blocks.
+33. **A worn piece's attributes written in place (ledgers 343 and 368).** `/attr_full_set`,
+    `/change_attr` and `/add_attr` write a worn piece's attributes without re-applying its
+    points, as legacy does. Because the takeoff's `ModifyPoints(false)` subtracts the new
+    attributes, a stat the old ones gave can stay behind or go negative. The Rewrite keeps
+    legacy's behaviour. The other choice is to take the piece's points off before the write and
+    put them back after it. Waits on it: nothing blocks.
+34. **Quest functions no script calls (ledger 390).** Of the 508 `missing` rows in
+    `.scratch/parity/quest-api.md`, 391 name a function that no file the quest runtime can load
+    mentions: every file under `locale/europe/quest/` except the name list `quest_functions`, plus
+    `settings.lua` and `translate.lua`, searched as `mod.fn`, `mod["fn"]` or a bare global name,
+    comments included (control: `pc.ore_refine` and `pc.get_level` are found, `pc.mining` and
+    `__refine_pick` are not). No GM command runs Lua text: `do_priv_guild`, the one that loads a
+    buffer, loads an empty one (`G/cmd_gm.cpp:3169-3200`), so a client cannot reach them. Earlier
+    ledgers ported such functions with probe quests (27 `ported` rows have no caller in the
+    owner's scripts), and the Rewrite keeps doing so. The other choice is to mark the 391 rows
+    `unused` with this evidence and port a function only when a script starts calling it. Waits
+    on it: nothing blocks; it decides how much of the quest API is left.
+35. **The horse refill at every login (ledger 392).** The owner's build defines
+    `__FIX_NIVEL_CAL__` (`C/prodomodefines.h:95`), so `CInputLogin::Entergame` runs
+    `SetHorseLevel(GetHorseLevel())` for every character with a horse
+    (`G/input_login.cpp:887-897`): both pools refill, the health drop time moves three days on,
+    and skill 130 is planted at the horse level. A dead or starved horse therefore stands fed and
+    rested after a relog, which makes `/horse_set_stat`, the drop clock and the revive matter only
+    within one session. The Rewrite ports it as written and treats it as a Quirk. The other choice
+    is to call it a Defect and keep the stored pools, planting only the skill. Waits on it:
+    nothing blocks; a change is one call in `enter_horse`.

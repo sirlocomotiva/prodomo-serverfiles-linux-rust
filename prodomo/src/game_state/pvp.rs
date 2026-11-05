@@ -280,9 +280,11 @@ impl GameState {
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(attacker);
+        self.cancel_mining(attacker);
         if let Some(body) = self.bodies.get_mut(&victim) {
             body.last_move = now;
         }
+        self.cancel_mining(victim);
     }
 
     /// `SendDamagePacket` of the player under `victim` (`G/char_battle.cpp:1720-1742`):

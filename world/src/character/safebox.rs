@@ -399,6 +399,19 @@ impl Safebox {
         Some(held)
     }
 
+    /// `CSafebox::ChangeSize` (`G/safebox.cpp:148-163`): grow to `rows` rows. A size at
+    /// or below the held one leaves the grid alone; a grow keeps every covered cell.
+    pub fn change_size(&mut self, rows: u8) {
+        if rows <= self.rows {
+            return;
+        }
+        self.rows = rows;
+        self.grid.resize(
+            usize::try_from(self.cells()).unwrap_or(self.grid.len()),
+            false,
+        );
+    }
+
     /// The set record of an item where it is anchored.
     fn set_record(&self, item: &Item) -> StoreRecord {
         StoreRecord::Set(GcStoreItemSet {
@@ -867,6 +880,19 @@ mod tests {
         assert_eq!(safebox.account(), 7);
         assert_eq!(safebox.rows(), SAFEBOX_ROWS);
         assert_eq!(safebox.window(), StoreWindow::Safebox);
+    }
+
+    #[test]
+    fn a_size_change_grows_and_never_shrinks() {
+        let (mut safebox, _) = Safebox::open(StoreWindow::Safebox, 9, 7, Vec::new());
+        assert_eq!(safebox.cells(), 45);
+        safebox.change_size(9);
+        assert_eq!(safebox.cells(), 45, "the same size leaves the grid alone");
+        safebox.change_size(0);
+        assert_eq!(safebox.cells(), 45, "a smaller size leaves the grid alone");
+        safebox.change_size(18);
+        assert_eq!((safebox.rows(), safebox.cells()), (18, 90));
+        assert!(safebox.has_room(45, 2), "the new rows take items");
     }
 
     #[test]

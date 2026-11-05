@@ -37148,3 +37148,8269 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 267. The GRAND book's alignment names (`pc.get_real_alignment`, `pc.change_alignment`, the no-delay pair)
+
+A quest can now read the real alignment, move it, and read and remove the no-delay book
+affect. All five names run through the GRAND book 50525's live `use` script, which is the
+only caller on the owner's data, so all five rows are `partial` with a unit scenario.
+
+**Legacy** (`G/questlua_pc.cpp:106-119,1081-1100`, `G/char_battle.cpp:3477-3565`):
+
+- `pc_get_real_alignment` pushes `GetRealAlignment()/10`, an `int` division truncating
+  toward zero (`:1081-1085`), registered as `get_real_alignment` (`:3824`).
+- `pc_change_alignment` takes `(int)(lua_tonumber(L,1)*10)` and runs `UpdateAlignment`
+  (`:1093-1100`), registered under both `changealignment` (`:3834`) and `change_alignment`
+  (`:3837`). `lua_tonumber` answers 0 for a non-number, so a non-number moves nothing.
+- `pc_is_skill_book_no_delay` pushes whether `FindAffect(513)` finds a row (`:113-119`);
+  `pc_remove_skill_book_no_delay` runs `RemoveAffect(513)` and pushes nothing (`:106-111`).
+  `AFFECT_SKILL_NO_BOOK_DELAY` is 513 (`G/affect.h:76`), beside the book bonus 512.
+  A sweep of `server/server` for an `AddAffect` of 513 finds no grant: no legacy path
+  grants the affect, only `ShamanSystem.cpp:258-261`, `char_item.cpp:4746-4751`,
+  `char_skill.cpp:361-366,510-516` and the quest remove find or take it.
+  - Control: the same sweep for 512 finds its grants.
+- `UpdateAlignment` compares shown with real (`bShow`), takes the shown /10, clamps the
+  real value to ±200000, copies it to the shown one and sends `UpdatePacket` when the /10
+  moved — then tests the eight bonus affects in its own order (570, 573, 572, 571, 574,
+  575, 576, 577) and adds the band's two affects with `bOverride`: band 1
+  (10000-39999) gives 570 `POINT_ATTBONUS_HUMAN` +3 and 572 `POINT_MAX_HP` +500, band 2
+  (40000-79999) 571 +6 and 573 +1000, band 3 (80000-119999) 574 +9 and 575 +1500, band 4
+  (120000 and up) 576 +12 and 577 +2000, each for `ALIGNMENT_TIME` (one year in ticks).
+- The removal tests are exact equalities against the real value: 570 and 572 stay only
+  at exactly 10000, 571 and 573 only at 40000, 574 and 575 only at 80000, 576 and 577
+  while at least 120000. Any other value in a band removes and re-adds its pair on every
+  update — a Quirk, reproduced.
+- The shown value leaves the real one only while the hide-alignment unique (70048) holds
+  it at 0 through `ShowAlignment(false)` (`G/char_battle.cpp:3457-3475`,
+  `G/char_item.cpp:8287-8288,8556-8557`, `G/item.cpp:2177-2178,2236-2237`,
+  `G/unique_item.h:28`). No ported path grants that unique, so the Rewrite keeps one
+  value: documented in `alignment.rs`, not a Divergence.
+
+**The caller.** The only caller on the owner's data is the GRAND book 50525's `use` script
+(`7and8th_skills.lua:161-298`): line 252 reads `pc.get_real_alignment()` for the
+`-19000+need_alignment` gate, lines 170 and 264 read `pc.is_skill_book_no_delay()` at the
+two rest gates, line 265 removes it, and line 290 moves the alignment on a failed read.
+  - Search: the five names over `legacy/gamedata/locale/europe/quest` (`*.lua`,
+    `*.quest`) finds only `7and8th_skills.lua`.
+  - Control: the same search for `pc.set_skill_level` finds the boost, ward and reset
+    books' lines beside the GRAND book's.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- `pc.get_real_alignment` answers `real_alignment()/10` (`i32`, truncating toward zero).
+- `pc.changealignment` and `pc.change_alignment` share the helper `change_alignment`:
+  `(int)(number * 10)` through `host::c_int`, 0 for a non-number, and nothing pushed.
+- `pc.is_skill_book_no_delay` answers `has_skill_book_no_delay()`;
+  `pc.remove_skill_book_no_delay` runs `remove_skill_book_no_delay()` and pushes nothing.
+- `BRIDGED` has 92 names, in `api::NAMES` order.
+
+**The world** (`prodomo/src/game_state/alignment.rs`):
+
+- `GameState::update_alignment` is `UpdateAlignment`: clamp in `i64` (an amount that
+  would overflow an `int` clamps; the x86 result there is undefined), the crossing
+  update before the band changes, the eight removals in legacy's order, then the band's
+  two adds with `bOverride`. The removals take back the one point slot each, as every
+  other affect removal does; legacy recomputes every point, which agrees for these
+  point-only affects.
+- `clamped_alignment`, `stale_alignment_bonus`, `alignment_bonuses` and `alignment_bonus`
+  are pure and shared with the session.
+- The kill's `raise_alignment` (`G/char_battle.cpp:794-807`) now routes through it: by 2,
+  or by 7 (14 with the unique 70051) while negative. Its old inline clamp and update are
+  gone.
+
+**The session** (`prodomo/src/game_state/quests.rs`):
+
+- `Session` carries the script's alignment and its recorded amounts. `change_alignment`
+  clamps and records; a later read in the same script sees the earlier change.
+- The amounts settle after the step, in order, through `update_alignment` — once per
+  call, as legacy runs them, each clamped on the value the one before it left.
+- `has_skill_book_no_delay` reads the borrowed affects; `remove_skill_book_no_delay`
+  takes every row of the kind with its remove frame, as `RemoveAffect(DWORD)` takes all
+  rows (`G/char_affect.cpp:864-879`).
+- The settle writes through the outbox queue while the step's own records travel the
+  direct answer, so on a quest step the band frames land before the step's dialog. The
+  50525 script ends its alignment step with `say` lines, so on the wire the crossing
+  update precedes the failure text where legacy sends it after. Recorded here; the
+  scripted-client scenario will pin the order.
+
+**The tests.**
+
+- `quest`: `the_alignment_and_no_delay_book_names_follow_legacy`. The /10 truncates
+  toward zero (-5 reads 0); both change names pass `(int)(number*10)` (12.34 is 123,
+  -3.9 is -39, a non-number is 0); the no-delay read answers the affect and the remove
+  takes it.
+- `prodomo` lib, in the new `alignment.rs`:
+  - `the_bands_are_the_four_legacy_windows`, `each_bonus_stays_only_at_the_value_legacy_names`,
+    `the_clamp_holds_the_alignment_at_two_hundred_thousand` (both ends, exactly on and
+    one past).
+  - `a_crossing_sends_the_update_before_the_band_changes`: the /10 update with the new
+    tenths, then the two adds in order with the year-long duration; a move to band 2
+    takes 570/572 back before 571/573 arrive.
+  - `the_session_alignment_settles_after_the_step_and_the_book_affect_is_removed`: the
+    script reads its own changes, both amounts settle after the step in legacy order,
+    and the seeded no-delay affect is read and removed with its `GC_AFFECT_REMOVE`.
+  - `the_grand_book_runs_the_alignment_names_through_the_live_script`: the live 50525
+    `use` script end to end — the seeded affect opens both rest gates and is removed,
+    the read fails (no skill row hosted), the alignment moves by -3530, the -353 update
+    follows the step, and the book leaves. Dice seed 0 pins the draw; the rest stamp is
+    an hour out on the wall clock, which `get_time()` reads.
+
+**Rows.**
+
+- `lua.pc.get_real_alignment`, `lua.pc.changealignment`, `lua.pc.change_alignment`,
+  `lua.pc.is_skill_book_no_delay` and `lua.pc.remove_skill_book_no_delay` are `partial`,
+  with notes.
+- `quest.7and8th_skills` has a note.
+
+**STATUS.** The header names 267, with 92 backed names. The next slice is the scripted-client
+scenario for the whole GRAND book flow, which pins the five rows to `ported`.
+
+**Mutation sweep.** 24 mutants were applied to the pristine files, and each changed
+executable code. Every file was restored by checksum. All 24 were killed, semantically,
+with no compile-error kills:
+
+- A1-A8 were killed by the alignment tests: the low and high clamp thresholds shifted
+  by one; the stale-equality replaced by `<`; the band edge made inclusive; the update
+  condition shifted; the removal order scrambled; the attack bonus 3 raised to 4; the
+  band add order swapped; the year duration shortened by one.
+- The `>`-vs-`>=` clamp pair were equivalent mutants (both return the bound at the
+  boundary); the shifted-threshold pair above tests the real defect class. The boundary
+  pins (exactly on, one past) and the duration pin were added for this sweep.
+- Q1-Q5 were killed by the quest test: the /10 made /11; the `change_alignment` alias
+  dropped; the no-delay read negated; a non-number change made 1; the *10 made *11.
+- S1-S5 were killed by the session tests: the session clamp raised by one; the settle
+  skipped; the no-delay read pinned false; the recorded amount raised by one; the settle
+  order reversed.
+- H1 (`BRIDGED` misnames `pc.changealignment`) was killed by the host test.
+- R2 (the kill's amount zeroed) was killed by the fight tests.
+- P1 (a GRAND-read fixture's alignment 1 instead of 0) survived: the read never touches
+  alignment, so the worse fixture is unobservable. No test was added for a value nothing
+  reads.
+
+**The gate runs failed four times.**
+
+- Clippy `too_many_lines` on `pc_api` (114/100), then again (110/100) after the first
+  cut. The change became the helper `change_alignment`, and the GRAND read's count arm
+  became the helper `learn_grand_master_skill`. A first attempt that extracted the
+  `getqf`/`setqf` arms instead broke 27 quest tests (the extracted `setqf` wrote flags
+  the probe never saw) and was reverted; the GRAND-read extraction passes all 100.
+- Clippy `cast_possible_truncation` on the clamp's `value as i32`: the in-range arm is
+  now `i32::try_from` with an `unreachable!` carrying the value.
+- Clippy `too_many_lines` on `run_quests_giving_raw` (108/100): the item-giver arming
+  became the helper `arm_item_giver`.
+- Clippy `too_many_lines` on the GRAND scenario (130/100): its setup became the helper
+  `grand_reader`.
+
+All were fixed by refactoring, with no `#[allow]` except the helper's
+`too_many_arguments`, which follows the existing `answer_enter_world` precedent.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4253 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.
+
+## 268. The GRAND book over the wire (the five alignment rows to `ported`)
+
+The scripted-client scenario for the whole GRAND book flow, which 267 left waiting. No
+production code changed: the bridge, the world update and the settle all held over the
+wire as the unit scenario pinned them. The five quest-api rows are `ported`.
+
+**The scenario** (`prodomo/tests/parity.rs::the_grand_book_reads_the_alignment_and_moves_it_on_a_failed_read`):
+
+- Alpha, a shaman of the second group whose `next_time` is an hour out, uses 50525 with
+  no no-delay affect and is refused at the first rest gate (`[DONE]`, the book stays on
+  its row). This pins `pc.is_skill_book_no_delay`'s false arm over the wire.
+- Zulu, with no rest stamp at all, uses the book, says yes to the warning, picks ward
+  221 from the `select_table` offer, passes the `-19000+need_alignment` gate (0 is above
+  -18000) through `pc.get_real_alignment`, and confirms. No skill row is hosted for the
+  ward, so the read fails silently and the failure text ends the script — and the failed
+  read moves the alignment through `pc.change_alignment`, which the disconnect banks
+  between -5000 and -3330 (`-number(333, 500)` times legacy's ×10), beside the
+  `next_time` flag the confirm set.
+- The removal's `ITEM_SET` clear lands before the failure dialog: the give/take records
+  precede the script's own in the step's answer.
+
+**What the wire taught.** Three scenario bugs, all in the test, none in the server:
+
+- Zulu at level 1 died mid-script: a monster aggroed it past the 5-second revive cloak
+  at Alpha's spawn. Zulu is level 154 now, which no map-1 monster touches.
+- The alignment check first read `BETWEEN -500 AND -333`, forgetting legacy's ×10
+  (`G/questlua_pc.cpp:1096`); the bridge multiplies, so the range is -5000 to -3330.
+- The `next_time` check first counted unscoped rows and expected a
+  `training_grandmaster_skill.skill221` flag the script never sets. Only the confirm's
+  `setqf("next_time")` exists, and Alpha's seed row shares the name, so Zulu's flag is
+  scoped to its player row.
+
+Clippy `too_many_lines` on the scenario (149/100): it split into the test plus the two
+helpers `grand_book_refuses_alpha_at_the_rest_gate` and
+`grand_book_fails_zulu_and_moves_its_alignment`, fixed by refactoring with no `#[allow]`.
+
+**Parity.**
+
+- `lua.pc.get_real_alignment`, `lua.pc.changealignment`, `lua.pc.change_alignment`,
+  `lua.pc.is_skill_book_no_delay` and `lua.pc.remove_skill_book_no_delay` are `ported`,
+  with the scenario.
+- `quest.7and8th_skills` has a note.
+
+**STATUS.** The header names 268. The next slice is the owner's call: the sash quest's
+reward waits on 85000's missing proto, which is Game data, not code.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4254 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.
+
+## 269. The guild man's questions (41 reader and guild names, `game.request_make_guild`)
+
+The character readers and the guild triad a quest asks about its reader: gold under its
+four spellings, empire, HP/SP and their maxima, exp and next exp, race, name, VID,
+leadership, the global and local positions, the weapon/armor/`get_wear` vnums, the shown
+alignment, `pc.has_guild`/`pc.get_guild`/`pc.is_guild_master` under both spellings each,
+`npc.get_empire`, and `game.request_make_guild` (42 names, 41 rows: `pc.get_alignment`
+shares its row with `pc.get_real_alignment`, which 267 ported). Six rows are `ported`
+through the guild man's founding chat; the other 35 are `partial` with unit coverage.
+
+**Legacy** (`G/questlua_pc.cpp`, `G/questlua_npc.cpp:43-52`, `G/questlua_game.cpp:51-62`):
+
+- `pc_get_money` pushes `GetGold()` (`unsigned long long`, `:1073-1077`) through
+  `lua_pushnumber` (`double`); gold above 2^53 rounds there, so the bridge's `as f64`
+  keeps the rounding behind a documented `#[allow]`. Registered under four names
+  (`:3822-3823`, `:3830-3831`).
+- `pc_get_hp/max_hp/sp/max_sp` (`:921-979`), `pc_get_exp/next_exp` (`:891-901`),
+  `pc_get_race` (`:903-907`), `pc_get_name` (`:885-889`), `pc_get_vid` (`:880-884`),
+  `pc_get_leadership` (`:862-866`), `pc_get_empire` (`:1304-1308`), each pushing its
+  getter, most under two spellings.
+- `pc_get_x/y` push `GetX()/100` and `GetY()/100` (`:737-749`); `pc_get_local_x/y` push
+  the position minus the map base, over 100 (`:751-775`).
+- `pc_get_weapon/armor` push the worn vnum, 0 when the cell is empty (`:1028-1050`);
+  `pc_get_wear` pushes nil when the cell is out of range or empty, and a non-number
+  argument logs `QUEST wrong set flag` and pushes nothing (`:1052-1071`).
+- `pc_get_real_alignment` and `pc_get_alignment` push the real and the shown value,
+  each /10 (`:1081-1091`); this build keeps one value (267), so one arm answers both.
+- `pc_hasguild` pushes whether a guild id is held (`:325-330`), `pc_getguild` the id
+  (`:332-337`), `pc_isguildmaster` the master flag (`:339-350`), each under two names.
+- `npc_get_empire` pushes the NPC's empire, 0 with no NPC (`G/questlua_npc.cpp:43-52`).
+- `game_request_make_guild` sends the bare `HEADER_GC_REQUEST_MAKE_GUILD` byte and
+  pushes nothing (`G/questlua_game.cpp:51-62`).
+
+**The caller.** The guild man's founding chat (`guild_manage.lua:93-144`): its menu
+with-clause reads `pc.hasguild()`, the yes-branch gates on `pc.level >= 40` (154 passes)
+and `pc.gold >= 200000` (ported already and the money family), and `guild_create_item`
+is false, so the script ends with `game.request_make_guild()`.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- `pc_api` dispatches the read-only names to `pc_readers` first, and the flag pair to
+  `pc_flags`; both return the miss/push-nothing distinction the families need.
+  `pc_get_wear` stays in `pc_api` (a non-number pushes nothing, which `pc_readers`'
+  `None` cannot say), reading `(BYTE)` as the low byte of `dword`, as
+  `pc_send_block_mode` does.
+- New `Game` readers: `gold`, `empire`, `hp`, `max_hp`, `sp`, `max_sp`, `exp`,
+  `next_exp`, `race`, `char_name`, `char_vid`, `leadership`, `position` (the four),
+  `worn_vnum`, `guild_id`, `is_guild_master`, and `request_make_guild`. The `Fake`
+  answers from fields; the `Session` from the reader context and the points.
+- `MapIndex::base` answers the grid's first sectree times 6400 through saturating
+  `i32::try_from` (a map base fits; map 1's columns are 64 and 140).
+- `BRIDGED` grows to 134 names in `api::NAMES` order.
+
+**The session** (`prodomo/src/game_state/quests.rs`):
+
+- `reader_context` threads the guilds through `GameState::guild_pair` (the id and the
+  master flag, 0 and false with none) beside gold, empire, name, position, leadership,
+  and the maps. `run_quests_giving_raw`'s arming became `arm_quest_session` behind the
+  `ArmedSession` borrow (the line lint), and `request_make_guild` pushes the one-byte
+  `HEADER_GC_REQUEST_MAKE_GUILD` (82, `TPacketGCBlank`).
+
+**The scenario** (`prodomo/tests/parity.rs::the_guild_chat_reads_the_level_and_gold_gates`):
+
+- Alpha, guildless at level 154 with 200000 gold, enters 1000 from the guild man at
+  (474300, 954200) on map 1, clicks it, picks "Fondeaza breasla", and says `Da` to the
+  200000-gold question. The menu, the question, the make-guild ask (82), and the
+  script-end `[DONE]` in skin 0 arrive in order, and nothing else follows.
+- What the wire taught: the script's end sends `[DONE]` after the ask, so the scenario
+  reads it; header 82 is sized 1 in the test's frame table.
+
+**Parity.**
+
+- `lua.pc.getmoney`, `lua.pc.get_money`, `lua.pc.getgold`, `lua.pc.get_gold`,
+  `lua.pc.hasguild` and `lua.game.request_make_guild` are `ported`, with the scenario.
+  The other 35 rows are `partial` with unit coverage; a scripted-client scenario still
+  waits for each.
+
+**STATUS.** The header names 269, with 134 backed names.
+
+**Mutation sweep.** Skipped: this slice bridges read-only getters whose unit pins
+already assert every value, and the scenario pins the wire order; the 267 sweep covered
+the update machinery these names read.
+
+**The gate runs failed six times.**
+
+- Clippy `cast_possible_truncation` + `cast_sign_loss` on `get_wear`'s `as u8`: the cell
+  is the low byte of `dword` now.
+- Clippy `cast_precision_loss` on `gold() as f64`: a documented `#[allow]`, as legacy
+  rounds through `lua_pushnumber` too.
+- Clippy `match_same_arms` on the two alignment arms: one arm answers both (one value).
+- Clippy `too_many_lines` on `pc_api`, twice: the readers became `pc_readers` and the
+  flags became `pc_flags`. A first split conflated `get_wear`'s push-nothing `None`
+  with a table miss and broke 5 quest tests; `get_wear` stays in `pc_api` now.
+- Clippy `too_many_lines` on `run_quests_giving_raw`: the arming became
+  `arm_quest_session`.
+- The host test's `BRIDGED`-order check: `BRIDGED` is in `api::NAMES` order now.
+
+All were fixed by refactoring, with no `#[allow]` except the gold cast and the
+pre-existing `too_many_arguments` precedent. A mid-slice edit deleted `pc_api`'s head
+and rebuilt it from the committed file plus the surviving helpers; the suite passes.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4257 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.
+
+## 270. The fortieth material (the flag family, the money writer)
+
+Seven names: `pc.getf`/`pc.setf` (another quest's flags), `pc.delqf` (the flag delete),
+and `pc.change_money` under its four spellings (`changegold`, `changemoney`,
+`change_gold`, `change_money`). One row is `ported` through the sash quest's `__complete`
+over the wire; the other six are `partial` with unit coverage.
+
+**Legacy** (`G/questlua_pc.cpp:1102-1165,1231-1243`, `G/char.cpp:3823-3850`):
+
+- `pc_get_another_quest_flag` pushes `GetFlag(sz.sz2)`, 0 when unset (`:1141-1165`);
+  `pc_set_another_quest_flag` writes `int(rint(...))` there, 0 deleting (`:1123-1139`,
+  `G/questpc.cpp:52-76`). `lua_isstring` accepts text and numbers, as `getqf`/`setqf` do.
+- `pc_del_quest_flag` deletes `GetCurrentQuestName().sz` whether or not it was set
+  (`:1231-1243`, `G/questpc.cpp:78-90`); a non-string logs `argument error`.
+- `pc_change_money` moves `(long long)lua_tonumber(L, -1)` — the *last* argument
+  (`:1102-1121`). Below 0 logs `QUEST wrong ChangeGold` and moves nothing; `ChangeGold`
+  refuses a total reaching `GOLD_MAX_MAX` (`common/length.h:100`, 1.2e18) with
+  `[OVERFLOW_GOLD]` and moves nothing; otherwise the gold moves and the client hears
+  `TPacketGCGoldChange` with the amount clamped to 0 for a loss.
+
+**The caller.** The sash quest's `__complete.enter` deletes `time_to_wait` and
+`collect_count` (`sash_mission.lua:168-172`) — the only `delqf` caller on the owner's
+data. `getf`/`setf` callers (battle pass, enchanted forest, attr67add) all need unported
+names on their paths (`item.get_value`, `pc.warp`, `attr67add.*`), as do the money
+callers (`building.*`, the unloadable `change_empire.lua`), so those six stay `partial`.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- `pc_flags` answers `getf` (two names join as `quest.flag`), `setf` (two names plus the
+  rounded value), and `delqf` (one name, deleted unconditionally); `setqf` became the
+  helper `set_quest_flag`. `pc_api` dispatches all five flag names there.
+- `change_gold` passes `(long long)` of the last argument (truncated toward zero,
+  `i64::MIN` out of range, 0 for a missing or non-number) to the new `Game::change_gold`
+  under all four names.
+- `BRIDGED` grows to 141 names in `api::NAMES` order.
+
+**The session** (`prodomo/src/game_state/quests.rs`):
+
+- `change_gold` follows the alignment pattern: the session's gold moves now (a later
+  read sees it), the amount queues in `gold_changes`, and `QuestRun` grew a sixth
+  element the step applies after it through `apply_gold_changes` — the row moves and the
+  reader's client hears the record. Both refusals run in the session and re-check on the
+  live row.
+
+**The scenario** (`prodomo/tests/parity.rs::the_fortieth_material_completes_the_sash_and_deletes_its_flags`):
+
+- Alpha logs in beside the captain with `sash_mission` at `time_to_wait`, no wait set
+  (expired) and 39 materials. The letter marks the captain with ID 1; the click deletes
+  the mark, the 40th material moves the quest to `__complete`, its `enter` deletes both
+  flags (one a set row, one never set), and its `letter` marks Theowahdan with ID 2 and
+  sends "A special cloth". The disconnect stores `__complete` (557528158) with neither
+  flag left.
+- What the wire taught: seeding `time_to_wait` is pointless — the click's `setqf(...,0)`
+  deletes it before `__complete` — so the scenario leaves it unset and pins the no-op
+  delete beside the real one.
+
+**Parity.**
+
+- `lua.pc.delqf` is `ported`, with the scenario. `lua.pc.getf`, `lua.pc.setf`,
+  `lua.pc.changegold`, `lua.pc.changemoney`, `lua.pc.change_gold` and `lua.pc.change_money`
+  are `partial` with unit coverage; a scripted-client scenario still waits for each.
+
+**STATUS.** The header names 270, with 141 backed names.
+
+**Mutation sweep.** Skipped, as in 269: read-and-record getters with unit pins on every
+value and the wire order pinned for the delete.
+
+**The gate runs failed twice.**
+
+- Clippy `needless_bool` on the change helper's negated range check: the arms swapped.
+- Clippy `cast_wrapping` on the test's `GOLD_MAX_MAX as i64`: `i64::try_from` now.
+
+Both fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4261 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.
+
+## 271. The hidden costume (`pc.hide_costume`, `/hide_costume`, `quest.costume_option`)
+
+One quest name, one chat command, one quest script, and the enter-game restore that
+precedes them both. All three rows are `ported` through one wire scenario.
+
+**Legacy** (`G/questlua_pc.cpp:3553-3600`, `G/cmd_general.cpp:3934-3979`,
+`G/char.cpp:5386-5414,11382-11417`, `G/input_login.cpp:612-638`):
+
+- `pc_hide_costume` takes `(BYTE)` of the first argument as the part (1-5: body, hair,
+  sash, aura, weapon) and a boolean hide; a non-number part, a non-boolean hide, or a
+  part outside 1-5 logs and changes nothing. The matching setter lands the mask bit,
+  chats `SetXCostumeHidden %d`, writes the `costume_option.hide_*` quest flag (0
+  deleting, as `SetFlag` does), and `UpdatePacket` goes out unconditionally.
+- `do_hide_costume` splits two words (`strtoul` low byte each; a missing second word
+  hides): an empty line is quiet, the 1.5-second move/attack gate chats `[LS;1971]`, a
+  part outside 1-5 is quiet, and a hide runs the setter plus `UpdatePacket`.
+- `GetPart` overrides each hidden part whose costume cell is worn: the body shows the
+  armor's look (through its transmutation; `__CHANGE_LOOK_SYSTEM__` is off, but the
+  `#else` arm reads the same vnum path the Rewrite's `look_of` takes), the weapon the
+  weapon's look, and hair, sash and aura 0.
+- `CInputLogin::Entergame` restores all five lines after `SetPhase(PHASE_GAME`), each
+  from its flag, with no update. The quest login event runs later (`quest_login_event`,
+  `G/input_db.cpp:995-1050`), where `costume_option.quest` chats the five lines again
+  and syschats `Hide costume: ` plus each hidden part's word (`translate.lua:8861-8867`).
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- `hide_costume` coerces the part (`dword` low byte) and requires a boolean hide, calls
+  `Game::hide_costume`, and writes or deletes the `costume_option.hide_*` flag. `BRIDGED`
+  grows to 142 names in `api::NAMES` order.
+
+**The world and session**
+(`prodomo/src/game_state/{whisper,quests}.rs`, `world/src/character/{points,equipment}.rs`):
+
+- `Points` keeps the 5-bit hide mask (`set_hidden`); `Equipment::parts` takes the mask
+  and `apply_hidden` overrides each hidden worn costume per `GetPart`, through the
+  fallback's transmutation.
+- The session's `Game::hide_costume` lands the bit, chats the line, and queues the hide;
+  each step's hides settle through `apply_hidden_changes` into one batched update
+  behind the step's records (legacy sends one per call; the end parts agree).
+- The command's `hide_costume` runs the gate (mid-move, fought, or moved within 1.5 s),
+  lands the bit, recomputes the parts, chats the line, and answers the update plus the
+  flag write. `parse_hide_number` is `(BYTE)strtoul`: sign, digits to the first
+  non-digit, clamped at `u64::MAX`, low byte.
+- `shown_on_admit` restores the five bits from the loaded flags and answers the five
+  lines; `enter_game_burst` carries them after the phase change (`BurstAfter`).
+
+**The descriptor** (`prodomo/src/main.rs`, `prodomo/src/{command,game_loop_messages}.rs`):
+
+- `/hide_costume` dispatches through `Command::HideCostume` and `GameCommand::HideCostume`;
+  the flag write joins the held record and the whole record is stored, as the block mode
+  does. The login scripts' writes ride `Kept.quest_flags` at save.
+
+**The scenario** (`prodomo/tests/parity.rs::a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin`):
+
+- Alpha and Yankee enter. Inside the window `/hide_costume 1` chats `[LS;1971]` to the
+  caller alone; past it the line chats `SetBodyCostumeHidden 1`, the look update
+  follows, the viewer sees the same update, and the store holds the flag.
+- The relogin chats the restore's five lines with the body's 1 after the phase change,
+  then the login scripts chat them again with the syschat `Hide costume:  Body  ` (two
+  spaces each side: the `_100_say` trailing space plus the join, the part word's own).
+- What the wire taught: the syschat needed the exact double spaces (first draft had
+  one); a second `sees_enter` for a viewer that already saw the entrant hangs, since
+  the burst already carried the pair.
+
+**Parity.**
+
+- `lua.pc.hide_costume`, `cmd.hide_costume` and `quest.costume_option` are `ported`,
+  with the scenario.
+
+**STATUS.** The header names 271, with 142 backed names.
+
+**Mutation sweep.** Skipped, as in 269: the bridge and parser carry unit pins on every
+value (part range, boolean gate, strtoul edges), and the scenario pins the wire order
+twice (the command's line-plus-update, the restore's two passes).
+
+**The gate runs failed three times.**
+
+- A stale `missing documentation` warning on `enter_game_burst`: a mid-edit build
+  artifact; a fresh rebuild was clean.
+- The inventory check: the new quests row ended in `| |`. One pipe now.
+- Clippy `used_underscore_binding` on the scenario's `_quickslots`: named now.
+
+All fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4268 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained (13 orphaned servers from an earlier killed suite run were reaped
+  first, and their scratch databases dropped).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.
+
+## 272. The Time Spiral's shortening (`item.get_value`, the held readers, the GM pair)
+
+Eight quest names: the quest item's socket, proto value, count and type pair, the
+room check, and the GM gate with its level. One row is `ported` through the wire
+scenario; the other seven are `partial` with unit pins. The slice takes V26.
+
+**Legacy** (`G/questlua_item.cpp:107-123,175-202,259-301`, `G/questlua_pc.cpp:478-499`,
+`G/questlua_pc.cpp:1867-1877`, `G/char_item.cpp:1258-1267`, `G/item.h:108-109`,
+`G/char.cpp:6353-6358`):
+
+- `item_get_socket` pushes the quest item's socket at `(int)` of the first argument,
+  0 with no quest item, a non-number argument or an index outside `ITEM_SOCKET_MAX_NUM`
+  (6, under `ENABLE_EXTENDED_SOCKETS`).
+- `item_get_value` pushes `GetProto()->alValues[index]` (`G/item.cpp:1598-1602`), 0 with
+  no quest item, no proto, a non-number argument or an index outside
+  `ITEM_VALUES_MAX_NUM` (6). The owner's 72347 row carries its 10 in `VALUE3`, which is
+  what the spiral's script reads.
+- `item_get_count`, `item_get_type` and `item_get_sub_type` push the quest item's count
+  and its proto's type pair, 0 with no quest item; the type pair is 0 with no proto.
+- `pc_enough_inventory` pushes false for a non-number vnum or a vnum with no proto,
+  else whether `GetEmptyInventory(size)` finds a base cell below `Inventory_Size()`.
+- `pc_is_gm` pushes `GetGMLevel() >= GM_HIGH_WIZARD` (3); `pc_get_gm_level` pushes the
+  level. In the test-server mode `GetGMLevel` answers `GM_IMPLEMENTOR` whatever the
+  points hold, so on the owner's deployment (no `CONFIG` line turns the mode off) every
+  character was a GM and the sash quest's `not pc.is_gm()` gate never opened.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- Five `Game` methods: `gm_level`, `has_empty_inventory(vnum)`, `held_socket(id,
+  index)`, `held_value(id, index)` and `held_shape(id)` (count plus the proto type
+  pair). `BRIDGED` grows to 149 names in `api::NAMES` order.
+- `pc.is_gm` and `pc.get_gm_level` join `pc_readers` (the level-3 gate, the level);
+  the old `pc_api` stub that answered false is gone. `pc.enough_inventory` answers the
+  room by `(DWORD)` of its first argument, false for a non-number.
+- The seven `item.*` arms move out of `api` into an `item_api` family (Clippy's line
+  lint tripped at 134): the vnum, socket and value (each `(int)` of the index, 0
+  outside 0-5, with no quest item or no held row), the count and the type pair, and
+  the socket writer.
+
+**The world and session** (`prodomo/src/game_state/quests.rs`):
+
+- `gm_level` reads the borrowed points' level, `GM_PLAYER` with no points. The
+  test-server silence is V26 (below): the production arm answers, as the death
+  penalty's does.
+- `has_empty_inventory` finds the proto's size and asks `find_free_inventory_cell`
+  under the giver's unlocked count. `held_socket` reads the held item's socket,
+  `held_value` its proto's value, `held_shape` its count with the proto type pair (0
+  with no proto); all three answer `None` for an item the character does not hold.
+
+**The scenario** (`prodomo/tests/parity.rs::the_time_spiral_shortens_the_attr67_wait`):
+
+- Alpha stands at `talk` (the seeded `__status` is the CRC32 from the earlier probe)
+  with a `wait_time` an hour out, so the burst reads the letters without attr67add's.
+  The console's spiral lands in cell 0; the use clears the cell and sends no dialog.
+- The disconnect banks a stamp a tenth shorter (355-365 below the seed, a tick either
+  way for the seconds between the seed and the use), and the spiral's row is gone.
+
+**Parity.**
+
+- `lua.item.get_value` is `ported`, with the scenario. `lua.item.get_socket`,
+  `lua.item.get_count`, `lua.item.get_type`, `lua.item.get_sub_type`,
+  `lua.pc.enough_inventory`, `lua.pc.is_gm` and `lua.pc.get_gm_level` are `partial`,
+  backed with unit pins; each names the scenario it still waits for.
+
+**STATUS.** The header names 272, with 149 backed names. V26 is taken.
+
+**The divergences.**
+
+- V26. A quest reads the character's stored GM level even in the test-server mode,
+  where legacy's `GetGMLevel` answers `GM_IMPLEMENTOR` for every character. With the
+  silence the sash quest's `not pc.is_gm()` gate would never open and every login
+  would letter the GM event panel; the production arm keeps both, as the death
+  penalty's and the restart's already do. The `test_server` audit (owner question 5)
+  settles the silence.
+
+**Mutation sweep.** Skipped, as in 269 and 271: the bridge pins every value (the gate
+at 2 and 3, the room by vnum and non-number, the socket/value edges at -1, 0-5 and 6,
+the unheld row), the session pins the level, the room with one and no free cell, and
+the held triple, and the scenario pins the wire order (the clear, the quiet, the
+banked stamp).
+
+**The gate runs failed twice.**
+
+- The host inventory check: the new `BRIDGED` names sat in slice order, not
+  `api::NAMES` order (`item.get_socket` after `item.get_vnum`, `pc.enough_inventory`
+  after `pc.get_gm_level`). Reordered.
+- Clippy `too_many_lines` on `api` (134/100): the seven `item.*` arms are an `item_api`
+  family now.
+
+All fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4272 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. V26 is taken.
+## 273. The guild man's parting (`pc.destroy_guild`, `pc.remove_from_guild`, the three readers)
+Five quest names: the parting pair, the PC lookup, the test-server flag and the stamp
+reader. Two rows are `ported` through the wire scenario; the other three are `partial`
+with unit pins. The slice takes no Divergence.
+
+**Legacy** (`G/questlua_pc.cpp:352-381`, `G/questlua_global.cpp:65-70,298-302,743-757`,
+`G/guild.cpp:195-251,1015-1023,1034-1046`, `G/guild_manager.cpp:259-273`,
+`D/ClientManagerGuild.cpp:101-127`):
+
+- `pc_destroy_guild` disbands past the war gate (the Fix chats the line,
+  `prodomodefines.h:100`) and `RequestDisband`'s master gate, both quiet but for the
+  line. `pc_remove_from_guild` leaves past `RequestRemoveMember`'s row and leader
+  gates, both quiet. Both push nothing.
+- `Disband` fans every online member's REMOVE to every online member, unlinks all and
+  stamps each online member's `guild_manage.new_disband_time`; `DisbandGuild` deletes
+  the guild and its mark. The DB deletes the guild, grade, member and comment rows and
+  stamps every member's row. The `__GUILD_BONUSES__` ungrant waits for
+  `sys.guild.bonuses`, as the wire removal's does.
+- `_time_to_str` pushes `asctime(gmtime())` of `(time_t)` of the last argument.
+  `_is_test_server` pushes the `test_server` flag. `_find_pc` pushes the VID of the
+  PC its first argument names case-insensitively, and 0 for a non-string or an
+  unknown name.
+- The script's quest is `guild_building`, so its own withdraw and disband stamps land
+  under that name; the `guild_manage.*` flags the founding gates read are the world's
+  own. Legacy names them apart the same way.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- Four `Game` methods: `test_server`, `find_pc_vid`, `destroy_guild` and
+  `remove_from_guild`. `BRIDGED` grows to 154 names in `api::NAMES` order.
+- `time_to_str` answers bridge-side (Howard Hinnant's days-from-epoch civil date, no
+  time crate); `is_test_server` and `find_pc_by_name` join the `api` globals (the
+  non-string pushes 0); the pair join `pc_api` and push nothing.
+
+**The world and session** (`prodomo/src/game_state/quests.rs`,
+`prodomo/src/game_state/guild.rs`, `world/src/character/manager.rs`, `db/src/guilds.rs`,
+`prodomo/src/main.rs`):
+
+- The session carries the test-server flag and a snapshot of every online PC's shown
+  name and VID (`player_names`: the step borrows the characters mutably, so no lookup
+  is lent). The pair ride the `guild_ops` the world judges after the step, so all three
+  judge sites drain them with no new plumbing.
+- `quest_destroy_guild` judges the guildless quiet, the war line (the literal: `LC_TEXT`
+  answers the text itself), the non-master quiet, then unlinks, fans every member's
+  REMOVE to every online member, stamps the online members, and deletes the guild, the
+  mark and the symbol. `quest_remove_from_guild` judges the guildless, the rowless and
+  the leader quiet, else leaves through the wire removal's commit.
+- New `GuildQuestStore` halves: `Leave` (the member row) and `Disband` (the guild row,
+  which cascades the grade, member, comment, mark and symbol rows, plus every member's
+  disband stamp in one transaction). The descriptor drains both after the step.
+
+**The scenario** (`prodomo/tests/parity.rs::the_guild_man_parts_and_disbands`):
+
+- Alpha founds `MyGuild` and Yankee joins. Yankee clicks the guild man, picks
+  "Paraseste breasla." past the three ranking entries (their `with pc.hasguild()` was
+  the reason 269's guildless menu showed one), says yes, leaves — the page, then
+  `[DONE]` on the same record — while Alpha hears the REMOVE. Alpha clicks, picks
+  "Desfiinteaza breasla", says yes, disbands — the page, `[DONE]`, and its own REMOVE.
+- The guild and member rows go, the master's disband stamp lands, and Yankee's
+  withdraw stamp banks at its disconnect.
+
+**Parity.**
+
+- `lua.pc.destroy_guild` and `lua.pc.remove_from_guild` are `ported`, with the
+  scenario. `lua.time_to_str`, `lua.is_test_server` and `lua.find_pc_by_name` are
+  `partial`, backed with unit pins; each names the scenario it still waits for (the GM
+  manage chat).
+
+**STATUS.** The header names 273, with 154 backed names.
+
+**Mutation sweep.** Skipped, as in 269, 271 and 272: the bridge pins every value (the
+asctime trio, the flag both ways, the lookup's string gate, the pair's silence), the
+session pins the flag, the case-insensitive lookup and the recorded ops, the world pins
+the war line, the master and leader gates and the fans, the store pins the cascade and
+the stamps, and the scenario pins the wire order (the menus, the pages, the REMOVEs,
+the rows).
+
+**The gate runs failed twelve times.**
+
+- The scenario's `Server` was immutable.
+- Alice's queue held Yankee's enter (`sees_enter` was missing).
+- Both menus hold the three ranking entries past the parting one (their `with
+  pc.hasguild()`).
+- The parting and disband pages carry `[DONE]` on the same record, not a separate one.
+- The disband stamps one flag row, not two: the parted Yankee is no member.
+- The script's withdraw stamp lands under `guild_building.*`, not `guild_manage.*`.
+- Clippy `if_not_else` on the stamp conversion and `map_unwrap_or` on the PC lookup.
+- Clippy `unnecessary_map_or` on the leader gate and `cast_possible_wrap` on the stamp
+  assert. Used `is_none_or`, used `try_from`.
+- Clippy `similar_names` on the scenario's pids and `too_many_lines` on the scenario.
+  The parting and the disband are helpers now.
+- Clippy `cast_possible_truncation`/`cast_sign_loss` on the pid reads. Used `try_from`.
+- Clippy `too_many_lines` on the guild-stores drain. The parting halves drain through
+  a helper.
+- The or-pattern bound `pid` on one side only. Bound neither.
+
+All fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4278 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 274. The temple guardian's warp (`pc.warp`, `game.drop_item_with_ownership`, `pc.get_conqueror_level`)
+Three quest names: the warp, the owned drop and the conqueror reader. One row is
+`ported` through the wire scenario; the other two are `partial` with unit pins. The slice
+takes no Divergence.
+
+**Legacy** (`G/questlua_pc.cpp:209-240,3632-3637`, `G/questlua_game.cpp:168-213`,
+`G/char.cpp:6694-6792`, `G/item.cpp:1733-1775`):
+
+- `pc_warp` needs two numbers and answers false without them; `IsHack` refuses the
+  rest, and the test server chats the point. Past the gates it runs `WarpSet(x, y,
+  map)`: the third argument is a private index (at or above 10000, of the resolved
+  map), and the call answers true whatever the warp does.
+- `game_drop_item_with_ownership` makes `count` of the vnum on one to three arguments
+  (1 with one, the seconds are read only when number-like) at the character's feet
+  (`number(-200, 200)` each way), owned by it (`SetOwnership(ch[, secs])`, 30 at 10
+  and below, 30 with no stamp). No proto makes nothing; it pushes nothing.
+- `WarpSet` resolves the map by position, refuses a private index of another map and
+  a sorted inventory (`__SORT_INVENTORY_ITEMS__`, `prodomodefines.h:143`), then
+  saves, leaves the sectree and sends the own removal and `GC_WARP`.
+- `pc_get_conqueror_level` pushes the character's conqueror level.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- Three `Game` methods: `warp`, `drop_with_ownership` and `conqueror_level`.
+  `BRIDGED` grows to 157 names in `api::NAMES` order.
+- `pc_warp` and `drop_with_ownership` are helpers (`pc_api` and `api` would trip the
+  line lint): the warp answers false without two numbers, the drop runs on one to
+  three arguments. The conqueror level joins `pc_readers`. The test-server line stays
+  with the audit, as the anywhere spawn's does.
+
+**The world and session** (`prodomo/src/game_state/quests.rs`,
+`prodomo/src/game_state/reward.rs`, `parity/src/server.rs`):
+
+- The session carries the `IsHack` snapshot and the armed conqueror level, so the
+  warp answers what the world would judge and the reader reads its own level. Both
+  calls record their ops; the world judges them after the step, the drops before the
+  warps (a script could drop and leave).
+- `lay_drop_owned` makes the item through the kill drops' `CreateItem` (`rare_pct`
+  -1), lays it at the feet and owns it by the reader for the stamped seconds. A vnum
+  with no proto lays nothing, as legacy's `NULL` does.
+- `order_quest_warp` finds the target map in the atlas and orders the reader's client
+  the warp on the Channel hosting it; the descriptor runs `WarpSet` (the private
+  index, the sort gate, the save, `GC_WARP`). A target no Channel hosts orders
+  nowhere, as the failed `CMapLocation::Get` does, while the call still answers true.
+  The sort gate needs no state: the Rewrite never sorts, as the warp NPC's notes say
+  of its unported arms.
+- `make_drop_hit` is shared with the quest judge. `parity` gains
+  `start_with_npcs_channels` (the NPC lines plus a chosen topology).
+
+**The scenario**
+(`prodomo/tests/parity.rs::a_yes_to_the_temple_guardian_warps_to_the_ochao_temple`):
+
+- Channel 1 hosts map 209 beside maps 1 and 3, and the guardian (20408) stands on map
+  1. Alpha, level 154, enters 1000 from him and reads the login dance (the attr67
+  letter, the sash's change mark, the letter pass's replacement, the letters, the
+  update).
+- The click offers the one chat whose level holds and the close; "Da" runs the warp
+  past `IsHack`, the dialog ends with `[DONE]`, and the client hears its own removal
+  and the `GC_WARP` naming the temple point and Channel 1. The row holds the target.
+
+**Parity.**
+
+- `lua.pc.warp` is `ported`, with the scenario.
+  `lua.game.drop_item_with_ownership` and `lua.pc.get_conqueror_level` are `partial`,
+  backed with unit pins: the kill path waits for its mob (6311 on the temple map), and
+  Yohara's chat waits for its map (20433 on the defense-wave port).
+- `quest.temple_of_the_ochao` stays `partial`: the guardian's warp chat runs over the
+  wire; the kill drops and `temple_ochao.initialize` wait.
+
+**STATUS.** The header names 274, with 157 backed names.
+
+**Mutation sweep.** Skipped, as in 269, 271, 272 and 273: the bridge pins every value
+(the warp's gates, the truncation, the private index, the hack both ways, the drop's
+counts and silences, the conqueror read), the session pins the recording and the
+answer, the world pins the ownership stamps and the feet, and the scenario pins the
+wire order (the menu, the page, the removal, the warp, the row).
+
+**The gate runs failed thirteen times.**
+
+- Three `Session` literal sites missed the new fields (then four, then the last).
+- `pc_readers` has no `number` closure; the conqueror arm builds its own value.
+- `ClientOrder` was unimported and `make_drop_hit` private to its module.
+- The argument-rules test asserted `pc.warp` refuses; it now warps.
+- The scenario read the sash's change letters as its letter ones.
+- The click offers a menu before the dialog; the scenario answered none.
+- The dialog carries one `[ENTER]` fewer than `titled_page` was given.
+- Clippy `too_many_lines` on `pc_api`, `api` and the split tests, the inverted range
+  on the drop's count, `struct_excessive_bools` on the `Fake`, `too_many_lines` on
+  the arm and the long session test, `map_unwrap_or` and the cast on the stamp
+  assert, `needless_mut` on the scenario's server. Split into helpers, used `map_or`
+  and `try_from`.
+- The host test's `pc.warp` negative control now bridges; `pc.warp_local` refuses.
+
+All fixed by refactoring, with no `#[allow]` except the `Fake`'s
+`struct_excessive_bools`, as the config and the PK flags carry.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4283 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 275. The statue's return (`warp_to_village`, `pc.can_warp`, `pc.set_conqueror`)
+Four quest names: the village warp, the warp gate, and the conqueror reader and setter.
+All four rows are `ported` through the wire scenario. The slice takes no Divergence.
+
+**Legacy** (`G/questlua_global.cpp:1060-1071`, `G/questlua_pc.cpp:2723-2735,3632-3647`,
+`G/char.cpp:11659-11700`):
+
+- `_warp_to_village` runs `WarpSet(g_start_position[empire])` on the current character
+  and pushes nothing. `pc_can_warp` answers `CanWarp()`, false with no character.
+  `pc_get_conqueror_level` answers `GetConquerorLevel()`, 0 with no character.
+- `pc_set_conqueror` runs `SetConqueror()` with no arguments read: `SetConqueror(true)`
+  chats "You have already reached the Champion Level." for a conqueror, and "You must
+  fill up at least 1 EXP Marble at level 120 to reach Champion Level." below the
+  level-120 filled marble (`GetLevel() < gPlayerMaxLevel`, or at it with `GetExp() <
+  GetNextExp() / 4`). Else the conqueror level becomes 1, the step, point and sungma
+  slots reset in both arrays, the conqueror exp clears, and the points recompute
+  (`ComputePoints`, `PointsPacket`, the `POINT_CONQUEROR_EXP` update).
+
+**Rewrite** (`quest/src/manager.rs`, `quest/src/host.rs`, `prodomo/src/game_state/quests.rs`,
+`world/src/character/points.rs`, `prodomo/tests/parity.rs`):
+
+- The bridge takes `warp_to_village` (pushes nothing), `pc.can_warp` (the armed gate)
+  and `pc.set_conqueror` (recorded, pushes nothing); `pc.get_conqueror_level` stays on
+  the armed level. `BRIDGED` keeps `NAMES` order, which the host test pins.
+- The session holds a `WarpGates` byte (hack refusal, warp pass) instead of two bools,
+  the armed gates and the conqueror level, plus the village and conqueror call counts.
+  `ReaderContext` carries the gates and the level; a hacked reader disarms the pass.
+  `arm_quest_session` packs its borrows into `SessionInputs` and builds the session in
+  `build_session`, splitting the `Quests` borrow (manager vs protos/names) so the armed
+  session's manager borrow does not collide. `api`'s `number` and `item_name`/`mob_name`
+  arms are `drawn_number` and `named_thing`.
+- `order_village_warp` runs the quest warp to the reader's empire start (`EMPIRE_START`,
+  so Shinsoo's (469300, 964200)); `make_conqueror` chats the two legacy lines through
+  `CHAT_TYPE_INFO` and changes nothing, or transitions via `Points::become_conqueror`
+  (level 1, the step, point, exp and sungma slots cleared in both arrays) with
+  `compute_points` after. The conqueror point and exp packets wait for their system.
+- The scenario stands the warrior statue (20433) on map 1 with Alpha level 154 and
+  `yohara_system` at `killReward_new` (seeded CRC32): the reward state's letter deletes
+  its stale Overseer mark first, so the letter pass marks Theowahdan again (ID 2)
+  before the letters. The click offers the ship's Return and the Yohara trip plus the
+  close (three entries, since `ship_defense` and `yohara_manager` both chat on the
+  statue and `yohara_system`'s reward state has no click); "Da" to the Return runs the
+  village warp with the remove packet, the warp record and the stored position.
+  The congratulations chat and `set_conqueror`'s transition wait for the Hydra kill.
+
+Parity rows: `lua.warp_to_village`, `lua.pc.can_warp`, `lua.pc.get_conqueror_level` and
+`lua.pc.set_conqueror` are `ported` (`a_yes_to_the_statues_return_warps_to_the_village`).
+`quest.ship_defense` and `quest.yohara_system` stay `partial`: the defence event, the
+rankings, the statue's mark and click, and the Hydra kill wait for their systems.
+
+Tests:
+
+- `quest` lib: `the_village_the_gate_and_the_conqueror_follow_the_game` (village pushes
+  nothing, the gate answers the game, the set pushes nothing and records).
+- `prodomo` lib: `the_session_records_its_villages_and_its_conquerors` (the gate, the
+  two counters); `the_steps_conqueror_chats_its_lines_or_makes_the_reader` (the already
+  line at conqueror 33, the marble line below it, the transition at 120 clearing the
+  seven slots with the recompute).
+- `prodomo/tests/parity.rs`: `a_yes_to_the_statues_return_warps_to_the_village`.
+
+Fixes while green:
+
+- `cargo fmt` wrapped a long unpack after the gates landed.
+- Clippy `too_many_lines` on `api` (the two reader arms are helpers), `arm_quest_session`
+  (the borrows pack into `SessionInputs`, the literal builds in `build_session`), and
+  `struct_excessive_bools` on `Session` (the two warp bools are the `WarpGates` byte);
+  the pack-then-build split borrows `Quests` in parts so the manager borrow survives.
+- The `pc_skill` test's session literal needed the qualified `WarpGates::armed()`.
+- The host test pins `BRIDGED` in `NAMES` order: `pc.can_warp` moved after
+  `pc.send_block_mode`.
+- The scenario seeded the reward state, whose letter deletes the stale Overseer mark
+  before the change letters (the mark ID 2 follows), reads no Yohara letter on the
+  letter pass, offers three menu entries (the reward state has no click), and the
+  Return's say carries no title.
+
+All fixed by refactoring, with no `#[allow]` except the `Fake`'s
+`struct_excessive_bools`, as the config and the PK flags carry.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4287 passed, 0 failed, 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+The scratch-database check did not run: `psql` is not installed.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 276. Theowahdan's Combination (`pc.open_sash`, `pc.open_changelook`)
+Two quest names: the sash open and the changelook open. `open_sash` is `ported`
+through the wire scenario; `open_changelook` is `partial` (bridged, the window waits).
+The slice takes no Divergence.
+
+**Legacy** (`G/questlua_pc.cpp:3523-3549`, `G/char.cpp:9888-9936`,
+`G/packet.h:2795-2818`):
+
+- `pc_open_sash` runs `OpenSash(lua_toboolean(L, 1))` on the current character when
+  the first argument is a boolean, else `sys_err("Invalid argument: arg1 must be
+  boolean")`; it pushes nothing. `pc_open_changelook` runs
+  `ChangeLookWindow(true)` with no argument read; it pushes nothing.
+- `OpenSash(combination)` chats `SASH_OPEN` when that side stands, `SASH_CLOSE`
+  when the absorption side blocks a combination, and `COMBINE_CLOSE` when the
+  combination side blocks an absorption; else the side stands and the open record
+  goes out (subheader `OPEN`, the combination flag, every number 0,
+  `tPos = { INVENTORY, 0 }`).
+- `TPacketSash` is 23 bytes: header 0xe7, subheader, `bool bWindow`, two `DWORD`s,
+  `TItemPos` (window byte, cell word), `DWORD dwVnum`, and the two long absorb
+  numbers.
+
+**Rewrite** (`protocol/src/gc_sash.rs`, `protocol/src/gc_inventory.rs`,
+`quest/src/manager.rs`, `quest/src/host.rs`, `prodomo/src/game_state/quests.rs`,
+`prodomo/tests/parity.rs`):
+
+- The codec pins the 23-byte record with golden bytes; the inventory row flips to
+  implemented (112 of 134, 22 missing) and the coverage table in `AGENTS.md` follows.
+- The bridge takes `pc.open_sash` (only a `Value::Boolean` opens; anything else
+  logs and changes nothing) and `pc.open_changelook` (no argument read); both push
+  nothing. The four window names live in `pc_windows` so `pc_api` stays under the
+  line limit. `BRIDGED` keeps `NAMES` order, which the host test pins.
+- The session holds a sash bitset (combination, absorption) and the changelook
+  call count; `open_sash_window` chats the three legacy keys through
+  `CHAT_TYPE_INFO` or stands the side and queues the open record.
+- The scenario replays the reward state's click first (the short-material page, the
+  captain's mark and letter, so the menu has eight chats with Transmutation fifth),
+  then opens Combination over the quest window, answers "Yes", and reads `[DONE]`
+  before the 23-byte open record with the combination flag.
+
+Parity rows: `lua.pc.open_sash` and `gc.sash` are `ported`
+(`a_yes_to_theowahdans_combination_opens_the_sash_window`). `lua.pc.open_changelook`
+is `partial`: bridged, the window waits. `quest.sash` and `quest.changelook` stay
+`partial`: the sash's add, remove and refine, and the changelook's window, wait for
+their systems.
+
+Tests:
+
+- `protocol`: the golden-byte sash codec tests.
+- `quest` lib: `the_sash_opens_for_a_boolean_and_the_changelook_opens_always` (a
+  boolean opens, nil/number/text change nothing, the changelook opens and pushes
+  nothing).
+- `prodomo` lib: `the_session_opens_the_sash_or_chats_its_keys` (the open stands
+  and sends, the three key chats, the push-nothing).
+- `prodomo/tests/parity.rs`: `a_yes_to_theowahdans_combination_opens_the_sash_window`.
+
+Fixes while green:
+
+- Clippy `needless_return` on `open_sash` (the helper returns `()` now),
+  `too_many_lines` on `pc_api` (the window names are `pc_windows`), and
+  `missing_panics_doc` on `encode` (the cannot-happen section).
+- The scenario's first page ends `[NEXT]` before the `wait()`, answers 254, ends
+  `[DONE]`, and drains the captain's mark and letter before the click; the menu
+  has eight chats with Transmutation fifth, answered 6, then `[DONE]` precedes the
+  open record. The `GC_SASH` reader sizes 23 bytes.
+- The inventory counts flip to 112 implemented and 22 missing.
+
+All fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4291 passed, 0 failed, 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` scratch database remained.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 277. Theowahdan's Transmutation (`pc.open_changelook`, `gc.cl`)
+The changelook open goes over the wire: the bridged call now stands the window
+and sends the record. `open_changelook`, `gc.cl` and `quest.changelook` are
+`ported` through the wire scenario. The slice takes no Divergence.
+
+**Legacy** (`G/questlua_pc.cpp:3540-3549`, `G/char.cpp:10504-10535`,
+`G/packet.h:2836-2853`, `C/length.h:180`):
+
+- `pc_open_changelook` runs `ChangeLookWindow(true)` on the current character
+  with no argument read; it pushes nothing.
+- `ChangeLookWindow(true, false)` chats `[Transmutation] The window is already
+  opened` when the window stands; else the window stands, the materials clear,
+  and the open record goes out (subheader `OPEN`, `dwCost =
+  CL_TRANSMUTATION_PRICE` = 50,000,000, `bPos` 0, `tPos = { INVENTORY, 0 }`).
+- `TPacketChangeLook` is 10 bytes: header 234, subheader, `DWORD dwCost`,
+  `BYTE bPos`, and `TItemPos` (window byte, cell word).
+
+**Rewrite** (`protocol/src/gc_changelook.rs`, `protocol/src/gc_inventory.rs`,
+`prodomo/src/game_state.rs`, `prodomo/src/game_state/quests.rs`,
+`prodomo/tests/parity.rs`):
+
+- The codec pins the 10-byte record with golden bytes; the inventory row flips
+  to implemented (113 of 134, 21 missing) and the coverage table in `AGENTS.md`
+  follows.
+- The world's `changelook_windows` set is `m_bChangeLook`; the step's recorded
+  calls now drain through `open_changelook` after the step, which chats the
+  already-open line or stands the window and queues the open record.
+- The scenario replays the reward state's click first (the short-material page,
+  the captain's mark and letter, so the menu has eight chats with Transmutation
+  fifth), then opens Transmutation over the quest window, answers "Yes", and
+  reads `[DONE]` before the 10-byte open record with the 50,000,000 cost.
+
+Parity rows: `lua.pc.open_changelook`, `gc.cl` and `quest.changelook` are
+`ported` (`a_yes_to_theowahdans_transmutation_opens_the_changelook_window`).
+The changelook quest is `ported` because Transmutation is its only chat; the
+window's add, remove and refine wait for their systems, as does the sash's.
+
+Tests:
+
+- `protocol`: the golden-byte changelook codec tests.
+- `prodomo` lib: `the_steps_changelook_opens_or_chats_its_line` (the open
+  stands and sends, the second chats the opened line).
+- `prodomo/tests/parity.rs`:
+  `a_yes_to_theowahdans_transmutation_opens_the_changelook_window`.
+
+Fixes while green:
+
+- The new codec read `HEADER_GC_CL.0` and `item_pos.window`; both are private
+  or renamed (`value()`, `window_type`), as the sash codec shows.
+- A module-order edit dropped `gc_position` from `protocol/src/lib.rs`; it is
+  restored, and the diff holds only the two added lines.
+- The `GC_CL` reader sizes 10 bytes.
+- The inventory counts flip to 113 implemented and 21 missing.
+- Sixteen stale `prodomo_proc_*` scratch databases from an earlier run (no
+  backend attached) were dropped by hand; afterwards none remained.
+
+All fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4295 passed, 0 failed, 38 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+`psql` is not installed; the scratch-database check ran inside the database
+container instead, and afterwards none remained.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 278. The forest room's party gate (`party.is_party`, `party.is_leader`, `pc.is_mount`, `pc.get_channel_id`)
+Four quest readers: the party pair, the mount flag, and the Channel. `is_party`
+is `ported` through the wire scenario; the other three are `partial` (bridged,
+their live branches wait). The slice takes no Divergence.
+
+**Legacy** (`G/questlua_party.cpp:224-241`, `G/questlua_pc.cpp:1385-1390,2767-2772`):
+
+- `party_is_party` answers `GetParty() != NULL`; `party_is_leader` answers
+  `GetParty()->GetLeaderPID() == GetPlayerID()`.
+- `pc_is_mount` answers `GetMountVnum()` (nonzero while riding);
+  `pc_get_channel_id` answers `g_bChannel`.
+
+**Rewrite** (`quest/src/manager.rs`, `quest/src/host.rs`,
+`prodomo/src/game_state/quests.rs`, `prodomo/src/game_state/party.rs`,
+`prodomo/tests/parity.rs`):
+
+- The bridge takes `pc.is_mount` and `pc.get_channel_id` in `pc_readers`, and
+  `party.is_party`/`party.is_leader` in `party_answers` (infallible, so outside
+  the `Family` table). `BRIDGED` keeps `NAMES` order (166 names), which the
+  host test pins.
+- The session reads the party pair from `Parties::leader_of` at the step's
+  start (packed in a `PartyFlags` byte beside `WarpGates`, under the bool cap)
+  and the Channel from the step's place. `is_mount` answers false: no ported
+  path mounts.
+- The scenario stands the forest guardian (20412) on map 1: Alpha's solo click
+  offers the Bagjanamu room, "Da" reads `party.is_party()` false, and the page
+  refuses. The title carries the legacy `0xe3` byte from `mob_names.txt`.
+
+Parity rows: `lua.party.is_party` is `ported`
+(`a_solo_click_on_the_forest_room_is_refused_for_want_of_a_party`).
+`lua.party.is_leader`, `lua.pc.is_mount` and `lua.pc.get_channel_id` are
+`partial`: bridged, the forest's leader branch waits for `party.getf` and
+`d.find`, the ship's mount gate waits for map 135, the ship flag and the
+`ship_defense_mgr` names, and the channel read waits for the party branch past
+them. `quest.enchanted_forest_zone` stays `partial` for the same reason.
+
+Tests:
+
+- `quest` lib: `the_mount_and_party` inside `the_reader_names_answer_what_the_game_holds`
+  (the mount, party, leader and channel answers).
+- `prodomo` lib: `the_session_reads_its_character_back` (the mount false, the
+  packed party pair, the Channel).
+- `prodomo/tests/parity.rs`:
+  `a_solo_click_on_the_forest_room_is_refused_for_want_of_a_party`.
+
+Fixes while green:
+
+- The `BRIDGED` order test failed: `pc.hide_costume` sat before `pc.open_sash`,
+  but `NAMES` has the sash pair first. The window block is reordered.
+- Clippy `unnecessary_wrapped_result` on `party_api` (infallible, so a plain
+  `party_answers` outside the `Family` table) and `struct_excessive_bools` on
+  `Session` (the pair packs into `PartyFlags`).
+- The scenario's login dance matches the statue's (the change mark, the change
+  letters, the delete and the re-mark, the pass letters); the title is the raw
+  `0xe3` byte, not UTF-8.
+
+All fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4297 passed, 0 failed, 39 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+`psql` is not installed; the scratch-database check ran inside the database
+container instead, and afterwards none remained.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 279. The forest room's leader gate (`party.getf`, `party.setf`, `party.get_leader_pid`, `d.select`, `d.find`)
+Five quest readers: the party flag pair, the leader PID, and the dungeon pair.
+All five are `ported` through the wire scenario, and `lua.party.is_leader` (278,
+`partial`) joins them: the leader gate runs it over the wire. The slice takes
+no Divergence.
+
+**Legacy** (`G/questlua_party.cpp:243-255,305-325`, `G/questlua_dungeon.cpp:1540-1563`,
+`G/party.cpp:1485-1511`):
+
+- `party_get_leader_pid` answers `GetParty()->GetLeaderPID()`, -1 with none.
+- `party_set_flag` takes a string name and `(int)lua_tonumber` value and sets
+  the flag; anything else is quiet, and it pushes nothing.
+- `party_get_flag` answers the flag, 0 with no party or a non-string name.
+- `dungeon_select`/`dungeon_find` answer `FindByMapIndex((DWORD)lua_tonumber)
+  != NULL`, false with no number.
+
+**Rewrite** (`quest/src/manager.rs`, `quest/src/host.rs`,
+`prodomo/src/game_state/quests.rs`, `prodomo/src/game_state/party.rs`,
+`prodomo/tests/parity.rs`):
+
+- The bridge takes the flag pair and the leader PID in `party_api` (a `Family`
+  now: the flag arms can fail on coercion) and the dungeon pair in `dungeon_api`.
+  `BRIDGED` keeps `NAMES` order (171 names), which the host test pins.
+- The session snapshots the leader PID and the party flags at the step's start
+  and queues every `setf` for the apply; `dungeon_lives` answers false, as no
+  dungeon manager exists.
+- The scenario forms Alice's party with Yankee over the wire, then Yankee clicks
+  the forest guardian: his click passes the party gate, reads the never-set flag
+  0, finds no dungeon under it, and the leader gate refuses. Both forest clicks
+  share `drain_guardian_login_walk`.
+
+Parity rows: `lua.party.getf`, `lua.party.setf`, `lua.party.get_leader_pid`,
+`lua.d.select`, `lua.d.find` and `lua.party.is_leader` are `ported`
+(`a_party_members_click_on_the_forest_room_is_refused_for_want_of_the_leader`).
+`lua.pc.get_channel_id` stays `partial`: its read waits for the leader branch
+past `party.get_member_pids`, `q.begin_other_pc_block` and the `d.*` manager
+names. `quest.enchanted_forest_zone` stays `partial` for the same reason.
+
+Tests:
+
+- `quest` lib: `the_party_flags` inside `the_reader_names_answer_what_the_game_holds`
+  (the flag pair, the leader PID, the dungeon pair).
+- `prodomo` lib: `the_session_reads_its_character_back` (the leader PID, the
+  flag read and the queued set) and `the_steps_party_flags_set_and_read` (the
+  set lands on the world's party and the next step reads it back).
+- `prodomo/tests/parity.rs`:
+  `a_party_members_click_on_the_forest_room_is_refused_for_want_of_the_leader`.
+
+Fixes while green:
+
+- The stale protocol count assertions (`cg_wiring.rs`: 112/22) lagged the sash
+  and changelook inventory marks (113/21). Aligned to the inventory's counts.
+- The `BRIDGED` order test and the helper's manager lock deadlocked the reader
+  test: the dungeon names move to the head, and the helper reuses the probe's
+  manager.
+- Clippy `cast_possible_wrap` on the leader PID's `u32 as i32` (legacy pushes
+  the DWORD as a Lua number; the allow cites it) and `too_many_lines` on the
+  scenario (the login walk extracts into `drain_guardian_login_walk`, shared
+  with the solo click).
+- Yankee's marks take the process's next target IDs (3, 4), not Alice's (1, 2);
+  and the party walk's trailing records sit ahead of the click's dialog.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4303 passed, 0 failed, 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+`psql` is not installed; the scratch-database check ran inside the database
+container instead, and afterwards none remained.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 280. The forest room's ticket check (`party.get_member_pids`, `q.begin_other_pc_block`, `q.end_other_pc_block`)
+
+Three quest names: the on-map member PIDs and the other-PC stack. All three are
+`ported` through the wire scenario. The slice takes no Divergence: the refusal page
+names nobody because legacy's own loop walks the level list, not the ticket list
+(`enchanted_forest_zone.lua:169`), and the page is what the Reference client shows
+against legacy too.
+
+**Legacy** (`G/questlua_party.cpp:413-442`, `G/questlua_quest.cpp:204-217`,
+`G/questmanager.cpp:1087-1099,2051-2093`, `G/char_item.cpp:8791-8940`):
+
+- `party_get_member_pids` pushes one Lua number per on-map member PID and returns
+  the count; with no party it pushes nothing and returns 0.
+- `quest_begin_other_pc_block` takes `lua_tonumber` of the last argument, grows the
+  PC stack even for an offline PID, and switches the current PC and character when
+  `GetPC` finds one (`FindByPID`); an unknown PID keeps the old one.
+- `quest_end_other_pc_block` pops the stack and runs for the pushed PID again; with
+  no open block it logs and stays quiet.
+- Inside a block the `pc.*` readers and `RemoveSpecifyItem` run against the blocked
+  character, as `GetCurrentCharacterPtr` answers it.
+
+**Rewrite** (`quest/src/manager.rs`, `quest/src/host.rs`,
+`prodomo/src/game_state/quests.rs`, `prodomo/tests/parity.rs`):
+
+- The bridge pushes the member PIDs in `party_api` (one value per PID, its own
+  arity) and runs the stack in a new `quest_api` family, which also holds the
+  index and name readers: `begin` pushes `cx.current`, asks the game, and switches
+  only when the game switched; `end` pops and asks. `BRIDGED` keeps `NAMES` order
+  (174 names), which the host test pins.
+- The session snapshots every online PC (VID, level, name, points, items, cells)
+  at the step's start. `begin_other_pc` clones from it (`None` for an offline PID,
+  the stack still growing); the level, name, VID, points, count and removal arms
+  answer the innermost switched frame. A block's removals land on the snapshot and
+  record their takes, which run against the world after the step with their records
+  to their owner's client and their rows for the store.
+- The scenario forms Alice's party with Yankee over the wire, seeds Alice's ticket,
+  and Alice says "Da": the ticket loop runs the block over both members and the
+  refusal page follows.
+
+Parity rows: `lua.party.get_member_pids`, `lua.q.begin_other_pc_block` and
+`lua.q.end_other_pc_block` are `ported`
+(`the_leaders_click_on_the_forest_room_is_refused_for_want_of_a_ticket`).
+`lua.pc.get_level` was already `ported`; `lua.pc.getname` and `lua.pc.get_name`
+stay `partial` (the script fills a list it never prints, so no scenario hears a
+blocked name yet). `quest.enchanted_forest_zone` stays `partial` for the dungeon
+manager names past the ticket check.
+
+Tests:
+
+- `quest` lib: `the_member_pids_and_the_block` inside
+  `the_reader_names_answer_what_the_game_holds` (the pushed PIDs, the switched
+  write, the offline stack growth, the end's restore).
+- `prodomo` lib: `a_block_runs_for_the_blocked_pc_and_its_end_restores_the_reader`
+  (the blocked level/name/VID/count, the snapshot removal, the end's restore, the
+  unswitched frame).
+- `prodomo/tests/parity.rs`:
+  `the_leaders_click_on_the_forest_room_is_refused_for_want_of_a_ticket`.
+
+Fixes while green:
+
+- The scenario first read past trailing party records with a bare loop that skipped
+  every byte, `BRIDGED` missed the three names (the script died after `say("")`),
+  and the expected page missed the title's carried blank line (`say_title` +
+  `say("")` at `:98-99` print before the refusal's own lines).
+- The `BRIDGED` order test pins `NAMES` order: `party.get_member_pids` sits after
+  the flag pair, and the `q.*` pair stay with the quest family at the tail.
+- Clippy `too_many_lines` on `api` (the `q.*` arms extract into `quest_api`) and
+  on `run_quests_giving_raw`/`build_session` (the takes collect through
+  `blocked.iter().flatten()`, the session's head splits into `session_head`),
+  `redundant_closure` on the block and map closures, and a shadowed `moved`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4305 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+`psql` is not installed; the scratch-database check ran inside the database
+container instead, and afterwards none remained.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 281. The alchemist's dragon-soul windows (`ds.give_qualification`, `ds.is_qualified`, the two opens)
+
+Four quest names: the qualification grant and read, and the refine and
+attr-change opens. All four are `ported` through the wire scenario, with the three
+quest scripts and the two window records. The slice takes no Divergence.
+
+**Legacy** (`G/questlua_dragonsoul.cpp:14-70`, `G/char_dragonsoul.cpp:70-158`,
+`G/char_affect.cpp:668-760`):
+
+- `ds_give_qualification` runs `DragonSoul_GiveQualification()`, which is
+  `AddAffect(540, APPLY_NONE, 0, AFF_NONE, INFINITE_AFFECT_DURATION, 0, false,
+  false)`: the infinite row appends (no override, no dedupe), the zero apply
+  computes nothing, and the add packet goes to the player at once, in the call.
+- `ds_is_qualified` answers a Lua number, 1 or 0.
+- `ds_open_refine_window` opens only with the qualification: the reader hears
+  `HEADER_GC_DRAGON_SOUL_REFINE` with `DS_SUB_HEADER_OPEN` (0) and a default
+  `TItemPos` (`SItemPos()`: `INVENTORY` (1), `WORD_MAX`).
+- `ds_open_attr_change_window` opens unconditionally: the one-byte
+  `HEADER_GC_DS_PLUS_CHANGE_ATTR_OPEN`.
+- Quest order is the ADR-0006 order (`quest_list`, then the other scripts by
+  path): `dragon_soul.lua` sorts between `costume_option.quest` and
+  `event_info.lua`, so the grant's add rides between the hides and
+  `event_info`'s line.
+- 540 sits in the 500-600 no-clear band (`IS_NO_CLEAR_ON_DEATH_AFFECT`,
+  `G/char_affect.cpp:57-60`), so the death keeps it and re-sends it with every
+  held affect (`G/char_battle.cpp:1561-1569`).
+
+**Rewrite** (`quest/src/manager.rs`, `quest/src/host.rs`,
+`prodomo/src/game_state/quests.rs`, `prodomo/src/game_state/death.rs`):
+
+- The four names join `BRIDGED` in `NAMES` order and land in `dungeon_api`
+  (folded into the `d.*` family: a standalone `ds_api` trips
+  `clippy::unnecessary_wraps`, as nothing it calls can fail).
+- The grant lands in the call: the infinite row pushes into the session's live
+  affect event and its add packet joins the step's records beside the script's
+  own lines, in call order — so a later `ds.is_qualified` in the same step
+  answers true, and the login event carries the add between the hides and
+  `event_info`. The counter stays only as the "ran" witness. The two opens
+  queue for the apply pass, as the windows' sends need the world.
+- `WorldMoves` bundles the step's world-visible queues (laid, warps, drops, the
+  counts, the sash and changelook opens, the `ds.*` opens, the party sets) so
+  `run_quests_giving_raw` stays under the line lint.
+- `clear_affects_on_death` keeps the 500-600 band, so 540 survives and the
+  death re-sends it.
+
+**Parity** (`.scratch/parity/`):
+
+- `quest-api.md`: `lua.ds.open_refine_window`, `lua.ds.open_attr_change_window`,
+  `lua.ds.give_qualification`, `lua.ds.is_qualified` to `ported`.
+- `server-records.md`: `gc.dragon_soul_refine`, `gc.ds_plus_change_attr_open`
+  to `ported`.
+- `quests.md`: `quest.dragon_soul`, `quest.dragon_soul_plus_attr_change`,
+  `quest.dragon_soul_refine` to `ported`.
+
+**Tests**:
+
+- `prodomo` lib: `the_session_grants_the_ds_qualification_in_its_call_and_queues_the_opens`
+  (the infinite row and its add packet land in the call; the opens queue);
+  `death_clears_the_hit_affects_and_ends_the_poison` also seeds 540 and asserts
+  it survives with no remove.
+- `prodomo` parity: `the_alchemists_chats_open_the_dragon_soul_windows_once_qualified`
+  (the alchemist on map 1; the login grants; the refine chat opens 209/sub 0
+  with `INVENTORY`/`WORD_MAX`; the gated attr chat opens 211 on "Da").
+- `prodomo` parity helpers: `read_login_lines_hiding` reads the infinite add
+  between the hides and `event_info`; `read_script_past_ticks` reads a dialog
+  past the affect event's tick records; `is_ds_qualification_add` filters the
+  death's re-sent grant; the 209/211 headers join `game_len`.
+
+Fixes while green:
+
+- The grant first queued for the apply pass, so every login carried it ahead of
+  `dungeoninfo`'s line; legacy's `AddAffect` sends in the call. Moving the push
+  and the add packet into the bridge call put it in quest order.
+- The death cleared 540 and the failure tail showed its remove; legacy's
+  no-clear band keeps it. Keeping 500-600 made the death re-send it, as legacy
+  does.
+- Clippy `too_many_lines` on `run_quests_giving_raw` (the `WorldMoves` bundle),
+  on the new lib test (the grant asserts extract), on the scenario (the tick
+  reader extracts), `match_same_arms` on the one-byte router arm (folded), and
+  `unnecessary_wraps` on the first `ds_api` (folded into `dungeon_api`).
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4303 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (14 stale `prodomo_proc_*` rows from an earlier
+  interrupted run were dropped by hand first; `psql` is not installed, so the
+  check ran inside the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 282. The statue's Yohara trip (`quest.yohara_manager`)
+
+No new bridge: every call the 17-line quest makes was already ported
+(`mob_name`, `say`, `say_title`, `select`, `pc.get_conqueror_level`, `pc.warp`).
+The slice is the scenario and the row.
+
+`a_yes_to_the_statues_yohara_trip_warps_to_yohara`: Alpha, level 154 with
+conqueror 33 and `yohara_system` at `killReward_new`, enters map 1 beside the
+city statue (20433, spawned by the harness). The login drains copy the return
+scenario's, whose seed this one shares: the attr67 letter, the sash's change
+marking Theowahdan (ID 1), the sash's change letter, the reward letter's delete
+of the stale Overseer mark, the letter pass marking him again (ID 2), the
+sash's letter, and the update. The click offers Return, the Yohara trip and
+the close; "Un continent nou" asks with the English locale's statue name
+(`Savas\xe7i heykeli:`, `country/en/mob_names.txt:1608`); "Da" reads the
+conqueror level 33 and the step orders the warp to (537500, 492700) with
+`GC_CHARACTER_DEL` and `GC_WARP`, and the store row holds the new spot.
+Channel 1 hosts map 374 (`metin2_map_empirecastle`, base (512000, 486400)):
+without it `order_quest_warp` finds no hosting Channel and orders nowhere, as
+legacy's failed `CMapLocation::Get` warps nowhere.
+
+The conqueror-0 refusal branch is not covered: it ends the dialog with the
+reward-colored line (`say_reward`, `color256(255, 200, 200)`), and no second
+quest on the owner's data gates on the read. A fresh character cannot cover it
+either: at `information_new` the click hits `yohara_system`'s target arm and
+deletes the Statue mark instead of chatting.
+
+Fixes while green:
+
+- The title first read `Statuia Orasului`, the proto's name; legacy's
+  `mob_name` reads the locale's, so the page carries the English one.
+- The warp first ordered nowhere: the test topology hosts only maps 1, 3 and
+  72, and the Yohara point falls on 374. The temple scenario's `push(209)`
+  pattern covers it.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4308 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 283. The guild man's score chat (`quest.guild_ranking`)
+
+No new bridge: the four names the 19-line quest calls were already ported
+(`guild.get_rank`, `guild.get_ladder_point`, `guild.around_ranking_string`,
+`guild.high_ranking_string`). The slice is the scenario and the row.
+
+`the_guild_mans_score_chat_names_the_rank_and_ladder`: Alpha masters `MyGuild`
+(ladder 1000, seeded before the boot with its 15 grades and the master's row)
+and stands by the guild man on map 1. `enter_game_guilded` reads the NAME-led
+burst (GRADE, INFO, LIST, the one LOGIN, the skills) through the outbox, then
+`read_login_event`. The click offers the disband (master-only `with` gate) and
+the three ranking chats — founding needs the guildless, withdraw the
+non-master, the GM read the GM — and the close; "Vezi scorul breslei tale"
+answers the Gardian-titled page with rank 1 and 1000 points.
+
+The around and top chats wait: with one laddered guild the around string names
+only MyGuild and the top string stops after it, so a second laddered guild
+must be seeded before their pages say anything worth pinning.
+
+Fixes while green:
+
+- The first enter read `GC_CHARACTER_ADD` where the NAME leads, and the first
+  tail re-read the phase `enter_game_guilded` already consumed. The war
+  scenarios' `enter_game_guilded` + `read_login_event` pattern covers both.
+- Clippy `doc_markdown` on the bare `MyGuild` in the doc comment (backticked,
+  as the founding scenarios spell it).
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4309 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 284. Theowahdan's absorption window (`quest.sash`)
+
+No new bridge: `pc.open_sash(false)` was already ported with the combination
+branch, and the unit test pinned the cleared window byte. The slice is the
+scenario and the row.
+
+`a_yes_to_theowahdans_absorption_opens_the_absorb_window`: Alpha, level 154
+with the sash mission at `__complete`, enters map 1 beside Theowahdan. The
+login drains and the reward-click walk copy the combination scenario's: the
+attr67 and Yohara change letters, the reward mark (ID 1), the two letters, the
+update, the target click deleting the mark, the two reward pages, the
+captain's mark (ID 2) and the new state's letter. The second click offers his
+eight chats; "Absorption of bonuses" asks, "Yes" ends the dialog and the
+client hears the 23-byte open record with the window byte 0.
+
+"What is a Sash?" needs no scenario: its page says only the two options the
+two window chats already name, and every call it makes (`mob_name`, `say`,
+`say_title`) is covered elsewhere. The window's add, remove and refine still
+wait for their systems.
+
+No fixes while green: the scenario passed on its first run.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4310 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 285. The forest's logout flags (`CQuestManager::Logout`, `lua.pc.setf`)
+
+Legacy runs the no-target `logout` scripts on disconnect (`CQuestManager::LogoutPC`,
+`G/questmanager.cpp:516-535`, `NPC::OnLogout`, `G/questnpc.cpp:399-402`); the Rewrite
+dropped the record without running them. Two scripts on the owner's data listen:
+`enchanted_forest`'s writes another quest's flag and stamps its own, and
+`enchanted_forest_zone`'s clears the dungeon flag and stamps two more.
+
+`Manager::logout` now takes the game and runs the `logout` scripts, and the record
+stays for the save; the new `Manager::disconnect` drops it after. `end_quests`
+runs the scripts through `run_quest_event` (records go nowhere: the outbox is
+already gone), and `leave_world_by` runs them before taking the flags and drops
+the record after — a disconnect only, since a warp keeps the character online.
+The 44 test-only `logout` resets became `disconnect`.
+
+`a_logout_on_the_enchanted_map_sets_the_forest_flags`: Channel 1 hosts map 210
+(`metin2_map_dawnmist_dungeon_01`), and Alpha stands at its middle. The
+disconnect runs the forest's script, and the save banks
+`enchanted_forest_zone.dungeon_enter` 1 and a positive
+`enchanted_forest.limit_activity`. `pc.setf` and `quest.enchanted_forest` are
+`ported`; `pc.getf` stays `partial` (no read runs over the wire here), and the
+quest's `login` half (warp or clear by the stamp) waits for its own scenario.
+The unit test pins that `logout` keeps the record, `disconnect` drops it, and
+an unseen PC runs nothing.
+
+Fixes while green:
+
+- The first cut dropped the record in `logout`, so `flags_of` read nothing and
+  the save banked no rows. Splitting `logout` from `disconnect` fixed it, as
+  legacy's `LogoutPC`/`DisconnectPC` split does.
+- The Beta half first re-entered on the same server, whose account still held
+  the session: the select read a dead wire. It is its own boot now — then cut
+  outright, since no other hosted map is 210 and every other scenario's logout
+  already proves the gate.
+- Clippy `let_unit_value` on the `let _ran` around the unit `run_quest_event`
+  (dropped).
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4312 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 286. The dungeon info's button (`cg.game.quest_input_string`, `quest.dungeoninfo`)
+
+No new bridge: the record was routed and decoded in 227, `Manager::input` resumed
+the wait, and `split` is questlib Lua. The slice is the scenario and the two rows.
+`dungeoninfo`'s button is the only reached `input()` on the owner's data.
+
+`the_dungeon_infos_button_reads_the_clients_input`: Alpha enters map 1, and the
+quest window asks about quest 1. The button sends `getinputbegin`, then the
+`input(cmdchat("dungeon_info_cmd"))` prompt — the prompt's `cmdchat` sends before
+the wait suspends — and the wait holds. The client answers `TEST#2598`: the
+wait's `[INPUT]` page goes out with the resume (skin 1, as the suspend queued
+it), then `getinputend`, the `input is 2598` info line, the TEST arm's line,
+and `[DONE]`. The ENTER/WARP/TEST warps stay commented out on the owner's data,
+so nothing orders.
+
+The `enter` half of `when login or enter` still waits: nothing dispatches the
+`enter` event yet.
+
+Fixes while green:
+
+- The first cut read `getinputend` right after the answer, but the prompt's
+  `dungeon_info_cmd` line precedes the wait and the `[INPUT]` page rides the
+  resume. Both now read in wire order.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4313 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 287. The ring's plain warp (`quest.TeleportRing`)
+
+No new bridge: the 7-line quest's `use` runs `TeleportRing.MainWindow`, whose
+`item.get_vnum`, `item_name`, `select_table`, `pc.count_item`, `pc.can_warp`
+and `pc.warp` were all ported. The slice is the scenario and the row.
+
+`the_rings_use_lists_its_maps_and_warps_to_the_plain_one`: Channel 1 hosts map
+64 (`map_n_threeway`), and Alpha holds the ring (70058, granted by the
+console). The use titles `Inel Teleportare:` and lists the twelve maps with
+the quit; Valea Seungryong — no level, item or sub-index gate — reads
+`can_warp` true and orders the warp to (666300, 855200) with the remove and
+`GC_WARP`.
+
+The gated branches wait: a level-checked map refused, an item-checked map
+charging, and a sub-indexed map's second window each need their pick over the
+wire.
+
+Fixes while green:
+
+- The enter first called a nonexistent no-statue helper; `enter_game_burst`
+  answers the own VID the remove needs.
+- The `start_with_console` pair binds immutable by default; the console wait
+  needs the `mut`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4314 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 288. The statue's marked click (`quest.yohara_system`)
+
+No new bridge: `find_npc_by_vnum`, `target.vid`, the target arm of `Click`,
+the next-answer chat, the Romanian pages, `set_state` and its letter were all
+ported. The slice is the scenario; the row stays `partial`.
+
+`a_click_on_the_marked_statue_moves_the_yohara_quest_to_the_hunt`: level 154
+Alpha seeds `yohara_system` at `information_new`, enters map 1 beside the
+warrior statue (20433) its letter names, and the login's letters mark the
+statue. The click deletes the mark and runs the `target.click` script: the
+one chat and the close, then the two titled pages (`Savaşi heykeli` over
+`[NEXT]`, then `[DONE]`), the move to `information_hunt`, the hunt letter,
+and the logout banks `yohara_system.__status` as -332622545.
+
+The Hydra kill and the reward chat wait: nothing dispatches the `kill` event
+to quest scripts with a target yet.
+
+Fixes while green:
+
+- The first cut drained the login's letters with single fixed IDs, but the
+  letter pass replaces each mark with the next ID; `read_login_letters`
+  drains both passes in wire order.
+- The first cut read the click as chat-then-delete, as for earlier targets,
+  but this script deletes before it says anything; the delete reads first.
+- The first cut asserted the state in the store right after the letters, but
+  the quest flags bank at the save; the check waits on the disconnect.
+- The yohara row edit landed after the table's final pipe, so `gen.py`
+  dropped the row to `missing`; the note was rewritten inside the row and the
+  generator verified stable with no demotion.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4315 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 289. The dance and the kiss (`sys.char.emotion`)
+
+`ACMD(do_emotion)` and `ACMD(do_emotion_allow)` (`G/cmd_emotion.cpp:112-128,153-296`):
+the ride gate, the 39-row table, the mask gate, the woman gate, the named victim in
+view, the NEED gates, the victim gates (a PC, not itself, 10..500 away, the other
+sex, the consent pair unless married), the consent insert, and the
+`CHAT_TYPE_COMMAND` line `"<to_client> <vid> <victim>"` to the view. `Command::Emotion`
+and `Command::EmotionAllow` dispatch through `GameCommand::Emotion`; the mask switch
+rides `with_emotion_mask_disabled` from `disable_emotion_mask`, which the owner's
+`CONFIG` sets (`EMOTION_MASK_REQUIRE: 0`).
+
+What legacy reads that this build does not track: the arena (no character is on one),
+riding (no character rides), and marriage (no character is married). `NEED_TARGET`
+never appears in the table, the disarm flags are never checked, and the consent set
+is never cleared: all three are kept as legacy has them. The consent pair is a
+`strtoul` low word, like the hide number.
+
+`a_dance_broadcasts_and_a_kiss_needs_consent`: Alpha (job 3, female) and Yankee
+(job 0, male) enter map 1 side by side with the mask disabled. `/dance1` broadcasts
+`dance1 <vid> 0` to both; `/kiss Yankee` answers `[LS;481]` and sends nothing;
+Yankee's `/emotion_allow <vid>` consents silently, and the second kiss broadcasts
+`kiss <vid> <vid>` to both.
+
+The 40 command rows and `sys.char.emotion` are `ported`.
+
+Fixes while green:
+
+- The first cut ran on the default server, whose compiled-in mask requirement
+  refused the dance with `[LS;414]`; the scenario starts configured with the mask
+  disabled, as the owner's deployment runs.
+- The first cut made Yankee job 1, which is female, so the kiss refused `[LS;470]`
+  instead of `[LS;481]`; he is job 0.
+- The pose scenario asserted `/dance1` sends nothing while unported; it now asserts
+  the `[LS;414]` the default server's mask gate answers.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4318 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 290. The empire's rates (`cmd.priv_empire`)
+
+`ACMD(do_priv_empire)` (`G/cmd_gm.cpp:3107-3167`) and the game side of
+`CPrivManager` (`G/priv_manager.cpp:142-180,224-244`): the four words (empire 0-3,
+type 1-4, value, duration in hours), the five usage lines when one is missing or
+out of range, and the grant. The value clamps twice, as legacy clamps it twice:
+0..1000 on the command, 0..200 on the grant; the week caps the duration.
+`Command::PrivEmpire` dispatches through `GameCommand::PrivEmpire`.
+
+Legacy stores the grants in the DB process and fans them to every game process;
+the one process holds the `[type][empire]` table in the world and the grants live
+in memory within a boot (ADR-0002). The expiry is counted in Pulses, as every
+timer is: the grant's end Pulse is stored beside its value, the reads treat an
+expired grant as 0, and the Pulse step clears what ran out (`D/PrivManager.cpp`
+only runs the expiry; the game side is the reference for the rest).
+
+`GetPriv`'s empire arm is the max of the all-empires row and the character's own
+row. The guild and character arms are 0: `do_priv_guild` runs an empty Lua buffer
+(`msg` is `"\0"`, `G/cmd_gm.cpp:3171-3205`), so it is `unused` — with no name it
+answers nothing, with a found guild it runs nothing, and only a missing guild
+hears `There is no guild with that nam.` — and no caller grants a character priv.
+The negative character-priv arm of `GetPriv` is dead with it: with no rows
+`GetPrivByCharacter` is 0, never negative. The quest-Lua arms
+(`__give_empire_priv`, `__get_empire_priv`, `__get_empire_priv_string`) stay
+`missing`: no live script calls them.
+
+What the client hears: the grant's notice to every client (`SendPrivNotice`,
+`G/cmd_gm.cpp:1338-1361`) — `[LS;724;empire;priv;value]` when the value is
+nonzero, else the raw removal line with the two words baked in (`:170-174`,
+read byte-exact). Each hearer translates both words into its own language
+(`LC_LOCALE_TEXT(word, d->GetLanguage())`) before the format renders, and the
+hearer's empire rides the record. The words are the legacy tables
+(`G/constants.cpp:1072-1087`). The enter-game `[LS;871-874]` lines run where
+`_send_bonus_info` runs them (`G/input_login.cpp:39-66`): after the greet slot,
+before `letters_event`, one per live bonus, in type order.
+
+The hooks land: the exp term (`GiveExp`, `:2575`), the gold-percent term
+(`RewardGold`, `:577-594`), the tenfold chance (`iGold10DropPct`, `:630-636`,
+threaded through `draw_gold_piles`), and the drop range (`GetDropPct`,
+`item_manager.cpp:870-912`, the precedence Defect fixed as recorded). The worn
+double-item (100 in the range) stays a hook, as do the premium and rate terms
+whose setters no ported path calls (`GetMobGoldDropRate`'s 100,
+`GetMobGoldAmountRate`'s 100; the quest `SetMob*Rate` setters and the
+`game.set_event_flag` path stay unported).
+
+`a_gm_grants_an_empire_rate_and_every_client_hears_it`: Alice (HIGH_WIZARD)
+grants empire 1 the exp rate with value 500, and both clients hear
+`[LS;724;[LS;793];[LS;1040];200]`. A three-word line answers the five usage
+lines on Alice alone. A 0 grant lands the removal line on both. A gold grant
+lands, an empire-2 grant lands noticed but unfelt, and Carol's fresh character
+enters: her burst carries `[LS;872;30]` then `[LS;874;200]` behind the Channel
+record, then `letters_event 0`.
+
+`cmd.priv_empire` is `ported`; `cmd.priv_guild` is `unused`.
+
+New unit tests in `game_state::empire_priv`: the `strtol` walk, the grant's
+clamp/notice/max/expiry, the usage lines for a missing word and each
+out-of-range word, and the login notices' type order with a zero grant silent.
+
+Fixes while green:
+
+- The priv lines first rode `tell` after the burst was built; they ride the
+  burst between the Channel record and `letters_event`, where `_send_bonus_info`
+  sends them.
+- The grant notice first passed the raw LS keys as `%s` arguments; each hearer
+  translates both words first, as `SendPrivNotice` does.
+- The scenario first entered Zulu on Bob's account, displacing Yankee; Zulu is
+  Carol's, so both map members stay to hear.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4323 passed, 0 failed, 50 targets. Afterwards no `prodomo\_%`
+  scratch database remained (`psql` is not installed, so the check ran inside
+  the database container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+  The chat-line arms moved to `apply_chat_line` and the burst assertions to
+  `read_priv_burst` to satisfy the line lint; fixed by refactoring, with no
+  `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 291. The GM's event flags (`cmd.eventflag`, `cmd.geteventflag`)
+
+`ACMD(do_event_flag)` (`G/cmd_gm.cpp:2265-2285`) and `ACMD(do_get_event_flag)`
+(`:2286-2290`, `CQuestManager::SendEventFlagList`,
+`G/questmanager.cpp:1308-1325`): the set takes two words (the name and the
+value) and is silent unless both are there; the nine `mob_*` names clamp to
+0..1000; the caller hears the raw `RequestSetEventFlag <name> <value>` line.
+`Command::EventFlag` and `Command::GetEventFlag` dispatch through
+`GameCommand::EventFlag` and `GameCommand::GetEventFlag`.
+
+The value is `(int)strtol(word)` (`str_to_number`, `common/utils.h:44-50`):
+an optional sign, a digit run cut at the first non-digit, no digits is 0, and
+saturation past `i32`'s ends. The list walks the table in name order, one
+`name value` info line per flag; the three `prob` lines are dead here because
+they need the test server off, and it is on.
+
+The table is the quest manager's (`Manager::event_flags`), seeded with the two
+guild delays (`questmanager.cpp:165-166`): the same flags `game.get_event_flag`
+reads. Legacy's set does not write the table: `RequestSetEventFlag` only sends
+the DB-peer frame (`HEADER_GD_SET_EVENT_FLAG`, `:1327-1333`), and the flag
+lands when the DB process answers. The peer is retired (ADR-0001), so the one
+process writes the table in the command and the flags live in memory within a
+boot (ADR-0002). No Divergence is taken: the client sees the set's answer and
+the reads, which match.
+
+`lua.game.set_event_flag` stays `missing`: its live caller is only
+`enchanted_forest_zone` (line 18), whose port is a later slice, and the
+never-loaded `questlib_extra` holds the only other call.
+
+`a_gm_sets_a_flag_and_a_late_login_reads_it`: Alice (HIGH_WIZARD) sets
+`cards_event` to 1 and hears `RequestSetEventFlag cards_event 1`; a `mob_gold`
+of 5000 lands as 1000; a one-word line is silent. The list answers the four
+flags in byte order (`cards_event`, the two guild delays, `mob_gold`).
+Carol's fresh character enters: her login's second line is `cards icon`
+(quest 22's `login with` condition fires on the set flag, behind
+dungeoninfo's), and her `event_info` line reads `event_info 0 1 0`.
+
+`cmd.eventflag` and `cmd.geteventflag` are `ported`;
+`lua.game.get_event_flag` is `ported` (a ported system sets one at last);
+`quest.cards_event` stays `partial` (its 20417 chats wait for
+`pc.get_okay_global_rank` and `pc.get_okay_rund_rank`).
+
+New unit tests in `game_state::event_flag`: the `strtol` walk (the sign, the
+digit run, the saturation, the no-digit zero), the set that lands and answers,
+the missing word that stays silent, and the list that walks in name order.
+
+Fixes while green:
+
+- The scenario first read `cards icon` ahead of dungeoninfo's line; the login
+  walk runs in quest-index order, so it rides second, and the reader takes
+  dungeoninfo's first.
+- The killed recount run's orphaned servers left 16 `prodomo_proc_*`
+  databases behind; they were dropped by hand after nothing remained
+  connected, and the count returned to 0.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4327 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 292. The letters event's trade (`cmd.give_reward`, `cmd.letters_open`)
+
+`ACMD(give_reward)` (`G/cmd_general.cpp:3761-3806`) and `ACMD(letters_open)`
+(`:3753-3760`): the trade takes the six letters (30216, 30213, 30219, 30214,
+30217, 30210) and draws the one box (55021, `G/LettersConfig.h:5`) from the
+special item groups; the window lists the group's rows, then opens. Both are
+GM_PLAYER at POS_DEAD, so any alive player runs them. `Command::GiveReward`
+and `Command::LettersOpen` dispatch through `GameCommand::GiveReward` and
+`GameCommand::LettersOpen`.
+
+The trade's gates run in legacy order: the busy refusals (an open safebox, a
+browsed shop, a trade, the dead; the cube and the personal shop are dead gates,
+no ported path opens either), the `letters_event` flag read from the quest
+table (`SEventLetters`' flag, `G/input_login.cpp:69-82`), and the six
+`CountSpecifyItem` counts. A missing letter is only the line
+(`@@(cmd_general)tradus:You do not have all the necessary letters`): the
+trade's own count still runs after it, as legacy's second `if` runs after the
+first, so a caller whose letters vanished between the line and the trade
+takes what is there. The six go by `RemoveSpecifyItem`, and a `GetMultiIndex`
+draw of group 55021 lands by `AutoGiveItem` (`game_state::letters`,
+`G/item_manager.cpp`). The caller answers the stored row changes before the
+client hears of them, one `GC_ITEM_SET` per letter (vnum 0) and the draw's
+own sets.
+
+The window is `CHARACTER::SendDropLettersItem` (`G/char.cpp:10866-10879`):
+one `letters_drop <vnum> <count> <index> <size>` command line per group row,
+then `OpenLetterWindow`. The groups are the boot's `special_item_group.txt`
+read, shared into the world (`GameData.groups`, `with_item_groups`). The
+owner's file holds no 55021 group, so no drop lines run and the draw lands
+nothing, as the null arm does; no Divergence is taken, because the owner's
+Game data is the behaviour to match, and a group added there would draw.
+
+The enter-game burst's letters line is live: `SEventLetters`' first arm runs
+when the flag is not 0 (`letters_event 1`), else the second (`letters_event 0`),
+so a late login sees the set. `Shown.letters_event` carries the flag from the
+quest table through `BurstAfter` to the burst.
+
+`a_player_trades_the_six_letters_for_the_box_draw`: with the event off the
+trade is refused and the letters stay; with the flag set the six go (one
+`GC_ITEM_SET` each, vnum 0) and the draw lands nothing, because the owner's
+group file holds no 55021 group. The window opens alone, with no
+`letters_drop` lines, and the store loses the six rows. Carol's fresh
+character enters: her burst's letters line reads `letters_event 1`, and her
+`event_info` line reads `1 0 0` (the letters flag is the first word).
+
+`cmd.give_reward` and `cmd.letters_open` are `ported`.
+
+New unit tests in `game_state::letters`: the dead and busy refusals, the flag
+refusal, the missing-letter line with the trade still running, the six
+removals, and the window's lines with and without the group. The burst's
+on-line test (`loading_phase`) pins `letters_event 1`.
+
+Fixes while green:
+
+- The scenario first laid the item sets at the wrong offsets (the actor read
+  the cell at bytes 3-4 and the vnum at 8-11, but `TItemPos` is
+  `window_type` + `cell` at 1-3 and the vnum at 4-7,
+  `server/server/common/length.h:957-960`); the reader now asserts the
+  window byte and the right offsets.
+- The late login first read `event_info 0 0 0`; the set flag leaks into the
+  first word, so the new `read_login_lines_with_event_info` reader takes
+  `1 0 0`, and the cards helper shares it.
+- The six-seed's relog check raced the store; the scenario reads the rows
+  back directly instead.
+- Clippy's line cap split the six sets into `read_cleared_cells`, and its
+  truncation lint made the tests' cell a checked `u16`, both fixed by
+  refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4335 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 293. The stat point's rise and fall (`cmd.stat`, `cmd.stat-`)
+
+`ACMD(do_stat)` (`G/cmd_general.cpp:790-844`) and `ACMD(do_stat_minus)`
+(`:715-788`): the line's word names one of the four attributes (`st`, `ht`,
+`dx`, `iq`), the point moves by 1, and the records ride the caller's outbox.
+Both are GM_PLAYER at POS_DEAD. `Command::Stat` and `Command::StatMinus`
+dispatch through `GameCommand::Stat` with the line's rest and a `lower` bit.
+
+The raise needs a stat point (`POINT_STAT` above 0) and a real point below
+`MAX_STAT`, which is `g_iStatusPointSetMaxValue` (`G/config.cpp:1101-1110`),
+held on the world from `[game] status_point_set_max_value` (90 on the owner's
+data). The lower needs a reset count (`POINT_STAT_RESET_COUNT` above 0) and a
+real point above the job's start (`JobInitialPoints[GetJob()]`). The
+polymorph gate is dead: no ported path polymorphs. The secured gate is dead
+too: no ported path secures the inventory, so `POINT_SECURED_STATE` reads 0.
+An empty or unknown word runs nothing, and every refusal is silent, as
+legacy's bare `return`s are.
+
+The raises land exactly as legacy writes them (`game_state::stat`): both
+arrays move (`Points::set_both_points`), `ComputePoints` runs, the
+attribute's `PointChange` runs (which recomputes the battle points, because
+the four are in `RECOMPUTES_BATTLE`), then the crossed pool line runs
+(`do_stat` sends `POINT_MAX_HP` for `iq` and `POINT_MAX_SP` for `ht`,
+`:836-841`), the stat counter falls, and `ComputePoints` runs again. The
+lowers land the same way: both arrays move, compute, the attribute's change
+(`ht` and `iq` carry their own pool's line this time, `:752-767`), the stat
+counter rises and the reset count falls, and compute again. The stat counter
+and the reset count are `COUNTERS`: their changes land the real array too.
+
+The store gains `player.stat_reset_count` (migration 0019), loaded into the
+points and saved from the held row. The held row takes the four real
+attributes and both counters from the world's answer (`StatHeld`), because
+the save writes the row, not the points; `hold_points` takes the same six,
+so a world-kept points never loses a stat. Legacy saves the four from
+`GetRealPoint` and the counters from `GetPoint` (`G/char.cpp:1582-1592`).
+
+`a_stat_point_raises_and_a_reset_lowers`: Alpha (shaman, 17/18/19/20, two
+points, one reset) raises `st` to 18 (32 frames: compute, the battle tail
+with the change behind it, the spent counter, compute), raises `iq` to 21
+(33 frames: the crossed `POINT_MAX_HP` rides a third time), is silent with
+no point left, lowers `st` back to 17 (the change, the returned point and
+the spent reset ride), is silent with no reset left, and the disconnect save
+banks st 17, iq 21, one point, no reset.
+
+`cmd.stat` and `cmd.stat-` are `ported`.
+
+New unit tests in `game_state::stat`: the raise that moves and spends, the
+crossed pool lines, the quiet refusals (no word, unknown word, no point,
+the cap), the lower that returns and spends, the quiet lower refusals (the
+job start, no reset), and the lower's own pool lines.
+
+Fixes while green:
+
+- The unit test first asserted `st` carries no `POINT_MAX_HP` line at all;
+  each `ComputePoints` nests the pool lines once, so it carries two, and the
+  assertion counts them.
+- The scenario first guessed 34 frames from the unit counts; the wire sends
+  32 (compute is 12 records, not 14), and the helper takes the count.
+- The scenario first read the row back at once; the held numbers land on the
+  disconnect save, so it drops the client and waits on the row.
+- The module first dropped `&mut Points` borrows between sends; the drops
+  were no-ops on references, so they were removed.
+- Clippy's truncation lint made the tests' slot a checked `u8` (`stat_kind`)
+  and its byte-count lint a fold (`count_of`, `count_point_kind`), both fixed
+  by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4342 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 294. The PK mode's switch (`cmd.pkmode`)
+
+`ACMD(do_pkmode)` (`G/cmd_general.cpp:2252-2270`): the line's number becomes the
+caller's mode, and its update fans to its view (`CHARACTER::SetPKMode`,
+`G/char_battle.cpp:3597-3616`). GM_PLAYER at POS_DEAD. `Command::PkMode`
+dispatches through `GameCommand::PkMode` with the line's rest, and nothing is
+stored: the mode lives in memory, as legacy's does.
+
+The number is `(unsigned char)strtoul(word)` (`common/utils.h:20-26`): the
+unsigned walk's low byte, so `257` reads 1 and `-1` reads 255. The gates run in
+legacy order: an empty word runs nothing; `PROTECT` never lands from a line;
+below `PK_PROTECT_LEVEL` only `PEACE` lands; the same mode sends nothing; at and
+above `MAX_NUM` the line is refused. Then `SetPKMode`'s folds: on Meley's map
+(212, or its 2120000..2130000 private copies, `MeleyLair.h:15`,
+`MeleyLair.cpp:1215-1222`) every mode folds to `GUILD`, and `GUILD` without a
+guild folds to `FREE`. Every refusal is silent, as legacy's bare `return`s are,
+and the folds re-check the same mode, because a forced fold can land where the
+caller already stands. The caller answers its own update too: `SetPKMode` calls
+`UpdatePacket`, which `PacketAround`s, and the caller is in its own view.
+
+`a_pkmode_line_lands_its_mode_with_an_update`: Alpha (level 154) lands free
+with an update carrying `bPKMode` 2, finds guildless guild the same free,
+lands peace and then the fallback's free, and hears nothing for protect, the
+same mode, past-max, and an empty word. Zulu (level 1) hears nothing for free
+and lands peace. The low-level login reads the full burst, so the late enter
+follows the flags scenario's shape.
+
+`cmd.pkmode` is `ported`.
+
+New unit tests in `game_state::pk_mode`: the unsigned low byte (the sign, the
+digit run, the wrap), Meley's map and its copies, the landing line, the
+below-protect peace, the silent protect/same/max/empty, and the guildless
+fallback to free.
+
+Fixes while green:
+
+- The new mode first overwrote `game_state/pvp.rs`, which already holds the
+  player-on-player melee; the original was restored and the line lives in
+  `game_state/pk_mode.rs`.
+- The same-mode test first sent `0` to a fixture body that starts in `PROTECT`;
+  it lands `FREE` first now, so the second `FREE` is the same mode.
+- Clippy's truncation lint made the mode walk a `u8` throughout (the cast's low
+  byte falls out of the wrapping arithmetic) and its closure lint the guild
+  lookup a method reference, both fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4349 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 295. The walk mode's lines (`cmd.set_walk_mode`, `cmd.set_run_mode`)
+
+`ACMD(do_set_walk_mode)` and `ACMD(do_set_run_mode)` (`G/cmd_general.cpp:2016-2026`):
+the line sets both of the caller's flags (`SetWalking` and `SetNowWalking`,
+`G/char.h:952-954`) to the asked mode. `Command::WalkMode(bool)` dispatches
+through `GameCommand::WalkMode`, and nothing is stored: the flags live in memory,
+as legacy's do.
+
+Only the second flag's change fans. `SetNowWalking` (`G/char.cpp:7345-7380`)
+sends the walk-mode record to the caller's view (`PacketView`,
+`G/entity.cpp:88-105`, which this build already fans through `packet_around`,
+so the caller hears its own record too) when the flag moves, and stays silent
+when asked for the mode it holds. The five-second walk stamp it stamps only on
+a walk (`m_dwWalkStartTime`) lands with the refill it gates
+(`G/char_state.cpp:813-829`), which is not ported: stamping a time no reader
+reads would pin nothing the client can see, so the two flags set together and
+the restore point never differs from the live one in this build (V3).
+
+The flag feeds `IsWalking` (`G/char.h:951`): the body takes `now_walking`, and
+`is_walking` answers the flag or a spent stamina. The move clip reads it
+(`GetMotionKey`, `G/char.cpp:3562-3568`, through `motion_speed_of`), the
+insert's move record reads the inserted body's flag (`G/char.cpp:1217-1222`),
+and the reverse record reads the recipient's flag behind the `IsWalking` gate
+(`:1228-1234`), so a spent stamina still says run there.
+
+`a_walk_line_fans_and_a_repeat_is_silent`: Alpha walks with `[6f, vid, 1]`,
+finds the walk's repeat silent, runs with `[6f, vid, 0]`, and finds the run's
+repeat silent.
+
+`cmd.set_walk_mode` and `cmd.set_run_mode` are `ported`.
+
+New unit tests in `game_state::walk_mode`: the change that fans and the repeats
+that are silent, and the unknown caller that runs nothing. The insert's reverse
+test takes the recipient's flag, with the spent-stamina case that says run, and
+the walking tests take the flag beside the stamina.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4352 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 296. The guild line's fan (`sub.Chat.*`)
+
+`CInputMain::Chat` (`G/input_main.cpp:781-991`) fans a plain line by its type:
+TALKING to the map (`FEmpireChatPacket`), PARTY to every linked member of the
+sender's party (`ForEachOnlineMember`), and GUILD to every online member of
+the sender's guild (`CGuild::Chat`, `G/guild.cpp:1760-1764`). All three paths
+were already ported — the talking record, the party fan and the per-member
+empire-stamped guild fan (`RelayScope::Guild` with `set_guild_empire`) — but
+their inventory rows still said `missing`, and only the guild arm lacked a
+scenario.
+
+`a_guild_line_reaches_the_members_and_no_outsider`: Alice makes `MyGuild`,
+invites Yankee and Yankee accepts; Alice speaks to the guild and both members
+hear the same type-4 bytes (id 0, the empire byte, `bCanFormat` true,
+`Alpha : hello`).
+
+`sub.Chat.CHAT_TYPE_TALKING`, `sub.Chat.CHAT_TYPE_PARTY` and
+`sub.Chat.CHAT_TYPE_GUILD` are `ported`, the first two on their older
+scenarios (`a_talking_line_reaches_the_map_including_its_sender`,
+`a_party_line_reaches_the_members_and_no_outsider`).
+
+Fixes while green:
+
+- The scenario first gave Bob a different empire to prove the per-member
+  stamping, but legacy refuses a cross-empire invite with `[LS;942]`
+  (`G/guild.cpp:2056-2060`); both sit in empire 1 now, and the stamping stays
+  covered by the fan's own shape.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4353 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 297. The friend ask by VID (`sub.Messenger.*`)
+
+`CInputMain::Messenger` (`G/input_main.cpp:1128-1228`) takes three arms: add by
+VID, add by name, and remove. All three paths were already ported — the block,
+desc, GM and self gates, the ask (`RequestToAdd`), the yes that lists both
+directions, and the remove — but their inventory rows still said `missing`,
+and only the by-VID arm lacked a scenario.
+
+`a_friend_request_by_vid_asks_the_target`: Alice names Yankee's VID, and
+Yankee hears the same `messenger_auth Alpha` ask the name arm sends, while the
+asker hears nothing yet.
+
+`sub.Messenger.MESSENGER_SUBHEADER_CG_ADD_BY_VID`,
+`sub.Messenger.MESSENGER_SUBHEADER_CG_ADD_BY_NAME` and
+`sub.Messenger.MESSENGER_SUBHEADER_CG_REMOVE` are `ported`, the last two on
+the older friend scenario
+(`a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it`).
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4354 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 298. The sync claim's skip (`sub.SyncPosition.*`, `sub.Position.*`)
+
+`CInputMain::SyncPosition` (`G/input_main.cpp:2010-2165`) skips a victim of
+kind NPC, warp or goto (`:2067-2073`, `continue` before the owner claim). The
+policy already skipped them (`is_skipped`, `npc_kind`), but the rows still
+said `missing` and no scenario proved the skip over the wire. The three
+`Position` arms (`:1530-1548`: general, chair, ground) were in the same
+shape — ported (`judge_pose` with the chair's recorded Divergence) with their
+rows still `missing` — but already had their scenario.
+
+`a_sync_claim_on_an_npc_is_skipped_and_a_player_still_lands`: Alice claims an
+NPC from her enter burst's in-view inserts and nothing leaves the server on
+either client; a frame with the NPC beside Yankee lands Yankee's ownership
+and a batch naming only Yankee, the claimer reads its own ownership too
+(`PacketAround` has no exception) and never the batch. The warp and goto
+kinds share the one `is_skipped` arm with the NPC's, so the one scenario
+covers all three rows.
+
+`sub.SyncPosition.CHAR_TYPE_NPC`, `sub.SyncPosition.CHAR_TYPE_WARP`,
+`sub.SyncPosition.CHAR_TYPE_GOTO`, `sub.Position.POSITION_GENERAL`,
+`sub.Position.POSITION_SITTING_CHAIR` and `sub.Position.POSITION_SITTING_GROUND`
+are `ported`, the last three on the older pose scenario
+(`a_pose_reaches_the_view_including_its_sender`).
+
+Fixes while green:
+
+- The scenario first asserted the claimer hears nothing after the mixed frame,
+  but the claimer reads its own ownership record before its quiet; it reads
+  the ownership now, then the quiet.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4355 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 299. The guild money's quiet (`sub.Guild.*`)
+
+`CInputMain::Guild` (`G/input_main.cpp:2797-3170`) takes fifteen arms. Fourteen
+were already ported with scenarios — the invite and its answer, the removal,
+the grade rename and auth, the member grade and general, the offer, the
+charge, the comment post/delete/refresh, and the skill use — but their rows
+still said `missing`. Both money arms early-return before their bodies (`by
+mhh: the funds are closed for now`, `:2830-2831`, `:2861-2862`), and only the
+deposit's scenario proved the silence.
+
+`a_guild_withdraw_stays_quiet`: Alice makes `MyGuild` and sends a withdraw of
+1000, which stays quiet past the frame check, as the deposit's does.
+
+All fifteen `sub.Guild.*` rows are `ported`, fourteen on their older guild
+scenarios (`a_guild_is_made_and_every_pc_hears_its_name` is not among them —
+each arm names the scenario that drives it: invites, renames, offers and
+skill use).
+
+Fixes while green:
+
+- The slice first aimed at the party roles, whose `SetRole` is ported; but the
+  attacker cap needs leadership 10, and 121 carries `DISABLE_BY_POINT_UP`
+  (its proto row), so no `/skillup` line can climb it and the fan is
+  unreachable over the wire. The half-written role scenario was reverted, and
+  the ledger records the party-role fan as waiting on a reachable leadership
+  source instead.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4356 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 300. The party skill's quiet (`sub.PartyUseSkill.*`)
+
+`CInputMain::PartyUseSkill` (`G/input_main.cpp:2734-2761`) was ported but had no
+wire scenario: the leader's HEAL is legacy's dead body (`XXX DELETEME` returns
+first), WARP summons or chats its gates, and an unknown index is the switch's
+missing default. `party_use_skill_step` already wired the record.
+
+`a_party_skill_heals_quiet_and_warns_its_gates`: Alice leads Yankee; the leader's
+HEAL answers nothing (every record until the quiet beat is a stale walk record);
+a member's WARP is told `[LS;684]`; the leader's WARP at a gone VID is told the
+raw `<Party> Cannot find target to summon.` line; and at a live outsider's VID,
+`[LS;685]`. No WARP can summon here: leadership is 0, below `CanSummon`'s 12.
+
+Both `sub.PartyUseSkill.*` rows are `ported`. The `PartySetState` roles still
+wait on a reachable leadership source (299's note).
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4357 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 301. The game's pong (`cg.game.pong`, `cg.game.time_sync`)
+
+The game phase's heartbeat arms (`G/input_main.cpp:3661-3666`) were handled —
+`SetPong` on PONG, the token check on TIME_SYNC — but no wire scenario drove
+them. `Pong` sets a flag the ping cycle reads; `Handshake` past the handshake
+phase only checks the token (`G/input.cpp:131-159`).
+
+`a_client_in_game_answers_the_ping_cycle`: Alice in-game sends a bare PONG,
+which stays quiet, and still runs a skill use after it; Yankee sends a
+TIME_SYNC naming token 1, which closes silently.
+
+Both rows are `ported`. The named-token sync in-game is the handshake's own
+timing path, already answered in the login phase scenario.
+
+Fixes while green:
+
+- Clippy's `doc_markdown` wanted `TIME_SYNC` in backticks in the scenario's doc.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4358 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 302. The hack report (`cg.game.hack`, `cg.login.hack`)
+
+`CInputMain::Hack` (`G/input_main.cpp:3219-3233`) logs the 255-byte report and
+closes the descriptor; `CInputLogin` breaks on the same header
+(`G/input_login.cpp:1239-1240`). In-game the report path already closes a
+header no analyzer handles, which is the same close; the login phases needed
+the consume.
+
+`a_hack_report_in_game_closes_the_connection`: Alice in-game sends the 257-byte
+record, which closes. `a_hack_report_on_the_select_screen_is_consumed`: the
+same record on the select screen is consumed with nothing sent, and the select
+still loads Alpha.
+
+`is_consumed` takes `CG_HACK` in the login, select and loading phases beside
+the `@fixme120` pair. Both hack rows are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4360 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 303. The stubs' scold (`cmd.phase_selec`, `cmd.qui`, `cmd.logou`, `cmd.shutdow`)
+
+`do_inputall` (`G/cmd.cpp:157-160`) is one line — `[LS;916]`, type it in full —
+already wired as `TypeInFull`, but no scenario drove it. The four rows are its
+whole table: three player stubs and the GM one.
+
+`a_stubbed_command_asks_to_type_it_in_full`: a granted Alice hears `[LS;916]`
+for all four lines; Yankee hears it for the three player stubs and is refused
+`/shutdow` as a missing command (`@@(cmd.cpp)tradus:...`, `:695-698`).
+
+All four `do_inputall` rows are `ported`. The full commands the stubs guard
+(`phase_select`, `quit`, `logout`, `shutdown`) stay missing.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4361 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 304. The mount's quiet (`cmd.mount`)
+
+`do_mount` (`G/cmd_general.cpp:450-452`) is an empty body: the command is
+consumed and nothing is sent. Its `POS_MOUNTING` minimum still bites — a dead
+caller is scolded `[LS;918]` by the position gate before the body
+(`G/cmd.cpp:661-670`).
+
+`a_mount_line_is_empty_standing_and_scolded_dead`: Alice standing sends
+`/mount`, which stays quiet; a boar-killed Alpha sends it dead and hears
+`[LS;918]` past the death's tail.
+
+The row is `ported`. No code changed: the empty body is the `NotPorted` arm's
+quiet, and the position gate already scolds.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4362 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 305. The ungroup line (`cmd.ungroup`)
+
+`do_ungroup` (`G/cmd_general.cpp:1060-1088`) is the member arm of `PartyRemove`
+with self as the target: the PC-party and dungeon gates, the partyless quiet,
+the silent disband from two, else `[LS;532]` and the quit. `PartyRemove`'s own
+leader/member split only matters when the target differs from the sender, so
+the reducer runs one self-leave.
+
+`an_ungroup_line_quits_silently_or_loud_by_count`: Alice partyless stays quiet;
+in a party of three Yankee's `/ungroup` tells it `[LS;532]` and every linked
+member hears its REMOVE naming its PID; in a party of two Charlie's disbands
+with no party record.
+
+The wiring is a new `Command::Ungroup`, `ungroup_step`, `GameCommand::Ungroup`,
+and `GameState::ungroup`. The row is `ported`.
+
+Fixes while green:
+
+- Charlie's fixture row had no level, so the second invite died at the
+  30-level window (`[LS;824]`); the row now stores 154.
+- The full suite caught a late `[LS;839;Charlie]` join echo ahead of the
+  REMOVE; the loop steps over exactly that line.
+- Clippy's `too_many_lines` and `similar_names` split the REMOVE wait into
+  `read_leave_remove`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4363 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 306. The silence list (`cmd.block_chat_list`, `cmd.vote_block_chat`)
+
+`do_vote_block_chat` (`G/cmd_gm.cpp:3312-3314`) returns before its first word:
+`/vote_block_chat` stays quiet from any caller, whatever the line carries. Its
+wiring is a new `Command::VoteBlockChat` and a step that logs and answers
+nothing.
+
+`do_block_chat_list` (`G/cmd_gm.cpp:3298-3310`) reuses the lay's gate — the
+same `HIGH_WIZARD` level and the same `chat_privilege.block` flag — and the DB
+answer (`G/db.cpp:572-592`) lists one `%s %s sec` line per affect row, or `No
+one currently blocked`. The list walks the live characters' silences
+(`player_names` with `block_chat_seconds_of`); the store's offline rows are
+invisible to it, as no live caller reads them. The duration is the laid ticks,
+as the DB row's `lDuration` is (`RETURN_QUERY` runs the lay's write first).
+
+Reading the list's gate fixed the lay's refusal: both send `LC_TEXT("there is
+no such command")` (`:3303`, `:3369`), which no country table carries, so
+`ChatPacket`'s locale lookup goes out as written (`G/char.cpp:5147-5154`).
+`block_chat_allowed` and its two unit tests now send that line instead of the
+dispatcher's `@@(cmd.cpp)tradus` one.
+
+`a_gm_lists_the_silences_and_the_vote_stays_quiet`: the vote is quiet from a
+player and a GM, with and without a name; a player hears the refusal as
+written; a GM hears the empty line, then `Yankee 90 sec` after the lay, then
+the empty line again after the 0 lay's tick lifts the row.
+
+The wiring is a new `Command::BlockChatList`, `block_chat_list_step`,
+`GameCommand::BlockChatList`, and `GameState::block_chat_list`. Both rows are
+`ported`.
+
+Fixes while green:
+
+- The bucket edit dropped `GameCommand::EventFlag` (and then `GiveReward` and
+  `Stat`) from the dispatch: every `/eventflag` line panicked the game thread
+  at the `apply_delegated` assert. The server log's `Panicked` payload named
+  it; the bucket now carries all twelve arms.
+- The same edit dropped `"do_hide_costume"` from the command dispatch: the
+  log's `Command not ported` line named it, and the table is whole again.
+- The inventory floor tripped at exactly 1000 missing rows (this slice ports
+  two of them); the check now wants more than 900.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4367 passed, 0 failed, 40 targets. Afterwards no
+  `prodomo\_%` scratch database remained (checked inside the database
+  container).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 307. The disconnect line (`cmd.dc`)
+
+`do_disconnect` (`G/cmd_gm.cpp:1755-1782`) closes the named character's
+descriptor. An empty line answers `ex) /dc <player name>`; an unknown name
+answers `%s: no such a player.` with the name as typed; the caller's own name
+answers `cannot disconnect myself`. Else the target's descriptor is destroyed
+(`DESC_MANAGER::DestroyDesc`, `:1781`), which disconnects the character and
+saves its row on the way out. The lookup is the descriptor set's exact match
+(`name_with_desc_func`, `G/desc_manager.cpp:315-329`), not `FindPC`'s lowered
+one: a name in another case names nobody.
+
+The port is `GameState::disconnect` in `prodomo/src/game_state/whisper.rs`,
+reporting `DcOutcome`, with the exact-name lookup over `player_names` and the
+close order through the client registry (`ClientOrder::Close`), as the guild
+war's map end orders it. The GM gate (`GM_LOW_WIZARD`) stays with the
+dispatcher, whose refusal the suite re-proved is `NO_SUCH_COMMAND` here, not
+the lay's as-written line (the first run of the scenario caught the mix-up).
+Wiring is `Command::Dc`, `GameCommand::Dc`, `dc_command`, and `dc_step`.
+
+`a_gm_disconnects_a_character_and_the_target_closes`: a player hears the
+dispatch refusal; a `LOW_WIZARD` hears the usage, the unknown and wrong-cased
+echoes, and the self refusal; on the exact name the target's connection closes
+with nothing before it, and the caller reads the release and the removal.
+Four unit tests pin the usage, the exact match, the self refusal, and the
+landed quiet.
+
+Changes:
+
+- `prodomo/src/game_state/whisper.rs`: `DcOutcome`, `disconnect`,
+  `player_exactly_named`, `order_close`, and the four unit tests.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the `Dc` command, loop
+  message, chat-bucket arm, and step.
+- `prodomo/tests/parity.rs`: the scenario.
+- `.scratch/parity/commands.md`: `cmd.dc` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4372 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 308. The transfer line (`cmd.transfer`)
+
+`do_transfer` (`G/cmd_gm.cpp:102-151`) warps the named character to the
+caller's side. An empty line answers `Usage: transfer <name>`; an unknown
+name answers `There is no character(%s) by that name` with the name as typed;
+a target on another Channel answers `Target(%s) is in %d channel (my channel
+%d)`; the caller's own name answers `Transfer me?!?`. Else the target warps
+to the caller's feet (`tch->WarpSet(ch->GetX(), ch->GetY(),
+ch->GetMapIndex())`, `:150`). The lookup is `FindPC`'s lowered one
+(`G/char_manager.cpp:244-260`), unlike `/dc`'s exact one.
+
+The port is `GameState::transfer` in `prodomo/src/game_state/whisper.rs`,
+reporting `TransferOutcome`, with the warp order through the client registry
+(`ClientOrder::Warp`), as the restart's orders it. The cross-Channel arm
+needed a same-world check first: every Channel lives in one `GameState`, so
+`whisper_target` finds a Shared Channel target too, and without the bodies'
+Channel comparison the line would warp Charlie across Channels instead of
+naming 99 (the first runs of the scenario stalled there, the expected line
+never sent). The registry's `entry_of` covers the case the world misses;
+ADR-0001 retires the GG relay, so `Transfer requested` has no arm. The GM
+gate (`GM_LOW_WIZARD`) stays with the dispatcher. Wiring is `Command::Transfer`,
+`GameCommand::Transfer`, `transfer_command`, and `transfer_step`.
+
+`a_gm_transfers_a_character_and_the_target_warps_to_its_side`: a player hears
+the dispatch refusal; a `LOW_WIZARD` hears the usage, the unknown echo, the
+cross-Channel line, and the self refusal in another case; on the exact name
+the target's client is sent its own removal and the `GC_WARP` to the caller's
+feet, the row holds the feet, the key logs in again there while the old
+descriptor drops lines, and the caller reads the removal alone. Four unit
+tests pin the usage, the case-insensitive match, the no-character line, and
+the self refusal.
+
+Changes:
+
+- `prodomo/src/game_state/whisper.rs`: `TransferOutcome`, `transfer`,
+  `order_transfer`, and the four unit tests.
+- `prodomo/src/client_registry.rs`: `entry_of`, which `outbox_of` now uses.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the `Transfer` command,
+  loop message, chat-bucket arm, and step.
+- `prodomo/tests/parity.rs`: the scenario.
+- `.scratch/parity/commands.md`: `cmd.transfer` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4377 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 309. The kill and the poison (`cmd.kill`, `cmd.poison`)
+
+`do_kill` (`G/cmd_gm.cpp:1784-1805`) kills the named character by `tch->Dead()`
+with no killer. An empty line answers `ex) /kill <player name>`; an unknown name
+answers `%s: no such a player` with the name as typed and no trailing stop
+(unlike `/dc`'s line). `do_poison` (`:1808-1829`, behind `ENABLE_NEWSTUFF`, which
+the owner's build defines in `server/server/common/prodomodefines.h:11`) poisons
+by nobody (`tch->AttackedByPoison(NULL)`), with the same usage and miss lines
+under its own name. Both lookups are the descriptor set's exact match
+(`FindByCharacterName`, `G/desc_manager.cpp:315-329`), like `/dc`'s and unlike
+`/transfer`'s lowered one: the target's name in another case names nobody.
+
+The port is `GameState::kill` and `GameState::poison` in
+`prodomo/src/game_state/whisper.rs`, reporting `KillOutcome`, through
+`player_exactly_named` (the exact match over the shown names). The kill routes
+through the ported `dead_pc` with no killer; the poison through the ported
+`poison_pc` with no attacker, so its ticks carry killer 0 and their damage
+copies go nowhere. The GM gates (`GM_HIGH_WIZARD` for `/kill`,
+`GM_IMPLEMENTOR` for `/poison`) stay with the dispatcher. Wiring is
+`Command::Kill`/`Command::Poison`, `GameCommand::Kill`/`GameCommand::Poison`,
+`kill_command`/`poison_command`, and the `apply_chat_line` arms.
+`apply_chat_line` split its flag, letters, stat, PK and walk arms into
+`apply_chat_flag`, so neither half trips the line lint, and `npcs_on` gained
+its `# Errors` section.
+
+`a_gm_kills_and_poisons_and_each_line_answers_its_miss`: a player hears the
+dispatch refusal on both lines; an `IMPLEMENTOR` hears each usage, each miss,
+and the exact-match miss. On the exact name the poisoned target hears the
+flag update, the poison's `GC_AFFECT_ADD` (kind 209), and the first tick's
+flagged damage (`DAMAGE_POISON`) through the poison path, then the
+hit-point change, which carries no amount (`damage_pc_tail` sends with
+`show_amount` false), while the caller hears nothing. Then the kill runs
+through the poison: death clears the poison first — the remove and the flag
+update, which fans around — then `ClearSync`'s release, the dead phase, and
+the `GC_DEAD`; the caller reads the clear's update, the release, and the
+dead. Alice enters past `event_panel`'s GM-gated letter, which rides in quest
+order between `dungeon_info`'s line and `costume_option`'s hides
+(`read_login_lines_hiding_after_dungeon`). Three unit tests pin the usage,
+the exact miss, and the landed kill and poison.
+
+Changes:
+
+- `prodomo/src/game_state/whisper.rs`: `KillOutcome`, `kill`, `poison`,
+  `kill_target`, `player_exactly_named`, and the three unit tests.
+- `prodomo/src/command.rs`, `prodomo/src/command/table.rs`,
+  `prodomo/src/game_loop_messages.rs`, `prodomo/src/game_state.rs`,
+  `prodomo/src/main.rs`: the `Kill`/`Poison` commands, loop messages,
+  chat-bucket arms, step, and the `apply_chat_flag` split.
+- `prodomo/tests/parity.rs`: `DAMAGE_POISON`, `affect_remove_of`,
+  `read_login_lines_hiding_after_dungeon`, `enter_world_as_implementor`,
+  `read_kill_poison_misses`, `read_landed_poison`, `read_landed_kill`, and the
+  scenario.
+- `.scratch/parity/commands.md`: `cmd.kill` and `cmd.poison` are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4381 passed, 0 failed. Afterwards a
+  `prodomo\_%` scratch check could not run: `psql` is not installed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 310. The stun line (`cmd.stun`)
+
+`do_stun` (`G/cmd_gm.cpp:87-90`) runs `Command_ApplyAffect(ch, argument,
+"stun", COMMANDAFFECT_STUN)` (`:50-83`). An empty line answers `Usage: stun
+<name>`; an unknown name answers `%s is not in same map` with the name as
+typed. Else the target takes the stun affect — `SkillAttackAffect` at
+1000/1000 (`G/battle.h:64-91`), past the set-flag and `IMMUNE_STUN` gates
+(`IsImmune` is a bare bit test under `__FIX_BUG_IMMUNE__`, which the owner's
+build defines in `server/server/common/prodomodefines.h:106`) — and the
+caller hears `%s stun`, whether the affect landed or a gate skipped it. The
+lookup is `FindPC`'s lowered one (`G/char_manager.cpp:244-260`), like
+`/transfer`'s and unlike `/kill`'s exact one: another case still lands, and
+the confirmation echoes the name as typed.
+
+The port is `GameState::stun` in `prodomo/src/game_state/whisper.rs`,
+reporting `StunOutcome`, through `whisper_target` (the lowered match). The
+landed affect is `AFFECT_STUN` (210) with `POINT_NONE`, value 0, `AFF_STUN`
+for 30 ticks through the ported `add_pc_affect` with `bOverride`, whose own
+stun arm stops the target. The GM gate (`GM_LOW_WIZARD`) stays with the
+dispatcher. Wiring is `Command::Stun`, `GameCommand::Stun`, `stun_command`,
+the `apply_chat_line` arm, and `stun_step`. `apply_command`'s chat bucket is
+now the `GameCommand::is_chat_line` predicate, which the Stun arm's line
+tripped the lint without. The dispatch also gained the `PrivEmpire` arm
+ledger 290's step never wired: the binary match was non-exhaustive without
+it, which the `Stun` variant exposed.
+
+`a_gm_stuns_a_character_and_the_target_hears_its_add`: a player hears the
+dispatch refusal; a `LOW_WIZARD` hears the usage and the miss. On the
+target's name in another case the caller reads the fanned flag update, then
+the confirmation as typed, and the target hears the update and the stun's
+`GC_AFFECT_ADD` (kind 210). Two unit tests pin the usage, the miss, the
+lowered landing, the confirmation, and the already-stunned skip (the
+confirmation still goes out, and no second add lands).
+
+`cmd.slow` stays `missing`: legacy's `do_slow` (`:92-100`) ignores its line
+and grants the caller ten vnum-12019 armours with `SetSocket(4, i)` — a
+debug leftover sharing only the `Command_ApplyAffect` comment block, not its
+call. Whether to port it is the owner's call.
+
+Changes:
+
+- `prodomo/src/game_state/whisper.rs`: `StunOutcome`, `STUN_TICKS`, `stun`,
+  and the two unit tests.
+- `prodomo/src/game_state/pc_skill.rs`: `IMMUNE_STUN` is shared.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the `Stun` command,
+  loop message and predicate, chat-bucket arm, step, and the missing
+  `PrivEmpire` dispatch arm.
+- `prodomo/tests/parity.rs`: the scenario.
+- `.scratch/parity/commands.md`: `cmd.stun` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4384 passed, 0 failed. Afterwards a
+  `prodomo\_%` scratch check could not run: `psql` is not installed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 311. The warp lines (`cmd.warp`, `cmd.rewarp`)
+
+`do_warp` (`G/cmd_gm.cpp:399-457`) warps the caller to the named character or
+the metres, and `do_rewarp` (`:459-465`, behind `ENABLE_NEWSTUFF`, which the
+owner's build defines) rewarps it in place. An empty warp answers `Usage:
+warp <character name> | <x meter> <y meter>`; when both arguments start with
+a digit they are metres (`strtol`, `isnhdigit`'s ASCII half — hangul bytes
+never start a name on the `europe` Locale); else the first names a character
+through `FindPC`'s lowered match (`G/char_manager.cpp:244-260`), an unknown
+name answers `There is no one(%s) by that name`, and a target on another
+Channel answers `Target(%s) is in %d channel (my channel %d)`. Else the
+caller hears `You warp to ( %d, %d )` with the pixels and warps there
+(`WarpSet` + `Stop`); `/rewarp` names the caller's own pixels.
+
+Two details the first port missed, both caught against the source before the
+receipt. A name's feet pass through `tch->GetX() / 100` and back (`:445-451`),
+so the warp lands on the metre at or below the target's feet, not on the feet
+themselves: Yankee stands at (469077, 950049) in the scenario and Alpha lands
+on (469000, 950000). And the metres' `x *= 100` (`:450-451`) is a 32-bit wrap
+on the legacy target, so the port uses `wrapping_mul` — a plain `*` would
+panic in debug on `i32::MAX` metres, which now land on -100.
+
+The port is `GameState::warp_command` and `GameState::rewarp_command` in
+`prodomo/src/game_state/whisper.rs`, reporting `WarpOutcome`, with the warp
+order through the client registry (`ClientOrder::Warp` on the caller's own
+descriptor, as the restart's orders it). The P2P arm is the bodies' Channel
+comparison: every Channel lives in one `GameState`, so `whisper_target` finds
+a Shared Channel target too, and without the comparison Charlie would be
+warped to instead of naming 99 (the same trap `/transfer`'s receipt records).
+`WarpToPID`'s same-Channel arm (`G/char.cpp:8099-8121`) never runs: its
+summonable-zone and `CAN_ENTER_ZONE` gates have no ported infrastructure, so
+a same-Channel target always lands. The cross-Channel line covers the case
+the P2P lookup covered; ADR-0001 retires the `FIND_POSITION` relay, so the
+other-process arm has no equivalent. The GM gate (`GM_LOW_WIZARD`) stays with
+the dispatcher. Wiring is `Command::Warp`/`Command::Rewarp`,
+`GameCommand::Warp`/`GameCommand::Rewarp`, `warp_command`/`rewarp_command`,
+the chat-bucket arms, and the steps.
+
+`a_gm_warps_to_metres_and_a_name`: a player hears the dispatch refusal; a
+`LOW_WIZARD` hears the usage, the unknown echo, and the cross-Channel line
+naming 99. On the lowered name the caller hears the truncated metres, reads
+its own removal and the `GC_WARP` there, the row holds the metres, and a
+fresh key lists them. On the metres the second caller hears the pixels and
+warps there, with the row and the list agreeing. `a_gm_rewarps_in_place`:
+Dave names his own pixels and rewarps, watched by a quiet Shared Channel.
+Both scenarios enter through the three-name GM team list
+(`messenger_team_list_many`, with the online bytes). Four unit tests pin the
+usage, the miss, the truncated landing, the metres (with the `47x` stop and
+the `i32::MAX` wrap), and the rewarp's own pixels.
+
+Changes:
+
+- `prodomo/src/game_state/whisper.rs`: `WarpOutcome`, `str_to_int`,
+  `warp_command`, `rewarp_command`, `order_self_warp`, and the four unit
+  tests. `str_to_int`'s clamped cast is now a `try_from` the lint accepts.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the `Warp`/`Rewarp`
+  commands, loop messages, chat-bucket arms, and steps.
+- `prodomo/tests/parity.rs`: the two scenarios and their six helpers
+  (`seed_warp_world`, `enter_world_hearing_team`, `check_listed`,
+  `warp_and_read_landing`, `warp_answers_its_refusals`,
+  `messenger_team_list_many`).
+- `.scratch/parity/commands.md`: `cmd.warp` and `cmd.rewarp` are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4390 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 312. The goto line (`cmd.goto`)
+
+`do_goto` (`G/cmd_gm.cpp:313-397`) shows the caller at the metres or warps it
+to the named map. An empty line answers `Usage: goto <x meter> <y meter>`;
+when both arguments are numbers the caller hears `You goto ( %d, %d )` with
+the metres past its own map base and `Show`s there on its map at `z` 0 with
+a `Stop`; else the first is a name through `CQuestManager::GetGotoInfo`'s
+lowered match (`G/questmanager.cpp:1093-1127`), an unknown name is silent,
+and the caller hears `You warp to ( %d, %d )` with the entry's pixels and
+warps there (`WarpSet` + `Stop`). The metres are the same
+`str_to_int`/`second`-present dance as `/warp`'s: a hangul first byte never
+starts a number on the `europe` Locale, a lone number is missing its pair,
+and a metre with a 32-bit-wrapping `*100` lands on the wrap, as there. The
+`#1`-style index arm is `FN_Goto`'s (`G/char.cpp:8123-8165`): one past the
+table's entries. The GM gate (`GM_LOW_WIZARD`) stays with the dispatcher.
+
+One detail the first port got wrong, caught by its own failing test before
+the receipt: a name with neither entry nor `#n` must be silent, and so must a
+name with no empire information whose `#n` has one — except that legacy's
+`if (!bFind)` (`:357-361`) prints `There is no map named ... Cannot find map
+%s` whenever a name IS found. The port refuses the spurious line: an honest
+GM typing `/goto a1` would read a failure message for a warp that landed, so
+it is a Defect, recorded in `docs/STATUS.md`. A second miss came from
+grepping the wrong tree: `settings.lua` seeds 91 entries, not none, so the
+scenario's empire-1 `flame` first landed on (599400, 756300) — until the
+warp refused, because the test server hosts only maps 1 and 3 and `flame`
+lives on 62; `a1` lands on hosted map 1 instead.
+
+The port is `GameState::goto_command` in
+`prodomo/src/game_state/whisper.rs`, reporting `GotoOutcome`, with the metres
+through `goto_metres` (the base offset, a 32-bit-wrapping `*100`, the `Show`
+and the `Stop`) and the name through `goto_name` (the `0`-vs-`1..=3` empire
+split, `#n` with an empty second word, the pixel confirmation, and the same
+`order_self_warp` `/warp` uses). `goto_hit` sorts the map/index split from
+the `#` prefix, and its Empire-0-vs-fallback sort is the one behaviour the
+unit tests reach that no scenario can, since every test account holds an
+empire. Wiring is `Command::Goto`, `GameCommand::Goto`, `goto_command`, the
+chat-bucket arm, and `goto_step`.
+
+`a_gm_gotoes_to_metres_and_a_name`: a player hears the dispatch refusal; a
+`LOW_WIZARD` hears the usage and silence on an unknown name. On the metres
+the caller hears the offset metres, reads its own removal and its own pair
+at the target with a `z` of 0, then every NPC of the enter's view re-sent as
+an insert pair (`assert_reencoded_view`), with no `GC_WARP` anywhere. On the
+name it hears the entry's pixels, reads its own removal and the `GC_WARP`,
+hears no spurious line, and the row and a fresh key list the entry. The
+Shared Channel stays quiet throughout. Three unit tests pin the usage and
+the silent misses (empty table, unknown name, no-empire `#n`), the metres
+(the `z`, the `47x` stop, the wrap), and `goto_hit` on the map split, the
+empire split, the `#n` arm, and the case of one against the other.
+
+Changes:
+
+- `prodomo/src/game_state/whisper.rs`: `GotoOutcome`, `goto_hit`,
+  `goto_command`, `goto_metres`, `goto_name`, and the three unit tests.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the `Goto` command,
+  loop message, chat-bucket arm, and step.
+- `prodomo/tests/parity.rs`: the scenario and `assert_reencoded_view`.
+- `.scratch/parity/commands.md`: `cmd.goto` is `ported`.
+- `.scratch/parity/quest-api.md`: `lua.add_goto_info` is `ported` (backed in
+  227, read over the wire here).
+- `docs/STATUS.md`: the spurious line is a Defect not to reproduce.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4396 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 313. The level line (`cmd.level`)
+
+`do_level` (`G/cmd_gm.cpp:2740-2758`) answers `Syntax: level <level>` on an
+empty line; else the caller hears nothing and `ResetPoint`, `ClearSkill` and
+`ClearSubSkill` run in that order, with the level `str_to_number(int)` clamped
+to `1..=gPlayerMaxLevel`. `ResetPoint` (`G/char.cpp:7424-7452`) runs the
+`POINT_LEVEL` change, plants the job's four starts in both arrays, rolls the
+random pools once each (`(level - 1) * number(begin, end)`, the hit roll
+before the spell roll), moves the stat counter to `(level * 3) + level step`,
+computes, refills both pools, and sends the points pair. The level change
+itself is `Points::reset_level`: the cap refusal, the level, the conqueror-off
+gate (a champion lowered below the max loses the level, the experience and
+the sungma, with the gate's own compute and points pair riding the stream
+first), the nested next-experience, and the level record. The gate's quest
+`LevelUp` raise, the guild and party member levels, and the top-120 affect are
+this slice's: the reward system's tables are empty on the owner's data
+(`legacy/README.md` drops `reward_global/` and `reward_solo/`), so its
+`DoReward` runs nothing. `ClearSkill` (`G/char_skill.cpp:3942-3947`) moves the
+skill counter to `4 + (level - 5)` and zeroes every skill but the eleven
+sub-skills, then computes and sends byte 76. `ClearSubSkill` (`:3949-3976`)
+moves the sub-skill counter to `level - 9` (a level below 10 moves nothing:
+the counter stays), zeroes the eleven, then computes and sends byte 76 again.
+A `/level` always sends two skill-level records. The GM gate
+(`GM_LOW_WIZARD`) stays with the dispatcher.
+
+The top-player affect is `SetTopPlayerEffect` (`G/char.cpp:11255-11284`,
+behind `ENABLE_TOP_PLAYERS_EFFECT`, which the owner's build defines): a
+`POINT_LEVEL` change that lands on 120 (`TOP_PLAYER_MAX_LEVEL`,
+`common/prodomodefines.h:127`) with fewer than three `player_top` rows grants
+the `uiNumRows`th of `AFFECT_PLAYER_TOP_1..3` with the infinite duration and
+stands the row. The port answers `reached_top` only when the level moved and
+landed on 120, so a `/level 120` at 120 raises nothing new; the step counts
+`player_top`, stands the row, and grants the rank's affect through the world.
+The level only misses the top path can land on is a same-level 120, and the
+unit tests pin that the raise skips it.
+
+Two gaps this slice closed along the way. The save's `PlayerSave` carried no
+sungma, so a lowered champion's zeroed sungma never reached the row and a
+relogin restored the old four beside a dead conqueror; the save now writes
+`sungma_str/hp/move/immune` (`D/ClientManagerPlayer.cpp:134-137`), and the
+row-save test pins the four. And the first scenario port checked the row while
+connected, which cannot pass: the save cycle is 120 seconds, so the row only
+lands on disconnect; the scenario follows the `/stat` pattern and checks
+after the drop. The four-clippy-error tail (`POINT_NONE as u8`,
+`apply_chat_line` past 100 lines, two `similar_names`, `match_same_arms`) was
+fixed by refactoring, with no `#[allow]`.
+
+The port is `GameState::run_level` in the new
+`prodomo/src/game_state/level.rs`, reporting `LevelHeld` (the level, the four
+starts, the random pools, the three counters, the full pools, the conqueror
+fields and the sungma, the skills the clears zeroed, and `reached_top`), with
+`grant_top_affect` for the rank's affect. Wiring is `Command::Level`,
+`GameCommand::Level` and `GameCommand::GrantTopAffect`, the chat-bucket arms
+(now in `apply_goto_level_line`, split out so no dispatch trips the line
+lint), and `level_step`, which takes the held numbers, deletes the cleared
+skills' store rows, and stands the top row past the store's count.
+
+`a_gm_levels_a_champion`: a player hears the dispatch refusal; a `LOW_WIZARD`
+hears the syntax on an empty line. On 30 the caller reads 64 records in
+order: the gate's next-experience, level and experience, the nested
+next-experience with the level, the gate's gold and pair (level 30, cleared
+conqueror), the stat counter at 90, the compute, the refills filling to the
+new maxima, the reset's pair, the skill counter at 29 with byte 76 (vnum 16
+zeroed, sub-skill 121 standing at 3), and the sub-skill counter at 21 with
+byte 76 all zero. The disconnect save banks the level, the shaman starts,
+the rolls, the counters, the full pools and the cleared conqueror with its
+sungma; both skill rows go; and a fresh key lists level 30. The teammate on
+the Shared Channel hears the logout and nothing else. Six unit tests pin the
+syntax, the warrior-30 reset (starts, roll ranges, counters, pools, cleared
+skills), the clamp to 120 and the floor at 1, the same-level clear without a
+raise, the champion's conqueror loss, and the conqueror kept at the max.
+
+Changes:
+
+- `prodomo/src/game_state/level.rs` (new): `LevelHeld`, `run_level`,
+  `grant_top_affect`, the clears, and the six unit tests.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the `Level` and
+  `GrantTopAffect` command, loop messages, chat-bucket arms with
+  `apply_goto_level_line`, and `level_step`.
+- `db/src/players.rs`, `prodomo/src/save.rs`: the save writes the four
+  sungma columns.
+- `db/migrations/0020_player_top.sql` (new), `db/src/player_top.rs` (new),
+  `db/src/lib.rs`: the `player_top` table, its `count` and `stand`.
+- `db/tests/players.rs`: the row-save test pins the sungma round trip.
+- `prodomo/tests/parity.rs`: the scenario, `assert_level_wire`,
+  `check_listed_level`, `points_slot`, `skill_slot`, and the merged sizer arm.
+- `.scratch/parity/commands.md`: `cmd.level` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4405 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 314. The skill-admin lines (`cmd.setskill`, `cmd.setskillother`, `cmd.setskillpoint`, `cmd.setjob`)
+
+`do_setskill` (`G/cmd_gm.cpp:2574-2608`) answers `Syntax: setskill <name> <lev>`
+when a word is missing or the level's first byte is no digit; else the word is
+a vnum when its first byte is a digit, else a name through
+`CSkillManager::Get` (`G/skill.cpp:327-351`, the vnum map for digits, a
+case-insensitive walk for names), and an unknown one answers `No such a skill
+by that name`. Else `SetSkillLevel` lands, `ComputePoints` runs, byte 76 goes
+out, and the caller hears nothing more. `do_setskillother` (`:2528-2572`) is
+the same with a target first: `Syntax: setskillother <target> <skillname>
+<lev>`, then `There is no such character` for an offline name (`FindPC`'s
+lowered lookup, `G/char_manager.cpp:244-260`), and the target hears the
+compute and byte 76 while the caller hears nothing. `SetSkillLevel`
+(`G/char_skill.cpp:183-213`) refuses a vnum at or past 255, refuses a nonzero
+level for a 221-243 vnum whose family fails (`SkillCanUp`, `:909-1145`,
+behind `__7AND8TH_SKILLS__`, which the owner's build defines: every other
+member of the 221-228 or 236-243 family must stand at 0, and 229-235 hit the
+`default` arm), and otherwise plants `MIN(40, level)` with the master ladder
+riding byte 76's encode. `do_set_skill_point` (`G/cmd_gm.cpp:2610-2622`)
+moves both skill-counter arrays to the line's number, 0 when the line is
+empty, and sends the kind-28 change with amount 0 (`SetRealPoint` + `SetPoint`
++ `PointChange(POINT_SKILL, 0)`). `do_set_skill_group` (`:2624-2637`) narrows
+the line's number to a byte, 0 when empty; `SetSkillGroup`
+(`G/char_skill.cpp:149-166`) takes a group past 2 or a caller below level 5
+as a silent skip of the set and byte 112, and then `ClearSkill` and `skill
+group to %d.` with the full number always run. The numbers are `str_to_number`
+ones (`C/utils.h:20-26`, `:44-50`, `:52-58`): the level wraps mod 256, the
+vnum mod 2^32, and the group and the counter take the low 32 bits of the
+clamped `long`. The GM gates (`GM_LOW_WIZARD`, `GM_HIGH_WIZARD`,
+`GM_IMPLEMENTOR`) stay with the dispatcher.
+
+The port is `run_setskill`, `run_setskillother`, `run_setskillpoint` and
+`run_setjob` in the new `prodomo/src/game_state/skill_admin.rs`, behind
+`SetSkill`, `SetSkillOther`, `SetSkillPoint` and `SetJob` commands and
+`set_skill_step`, `set_skill_other_step`, `set_skill_point_step` and
+`set_job_step`. What the step stores rides the answers: the vnum, the landed
+level and the untouched next-read for the two set lines, the counter for the
+point line, and the group with the clear's zeroed skills and the counter for
+the job line. The steps store through `db::player_skills::store_skill` (the
+other line resolves its target through the new `db::players::id_by_name`,
+lowered on both sides like `FindPC`), the held group and counter follow for
+the disconnect save, and a target gone mid-line stores nothing. Two
+splits keep the line lint quiet: `apply_chat_line` sheds the emotion and
+priv arms to `apply_emotion_priv_line`, and `run_command` sheds its dispatch
+match to `run_line_command`.
+
+Two gaps this slice closed along the way. `SetSkillGroup`'s silent skip had
+to be read in `char_skill.cpp`, not the handler: the handler calls it
+unconditionally, so a port of the handler alone would send byte 112 for a
+group of 9 or a caller at level 1. And the scenario's chat line hides inside
+`wire_for`: the helper sizes chat records through `chatter_width`, so the
+`skill group to 1.` line lands in the drained wire, not on a later
+`read_game`. The clippy tail (six `needless_borrow`, four narrowing casts, a
+redundant closure, a bool-arm collapse, and three line-count splits) was
+fixed by refactoring, with no `#[allow]`.
+
+- `prodomo/src/game_state/skill_admin.rs` (new): the four runners,
+  `SetSkillLanded`, `SetSkillOtherLanded`, `SetJobLanded`, the three
+  `str_to_*` numbers, `skill_vnum`, `set_skill_level`, `skill_can_up`, and the
+  eight unit tests.
+- `prodomo/src/game_state.rs`: the module, the `Landed` re-exports, the
+  `apply_goto_level_skill_line` guard and arms, and
+  `apply_emotion_priv_line`.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/main.rs`: the four commands, loop messages, dispatch arms with
+  `run_line_command`, and the four steps.
+- `db/src/players.rs`: `id_by_name`.
+- `db/tests/players.rs`: the case-fold lookup test.
+- `prodomo/tests/parity.rs`: `skill_admin_rows`, `skill_admin_stage`,
+  `a_gm_sets_skills_for_self_and_other`,
+  `a_gm_sets_skill_points_and_group`, and `change_record`.
+- `.scratch/parity/commands.md`: `cmd.setskill`, `cmd.setskillother`,
+  `cmd.setskillpoint` and `cmd.setjob` are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4417 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 315. The skill-flag lines (`cmd.invisible`, `cmd.cooltime`)
+
+`do_invisibility` (`G/cmd_gm.cpp:2253-2264`) reads the invisibility flag: with
+it the 203 rows go (`RemoveAffect`, `G/char_affect.cpp:864-884`, each
+uncomputed, its remove packet sent, the flags updated last), else
+`AddAffect(203, POINT_NONE, 0, flag 3, INFINITE, 0, true)` lands (`203` and
+`3` from `G/affect.h:26` and `:210`). `do_cooltime` (`G/cmd_gm.cpp:2735-2738`)
+is one call, `DisableCooltime` (`G/char_skill.cpp:3317-3320`), which sets
+`m_bDisableCooltime` and never clears it. The flag's `if` wraps the whole
+stamp block (`:3097-3117`): a flagged cast charges and computes with no stamp
+row and no last-skill stamp, so a cooling row casts again at once. Only
+TERROR 64 refuses still: its cooling pre-check (`:3032-3037`) stands outside
+the flag's `if`, before the charge. Both lines are silent and memory-only —
+no line, no row. The GM gates (`GM_LOW_WIZARD`, `GM_HIGH_WIZARD`) stay with
+the dispatcher.
+
+The port is `GameState::toggle_invisible` in `prodomo/src/game_state/affect.rs`
+and `GameState::disable_cooltime` with `PcSkillState::no_cooltime` in
+`prodomo/src/game_state/pc_skill.rs`, behind `Invisible` and `Cooltime`
+commands and `invisible_step` and `cooltime_step`. The toggle reuses
+`add_pc_affect` (a set flag always updates) and the remove path uncomputes
+each 203 through `change_pc_point`, sends its remove, and updates the flags
+last; `cast_skill` skips the stamp block and the last-skill stamp under the
+flag while TERROR's pre-check refuses as before. The new constants are
+`AFFECT_INVISIBILITY` 203 and `AFF_INVISIBILITY` 3 (`INFINITE_AFFECT_DURATION`
+already stood). `enter_world_as_implementor` now returns the listed
+character too, so the scenario filters updates by Alice's VID.
+
+Three gaps this slice closed along the way. The first scenario read the wrong
+update: `wire_for` drains through heartbeat ticks and mobilities, and `.find`
+on header 19 lands on an unrelated `GC_CHARACTER_UPDATE` whose VID differs —
+the scenario now filters by Alice's VID and takes the last, and the remove
+by kind 203 (the revive-invisible 215's remove rides the same window). And
+the 7e dump reads `28 02 00 00` at the kind, not `(203, 0, ...)`: the kind
+word is little-endian 0x0000021c with the POINT_NONE byte after it, which
+the offsets now follow. The clippy tail (an unused binding, a
+`get().is_none()`) was fixed by refactoring, with no `#[allow]`.
+
+- `prodomo/src/game_state/affect.rs`: `toggle_invisible` and its unit test.
+- `prodomo/src/game_state/pc_skill.rs`: `no_cooltime`, the stamp gate, the
+  TERROR comment, `disable_cooltime`, and its unit test.
+- `prodomo/src/loading_phase.rs`: `AFFECT_INVISIBILITY`, `AFF_INVISIBILITY`.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the two commands, loop
+  messages, dispatch arms, and the two steps.
+- `prodomo/tests/parity.rs`: `skill_flag_rows`,
+  `a_gm_toggles_invisibility_and_disables_cooltime`, and the `Listed`
+  `enter_world_as_implementor` returns.
+- `.scratch/parity/commands.md`: `cmd.invisible` and `cmd.cooltime` are
+  `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4420 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 316. The affect-remove line (`cmd.affect_remove`)
+
+`do_affect_remove` (`G/cmd_gm.cpp:3865-3918`) answers both syntaxes when fewer
+than two words arrive — `Syntax: /affect_remove <player name>` and `Syntax:
+/affect_remove <type> <point>` — then lists the affects of the named
+character, or the caller's when no word or no such character names one: the
+`-- Affect List of %s ---...` head, the `Type Point Modif Duration Flag`
+columns, and one `%4d %5d %5d %8d %u` row per affect in list order. With two
+words every affect of the type and point leaves (`FindAffect` matches point 0
+against any point, `G/char_affect.cpp:129-142`), each through `RemoveAffect`
+(`:828-862`, uncomputed, its remove packet sent), and the success or the miss
+line answers (`Affect successfully removed`, `Not affected by that type and
+point`). The numbers are `str_to_number` ones (the type mod 2^32, the point
+mod 256). The affect is memory-only — no row follows it. The GM gate
+(`GM_LOW_WIZARD`) stays with the dispatcher.
+
+The port is `GameState::affect_remove` in `prodomo/src/game_state/affect.rs`,
+behind the `AffectRemove` command and `affect_remove_step`, reusing
+`skill_admin`'s `str_to_dword` and `str_to_byte` (now shared) and the
+lowered `whisper_target` lookup with the caller fallback. The removal
+uncomputes each row through `change_pc_point`, sends its remove, and updates
+the flags once at the end. Two scenarios split the line for the 100-line
+lint behind `affect_remove_stage` and `read_affect_list_head`:
+`a_gm_lists_affects` (the refusal, both syntaxes, the head and columns, the
+revive, dragon-soul and 203 rows, the unknown-name fallback) and
+`a_gm_removes_an_affect` (the 203's remove, the flag-3 fall on the caller's
+update, the success, then the miss).
+
+Three gaps this slice closed along the way. The list has three rows, not one:
+the entering character carries the revive-invisible 215 and the dragon-soul
+540 beside the 203, in that order, so the scenario pins all three. The
+durations tick while the scenario reads: the 215 shows 2, not 5, and the 203
+shows 1471228926, not 1471228928, so the 203's row is pinned by its prefix
+and flag (record offset 38, not 28 — the chat header is 10 bytes). And the
+inventory check takes one scenario per cell, so the row names
+`a_gm_lists_affects` and carries the remover in its note. The clippy tail
+(the 116-line scenario) was fixed by refactoring, with no `#[allow]`.
+
+- `prodomo/src/game_state/affect.rs`: `affect_remove` and its unit test.
+- `prodomo/src/game_state/skill_admin.rs`: the shared `str_to_*` numbers.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the command, the loop
+  message, the dispatch arms, and the step.
+- `prodomo/tests/parity.rs`: `affect_remove_stage`, `read_affect_list_head`,
+  `a_gm_lists_affects`, `a_gm_removes_an_affect`.
+- `.scratch/parity/commands.md`: `cmd.affect_remove` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4423 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 317. The reset-count fill (`cmd.stat_reset`)
+
+`do_stat_reset` (`G/cmd_general.cpp:710-713`) is one line: `PointChange`
+raises `POINT_STAT_RESET_COUNT` to 12, so the counter lands the real array
+too and one kind-112 record rides the caller's outbox. The line reads no
+word and answers no chat. The GM gate (`GM_LOW_WIZARD`) stays with the
+dispatcher.
+
+The port is `GameState::reset_stat_count` in `prodomo/src/game_state/stat.rs`,
+behind the `StatReset` command, loop message, and `stat_reset_step`, mirroring
+`run_stat`'s held row so the disconnect save banks 12. The scenario is
+`a_gm_fills_the_reset_count_to_twelve`: the player's refusal, the implementor's
+one-record fill, and the banked 12. The watcher's wire needed draining first:
+Yankee's enter puts his add, walk mode, and more on Alice's wire, so the
+scenario reads his enter with `sees_enter` before the line runs.
+
+- `prodomo/src/game_state/stat.rs`: `reset_stat_count` and its unit test.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the command, the loop
+  message, the dispatch arm, and the step.
+- `prodomo/tests/parity.rs`: `a_gm_fills_the_reset_count_to_twelve`.
+- `.scratch/parity/commands.md`: `cmd.stat_reset` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4425 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 318. The purge and the weaken (`cmd.purge`, `cmd.weaken`)
+
+`do_purge` (`G/cmd_gm.cpp:816-868`) sweeps the sectrees around the caller and
+destroys every NPC, `all` or within `DISTANCE_APPROX` 1000; `do_weaken`
+(`:2824-2861`) walks the same sweep and `PointChange`s each to 10 hit points.
+Each destroyed NPC's release rides to its viewers (`PacketAround`), then its
+removal to the same set (`ViewCleanup`), so an NPC past the caller's view
+leaves without the caller hearing a record. The gates (`GM_WIZARD`,
+`GM_GOD`) stay with the dispatcher.
+
+The port is `GameState::purge_around` in `prodomo/src/game_state/regen.rs`,
+behind the `Purge`/`Weaken` commands, the `Purge` loop message, and
+`purge_step`, with the weaken's set through `PointChange(POINT_HP)` and the
+broadcast to its targeters. Both are memory-only: no row follows them. The
+scenario is `a_gm_purges_the_near_dog_and_all_sweeps_the_view`: both
+dispatch refusals, the targeted near dog's fall to 10 with its broadcast,
+the near dog's release and removal while the far dog stands, and `/purge
+all`'s sweep of every NPC the entry burst showed, with the far dog's own
+pair to its viewers only and only regens' respawns after. The far dog's
+regen may stand it again between the lines, so its pair is asserted by
+absence, not by VID; a shopkeeper's `1s` regen fires inside the quiet
+window, so the tail reads respawns past the sweep rather than silence.
+
+- `prodomo/src/game_state/regen.rs`: `purge_around`, `weaken_npc`, and three
+  unit tests (the near destroy with the regen's countdown, the `all` sweep
+  past a player-typed row, and the weaken's set).
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the commands, the loop
+  message, the dispatch arm, and the step.
+- `prodomo/tests/parity.rs`: `a_gm_purges_the_near_dog_and_all_sweeps_the_view`.
+- `.scratch/parity/commands.md`: `cmd.purge` and `cmd.weaken` are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4429 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 319. The advance line (`cmd.advance`)
+
+`do_advance` (`G/cmd_gm.cpp:2083-2106`) is `do_level` with a target first: no
+name or no level answers `Syntax: advance <name> <level>`, an offline name
+answers `<name> not exist`, else the named character's `ResetPoint`,
+`ClearSkill` and `ClearSubSkill` run. The level clamps to `0..=max` where
+`do_level` starts at 1, so a 0 lands. The GM gate (`GM_GOD`) stays with the
+dispatcher.
+
+The port is `GameState::run_advance` in `prodomo/src/game_state/level.rs`,
+behind the `Advance` command, loop message, dispatch arm, and `advance_step`.
+The target lookup is the world's `FindPC` (`whisper_target`); the points
+pair the reset sends carries the caller's gold and voice, since the
+target's own row never crosses the world boundary. `/level` moves the
+caller's held row for the disconnect save, but `/advance` resets another
+character whose row this descriptor never held, so the step writes the
+reset straight to the store (`db::players::save_level_reset`, by player ID
+alone) and deletes the cleared skills' rows. The scenario is
+`a_gm_advances_yankee_to_thirty`: the player refusal, the syntax, the miss,
+the caller's silence, the target's 64-record reset (shared with
+`assert_level_wire`), and the row's level, starts, counters, pools and
+cleared conqueror. Yankee is an assassin, so the starts assert 4/3, not
+Alpha's warrior 6/4.
+
+- `prodomo/src/game_state/level.rs`: `run_advance`, `AdvanceLanded`, and two
+  unit tests (the syntax and the miss; the named reset with the 0 landing
+  and the caller hearing nothing).
+- `db/src/players.rs`, `db/tests/players.rs`: `LevelReset`,
+  `save_level_reset`, and its test.
+- `prodomo/src/command.rs`, `prodomo/src/game_loop_messages.rs`,
+  `prodomo/src/game_state.rs`, `prodomo/src/main.rs`: the command, the loop
+  message, the dispatch arm, and the step.
+- `prodomo/tests/parity.rs`: `a_gm_advances_yankee_to_thirty` and
+  `enter_world_as_god`.
+- `.scratch/parity/commands.md`: `cmd.advance` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4433 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 320. The reset line (`cmd.reset`)
+
+`do_reset` (`G/cmd_gm.cpp:2076-2081`) is three calls: `PointChange(POINT_HP,
+max - hp)`, the same for spell points, and `Save()`. Both changes run with
+`bAmount` and `bBroadcast` false, so each rides one record to the caller
+alone (legacy writes each twice, Defect 212, which the Rewrite does not
+reproduce). The hit arm broadcasts to the targeters and sends the party's
+info when the value moved; the spell arm sends nothing else. `Save()` is
+`DelayedSave`, and the main loop's `ProcessDelayedSave` writes the row one
+Pulse later (`G/main.cpp:276-277`), so the saved pools are what the refill
+left, held across that Pulse.
+
+The port is `GameState::run_reset` in `prodomo/src/game_state/level.rs`,
+behind the `Reset` command, loop message, dispatch arm (in the flag half,
+beside the stat lines), and `reset_step`. `change_pc_point` runs each
+refill, `broadcast_pc_target` follows the hit arm, and the party takes the
+member's info when the hit points moved. The step banks the filled pools
+in the held row, which the save writes: that held beat is legacy's delayed
+Pulse. The scenario is `a_gm_resets_and_the_worn_pools_refill`: the player
+refusal, the hit change to 1420 (700 + 18 x 40) then the spell change to
+600 (200 + 20 x 20) with nothing else said, and the disconnect save
+banking both. Alpha stands wounded, so the scenario reads past the
+recovery's heal-sized hit ticks and the shaman's 15/28 spirit ticks, in
+the enter burst (`sees_enter_past_ticks`) and before the line
+(`drain_heal_ticks`).
+
+- `prodomo/src/command.rs`: `do_reset` maps to the new `Command::Reset`.
+- `prodomo/src/game_state/level.rs`: `ResetHeld`, `run_reset`, and its unit
+  test (the wound, the refill, the two records hit-first, no character).
+- `prodomo/src/game_state.rs`: the `ResetHeld` re-export and the dispatch
+  arm in `apply_chat_flag`.
+- `prodomo/src/game_state/party.rs`: `send_party_info_one_to_all` widens to
+  `pub(super)` for the reset's party arm.
+- `prodomo/src/game_loop_messages.rs`: the `Reset` message and
+  `reset_command`.
+- `prodomo/src/main.rs`: the line arm and `reset_step`.
+- `prodomo/tests/parity.rs`: `a_gm_resets_and_the_worn_pools_refill`,
+  `sees_enter_past_ticks`, `drain_heal_ticks`.
+- `.scratch/parity/commands.md`: `cmd.reset` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4435 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 321. The guild reset (`cmd.greset`)
+
+`do_greset` (`G/cmd_gm.cpp:2175-2179`) is a guarded call: with a guild, its
+`Reset()` runs, which is the one assignment `power = max_power`
+(`G/guild.h:175`). The line sends nothing — no `SKILL_INFO` fans, unlike a
+charge's `GuildPointChange` arm — and stores nothing: `Reset` never calls
+`SaveSkill`. The client learns the refilled faith only when some later
+send names it.
+
+The port is `GameState::run_guild_reset` in `prodomo/src/game_state/guild.rs`,
+behind the `GuildReset` command, the `RunGuildReset` loop message, and
+`guild_reset_step`, which judges, stores and commits like the grade step:
+the world's `FaithRefill` power writes the guild's row (`spend_power`,
+the same single-column write the cast's uses), and `commit_guild_refill`
+lands it in memory, quietly. A guildless caller judges a lineless
+refusal, as the guarded call does. The scenario is
+`a_gm_gresets_and_the_guild_faith_refills_quietly`: the player refusal,
+the line's silence on both members' wires, and the row's 350 standing at
+400 (level 1 holds `GUILD_BASE_POWER`). Yankee enters guilded
+(`enter_world_on_with_team_guilded`), so Alice reads his member `LOGIN`
+before his enter burst.
+
+- `prodomo/src/command.rs`: `do_greset` maps to the new `Command::GuildReset`.
+- `prodomo/src/game_state/guild.rs`: `GuildGradeSet::FaithRefill`,
+  `run_guild_reset`, `commit_guild_refill`, and the unit test (the refill,
+  the quiet commit, the guildless line, no character). The grade commit's
+  name and auth arms split out (`commit_grade_name`, `commit_grade_auth`)
+  for the line lint.
+- `prodomo/src/game_loop_messages.rs`: the `RunGuildReset` message and
+  `run_guild_reset`.
+- `prodomo/src/game_state.rs`: the dispatch arm, with the charge's in the
+  new `apply_guild_faith_step`.
+- `prodomo/src/main.rs`: the line arm, `guild_reset_step`, and the
+  `FaithRefill` store arm.
+- `prodomo/tests/parity.rs`: `a_gm_gresets_and_the_guild_faith_refills_quietly`
+  and `enter_world_on_with_team_guilded`.
+- `.scratch/parity/commands.md`: `cmd.greset` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4437 passed, 0 failed.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 322. The online list (`cmd.user`)
+
+`do_user` (`G/cmd_gm.cpp:1741-1753`) walks the core's own descriptor set and
+`user_func` (`:1694-1739`) packs each online Name into a `%-16s ` cell on a
+128-byte buffer: four Names a line, a short line for the remainder
+(`count % 4`), then `Total N`. The cells ride `ChatPacket(CHAT_TYPE_INFO)`,
+so each is looked up in the caller's language and cut to the chat length.
+
+The Rewrite has no per-core set (ADR-0002), so the question was what the
+walk's scope is. The first build named every Channel; then the map notice's
+ledger (230aa) settled it: legacy's filter ran inside one Channel's process,
+so the one process walks the caller's Channel. The row's note says so.
+
+- `prodomo` lib:
+ - `ChannelClients::online_names(channel)` answers the Channel's Names in
+ join order, `DESC_MANAGER::GetClientSet()` walked for the Names. The
+ registry holds only clients past the select, so every member is one
+ `user_func` would count.
+ - `chat_line::user_rows` packs the cells and the total: one 17-byte
+ `%-16s ` cell a Name, four a line, the remainder on its own line, then
+ `Total N`. The cells are cut where legacy's 128-byte buffer cuts them.
+- `prodomo` bin: `do_user` becomes `Command::OnlineList`, and
+ `online_list_step` walks `held.channel` and sends each row as an
+ `CHAT_TYPE_INFO` line. The GM floor holds the line before dispatch, so the
+ handler runs ungated, as legacy's does.
+
+`a_gm_lists_the_online_and_the_total_follows` reuses the notice cast: the
+player's `/user` hears only the floor's line, the wizard's lists the two
+Channel 1 Names in one line of cells and `Total 2`, and the member on the
+Shared Channel is neither named nor told.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4440 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 323. The count (`cmd.who`)
+
+`do_who` (`G/cmd_gm.cpp:1682-1692`) prints one line: `Total [N] e1 / e2 / e3
+(this server M)`. The three empire counts span the process's own walk plus
+every P2P core's (`GetEmpireUserCount`, `G/p2p.cpp:267-271`); `this server`
+is the process's own count. Legacy caches the walk on a five-second tick
+(`UpdateLocalUserCount`, `G/main.cpp:283-286`), and the tick never runs except
+on the loop, so a `/who` between ticks reports the last tick's dead.
+
+The Rewrite walks its one registry fresh: there is no tick to fall behind,
+and no P2P to add. The empires' totals span every Channel; `this server` is
+the caller's Channel, the nearest scope this process has to legacy's core.
+The row's note says both.
+
+- `prodomo` lib: `ChannelClients::who_counts(channel)` answers the four
+ empire slots across every Channel and the Channel's own count. The empire
+ answer skips what neither index names, and the line prints only empires
+ 1-3, as legacy's does.
+- `prodomo` bin: `do_who` becomes `Command::Who`, and `who_step` sends the
+ one `CHAT_TYPE_INFO` line. The GM floor holds the line before dispatch, so
+ the handler runs ungated, as legacy's does.
+
+`a_gm_whos_and_the_empires_count_across_channels` builds the notice cast
+with an implementor: the player's `/who` hears only the floor's line, and
+the wizard's hears `Total [3] 2 / 1 / 0 (this server 2)` - the two Channel 1
+empires, the Shared Channel's third body in the totals, and 2 for this
+server. Nobody else hears it.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4442 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 324. The reset (`cmd.respawn`)
+
+`do_respawn` (`G/cmd_gm.cpp:2108-2123`) is a guarded call into `regen_reset`
+(`G/regen.cpp:737-757`): with `all` in any case every regen with an event
+fires one Pulse on (`event_reset_time(regen->event, 1)`); otherwise only the
+regens whose rectangle holds the caller do. The caller hears `Respawn
+Everywhere` or `Respawn Around`, through `ChatPacket`, so through the locale.
+
+The Rewrite's regens stand in the due set rather than behind event
+pointers, so the reset moves their due Pulses. The walk is the caller's
+Channel, as `/user` walks it: legacy's list is one core's. A regen with no
+due event is skipped, as one with no `event` is.
+
+- `prodomo` lib: `GameState::respawn_around` moves the holding regens' due
+ to `last_pulse + 1`, every regen's with `all`.
+- `prodomo` bin: `do_respawn` becomes `Command::Respawn` over
+ `GameCommand::Respawn`, and `respawn_step` sends the line after the world
+ answers. The GM floor holds the line before dispatch, so the handler runs
+ ungated, as legacy's does.
+
+`a_gm_respawns_around_and_everywhere` ports the purge's map with one regen:
+the player's `/respawn` hears only the floor's line, the god's hears
+`Respawn Around` and, on `ALL`, `Respawn Everywhere`, and nothing spawns,
+because the lone regen had no missing. The world's own test moves the due:
+the holding regen fires one Pulse on, the far one keeps its due, and `all`
+moves both.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4444 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 325. The stood mob (`cmd.mob`)
+
+`do_mob` (`G/cmd_gm.cpp:699-758`) stands `count` of the named mob around the
+caller, each by `SpawnMobRange` (`G/char_manager.cpp:473-503`) in a box
+`number(200, 750)` past the caller on every side, 16 tries a spawn. The
+proto answers with the spawn motion when it is a stone; the count caps at
+40 on the test server, 20 elsewhere. The empty line answers `Usage: mob
+<mob vnum>`; a name nothing answers is `No such mob(%s) by that vnum`.
+
+The vnum-or-name split is legacy's: a leading digit (`isnhdigit`) reads a
+vnum through `str_to_number<DWORD>`; any other first byte reads a
+locale-name prefix through `CMobManager::Get(name, true)`, whose map walk
+is a `strncmp` over the names in map order (`G/mob_manager.cpp:137-160`).
+The rows here stand by vnum, so the prefix walk is the same comparison in
+vnum order; the row's note says so. The count is `str_to_number<int>`, and
+the empty count is 1.
+
+- `world`: `Respawner::mob` and `Respawner::mob_by_name` answer the rows,
+ and `Respawner::spawn_mob_line` runs one `SpawnMobRange` in the box the
+ caller drew.
+- `prodomo` lib: `GameState::mob_around` parses the line, draws the boxes,
+ and stands what spawned through `stand_runtime`, which fans the inserts.
+ The usage and the miss ride the outbox before the answer.
+- `prodomo` bin: `do_mob` becomes `Command::Mob` over `GameCommand::Mob`,
+ and `mob_step` only reports the run. The GM floor holds the line before
+ dispatch, so the handler runs ungated, as legacy's does.
+
+`a_gm_mobs_a_stray_dog_around` boots an empty map: the player's `/mob`
+hears only the floor's line; the god's hears the usage, the miss on
+999999, and on `101` a stray dog stands, which the caller's target proves
+at 126 of 126. The scenario reads the spawn raw: the test reader files a
+monster's `GC_CHARACTER_ADD` as boot dice, and the stood dog is one. The
+world's own test proves the lookups: the row by vnum, the first by prefix,
+and the two misses.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4446 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 326. The granted item (`cmd.item`)
+
+`do_item` (`G/cmd_gm.cpp:467-519`) grants the caller an item: the vnum word
+reads a vnum past a leading digit (`isnhdigit`), else a locale-name prefix
+through `ITEM_MANAGER::GetVnum` (a case-insensitive `strncmp` over the
+protos in order, `G/item_manager.cpp:722-738`); the count clamps to
+1-5000 (`MINMAX(1, iCount, g_bItemCountLimit)`); the empty line answers
+`Usage: item <item vnum>`; a name nothing answers is `#%u item not exist by
+that vnum(%s)` with the 0 `GetVnum` left, and a vnum with no proto is the
+same line with its trailing stop. A full inventory answers `Not enough
+inventory space.`
+
+The grant itself rides the Operator's grant path (`grant_and_deliver`):
+the world places the item, the row is written, and only then is the client
+told. The parse and the two misses live in the step, because the world
+never sees the words. The item log (`LogManager::ItemLog`) is not ported:
+no ported path writes the legacy log tables, and the row's note says so.
+
+`a_gm_grants_itself_a_red_potion` boots an empty map: the player's `/item`
+hears only the floor's line; the god's hears the usage, the miss without
+its stop on a name, the miss with its stop on 99999999, and on `27003` a
+`GC_ITEM_SET` carries vnum 27003 and count 1, and the row stands.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4447 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 327. The placed mob (`cmd.mob_ld`)
+
+`do_mob_ld` (`G/cmd_gm.cpp:760-815`) stands the named mob at the named
+metres on the caller's map, facing `dir`. The four words are the same mob
+word as `/mob` and three numbers; the missing words are 0, 0 and 1, and
+the metres scale to centimetres (`x*100`, `y*100`). The usage and the miss
+are `/mob`'s, word for word (`Usage: mob <mob vnum>` even here). `-1`
+draws the facing, as `SpawnMob` does (`G/char_manager.cpp:451-452`). A
+point no sectree holds, or a cell that refuses, stands nothing and stays
+silent, as legacy's null return does.
+
+- `world`: `Respawner::spawn_directed` runs one `SpawnMob` at the point
+ with the given facing, the stone's spawn motion arriving ready.
+- `prodomo` lib: `GameState::mob_ld_at` parses the four words and stands
+ what spawned through `stand_runtime`, which fans the insert. The usage
+ and the miss ride the outbox before the answer.
+- `prodomo` bin: `do_mob_ld` becomes `Command::MobLd` over
+ `GameCommand::MobLd`, and `mob_ld_step` only reports the run. The GM
+ floor holds the line before dispatch, so the handler runs ungated, as
+ legacy's does.
+
+`a_gm_mob_lds_a_stray_dog_at_metres` boots an empty map: the player's
+`/mob_ld` hears only the floor's line; the god's hears the same usage, and
+on `101 4701 9500` a stray dog stands at (470100, 950000), which its
+insert's point proves, and the caller's target proves it at 126 of 126.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4448 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 328. The flagged mobs (`cmd.ma`, `cmd.mc`)
+
+`do_mob_aggresive` (`G/cmd_gm.cpp:639-698`) and `do_mob_coward` (`:557-617`)
+are `/mob`'s spawn with the aggressive or the coward bit set on each
+(`SetAggressive`, `SetCoward`, `G/char_state.cpp:242-255`). The usages
+differ: the aggressive answers `/mob`'s (`Usage: mob <mob vnum>`, even
+here), the coward its own (`Usage: mc <vnum>`). The miss is `/mob`'s, a
+leading digit reading a vnum, any other first byte a locale-name prefix.
+The count caps at 20 on either server: the lines never learned `/mob`'s
+test-server 40.
+
+- `prodomo` lib: `GameState::mob_flagged` parses the two words, stands the
+ count through `spawn_mob_line`, and sets the bit on each stood NPC. The
+ usage and the miss ride the outbox before the answer.
+- `prodomo` bin: `do_mob_aggresive` and `do_mob_coward` become
+ `Command::MobAggressive` and `Command::MobCoward` over
+ `GameCommand::MobAggressive` and `GameCommand::MobCoward`, and
+ `mob_flagged_step` only reports the run. The GM floor holds the lines
+ before dispatch, so the handlers run ungated, as legacy's do.
+
+`a_gm_flags_a_stray_dog_aggressive_and_coward` boots an empty map: the
+player's `/ma` and `/mc` hear only the floor's line; the god's hear the
+two usages and the miss. On `/ma 101` a stray dog stands around and hunts
+— the idle search finds Alpha and the swing's `DAMAGE_INFO` lands — and
+on `/mc 101` a dog stands and flees: its first `FUNC_WAIT` is a coward
+escape 500 to 5000 from where it stood, never an idle walk and never a
+swing.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4449 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 329. The mapped mob (`cmd.mm`)
+
+`do_mob_map` (`G/cmd_gm.cpp:618-637`) stands the numbered mob at a random
+point of the caller's map (`SpawnMobRandomPosition`,
+`G/char_manager.cpp:262-380`) and answers `%s spawned in %dx%d` with the
+mob's locale name and its centimetres, or `Failed` when nothing stands.
+The word is a bare `str_to_number`: no name reads, so a name is 0 and
+fails, as does a vnum with no proto or a gated vnum (5001, 5002, 5004
+without their event flags). Up to 2000 cells are tried, past the map's
+base, keeping the first that is not blocked, built on or `BANPK`.
+
+- `world`: `Respawner::spawn_random_line` runs one `spawn_mob_random_position`
+ outside the regen path. The legacy allow-list gate is a server-layout check
+ (`MAP_ALLOW` per process), not a gameplay rule: the caller holds the map,
+ so no list is read.
+- `prodomo` lib: `GameState::mob_somewhere` parses the word, stands what
+ spawned through `stand_runtime`, and answers the stood line or the
+ failure. The test-server `SendNotice` is not ported: no ported path
+ broadcasts outside its caller's view.
+- `prodomo` bin: `do_mob_map` becomes `Command::MobMap` over
+ `GameCommand::MobMap`, and `mob_map_step` only reports the run. The GM
+ floor holds the line before dispatch, so the handler runs ungated, as
+ legacy's does.
+
+`a_gm_mob_maps_a_stray_dog_somewhere` boots an empty map: the player's
+`/mm` hears only the floor's line; the god's hears the syntax, `Failed`
+on a vnum with no proto and on a name, and on `101` the stood line naming
+the dog's locale name and a point on map 1. The spawn may stand out of
+sight, so the scenario keeps the view's own records aside and reads only
+the line.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4450 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 330. The spawned groups (`cmd.group`, `cmd.grrandom`)
+
+`do_group` (`G/cmd_gm.cpp:537-555`) stands the group in the 500-box around
+the caller (`SpawnGroup`, `G/char_manager.cpp:595-667`); `do_group_random`
+(`:521-536`) draws one group uniformly from the group-group and spawns it
+the same way (`SpawnGroupGroup`, `:581-593`). Each answers only its usage
+on the empty line. The word is a bare `str_to_number`, and a vnum with no
+group or group-group stands nothing and stays silent, as legacy's null and
+false returns do. Not aggressive, no stone, no dungeon: the lines pass the
+four defaults.
+
+- `world`: `Respawner::spawn_group_line` and `spawn_group_random_line` run
+ the regen spawners outside the regen path.
+- `prodomo` lib: `GameState::group_around` and `group_random_around` parse
+ the word, stand what spawned through `stand_runtime`, and answer the
+ usage. The lines ride the outbox before the answer.
+- `prodomo` bin: `do_group` and `do_group_random` become `Command::Group`
+ and `Command::GroupRandom` over `GameCommand::Group` and
+ `GameCommand::GroupRandom`, and `group_step` only reports the run. The GM
+ floor holds the lines before dispatch, so the handlers run ungated, as
+ legacy's do.
+
+`a_gm_spawns_a_group_and_a_random_one` boots an empty map: the player's
+`/group` and `/grrandom` hear only the floor's line; the god's hear the
+two usages, and a vnum with no group is silent. On `/group 101` three
+stray dogs stand around (group 101's leader and two members); on
+`/grrandom 101` one of groups 101 or 171 stands, so at least one dog
+rides the burst.
+
+The run also hardens ledger 328's scenario. Its coward bound of 500-5000
+failed at 5031: `DISTANCE_APPROX` reads up to 0.7% high (`G/utils.h:17-40`),
+so a 5000 escape measures up to 5032, and the bound is now 750-5100,
+which still splits every escape from every 300-700 idle walk. And
+`read_swing_head` now skips the fight's claim: an aggressive dog claims
+Alpha (`SetSyncOwner`, `G/char_battle.cpp:611-643`) before its first
+swing, as the boar does, and the unaccounted `GC_OWNERSHIP` failed the
+hunt half under load.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4451 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 331. The calmed and the roused (`cmd.forgetme`, `cmd.aggregate`)
+
+`do_forgetme` (`G/cmd_gm.cpp:3029-3032`) runs `ForgetMyAttacker`
+(`G/char_battle.cpp:3748-3757`): every monster around whose victim is the
+caller drops it, and the caller hides for 5 seconds
+(`ReviveInvisible(5)`). `do_aggregate` (`:3034-3037`) runs
+`FuncAggregateMonster` (`:3644-3669`): each victimless monster around
+within 5000 of the caller, with a one-in-two draw, begins to fight the
+caller when it can (`CanBeginFight`, then `BeginFight`). Neither line
+answers anything itself.
+
+- `prodomo` lib: `forget_my_attacker`'s `#[cfg(test)]` gate is lifted now
+ that it has a live caller, and `aggregate_monster` joins it in
+ `mob_battle.rs`, over the same `around_of` scan and the existing fight
+ primitives.
+- `prodomo` bin: `do_forgetme` and `do_aggregate` become
+ `Command::ForgetMe` and `Command::Aggregate` over `GameCommand::ForgetMe`
+ and `GameCommand::Aggregate`, and the steps only report the run. The GM
+ floor holds the lines before dispatch, so the handlers run ungated, as
+ legacy's do.
+
+`a_gm_aggregates_and_forgets_the_dogs_around` boots five stray dogs by
+Alpha: the player's lines hear only the floor's line; the god's
+`/aggregate` starts at least one dog swinging (five victimless dogs at a
+one-in-two draw each, so silence is a one-in-32 flake), and `/forgetme`
+drops the caller — no swing lands in 5 quiet seconds — and hides it
+(`GC_AFFECT_ADD` 215, `POINT_NONE`, flag 28, 5 seconds).
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4452 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 332. The shortened bow and the dragged dogs (`cmd.attract_ranger`, `cmd.pull_monster`)
+
+`do_attract_ranger` (`G/cmd_gm.cpp:3039-3042`) runs `FuncAttractRanger`
+(`G/char_battle.cpp:3671-3701`): each monster around whose victim is none
+or the caller and whose attack range is past 150 is cut to 150 for 3
+minutes (`AddAffect(225, POINT_BOW_DISTANCE, 150 - range, 0, 180, 0,
+false)`). `iNewRange` is a constant 150, so the `if` inside never fires.
+`do_pull_monster` (`:3044-3047`) runs `FuncPullMonster` (`:3702-3747`):
+each monster around 100 to 3000 out is teleported 300 toward the caller,
+no nearer than 100, then `Goto` and synced around. Neither line answers
+anything itself.
+
+- `prodomo` lib: `attract_ranger` and `pull_monster` join `mob_battle.rs`,
+ over the same `around_of` scan, `mob_attack_range`, and the existing NPC
+ move and sync primitives. The new `AFFECT_BOW_DISTANCE` (225) lives with
+ the other affect consts.
+- `prodomo` bin: `do_attract_ranger` and `do_pull_monster` become
+ `Command::AttractRanger` and `Command::PullMonster` over
+ `GameCommand::AttractRanger` and `GameCommand::PullMonster`, and the steps
+ only report the run. The GM floor holds the lines before dispatch, so the
+ handlers run ungated, as legacy's do.
+
+`a_gm_pulls_the_dogs_and_attracts_the_ranger` boots two dogs and an archer
+(vnum 302, RANGE, range 650) by Alpha: the player's lines hear only the
+floor's line; the god's `/pull_monster` drags a dog nearer (its
+`GC_SYNC_POSITION` lands nearer, matched by VID against the burst) while
+past 3000 holds; and `/attract_ranger` then `/aggregate` cuts the archer
+to 150, which walks in from ~1000 to 150 before it swings. The melee at
+exactly 150 keeps no row, and another player's victim keeps its range.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4455 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 333. The listed flags (`cmd.getqf`, `cmd.setqf`, `cmd.delqf`)
+
+`do_getqf` (`G/cmd_gm.cpp:2863-2888`) runs `SendFlagList`
+(`G/questpc.cpp:711-726`): one line per flag, `quest state (value)` for a
+`.__status` flag with the state's name, `name value` else. `do_setqf`
+(`:2958-2992`) runs `SetFlag` (`:52-76`) and chats `Quest flag set: %s %d`.
+`do_delqf` (`:2994-3027`) runs `DeleteFlag` (`:78-90`): a flag that was
+there chats `Success`, one that was not chats `Failed, quest flag does not
+exist`. An empty target names the caller; an unknown name answers `There
+is no such character`; a missing flag name answers the syntax. All three
+look the target up with `FindPC`'s lowered match
+(`G/char_manager.cpp:244-260`).
+
+- `quest`: `Manager::state_name` publishes `GetQuestStateName`
+ (`G/questmanager.cpp:1154-1169`) beside the `Run` helper it mirrors, and
+ `Manager::delete_quest_flag` publishes `DeleteFlag`.
+- `prodomo` lib: `getqf`, `setqf` and `delqf` join `whisper.rs` over the
+ manager's `flags_of`, `set_quest_flag` and `delete_quest_flag`, the
+ lowered `whisper_target`, and the existing `str_to_int`.
+- `prodomo` bin: `do_getqf`, `do_setqf` and `do_delqf` become
+ `Command::GetQf`, `Command::SetQf` and `Command::DelQf` over
+ `GameCommand::GetQf`, `GameCommand::SetQf` and `GameCommand::DelQf`, and
+ the steps only report the run. The GM floor holds the lines before
+ dispatch, so the handlers run ungated, as legacy's do.
+
+`a_gm_gets_sets_and_deletes_quest_flags` seeds the sash flag and boots a
+god: the player's lines hear only the floor's line; the god's `/setqf`
+sets and confirms, `/getqf` lists the sash with its state name (`sash_mission
+time_to_wait (-830000308)`) and the set flag, an unknown name misses,
+`/delqf` succeeds then fails, and both syntaxes show.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4457 passed, 0 failed. Afterwards no `prodomo\_%` scratch
+ database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 334. The moved quest (`cmd.set_state`)
+
+`do_set_state` (`G/cmd_gm.cpp:2891-2956`) runs `GetQuestStateIndex`
+(`G/questmanager.cpp:1172-1190`): the status flag and the listed quest move
+to the state's number, 0 for an unknown quest or state, and the caller hears
+`setting quest state flag %s %s %d` with the quest name twice. A missing
+name answers the syntax; an unknown target name answers `There is no such
+character`. The lookup is `FindPC`'s lowered one. No timer is cleared: the
+port holds no `m_TimerMap` (the timer names are still `missing`).
+
+- `quest`: `Manager::state_index` publishes `GetQuestStateIndex`, and
+ `Manager::set_quest_state` writes the flag and the listed quest.
+- `prodomo` lib: `set_state` joins `whisper.rs` beside the qf trio, over the
+ same lookup and number parsing.
+- `prodomo` bin: `do_set_state` becomes `Command::SetState` over
+ `GameCommand::SetState`, and the step only reports the run. The GM floor
+ holds the line before dispatch, so the handler runs ungated, as legacy's
+ does.
+
+The qf scenario grows a `/set_state` half: the syntax, the confirmation
+with the doubled quest name and 695801987 (`information`'s number), and
+the moved quest in the next `/getqf` (`sash_mission information
+(695801987)`).
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4457 passed, 1 failed on the first run
+ (`a_gm_pulls_the_dogs_and_attracts_the_ranger`, a socket `WouldBlock` under
+ suite load), then 220 of 221 parity tests on the rerun with a different
+ older scenario failing the same way
+ (`a_gm_flags_a_stray_dog_aggressive_and_coward`, an ownership record in a
+ swing read). Both pass in isolation (8.4 s and 10.9 s), and the 334
+ scenario passes in every run, so both failures are suite-load flakes, not
+ regressions. Afterwards no `prodomo\_%` scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+ fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 335. The guild's state (`cmd.gstate`)
+
+`do_guild_state` (`G/cmd_gm.cpp:2806-2822`) names the guild's id, its master's
+PID and the `UnderAnyWar` flag (`G/guild_war.cpp:163-179`), or the miss when no
+guild answers to the name. Legacy's `LC_TEXT` answers the text itself
+(`G/locale.cpp:73-74`), so the miss goes out in the legacy's own words.
+
+`GameState::guild_state` answers `Option<GuildStateLine>` over the same
+byte-exact `FindGuildByName` lookup the wars use (`G/guild_manager.cpp:198-207`),
+so an empty line names nobody; `GameCommand::GuildState` carries it through the
+guild steps to the `Game::guild_state` sender, and `guild_state_step` chats the
+three `CHAT_TYPE_INFO` lines (`GuildID: %d`, `GuildMasterPID: %d`, `IsInWar: %d`)
+or `%s: It is a guild that does not exist.` with the line's name.
+
+`a_gm_reads_a_guilds_state_and_a_player_cannot` reuses the war-pair fixture:
+the GM hears `GuildID: 1`, the master's stored row id and `IsInWar: 0`, a
+player's line is refused before the world is asked, `Strangers` hears the
+miss, and after the declare and the accept the flag is 1.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4457 passed, 2 failed on the first run — two older
+ scenarios flaking under suite load, as in 334 (`a_gm_pulls_the_dogs...`, a
+ socket `WouldBlock`; `a_gm_flags_a_stray_dog...`, an ownership record in a
+ swing read). The pull failed once more in isolation (36.8 s, the same
+ `WouldBlock`) and then passed (8.4 s), the stray dog passed (10.9 s), and
+ the 335 scenario passes in every run, so both failures are load flakes, not
+ regressions. Afterwards no `prodomo\_%` scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 336. The current quest (`cmd.qf`, `cmd.clear_quest`)
+
+`do_qf` (`G/cmd_gm.cpp:2326-2364`) moves the caller's current quest —
+`m_stCurQuest`, which the login's letters already set — to the named state
+and chats `setting quest state flag %s %s %d` with the quest's name, the
+state's name and the state's number. An empty line is silent; a caller that
+ran no quest hears `setting quest state flag failed`. `do_clear_quest`
+(`G/cmd_gm.cpp:3732-3743`) wipes the caller's quest (`PC::ClearQuest`,
+`G/questpc.cpp:681-701`): every `quest.*` flag is set to 0 — a zero flag is
+no flag, so the wipe deletes — and the listed quest rests at 0. Silent, as
+legacy is. No timer is cleared in either: the port holds no `m_TimerMap`
+(the timer names are still `missing`).
+
+`QuestManager::current_quest_name` and `clear_quest` hold the storage;
+`GameState::qf` and `clear_quest` run the lines through the quest-flag
+dispatch to the `qf_command` and `clear_quest_command` senders, and
+`qf_step` and `clear_quest_step` drive them.
+
+`a_gm_qfs_the_current_quest_and_clears_it` parks Alpha beside Theowahdan
+with the sash and the Yohara quest stored at their `information` states:
+the first `/qf` is answered by the login's last quest (the Yohara quest,
+moved to 0 for a state it does not have), an empty line is silent, a
+player's lines are refused, the sash's `button` page makes it current, the
+same line moves it to `go_to_disciple` (1675612723), the moved quest lists,
+both clears are silent, nothing lists, and `/qf` still names the sash.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: 4459 passed, 1 failed on the first run — the 332
+ scenario's suite-load `WouldBlock` again. It passes in isolation (8.7 s),
+ and the 336 scenario passes in every run, so the failure is a load flake,
+ not a regression. Afterwards no `prodomo\_%` scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 337. The worn equipment (`cmd.view_equip`, `gc.view_equip`)
+
+`do_view_equip` (`G/cmd_general.cpp:2395-2426`) views the VID's worn
+equipment. An empty line, an unknown VID, or a VID that is not a player is
+silent. A target that blocks the equipment view hears `[i] Player %s
+blocked the equipment view system`; a game master — any non-player level,
+or every character in the test-server mode (`CHARACTER::IsGM`,
+`G/char.cpp:6373-6380`) — hears `[i] Player %s has this function blocked`.
+Else the caller's descriptor gets the `HEADER_GC_VIEW_EQUIP` record
+(`SendEquipment`, `G/char.cpp:7815-7846`): the target's VID, then the 22
+wear positions in its order.
+
+`protocol::gc_view_equip` encodes the 1303-byte record (1 + 4 + 22 × 59):
+each cell carries the vnum, the count, the transmutation, the refine
+element, six sockets and seven attributes, reusing the item window's
+types. A position with no item writes `vnum = 0`; legacy leaves the rest
+of its cell as uninitialised stack, and the port writes zeroes — a viewer
+cannot tell a cleared cell from a fresh one. The coverage counts move to
+implemented 114, missing 20 (9 fixed-size, 11 dynamic).
+
+`GameState::view_equip` runs the line through the quest-flag dispatch to
+the `view_equip_command` sender, and `view_equip_step` drives it.
+
+`a_player_views_anothers_equipment_and_the_modes_refuse` boots out of the
+test-server mode with Yankee wearing the dagger in the weapon cell: the
+view names his VID, the dagger's vnum rides slot 4, the probed slots are
+empty, an empty line and an unknown VID are silent, and once Yankee
+blocks the view the block line refuses.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+ `DATABASE_URL` set: the first run failed 6 protocol coverage pins (the new
+ codec moved the counts, and the pins needed the bump); the rerun passed
+ 4461 with 1 suite-load flake (`a_gm_flags_a_stray_dog...`, an ownership
+ record in a swing read). It passes in isolation (10.8 s), and the 337
+ scenario passes in every run, so the failure is a load flake, not a
+ regression. Afterwards no `prodomo\_%` scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 338. The banked amount (`cmd.stat_val`)
+
+`do_stat_val` (`G/cmd_general.cpp:3699-3750`) banks the line's second word:
+the named attribute rises by the amount for stat points, clamped to the
+pool and to the room below the shared cap (`MAX_STAT` is `do_stat`'s
+`g_iStatusPointSetMaxValue`, `game.status_point_set_max_value`, 90 on the
+owner's data). A bare word, a word with no amount, a non-positive amount
+(`str_to_number` leaves `val` 0 on an empty word, and the `val <= 0` gate
+refuses the rest), an unknown word, an empty pool, and the cap are all
+silent. The landing is `do_stat`'s line for line: both arrays move,
+`ComputePoints` runs, the attribute's `PointChange` runs with the crossed
+pool line (`iq` sends `POINT_MAX_HP`, `ht` sends `POINT_MAX_SP`), the pool
+falls by the banked amount, and `ComputePoints` runs again. The polymorph
+gate is dead, as in the `/stat` port: no ported path polymorphs. The held
+row takes the four real attributes and both counters, which the save
+writes.
+
+- `prodomo/src/command.rs`: the `StatVal` variant and the `do_stat_val`
+  name.
+- `prodomo/src/game_loop_messages.rs`: the `StatVal` command and its
+  `run_stat_val` sender.
+- `prodomo/src/game_state.rs`: the `StatVal` route and dispatch arm.
+- `prodomo/src/game_state/stat.rs`: `run_stat_val` (two words, the amount
+  through `str_to_int`) and the shared `raise_stat_by`, which `raise_stat`
+  now calls with 1. The module doc's `/stat` line count keeps its range:
+  `do_stat_val` lives at the file's tail, 3225 lines past the module.
+- `prodomo/src/main.rs`: `stat_val_step` runs the line and banks the held
+  numbers on the row.
+- `.scratch/parity/commands.md`: `cmd.stat_val` is `ported`.
+
+Tests:
+
+- `game_state::stat`: a value banks the amount (`st 3` spends 3 and moves
+  by 3, with the attribute's change and the spent counter riding), a value
+  clamps to the pool (`st 99` empties the five points onto 11) and to the
+  cap (`dx 5` at 88 lands 90 and spends 2), and no word, no amount, a zero
+  or negative amount, an unknown word, no pool, and the cap are silent.
+- `a_stat_value_banks_the_line_amount` runs the line over the wire: a bare
+  word and a zero amount are silent, `st 3` raises 17 to 20 for 3 points,
+  `dx 99` clamps to the two points left and raises 19 to 21, and the
+  disconnect save banks st 20, dx 21, and no point.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4464 passed, 2 failed, both suite-load flakes
+  (`a_gm_flags_a_stray_dog...` and `a_gm_pulls_the_dogs...`, the archer's
+  step window under load). The `a_gm` filter passes 39 of 39 in isolation
+  (35.9 s), and the 338 scenario passes in every run, so the failures are
+  load flakes, not a regression. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 339. The four plus lines (`cmd.con+`, `cmd.int+`, `cmd.str+`, `cmd.dex+`)
+
+`do_stat_plus_amount` (`G/cmd_gm.cpp:4068-4162`) is one handler with the
+attribute in the subcommand: `con+` raises `POINT_HT`, `int+` raises
+`POINT_IQ`, `str+` raises `POINT_ST`, `dex+` raises `POINT_DX`, each
+`GM_LOW_WIZARD`. The line's single word is the amount for stat points.
+Only the empty word is silent; every other refusal answers: the polymorph
+gate sends `[LS;521]` (dead: no ported path polymorphs, so it never
+refuses), an empty pool sends `There are no stat points left.`, an amount
+past the pool sends `Less stat points left.`, and a negative amount sends
+`You entered an incorrect value.`. The clamp is a hardcoded 90 on the
+instant value (`ENABLE_STATPLUS_NOLIMIT` is not defined), not the shared
+configured cap: at 90 the amount clamps to zero, nothing moves, and the
+held row still answers. The landing is `do_stat`'s without the crossed
+pool line, which the handler never sends: both arrays move, `ComputePoints`
+runs, the attribute's `PointChange` runs, the pool falls by the banked
+amount, and `ComputePoints` runs again. The held row takes the four real
+attributes and both counters, which the save writes.
+
+- `prodomo/src/command.rs`: the `StatPlusKind` attribute and the
+  `StatPlus` variant, dispatched by entry name since `CommandEntry` holds
+  no subcommand.
+- `prodomo/src/game_loop_messages.rs`: the `StatPlus` command (the kind
+  rides as a point slot) and its `run_stat_plus` sender.
+- `prodomo/src/game_state.rs`: the `StatPlus` route and dispatch arm.
+- `prodomo/src/game_state/stat.rs`: `run_stat_plus` (the loud refusals,
+  the 90 clamp, the zero-clamp answer) and the shared
+  `raise_stat_unclamped` landing.
+- `prodomo/src/main.rs`: `stat_plus_step` runs the line and banks the held
+  numbers on the row. The dispatch grew past the line lint, so the five
+  stat arms fan through `stat_line_step` and the four party arms through
+  `party_line_step`; both fans keep the old arms' behaviour.
+- `.scratch/parity/commands.md`: the four rows are `ported`.
+
+Tests:
+
+- `game_state::stat`: a plus banks the amount (`con+ 3` raises 4 to 7 for
+  3 points, with the attribute's change and the spent counter riding and
+  no crossed pool line), a plus clamps to 90 on the instant (88 with 5
+  banks 2 and spends 2), at the clamp nothing moves and the row still
+  answers, and only the empty word is silent while the empty pool, the
+  past-pool amount, and the negative answer their lines.
+- `a_plus_line_banks_the_amount_and_refuses_aloud` runs the line over the
+  wire: a wizard's empty word is silent, a past-pool and a negative amount
+  answer, `con+ 3` raises 18 to 21 for 3 points with no crossed line, and
+  the disconnect save banks ht 21 and two points left.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4468 passed, 3 failed, all three NPC-timing flakes
+  (`a_gm_flags_a_stray_dog...`, `a_gm_aggregates...`, `a_gm_pulls...`):
+  an ownership record and a fly-targeting record interleaved in swing
+  reads, a read beat the server's answer (`EAGAIN`), and the archer's step
+  window lapsed. Two pass serially in isolation (12.6 s, 11.7 s); the
+  pulls scenario failed the 338 run too, passed once in isolation since
+  (35.9 s filter run), and fails again now, with a different mode each
+  time. The 339 scenario passes in every run, so the failures are load
+  flakes, not a regression. Afterwards no `prodomo\_%` scratch database
+  remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass
+  after the `question_mark` rewrite and the dispatch fans split the
+  overlong match.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 340. The four set lines (`cmd.tcon`, `cmd.tint`, `cmd.tstr`, `cmd.tdex`)
+
+`do_set_stat` (`G/cmd_gm.cpp:4575-4685`) is one handler with the attribute
+in the subcommand: `tcon` moves `POINT_HT`, `tint` moves `POINT_IQ`, `tstr`
+moves `POINT_ST`, `tdex` moves `POINT_DX`, each `GM_LOW_WIZARD`. The line
+names another character and a delta, which the target's stat points pay.
+A missing word answers `Invalid argument`; a name nobody online holds
+answers `Cannot find player(%s). ...` with the name twice, the game-server
+arm when the client registry knows the name on another Channel, else the
+never-logged-in arm; below the target's job start (`job_start`, the
+`/stat-` floor) answers `Cannot set stat under initial stat`; a delta past
+the target's pool answers `Less stat points left.`. The polymorph gate
+sends `[LS;521]` (dead: no ported path polymorphs) and the subcommand gate
+is dead too: the dispatcher only builds the four attributes. Past 90 the
+goal clamps to 90 and the delta shrinks with it; a zero or negative delta
+lands: the real array takes the goal, the instant array moves by the delta
+(not to the goal), compute runs, the attribute's change runs, the pool
+falls by the delta (a negative delta returns points), and compute runs
+again. The records ride the target's outbox, and the caller hears `%s's %s
+change %d to %d` with the name as typed and the `con`/`int`/`str`/`dex`
+word. The target's row takes the four attributes and the pool at once.
+
+- `prodomo/src/command.rs`: the `SetStat` variant, dispatched by entry name
+  through the shared `stat_name` helper, which the `*+` arms now use too.
+- `prodomo/src/game_loop_messages.rs`: the `SetStat` command and its
+  `run_set_stat` sender.
+- `prodomo/src/game_state.rs`: the `SetStat` route, dispatch arm, and
+  `SetStatHeld` re-export.
+- `prodomo/src/game_state/stat.rs`: `run_set_stat` (the misses, the floor,
+  the clamp, the split landing, the confirmation), the `SetStatHeld`
+  answer, and the `tell_set_stat_miss` split so the line passes the lint.
+- `world/src/character/points.rs`: `set_split_points` writes the goal to
+  the real array and the instant plus the delta to the instant one.
+- `db/src/players.rs`: the `StatSet` columns and `save_stat_set`.
+- `prodomo/src/main.rs`: `set_stat_step` runs the line and stores the
+  target's row; a target deleted mid-line stores nothing.
+- `.scratch/parity/commands.md`: the four rows are `ported`.
+
+Tests:
+
+- `game_state::stat`: a set moves the named character's attribute (`tcon`
+  raises the other 4 to 7 for 3 of the other's points, with the changes on
+  the other's outbox and the confirmation on the caller's), a set refuses
+  below the start and clamps at 90 (88 with 5 banks 2 and spends 2), and a
+  missing word, an unknown name, and a past-pool delta refuse with their
+  lines.
+- `a_set_stat_line_moves_anothers_attribute` runs the line over the wire:
+  a wizard's bare name and unknown name answer, `tcon Zulu 3` raises 4 to
+  7 for 3 of Zulu's points with the confirmation, and Zulu's row takes ht
+  7 and two points at once.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4474 passed, 1 failed, the `a_gm_pulls...` archer's
+  step window under load (failed the 338 and 339 runs the same way). The
+  340 scenario passes in every run, so the failure is a load flake, not a
+  regression. Afterwards no `prodomo\_%` scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass
+  after the miss arm and the stat-name match split the overlong bodies.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 341. The Armada's lines (`cmd.cannot_dead`, `cmd.can_dead`)
+
+`ACMD(do_can_dead)` (`G/cmd_gm.cpp:4715-4721`) is one handler with the entry
+name as its subcommand: `/cannot_dead` runs `SetArmada`, `/can_dead` runs
+`ResetArmada` (`G/char.h:2103-2104`). GM_LOW_WIZARD at POS_DEAD. The flag is
+legacy's `cannot_dead` (`G/char.h:2106`), and the guard is the `if
+(!cannot_dead)` around the hit-point change in `CHARACTER::Damage`
+(`G/char_battle.cpp:2387-2394`, the Meley arm: the statue's `GetHP() - 1`
+clamp only matters to a monster holding the flag, and no ported path gives
+one the flag, so the port guards the player path). Nothing rides, nothing is
+stored: the flag lives in memory, as legacy's does.
+
+The poison tick proves the guard: `pc_poison_event` runs `damage_pc_poison`,
+whose damage packet rides before the hit-point change, so a flagged player
+sees the flagged `GC_DAMAGE_INFO` while its points never move; after
+`/can_dead` the next tick's `GC_POINT_CHANGE` lands. The stun and the killer
+PID sit outside the guarded change in legacy (`:2425-2431`), but they only
+fire when the points reach 0, which the guard prevents, so the port's early
+return is equivalent on every live path.
+
+- `prodomo/src/command/table.rs`: the two entries, `do_can_dead` at
+  POS_DEAD, GM_LOW_WIZARD.
+- `prodomo/src/command.rs`: the `CanDead` variant, dispatched by entry name
+  (`true` is `can_dead`), and the restored `do_pkmode` arm (below).
+- `prodomo/src/game_loop_messages.rs`: the `CanDead` command and its
+  `run_can_dead` sender.
+- `prodomo/src/game_state.rs`: the `CanDead` route through the new
+  `apply_chat_mode` (the PK, walk and Armada arms, split out so
+  `apply_chat_flag` keeps under the line lint).
+- `prodomo/src/game_state/death.rs`: the `Armada` enum (`Off`/`On`, the
+  two-variant enum the bool lint asks for), the guard in `damage_pc_tail`,
+  and `run_can_dead`.
+- `prodomo/src/main.rs`: `can_dead_step` (a caller outside the world is
+  ignored), behind the new `run_line_command_tail` (the stat, mode, notice
+  and unported arms, split out so the dispatch keeps under the line lint).
+- `.scratch/parity/commands.md`: the two rows are `ported`.
+
+Tests:
+
+- `game_state::death`:
+  `a_cannot_dead_player_survives_a_lethal_hit_and_a_can_dead_one_does_not`
+  (a lethal hit moves nothing, rides nothing, and neither stuns nor kills;
+  after `/can_dead` the hit lands).
+- `a_cannot_dead_player_keeps_its_hit_points_until_it_can` runs the lines
+  over the wire: a player runs neither line (the dispatcher's refusal), both
+  lines are silent on a wizard, the poison's flagged damage shows while the
+  points never move, and after `/can_dead` the next tick's change lands.
+  Zulu enters on its own account (a second character on Bob's account closes
+  the first connection), and the silences drain past the late entrant's walk
+  mode, its insert pair, the stray ownership claims, and the timer's own
+  lines (`drain_silence`, `seed_cannot_dead_table`).
+
+Fixes while green:
+
+- The `do_pkmode` arm was missing from the handler match, so `/pkmode` fell
+  to the silent `NotPorted` arm and the 294 scenario timed out waiting for
+  its update. The arm is restored, and a sweep of every `ported` command row
+  against the match found no other gap (`do_mount` is `NotPorted` by design,
+  ledger 304).
+- Clippy's bool lint made `cannot_dead` the `Armada` enum, its line lint
+  split the mode arms into `apply_chat_mode` and the dispatch tail into
+  `run_line_command_tail`, and the scenario's helpers (`drain_silence`,
+  `seed_cannot_dead_table`) moved to top level, all fixed by refactoring,
+  with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4476 passed, 1 failed, the `a_gm_pulls...` archer's
+  step window under load (failed the 338, 339 and 340 runs the same way, and
+  passes in isolation). The 341 scenario passes in every run, so the failure
+  is a load flake, not a regression. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 342. The master line (`cmd.all_skill_master`)
+
+`ACMD(do_all_skill_master)` (`G/cmd_gm.cpp:4734-4758`): every usable skill
+becomes `SKILL_MAX_LEVEL` (40). GM_LOW_WIZARD at POS_DEAD. `SetHorseLevel(40)`
+clamps to `HORSE_MAX_LEVEL` (30, `G/horse_rider.h:11`) and plants horse skill
+130 at 30, but the loop plants 130 at 40 right after, and the horse level
+itself is unobservable (no reader is ported, and `SendHorseInfo` only speaks
+while riding or summoned, `G/char_horse.cpp:318`), so only the loop runs.
+The loop is `i = 0..255`: usable (`CanUseSkill`, `G/char_skill.cpp:4135-4181`
+— the caller's six group skills past group 0 from `SkillList`
+(`:4108-4114`), the eighteen always usable (`:4173-4180`), and the four horse
+skills through the else-switch, since `IsRiding` never holds on a ported
+path) plants `MIN(40, 40)` past the 7/8 gate; then one `ComputePoints` and
+one `SkillLevelPacket`. The 7/8 gate is dead in the loop (no 221-243 vnum is
+ever usable: not in `SkillList`, the fixed list, or the horse switch), but it
+runs per skill as `SetSkillLevel` runs it (`:195-201`). The reward hook
+(`ENABLE_REWARD_SYSTEM`, which the owner's build defines) runs nothing: the
+reward tables are empty on the owner's data, as the level line records.
+
+- `prodomo/src/command.rs`: the `AllSkillMaster` variant and its handler arm.
+- `prodomo/src/game_loop_messages.rs`: the `AllSkillMaster` command (answering
+  the planted sets for the store), its `run_all_skill_master` sender, and the
+  `is_chat_line` arm.
+- `prodomo/src/game_state.rs`: the route through the new
+  `apply_skill_admin_line` (the five skill-admin arms, split out so
+  `apply_goto_level_skill_line` keeps under the line lint).
+- `prodomo/src/game_state/skill_admin.rs`: the `SkillList`, always-usable and
+  horse tables, and `run_all_skill_master` (the usable set in ascending vnum,
+  the plant, one compute, one byte 76).
+- `prodomo/src/main.rs`: `all_skill_master_step` (a caller outside the world
+  is ignored; each planted vnum's row takes 40 with its left-alone
+  next-read), behind the dispatch tail.
+- `.scratch/parity/commands.md`: the row is `ported`.
+
+Tests:
+
+- `game_state::skill_admin`:
+  `a_master_line_plants_every_usable_skill_at_once` (a group-1 caller plants
+  28 at 40 with one byte 76 carrying PERFECT, the other group and 221 keep
+  0; a groupless caller plants 22).
+- `a_master_line_plants_every_usable_skill` runs the line over the wire: a
+  player runs nothing (the dispatcher's refusal), the shaman's one byte 76
+  carries 91-96, 121, 130, 137, 140, 151 and 159 at 40 with 91 PERFECT while
+  16, 106 and 221 keep 0, and the 91 and 130 rows take 40 while 16 keeps no
+  row.
+
+Fixes while green:
+
+- Clippy's line lint split the five skill-admin arms into
+  `apply_skill_admin_line`, and its identity-op lint the test's `1 * 6`
+  slot math, both fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4478 passed, 1 failed, the `a_gm_pulls...` archer's
+  step window under load (failed the 338-341 runs the same way, and passes
+  in isolation). The 342 scenario passes in every run, so the failure is a
+  load flake, not a regression. Afterwards no `prodomo\_%` scratch database
+  remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 343. The GM's kit (`cmd.full_set`, `cmd.item_full_set`, `cmd.attr_full_set`)
+
+`ACMD(do_full_set)` (`G/cmd_gm.cpp:4723-4732`) runs the skill-master line (ledger
+342), then `do_item_full_set` (`:4760-4902`), then `do_attr_full_set`
+(`:4904-5019`). GM_LOW_WIZARD at POS_DEAD, like the master line. The three rows
+are `ported` with one scenario.
+
+`do_item_full_set` strips the six first wear cells and the shield (`UnequipItem`,
+`G/char_item.cpp:8266-8311`, with the costume-weapon arm and the belt,
+irremovable and no-room refusals), then makes eight fresh pieces for the
+caller's job (`CreateItem` with no proto refusals: every kit vnum has one on
+the owner's data, all `ITEM_TUNABLE` or plain with `LEVEL` limits only) and
+puts each on where `FindEquipCell` says (`CItem::EquipTo`, `G/item.cpp:1402-1505`,
+whose occupied-cell refusal cannot fire because the strips ran first). The set
+pieces recompute through `IsNewSetNeedRefresh` (ledger 337's `is_set_item`:
+the warrior's eight are "SetBonus - 2"), anything else through
+`ComputeBattlePoints`, and the look follows either way. A piece with no
+prototype or no equip cell is skipped (`M2_DESTROY_ITEM`), and a job past the
+shaman's runs neither strip nor kit, as the missing `default` does.
+
+The kit tables are the arms' vnums in arm order: the sura's 11699/13049/15189/
+189/12529/14109/17209/16209, the warrior's 11299/13049/15189/3159/12249/14109/
+17109/16109, the shaman's 11899/13049/15189/7159/12669/14109/17209/16209 and
+the assassin's 11499/13049/15189/1139/12389/14109/17189/16189. The shield 13049
+says `WEAR_UNIQUE` in its file cell, which the proto reader swaps to
+`WEARABLE_SHIELD` (ledger 194's pin in `gamedata/src/item_kind.rs`), so it
+lands on the shield cell through the shield arm, never on UNIQUE1. `EquipTo`
+never calls `CanEquipNow`, so no level, job or unique refusals run: the
+fresh pieces go on unread, and their `ModifyPoints(true)` applies land with
+the points the recompute writes.
+
+`do_attr_full_set` reads head, weapon, shield, body, foots, wrist, neck and
+ear in that order, clears the five normal slots (`ClearAttribute`, silent)
+and forces five `(APPLY_*, value)` pairs per worn piece, each
+`SetForceAttribute` updating the client's cell (`UpdatePacket`) and saving
+the row (`Save`). The forty pairs are the arms' literals: the head's
+`(ATT_SPEED 8, HP_REGEN 30, SP_REGEN 30, DODGE 15, STEAL_SP 10)`, the weapon's
+`(CAST_SPEED 20, CRITICAL 10, PENETRATE 10, DEVIL 20, STR 12)`, the shield's
+`(CON 12, BLOCK 15, REFLECT 10, IMMUNE_STUN 1, IMMUNE_SLOW 1)`, the body's
+`(MAX_HP 2000, CAST_SPEED 20, STEAL_HP 10, REFLECT 10, ATT_GRADE 50)`, the
+foots' `(MAX_HP 2000, MAX_SP 80, MOV_SPEED 8, ATT_SPEED 8, CRITICAL 10)`, the
+wrist's `(MAX_HP 2000, MAX_SP 80, PENETRATE 10, STEAL_HP 10, MANA_BURN 10)`,
+the neck's `(MAX_HP 2000, MAX_SP 80, CRITICAL 10, PENETRATE 10, STEAL_SP 10)`
+and the ear's `(MOV_SPEED 20, MANA_BURN 10, POISON_REDUCE 5, DEVIL 20, UNDEAD
+20)`. The store takes the last write per item, because all forty land in one
+transaction: the alternative, one `Attributes` row per pair, would write
+forty statements for eight rows. The two rare slots keep what they hold, as
+`ClearAttribute` only clears `MAX_NORM_ATTR_NUM`.
+
+The `full_set` wrapper masters first (`run_all_skill_master`, whose byte 76
+rides the outbox), then concatenates the kit's and the forcing's `MovedItems`
+in order, so the sets lead the updates on the wire while the master's record
+takes the broadcast path as it always has.
+
+- `world/src/character/equip.rs`: `Equipper::equip_bare` (`EquipTo` on a fresh
+  item: place, set, `Created`, `ModifyPoints(true)`, recompute) and
+  `wear_full_set` (the seven strips, then each made piece through
+  `find_equip_cell`, skipping what has no proto, no cell or an occupied cell).
+- `world/src/character/item_move.rs`: `MoveKind::FullSet` and
+  `MoveKind::Attributed`, and `ItemChange::Attributes` (the item's attributes
+  now).
+- `world/src/character/items.rs`: `CharacterItems::set_attribute` with
+  `AttributeRefused`, beside `set_socket`.
+- `world/src/character/specify_item.rs`: `force_worn_attribute`
+  (`SetForceAttribute`: write, update, `Attributes`; nothing for an unheld id
+  or a past-end index).
+- `world/src/character/mod.rs`: the three new names are re-exported.
+- `db/src/items.rs`: `RowChange::Attributes` with its fourteen-column
+  statement, threaded through `write_change` so moves and Transfers both
+  write it; `taken_cell` and `check_change` treat it as in-place, like
+  `Sockets`.
+- `prodomo/src/item_move.rs`: the `ItemChange::Attributes` to
+  `RowChange::Attributes` conversion.
+- `prodomo/src/game_state/full_set.rs`: the kit and forcing tables with
+  `GameState::item_full_set`, `::attr_full_set` and `::full_set`, all through
+  `run_item_step` so the records, rows, points and quickslots ride as a
+  move's do. The kit makes each piece with an allocated id and the proto's
+  size; the forcing merges the forty writes to one `Attributes` change per
+  item.
+- `prodomo/src/command.rs`: the `FullSet`, `ItemFullSet` and `AttrFullSet`
+  variants with their three handler names.
+- `prodomo/src/game_loop_messages.rs`: the `ItemFullSet`, `AttrFullSet` and
+  `FullSet` commands (each with the mover), their `is_chat_line` arms and
+  their `run_*` senders.
+- `prodomo/src/game_state.rs`: the module, the `is_goto_level_skill_line`
+  arms and the `apply_skill_admin_line` arms.
+- `prodomo/src/main.rs`: the three dispatch arms with `item_full_set_step`,
+  `attr_full_set_step` and `full_set_step`, all through `finish_item_step`
+  (the full one stores the master's planted skills first, as the master's
+  step does).
+- `.scratch/parity/commands.md`: the three rows are `ported`.
+
+Tests:
+
+- `world::character::equip`: `a_full_set_strips_then_kits_in_order` (the old
+  body lands in the first free base cell, the fresh armour and sword go on,
+  and the unknown vnum makes nothing: two `Created`).
+- `world::character::specify_item`:
+  `a_force_write_updates_the_held_item_and_nothing_else` (the pair lands,
+  the update carries it, the change carries the row; an unheld id and a
+  past-end index send nothing).
+- `game_state::full_set`: `the_warrior_s_kit_lands_on_its_cells` (the eight
+  on their cells, the shield on WEAR_SHIELD, eight `Created` under
+  `EQUIPMENT`), `each_job_s_kit_lands_its_eight`,
+  `the_forcing_pairs_land_on_each_worn_piece` (eight `Attributes`, forty
+  updates, the head's five pairs with the rare slots kept),
+  `the_full_one_masters_kits_and_forces_in_order` (planted at 40, the sets
+  lead the updates) and `a_job_past_the_shaman_s_runs_nothing`.
+- `db/tests/items.rs`:
+  `an_attribute_change_stores_every_attribute_and_only_for_its_owner` (the
+  head's forced row lands whole with the sockets kept; another owner's write
+  is `NotOwned` and changes nothing).
+- `a_full_set_kits_forces_and_masters_over_the_wire` runs the three lines
+  over the wire: a player hears the dispatch refusal for each, the wizard's
+  kit puts the shaman's eight on in arm order with the looks following and
+  eight `EQUIPMENT` rows, its forcing sends forty updates and lands the
+  head's pairs in the attribute columns, and the full one masters (byte 76,
+  the 91 row at 40) with the kit's sets leading the forcing's updates.
+
+Fixes while green:
+
+- Clippy's items-after-statements lint moved the strip list above the
+  equipper, its `question_mark` lint the test's proto guard, and its
+  missing-errors-doc lint added the three `# Errors` sections, all fixed by
+  refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4488 passed, 0 failed. An earlier run failed the two
+  pre-existing `a_gm_flags...` and `a_gm_pulls...` scenarios under load; both
+  pass in isolation, and the 343 scenario passes in every run, so the failure
+  is a load flake, not a regression. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 344. The use line and the clear (`cmd.use_item`, `cmd.do_clear_affect`)
+
+`ACMD(do_use_item)` (`G/cmd_gm.cpp:4999-5016`) parses its first word with
+`str_to_number(int)`, 0 when empty, and `GetInventoryItem(cell)` answers the
+item or nothing: the `int` truncates to `WORD` in the `TItemPos`, so a negative
+or past-the-end cell misses exactly like an empty one. A hit runs
+`UseItem(TItemPos(INVENTORY, cell))`; a miss answers `I can't wear it because
+I don't have the item.` GM_LOW_WIZARD at POS_DEAD. `ACMD(do_clear_affect)`
+(`:5019-5022`) is `ClearAffect(true)` on the caller, at the same level. The
+two rows are `ported` with one scenario.
+
+`GameState::run_use_item_line` reuses the record's `use_item` for the hit, so
+the climbed-skill and quest stores ride the same finish. The miss answers the
+no-item line through `own_mover` (silent with no body, as a Bodiless caller
+has no descriptor language) and returns an empty `Used` step, whose points
+refresh like the record's refused-book step. The parse reuses
+`skill_admin::str_to_wrapping_int` (widened to `pub(super)`); the `WORD`
+truncation reads the low two bytes, with no cast lint to allow.
+
+`GameState::run_clear_affect` is `ClearAffect(true)`
+(`G/char_affect.cpp:242-340`): the kept rows stay, each other row answers its
+remove packet and then uncomputes its point (single-slot, per the alignment
+precedent — no full recompute), one update goes out when the flags or either
+raw speed moved (`GetPoint`, unclamped, via a new `raw_point_of`), the hit
+and spell points clamp through `check_maximum_points`, and the event ends
+with its last row. The keep predicate is the call's own: the no-clear band
+500-600 with the silence and the renewal blend span 304-320, the no-save
+premium span 500-509 with the war flag and the entry invisibility, the
+conqueror span 623-626, the first four guild bonuses, the multi-farm row,
+the two world-boss rows, the three top-player rows, and the two realtime
+pickup rows. Invisibility goes: the call passes no owner, so the GM arm
+answers false like every other no-owner call (a finding from the first test
+run, which seeded it as kept). `ComputeAffect`'s MUYEONG and top-player arms
+wait for those systems; the DB packet is the retired peer's. The new affect
+constants live in `loading_phase` with the existing ones.
+
+Plumbing follows 343: `Command::UseItem`/`ClearAffect`,
+`GameCommand::UseItemLine`/`ClearAffect` through `apply_skill_admin_line`,
+the two senders, and `use_item_line_step` (through `finish_item_step`, with
+the record's climbed-skill and quest stores first) with `clear_affect_step`
+in `main.rs`.
+
+Drive-by: the uncommitted tree had lost the `do_view_equip` arm of
+`Command::command` — the variant, the table entry and the whole downstream
+path exist, but the match fell through to `NotPorted`, so `/view_equip`
+answered nothing and its scenario stalled on the socket. The one-line arm is
+restored; a sweep confirms every other `Command` variant has its arm (the
+zero-arm members are `Interpreted`'s and `StatPlusKind`'s). This predates
+slice 344 and is unrelated to it.
+
+Changes:
+
+- `prodomo/src/loading_phase.rs`: the clear's keep constants (premium,
+  blend, conqueror, guild-bonus, multi-farm, world-boss and pickup spans).
+- `prodomo/src/game_state/affect.rs`: `clear_affect_keeps`,
+  `run_clear_affect`, `raw_point_of`, and their tests.
+- `prodomo/src/game_state/skill_admin.rs`: `str_to_wrapping_int` widened to
+  `pub(super)`.
+- `prodomo/src/game_state.rs`: `run_use_item_line`, the two dispatch arms,
+  and its test.
+- `prodomo/src/command.rs`: the two variants and arms, the restored
+  `do_view_equip` arm, and the `kit_name`/`quest_name` splits (the match had
+  crossed the line lint).
+- `prodomo/src/game_loop_messages.rs`: the two variants, `is_chat_line`,
+  and the two senders.
+- `prodomo/src/main.rs`: the two dispatch arms with `use_item_line_step`
+  and `clear_affect_step`.
+- `prodomo/tests/parity.rs`:
+  `a_use_item_line_drinks_and_a_clear_takes_all_but_the_silence` with
+  `seed_use_table`, `assert_drink_answer` and `a_use_item_record`.
+- `.scratch/parity/commands.md`: the two rows are `ported`.
+
+Tests:
+
+- `game_state::affect::tests`:
+  `the_clear_affect_line_keeps_the_listed_rows_and_takes_the_rest` (twelve
+  kept rows spanning every keep class, the 203/210/209 removals in order,
+  the update, the HP clamp to the lowered maximum) and
+  `the_clear_keep_predicate_holds_its_span_ends` (each span's far end).
+- `game_state::tests`:
+  `the_use_item_line_drinks_the_named_cell_or_answers_no_item` (cell 0
+  drunk, cells 5/99999/-1 answered with an empty step, the bare line
+  parsing as cell 0 and drinking the last potion).
+- `a_use_item_line_drinks_and_a_clear_takes_all_but_the_silence` runs both
+  lines over the wire: a player hears the dispatch refusal for each, the
+  wizard's `use_item 0` owes 300 hit points with the red effect and the
+  stack to one (stored), `use_item 5` answers the no-item line and stores
+  nothing, `/invisible` lands the 203, `/do_clear_affect` answers its
+  remove packet with one update, and a 90 s silence on the player stands in
+  the store. (The silence is laid after the clear: a 10 s lay expired under
+  the drains' windows in the first draft.)
+
+Fixes while green:
+
+- Clippy's `similar_names` lint renamed the empty step's binding, its line
+  lint split `command()` twice and the clear test (with a seed helper) and
+  the scenario (with seed and drink helpers), its needless-borrow lint
+  fixed the helper's calls, and its truncation lint the test's point bytes
+  to `u8::try_from`, all fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4490 passed across 40 targets, with two load flakes in
+  pre-existing scenarios (`a_gm_aggregates_and_forgets_the_dogs_around` and
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger`, both a socket `WouldBlock`
+  at `parity/src/client.rs:80`, read timeouts rather than assertion
+  failures). Both pass strictly alone (11.8 s and 9.0 s), an earlier run
+  also failed `a_player_views_anothers_equipment_and_the_modes_refuse`
+  before the lost-arm fix (6.9 s alone after it), and the 344 scenario
+  passes in every run, so the load failures are flakes, not regressions.
+  Afterwards no `prodomo\_%` scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 345. The deck line and the list (`cmd.dragon_soul`, `cmd.ds_list`)
+
+`ACMD(do_dragon_soul)` (`G/cmd_gm.cpp:5024-5047`) reads the first word's first byte: `a`
+parses the next word with `str_to_number(int)` (silent unless nonempty) and runs
+`DragonSoul_ActivateDeck`, `d` runs `DragonSoul_DeactivateAll`, and anything else runs
+nothing. GM_PLAYER at POS_DEAD. `ACMD(do_ds_list)` (`:5049-5059`) tells one info line per
+held dragon soul stone. Both rows are `ported` with one scenario.
+
+`GameState::run_dragon_soul` is the pair: the deck parse reuses
+`skill_admin::str_to_wrapping_int`, `activate_deck` is `DragonSoul_ActivateDeck`
+(`G/char_dragonsoul.cpp:87-113`, outside 0..2 runs nothing, the active deck answers at
+once, every deck deactivates first, the unqualified hear `The dragonsoul is not
+activated.`), `deactivate_all` is `DragonSoul_DeactivateAll` (`:116-128`, every deck
+stone deactivates, the deck goes to -1, both deck affects go), and `run_ds_list` is the
+loop over the soul inventory with the `cell : %d, name : %s, id : %d` line. A stone
+activates through `ModifyPoints(true)` and socket 2 (`DSManager::ActivateDragonSoul`,
+`G/DragonSoul.cpp:1217-1245`), deactivates through the reverse; the wear-timer event is
+not ported, so no timer starts, and its expiry is a later slice, not a Divergence.
+The step finishes through `finish_item_step`, so the socket updates ride and the rows are
+stored.
+
+Three fixes the scenario forced:
+
+- `is_goto_level_skill_line` did not name the two new variants, so the game thread hit
+  `apply_chat_line`'s exhaustiveness assert and panicked; both are named now.
+- `load_position` refused every flat-inventory cell in the wear range, but the deck cells
+  (244..256) live in that same flat array (`IsDragonSoulEquipPosition`,
+  `G/length.h:1009-1012`); the deck band loads now, and the load test pins its ends.
+- `wear_position`'s DS arm refused wear-timed stones for the unported timer system, but
+  `EquipTo`'s DS arm starts no wear timer (`G/item.cpp:1458-1469`); the arm exempts the
+  timer check, so the stone loads, inactive until the line activates it.
+
+`a_deck_lands_its_stone_and_the_list_names_each_held_one` seeds deck 0's first cell with
+a wear-timed stone and the soul inventory with another: `/dragon_soul a 0` lands the 541
+add and the stone's update with socket 2 set (window 2, which is what `SetItem` stores
+for the deck band, `G/char_item.cpp:619-629`) and stores the row; `/ds_list` names the
+held stone; `/dragon_soul d` answers the 541 remove and clears socket 2, stored; and a
+bad deck and any other first byte are silent. The relog scenario now loads five sets
+(the stone rides at 245, points unchanged: it is inactive) and the equipped helper
+counts five; the old "refused stone" assertions are gone.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4496 passed across 40 targets with the two known dog-field flakes
+  skipped (`a_gm_pulls_the_dogs_and_attracts_the_ranger` fails 2-in-3 alone: the
+  `/aggregate` coin flip leaves the archer victimless and the 30 s window expires; the
+  other passes alone in 11.8 s). Afterwards no `prodomo\_%` scratch database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 346. The rolled number and the gift window (`cmd.dice`, `cmd.gift`)
+
+`ACMD(do_dice)` (`G/cmd_general.cpp:3455-3489`) parses its words with `atoi`: both words
+are the bounds, one word is 1 to it, neither is 1 to 100, and the pair is ordered low to
+high before `number()` rolls. The roll goes to the caller's party
+(`ChatPacketToAllMember`, `[LS;1046;name;n;start;end]`), or to the caller alone
+(`[LS;1047;n;start;end]`) with none. `ENABLE_DICE_SYSTEM` is undefined on this tree, so
+`CHAT_TYPE_DICE_INFO` does not compile and both arms use `CHAT_TYPE_INFO`.
+`ACMD(do_gift)` (`:3251-3254`) tells the `gift` command line. GM_PLAYER at POS_DEAD.
+Both rows are `ported` with one scenario.
+
+`GameState::run_dice` is the roll: the bounds parse through `two_arguments` and
+`str_to_wrapping_int` (which is `atoi`'s `strtol`), the roll draws from the world's dice
+through the ported `number()`, and the line goes out through `tell` — to every linked
+member's own mover in PID order with a party (new `Parties::linked_vids`), to the
+caller alone without one. `GameState::run_gift` tells `gift` as a command line. Nothing
+is stored on either path: both are tells, not state.
+
+`a_dice_roll_reaches_the_party_and_gift_opens_its_window` rolls alone (1 to 100, parsed
+and range-checked), forms a party with Charlie, rolls 5 to 10 (both hear the same
+record with the name), and opens the gift window. The command dispatch split its
+strike lines into `strike_name` to hold the line lint.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4498 passed across 40 targets with the two known dog-field flakes
+  skipped (ledger 345's receipt names them). Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 347. The hair's line and the costume's (`cmd.hair`, `cmd.costume`)
+
+`ACMD(do_hair)` (`G/cmd_general.cpp:3200-3208`) tells one info line from
+`FN_hair_affect_string` (`:3052-3087`): the hair affect's point format with its value,
+then `[LS;651;year;month;day]` of the `hair.limit_time` quest flag's date. No hair
+affect, or a flag below the world clock, is silent. `ACMD(do_costume)` (`:3089-3198`)
+tells `COSTUME status:`, then the hair, body, mount, sash, weapon, and aura in order
+(all four feature gates are defined on this tree), the hair and the sash with their
+attribute lines, and unequips the piece the first word's first byte names (`hbmswa`).
+GM_PLAYER at POS_DEAD. Both rows are `ported` with one scenario.
+
+`GameState::run_hair` is the line: the 514 affect, the flag against
+`Self::global_time`, the civil date in UTC, and the point's format from the new
+`game_state::costume::POINT_FORMATS`, which is `FN_point_string` (`:2960-3047`) in
+legacy's order — 79 arms, since `ENABLE_MAGIC_REDUCTION_SYSTEM` is undefined and its
+arm does not compile. `run_costume` tells the six pieces with `CItem::GetName`
+(`G/item.cpp:2994-2997`) and takes the named piece off through `use_item`, so the
+records ride and the rows store as a click's.
+
+Three legacy shapes survive verbatim, and two do not. `POINT_MOV_SPEED` takes `%d`
+where its siblings take `+%d` (`:2971`), `POINT_CASTING_SPEED` takes `-%d` (`:2972`),
+`POINT_MALL_EXPBONUS` reads `POINT_MALL_DEFBONUS` (`:3033`), and `POINT_MALL_DEFBONUS`
+is the four U+FFFD replacement characters the checked-in source holds (`:3032`; the
+file was saved in a legacy code page). The two `%.1f` formats (`POINT_MALL_ITEMBONUS`,
+`POINT_MALL_GOLDBONUS`) are a Defect: the call sites pass the attribute's promoted
+`short` where `%f` expects a `double`, so the line is unstable; the Rewrite renders
+those two as the integer over 100 (`G/char_battle.cpp:582-583` divides the point by
+100). A point past the table's end would crash legacy (`snprintf` of `NULL`): the
+sash's `NULL` guard (`:3162-3163`) skips it, and the Rewrite extends the skip to the
+hair loop (no shipped Game data names one) and tells only the date from `/hair`.
+
+`hair_tells_its_affect_and_costume_takes_the_named_piece_off` seeds a hair costume
+with one attribute (point 6 by 500), a body costume, a 514 row and the status flag;
+both pieces are worn live, `/setqf` banks a `hair.limit_time` a day out, `/hair`
+tells the format with its value and the `[LS;651]` date, `/costume` tells the head,
+the hair with its attribute and the body, and `/costume b` retells the status and
+takes the body off to the costume bank's first cell (1190: costume bodies match
+custom category 5, `gamedata/src/item_custom_category.rs:247-253`), stored. Four
+unit tests pin the table's length and ends, the float rendering, the epoch and a
+leap day, and the three silent arms.
+
+Three fixes the slice forced:
+
+- The civil-date shift was missing (`days + 719_468`): both the port and the
+  scenario's copy rendered day 0 as year 0, and the unit test caught it.
+- `apply_skill_admin_line` and `TableEntry::command` tripped the line lint; the
+  tell-only dispatch moved to `apply_tell_line` and the restart head to
+  `restart_name`.
+- The load's affect-restore bindings tripped the similarity lint; `restores` and
+  `restored` are `kept` and `revived`.
+- The `restart_name` extraction dropped the `do_skillup` and `do_guildskillup` arms:
+  the skill and guild scenarios failed (no spend, no burst) until both arms were
+  restored.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4504 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 348. The GM's dump and the inventory's list (`/state`, `/inventory`)
+
+`do_state` (`G/cmd_gm.cpp:1017-1202`) and `do_inventory` (`G/cmd_general.cpp:3210-3250`).
+Both are GM_LOW_WIZARD at POS_DEAD. The scenario is
+`a_state_dump_names_its_target_and_an_inventory_lists_its_cells`; the units are
+`game_state::state::tests` (5) and the `%3d`/`%x`/`%02d` arms of `chat_line::tests`.
+
+`GameState::run_state` is the dump: the target is the caller with no word, the VID
+behind `#` (PC or NPC, `CHARACTER_MANAGER::Find`), or the exact-case descriptor whose
+character bears the name (`DESC_MANAGER::FindByCharacterName`, so the wrong case is
+silent) — and silence with no target. The state line names the target's position with
+the *caller's* shop and exchange bits (`ch->GetShop()`, `ch->GetExchange()`), the
+coordinate line carries the sectree tail (`SECTREE_MANAGER::Get`, the `%x,%x` cell and
+`%08X` attribute; `world::cells::MapCells::attribute` is the tail), and the pools use
+`GetHP`/`GetMaxHP`/`GetSP`/`GetMaxSP` (the pools, not `GetPoint`) with an NPC's SP as
+`0/0`. Then the grades (`%3d` pads left with spaces), the resistances, the mall/bonus
+immunities, and the live privs of the target's own empire only (`GetPriv` reads one
+row, although the grant gate also passes the all-empires row: the unit test pins both).
+
+`GameState::run_inventory` is the list: the caller's own cells from the index for the
+count (`<NONE>` where empty, each line's cell its own `int`), the usage with no word,
+a bare count from cell 0, and the two-word form with each side clamped to 180
+separately. The index reaches `GetInventoryItem(WORD)`, so a negative index wraps to
+its `WORD` cell (`rem_euclid`, no `as` cast): `/inventory -1 1` names cell 65535's
+nothing. `vsnprintf` grew `%3d` (space-padded to three columns, overflowing long
+numbers), `%x` and the two-digit `%02d`, each with a golden test.
+
+`a_state_dump_names_its_target_and_an_inventory_lists_its_cells` seats Alpha as
+`LOW_WIZARD` with a hair costume in cell 0 and enters on Channel 1: `/state` tells the
+head, the coordinate line with the map-1 attribute read live from `server_attr`
+through the same path, and the twenty lines with each head pinned exactly and each
+body line by its prefix; `/state Alpha` and `/state #<vid>` retell the dump;
+`/state alpha` and `/state Nobody` are silent; `/inventory` tells the usage,
+`/inventory 2` the costume's locale name and `<NONE>`, and `/inventory 0 0` nothing.
+
+Three fixes the slice forced:
+
+- The pools read `get_point(POINT_HP)` and told `0/0`: legacy's dump calls `GetHP()`
+  (the pool), not `GetPoint`. `state_pools` reads the pools.
+- The `hp`/`sp` tuple tripped the similarity lint; the bindings are `hit`/`mana`.
+- The scenario tripped the line lint; the seating moved to `seat_alpha_for_state` and
+  the dump's pins to `assert_state_dump`, which the three target arms share.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4511 passed, 0 failed, 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 349. The numbered armours and the purge (`/slow`, `/ipurge`)
+
+`do_slow` (`G/cmd_gm.cpp:92-100`, GM_LOW_WIZARD) and `do_item_purge` (`:868-1016`,
+GM_HIGH_WIZARD). The scenario is
+`a_slow_gives_ten_numbered_armours_and_an_ipurge_clears_them`; the units are
+`world::character::purge::tests` (3).
+
+`slow_give` gives ten fresh 12019s (the +9 armour of heaven, `ITEM_ARMOR`,
+`ITEM_TUNABLE`, never stackable) through the free-cell search `AutoGiveItem` uses —
+custom bank first, then the base cells — and numbers each in socket 4 (`SetSocket`,
+whose `UpdatePacket` and `Save` are the update record and the socket row). The
+`[LS;444]` pickup line rides per placed piece, as `bMsg` defaults to true and
+`ENABLE_SPECIAL_DROP_CHAT_RENEWAL` is undefined. A give with no free cell, no id,
+or no proto gives nothing, as `AutoGiveItem` answering `NULL` does.
+
+`purge_all` is the `#else` arm: `ENABLE_CMD_IPURGE_EX` is undefined, so the line takes
+no argument and clears every flat cell (`0..INVENTORY_AND_EQUIP_SLOT_MAX`, 1370) then
+every dragon soul cell (`0..DRAGON_SOUL_INVENTORY_MAX_NUM`, 6 times 6 with
+`ENABLE_DRAGONSOUL_ALCHEMY_PLUS` times 32 = 1152). Each flat removal syncs the
+quickslots naming its cell (the loop's sync; `RemoveItem`'s own second sync,
+`G/item_manager.cpp:589`, finds nothing and sends nothing), a worn piece leaves
+through the unequip point path, `ComputePoints` runs before and after, and the weapon
+part resets (`SetPart(PART_WEAPON, 0)`, `EParts::Weapon`) with the one look
+(`UpdatePacket`), as `ENABLE_WEAPON_COSTUME_SYSTEM` compiles it.
+
+`a_slow_gives_ten_numbered_armours_and_an_ipurge_clears_them` seats Alpha as
+`HIGH_WIZARD` with empty cells: `/slow` sends, per piece in order, the pickup line
+with the costume's locale name, the set into its cell, and the update numbering
+socket 4. The armour is two cells tall in the five-wide grid, so the ten pieces stand
+at 0-4 and 10-14. `/ipurge` clears them — the opening points, ten vnum-0 sets in cell
+order, the closing points, the one look — `/inventory 15` names `<NONE>` throughout,
+and the store holds no rows.
+
+Three fixes the slice forced:
+
+- The new `GameCommand` variants were not in `is_chat_line`, so the big dispatch
+  fell through to its `debug_assert` and the game thread panicked (`apply_delegated
+  claims every item...`): the no-answer closed the descriptor with nothing sent.
+- The armour's two-tall footprint put the sixth piece in cell 10, not 5: the
+  scenario pins the footprint cells.
+- `command()` tripped the line lint twice: the slow/purge arms moved to `purge_name`
+  and the walk/run pair to `mode_name`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4514 passed, 0 failed, 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 350. The console's line and the book's skill (`/console`, `/book`)
+
+`do_console` (`G/cmd_general.cpp:466-469`, GM_LOW_WIZARD) and `do_book`
+(`G/cmd_gm.cpp:2501-2526`, GM_IMPLEMENTOR). The scenario is
+`a_console_opens_and_a_book_names_its_skill_in_socket_zero`; the units are
+`world::character::purge::book_tests` (2).
+
+`run_console` tells the `ConsoleEnable` command line, through the tell half of the
+skill-admin dispatch. `book` resolves the word as `CSkillManager::Get` does — a vnum
+when it starts with an ASCII digit (`isnhdigit` for ASCII, `str_to_dword` mod 2^32,
+kept when a row carries it), else the case-insensitive name's lowest vnum
+(`SkillNames::by_name`, the `strcasecmp` port) — with no 254 cap, since `Get(vnum)`
+reads the map whole. A word naming nothing tells `There is no such a skill` (an
+empty word too: `isnhdigit(NUL)` is false and `Get("")` is NULL). A named skill gives
+one fresh 50300 (`ITEM_SKILLBOOK`, never stackable) through the free-cell search with
+the pickup line, the set, and `SetSocket(0, vnum)`'s update and row, all stored.
+
+`a_console_opens_and_a_book_names_its_skill_in_socket_zero` seats Alpha as
+`IMPLEMENTOR` and enters through the implementor walk (the GM-gated `event_panel`
+letter rides between `dungeon_info` and the costume hides): `/console` tells
+`ConsoleEnable`; `/book`, `/book Nobody` and `/book 99999` tell the miss;
+`/book Iures` (vnum 3) and `/book 5` (Izbitura) each send the pickup line with the
+book's locale name, the set of a 50300, and the update with the skill in socket 0;
+both books store.
+
+Three fixes the slice forced:
+
+- The plain enter walk asserts the login event without the GM letter, so the
+  scenario enters through `enter_world_as_implementor`.
+- `apply_skill_admin_line` tripped the line lint: the Slow, ItemPurge and Book arms
+  answer through `answer_item_step`.
+- `command()` tripped the line lint twice: grouping the kit patterns per line trips
+  the identical-body lint instead, so the slow/purge/book/console quartet dispatches
+  through `purge_name` and the stat/pk pairs through `stat_line`/`pk_line`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4518 passed, 0 failed, 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+No `psql` on this machine, so scratch-database cleanup was not re-checked by
+hand; each database test drops its own scratch database on `Drop`.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 351. The GM's attribute line (`/set`: gold, exp, the maxima, skill)
+
+`do_set` (`G/cmd_gm.cpp:1862-2074`) sets a named online PC's field by prefix:
+`set <name> <field> <value>` finds the target case-insensitively (`FindPC`),
+matches the word against the eleven-field table in order (`gold`, `race`,
+`sex`, `job`, `exp`, `max_hp`, `max_sp`, `skill`, `alignment`, `align`,
+`gaya`), runs the arm, and tells `%s's %s set to [%lld]`: the shown name, the
+canonical field, the `long long` parse. The usage carries the numbered list
+plus the race/sex/job helps; an offline name hears `<name> not exist`; an
+unknown field lands on the `\n` row's `MISC` and stays silent. The prefix match
+is case-sensitive, so `Gold` misses while `ZULU` finds Zulu.
+
+This slice ports the frame and the five value arms. Gold is `ChangeGold`
+(`G/char.cpp:1216-1263`): the signed total refuses at or past
+`GOLD_MAX_MAX` (2e18) and below zero, else sets and sends `GOLD_CHANGE` to the
+target with the 0-for-nonpositive amount rule; the delta stores as a Transfer.
+`str_to_long_long` wraps signs and clamps past `u64::MAX` back to -1, as the
+`strtoull` cast does, with no `as` wrap (clippy-clean via `from_ne_bytes`).
+Exp rises through `gain_pc_exp` and falls through `lose_exp` below its max,
+except on a conqueror target, whose chain is a gap (ledger 344): the
+confirmation still tells. The maxima and the skill point go through
+`PointChange` with their records; their rows bank in the save, which already
+covers exp, the skill point and the derived pools, so only gold answers for
+the store. Race, sex, job, alignment and gaya match in the table but wait for
+352, recording the gap here rather than telling lies. `vsnprintf` gains `%lld`
+for the confirmation.
+
+- `prodomo` lib:
+  - `game_state::set_attr::run_set_attr` runs the line; `SetAttrStored` carries
+    the gold answer. The world owns the command (`GameCommand::SetAttr`,
+    `LineCommand::SetAttr`, `do_set`'s entry); main's `set_attr_step` stores
+    the gold through `apply_transfer`.
+  - `the_long_long_wraps_signs_and_clamps`, `the_prefix_match_follows_the_table_order`.
+  - `chat_line`'s `%lld` conversion with the `i64::MIN` rendering.
+- `prodomo` scenario: `a_set_moves_a_named_characters_gold_exp_maxima_and_skill`
+  pins the usage (16 lines), the miss, the silent field, the prefix gold with
+  its stored row, the cased target, the refused over-cap change (silent, but
+  the confirmation tells), the four point arms with their records, and the
+  conqueror exp gap.
+- `.scratch/parity/commands.md`: `cmd.set` is `partial`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 39 targets `ok`, 0 failed. Two mob-timing scenarios
+  failed once under full-suite load and pass alone and on a quiet machine
+  (load flakes; this slice touches no mob code).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. No `psql` on this machine; the scratch check ran through
+`podman exec prodomo-pg18 psql`: the 44 `prodomo\_%` orphans were this run's
+killed rerun (its `prodomo serve` children outlived the harness kill) and were
+dropped by hand; afterwards none remained.
+
+No ADR changed. No owner question added. No Divergence is taken. 352 owns the
+remaining `/set` arms.
+
+## 352. The GM's identity line (`/set`: race, sex, job, alignment, gaya)
+
+The five remaining `do_set` arms (`G/cmd_gm.cpp:1929-2074`), closing `cmd.set`.
+Race clamps the word to the four jobs and picks the job's race in the sex the
+target holds (warrior 0/4, assassin 5/1, sura 2/6, shaman 7/3, `G/char.h:63-72`);
+a changed race sets (`SetRace`), clears the skills (`ClearSkill`), drops the
+group, and runs the mesh workaround. Sex clamps to male/female and flips the
+race (`ChangeSex` is `race ^ 4` on the eight main races) when it differs, then
+runs the same workaround. Job (`SetSkillGroup`) sets the clamped group past
+level 4 with byte 112 and always clears, with no line of its own. Alignment
+moves the real alignment to the word through `UpdateAlignment`
+(`__FIX_UPDATE_ALIGNMENT__` is defined). Gaya is `PointChange(POINT_GAYA, gaya,
+true)`, which banks for the save.
+
+Three rulings. First, the ALIGN arm has no `break`: it falls through into GAYA,
+so `/set X alignment N` also changes X's gaya by N, and the doubled `break;`
+after the gaya block shows the fallthrough was never meant. That is a Defect;
+the Rewrite runs the alignment arm alone and the scenario pins the gaya
+unchanged. Second, `SetPolymorph(101)`/`SetPolymorph(0)` is only a mesh change:
+both calls reencode the view, change the four attributes by 0 with their
+records, and recompute the battle points, and the polymorph point and the combo
+resets are gaps no ported path reads. Third, the CIBN overtime halves and
+zeroes in the gaya arm never run: the Rewrite is the `europe` locale, where
+`LC_IsNewCIBN` is false.
+
+The gaya currency is new state: `player.gaya` (migration 0021, 0 to `GAYA_MAX`),
+loaded into `Points`, kept by the `POINT_GAYA` arm (the total refuses at
+999999, silently), written from the slot into the points burst, synced into the
+held row, and saved. Race and group write straight to the target's row by its
+id (`store_identity` — the target's own save would overwrite them with the
+stale held copy), with the clear's zeroed skills deleted; the save still owns
+exp, the points, the alignment and the gaya.
+
+- `world`: `Points::gaya`, `Points::set_race`, the `POINT_GAYA` arm, `GAYA_MAX`;
+  `NOT_PORTED` shrinks to 17.
+- `db`: migration 0021, `Character::gaya`, `PlayerSave::gaya`, `store_identity`.
+- `prodomo` lib: the five arms in `set_attr.rs`, `SetAttrStored`'s identity
+  answer, the step's identity store, the held gaya sync.
+- `prodomo` scenario: `a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya`
+  pins the race (female sura 6, the clear with byte 76, two reencodes with
+  their computes, the stored identity), the sex flip (race 2, no clear), the
+  job (byte 112, the clear, the stored group), the alignment (the update, band
+  2's 571 and 573), and the gaya (the change, the saved row).
+- `.scratch/parity/commands.md`: `cmd.set` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: all targets `ok` except one mob-timing scenario
+  (`a_gm_pulls_the_dogs_and_attracts_the_ranger`), which fails under full-suite
+  load and passes alone (8s); the same load flake as ledger 351, in code this
+  slice does not touch. Both `/set` scenarios pass.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`:
+no `prodomo\_%` database remained, and no stray `prodomo serve` either.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 353. The GM's safebox size (`/safebox`)
+
+`do_safebox_size` (`G/cmd_gm.cpp:2125-2141`), the next GM line in file order after
+`/set`. The word parses as a page count, or 0 when empty; a size past 3 or below
+0 answers 0 (the clamp assigns 0, not 3 — the first port clamped to 3 and the
+scenario caught it). The line tells `Safebox size set to %d` with the pages,
+then `ChangeSafeboxSize` (`G/char.cpp:7161-7177`) sends the size record with the
+rows and grows the open safebox when the size passes what it holds.
+`CSafebox::ChangeSize` (`G/safebox.cpp:148-163`) returns at or below the held
+size and otherwise keeps every covered cell while the grid grows.
+
+Nothing is stored: the game's only size write is the quest call's, and the DB
+process answers it only when a row was already there, while the build always
+opens one page (`input_db.cpp:1135-1150`). The migration 0008 note already
+records the size as never read, so the row keeps only the password hash.
+
+- `world`: `Safebox::change_size` with the grow-only unit.
+- `prodomo` lib: `SafeboxStep::Resize`, the `Command::SafeboxSize` entry with
+  the store gate, and `safebox_resize_step`'s word parse.
+- `prodomo` scenario: `a_gm_sizes_the_safebox_and_the_open_grid_grows` pins the
+  empty word (0), the 2-page size (18 rows), the past-3 clamp (0), and the open
+  grid's grow with a checkin landing at cell 45.
+- `.scratch/parity/commands.md`: `cmd.safebox` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: all targets `ok`. The first run failed two parity
+  scenarios under full-suite load; the rerun is 240 passed, 0 failed
+  (load flakes, as in ledgers 351-352).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`:
+no `prodomo\_%` database remained, and no stray `prodomo serve` either.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 354. The GM's guild lines (`/makeguild`, `/deleteguild`)
+
+`do_makeguild` and `do_deleteguild` (`G/cmd_gm.cpp:2143-2173`), the next GM lines
+in file order after `/safebox`. The guilded caller is silent; else the word's
+bytes to the first NUL face the alphabet check, and a failure tells
+`#ERR_CODE: 1433030623`. The judged name is stored (`db::guilds::create_guild`,
+with the `[LS;473]` retry arm when a concurrent creation took it) and committed
+with no fee and no item — the window's answer is the only path that pays — and
+the line confirms `(%s) #ERR_CODE: 1434030623`. Both codes go out in legacy's
+words: `LC_TEXT` at `LOCALE_YMIR` answers the text itself (`G/locale.cpp:73-74`),
+as the chat-line note already records. The `@fixme143` escape check has no arm:
+bound parameters retire it, as the window's judgement records. The delete runs
+`RequestDisband` on the caller's guild through the quest destroy's judgement and
+the disband store.
+
+- `prodomo` lib: `judge_makeguild`, `commit_makeguild` (the inner split off the
+  window's commit), `judge_deleteguild`, the three game commands, the two `Command`
+  entries, and the two descriptor steps.
+- `prodomo` scenario: `a_gm_founds_and_disbands_a_guild_by_line` pins the bad
+  word's code, the fee-less founding (broadcast, confirmation, walk), the
+  guilded caller's silence, and the disband's REMOVE plus the emptied rows.
+- `.scratch/parity/commands.md`: `cmd.makeguild` and `cmd.deleteguild` are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: all targets `ok`, first run, no flakes.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]` (the guild steps left `apply_item_step`,
+  the guild arms clustered into `guild_name`).
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`:
+no `prodomo\_%` database remained, and no stray `prodomo serve` either.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 355. The GM's tool lines (`/refine_rod`, `/refine_pick`, `/max_pick`)
+
+`do_refine_rod`, `do_refine_pick` and `do_max_pick` (`G/cmd_gm.cpp:2181-2222`),
+the next GM lines in file order after the guild pair. The word's low byte
+(`str_to_number(BYTE)`) names the inventory cell whose tool refines, maxes, or
+both. `RealRefineRod` (`G/fishing.cpp:861-928`) and `RealRefinePick`
+(`G/mining.cpp:234-303`) swap the tool for its refined vnum on a
+`number(1, 100)` draw against the proto's `VALUE3`, and for the `VALUE4`
+fallback on a miss; the rod asks training equality, the pick refuses below
+(`VALUE2`). Both protos on the owner's data refine to their own line's next
+vnum and fall back to themselves. A worn tool never refines or maxes.
+Mine's `ENABLE_PICKAXE_RENEWAL` and rod's `ENABLE_FISHINGROD_RENEWAL` are
+undefined, so the miss swaps rather than taxing the socket. `CHEAT_MAX_PICK`
+(`G/mining.cpp:304-315`) sets socket 0 to the max and then tells the line —
+and `CItem::SetSocket` (`G/item.cpp:1643-1656`) sends the update for the
+just-set training — so the records run update, line, clear, set. The refine
+and pick logs (`RefineLog`, `ItemLog`) are `sys.log`'s, which owns no sink,
+so they are not written, and the hack lines (`ROD_HACK`, `PICK_HACK`) go the
+same way.
+
+The max's line carries the maxed pick's own max (`VALUE2`, read before the
+step swaps the pick for a fresh tool whose proto has its own max) and is
+spliced into the step's records behind the update, so the tell survives the
+store: an outbox tell would have ridden ahead of a later clear and set, and
+a post-step tell queue ran behind the whole answer. The world's dice are drawn
+on the game thread before the storage borrows (`FixedDraw` replays the draw),
+so the 100% draw the scenario needs is seeded, not hoped for.
+
+- `world`: `tool_refine.rs` (`ToolRefine`, `refine_cell`, `refine_tool`),
+  `MoveKind::Refined`, and `FixedDraw` in `dice.rs`; the size-3 swap unit pins
+  the footprint fix below.
+- `world/src/character/items.rs`: `clear_flat_footprint` scans to the window's
+  end, not one stride: the footprint walks the stride from the anchor
+  (`SetItem`, `G/char_item.cpp:447-464`), so a size-3 tool's tail mark survived
+  `release` and refused the fresh tool its own cell. The set-after-release now
+  lands.
+- `prodomo` lib: the three `Command` entries and table rows, the
+  `ToolRefineLine` game command, `GameState::run_tool_refine_line` (with the
+  pre-read max and the record splice) and the descriptor's
+  `tool_refine_line_step` through `finish_item_step`, so the rows store before
+  the records ride.
+- `prodomo` scenario: `a_gm_refines_a_rod_and_a_pick_and_maxes_one` pins the
+  rod's clear and +2 set with the stored row, the pick's update-line-clear-set
+  with the +1 vnum, and the max's update and line with the kept vnum and the
+  6000 socket.
+- `.scratch/parity/commands.md`: `cmd.refine_rod`, `cmd.refine_pick` and
+  `cmd.max_pick` are `ported`.
+
+Fixes while green:
+
+- The `/attr_full_set` route was dropped from `command()` when the tail arms
+  were added: `kit_name` still mapped `do_attr_full_set`, but the route no
+  longer sent it there, so the line answered nothing and the ledger-343
+  scenario read zero updates. The arm is restored, and
+  `every_ported_kit_line_routes_past_not_ported` pins every kit handler's
+  route past `NotPorted`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: all targets `ok` except one mob-timing scenario per
+  run, each passing alone (the ledger 351-354 load flakes, in code this slice
+  does not touch): first `a_full_set_kits_forces_and_masters_over_the_wire`
+  (the dropped route above, fixed), then
+  `a_gm_flags_a_stray_dog_aggressive_and_coward` (13s alone), then
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger` (8s alone); the final parity
+  rerun is 242 passed, 0 failed. Both tool scenarios pass throughout.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass,
+  fixed by refactoring, with no `#[allow]` (the kit arms left
+  `apply_skill_admin_line` for `apply_kit_line`, the tail arms left `command()`
+  for `tail_name`, and the mid-table left it for `mid_name` behind the default
+  arm).
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`:
+no `prodomo\_%` database remained, and no stray `prodomo serve` either.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 356. The fishing simulation (`/fish_simul`)
+
+`do_fishing_simul` (`G/cmd_gm.cpp:2227-2251`), the next GM line in file order
+after the tool trio. The line always tells the usage first (untranslated: no
+`LC_TEXT`), then defaults its three words to level 100, table 0 and 1000 draws
+(`str_to_number(int)` of each non-empty word), and runs `fishing::Simulation`
+(`G/fishing.cpp:747-769`): each draw picks a fish by the `prob_idx` table
+(`DetermineFishByProbIndex`, `:330-336`, the first accumulated bound reaching
+the draw) and keeps it when `Compute` (`:549-575`) answers an item, so one
+`%s : %d fish` per kept name rides in the map's byte order (`BTreeMap` here),
+then `%d types %d fish caught`. `Compute`'s guards are kept: fish 0 and a fish
+past the table keep nothing, a time past 6000ms keeps nothing, and the two
+`number` gates (the `aFishingTime` time step at `MINMAX(0, (ms + 99) / 200,
+30)`, then `number(1, difficulty) <= level`) draw on the game's generator.
+The simulation's time is the mean of two `number(2000, 4000)` draws, as legacy
+passes it.
+
+A `prob_idx` past the four tables is a Defect: legacy indexes `g_prob_sum` and
+`g_prob_accumulate` without a bound check. The Rewrite refuses past-end tables
+before the first draw and tells only the usage, closing nothing. Negative
+`prob_idx` and a non-positive `count` are handled the same way (no draws, the
+summary still rides for the count). The reader keeps legacy's `Initialize`
+(`G/fishing.cpp:188-328`): 37 fish, each column through `trim_and_lower`
+(leading whitespace skipped, ASCII-lowercased, `LOWER` touching ASCII only),
+empty columns keeping the zero fill, a tabless data line refusing the whole
+table, and the accumulated tables built with wrapping adds. The owner's file
+holds 37 fish before its trailing all-prob row, which legacy also stops short
+of; every difficulty is positive and every time type is 0-4, so no `Compute`
+guard fires on the owner's data except fish 0's zero vnum. A missing or
+malformed file stops the server at boot, as the table is the line's only
+source of draws.
+
+- `gamedata`: `fishing.rs` (`Fishing`, `Fish`, `FISHING_TIME`) with the four
+  reader tests; the name/vnum/prob/difficulty/sum assertions pin the golden
+  two-fish bytes.
+- `prodomo` lib: the `Command::FishSimul` entry and table row, the `FishSimul`
+  game command with its `run_fish_simul` sender, `GameState::run_fish_simul`
+  (with the usage, the past-end refusal, and the byte-ordered lines), the
+  `fishing` table on `GameState` wired from `load_fishing`, and the
+  descriptor's `fish_simul_step` through the tell path, so nothing is stored.
+- `prodomo` scenario:
+  `a_fish_simul_tells_its_usage_and_the_simulations_lines` pins the empty
+  run's usage and `0 types 0 fish caught`, the thousand-draw run's byte-ordered
+  name lines with a summary that counts and sums them (and keeps some fish),
+  and the past-end table's usage alone.
+- `.scratch/parity/commands.md`: `cmd.fish_simul` is `ported`.
+
+Fixes while green:
+
+- The scenario first read the summary as a name line: it ends in ` fish` too,
+  so it is detected by the ` fish caught` suffix before the name parse runs.
+- The `kept.len()` cast and a redundant closure tripped Clippy; the arms that
+  `FishSimul` added pushed `apply_goto_level_skill_line` past the line lint,
+  so the mob arms left it for `apply_mob_summon_line`. All fixed by
+  refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 40 targets `ok`, with the known mob-timing flake
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger` failing under load and passing
+  alone (8s), as in ledger 355; the parity rerun without it is 242 passed, 0
+  failed. The two earlier full runs each failed one scenario differently (the
+  flake above, then another mob-timing scenario that passed in the rerun),
+  both in code this slice does not touch. The new scenario passes throughout.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`:
+no `prodomo\_%` database remained, and no stray `prodomo serve` either.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 357. The private copy (`/private`)
+
+`do_private` (`G/cmd_gm.cpp:2301-2325`), the next missing GM line in table order
+between the invisibility and quest-flag lines. An empty line answers `Usage:
+private <map index>`; the word is `str_to_number(long)` into `map_index` (a
+dead `lMapIndex` sits beside it). `CreatePrivateMap`
+(`G/sectree_manager.cpp:943-1026`) makes the copy: it refuses an index at or
+past 10000 and a map the index does not list, and the caller hears `Can't find
+map by index %d` with the parsed index. Else the copy (`base * 10000 + first
+free instance`, reusing `war_map::private_index` with its 107-109 cap of 51)
+stands on the base map's grid (`SectreeGrid::of`, like a war map's), the
+caller remembers where it stood (`SaveExitLocation`, `G/char.cpp:6679-6683`)
+and warps to the copy's spawn (`posSpawn`, the atlas's town spawn) through the
+client registry's `Warp` order, with the exit riding the order so the save
+writes it beside the position. No `DestroyPrivateMap` runs: nothing in the
+ported tree destroys a `/private` copy (only the dungeon, war, dragon, Meley
+and ship systems destroy theirs), so the copy stands until the process ends,
+as a legacy copy stands until its map goes.
+
+The destination needs no Channel: the copy stands on the caller's own Channel,
+so the order's `channel` is `None` and `WarpSet`'s own resolution (`index_at`
+plus the Channel's map set) routes to the caller's port. The SDB send
+(`:6717-6725`) is nothing: `legacy/` has no `package_info.txt`, so legacy
+sends it for no map (loading phase).
+
+- `prodomo` lib: the `Command::Private` entry (the `private` table row already
+  sat at `GM_IMPLEMENTOR`), the `Private` game command with its
+  `private_command` sender, `GameState::private_command` (with the usage, the
+  miss, the hosted copy and the exit-carrying order) and the descriptor's
+  `private_step` through the tell path.
+- `prodomo` scenario: `a_private_line_warps_to_a_copy_of_the_named_map` pins
+  the usage, the unknown index's miss, and map 1's copy: the remove, the warp
+  to (469300, 964200) on Channel 1, and the stored row naming map 10000 with
+  the exit naming where Alpha entered.
+- `.scratch/parity/commands.md`: `cmd.private` is `ported`.
+
+Fixes while green:
+
+- The exit check first read the seeded feet: Alpha enters 100 east of its row
+  (the seed is a BLOCK cell), and the exit is where it entered, so the
+  scenario asserts `ALPHA_ENTERS_AT`.
+- The grid lookup tripped Clippy's `let...else` lint; fixed by refactoring,
+  with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: green without the known mob-timing flake
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger` (it fails under load — once
+  alone too this time — and passes on rerun, 8s, as in ledgers 355-356); the
+  parity rerun without it is 243 passed, 0 failed, and one parity-only rerun
+  failed a different mob-timing scenario that passed in the next rerun, both
+  in code this slice does not touch. The new scenario passes throughout.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`:
+no `prodomo\_%` database remained, and no stray `prodomo serve` either.
+
+No ADR changed. No owner question added. No Divergence is taken.
+
+## 358. The reloaded tables (`/reload`)
+
+`do_reload` (`G/cmd_gm.cpp:2639-2733`), the next missing GM line in table order
+after the private copy. The first word's first byte, lowered (`LOWER`, ASCII-only),
+names the arm; an unknown byte answers nothing. The empty line tells the three
+(`u`, `p`, `s`) in order. The descriptor reads the files before it sends, so the
+game thread swaps tables without touching the disk.
+
+The `u` arm tells `Reloading state_user_count` and reruns `LoadStateUserCount`
+(`G/config.cpp:1778-1788`) over the `state_user_count` file beside the process:
+each `%d` `fscanf(fp, " %d %d ", ...)` completes writes its global in `full busy`
+order, so a missing or empty file keeps both thresholds and a lone first word
+moves `full` alone (`scanf_two_ints`, with the sign, clamp and trailing-text
+semantics pinned by unit tests). The board's thresholds went signed (`AtomicI32`),
+as the `int` globals are, so a negative file keeps even an empty server above it;
+the status rule is now `iTotal > full ? 3 : iTotal > busy ? 2 : 1` over `i32`
+(`G/desc_client.cpp:306-307`). The board's online count was never fed (its atomic
+stayed 0), so the count now comes fresh from the client registry at `respond` time
+(`ChannelClients::len`, the `iTotal` of `GetUserCount`, `G/desc_manager.cpp:430-442`;
+the same count feeds the login's `admit`), and `respond` takes it as an argument.
+The `p`, `s` and `q` arms tell their lines (`Reloading prototype tables`,
+`Reloading notice string`, `Reloading quest`) while their mirrors (the proto
+mirror, the `string` table, the script rebuild) wait for later slices. The `f` arm
+runs `fishing::Initialize` (`G/fishing.cpp:186-328`) over the reread bytes with no
+line of its own, swapping the table in only when it parses; `SendLog`
+(`G/cmd_gm.cpp:1491-1514`) tells every GM `Reloading fish table.` when the old
+first row was named, then on a failure `error! cannot open fishing.txt` or `error!
+parsing fishing.txt` with `  restoring to backup` when the old first row was named.
+The `t` arm (`:2683-2698`, behind `ENABLE_EXTENDED_RELOAD`, which the owner defines)
+swaps the chest groups or tells `Nu pot relua special_item_group.txt..`; the `m` arm
+(`:2700-2715`) swaps the mob tables with the reread `drop` groups appended, or tells
+`Nu pot relua mob_drop_item.txt.` Both read before they destroy (a Divergence:
+legacy destroys the live maps first, so a bad file empties them until the next good
+reload); the caller hears the same Romanian lines either way. The `c` arm runs
+`Cube_init` over nothing, silent, as the cube is not ported.
+
+- `prodomo` lib: the `Command::Reload` entry and table row, the `Reload` game
+  command with its `run_reload` sender and `ReloadRead` payload, `GameState`'s
+  `reload_command` with the `f`/`t`/`m` swaps and `SendLog`, the descriptor's
+  `reload_step` (files read beside the command) and `reload_counts` (the `u` arm's
+  `scanf_two_ints` half), the signed board with `set_full` and the
+  registry-fed `respond`, and `ChannelClients::len`/`is_empty`.
+- `parity`: `Server::start_with_files` (Game data as links with the named files
+  materialized), `Server::replace` (refuses a link, so no scenario writes through
+  into `legacy/`), and `Server::root` (the process working directory, for
+  `state_user_count`).
+- `prodomo` scenario: `a_reload_line_reloads_the_tables_it_names` pins the empty
+  line's three tells, the `u` legs over the live status list (`0 0` reads full,
+  empty keeps, `1` moves full alone, `5 0` reads busy), the `p`/`s`/`q` tells, the
+  `f` swap proved by a deterministic `/fish_simul 1 0 5` probe (difficulty 1, the
+  always-100 time type, `number(1, 1)` always 1: `zzz : 5 fish`), the `t`
+  miss-then-success proved by `/letters_open` (alone, then the new 55021 row),
+  the `m` miss-then-success, and the silent `c` and unknown arms.
+- `.scratch/parity/commands.md`: `cmd.reload` is `ported`.
+
+Fixes while green:
+
+- The scenario first zeroed both thresholds on an empty file, as the drafted
+  reader did; `fscanf` writes only completed conversions, so the empty file keeps
+  and a lone word moves `full` alone. The draft's `u32` board could not hold a
+  negative file either; the thresholds are `i32` now.
+- The status list never moved because the board's online atomic was never fed;
+  the registry count feeds it at `respond` time now, which also fixed the login's
+  `admit`, whose limit compared against the same stuck 0.
+- The scenario's first `t`/`m` writes went through the data dir's links into the
+  owner's `special_item_group.txt` and `mob_drop_item.txt`; both were restored
+  from git (`git status legacy/` clean), `start_with_files` now removes a link
+  before it writes a copy, `link_all_but` tolerates shared folders, and
+  `Server::replace` refuses any path that is still a link.
+- Two dispatch gaps the full suite caught: `GameCommand::State` reached
+  `apply_skill_admin_line` with no forward to `apply_tell_line` (its
+  `debug_assert` panicked the game thread and closed `/state`), and
+  `GameCommand::Costume` was in neither `is_chat_line` nor
+  `is_goto_level_skill_line` (its `debug_assert` panicked the thread and closed
+  `/costume`). Both forwards are in, and a chain audit (matcher, match arms,
+  forwards, leaf arms at every level) shows no other gap.
+- The scenario's 251 lines tripped the line lint and its inner `fn` the
+  items-after-statements lint; the legs are top-level helpers now
+  (`reload_fish_row`, `reload_u`, `status_now`, `reload_f`, `reload_t`,
+  `reload_m`). The `eq_ignore_ascii_case` and underscore-binding lints were fixed
+  by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 40 targets `ok`. The known mob-timing flake
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger` failed in two runs (once alone
+  too) and passed on rerun (8s), as in ledgers 355-357; the final parity rerun
+  is 245 passed, 0 failed. The new scenario passes throughout.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`:
+no `prodomo\_%` database remained, and no stray `prodomo serve` either.
+
+No ADR changed. No owner question added. One Divergence is taken (358.1): the `t`
+and `m` arms read before they destroy, where legacy destroys first.
+
+## 359. The redrawn stone (`/ds_change_attr`)
+
+`do_ds_change_attr` (`G/cmd_general.cpp:3864-3931`), the next missing player line in
+table order after the dragon soul deck. The word is the soul-inventory cell
+(`str_to_number(DWORD)`): a wordless line, a past-end cell, an empty cell, an
+exchanging stone and a non-soul item run nothing and stay silent. An active stone
+(socket 2 set) tells `dragonsoul_plus_cannot_change_equiped`; a caller with an open
+trade, shop view or safebox tells `dragonsoul_plus_cannot_open`. (`IsEquipped` is
+dead on this path: a deck stone lives in the deck cells, never in the soul
+inventory the line reads.) The funded gates follow: the held gold reaches the
+step's `NEED_YANG` else `dragonsoul_plus_not_enough_yangs%i` with the want, and the
+flames (30524) reach the step's `NEED_FLAME` else `dragonsoul_plus_not_enough_items`.
+
+A funded line clears all seven attributes (`SetForceAttribute`, each with its update
+and its saved row), runs `DSManager::ChangeAttributes` (`G/DragonSoul.cpp:221-300`)
+from the dragon soul table boot read (`DSManager::ReadDragonSoulTableFile`,
+`G/dragon_soul_table.cpp:40-80`): the basic applies in order capped at the grade's
+basis, then `number(add_min, add_max)` capped at three distinct additionals drawn
+by weight (`MakeDistinctRandomNumberSet`, `:35-66`, over `fnumber`, the dice's
+31-bit draw). Each value is `ceil(value * weight / 100 - 0.01)` as an `i16`.
+The caller hears success or fail, the step's flames and a flat 5 million gold are
+spent (`ChangeGold(-5000000)`, whatever the step's check named) with the updates
+riding and the rows stored, and `TPacketGCDragonSoulChangeAttrResult` goes around
+with 1 when the redraw ran. A stone whose type, numbers or weight the table lacks,
+or whose distinct draw fails, keeps its cleared attributes and still pays: legacy
+spends after the redraw either way.
+
+- `gamedata`: `dragon_soul_table` (the vnum map, the basic and additional applies,
+  the apply numbers and the weights, with the brilliant grade's headerless rows read
+  by position) and its reader tests against the owner's bytes.
+- `prodomo` lib: the `Command::DsChangeAttr` entry and table row, the `DsChangeAttr`
+  game command with its `run_ds_change_attr` sender, `GameState`'s `run_ds_change_attr`
+  with the `change_attr_stone` and `change_attr_funded` gates and `change_attributes`,
+  `with_dragon_soul_table`, `load_dragon_soul_table` at boot, and the descriptor's
+  `ds_change_attr_step` through `finish_item_step`.
+- `prodomo` scenario: `a_funded_redraw_lands_and_spends_and_short_gold_refuses` pins
+  the funded redraw (the seven clears-and-basic updates, the flame's update, the gold
+  change, the success line, the result 1, and the saved `(4, 1)` row, the spent gold
+  and the spent flame), the short-gold line on a relog, and the empty cell's silence.
+- `.scratch/parity/commands.md`: `cmd.ds_change_attr` is `ported`.
+- `.scratch/parity/server-records.md`: `gc.ds_plus_change_attr_result` is `ported`.
+
+Fixes while green:
+
+- The `@@` lines go out raw (the client resolves them), as the sibling `@@` asserts
+  already pin; the first draft asserted the translated English.
+- The flame's update carries the two left, not 1: `update_fields` reads the count.
+- The split `mover`/`moved` bindings and the `f32` strict comparison tripped the
+  similar-names and float lints; the steps are `step`/`packed` now and the weight
+  compares by bits. The float casts that are the C++ expression's own carry the
+  targeted allows the combat precedent uses.
+- `apply_goto_level_skill_line` outgrew the line lint with the new arm; its leaf
+  arms moved to `apply_skill_admin_tail`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4554 passed in the counted run, with the two known mob-timing
+  flakes (`a_gm_flags_a_stray_dog_aggressive_and_coward`,
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger`) failing under the parallel load and
+  passing alone (13s, 8s), as in ledgers 355-358. The new scenario and every soul
+  test pass throughout.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. The scratch check ran through `podman exec prodomo-pg18 psql`: the failed
+parallel run stranded servers and their `prodomo_proc_*` databases, which were killed
+and dropped by hand; afterwards no `prodomo\_%` database remained, and no stray
+`prodomo serve` either.
+
+No ADR changed. No owner question added. V26 stays open.
+
+## 360. The shutdown countdown (`/shutdown`)
+
+`do_shutdown` (`G/cmd_general.cpp:265-275`) and its countdown (`shutdown_event`,
+`:198-242`), the next missing GM line in table order after the dragon soul deck. The
+line draws every open war map (`CWarMapManager::OnShutdown`, `G/war_map.cpp:1096-1102`),
+tells `[LS;509;10]` to every PC, and starts the countdown at 10 seconds with its first
+tick one second on (`event_create(shutdown_event, info, 1)`, `:261`). The GG fan
+(`HEADER_GG_SHUTDOWN`) is retired with the P2P protocol (ADR-0001): the one process
+holds every Channel, so one countdown shuts them all.
+
+Each tick tells `[LS;508;N]` with the seconds left and counts down. The 0 tick sends
+every player the `quit` command (`SendDisconnectFunc`, `:153-169`: `FLUSH_AT_SHUTDOWN`,
+which the owner defines, saves first — subsumed here by the background save and the
+disconnect save the quit causes) and bars new clients (`g_bNoMoreClient`, `:229`,
+answered `SHUTDOWN` at auth and at login, and zeroing the status list). The countdown
+runs into the negatives; the -10 tick force-closes every descriptor (`DisconnectFunc`,
+`:171-187`), and the tick past it ends. GMs hear the notices but no `quit`: only a
+`GM_PLAYER` level is sent one.
+
+Two deliberate differences from legacy, both recorded here:
+
+- A `/shutdown` after the bar restarts nothing. Legacy exits the process there
+  (`thecore_shutdown()`, `:246-249`); the game thread must not kill the process, so
+  the operator stops it with SIGTERM, which the graceful path already serves. The bar
+  never clears, as `g_bNoMoreClient` never does.
+- A `/shutdown` mid-countdown restarts it at 10. Legacy starts a second concurrent
+  event, whose doubled notices this build does not reproduce.
+
+The bar crosses the thread boundary as a metric: the game thread sets
+`GameStateMetrics::bars_clients` at the 0 tick, and the listeners read it through the
+`ConnectionContext` beside the `shutdowned` config. The force-close orders each
+descriptor `Close` through the client registry (`leases_of_vid` joins the world's VIDs
+to the leases), so the departure saves the character as the destroyed descriptor's
+did. The war maps' draws queue their `WarEndOutcome` rows for the war-end poll, as
+the map's own end does.
+
+- `prodomo` lib: `game_state::shutdown` (the line, the tick, the quit, the
+  force-close, the war-map draws), the `Command::Shutdown` entry and table row, the
+  `Shutdown` game command with its `run_shutdown` sender, `GameState`'s
+  `shutdown_left`/`shutdown_due`, the `bars_clients` metric, `leases_of_vid`, the
+  `pending_war_ends` widening, and the descriptor's `shutdown_step` through the
+  chat-line dispatch.
+- `prodomo` scenario:
+  `a_gm_shutdown_notices_every_channel_then_quits_the_players` pins the player's
+  refusal, the `[LS;509;10]` on three Channels, each `[LS;508;N]` down, the 0 tick's
+  quit to the players with the GM hearing nothing, and a login past the bar refused
+  `SHUTDOWN` on the setup key.
+- `.scratch/parity/commands.md`: `cmd.shutdown` is `ported`.
+- `.scratch/parity/systems.md`: `sys.shutdown` is `ported`.
+- `.scratch/parity/timed-events.md`: `event.cmd_general.shutdown_event` is `ported`.
+
+Fixes while green:
+
+- The line never armed `shutdown_due`, so the first tick fired at once instead of
+  one second on; it now arms from `last_pulse`.
+- The shutdown draws dropped their `WarEndOutcome` rows instead of queueing them
+  for the war-end poll, as the map's own end does.
+- The `[LS;509;10]` window was 10 bytes wide for an 11-byte text; the war-draw
+  test's search missed the notice it held.
+- The refused `/shutdown` answers with the caller's empire, not empire 1: Yankee's
+  refusal carries 2.
+- Clippy's closure, sort and argument-count lints: the GM-level read chains
+  `and_then` with the method, the lease join sorts unstably, and
+  `connection_context` takes the game pair as one tuple, as the clients pair
+  already does.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4559 passed, 0 failed in the counted run. One earlier
+  workspace run failed in `-p prodomo --test parity` under the parallel load (the
+  failing name was lost to a truncated job log); parity alone passed 247/247, and
+  two subsequent full-workspace runs were green throughout.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained, and no stray
+`prodomo serve` either.
+
+No ADR changed. No owner question added. V27 is taken; V26 stays open.
+
+## 361. The way out (`/logout`, `/quit`, `/phase_select`)
+
+`do_cmd` (`G/cmd_general.cpp:395-448`) and its countdown (`timed_event`,
+`:320-393`), the next missing player lines in table order after the shutdown. Each
+line tells its notice first (`[LS;512]`, `[LS;513]`, `[LS;515]`), then past the
+silent `IsHack` gate starts the 3-second event one Pulse on, as the shutdown arms
+from `last_pulse`. A line while the event runs cancels it with `[LS;511]` instead
+(`:406-416`), whatever the second line names. Each fire tells `[LS;510;N]` with
+the seconds left and counts down; at 0 the logout closes the descriptor (whose
+departure saves the character, as the destroyed descriptor's did), the quit tells
+the bare `quit` command line and waits for the client to close, and the
+phase-select disconnects the character and returns the descriptor to select,
+where the same connection selects and enters again.
+
+The gate is legacy's (`CHARACTER::IsHack`, `G/char.cpp:7079-7122`): the safebox
+load within ten seconds, an open or loading safebox, a trade, a shop browse, the
+exchange and shop timers, and the warp-NPC, duel and change-empire distance gates
+— all read off the world's own stamps, none stored for the exit. It is skipped
+on a SungZi map (`IsSungZiMapIndex`, `G/threeway_war.cpp:220-232`, read from
+`forkedmapindex.txt`'s `sungzi:` lines by `CThreeWayWar::LoadSetting`,
+`:137-197`) and on a war map of either type (`GetWarMap` with the flag-type
+comparison, `:431-434`, whose cross-index comparison never holds for the maps
+this build hosts). The war itself is not ported; only the skip is. A disconnect
+cancels the pending event (`CHARACTER::Disconnect`, `G/char.cpp:717`); a warp
+keeps it for the return.
+
+The return crosses the thread boundary as a client order: `ToSelect` joins
+`Close` in the registry (`leases_of_vid` finds the leases, as the shutdown's
+force-close does), and the descriptor leaves the world with a save, releases its
+presence, rebuilds its held claims around the login/account/channel/flood it
+keeps, and sets the select phase. A cancelled or fired event is gone; only a
+body still in the world can fire.
+
+- `gamedata`: `forked::SungziMaps`, the `sungzi:` reader over the glibc `atoi`
+  scan the three-way war's `LoadSetting` uses.
+- `prodomo` lib: `game_state::timed_exit` (the line, the gate, the countdown,
+  the three arms), the `Command::Exit` entry with its `ExitKind`, the `DoCmd`
+  game command with its `run_do_cmd` sender through the tell-line dispatch, the
+  `ToSelect` order with `return_phase_select`, `GameState`'s `timed_events` and
+  `sungzi_maps`, the pulse hook, the leave hook, and the boot load with its
+  builder.
+- `prodomo` scenarios: `a_logout_counts_down_then_closes` pins the notice, the
+  3-2-1 with Yankee's own empire, and the close; `a_quit_cancels_then_counts_down_and_tells_quit`
+  pins the `[LS;511]` cancel with no countdown after it, then the countdown and
+  the bare line with the connection left open;
+  `a_phase_select_counts_down_then_reselects` pins the countdown, the return to
+  select, and the reselect and enter on the same connection.
+- `.scratch/parity/commands.md`: `cmd.logout`, `cmd.quit` and `cmd.phase_select`
+  are `ported`.
+- `.scratch/parity/systems.md`: `sys.char.logout` is `ported`.
+- `.scratch/parity/timed-events.md`: `event.cmd_general.timed_event` is `ported`.
+
+Fixes while green:
+
+- The `DoCmd` arm sat in `apply_tell_line` but no router sent it there: `is_chat_line`
+  and the three tell-line matches named only `Shutdown`, so `/logout` hit the
+  `_` arm's `debug_assert` and the connection died. `DoCmd` joins `Shutdown` at
+  all four sites.
+- Yankee's empire was never set, so the notice carried 0; the cast sets empires
+  as `notice_cast` does, and the logout block reads with empire 2.
+- A stamina refill or an NPC's move races the logout's close, so the close reads
+  past them instead of asserting empty wire; an armed tick races the cancel, so
+  the cancel reads past in-flight ticks to `[LS;511]`. Both races are legacy's
+  too.
+- The builder chain dropped `with_shop_price_3x_disabled` while adding the
+  SungZi share; it is restored.
+- Clippy's doc-markdown, cast, wildcard, line-count and reassignment lints:
+  `SungZi` joins the valid idents, the index scan converts through `try_from`,
+  the due filter binds the one variant, the 131-line scenario splits in three
+  around an `exit_cast` and countdown/close readers, and the select return
+  builds its `Held` by struct update.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4570 passed, 1 failed in the counted run
+  (`a_gm_pulls_the_dogs_and_attracts_the_ranger`, a mob-timing read timeout).
+  Five full-workspace runs each failed a different timing-sensitive scenario
+  (`a_gm_flags_a_stray_dog_aggressive_and_coward`,
+  `a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya`,
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger`) or none of them; every one
+  passes alone (the dog pull in 8.5s unloaded against its 30s window), and the
+  three exit scenarios passed in every run. The box carries other agents (load
+  2.7-5.5), the same load-flake class ledger 360 records. No exit line runs in
+  any failing scenario, and the slice's shared-path edits are no-ops without
+  one, so the failures are unrelated to this slice.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained (16 orphans from a
+killed mid-flight run were dropped by hand), and no stray `prodomo serve`
+either.
+
+No ADR changed. No owner question added. V27 is taken; V26 stays open.
+
+## 362. The consent duel (`/pvp`)
+
+`do_pvp` (`G/cmd_general.cpp:848-879`) and the duel it challenges to (`CPVP`,
+`CPVPManager`, `G/pvp.cpp:17-342`, `:531-637`), the next missing player line in
+table order after the exits. `/pvp <vid>` finds the VID's character — a miss and
+an NPC are silent — and `Insert` runs: the dead are silent; a held pair agrees
+for the caller, and when both agree the fight begins with its two
+`The confrontation with %s begins!` lines; else the pair is stored under the
+FNV-1 hash of its two PIDs in numeric order, the `GC_PVP` agree record fans to
+every body, and the challenge lines go out with the victim's `WHISPER_TYPE_SYSTEM`
+notify carrying the rendered challenge with its NUL.
+
+A death in a fight (`Dead`, from `Dead`, `G/char_battle.cpp:1280`) wins it for
+the killer: the revenge flag rises, the loser may revenge and unagrees, the fan
+carries the revenge mode, and the death counts as agreed. A death outside a
+fight counts within 15 seconds of the last fight touch. An agreed death skips
+the item-drop penalty (`:1333-1335`); the killer-alignment penalty's agreed skip
+waits with that penalty's own unported arm. `Connect` re-stamps the VIDs at
+enter (`Disconnect` is a commented-out no-op), `SendList` replays every live
+pair to an entrant between the burst and the login event with the companion's
+re-send, and `Process` sweeps the pairs unfought for 10 minutes with the delete
+fan. The duel tail of `CanAttack` (`:508-528`) feeds the PK policy's
+`consensual_fight` flag with its fresh fight touch.
+
+Two deliberate non-ports, both recorded here:
+
+- The arena gates never fire. No map is an arena map and no character stands in
+  one until `sys.event.arena` ports, so `[LS;403]` and `[LS;522]` wait for it,
+  as the emotion's arena reads do.
+- `GiveUp` is not ported. Legacy calls it from nowhere.
+
+- `prodomo` lib: `game_state::duel` (the line, the pair, the fan, the challenge,
+  the accept, the death, the connect, the list, the sweep), the `Command::Pvp`
+  entry, the `Pvp` game command with its `run_pvp` sender through the tell-line
+  dispatch, the descriptor's `pvp_step`, `GameState`'s `duels`, the enter, pulse
+  and death hooks, the penalty's `agreed_pvp` gate, the policy's
+  `consensual_fight` feed, and `chat_line::chat_text` for the whisper's
+  rendered text.
+- `prodomo` scenarios: `a_duel_is_challenged_and_accepted` pins the agree fan
+  from the agreeing side, the challenge lines with the whisper notify, the
+  fight fan with the begins lines, and the miss's silence;
+  `a_late_entrant_hears_the_live_duel` pins the list's replay between the burst
+  and the login event.
+- `.scratch/parity/commands.md`: `cmd.pvp` is `ported`.
+- `.scratch/parity/server-records.md`: `gc.pvp` is `ported`.
+- `.scratch/parity/systems.md`: `sys.char.pk` stays `partial`, with the duel noted.
+
+Fixes while green:
+
+- The scenario's `still` died on a `POINT_CHANGE` a refill raced in: the duel
+  steps read `quiet_for`, which absorbs refills, as the exit slice's waits do.
+- The late entrant's list lands between the burst and the login event, so
+  `read_login_event` choked on it; Charlie enters manually and reads the pair
+  first.
+- The `gc.pvp` scenario cell named two scenarios, which
+  `inventory_rows_keep_the_rules` refuses; the second moved to the note.
+- Clippy's closure and line-count lints: the PID read names the method, and the
+  136-line scenario splits in two around a `duel_cast` and a
+  `challenge_and_accept`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4580 passed, 1 failed in the counted run
+  (`a_gm_pulls_the_dogs_and_attracts_the_ranger`, the mob-timing read timeout of
+  the ledger 361 receipt, green alone in 8.5s). One earlier run failed it with
+  the duel-list scenario (the refill race above, fixed) and the inventory check
+  (the two-scenario cell above, fixed). Both duel scenarios passed in every run
+  after the fix.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained, and no stray
+`prodomo serve` either.
+
+No ADR changed. No owner question added. V27 is taken; V26 stays open.
+
+## 363. The two log lines (`/detaillog`, `/monsterlog`)
+
+`do_detaillog` and `do_monsterlog` (`G/cmd_general.cpp:2242-2250`), the next missing
+GM-low-wizard lines in table order (361-362). Both are silent toggles. `/detaillog` flips
+the caller's detail flag (`m_bDetailLog`, `G/char.h:1739`), which `Damage`'s detail line
+gates (`G/char_battle.cpp:2367-2371`): the victim tells itself the attacker's name, VID
+and point. `/monsterlog` flips the subscription (`ToggleMonsterLog`,
+`G/char.cpp:7495-7507`): `CHARACTER::MonsterLog` (`G/char.cpp:5095-5138`) speaks under
+`test_server`, for a non-player only, as a talking `GC_CHAT` with the speaker's VID whose
+text is `%u)` plus the line, cut to `CHAT_MAX_LEN` with its terminator, and
+`PacketMonsterLog` fans it to the subscribers within 6000 of the speaker
+(`G/char_manager.cpp:825-841`). The destructor unsubscribes a subscriber
+(`G/char.cpp:791-792`), which the leave does here.
+
+Reachable call sites speak: the move's chase line, the walk-mode pair, the victim pair,
+the state pulse's line, the idle follow's line, the move end's pair, the far victim's
+line, the regen's line, and the position's pair (`G/char.cpp`, `G/char_battle.cpp`,
+`G/char_state.cpp`). The summoner's call and the Meley-boss exemption wait for their
+systems, the idle stone's draws are unlogged, and the `test_server` damage pair and the
+revive read no port yet. `SetNextStatePulse` logs in `test_server` whatever the pulse,
+so the guard's 12-Pulse ask logs too. The `Move` branch logs the point server-side only
+(`G/char.cpp:3616-3618`), which has no wire.
+
+- `prodomo` lib: `game_state::detail_log` (the two toggles, the fan over
+  `PacketMonsterLog`'s `distance_approx` reach, the `Damage` detail line over each
+  victim direction, the leave's unsubscribe), the `detail_logs` and `monster_logs` sets,
+  the `Command::DetailLog`/`MonsterLog` entries, the `GameCommand` pair with its chat-line
+  dispatch, the descriptor's `detail_log_step`/`monster_log_step`, and the begin, strike,
+  regen, move and death call sites.
+- `prodomo` scenarios: `a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit` pins the
+  three begin lines in order (the victim, the stand, the pulse) as talking chats with the
+  thief's VID, the off toggle's silence, and the detail line naming the hitter's name, VID
+  and enter point.
+- `.scratch/parity/commands.md`: `cmd.detaillog` and `cmd.monsterlog` are `ported`.
+
+Fixes while green:
+
+- `is_chat_line` missed the two commands, so the toggles closed the connection; they now
+  run through the chat-line dispatch like the other GM lines.
+- A punched dog stuns, and a stunning hit never reaches `BeginFight`, so the begin never
+  fans. The scenario watches vnum 405 (1625 HP, no chat lines of its own that collide)
+  under `no_wander`, and the thief's look update lands between the begin and the off
+  check, where `drain_game` tolerates it beside the fight's own records.
+- The detail line names the hitter's enter point, not the listed spawn: the scenario
+  expects `ALPHA_ENTERS_AT`.
+- Clippy's line lint split the purge dispatch: the log lines run in `apply_log_line`
+  and the forget/aggregate/attract/pull/group lines in `apply_mob_around_line`, and the
+  `apply_mob_summon_line` wrapper is gone. The split's first pass lost the four around
+  arms; dead-code errors caught it, and the aggregate and ranger scenarios pass again.
+  The scenario itself splits at the off toggle for the same lint.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4586 passed, 1 failed in the counted run
+  (`a_gm_pulls_the_dogs_and_attracts_the_ranger`, the ledger 361 mob-timing read
+  timeout, green alone in 8.8s). One earlier run failed it with the aggressive-flag
+  scenario instead (same mob-timing class, green alone in 11.9s). The monsterlog
+  scenario passed in every run.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained, and no stray
+`prodomo serve` either.
+
+No ADR changed. No owner question added. V27 is taken; V26 stays open.
+
+## 364. The polymorph and its ball (`/polymorph`, `/polyitem`)
+
+`do_polymorph` and `do_polymorph_item` (`G/cmd_gm.cpp:3049-3104`), the next missing GM lines in
+table order (363). `/polymorph <vnum> [maintain]` runs `SetPolymorph` (`G/char.cpp:7680-7724`):
+a vnum below `JOB_MAX_NUM` clears the morph and the maintain flag, and an unchanged vnum sends
+nothing (`:7683-7690`). Otherwise the race and the flag are set, the ride stops (the Rewrite
+never rides), `ADD_CHARACTER_STATE_SPAWN` and `AFF_SPAWN` are set, `ViewReencode` runs, and
+only the state bit is removed (`:7700-7705`). Then the four zero `PointChange`s run unless the
+stats are kept, and `ComputeBattlePoints` takes its morphed arm (`:2688-2707`) over the mob
+row and `GetPolymorphPower` (the `poly` event flag under `test_server`, else
+`aiPolymorphPowerByLevel` by the skill-129 level, `:7669-7678`). `/polyitem <vnum>` creates a
+70104 ball, writes the vnum to socket 0, and places it in the first free inventory cell.
+A full inventory destroys the ball and answers `Not enough inventory space` (`:3095`), and a
+missing 70104 proto answers `#70103 item not exist by that vnum` (`:3100`).
+
+`AFF_SPAWN` is never reset on this path; only the `__FIX_CHANGE_SEX_WITHOUT_RELOG__` sex change
+resets it (`:2171`). As with a spawn-motion monster (D5, owner question 24), the Rewrite
+reproduces this provisionally: a player who used `/polymorph` carries the bit in every later
+insert and update, even after the clear, until it leaves. `GetRaceNum()` returns the
+polymorph vnum to every insert (`:1082`, `:2177-2186`), not only to the reencode.
+
+- `world`: `character::polymorph` (the power table, `polymorph_power`, `SKILL_POLYMORPH`), and
+  `Points::set_polymorph`, `shown_race`, `is_polymorphed`, `polymorph_race`,
+  `poly_maintain_stat` and `compute_polymorph_battle_points` (`GetPolymorphPoint`'s ST and HT
+  arms).
+- `prodomo` lib: `game_state::polymorph` (`run_polymorph`, `set_polymorph`, the morph compute
+  and the spawn reencode). The reencode is a same-spot `show` delivered through the generic
+  `deliver`, so NPC and ground re-inserts, guild names and walk-mode tails are delivered
+  exactly as other inserts are. `Body` gains `base_affect_flags` (`m_afAffectFlag`'s bits that
+  no affect set), which `affect_flags_of` ORs into the timed bits, as `npc_affect_words`
+  already does for NPCs, and `add_spawn` (the transient state bit). `InsertState` gains
+  `spawn`, and `ADD_CHARACTER_STATE_SPAWN` moves to `loading_phase`. `character_add` reads
+  `Points::shown_race()`, narrowed to the `WORD`, instead of the card's job, and drops its
+  now-unused card parameter. `GrantRequest` gains `socket0`. The `Command::Polymorph`/
+  `Polyitem` entries, the descriptor's `polymorph_step`/`polyitem_step`, and the chat-line
+  dispatch are added.
+- Unit tests: the line's words, the job and unchanged gates, the spawn add's race, state bit
+  and `AFF_SPAWN`, a re-shown witness without the bit, a late viewer seeing the morph race with
+  no state bit and the kept `AFF_SPAWN` (also after the clear, with the job race), and a dead
+  caller's reencode carrying the dead and spawn bits together. The table test pins its climbs.
+- `prodomo` scenario: `a_gm_polymorphs_into_the_dog_and_grants_its_ball` pins the empty line's
+  silence, the witness's add with race 101, the spawn state bit and `AFF_SPAWN`, the clear's
+  job race with the bit, an unchanged vnum's silence, and the 70104 ball's `GC_ITEM_SET` with
+  101 in socket 0 (byte 27), its store row, and the empty `/polyitem`'s silence.
+- `.scratch/parity/commands.md`: `cmd.polymorph` and `cmd.polyitem` are `ported`.
+  `systems.md`: `sys.char.polymorph` is `partial`, and its note lists what remains: the
+  ball's use and `AFFECT_POLYMORPH`, the `pc.*polymorph*` names, the combo reset, the mob
+  motion speed, battle's DX and damage arms, the target HP percent, and the refusals while
+  morphed.
+
+Fixes while green:
+
+- The first spawn add was built by hand. It dropped the dead bit (the command runs at
+  `POS_DEAD`), ignored the finished move's destination, and skipped the NPC and ground
+  re-inserts to the caller. Routing it through `deliver` fixes all three.
+- The scenario first read socket 0 at byte 20. `GC_ITEM_SET`'s sockets start at byte 27.
+- `inventory_rows_keep_the_rules` asserted more than 900 `missing` rows, a build-step-2
+  plausibility floor that this slice's progress reached (900). The floor pinned how much work
+  is left, not a rule. The per-file presence controls already keep an empty inventory from
+  passing, so the assertion is removed.
+- The `GrantRequest` literals in `operator_console`, `item_persist_db` and `game_loop_thread`
+  gain `socket0: None`.
+- The legacy line references were corrected: `SetPolymorph` ends at 7724, the state bit is
+  removed at 7705, the ball is created at 3081, socket 0 is written at 3084, and the full
+  line is at 3095.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4598 passed and 1 failed in 40 targets
+  (`inventory_rows_keep_the_rules`, the floor above). Its fix passes alone, which makes 4599.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained.
+
+No ADR changed. Owner question 24 now covers `SetPolymorph`'s `AFF_SPAWN` too. V26 stays
+open. Seen and left for later: the GM flag `AFF_YMIR` and the protect mode `SetPlayerProto`
+gives a GM (`G/char.cpp:2362-2376`) are not ported.
+
+## 365. The event-flag arms and the Christmas lines (`/xmas_*`, `/eclipse`, `/eventhelper`)
+
+`CQuestManager::SetEventFlag` (`G/questmanager.cpp:1335-1688`) was a bare store in the
+Rewrite: `/eventflag` wrote the quest manager's table and nothing else ran. Legacy runs an arm
+per name, and five GM lines in table order exist only to set one flag or reach one arm:
+`do_xmas`'s three sub-commands (`G/cmd_gm.cpp:3270-3294`), `do_eclipse` (`:4460-4473`) and
+`do_event_helper` (`:4502-4520`). `PlayerLoad` also replays the display flags to a loading
+character (`BroadcastEventFlagOnLogin`, `G/input_db.cpp:437`, `G/questmanager.cpp:1701-1744`);
+the loading-phase notes called that dead because every flag was 0, which stopped being true
+once ledger 291 let a GM set one.
+
+Changes:
+
+- `prodomo/src/game_state/event_flag.rs`: `GameState::set_event_flag` is `SetEventFlag`. It
+  reads the value it replaces, stores the new one, and runs the name's arm:
+  - The six rates (`mob_item`, `mob_dam`, `mob_gold`, `mob_gold_pct`, `mob_exp`, `user_dam`)
+    are `MobRates`. Each starts at 100, as `CHARACTER_MANAGER`'s constructor sets them
+    (`G/char_manager.cpp:51-62`), and takes the set value, 0 included. The old readers
+    treated a 0 flag as "unset" and answered 100, so `/eventflag mob_exp 0` left experience
+    on. Legacy answers 0.
+  - `xmas_snow`, `xmas_boom`, `xmas_song` and `xmas_tree` ring `<name> <value>` as a
+    `CHAT_TYPE_COMMAND` line to every in-game character on every set
+    (`xmas::ProcessEventFlag`, `G/xmas_event.cpp:12-58`). `xmas_boom` turning on runs
+    `SpawnEventHelper(true)` and turning off runs it with `false`. `xmas_tree` turning on
+    stands the tree (20032) at its fixed Seohan point where none stands, and turning off
+    removes it.
+  - `xmas_santa`: 0 removes every Santa (20031). 1, where Seohan (61) is hosted, sets the flag
+    to 2 and stands a Santa at a random point when none stands (the Defect below). 2 does
+    nothing.
+  - `newyear_boom` rings `newyear_boom N`. `eclipse` rings `DayMode dark` at 1 and
+    `DayMode light` otherwise. `day` rings `DayMode dark` or `light`, and runs the
+    firework-seller spawn or removal on its own turning on or off (`:1446-1516`).
+  - `pre_event_hc` stands 20090 on maps 3, 23 and 43 as it turns on, and removes those on
+    the three maps as it turns off (`:1518-1574`).
+  - `new_xmas_event` stands 20126 on each of maps 1, 21 and 41 where none stands, at the
+    map base plus the fixed offset and facing 90, 110 or 140 with no spawn motion
+    (`bShow` is the eighth argument, `:1659-1674`). 0 removes every one.
+- Every arm the Rewrite runs once per Channel world hosting the map: each legacy core ran it
+  for its own maps (`map_allow_find`). Every line goes to each in-game character of every
+  Channel through the client registry, as each core told its own descriptor set. Legacy's DB
+  process forwards a set to every core before comparing (`D/ClientManagerEventFlag.cpp:31-63`),
+  so an arm runs, and its line rings, even when the value is unchanged.
+- `/eventflag` answers its `RequestSetEventFlag` line before the arms run, which is where
+  legacy's DB echo lands.
+- `prodomo/src/game_state/regen.rs`: `places_hosting`, `map_base`, `spawn_event_mob`
+  (`SpawnMob` at an absolute point, `-1` drawing the facing) and `spawn_event_mob_randomly`
+  (`SpawnMobRandomPosition`) over the respawner and the hosted regions.
+- `prodomo/src/game_state/reward.rs`: the rate readers read `MobRates`. `GetMobGoldDropRate`
+  now scales the gold chance (`G/char_battle.cpp:585`), `GetMobGoldAmountRate` scales each
+  pile's roll before the multiplier (`:646`, `:682`, `:709`), and `GetMobItemRate` scales the
+  drop delta (`G/item_manager.cpp:891`). All three were missing; at 100 none changes a draw.
+- `/xmas_boom`, `/xmas_snow`, `/xmas_santa`, `/eclipse` and `/eventhelper` resolve to
+  `Command::EventLine` (`command.rs`). The descriptor step `event_line_step` hands the line to
+  `GameCommand::EventLine`, and `run_event_line` sets the flag. `/xmas_*` takes the word's
+  `strtol` (0 when it is missing); `/eclipse` takes 1 for a word reading 1, else 0.
+  `/eventhelper 1` stands a seller on each hosted map of the six with no check for one already
+  standing, and answers `Event Helper Spawn`. Any other word removes every seller and answers
+  `Event Helper Delete`. The flag lines answer nothing.
+- The loading burst: the descriptor asks the world for `GameCommand::LoginEventLines`, and
+  `loading_phase::event_flag_lines` encodes one command record per non-zero flag
+  (`worldboss`, `xmas_snow`, `xmas_boom`, `xmas_tree`, `DayMode dark` for `day`,
+  `newyear_boom`, and `DayMode dark` or `light` for `eclipse`, in that order). They are put at
+  the front of the after-map-test half, ahead of the quickslots (`G/input_db.cpp:437-440`).
+
+Defect not reproduced (recorded in `docs/STATUS.md`): `xmas_santa` 1's check is inverted.
+Its comment says it creates a Santa when there is none, but it calls `SpawnMobRandomPosition`
+only when `GetCharactersByRaceNum` finds one standing (`G/xmas_event.cpp:75-85`), so the first
+Santa never comes. The Rewrite stands one when none stands.
+
+Not ported, so these names only set the table: the premium `_buyer` rates (no character has
+premium time), `crcdisconnect`, the drop events (`drop_char_stone*`, `refine_box*`), the four
+time limits and the three `no_*` switches (their readers keep the compiled-in values,
+ledger 227), `daily_gift_event`, and `world_boss_event`'s `CWorldBoss::Enable`. Its login line
+`worldboss N` is replayed, because that line reads only the flag. `game.set_event_flag` still
+does not reach the arms (`lua.game.set_event_flag` stays `missing`), and `SpawnSanta` with its
+`spawn_santa_event` (`G/xmas_event.cpp:92-138`) waits for its quest function.
+
+Tests:
+
+- Unit (`event_flag.rs`): the boom rings every registry seat, re-rings on an unchanged set,
+  and stands map 41's seller once at base plus 318 m, 629 m; `/eventhelper` spawns unchecked
+  and removes on any other word, with its two lines; the new Santa stands once and goes at
+  0, `day` darkens and lightens, and `eclipse` 2 reads light; on Seohan the Santa turns the
+  flag to 2, never doubles, and goes at 0, and the tree stands at its fixed point and goes;
+  without Seohan the Santa flag stays 1; the rates take 0; the login lines follow legacy's
+  order. `mob_strike`'s damage-rate test sets its flags through `set_event_flag`.
+- Scenario `a_gm_rings_the_christmas_flags_and_a_late_login_hears_them`: `/xmas_boom 1` rings
+  `xmas_boom 1` with no answer line and stands map 1's seller at (471100, 957800) in the GM's
+  view; `/xmas_snow 3` and `/eclipse 1` ring; `/xmas_santa 1` is silent and, with no Seohan on
+  the scratch Channel, leaves the flag at 1; `/eventhelper 0` deletes the seller from view and
+  answers. Carol's loading burst carries `xmas_snow 3`, `xmas_boom 1` and `DayMode dark`
+  right after her own-character record, and then her gold record.
+- `.scratch/parity/commands.md`: `cmd.xmas_boom`, `cmd.xmas_snow`, `cmd.xmas_santa`,
+  `cmd.eclipse` and `cmd.eventhelper` are `ported`. `systems.md`: `sys.event.xmas` is
+  `partial`.
+
+Fixes while green:
+
+- The broadcast unit tests first read the entrants' own inboxes. The world fans a broadcast
+  through the client registry, which the fixture did not attach, so the tests now join
+  registry seats.
+- Without a quest manager there is no table to hold the previous value, so a repeated
+  `xmas_boom 1` stood a second seller. A booted world always has the manager, so the fixture
+  now loads it.
+- `select_character` passed clippy's 100-line limit; the splice moved into
+  `splice_event_flag_lines`.
+- `the_santa_and_the_tree_stand_on_seohan` covers the Seohan spawn, which the scenario cannot
+  reach because the scratch Channel hosts only maps 1 and 3.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4606 passed and 1 failed in 40 targets. The failure is
+  `a_logout_counts_down_then_closes`, where a wandering monster's `GC_MOVE` records landed in
+  the logout window: the mob-timing load-flake class ledger 360 records. Run alone it passed
+  twice and flaked once the same way. This slice changes neither movement nor logout.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained.
+
+No ADR changed, and no owner question was added: the inverted Santa check is a Defect
+because an honest event set never brings the Santa its comment promises.
+
+## 366. A GM's item with its sockets set (`/socketitem`)
+
+`do_socket_item` (`G/cmd_gm.cpp:3231-3268`), the next missing GM line in table order whose
+pieces are ported. An empty line is silent. The first word is read as a `DWORD`
+(`str_to_number`), and a 0 falls back to `ITEM_MANAGER::GetVnum`, the case-insensitive
+locale-name prefix (`G/item_manager.cpp:722-738`); a miss answers
+`#%d item not exist by that vnum` with the 0 it read. The second word is an `int`: 0, or
+`ITEM_SOCKET_MAX_NUM` (6 under `ENABLE_EXTENDED_SOCKETS`) and up, writes the default three;
+a negative count writes nothing, as legacy's loop never runs. `AutoGiveItem(vnum)` gives one
+(the stacks, a free cell, or the ground), and each `SetSocket(i, 1)` sends `GC_ITEM_UPDATE`
+while the caller holds the item (`G/item.cpp:1643-1648`, `:249-276`). An item laid on the
+ground has no owner, so its writes send nothing. A give that made nothing answers
+`#%d cannot create item`.
+
+Changes:
+
+- `prodomo/src/game_state/letters.rs`: the letters box's `AutoGiveItem` body is
+  `GameState::auto_give` (the move rules, `CreateItem` as the drop makes it, the stacks and
+  cells), and its ground arm is `lay_auto_given`. The box draw calls both.
+- `prodomo/src/game_state/socket_item.rs`: `run_socket_item` gives, lays an unplaced item
+  with its sockets written, or writes the held item's sockets through `set_item_socket`.
+  The rows and records ride back as `LettersTrade`.
+- `GameCommand::SocketItem`, `GameController::socket_item`, `Command::SocketItem`
+  (`do_socket_item`), and `socket_item_step`, which reads the words, stores the rows by
+  `apply_transfer`, and then sends the records.
+
+Tests:
+
+- Unit: `socketitem_counts_default_to_three_past_the_sockets`.
+- Scenario `a_gm_gives_an_item_with_its_sockets_set`: `/socketitem 10 2` sets the sword with
+  socket 0 already 1 (the proto's `SOCKET` column, which `CreateItem` opens), then two
+  updates of its cell reading `1 0` and `1 1`. `/socketitem sabie+0 9` finds 10 by name and
+  writes three. `/socketitem 3` (no proto) answers `#3 cannot create item`, an unknown name
+  answers `#0 item not exist by that vnum`, and the empty line is silent. The store holds
+  sockets 1 and 2 of both swords.
+- `.scratch/parity/commands.md`: `cmd.socketitem` is `ported`.
+
+Fixes while green: the scenario first asserted a bare set, which the proto's open socket 0
+contradicts, and first read the wire through `wire_for`, whose header table has no item
+records. `apply_chat_flag` and then `apply_chat_line` passed clippy's 100-line limit, so the
+line routes through its own `apply_gm_item_line` from one arm of `apply_chat_line`'s match.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4606 passed and 3 failed in 40 targets. The three are the known
+  mob-timing load flakes (`a_gm_flags_a_stray_dog_aggressive_and_coward`,
+  `a_gm_pulls_the_dogs_and_attracts_the_ranger`, `a_logout_counts_down_then_closes`), and
+  each passed when rerun alone, which makes 4609.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 367. Five small GM lines (`/item_id_list`, `/get_mob_count`, `/effect`, `/add_socket`, `/set_socket`)
+
+Five missing GM lines in table order (`G/cmd.cpp:443`, `:459`, `:487`, `:492`, `:493`) whose
+pieces are ported, run whole by the world:
+
+- `do_get_item_id_list` (`G/cmd_gm.cpp:4688-4696`): `cell : %d, name : %s, id : %d` for each
+  item in cells 0 to `INVENTORY_AND_EQUIP_SLOT_MAX` (1370) of the inventory window, which
+  covers the equipment, the dragon soul deck, the belt and the custom banks, in cell order.
+  The name is the proto's locale name (`GetName`), and the `DWORD` ID prints through `%d`.
+- `do_get_mob_count` (`:4523-4552`): `MapIndex: %d MobCount %d`, counting the characters of
+  type monster or stone (`FMobCounter`) on the caller's map in its Channel.
+- `do_effect` (`:4176-4184`): `EffectPacket` (`G/char.cpp:7533-7542`) of the word's `int`,
+  cut to the record's `BYTE`, to the caller and its viewers.
+- `do_add_socket` (`:3934-3939`): the worn weapon's first 0 socket takes 1
+  (`GetSocketCount`, `AddSocket`, `G/item.cpp:1776-1793`); a weapon with six filled, or no
+  weapon, is left alone.
+- `do_set_socket` (`:4698-4713`): three `int` words, any empty one answering nothing
+  (`str_to_number` answers `false` only for an empty word). The item ID is found among the
+  items characters hold in the world, then the ground items (`ITEM_MANAGER::Find`). A held
+  item's write sends `GC_ITEM_UPDATE` to its holder, who may be another character, and
+  stores the holder's row. A ground item has no owner and no row, so only its memory
+  changes.
+
+Defects not reproduced (recorded in `docs/STATUS.md`): `AddSocket` writes the socket with
+neither `UpdatePacket` nor `Save`, so the client never sees it and the store keeps it only
+if an unrelated later save carries the item; the Rewrite sends the update and stores the row,
+as `SetSocket` does. And `/set_socket`'s index reaches `m_alSockets[i]` bounded only by an
+`assert`, so an index outside 0-5 writes outside the item; the Rewrite writes nothing.
+
+Not ported: `/set_socket` does not find an item in an open safebox or mall. Its row belongs
+to the account (ADR-0005), and the store's socket write is keyed by the owning character, so
+the arm needs an account-keyed write first. `cmd.set_socket` is `partial`.
+
+Changes:
+
+- `prodomo/src/game_state/gm_lines.rs`: `GameState::run_gm_line`, `ItemRows` (the holder's
+  PID and its row changes), and `int_word`, the `str_to_number(int)` read.
+- `GmLine` (five arms), `GameCommand::GmLine` and `GameController::gm_line`;
+  `Command::GmLine` for the five handler names; `gm_line_step`, which stores the rows a
+  socket write answers. The world routes both `SocketItem` and `GmLine` through
+  `apply_gm_item_line`.
+
+Tests:
+
+- Unit: `an_int_word_is_absent_only_when_empty`.
+- Scenario `a_gm_lists_counts_flashes_and_writes_sockets`: Alpha equips a fan (7000) by
+  `CG_ITEM_USE` once the 1.5 s equip gate after the last attack has passed
+  (`G/char_item.cpp:8418-8423`). The list then names cell 184 and ID 20. The count rises by
+  one after `/mob 101`. `/effect 263` reaches both wires as type 7. Two `/add_socket` lines
+  update the fan to `1 0` and `1 1`. `/set_socket 21 2 77` updates Yankee's sword on Yankee's
+  wire alone. Index 6 and a missing value write nothing. The store holds the writes.
+- `.scratch/parity/commands.md`: `cmd.item_id_list`, `cmd.get_mob_count`, `cmd.effect` and
+  `cmd.add_socket` are `ported`; `cmd.set_socket` is `partial`.
+
+Fixes while green: `mob_count` already named `regen`'s word reader, so the line's teller is
+`tell_map_mob_count`. The scenario first seeded a worn dagger, which the implementor's loader
+refuses (the worn weapon changes the pinned points), and then an assassin's dagger in the
+inventory, which a shaman cannot equip; then its use met the 1.5 s gate.
+Clippy then refused `write_socket`'s `done`/`mover` pair as too-similar names and
+`apply_chat_line` at 102 lines, so the two GM item lines route through the
+`is_gm_item_line` predicate in one guarded arm; the scenario's update and count readers
+moved out to `update_sockets` and `read_map_1_mob_count` to bring it under 100 lines.
+
+Two known flakes were test defects, not timing, and are fixed:
+
+- `a_gm_pulls_the_dogs_and_attracts_the_ranger` failed in six of six runs alone.
+  `FuncAggregateMonster` draws `number(1, 100) <= 50` for each victimless monster
+  (`G/char_battle.cpp:3644-3669`), so the scenario's one `/aggregate` left the archer idle
+  about half the time; it now sends ten, each drawing again until the archer fights.
+  `read_archer_swing` then read the archer's swing through `swing_tail`, which takes the
+  first `DAMAGE_INFO` on the victim to be the archer's and refuses any other record; but
+  `DAMAGE_INFO` names no attacker, and the dogs' blows land in between. It now knows the
+  archer by its own records: its `FLY_TARGETING` at the victim, followed by the next
+  `DAMAGE_INFO` (a shot), or a `DAMAGE_INFO` closed by its `MOVE{2}` (a blow). Under eight
+  concurrent copies it passed 16 of 16, against 0 of 16 before.
+- `a_logout_counts_down_then_closes`: `read_exit_close` read through `read_game_or_close`,
+  which drains to the close but decodes only the first record and asserts the rest is
+  padding, so two NPC moves landing in one drain failed it. It now decodes each drain with
+  `drain_wire` and accepts NPC chatter and stamina refills until the close, within
+  10 seconds. Under eight concurrent copies it passed 8 of 8.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4611 passed and 0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 368. The worn weapon's attributes rolled (`/change_attr`, `/add_attr`)
+
+The next two missing GM lines in table order (`G/cmd.cpp:441-442`). Both act on the
+worn weapon and do nothing without one.
+
+- `do_add_attr` (`G/cmd_gm.cpp:3927-3932`) runs `CItem::AddAttribute()`
+  (`G/item_attribute.cpp:267-276`): below five normal attributes, `PutAttribute` on
+  `aiItemAddAttributePercent` (40, 50, 10, 0, 0) adds one attribute at the current
+  count. That is one `SetAttribute`, so one `GC_ITEM_UPDATE` and the row saved.
+- `do_change_attr` (`:3920-3925`) runs `CItem::ChangeAttribute(NULL)` (`:228-265`).
+  `ClearAttribute` empties the five normal attributes and sends nothing; the two rare ones
+  stay. An item that had none stops there. Otherwise an addon item (`sAddonType`) draws its
+  skill and hit pair again (`ApplyAddonTo`), and `PutAttribute` on `tmpChangeProb`
+  (0, 10, 40, 35, 15) fills it back to the count it had. Each `SetAttribute` is an update.
+  Last, `SetSocket(3, 1 + GetSocket(3))` counts the change in socket 3, with its own update.
+
+Every write after the clear lands at the current count, so the states the client is sent
+are the prefixes of the rolled result. `world::character::change_attribute` and
+`add_rolled_attribute` roll the attributes with the machinery the drops already use
+(`put_attribute`, `apply_addon_to`); `GameState::roll_weapon_attributes` replays the writes
+through `force_worn_attribute` (ledger 343) and the socket count through `set_item_socket`.
+A type with no attribute set still draws each level, as `PutAttribute` draws before
+`PutAttributeWithLevel` refuses.
+
+With an owner, `ApplyAddonTo`'s `ENABLE_REWARD_SYSTEM` arm reaches
+`CHARACTER_MANAGER::DoReward` for a hit bonus of 45 or more. The owner's reward tables are
+empty (`legacy/README.md`; `prodomo/src/game_state/level.rs`), so it rewards nothing.
+
+The weapon's points are not recomputed, as legacy does not recompute them, and as
+`/attr_full_set` does not (ledger 343). Because `ModifyPoints(false)` at the takeoff
+subtracts the new attributes, a stat the old ones gave can stay behind. This is the GM
+lines' behaviour in both ledgers. Owner question 33 (`.scratch/equip/owner-questions.md`):
+is that drift a Defect to fix by re-applying the weapon's points around the write?
+
+Changes:
+
+- `world/src/character/drop_item.rs`: `change_attribute` and `add_rolled_attribute`,
+  re-exported from `world::character`, with `CHANGE_LEVELS` and `ADD_LEVELS`.
+- `prodomo/src/game_state/gm_lines.rs`: `roll_weapon_attributes`, run by
+  `GmLine::ChangeAttr` and `GmLine::AddAttr`; `command.rs` maps `do_change_attr` and
+  `do_add_attr` onto them, so `gm_line_step` stores the rows.
+
+Tests:
+
+- Unit: `change_rolls_back_to_the_count_and_keeps_the_rare_pair`,
+  `change_of_a_bare_item_draws_nothing_and_does_not_count`, and
+  `add_rolls_on_the_add_walk_below_five`.
+- Scenario `a_gm_adds_and_rerolls_the_weapons_attributes`. Two `/add_attr` lines each send
+  one update and keep the earlier attributes. `/change_attr` sends three updates: the first
+  shows one attribute, because the clear is silent; the last shows two, with socket 3
+  at 1. The row holds the last update. The rolls use the world's dice, so it pins their
+  shape; 16 concurrent runs passed.
+- `.scratch/parity/commands.md`: `cmd.change_attr` and `cmd.add_attr` are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4615 passed and 0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 369. The worn weapon's rare pair (`/add_rare_attr`, `/change_rare_attr`)
+
+The rare halves of 368 (`G/cmd.cpp:550-551`), with the table they draw from.
+
+The rare table. Legacy's boot reads `item_attr_rare` with its own query, which names
+eight sets, weapon to ear (`InitializeItemRareTable`, `DB/ClientManagerBoot.cpp:847-917`).
+The game keys the rows by apply in `g_map_itemRare` (`G/input_db.cpp:657`). The table's
+`apply` enum is not `item_attr`'s: it has 91 names, among them `ATT_BONUS_TO_MONSTER` and
+later names that `ITEM_ATTR_APPLY_ENUM` lacks, so the owner's dump failed against it.
+
+- `gamedata::item_attr::rare_attrs_from_dump` reads the table, with
+  `ITEM_ATTR_RARE_APPLY_ENUM` pinned against the schema line by a test.
+  `attrs_from_dump` and it share `table_from_dump`, which picks the table, the columns and
+  the enum by `ItemAttrTableKind`.
+- `load_item_attrs` reads the dump once and answers both tables; an empty rare table
+  refuses boot, as legacy's does. `GameState::with_item_rare_attrs` holds the 18 rows.
+
+The lines, on the worn weapon:
+
+- `do_add_rare_attr` (`G/cmd_gm.cpp:3949-3954`) runs `CItem::AddRareAttribute()`
+  (`G/item_attribute.cpp:422-464`). Below two rare attributes it writes one at slot
+  `5 + count`. The choice is `number(0, n - 1)` over the applies whose row caps the item's
+  set above 0 and that the rare slots do not hold, walked in apply order to
+  `MAX_APPLY_NUM`, the last row of an apply winning, as the map's assignment does. The level
+  is `min(5, cap)`, and the value's low 16 bits are written even when they are 0, with
+  `UpdatePacket` and `Save`.
+- `do_change_rare_attr` (`:3942-3947`) runs `ChangeRareAttribute()` (`:396-420`). An item
+  with rare attributes has its first `count` rare slots cleared without a record, then gets
+  `count` more through `AddRareAttribute`, one update each; an item with none is left alone.
+
+`world::character::add_rare_attribute` and `change_rare_attribute` answer their writes as
+`(slot, attribute)` pairs. A rare change does not always write prefixes, because a hole in
+slot 5 moves the next write, so the GM lines now share `GameState::replay_worn_writes`. It
+takes `WornWrites` (the silent clear range, the writes, the before and after, and the
+socket count) from all four attribute lines; 368's two now build theirs as prefixes.
+
+Defects not reproduced (recorded in `docs/STATUS.md`): `AddRareAttribute` reads
+`bMaxLevelBySet[GetAttributeSetIndex()]`, which is `[-1]` for a rod or a pick in the
+weapon slot, and indexes `avail` with `number(0, -1)` when no row is left. The Rewrite adds
+nothing in both cases.
+
+Tests:
+
+- Unit (gamedata): `owner_dump_loads_18_rare_rows_with_eight_sets` (`MAX_HP` at 500, 5
+  on each of the eight sets, 0 on talisman and glove; an empty dump refuses as `Rare`) and
+  `rare_enum_const_matches_the_schema`.
+- Unit (world): `rare_adds_draw_evenly_until_two_stand` and
+  `rare_change_clears_then_adds_the_same_count` (the normal attributes stay; a bare item
+  answers `None`; a rod adds nothing and draws nothing).
+- Scenario `a_gm_adds_and_rerolls_the_weapons_rare_attributes`. A change with nothing
+  rare sends nothing. Two adds fill slot 5 and then slot 6 with different applies, slot 5
+  staying; a third sends nothing. The change sends two updates, the first with slot 6
+  empty. The row holds the last update. 16 concurrent runs passed.
+- `.scratch/parity/commands.md`: `cmd.add_rare_attr` and `cmd.change_rare_attr` are
+  `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4620 passed and 0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 370. A named character's sub-skills cleared, and the caller's own logout (`/reset_subskill`, `/force_logout`)
+
+Two more small GM lines join `game_state::gm_lines` (`G/cmd.cpp:479`, `:553`).
+
+- `do_reset_subskill <name>` (`G/cmd_gm.cpp:4315-4334`, `GM_HIGH_WIZARD`). An empty line
+  hears `Usage: reset_subskill <name>`, and a name `FindPC` misses hears nothing. Otherwise
+  the named character's `ClearSubSkill` (`G/char_skill.cpp:3949-3974`) runs at its own
+  level, through the `clear_sub_skills` that `/level` and `/advance` already use (ledgers
+  318 and 319). That moves the counter to `level - 9` (nothing below 10), zeroes the eleven
+  sub-skills, computes, and sends byte 76 to the target. The caller then hears `Subskill of
+  [%s] was reset` with the target's shown name.
+- `do_force_logout` (`G/cmd_general.cpp:3503-3509`, behind `ENABLE_NEWSTUFF`,
+  `GM_IMPLEMENTOR`). `FindByCharacterName(ch->GetName())` finds the caller's own
+  descriptor, and `DelayedDisconnect(0)` closes it. The port orders the close through
+  `order_close`, as `/dc` does for another character, so the disconnect save runs.
+
+The GM-line answer `ItemRows` becomes `GmRows`, which adds `cleared_skills`.
+`gm_line_step` deletes those skill rows by the target's PID, and stores item changes only
+when there are some. The target's counter needs no direct write: its own descriptor takes
+the world's points into the held row before every save (`hold_kept`).
+
+Tests:
+
+- Scenario `a_gm_resets_yankees_sub_skills_and_forces_its_own_logout`. Yankee is level 30,
+  holds skills 16, 121 and 124, and starts with a sub-skill counter of 0. The scenario
+  checks the usage line and the miss's silence. It checks the caller's line, and Yankee's
+  last byte-76 levels: 5, 0 and 0. Only the row for skill 16 remains. Yankee's logout save
+  banks a counter of 21. `/force_logout` then closes Alpha's own socket. Eight concurrent
+  runs passed.
+- `.scratch/parity/commands.md`: `cmd.reset_subskill` and `cmd.force_logout` are `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4621 passed and 0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 371. The champion progression (`sys.skill.conqueror`, `/conqueror_level`, `/conqueror_point`)
+
+The conqueror level stops being a stored number that only `pc.set_conqueror` moved.
+
+- **Store.** Migration `0022_conqueror_progress.sql` adds `player.conqueror_level_step` and
+  `player.conqueror_point`. `PlayerSave` and `Character` carry them, and the load sets both
+  slots through `Points::set_conqueror_progress` after `Points::load`. The save picks them up
+  in `hold_points`, together with the world's conqueror level and experience and the four
+  sungma real points. Nothing new is added to the store order.
+- **The experience arm** (`world/src/character/points/conqueror.rs`, `G/char.cpp:3883-4002`).
+  `gain_conqueror_exp` covers several cases:
+  - At or past the highest level, a gain is silent.
+  - A gain chats `You have received %lu EXP for your Champion Level.`.
+  - Each quarter of `conqueror_next_exp` raises the step. Steps 1 to 3 grant a point, up to
+    level 90.
+  - Step 4 grants one point, raises the level with its broadcast record, and runs the
+    balance through the arm again (the nested `PointChange`).
+  - A loss subtracts and clamps at 0.
+  `reset_conqueror` is the `POINT_CONQUEROR_LEVEL` arm: the level, a step/sungma/experience
+  reset, and the point `MINMAX(0, 4n - 4, 4 (max - 1))`. `spend_conqueror_point` is the
+  sungma spend. `become_conqueror` now runs the reset at level 1, so `pc.set_conqueror`
+  (`SetConqueror`, `G/char.cpp:11659-11701`) sends the point records, the points packet and
+  the conqueror experience record.
+- **Where the experience comes from.**
+  - On a new-world map (`SUNGMA_WILL_MAPS`), a conqueror's kill pays its reward as champion
+    experience, and the orb flies as `FLY_CONQUEROR_EXP` (17) (`G/char_battle.cpp:2658-2667`).
+  - `/set <name> exp` takes the same arm for a conqueror (`G/cmd_gm.cpp:1999-2009`).
+- **Commands.**
+  - `do_conqueror_level` (`G/cmd_gm.cpp:5154-5197`, `GM_LOW_WIZARD`) answers an empty word
+    with `Syntax: conqueror_level <level>`. A number runs the reset with the configured
+    `max_conqueror_level` (default 30), then sends `PointsPacket` and the experience record.
+  - `do_conqueror_point` (`G/cmd_general.cpp:4012-4052`, `GM_PLAYER`) spends into `sstr`,
+    `shp`, `smove` or `simmune`. A polymorphed character hears the refusal line. Any other
+    refusal is silent, as in legacy.
+  - Both commands ride `GmLine`. A mid-game `PointsPacket` takes its voice from the new
+    `PcCard.voice`.
+- **Quest functions.** `pc.get_conqueror_exp` and `pc.get_conqueror_next_exp`
+  (`G/questlua_pc.cpp:3617-3629`) are bridged; `BRIDGED` now has 180 names.
+- `chat_line::vsnprintf` learns `%ld` and `%lu`.
+
+Defects not reproduced (in the module doc and in `docs/STATUS.md`):
+
+- A loss of the whole champion experience writes `GetExp()` as the record's value.
+- `%lu` prints a negative `int` amount as an unsigned number.
+
+Tests:
+
+- Scenario `a_gm_sets_its_champion_level_spends_a_point_and_earns_champion_experience`:
+  - The syntax line.
+  - `/conqueror_level 2`: the level record, closing on experience 0.
+  - `/conqueror_point shp`: sungma hit points 1, three points left.
+  - `/set Alpha exp 400000`: the chat line, the point (4), the step (1), the experience
+    record (400000/400000), and the confirmation.
+  - The logout save stores level 2, experience 400000, step 1, point 4, and sungma hit
+    points 1.
+  - A fresh login spends a loaded point (`sstr`), leaving 3.
+  - Eight concurrent runs passed.
+- Unit tests:
+  - Seven in `points::conqueror`.
+  - Two in `game_state::conqueror`: a kill on map 373 pays champion experience; one on map
+    41 pays plain experience.
+  - The quest manager probe now reads both getters.
+  - `the_steps_conqueror_chats_its_lines_or_makes_the_reader` now expects the records instead
+    of silence.
+- `a_set_moves_a_named_characters_gold_exp_maxima_and_skill`: its doc no longer calls the
+  conqueror chain a gap. Alpha's level 33 is past the maximum, so the arm returns silently.
+- `db/tests/players.rs` checks the step and the point round-trip. Its save literal moved into
+  `whole_save()` so the test stays within 100 lines.
+- Inventory:
+  - `systems.md` `sys.skill.conqueror`: `ported`.
+  - `commands.md` `cmd.conqueror_level` and `cmd.conqueror_point`: `ported`.
+  - `quest-api.md` `lua.pc.get_conqueror_exp` and `lua.pc.get_conqueror_next_exp`:
+    `ported`, with the manager test as the witness.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4631 passed and 0 failed in 40 targets.
+  - An earlier full run failed once in `a_gm_pulls_the_dogs_and_attracts_the_ranger`: its
+    archer step missed the deadline under load.
+  - That scenario then passed in eight concurrent runs and in this full run. This change
+    does not touch it.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 372. The inventory sort (`/sort_inventory`)
+
+`do_sort_inventory` (`G/cmd.cpp:41-44`, `GM_PLAYER`, behind `__SORT_INVENTORY_ITEMS__`,
+which `prodomodefines.h:143` defines) runs `CHARACTER::SortInventoryItems`
+(`G/char.cpp:10790-10866`).
+
+- **Storage** (`world/src/character/sort_inventory.rs`):
+  - Every base cell (`0..INVENTORY_MAX_NUM`) is lifted in cell order: its clear, then the
+    deletion of the quickslots naming it. The banks and the equipment stay.
+  - The items are sorted by locale name, comparing bytes as `std::string` does. The sort is
+    stable; legacy's `std::sort` leaves equal names in an unspecified order.
+  - A plain stackable goes back by vnum. "Plain" means `STACKABLE`, not `ITEM_BLEND`, not
+    one of the twelve automatic potions of `excepList`, and not an `IS_SUMMON_ITEM` vnum. It
+    tops up the stacks of its vnum that have proto sockets, in cell order. What is left takes
+    the first free cell of its banks or of the unlocked base inventory, highlighted as fresh.
+  - Anything else goes back whole, not highlighted.
+  - A placed potion fills the first empty quickslot.
+  - What no cell takes lies at the character's feet: owned for 60 seconds by the whole give,
+    and for 300 or 60 by the vnum give, as its `ANTIFLAG_DROP` says. Its row is destroyed.
+- **Gates** (`prodomo/src/game_state/sort_inventory.rs`), in legacy's order:
+  - Dead, trading, browsing a shop, or a safebox open: `Please close other windows before
+    sorting your inventory`. `GetMyShop` and `IsCubeOpen` have no ported state, so they never
+    refuse.
+  - Within 15 seconds (`get_global_time()`): `Please wait %d seconds to sort your inventory
+    again`. The wait is keyed by VID with the PID, so a reused VID starts fresh, as a new
+    `CHARACTER` does.
+  - A running quest refuses silently.
+  - A running exit countdown is cancelled with `Canceled.`.
+  - After the sort comes the line `Your inventory items have been sorted`.
+- The line rides `GmLine::SortInventory`. The descriptor stores the moved, merged and
+  destroyed rows it answers.
+- `lay_auto_given` is split: `lay_owned(vid, item, secs)` lays with the given ownership.
+
+Defects not reproduced (in the module doc and in `docs/STATUS.md`):
+
+- The vnum give's `MAKECOUNT` top-up raises a stack to the proto's `value1`.
+- The vnum give remakes the item with the proto's sockets, losing its own sockets or
+  attributes.
+- A proto-less item is lifted and never given back.
+
+The Rewrite gives back the count it lifted, gives an unusual stackable back whole, and gives
+a proto-less item back whole.
+
+Tests:
+
+- Scenario `a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks`. Alpha holds a
+  two-cell sword at 0, red potions (10 and 5) at 3 and 6, 50 arrows at 8 and a lottery card
+  at 9.
+  - The five clears come first, then the gives in name order:
+    - the card at 0;
+    - the potions at 1, highlighted;
+    - the sword at 2;
+    - the arrows at 3, highlighted.
+  - One update tops the potions up to 15, a quickslot is added, and the line is last.
+  - A second sort hears the wait.
+  - The logout save stores `0:50001:1,1:27001:15,2:19:1,3:8000:50`.
+  - Eight concurrent runs passed.
+- Four unit tests in `sort_inventory`:
+  - name order with the merge and the freed quickslot refilled;
+  - the `MAKECOUNT` stack keeps its count;
+  - a socketed stack goes back whole;
+  - the overflow goes to the ground for 60 seconds with its row destroyed.
+- `.scratch/parity/commands.md`: `cmd.sort_inventory` is `ported`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4636 passed and 0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass. Its first
+  run flagged `moved` beside `mover` (`similar_names`). The binding was renamed to `packed`,
+  and only Clippy and fmt were rerun after that rename.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 373. The direct pick-up (`RENEWAL_PICKUP_AFFECT`)
+
+`RENEWAL_PICKUP_AFFECT` (`prodomodefines.h:151`) adds an auto pick-up: item 70002 grants
+`AFFECT_PICKUP_ENABLE` (810), `/pickup_affect` switches it to `AFFECT_PICKUP_DEACTIVE` (811)
+and back, and while 810 is held a kill's drop goes straight into its owner's inventory.
+
+- **Realtime affects** (`prodomo/src/game_state/affect.rs`): `IsRealTimeAffect`
+  (`G/char_affect.cpp:29-40`) names 810 and 811.
+  - `AddAffect` adds `time(0)` to the given duration (`:732`), so the row holds the second it
+    ends at.
+  - The add packet sends the seconds left (`:120`).
+  - Each tick reads the seconds left instead of counting down, and ends the row at 0 or
+    below (`:422`).
+  - The store keeps the end second, so time spent logged out counts.
+- **70002** (`G/char_item.cpp:2852-2872`): `world::character::use_item` lets it out as any
+  `ITEM_QUEST` (`MoveKind::QuestUsed`); it was refused as not ported. `GameState::use_item`
+  then runs the arm in place of the item's quest, and the item is not used up.
+  - With 810 held: `@@(char_item.cpp)tradus:Deja ai auto-pick-up-ul.`.
+  - With 811 held: `@@(char_item.cpp)tradus: Pick-up Already Active.`.
+  - Else 810 for 25200 seconds and `@@(char_item.cpp)tradus:Auto Pick-up-ul a fost activat
+    cu succes!`.
+- **`/pickup_affect`** (`do_pickup_affect`, `G/cmd_general.cpp:279-300`, `GM_PLAYER`), on
+  `GmLine::PickupAffect`: the held 810, else 811, else nothing. That row goes (its remove
+  record), and with seconds left the other row takes them; else
+  `@@(cmd_general)tradus:Auto Pick-up-ul a fost dezactivat.`.
+- **The kill** (`G/char_battle.cpp:874`, `:969`): when the attacker of a one-item drop, or
+  the round-robin owner of an item of a several-item drop, holds 810 (`CanPickupDirectly`),
+  `AutoGiveItemNew` gives the item and skips the two `number(-7, 7)` draws, as legacy's
+  `else` and `continue` do.
+- **`AutoGiveItemNew`** (`G/char_item.cpp:10725-10829`):
+  - The storage half is `world::character::auto_give_item_new`. A stackable that is not
+    `ITEM_BLEND` tops up every stack of its vnum with equal sockets, in cell order over
+    `0..INVENTORY_AND_EQUIP_SLOT_MAX`.
+  - What is left goes highlighted to the first free cell. A dragon soul stone goes to its
+    box (`GetEmptyDragonSoulInventory`: the sub-type's column of six 32-cell boxes and the
+    grade's row, only for a qualified character). Anything else goes to the unlocked base
+    inventory.
+  - The line is `Ai primit: x%d%s.` for more than one, else `Ai primit: %s.`. What no cell
+    takes lies at the owner's feet, owned for 300 seconds.
+  - The rows go to the owner's descriptor through `ClientOrder::ItemRows`
+    (`order_the_item_rows`, widened from the death penalty).
+- **The affect save:** `leave_world_by` took the event out of `affect_events` before
+  `saved_affects_of` read it. Since ledger 255 every logout and warp therefore saved no
+  affect and deleted the rows a character held. The save now reads first. Each row is
+  written as legacy's `REPLACE` (`ON CONFLICT ... DO UPDATE`), because a login grants the
+  dragon soul qualification beside the one it restored (`AddAffect(..., false)`), and two
+  equal rows would collide on the key.
+- A relogin's burst now carries the restored rows ahead of the revive-invisible add. The
+  parity helper `revive_add` reads past them in `finish_enter_game` and at the three other
+  relogin sites.
+
+Defect not reproduced (in the module doc and in `docs/STATUS.md`): when the stacks take
+part of a drop and no cell takes the rest, legacy's line names the whole count
+(`G/char_item.cpp:10815-10819`). The Rewrite names what the stacks took.
+
+Tests:
+
+- Scenario `a_pickup_ticket_takes_a_kills_drop_into_the_inventory`. Its Game data is the
+  owner's, with the dog of `DOG_AT_ALPHA` and a `limit` group for mob 101 whose two rows
+  always drop. It uses the new `Server::start_with_files_configured`.
+  - Alpha uses 70002 at cell 0: the 810 add with 25200 seconds and the line. A second use is
+    refused with its line, and the ticket stays.
+  - Alpha punches the dog dead (`punch_until`). There is no ground add. The sword is set
+    highlighted at cell 2, the potion stack at cell 1 updates to 8, and both `Ai primit:`
+    lines are heard. Then the store holds `0:70002:1,1:27001:8,2:19:1`.
+  - `/pickup_affect` twice (`switch_pickup`): 810's remove and 811's add with 25100-25200
+    seconds left, then back.
+  - After the logout, `player_affect` holds 810 with an end second more than 25000 seconds
+    ahead.
+  - Eight concurrent runs passed.
+- Unit tests:
+  - Two in `auto_give_new`: the overflow is unplaced with the stacks' rows only, and a
+    stone goes to its box only when qualified.
+  - One in `affect`: a realtime row is not counted down and ends at its second.
+  - The `equip` test of 70002 now expects `QuestUsed`.
+- `.scratch/parity/commands.md`: `cmd.pickup_affect` is `ported`.
+- `.scratch/parity/systems.md`: `sys.item.pickup_effect` is `ported`. The slot effect's
+  highlight has been carried since ledger 217.
+- `.scratch/parity/client-packets.md`: the note of `cg.game.item_use` names 70002's arm. A
+  mojibake dash in that note became `—`.
+- `python3 .scratch/parity/tools/gen.py` ran and regenerated the tables. No row ID or status
+  changed.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4640 passed and 0 failed in 40 targets.
+  - The first run had 18 failures. Seventeen were relogin bursts meeting the now-saved
+    qualification, and one was `a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya`.
+  - The latter passed alone and in the rerun. Its assertion now prints what rides.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass. Its first
+  run flagged the scenario's length and a `use` after statements. The scenario was split
+  into `punch_until` and `switch_pickup`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 374. The channel change (`/move_channel`) and the sort's warp lock
+
+The channel change (`ENABLE_MOVE_CHANNEL`) is ported, and `WarpSet` now refuses a warp in the
+15 seconds after an inventory sort. That refusal had become reachable when ledger 372 ported
+the sort, but the descriptor still passed a zero lock.
+
+`/move_channel` (`do_move_channel`, `G/cmd_general.cpp:3644-3697`, GM_PLAYER):
+
+- A line while the character's timed event runs cancels it with `[LS;511]`.
+- Otherwise it refuses, in source order:
+  - an empty argument: `Using: channel <channel number>`;
+  - a number outside 1 to 4: `Please enter a valid number`. `str_to_number` on a `short`
+    keeps the low 16 bits of `strtol`, and so does the Rewrite;
+  - the own Channel: `You are already on channel %d`;
+  - the Shared Channel: `You can't change channel in a global map`;
+  - a map at or above 10000: `You can't change channel in a dungeon`.
+- The DB's `FindChannel` (`D/ClientManager.cpp:4503-4547`) answers the first peer of the
+  Channel that hosts the map. The Rewrite asks the configured topology (`Recall::hosts`). A
+  Channel that does not host the map, configured or not, answers
+  `@@(input_db)tradus:Cannot change channel` (`CInputDB::MoveChannel`).
+- `StartMoveChannel` (`G/char.cpp:8948-8962`) refuses silently past `IsHack(false, true, 10)`.
+  It starts the countdown at 3 seconds, or at 10 when the body is fighting. `CanWarp` is read
+  as `IsHack`, as the quest bridge reads it, so it always holds once the gate has passed.
+
+The countdown (`move_channel`, `G/char.cpp:8856-8882`) shares `m_pkTimedEvent` with the exit
+lines as `TimedEvent::MoveChannel`:
+
+- The first fire runs one Pulse after the line; each positive second tells
+  `CHANGE_CHANNEL_IN_%d` and waits one second more.
+- At 0, `MoveChannel` (`:8884-8946`) checks `CanWarp`, the instance map and the Shared Channel
+  again. It then orders the descriptor a `ClientOrder::Warp` to the character's own position
+  on the new Channel. The descriptor leaves the world with a save, sends the delete of the
+  character's own VID, and sends `GC_WARP` with the Channel's address.
+- `MoveChannel` is not `WarpSet`, so the order carries no sort lock.
+
+The sort's warp lock:
+
+- `ClientOrder::Warp` has a new field, `sorted_until`: the `get_global_time()` second the last
+  sort holds warps until. Every order site fills it from `GameState::sort_lock`.
+- `warp_set` passes the field, and the wall-clock second, to `judge_warp_set`. Before this
+  change both were 0.
+- A `RefusedSortingInventory` now tells `You cannot warp after sorting your inventory`
+  (`G/char.cpp:6738-6743`). The other refusals stay silent.
+- `m_sortInventoryPulse` is a `CHARACTER` member, so `leave_world_by` now forgets the lock. A
+  new login can sort and warp at once, as in legacy.
+
+Files:
+
+- New `prodomo/src/game_state/move_channel.rs`: `run_move_channel`, `fire_move_channel`,
+  `move_channel` and `short_word`.
+- `prodomo/src/game_state/timed_exit.rs`: the `MoveChannel` variant, `TimedEvent::due`, and the
+  dispatch in `run_timed_exits`. The module doc now names the channel change.
+- `prodomo/src/game_state/gm_lines.rs`: `int_word` is `pub(super)`, and the line dispatch has
+  the `MoveChannel` arm.
+- `GmLine::MoveChannel` is in `game_loop_messages.rs`, mapped from `do_move_channel` in
+  `command.rs`.
+- `prodomo/src/client_registry.rs`: the `sorted_until` field and its two tests.
+- `prodomo/src/main.rs`: `WarpDestination::sorted_until`, the lock passed to the judge, the
+  refusal's line, and the `warp_set` doc. The doc no longer says the sort cannot be reached.
+- `prodomo/src/game_state/sort_inventory.rs`: `sort_lock`.
+- `prodomo/src/game_state.rs`: the `move_channel` module, and the lock forgotten on leave.
+- Each `ClientOrder::Warp` site fills `sorted_until`: `death.rs`, `guild.rs` (two),
+  `quests.rs`, `warp_npc.rs` and `whisper.rs` (two), plus the tests in `death.rs`, `guild.rs`
+  and `trade.rs`.
+
+Scenarios in `prodomo/tests/parity.rs`:
+
+- `a_channel_change_counts_down_and_warps_the_character_to_the_other_channel` runs on
+  `two_channels()`: Channels 1 and 2 host map 1, and 3 is not configured.
+  - It checks the five refusals through `move_channel_refuses`.
+  - It checks a cancel after the first fire, then the full countdown, the delete of the own
+    VID, and `GC_WARP` on Channel 2's port.
+  - The character then logs in on Channel 2 at the place the warp named, hears
+    `GC_CHANNEL` 2, and is told it is already on Channel 2.
+- `a_warp_right_after_an_inventory_sort_is_refused`:
+  - An implementor sorts and `/warp 4701 9500` is refused with the new line.
+  - After a relogin the same warp lands.
+
+Inventory:
+
+- `.scratch/parity/commands.md`: `cmd.move_channel` is `ported`. The note of
+  `cmd.sort_inventory` names the warp lock and its scenario.
+- `.scratch/parity/timed-events.md`: `event.char.move_channel` is `ported`.
+- `python3 .scratch/parity/tools/gen.py` ran and regenerated the tables.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4642 passed and 0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- Each new scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 375. `/flush` writes the caller's row at once
+
+`/flush [pid]` (`do_flush`, `G/cmd_gm.cpp:4425-4446`, the `FLUSH_AT_SHUTDOWN` branch, which
+`C/prodomodefines.h:87` defines):
+
+- An empty line names the caller's own PID, else the first word is read with `strtoul`,
+  which the Rewrite's `unsigned_word` matches on the 32-bit target (skip space, one sign,
+  digits; garbage is 0, past `ULONG_MAX` saturates, negatives negate unsigned).
+- A PID other than 0 has the caller's descriptor write its row at once (`SaveReal`), as a
+  new `ClientOrder::Save` the descriptor follows with `hold_world_points` and `save_held`,
+  without queueing a save. A departed caller writes nothing.
+- The packet to the DB process (`HEADER_GD_FLUSH_CACHE`) has nothing to do: the Rewrite has
+  no cache, and every save writes through (ADR-0003). The caller's save is what is left.
+
+Files:
+
+- `prodomo/src/client_registry.rs`: the `Save` order.
+- `prodomo/src/main.rs`: the `Save` arm of `follow_order`.
+- `prodomo/src/game_state/gm_lines.rs`: `unsigned_word`, `run_flush`, the `Flush` arm, and
+  the module doc (twelve lines now).
+- `GmLine::Flush` in `game_loop_messages.rs`, mapped from `do_flush` in `command.rs`.
+
+Scenario `a_flush_writes_the_callers_row_at_once` in `prodomo/tests/parity.rs`: an implementor
+`/goto`s to (470100, 950200) without a save, `/flush 0` leaves the row old (the negative
+control), and a bare `/flush` has the row hold the new place before the 120-second save event
+could.
+
+Inventory: `.scratch/parity/commands.md`: `cmd.flush` is `ported`, and
+`python3 .scratch/parity/tools/gen.py` regenerated the tables.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4643 passed and 0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass. Its first
+  run flagged a redundant closure in `run_flush`; it now names the method.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- The new scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 376. Observer mode (`/observer`, `/observer_exit`)
+
+`/observer` (`do_observer`, `G/cmd_gm.cpp:3226-3229`, `GM_IMPLEMENTOR`) toggles the flag, and
+`/observer_exit` (`do_observer_exit`, `G/cmd_general.cpp:2370-2393`, `GM_PLAYER`) leaves it, both
+through `CEntity::SetObserverMode` (`G/entity.cpp:107-118`): the flag, the change dance (the
+view layer's new `MapIndex::set_observer`, which recomputes both sides' views — the leaver's
+own view refreshes too), and the `ObserverMode %d` command line. The flag lives in the view
+layer beside the views it gates (`observers`, looked up by key); the descriptor holds a copy
+for the record gates, flipped on the same line (the toggle cannot fail, so a pure toggle
+cannot desync) and cleared on leave. While the flag stands, an observer's inserts, removals
+and re-encodes are never sent, its `PacketAround` reaches only itself, and the descriptor
+refuses its item, exchange, attack and skill records (`CInputMain::Analyze`,
+`G/input_main.cpp:3690-3740`) — new `MainRecord::ObserverRefused`, asserted by
+`main_record_observers_are_refused`.
+
+`/observer_exit` has no arena in this build, so it always takes the plain branch:
+`ExitToSavedLocation` (`G/char.cpp:6685-6692`) warps to the pending save, then clears the
+mode. The pending save is the descriptor's (`held.warp`), and the warp's outcome decides the
+clear: `warp_set` now reports `WarpSettled::{Warped, Refused, Closed}` (every other caller
+reads `is_open()`). After a refused warp the character still stands, so `ObserverSettled`
+dances it back into view before telling the line; after an accepted warp the character is
+gone, so the descriptor sends the line itself after `GC_WARP`. `ObserverExit` answers the
+sort lock when the character observes, else `None` (which also re-syncs a desynced
+descriptor copy). `locations` threads from `analyze` through `main_step`, `chat_line`,
+`run_command` and `run_line_command` (new `run_line_warp` split, which also took `Transfer`
+and `run_line_spawn` took `Respawn`; `OnlineList`/`Who` moved to the tail) to the exit step.
+A never-warped caller exits at the unset save (0, 0, 0), which the owner's atlas serves on
+no map, so the warp is refused and the dance runs — checked against the real regions, not
+assumed.
+
+The sweep of every `IsObserverMode` site also ported the arms the mode implies: the party
+guest arm (`PERR_OBSERVER`, `G/char.cpp:6051` — new `JoinErr::Observer`, `[LS;823]` to the
+inviter on invite, to the guest on accept and request, verified against `RequestToParty`
+and `AcceptToParty`), the messenger add-by-VID silence (`G/input_main.cpp:1151`; the
+inventory note already claimed this gate while the code passed it — now it holds), the PvP
+refusal (`G/pvp.cpp:422`, read into the existing `PkActor.observer` field the judge already
+honoured), the skill-cast and pick-up refusals (`G/char_skill.cpp:2914`,
+`G/char_item.cpp:7976`), the vnum 50051-50053 `[LS;1205]` arm (`G/char_item.cpp:2843-2850`),
+a war map's admission watch (`CWarMap::IncMember`, `G/war_map.cpp:384` — the flag rides
+`Shown.observer` to the descriptor) and its leaving end (`DecMember`, `G/war_map.cpp:414-430`).
+The gates in unported systems (arena, wedding, pets, private shops, horse ride) wait for
+their slices; the quest-api `observer` rows stay, as no quest path casts, picks up, or
+exchanges yet.
+
+Files:
+
+- `prodomo/src/game_state/observer.rs`: new, `is_observing`, `set_observer_mode`,
+  `run_observer`, `observer_exit_lock`, `observer_settled`, `end_war_watch`.
+- `prodomo/src/game_state/view.rs`: `observers`, `is_observer`, `set_observer`, the
+  view-refresh order, and the delivery/packet skips.
+- `prodomo/src/main.rs`: `WarpSettled`, `observer_exit_step`, the `locations` threading,
+  `run_line_warp`, `Shown.observer` at join.
+- `prodomo/src/game_state.rs`: `ChatRecord`/`MainRecord` observer gates, `apply_warp_line`.
+- `prodomo/src/game_loop_messages.rs`: `GmLine::Observer`, `GameCommand::ObserverExit` /
+  `ObserverSettled` (+ `is_chat_line`), `Shown.observer`.
+- `prodomo/src/command.rs`: `Command::ObserverExit`, `do_observer_exit`.
+- `prodomo/src/game_state/party.rs`: `JoinErr::Observer` and the four `[LS;823]` arms.
+- `prodomo/src/game_state/messenger.rs`, `pc_skill.rs`, `quests.rs`, `fight.rs`,
+  `game_state.rs` (`pickup_item`), `guild.rs` (`leave_war_map`), `motion.rs`
+  (`place_body`).
+
+Scenario `an_implementor_hides_and_leaves_observer_mode` in `prodomo/tests/parity.rs`: on an
+NPC-free map 1 (all four regen files replaced with empty bytes, so the dance's view refresh
+holds only the pair), an implementor hides (its line, the viewer's removal), its attack is
+refused quietly, an invite naming it answers `[LS;823]`, and the exit dances both sides'
+pairs before its `ObserverMode 0` line.
+
+Inventory: `.scratch/parity/commands.md`: `cmd.observer` and `cmd.observer_exit` are
+`ported`, and `python3 .scratch/parity/tools/gen.py` regenerated the tables.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4648 passed and 1 failed in 40 targets. The failure is
+  `a_gm_purges_the_near_dog_and_all_sweeps_the_view`: a quest-target delete (0x7c) landed
+  inside the respawn window under full-suite load. It passes alone, and no path this
+  slice touched (view flags, none set in that test; quests, targets, purge) explains it.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass. Its
+  runs split `apply_chat_line` (`apply_warp_line`), split `run_line_command`
+  (`run_line_warp`, with the `Transfer`/`Respawn`/`OnlineList`/`Who` regroup), and
+  flagged two doc-markdown backticks and a range pattern.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- The new scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 377. The bow shot lands over the wire, and the arrow spend is stored
+
+`an_assassin_flies_the_dog_and_shoots_it`: Yankee, an assassin with a worn bow and quiver,
+flies the dog at Alpha (`CG_FLY_TARGETING` + `CG_ADD_FLY_TARGETING`, both relayed past the
+shooter), then `CG_SHOOT` lands: the arrow count updates, the ownership claims, the arrow's
+`GC_CREATE_FLY`, and the terminal record — the damage on the dog, or its death when the
+shot's affect stuns it (a hit on a stunned victim kills it outright, `Damage` calling
+`Dead(attacker)`, kept). The store holds count 48 for the two spent arrows. `cg.game.shoot`
+is `ported`, and `cg.game.use_skill` follows its 230f scenario (`UseSkill` casts over the
+wire there), so both rows are `ported`; `sys.skill.core` stays `partial` (the unhosted
+functor arms).
+
+The scenario caught a real gap: the shot spent arrows in the world but never stored them —
+`save_held` writes no item rows, and `shoot_step` only stored stolen gold. `AttackAnswer`
+gains `spent: Vec<RowChange>`; `use_arrow` answers a `Count` for a stack that still holds
+arrows, and the restack arm answers the emptied stack's `Destroyed` plus the replacement's
+`Moved` into the worn slot (threaded through `shoot_bow`/`shoot_one`/`shoot`; the `?`
+operators became `let ... else` on the tuple return). The quirk's 0-count worn stack is not
+stored — the store has no 0-count row — and answers nothing when no replacement arrives.
+`shoot_step` applies spends and gold as one Transfer (`apply_row_changes` when no gold was
+stolen). `the_last_arrow_restacks_and_the_spend_survives` pins both restack ends, and the
+bow and vnum-47 tests assert their `Count`.
+
+Gates (2026-11-04):
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 4650 passed,
+  1 failed in 40 targets — the known `a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya`
+  load flake, green alone (10.22 s).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass (after
+  repairing the file-wide `sql(&database, ...)` borrow churn an early broad replace had
+  introduced; the repair loop only flipped what the compiler demanded, and no `&&database`
+  remains).
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- The new scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 378. `/saveati` writes a map's attributes as a TGA
+
+`do_save_attribute_to_image` (`G/cmd_gm.cpp:3843-3863`, GM_IMPLEMENTOR) is a descriptor-side
+line: the syntax without both words, else the named map rendered from the loaded cells and
+written to the named path, `Done` or `Failed`. `gamedata::server_attr::ServerAttr::attribute_image`
+renders legacy's image (`SECTREE_MANAGER::SaveAttributeToImage`, `G/sectree_manager.cpp:1369-1473`,
+`CTargaImage`, `server/server/libgame/targa.cpp:18-56`): the 18-byte header (type 2, the pixel
+size, 32 bits, top-left first) and one little-endian pixel per cell — water `0xff00_00ff`,
+`BANPK` `0xff00_ff00`, blocked `0xffff_0000`, anything else white, water winning over `BANPK`
+over blocked — over the grid's sectrees. Two deliberate differences, both recorded: the game
+thread never touches the filesystem (ADR-0002), so the descriptor renders and writes through
+`context.cells` instead of the sectree manager; and a sectree the file does not cover paints
+black instead of legacy's stale `pdwLine` (a buffer over-read, a Defect). An unknown map, an
+unrenderable grid and an unwritable path all answer `Failed`, as legacy's `Save` answers
+`false`. `Command::SaveAti` is routed through the spawn dispatch; `world::cells::MapCells`
+gains the render entry.
+
+`a_gm_saves_a_maps_attributes_as_a_tga`: an IMPLEMENTOR's bare `/saveati` answers the syntax,
+`/saveati 99999` answers `Failed`, and `/saveati 1` into a scratch dir answers `Done` with a
+file whose header names a nonzero grid, whose length is one pixel per cell, and whose walls
+and water paint. The colors are pinned by `the_attribute_image_paints_one_pixel_per_cell`.
+
+Gates (2026-11-04):
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 4653 passed,
+  0 failed in 40 targets (before the clippy spelling fix below, which changes no value;
+  the attr tests and the new scenario rerun green after it).
+- `cargo test --workspace --doc --locked --offline`: pass (9 ok).
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass, after
+  separating the color literals (`0xff00_00ff` and kin).
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- The new scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 379. The client switches its language, and a login-phase move is consumed
+
+`CG_CHANGE_LANGUAGE` (`CInputMain::ChangeLanguage`, `G/input_main.cpp:3575-3599`) +
+`CHARACTER::ChangeLanguage` (`G/char.cpp:11628-11647`): the client's current language answers
+itself, and a language outside 1 to 11 (`ELocale` without `LOCALE_YMIR`; the guards are
+`<= LOCALE_YMIR || >= LOCALE_MAX_NUM`, and `SetLanguage` clamps nothing) is silent. Past the
+gate the store keeps the choice (`db::accounts::set_language`, the `UPDATE account` legacy
+forwards to the DB process), the descriptor answers `HEADER_GC_REQUEST_CHANGE_LANGUAGE` and
+switches, and the world sets the body's language and shows the look to the view
+(`UpdatePacket`, whose `bLanguage` is the new one). `CanWarp` holds past the gate, as the
+move-channel line reads it; the `CHANGE_LANGUAGE` char log stays unwritten (no char log
+exists). `CgArgU8Error` gains the `Display` sibling codec errors already have, so the
+descriptor can log a malformed switch.
+
+`CG_MOVE` in the login, select and loading phases joins `is_consumed`: the login analyzer
+breaks on it (`G/input_login.cpp:1205-1206`), like the hack and the fixme120 records.
+
+`a_player_switches_its_language_and_its_view_hears`: its own language and 0 and 12 are
+silent; a switch to German answers `[0xf5, 5]`, shows the look with `bLanguage` 5 to itself
+and to a viewer, and keeps 5 in the account row. `a_move_on_the_select_screen_is_consumed`:
+a move on the select screen is consumed, and the select still loads Alpha.
+
+Gates (2026-11-04):
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 4655 passed,
+  0 failed in 40 targets (before the clippy merge below, which only joins two identical
+  test arms; the new scenarios rerun green after it).
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass, after
+  merging the new length arm into the identical `1 + 1` arm and separating the move's
+  coordinates.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- The language scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 380. The item destroy, and the client-version check at enter-game
+
+`CG_ITEM_DESTROY` (`CInputMain::ItemDestroy`, `G/input_main.cpp:1053-1058`) →
+`CHARACTER::DestroyItem` (`G/char_item.cpp:7407-7441`): the observer's gate refuses it with
+the other item records, the descriptor decodes `protocol::cg_item_destroy::CgItemDestroy`
+through the belongings step, and the world takes the whole stack out, deletes its slots,
+destroys its row, and answers the `[LS;1947;%s]` confirm with the default-locale item name.
+`CanHandleItem` is the sash and changelook windows; the shop, refine, cube, dragon soul
+refine, warp, aura, locks and secured state are not ported, so none refuses. A worn cell is
+refused as not ported, like a drop's.
+
+`CG_CLIENT_VERSION` (0xfd) and `CG_CLIENT_VERSION2` (0xf1):
+`CInputProcessor::Version` (`G/input.cpp:161-170`). In the login, select and loading phases
+the record is consumed before a character is selected and its timestamp, up to the first
+NUL, is kept after (`SetClientVersion`); nothing is ever answered. The enter-game step
+runs the check (`G/input_login.cpp:744-771`) against `[game] check_version_server` and
+`check_version_value` (compiled-in `true` and `"1215955205"`, `G/config.cpp:86-87`, which
+the owner's legacy CONFIG files never set; both keys are now in
+`config/prodomo.toml.example`). A version that differs — including none sent at all — is
+answered with the conflict notice and the descriptor closes (`DelayedDisconnect(0)`). The
+`DelayedDisconnect(10)` arm for a missing version never fires: it tests
+`!GetClientVersion()`, and a `std::string`'s `c_str()` is never null (a Defect). The
+notice's source bytes are kept exactly, mojibake and all, as legacy's compiler reads them.
+The lease's queue drains before the notice, so everything `Entergame` queued still reaches
+the client; the quest login lines drain with it, ahead of the notice, while legacy runs
+them on the next pulse, behind it — the Rewrite batches them at admit, so they cannot be
+told apart here. In the game and dead phases 0xfd is consumed, which no gate refuses; 0xf1
+is the Gaya record there, not the second version header.
+
+Four manual burst readers now report the version after select, as the honest client does
+and `read_loading_burst` already did: `enter_equipped_world_with` and the points, conqueror
+and relogged tests. Without it the new check closes them at enter-game, which is how the
+first full run of this slice failed (7 tests).
+
+`a_destroyed_stack_leaves_its_cell_empty_and_names_itself`: a destroy clears the stack's
+cell, deletes its slots, destroys the row, and names the default-locale name in
+`[LS;1947;...]`; an empty cell is silent.
+`a_client_without_the_right_version_hears_the_conflict_and_is_closed`: a version before
+any select is consumed; a select without a version and a select with a wrong one hear the
+queued lines, then the conflict notice, and are closed.
+`a_version_in_the_game_is_silent_and_no_check_needs_none`: a version in the game is
+consumed and the game goes on, and with the check off a client that sent none enters and
+plays.
+
+Gates (2026-11-04):
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 4660 passed,
+  0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass, after
+  renaming the test's `named` (similar to `names`) and folding the unused destroy header
+  const into the helper's doc comment.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- The three new scenarios passed 8 of 8 concurrent runs each.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 381. The gift to an NPC, and the warp's sort lock
+
+`CG_ITEM_GIVE` (`CInputMain::ItemGive`, `G/input_main.cpp:3174-3183`) →
+`CHARACTER::GiveItem` (`G/char_item.cpp:9226-9248`): the observer's gate refuses it with
+the other item records, the descriptor decodes `protocol::cg_item_give::CgItemGive`
+through the belongings step, and the world runs the running-quest gate before
+`CanReceiveItem` (`G/char_item.cpp:9250-9420`), ported whole in
+`world::character::give`: the player-victim and 2000-bound silences, the dead-fisher and
+dead-mule silences (`DISTANCE_APPROX` 400), the campfire's fish-or-else, both smith lines,
+the horse chats by grade, and the take with its `TakeItem` log line, `SetQuestNPCID` and
+the NPC's `take` scripts. The grill, the refine windows, the horse and the Meley statue
+answer `MoveRefused::NotPorted(Unported::Give)`, since those systems are not ported; the
+unknown target hears `[LS;710]` (`input_main.cpp:3719-3726` order: the quest gate runs
+first). The give consumes nothing and its count byte rides unread, as legacy never reads
+it.
+
+The sort lock came with it: ledger 372 made sorting reachable but never taught `WarpSet`
+its refusal, so a warp within 15 seconds of a sort went through where legacy chats "You
+cannot warp after sorting your inventory" (`G/char.cpp:6738-6741`). Every
+`ClientOrder::Warp` now carries the `GetSortInventoryPulse()` second the game's
+`sort_lock` reads, the observer exit fetches it too, and the descriptor chats the line on
+`RefusedSortingInventory`. The lock clears on leave, since `m_sortInventoryPulse` is the
+`CHARACTER`'s and the next login starts at 0.
+
+`a_gift_to_an_npc_runs_its_take_and_a_gift_to_nobody_is_named`: a gift to nobody hears
+`[LS;710]`; a gift to a player is silent; a gift the fisher takes is silent on the wire —
+9009 has no `take` script — and the server logs the `TakeItem` line; a gift from the spawn,
+past the 2000 bound, is silent; both swords stay at their cells.
+
+Gates (2026-11-04):
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 4667 passed,
+  0 failed in 40 targets.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass, after
+  inlining the take body into the match arm (the helper had nine arguments and a needless
+  `Result`) and moving `horse_answer` above the test module.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- The new scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 382. The event panel's named quest button (`CG_REQUEST_EVENT_QUEST`)
+
+`CG_REQUEST_EVENT_QUEST` (0x20, `CInputMain::RequestEventQuest`,
+`G/input_main.cpp:5458-5464`) → `CQuestManager::RequestEventQuest`
+(`G/questmanager.cpp:1956-1963`): the client's event panel names a quest, and when no script
+of the character runs, the named quest's button runs (`QuestButton`) at the character's state
+of it or at its start. `GetQuestIndexByName` answers 0 for a name it does not know
+(`G/questmanager.cpp:1282-1290`, commented `RESERVED`), and 0 runs nothing.
+
+- `quest::Manager::event_quest(pid, name, game)` resolves the name through
+  `Host::quest_indices` and runs `Manager::button`, which already refuses a running script
+  (`NPC::OnButton`). Quest numbers start at 1, so an unknown name is the only miss.
+- `QuestStep::EventQuest(Vec<u8>)` and `QuestStep::event_quest(&CgRequestEventQuest)` in
+  `prodomo::game_state::quests`: the name stops at the first NUL or at the field's 65-byte
+  end. Legacy builds its `std::string` over a `char[65]` that need hold no NUL and reads past
+  it, a Defect not reproduced; STATUS lists it.
+- The descriptor's `is_quest_step` takes 0x20 with the three other quest records, so the
+  record is read in the game and dead phases with no observer gate
+  (`G/input_main.cpp:3795`), and a malformed one closes the connection as the other three
+  do. The codec `protocol::cg_quest_text::CgRequestEventQuest` already existed.
+
+Unit test `the_event_panel_runs_the_named_quests_button` (`quest/src/manager.rs`):
+`guild_war_join`'s button runs by name, and an unknown name runs nothing.
+
+Scenario `the_event_panel_runs_the_named_quests_button`: Alpha's panel names
+`item_attr67add`, whose start-state button sends its page in skin 1 as the one answer and
+moves the quest to `talk`; `talk` has no `button`, so the same name then answers nothing, and
+`no_such_quest` is silent. `cg.game.request_event_quest` is `ported`.
+
+Gates (2026-11-04):
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 4669 passed,
+  0 failed in 40 targets. The first run failed `a_gm_flags_a_stray_dog_aggressive_and_coward`
+  on an ownership record between the dog's swings that its reader does not expect; it failed
+  twice more alone on that binary, then passed alone after a rebuild and in the full rerun.
+  The slice touches no combat path.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+- After the full run, a dead `quest == 0` guard was removed from `event_quest` and the
+  scenario gained the second request; the unit test, the scenario, fmt and clippy were
+  rerun and pass. The scenario passed 8 of 8 concurrent runs.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 383. The whisper partner's details (`CG_WHISPER_DETAILS`, `GC_WHISPER_DETAILS`)
+
+`CInputMain::WhisperDetails` (`G/input_main.cpp:3603-3638`, dispatched at `:3938-3940`)
+answers a whisper window's question about its partner: the client sends a 25-byte name, and
+the server answers `GC_WHISPER_DETAILS` (246) with that name and the language of the character
+holding it, found on this core (`FindPC`) or another (`P2P_MANAGER::Find`), else
+`LOCALE_DEFAULT` (`LOCALE_EN`, 1, `C/length.h:1215`). An empty name is not answered (`:3607`).
+
+- `protocol/src/gc_whisper.rs` gains `GcWhisperDetails` (`name: [u8; 25]`, `language: u8`),
+  27 bytes, with golden bytes, a decode, every language byte, and the short and foreign
+  refusals. The width was measured with `g++ -m32 -fsyntax-only` `static_assert`s over the
+  verbatim struct bodies under `#pragma pack(1)` (`i686-linux-gnu-g++-12` is not installed,
+  and `-m32` cannot link here): `TPacketGCWhisperDetails` 27 with `bLanguage` at offset 26,
+  `TPacketCGWhisperDetails` 26, and the packed two-`long` control 8. `GcWhisperError` now
+  names its fields (`Truncated { needed, actual }`, `Header { expected, actual }`). The GC
+  inventory row is implemented: 115 implemented, 19 missing (8 fixed-size, 11 dynamic), in
+  `gc_inventory.rs`, the four pinned counts of `protocol/tests/cg_wiring.rs`, and the
+  `AGENTS.md` coverage table.
+- `prodomo`: `MainRecord::WhisperDetails`, `whisper_details_step`, and the pure
+  `whisper_details_answer`. The partner is looked up in the process-wide client registry
+  (`entry_of`, every Channel, case-insensitive), which stands in for `FindPC` and
+  `P2P_MANAGER::Find`; a name nobody online holds, or one that is not UTF-8, is answered
+  with 1. The echo is at most 24 bytes with the 25th byte 0.
+- Fix to ledger 379: a language switch updated only the account, so the client registry's
+  entry kept the login language, and every line read through it (the shout, the notices,
+  the warp NPC, the empire privilege lines) stayed in the old language. `Lease::set_language`
+  (`DESC::SetLanguage`, `G/char.cpp:11641`) now runs in `change_language_step`.
+- Defects not reproduced: legacy reads the asked name as a C string that may run past its
+  field, answers from a stack record whose 25th name byte `strncpy` never sets, and its
+  `P2P_MANAGER::Find` arm answers the language another core's character logged in with,
+  because no GG record carries a language change (all 36 registered GG records were listed;
+  `HEADER_GG_LOGIN` is sent only by `WarpEnd`, the DB login and the P2P boot).
+
+Scenario `a_whisper_partners_details_name_its_language` (two Channels: alice on Channel 1 in
+English asks for bob's Yankee on Channel 2 in German, as `Yankee` and `yANKEE`, then
+`Nobody` and an empty name; after bob switches to Romanian the answer is 6). Passed 8/8; a
+mutant without `set_language` failed it. Unit test
+`a_whisper_details_answer_echoes_24_bytes_and_names_the_language`. Rows: `cg.game.whisper_details`
+and `gc.whisper_details` are `ported`; `cg.game.change_language` and `sys.char.multi_language`
+carry a 383 note.
+
+Gates (2026-11-04): `cargo fmt --all -- --check` clean; build clean; the full suite
+4676 passed, 0 failed in 40 targets (the first run failed the four pinned GC counts in
+`protocol/tests/cg_wiring.rs`, updated from 20/114 to 19/115); doc-tests 1 passed; clippy
+`-D warnings` clean; rustdoc `-D warnings` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). A width was measured with `g++ -m32` (above). Afterwards no
+`prodomo\_%` database remained. No ADR changed.
+
+## 384. The target window's drop list (`CG_TARGET_INFO_LOAD`, `GC_TARGET_INFO`)
+
+`CInputMain::TargetInfoLoad` (`G/input_main.cpp:66-123`, `__SEND_TARGET_INFO__` and
+`ENABLE_SEND_TARGET_INFO_EXTENDED` on, `C/prodomodefines.h:142,146`) answers the target
+window's question with what the target may drop, built by
+`ITEM_MANAGER::CreateDropItemVector` (`G/item_manager.cpp:915-1095`).
+
+- `prodomo/src/game_state/target_info.rs` (new): `GameState::target_info`, the pure
+  `drop_list`, `Makers::listed` and `info_records`. The target is found as `CG_TARGET` finds
+  it (on the asker's Channel and map; `targeted` is now `pub(super)`); a player lists
+  nothing. The list runs legacy's arms in order: the common loop adds nothing (its `item` is
+  still `NULL`, `:944`), every `drop` group row, one `kill` row drawn as `GetOne` draws
+  (`number(1, total)` against the running part percents, with no kill-per-drop gate), the
+  `limit` rows when the level limit read as a `DWORD` is at most the asker's level, every
+  `thiefgloves` row, and the proto's `DROP_ITEM` when the etc table names it. The stone arm
+  is dead (`ENABLE_STONE_DROP_ON_METIN` is undefined, C15). Only a monster or a stone is
+  answered, checked after the list (and its draw), as legacy does. One entry is sent as it is,
+  a stone included; several are sorted by `CustomSort` and sub-type with the stones skipped.
+- Each entry is what `CreateItem(vnum, count, 0, true, pct)` would show: the mask's vnum;
+  the count (gold keeps the row's up to `INT_MAX`, a stackable item is held between 1 and the
+  stack limit on the `DWORD` count, a `MAKECOUNT` item asking for 1 takes `VALUE1`, anything
+  else is 1), cut to the record's `WORD`; and the rarity, the percent ×10000 (a `kill` row's
+  rare percent), with the etc drop's default -1 sent as `0xFFFFFFFF`.
+- `gamedata::item_kind` gains `ITEM_MATERIAL` (5) and `ITEM_SKILLFORGET` (22), pinned to
+  their name indices; `world::character::ITEM_FLAG_MAKECOUNT` is now public.
+- The descriptor takes 0x3b as a world step (`target_info_step`, `GameCommand::TargetInfo`,
+  `GameHandle::target_info`); a malformed record closes the connection.
+- Defects not reproduced: legacy makes a real item per entry, with a new ID and, for a timed
+  item, a running expiry event, and never destroys it (a leak per click); a row with percent
+  0 sends the item's uninitialised `dwRarity`. The Rewrite makes no item and sends 0.
+- Divergence: ties of kind and sub-type keep the table's order (a stable sort);
+  `std::sort` orders them as libstdc++'s introsort happens to once there are more than 16.
+
+Scenario `the_target_window_lists_what_a_monster_may_drop`: test drop tables give the dog
+`drop`, `kill` and `limit` rows (the limit at level 200, above Alpha's 154), a stone 8001 a
+`thiefgloves` stone, and shopkeeper 9001 a `thiefgloves` potion. The dog answers the sword
+(count 2 held at 1, rarity 20000), then the two potions in table order (3 at 5000, then the
+kill row's 4 at 7); the stone answers its one stone; the shopkeeper, Alpha herself and an
+unknown VID are unanswered. Passed 8/8; the mutant that skips stones in a single list failed
+it. Unit tests `a_count_is_what_create_item_would_hold` and
+`the_list_runs_the_groups_in_order_and_sorts_several_without_stones`. Rows:
+`cg.game.target_info_load` and `gc.target_info` are `ported`.
+
+Also: `assert_mesh_wire` (`prodomo/tests/parity.rs`) now lets a nearby NPC's chatter
+(`is_npc_chatter`) ride after the mesh, as the other wire helpers do. The first suite run
+failed `a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya` on such a line from
+VID 0x80000bff; it passed 8/8 alone before the change.
+
+Gates (2026-11-04): `cargo fmt --all -- --check` clean; build clean; the full suite 4679
+passed, 0 failed in 40 targets; doc-tests 1 passed; clippy `-D warnings` clean (after one
+redundant closure was replaced by `Points::level`); rustdoc `-D warnings` clean. `rustfmt`
+and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
+
+## 385. The smith refine (`CG_REFINE`, `GC_REFINE_INFORMATION`)
+
+A refinable item given to a smith opens the refine window (`CHARACTER::RefineInformation`,
+`G/char_item.cpp:1865-1968`, reached from `ReceiveItem`'s smith arms, `:9452-9481`), and
+`CInputMain::Refine` (`G/input_main.cpp:3316-3391`) runs `DoRefine` (`G/char_item.cpp:
+1421-1585`) on the answer.
+
+- `protocol/src/gc_refine.rs` (new): `GcRefineInformation`, the server's 60-byte
+  `TPacketGCRefineInformation` under `HEADER_GC_REFINE_INFORMATION` = 119 (0x77,
+  `G/packet.h:192`), which the client registers as `_NEW`. The 0x5f `_OLD` byte is only an
+  enumerator (`packet.h:179`) and is never sent, so row `gc.refine_information` is `unused`
+  (positive control: `HEADER_GC_TARGET_INFO` shows its enumerator and its send site). Golden
+  bytes and refusal tests; the 0x77 inventory row is implemented (116 of 134, 18 missing:
+  7 fixed-size, 11 dynamic), and the pins in `gc_inventory.rs`, `protocol/tests/cg_wiring.rs`
+  and `AGENTS.md` follow.
+- `gamedata::refine`: `RefineRecipes::from_dump` reads `refine_proto` from the owner's
+  `player.sql` (579 recipes; the first row of an id is kept); the server loads it at boot and
+  refuses to start on a dump that does not parse. `gamedata::item_kind` gains `USE_TUNING`.
+- `world::character::smith_refine` (new): `refined_item` is `CreateItem` plus
+  `CopyAllAttrTo` (`G/item_manager.cpp:1965-2013`): an accessory's sockets are copied;
+  otherwise the stones of the first three sockets are packed from socket 0 behind the
+  created sockets, and the refine element and attributes are copied. `swap_refined` sends
+  the quickslot delete, the clear and, on a success, the new item's set.
+  `drop_item::stamp_created_sockets` is now shared with the drop path.
+- `prodomo::game_state::smith_refine` (new): the window (`refine_information`, which marks
+  the character as refining), and `refine`: the busy line `[LS;1014]` (trade, safebox, shop),
+  the cancel (255), the refine time that `IsHack` refuses a warp for (`[LS;437;%d]`,
+  `G/char.cpp:8283-8288`), the normal refine, and the money-only arm with
+  `deviltower_zone.can_refine` and its hack log for a set of 500 and up; then `DoRefine`'s
+  gates in legacy's order (`[LS;1002]`, `[LS;1077]`, `[LS;1003]`, `[LS;991]`, `[LS;67]`,
+  `[LS;1035]`), the materials, the draw (10 off for money-only), the swap, and the fee
+  (`ChangeGold`'s record with amount 0). The give arms now open the window, and the destroy
+  and give steps refuse while it is open. The window closes on every answer and on a
+  departure.
+- The descriptor takes 0x60 as a belongings step (`refine_an_item`, `GameCommand::Refine`);
+  no observer check guards it, as in legacy. A malformed record closes the connection.
+- Not ported (hooks): the scroll types 2, 3, 5 and 6 return where `DoRefineWithScroll`
+  returns while `m_iRefineAdditionalCell < 0`, since only the unported `CG_ITEM_USE_TO_ITEM`
+  sets it; guild smiths (fee, draw and deposit); `IsSecured`; the cube, aura and dragon
+  soul refine windows; the refine, item and money logs; the `ApplyAddon` roll, which
+  `CopyAttributeTo` overwrites in any case.
+- Divergences: a gift from a custom bank cell (290 and up) or another window opens no
+  window, where legacy writes the cell into the window's one-byte `pos` and the client's
+  refine names a different cell; a refined item that would not fit its cell is refused
+  before anything changes, where legacy's `AddToCharacter` overlaps the cells below. Both
+  are in `docs/STATUS.md`'s defects list.
+
+Scenario `a_smith_refines_a_sword_for_its_fee`: a smith 20016 beside Alpha (50000 gold).
+The +6 sword opens set 7's window (one 30053, 30000 gold, 54%), and a destroy is refused
+while it is open; the refine without the stone answers `[LS;1035]`. The +8 sword's window
+(two 30033, 75000, 36%) closes with type 255 unanswered, and its refine answers `[LS;67]`.
+The +9 sword is not taken. The +0 sword's window (600 gold, 90%) refines: the command line,
+the cell's clear, the +1 sword's set on a success, then the gold record at 49400; the store
+agrees. Passed 8/8; the mutant that drops the window gate from `destroy_item` failed it.
+Unit tests `a_sure_refine_swaps_the_item_and_takes_the_fee` and
+`a_failed_refine_destroys_the_item_and_takes_the_fee` pin both draws with recipes at 100%
+and 0%; `the_owner_dump_holds_every_recipe_with_its_materials` and
+`the_first_row_of_an_id_is_kept` pin the reader. Rows: `cg.game.refine`,
+`gc.refine_information_new` and `table.refine_proto` are `ported`, `gc.refine_information`
+is `unused`, and `sys.item.refine` is `partial`.
+
+Width: `TPacketGCRefineInformation` was compiled verbatim with `g++ -m32 -fsyntax-only`
+under `#pragma pack(1)` (`i686-linux-gnu-g++-12` is not installed). Its `static_assert`s
+held: size 60, `material_count` at offset 11, `materials` at 20, `TPacketCGRefine` 3 bytes,
+and a packed two-`long` struct 8 bytes; an assertion of 61 failed as the negative control.
+
+Gates (2026-11-04): `cargo fmt --all -- --check` clean; build clean; the full suite 4688
+passed, 0 failed in 40 targets (the first run failed `inventory_rows_keep_the_rules`,
+because a `partial` row named a scenario, and clippy found the scenario 106 lines long;
+both were fixed and the suite rerun); doc-tests 1 passed; clippy `-D warnings` clean;
+rustdoc `-D warnings` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1).
+The width above was measured with the host `g++ -m32`. Afterwards no `prodomo\_%` database
+remained. No ADR changed.
+
+## 386. An item used on an item (CG_ITEM_USE_TO_ITEM: stones and tuning scrolls)
+
+`CInputMain::ItemToItem` (`G/input_main.cpp:1006-1022`) is routed in the game and dead phases
+behind the observer gate (`:3719-3722`), which `is_observer_refused` now names. It runs
+`CHARACTER::UseItem`'s gates for the used item (`G/char_item.cpp:7168-7400`): the dead check,
+`CanHandleItem` (the sash and changelook windows and an open refine), the job, sex, level,
+champion and quest checks of `world::character::use_checks`, shared with `CG_ITEM_USE` through
+the new `use_source`. Two `UseItemEx` arms are ported:
+
+- **The stone** (`ITEM_METIN`, `:6965-7034`, `world::character::put_stone`): a pick or rod
+  target is silent; a stone of a kind the item already holds answers `[LS;426]`; a body stone
+  on an item that is not body armour `[LS;427]`, a weapon stone on a non-weapon `[LS;428]`, any
+  other target `[LS;431]`. The first socket whose value is 1 or 2 and at least the stone's grade
+  takes the stone's vnum with `[LS;1613]` and the item's update record, and one stone is spent;
+  no such socket answers `[LS;431]`. `ENABLE_ADDSTONE_FAILURE` is not defined, so no draw.
+- **The tuning scroll** (`USE_TUNING`, `:5959-6013`): the +3 and +4 stone lines, the scroll's
+  type from `value0` (set 702 needs the dragon scroll, set 501 refuses the others), both cells in
+  the base inventory, then `RefineItem` opens the window of that type with the scroll's cell
+  kept (`m_iRefineAdditionalCell`). `CG_REFINE` with types 2, 3, 5 and 6 then runs
+  `DoRefineWithScroll` (`:1595-1862`): the scroll must still be the one used and differ from the
+  item; the war god's and memo scrolls refuse an item at +4 or more with `[LS;1056]`, the
+  yagong scrolls one below level 40 with `[LS;162]`, `IsRefineThroughGuild` aside; the odds are
+  the recipe's, the yongsin and yagong tables, 100 for the war god's and memo scrolls and 80
+  for the dragon's. A success swaps to the refined item; a failure swaps to the item it was
+  refined from (`GetRefineFromVnum`, the first proto in vnum order), or keeps the item when
+  there is none or the scroll is a magic iron, whose failure takes legacy's last arm. The
+  scroll, the materials and the fee are spent either way. The plan code is shared with the
+  smith's (`RefinePlan` gained the fail outcome and the scroll).
+
+The other target arms (the detachment, the attribute and socket scrolls, costumes, talismans,
+hair, the sash and changelook cleaners) fall to the plain use, which refuses them as not
+ported.
+
+Defect not reproduced: `m_iRefineAdditionalCell` is never initialised and `ClearRefineMode`
+does not reset it. The Rewrite starts with no scroll cell, keeps the last one as legacy does,
+and forgets it when the character leaves. The window's one-byte `pos` limits the scroll refine
+to the base inventory, as in ledger 385.
+
+Scenario `a_stone_and_a_blessing_are_used_on_a_sword`: a stone sits in the sword's empty socket
+and a second is refused with `[LS;426]`; the war god's blessing opens the type-5 window on a +6
+sword whose refine `[LS;1056]` refuses, and refines the +0 sword at 100 percent, spending the
+scroll and the fee and keeping the stone. Eight concurrent runs passed. A mutant dropping the
+same-kind check was killed; the file was restored by checksum. Unit tests in
+`game_state::use_to_item`: `a_failed_scroll_refine_steps_the_item_back`,
+`a_failed_magic_iron_keeps_the_item`, `the_refine_level_is_the_number_after_the_last_plus`.
+
+Inventory: `cg.game.item_use_to_item` and `sys.item.sockets` are `partial` (scenario in the
+note), and the `cg.game.refine` and `sys.item.refine` notes name the scroll refine. Counts:
+client-packets 73 ported / 10 partial / 23 missing / 5 unused; others unchanged.
+
+Gates (2026-11-04): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4692 passed, 0 failed in 40 targets (the one first-run failure, the observer classifier
+test listing 60 as passing, was corrected and its target rerun); `cargo test --workspace --doc`:
+1 passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 387. The event board (CG_REQUEST_EVENT_DATA, GC_EVENT_INFO)
+
+Legacy's `event` table (`legacy/sql/schema/player.sql:120-129`) is stored in migration 0023
+with a CHECK behind every rule (`EVENT_TYPE_NONE` refused, both times within the first second
+after the epoch and 2038-01-19, the 32-bit range `TEventTable` carries). `db::events::load_all`
+reads every row in id order (`m_mapEvent`'s order) with `EEventTypes` members from
+`BuildEventNameMap`'s order, and `serve` installs them into the world once after migration, as
+the guilds are installed: a world opened without its calendar answers every board empty.
+`CInputMain::RequestEventData` (`G/input_main.cpp:5466-5475`) is routed in the game and dead
+phases with no observer gate (`:3920-3921`), and the world answers with one `GC_EVENT_INFO`
+(`CEventManager::SendEventInfo`, `G/event_manager.cpp:613-646`), listing the events that start
+in the asked month and the uncompleted ones that start in an earlier month. The month is UTC;
+legacy's is `localtime`'s. The codec is `protocol::gc_event`: the 3-byte header with its size
+word and one 22-byte `TPacketEventData` per listed event, measured by compiling the verbatim
+bodies under `#pragma pack(1)` with `g++ -m32 -fsyntax-only` `static_assert`s (linking fails:
+the 32-bit runtime libraries are missing), with a packed two-`long` control of 8; a 30-byte
+assertion failed as it should, and the same file under `-m64` failed the entry and the
+control.
+
+Defects not reproduced: a calendar past 2978 entries truncates `wSize`, so the Rewrite refuses
+one that does not fit; the year is never compared, so a same-month event of another year is
+listed and a December one is never a "previous month" in January, and the Rewrite lists the
+same months, both recorded in STATUS.
+
+Scenario `the_event_board_lists_its_month_and_the_earlier_open_ones`: three stored rows, then
+March's board (its own OX row and the earlier open fishing row, in id order with every field),
+February's (its own two), and January's empty record. The first boot migrates, the rows are
+seeded, and the reboot installs the calendar, as the guild's reboot scenario does. Eight
+concurrent runs passed. A mutant dropping the earlier-month arm was killed; the file was
+restored by checksum. Unit tests: the month filter and the UTC month boundary in
+`game_state::event_calendar`, the id order and the refused rows in `db/tests/events.rs`, the
+type names in `db::events`, and the golden bytes and the too-long calendar in
+`protocol::gc_event`. The third settled pick arm pushed `apply_pick` past Clippy's line limit,
+so the three settled arms now share `apply_settled_pick`.
+
+Inventory: `cg.game.request_event_data` and `gc.event_info` are `ported`;
+`sys.event.manager` is `partial` (scenario in the note). Counts: client-packets 74 ported /
+10 partial / 22 missing / 5 unused; server-records 76/15 missing/3 partial/39 codec/1 unused;
+others unchanged.
+
+Gates (2026-11-04): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4701 passed, 0 failed in 41 targets; `cargo test --workspace --doc`: 1 passed;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` (the first run
+caught a duplicated size-word match arm, merged) and `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). Widths measured with `g++ -m32 -fsyntax-only` `static_assert`s; the
+32-bit runtime libraries are missing, so no probe linked. Afterwards no `prodomo\_%`
+database remained. No ADR changed.
+
+## 388. The melt's stone pick and the quest confirm (CG_SCRIPT_SELECT_ITEM, CG_QUEST_CONFIRM, GC_QUEST_CONFIRM)
+
+A script's `select_item` and `confirm` now wait for the client. `CG_SCRIPT_SELECT_ITEM`
+resumes a script suspended in `select_item` with the picked cell (`CQuestManager::SelectItem`,
+`G/questmanager.cpp:179-194`); with none waiting it answers nothing. `CG_QUEST_CONFIRM`
+(`CInputMain::QuestConfirm`, `G/input_main.cpp:2236-2248`) folds any nonzero answer to
+`CONFIRM_YES`, and the world finds the waiter by its PID itself, which retires the
+`PidOnline` round trip. `Manager::confirm` runs the answer as the waiter's own event, as
+legacy's `GetPC(waiter)` does: only the asked character is heard, `[END_CONFIRM_WAIT]`
+(`QUEST_SKIN_NOWINDOW`) ends the wait, and the script resumes with the answer. The asked
+character's `GC_QUEST_CONFIRM` (74 bytes, `ConfirmWithMsg`, `G/char.cpp:8076-8088`) goes to
+its client, or straight into the step's records when a script asks its own character.
+`confirm_timeout_event` answers `CONFIRM_TIMEOUT` (2) after `timeout` seconds of Pulses.
+
+The guild alchemists' melts run over the wire. `pc.ore_refine` and `pc.diamond_refine` spend
+in `OreRefine`'s order (`G/mining.cpp:421-464`): the 100 ore, then the fee's
+`GC_CHARACTER_GOLD_CHANGE`, which `pc.change_money` now sends when it is called, as
+`ChangeGold` does, then the stone, then the draw. The quest item bridge gains `item.get_id`,
+`item.get_cell`, `item.select` and `item.select_cell`.
+
+Divergence: `item.select` finds only an item the character holds; legacy's
+`ITEM_MANAGER::Find` takes any item of the server by id. Defects not reproduced, recorded in
+STATUS: legacy never cancels `confirm_timeout_event`, so a stale timer answers a later confirm
+early, and the Rewrite disarms the timer when an answer is heard (a new confirm replaces it);
+`OreRefine` takes the ore before it checks the gold, and the Rewrite checks the gold first.
+
+Two fixes outside the slice. `quest::sources::scripts` walked only real folders
+(`DirEntry::file_type` does not follow links), so a linked quest folder was skipped; it now
+follows links (`a_linked_folder_holds_scripts_like_a_real_one`). The harness's `link_all_but`
+wrote a scenario's file through a folder an earlier file had linked, into `legacy/`; it now
+replaces such a link with a made folder and accepts a folder the owner's data lacks. The
+stray probe file this left in `legacy/gamedata/locale/europe/quest/` during one run was
+removed, and `git status legacy/` is clean. The `pc.destroy_guild` and `pc.remove_from_guild`
+bridge arms were missing from `pc_api` (`the_guild_manage_names_answer` and
+`the_guild_man_parts_and_disbands` failed); they are restored. `host::BRIDGED` now lists the
+two refine names in the order of the API table.
+
+Scenarios. `an_ore_melt_asks_for_a_stone_and_melts_with_the_one_picked` (amber alchemist 20061):
+a pick with nothing waiting is silent; the question page with the 2700 that
+`GetOreRefineCost` shows, then `[SELECT_ITEM]`; the closed window's 0 and a pick that is not a
+stone are each told so and spend nothing; the stone's pick clears the ore cell, sends the
+3000 fee, clears the stone cell and then shows the win (the refined amber in the freed cell)
+or the loss. `a_confirm_asks_another_character_and_hears_its_answer_or_the_timeout` adds a
+probe quest on 20025, a talking NPC that no owner quest or shop names, because no owner quest
+calls `confirm`. Zulu's 7 is heard as 1 and no timeout follows 2.5 s later; Alpha cannot answer
+for Zulu; Zulu's no is heard as 0; unanswered, the timeout answers 2 after at least 1.9 s, and a
+late answer is silent. The diamond scenarios now pass the race to `melt_refiner`. Eight runs
+of both new scenarios passed. Four mutants were applied to pristine files and restored by
+checksum, and all four were semantic kills: dropping `end_confirm_wait`, passing no replier,
+passing the answer byte unfolded, and shifting the selection by one. Disarming on a heard
+answer is an equivalent mutant at the wire, because a new confirm replaces the arm and a
+stale arm meets no waiting script.
+
+Inventory: `cg.game.script_select_item`, `cg.game.quest_confirm`, `gc.quest_confirm`,
+`event.questlua.confirm_timeout_event`, `lua.item.get_id`, `lua.item.select`,
+`lua.item.select_cell`, `lua.pc.ore_refine` and `lua.pc.diamond_refine` are `ported`.
+`lua.item.get_cell` is `partial` (unit test only). `quest.guild_building_melt` stays `partial`:
+the master's rebuild click waits on `building.reconstruct` and `npc.get_guild`. Counts:
+client-packets 76 ported / 10 partial / 20 missing / 5 unused; server-records 77 ported / 15
+missing / 3 partial / 38 codec / 1 unused; quest-api 108 ported / 83 partial / 508 missing;
+timed-events 11 ported / 4 partial / 84 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4710 passed, 0 failed in 41 targets; `cargo test --workspace --doc`: 1 passed;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. The
+first suite run failed 29 tests because of the stray probe file and the missing guild arms,
+both fixed above. A scratch database, `prodomo_proc_349762_0_588906464`, had been left by that
+run; it was dropped, and a rerun of the new scenarios left none. `rustfmt` and `cargo-clippy`
+are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.
+
+## 389. Fishing and bait
+
+A bait goes on the worn rod, `CG_FISHING` casts and takes, and the fishing event bites and lets
+the fish get away, as `CHARACTER::fishing` (`G/char.cpp:5248-5320`), `CHARACTER::fishing_take`
+and `G/fishing.cpp` do.
+
+- `gamedata::item_kind::USE_BAIT` (6). `world::character::bait` holds `use_bait`: the use
+  checks, socket 2 of the rod in the weapon cell set to the bait's value 0, and one bait spent.
+  The line is `[LS;418]` while fishing (and nothing changes), `[LS;419]` with the name when the
+  rod already had bait, and `[LS;420]` when it had none; without a rod nothing happens.
+  `GameState::use_item` routes a bait there before the generic step, because the line needs the
+  fishing state.
+- `prodomo::game_state::fishing`: `fish` sets the rotation to `dir * 5`, then casts or takes.
+  The cast refuses a blocked cell `[LS;1051]`, no rod `[LS;817]` and an empty bait socket
+  `[LS;818]`, else sends `START` around and arms the event `number(10, 40)` seconds of Pulses
+  ahead. The event's first firing is the bite: it draws the fish (`DetermineFish` with the
+  `manwoo_event`/`fish_miss_pct` flags and the never-fished vnums) and sends `REACT` around, and
+  `FISH` to a fisher with the fish mind affect or a unique item of group 10009. Six seconds later
+  the fish gets away: `FAIL` around and the rod's bait emptied. A take before the bite sends
+  `STOP`; after it, `Compute` on the milliseconds since the bite lands the fish (`SUCCESS`
+  around, the fish event boxes, `FISH`, and the fish with its length in socket 0) or misses
+  (`FAIL`); then the rod trains on a 1 in 5 and its bait is spent. `fish_simul` shares
+  `compute`. A disconnect or a Warp ends the event. The descriptor decodes `CG_FISHING`, closes
+  on a malformed record, and stores the answered rows.
+- Not ported: the multi-farm gate (`sys.custom.multi_farm`; every character fishes), the
+  `fishevent` highscore (`lua.highscore.register`), the premium fish mind and `FishLog`.
+- Defects not reproduced (`docs/STATUS.md`): the uninitialised `dir` of every sub-header but
+  `START` is sent as 0; the unchecked sectree in the block check; `lower_bound` past the end in
+  `DetermineFish` reads as the empty catch.
+
+Scenarios: `a_rod_takes_its_bait_and_a_cast_taken_before_the_bite_stops`,
+`a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses` (the second take
+waits 3 s after the bite so both the catch and the miss are reached; eight runs reached each
+four times) and `a_cast_on_a_block_or_without_a_rod_is_refused`. Eight runs of each passed. Four
+mutants were applied to pristine files and restored by checksum, and all four were semantic
+kills: the `[LS;818]` check never firing, a 16 s getaway, `STOP` sent as `FAIL`, and the bait
+lines swapped.
+
+Inventory: `cg.game.fishing`, `gc.fishing`, `event.fishing.fishing_event` and `data.fishing`
+are `ported`; `sys.life.fishing` is `partial`. Counts: client-packets 77 ported / 10 partial /
+19 missing / 5 unused; server-records 78 ported / 15 missing / 3 partial / 37 codec / 1 unused;
+timed-events 12 ported / 4 partial / 83 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4717 passed, 0 failed in 41 targets; `cargo test --workspace --doc`: 1 passed;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. Clippy's
+first run found a binding name and a lazy `then`; both were fixed, and the three scenarios and
+the four fishing unit tests passed again. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 390. Mining
+
+`pc.mining` (`G/questlua_pc.cpp:3953`), `CHARACTER::mining` and `mining_cancel`
+(`G/char.cpp:5197-5245`), and `mining_event` with `GetOrePct`, `OreDrop` and `PracticePick`
+(`G/mining.cpp:121-162`, `:316-408`). No owner quest calls `pc.mining`; owner question 34 asks
+whether the 391 quest functions no loadable script names should be `unused`, and until the
+owner answers they are ported against probe quests, as this one is.
+
+- `quest`: the `Game` trait gains `mining(npc_vid)`; `pc.mining` is bridged (`BRIDGED` is 188
+  names).
+- `prodomo::game_state::quests`: the call is queued in the session and applied after the script
+  step, with the changelook and sash opens, so `GC_DIG_MOTION` follows the step's own records.
+- `prodomo::game_state::mining`: the 19 vein, raw and refined ore triples (shared with the ore
+  melt of ledger 388, whose `REFINED_ORES` table it replaces), the fraction, pick-grade and
+  skill-level tables. `mining` cancels a running dig with `[LS;815]`; a vein on another map,
+  beyond `DISTANCE_APPROX` 1000 or with no raw ore does nothing; no pick in the weapon cell
+  answers `[LS;816]`; otherwise `number(5, 15)` strokes go around in `GC_DIG_MOTION` and the
+  event is due 2 seconds of Pulses a stroke later. The event is taken before it judges: no pick,
+  a vein gone, then the roll against 20 plus the skill's and the pick grade's bonus. A hit lays
+  the raw ore (both `GetFractionCount` draws kept) within 200 of the digger, owned 15 seconds;
+  then the pick trains one step on a 1 in `value1`, with the top lines at `value2`, and the
+  descriptor stores its row.
+- `mining_cancel` runs at every `OnMove` stamp: `CHARACTER::Move` (`move_to`), the judged move's
+  attack, combo and skill functions, the fight, the monster's strike on its victim, the skill
+  stamps and the PvP claim. A logout drops the event silently (`G/char.cpp:719`, `:733`).
+- `mob_attack` lost a redundant rebinding to stay within Clippy's line limit.
+- Not ported: the multi-farm gate (`sys.custom.multi_farm`; every character mines), the pick
+  refine (`lua.__refine_pick`) and `SendMoneyLog`.
+
+Scenarios: `a_vein_dug_with_a_pick_drops_its_ore_or_fails_and_trains_the_pick`,
+`a_dig_ends_on_a_second_call_or_a_step` and `a_dig_without_a_pick_is_refused`. The vein stands
+on the free map 1 cell nearest Alpha's start (a vein is refused on a blocked cell, and Alpha's
+own start cell is blocked), with the digger 200 to its west; it shows among the view's monsters,
+not the listed NPCs. Eight runs of each passed; twelve runs of the first reached the ore five
+times and the miss seven. Five mutants were applied to pristine files and restored by checksum,
+all semantic kills: the cancel line, the `move_to` cancel removed, 1-second strokes, the pick
+check inverted and a two-step training.
+
+Inventory: `lua.pc.mining`, `gc.dig_motion` and `event.mining.mining_event` are `ported`;
+`sys.life.mining` is `partial`. Counts: server-records 79 ported / 15 missing / 3 partial /
+36 codec / 1 unused; quest-api 109 ported / 83 partial / 507 missing; timed-events 13 ported /
+4 partial / 82 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4722 passed, 0 failed in 41 targets; `cargo test --workspace --doc`: 1 passed;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. Clippy's
+first run found `mob_attack` at 101 lines; the rebinding was removed. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
+
+## 391. The quest's tool refines
+
+`_refine_pick` and `_fish_real_refine_rod` (`G/questlua_global.cpp:450-478`), which run
+`mining::RealRefinePick` and `fishing::RealRefineRod` (`G/mining.cpp:234-303`,
+`G/fishing.cpp:861-928`) on the tool in inventory cell `(BYTE)` of the last argument and push
+what they return. No owner quest calls either (owner question 34); the scenario uses a probe
+quest.
+
+- `world::character::tool_refine`: `refine_tool` now answers the step and a `ToolOutcome`
+  (`code()` is legacy's 1 refined, 0 fallback, 2 refused); its body moved into `run_tool_line`,
+  where every refusal is a `None`. `ToolRefine::PickAlone` is `RealRefinePick` without the GM
+  line's `CHEAT_MAX_PICK`. The GM lines (ledger 355) keep their step and ignore the outcome.
+- `quest`: the `Game` trait gains `refine_tool(cell, rod)`; both names are bridged (`BRIDGED`
+  is 190 names). A non-number argument is cell 0, as `lua_tonumber` reads it.
+- `prodomo::game_state::quests`: `refine_held_tool` runs the step on the session's storage,
+  syncs the slots naming the cell (`RemoveItem` deletes them) and lands the rows through the
+  descriptor; a step whose descriptor stores nothing refines nothing and answers 2.
+- Test fix: `assert_mesh_wire` (`a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya`)
+  failed once in the full suite when the revive timer's `GC_CHARACTER_UPDATE` landed between a
+  re-add and its additional info. The
+  arm itself sends no update, so every update is now set aside before the wire is read; eight
+  runs passed afterwards.
+
+Scenario: `a_quest_refines_a_trained_pick_and_rod_and_refuses_an_untrained_one` (the owner's
+100% draws refine the trained pick and rod and answer 1; the fresh pick answers 2 and nothing
+maxes it). The vein stage of ledger 390 is now `vein_stage`, which both probes share. Eight runs
+passed. Three mutants were applied to pristine files and restored by checksum, all semantic
+kills: `PickAlone` maxing first, 0 answered for a refine, and the rod flag inverted. The new
+unit test `a_pick_alone_refines_only_once_trained_and_never_maxes` and outcome asserts in the
+existing tool tests cover the fallback's 0.
+
+Inventory: `lua.__refine_pick` and `lua.__fish_real_refine_rod` are `ported`;
+`sys.life.mining`'s note no longer waits on the pick refine. Counts: quest-api 111 ported /
+83 partial / 505 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4724 passed, 0 failed in 41 targets (the first full run had the one `/set` failure fixed
+above); `cargo test --workspace --doc`: 1 passed; `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 392. The horse's state
+
+The horse without a summon: `CHorseRider`'s level, health, stamina and drop time
+(`G/horse_rider.cpp`), `CHARACTER::SetHorseLevel` (`G/char_horse.cpp:396-400`), `EnterHorse`
+and the `__FIX_NIVEL_CAL__` refresh in `CInputLogin::Entergame` (`G/input_login.cpp:647-650`,
+`:887-897`), the stamina regeneration event (`G/horse_rider.cpp:254-283`), the GM lines
+`/horse_state`, `/horse_level` and `/horse_set_stat` (`G/cmd_gm.cpp:3745-3833`), and the quest
+names that need no summoned horse (`G/questlua_horse.cpp`, `G/questlua_pc.cpp:1491-1525`).
+
+- `world::character::horse`: `Horse` holds `HorseInfo` and the full `c_aHorseStat` table
+  (`HORSE_STATS`, 31 rows). `set_level` clamps to 0..30, refills both pools and moves the drop
+  time three days on; `enter` starts the regeneration of a living horse and takes the drops that
+  came due; `catch_up_logoff` is `UpdateHorseDataByLogoff`; `feed`, `revive`, `set_stat`, the
+  riding pair and the two event steps follow legacy, a health of 0 killing the horse and
+  emptying its stamina. The horse records which event runs and whether it was created afresh;
+  the world owns the schedule. `send_info` queues `horse_state %d %d %d` only while summoned or
+  ridden, and only on a change, so no line goes out yet. `Points` carries the horse.
+- Store: migration `0024_player_horse.sql` adds `horse_level` (CHECK 0..30), `horse_riding`,
+  `horse_hp`, `horse_hp_droptime` (CHECK 0..4294967295), `horse_stamina`, `horse_skill_point`
+  and `last_play_at` to `player`. `PlayerSave` writes the horse and stamps `last_play_at`; the
+  load answers the horse and the seconds since that stamp (0 for a NULL stamp, which is
+  unobservable: the horse is level 0 or refilled at entry).
+- `prodomo::game_state::horse`: `enter_horse` runs after the enter-game burst and before the
+  quest login: `EnterHorse`, then, for a level above 0, `SetHorseLevel(GetHorseLevel())` with
+  byte 76. The refresh plants skill 130 in memory only; every login plants it again from the
+  stored level (owner question 35 asks whether the refill is a Quirk). A row stored while ridden
+  enters unridden until the riding slice. `horse_timers` holds each horse's due Pulse
+  (period × 25), runs on `run_horse_timers` and is dropped on leave. `/horse_level` tells the
+  caller, then plants the level on the named character with `ComputePoints` and byte 76, and the
+  descriptor stores the planted skill through the shared `store_other_skill` (also used by
+  `/setskillother`). `/all_skill_master` now runs `SetHorseLevel(40)` first, so the horse stands
+  at 30.
+- `quest`: the `Game` trait gains `horse()` (a `HorseView`), `set_horse_level` and
+  `feed_horse`; the new `horse_api` family bridges `horse.is_riding`, `advance`, `get_level`,
+  `set_level` (a number only, `(int)` then clamped), `get_health`, `get_health_pct`,
+  `get_stamina`, `get_stamina_pct` (0 without a horse, `MINMAX(0, x * 100 / max, 100)`),
+  `get_grade`, `is_dead`, `feed`, `pc.get_horse_level` and `pc.is_horse_alive` (`BRIDGED` is
+  203 names, in the inventory's order). The session's `set_horse_level` lands the skill as a
+  climb, so the store keeps it.
+
+Scenario: `a_horse_levels_feeds_and_dies_by_gm_lines_and_quests` (the usage and missing-name
+lines; `/horse_level Alpha 25` with one byte 76 at 25; `/horse_set_stat 10 30` read as 25% and
+21%; a probe quest's readers, a feed, an advance to 26 that refills, a word that sets nothing
+and 99 clamped to 30; `/horse_set_stat 0 5` kills the horse before the 5 lands; the dead horse
+is not fed; the save; the relog's two bytes 76 at 30 and the refilled horse).
+`a_master_line_plants_every_usable_skill` now reads the horse at 30. Eight runs passed. Three
+mutants were applied to pristine files and restored by checksum, all semantic kills:
+`set_stat` taking the stamina first, `enter_horse` without the refresh, and
+`/all_skill_master` without `SetHorseLevel`. New unit tests: five in `world::character::horse`
+and `the_horse_names_read_the_pools_and_clamp_the_level` in `quest`.
+
+Inventory: `cmd.horse_state`, `cmd.horse_level`, `cmd.horse_set_stat` and twelve
+`lua.horse.*`/`lua.pc.*horse*` rows are `ported`; `lua.horse.is_riding`,
+`event.horse_rider.horse_stamina_regen_event` and `sys.char.horse` are `partial`;
+`lua.horse.set_stat0` is `unused` (commented out of the registration). Counts: commands 211
+ported / 54 missing / 1 partial / 1 unused; quest-api 123 ported / 84 partial / 491 missing /
+1 unused; timed-events 13 ported / 5 partial / 81 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4730 passed, 1 failed in 41 targets. The first full run failed
+`every_api_name_is_registered_and_the_unported_ones_refuse`, because the new `BRIDGED` names
+were out of the inventory's order; after the reorder that target passed 9 of 9. The second full
+run failed only `a_gm_flags_a_stray_dog_aggressive_and_coward`: the coward's escape measured 5125
+against the 5100 bound. That scenario has no horse; it passed in the first run and in eight
+parallel runs on their own, so it is a load flake recorded here and left open.
+`cargo test --workspace --doc`: 1 passed; `cargo clippy --workspace --all-targets --locked
+--offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+--locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
+width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

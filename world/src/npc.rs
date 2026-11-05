@@ -927,6 +927,30 @@ impl Respawner {
         self
     }
 
+    /// `CMobManager::Get(vnum)` (`G/mob_manager.cpp:127-135`): the first row
+    /// for `vnum` in sorted order, or none.
+    #[must_use]
+    pub fn mob(&self, vnum: u32) -> Option<&gamedata::records::MobTableRecord> {
+        self.protos.get(vnum)
+    }
+
+    /// `CMobManager::Get(name, true)` (`G/mob_manager.cpp:137-160`): the row
+    /// whose locale name starts with `name`, first in the map's order, or
+    /// none. The map is keyed by name, so the walk is by name; the rows here
+    /// stand by vnum, so the walk is the same comparison in vnum order.
+    #[must_use]
+    pub fn mob_by_name(&self, name: &[u8]) -> Option<&gamedata::records::MobTableRecord> {
+        self.protos.rows().iter().map(|row| &row.table).find(|row| {
+            let end = row
+                .locale_name
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(row.locale_name.len());
+            let locale = &row.locale_name[..end];
+            locale.len() >= name.len() && locale[..name.len()] == *name
+        })
+    }
+
     /// `regen_spawn(regen, false)` as `regen_event` runs it (`G/regen.cpp:582-599`): the
     /// [`Regen::missing`] units of the regen at `index` in its map's list, each by the spawner
     /// its entry names and with the same draws as at boot. Answers the characters it stood up,
@@ -1034,6 +1058,178 @@ impl Respawner {
         let _stood = spawner.spawn_mob(&mut site, vnum, place, dice)?;
         self.vids = spawner.into_vids();
         Ok(site.npcs.into_iter().next())
+    }
+
+    /// `SpawnMob` as `/mob_ld` runs it (`G/cmd_gm.cpp:806-814`,
+    /// `G/char_manager.cpp:382-468`): the named mob at the named point on its
+    /// map, facing `dir`, or nothing when no sectree holds the point or the
+    /// cell refuses. `-1` draws the facing, as `SpawnMob` does. The caller
+    /// scales the metres to centimetres and reads the stone's spawn motion,
+    /// so both arrive ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the character outnumbers the VIDs left.
+    pub fn spawn_directed(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        vnum: u32,
+        (x, y): (i32, i32),
+        dir: i32,
+        spawn_motion: bool,
+        dice: &mut dyn Dice,
+    ) -> Result<Option<Npc>, NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        let facing = if dir == -1 {
+            Facing::Drawn
+        } else {
+            Facing::Given(u16::try_from(dir).unwrap_or_default())
+        };
+        let place = Place {
+            x,
+            y,
+            z: 0,
+            spawn_motion,
+            facing,
+        };
+        let _stood = spawner.spawn_mob(&mut site, vnum, place, dice)?;
+        self.vids = spawner.into_vids();
+        Ok(site.npcs.into_iter().next())
+    }
+
+    /// `SpawnMobRange` as `/mob` runs it (`G/cmd_gm.cpp:747-757`,
+    /// `G/char_manager.cpp:473-503`): the proto, the stone's forced spawn
+    /// motion, and the drawn point standing or refusing, 16 tries. Answers
+    /// the character that stood, or none when no drawn point took. The
+    /// caller draws the box's corners (`number(200, 750)` each side), so the
+    /// box arrives ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the character outnumbers the VIDs left.
+    pub fn spawn_mob_line(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        vnum: u32,
+        (sx, sy, ex, ey): (i32, i32, i32, i32),
+        spawn_motion: bool,
+        dice: &mut dyn Dice,
+    ) -> Result<Option<Npc>, NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        let area = Area { sx, sy, ex, ey };
+        let _stood = spawner.spawn_mob_range(&mut site, vnum, area, spawn_motion, dice)?;
+        self.vids = spawner.into_vids();
+        Ok(site.npcs.into_iter().next())
+    }
+
+    /// `SpawnMobRandomPosition` as `/mm` runs it (`G/cmd_gm.cpp:632`,
+    /// `G/char_manager.cpp:262-380`): the named mob at a random point of the
+    /// caller's map, or nothing when the vnum has no proto or 2000 tries find
+    /// no cell. The event-gated vnums refuse before any draw, as the regen
+    /// path does. The caller holds the map, so no allow-list is read: the
+    /// legacy gate is a server-layout check, not a gameplay rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the character outnumbers the VIDs left.
+    pub fn spawn_random_line(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        vnum: u32,
+        dice: &mut dyn Dice,
+    ) -> Result<Option<Npc>, NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        let _stood = spawner.spawn_mob_random_position(&mut site, vnum, dice)?;
+        self.vids = spawner.into_vids();
+        Ok(site.npcs.into_iter().next())
+    }
+
+    /// `SpawnGroup` as `/group` runs it (`G/cmd_gm.cpp:554`,
+    /// `G/char_manager.cpp:595-667`): the group in the box around the
+    /// caller, or nothing when the vnum names no group. Not aggressive, no
+    /// stone, no dungeon: the line's four extra arguments are the defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the character outnumbers the VIDs left.
+    pub fn spawn_group_line(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        vnum: u32,
+        (sx, sy, ex, ey): (i32, i32, i32, i32),
+        dice: &mut dyn Dice,
+    ) -> Result<Vec<Npc>, NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        let area = Area { sx, sy, ex, ey };
+        let _stood = spawner.spawn_group(&mut site, vnum, area, false, None, dice)?;
+        self.vids = spawner.into_vids();
+        Ok(std::mem::take(&mut site.npcs))
+    }
+
+    /// `SpawnGroupGroup` as `/grrandom` runs it (`G/cmd_gm.cpp:535`,
+    /// `G/char_manager.cpp:581-593`): one group drawn uniformly, spawned as
+    /// `/group` spawns it, or nothing when the vnum names no group-group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the character outnumbers the VIDs left.
+    pub fn spawn_group_random_line(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        vnum: u32,
+        (sx, sy, ex, ey): (i32, i32, i32, i32),
+        dice: &mut dyn Dice,
+    ) -> Result<Vec<Npc>, NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        let area = Area { sx, sy, ex, ey };
+        let _stood = spawner.spawn_group_group(&mut site, vnum, area, dice)?;
+        self.vids = spawner.into_vids();
+        Ok(std::mem::take(&mut site.npcs))
     }
 }
 
@@ -2205,5 +2401,23 @@ mod tests {
             .iter()
             .all(|n| n.vnum == 102 && n.stone == Some(stone)));
         assert_eq!(dice.left(), 7);
+    }
+
+    #[test]
+    fn a_mob_lookup_answers_the_row_by_vnum_or_name_prefix() {
+        let respawner = Respawner::new(
+            Arc::new(protos()),
+            Arc::new(groups()),
+            Arc::new(names()),
+            NpcVids::starting_at(FIRST_NPC_VID),
+        );
+        assert_eq!(respawner.mob(101).map(|row| row.vnum), Some(101));
+        assert!(respawner.mob(999_999).is_none());
+        assert_eq!(
+            respawner.mob_by_name(b"Proto").map(|row| row.vnum),
+            Some(101),
+            "the first row in vnum order whose locale name starts with the prefix"
+        );
+        assert!(respawner.mob_by_name(b"Nope").is_none());
     }
 }

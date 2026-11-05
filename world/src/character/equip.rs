@@ -55,7 +55,9 @@ use super::dice::{number, Dice};
 use super::equipment::{
     accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, Worn, PARTS,
 };
-use super::item_move::{ItemChange, ItemRecord, MoveRecord, MoveRefused, Unported};
+use super::item_move::{
+    ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, MoveRefused, Unported,
+};
 use super::items::CharacterItems;
 use super::points::{apply_is_ported, race_to_job, Points};
 use crate::item::{gc_item_clear, Item, ITEM_FLAG_IRREMOVABLE};
@@ -328,6 +330,54 @@ pub fn recompute_points(
     let mut equipper = Equipper::new(items, gear, 0);
     equipper.recompute(vnum);
     std::mem::take(&mut equipper.trail.records)
+}
+/// `do_item_full_set`'s unequip and equip (`G/cmd_gm.cpp:4760-4902`): the six first cells
+/// and the shield come off first (`UnequipItem`), then each `vnums` piece is made fresh
+/// and goes on where [`find_equip_cell`] says, in order, skipping what cannot go on.
+/// `make` hands a fresh [`Item`](crate::item::Item) for a vnum, or `None` when the vnum
+/// has no prototype or no id is left; the unequips ran before the first make, so a
+/// piece never overwrites what was worn.
+pub fn wear_full_set(
+    items: &mut CharacterItems,
+    gear: &mut Gear<'_>,
+    usable_cells: u16,
+    vnums: &[u32],
+    mut make: impl FnMut(u32) -> Option<Item>,
+) -> MoveDone {
+    const STRIPPED: [EWearPositions; 7] = [
+        EWearPositions::Body,
+        EWearPositions::Head,
+        EWearPositions::Foots,
+        EWearPositions::Wrist,
+        EWearPositions::Weapon,
+        EWearPositions::Neck,
+        EWearPositions::Shield,
+    ];
+    let mut equipper = Equipper::new(items, gear, usable_cells);
+    for wear in STRIPPED {
+        if let Some(held) = worn_at(equipper.items(), wear as u16) {
+            let _ = equipper.unequip_item(&held);
+        }
+    }
+    for vnum in vnums {
+        let Some(piece) = make(*vnum) else { continue };
+        let Ok(proto) = equipper.proto(piece.vnum) else {
+            continue;
+        };
+        let Some(wear) = find_equip_cell(equipper.items(), proto) else {
+            continue;
+        };
+        if worn_at(equipper.items(), wear).is_some() {
+            continue;
+        }
+        let _ = equipper.equip_bare(wear, &piece);
+    }
+    let trail = equipper.into_trail();
+    MoveDone {
+        kind: MoveKind::FullSet,
+        records: trail.records,
+        changes: trail.changes,
+    }
 }
 
 /// `CItem::FindEquipCell` with no candidate (`G/item.cpp:628-779`): the wear cell the item
@@ -863,6 +913,24 @@ impl<'s, 'g> Equipper<'s, 'g> {
         self.put_on(wear, item)?;
         self.add_to_character(held, cell)
     }
+    /// `CItem::EquipTo` on a fresh item (`G/item.cpp:1402-1505`), with the seed landed
+    /// already: the item goes into `wear` unread, its applies modify the points
+    /// (`ModifyPoints(true)`), and the recompute's points records and the look follow.
+    /// The caller found `wear` through [`find_equip_cell`] while it stands empty, so
+    /// `EquipTo`'s occupied-cell refusal cannot fire.
+    fn equip_bare(&mut self, wear: u16, item: &Item) -> Result<(), MoveRefused> {
+        let proto = self.proto(item.vnum)?;
+        let pos = wear_pos(wear);
+        self.items.set(pos, item).map_err(MoveRefused::Storage)?;
+        self.trail
+            .records
+            .push(MoveRecord::Item(ItemRecord::Set(item.gc_item_set(pos, 0))));
+        let stored = self.stored(item)?;
+        self.trail.changes.push(ItemChange::Created(stored.clone()));
+        self.modify_points(wear, &stored, proto, true);
+        self.recompute(item.vnum);
+        Ok(())
+    }
 }
 
 /// The item types whose `UseItemEx` arm is `EquipItem` or `UnequipItem`
@@ -898,8 +966,9 @@ pub fn is_skill_book(proto: &ItemProto) -> bool {
 }
 
 /// The `ITEM_QUEST` the `RENEWAL_PICKUP_AFFECT` arm of `UseItemEx` takes
-/// (`G/char_item.cpp:2852-2872`).
-const PICKUP_AFFECT_ITEM: u32 = 70_002;
+/// (`G/char_item.cpp:2852-2872`). It leaves here as any quest item does, and the caller runs
+/// the arm in place of the item's quest.
+pub const PICKUP_AFFECT_ITEM: u32 = 70_002;
 
 /// Run one `CG_ITEM_USE` on an item that is worn by using it: `CHARACTER::UseItem` and the
 /// equip arm of `UseItemEx` (`G/char_item.cpp:7168-7400`, `:2718-3053`). An item that is
@@ -927,20 +996,9 @@ pub fn use_item(
     rules: &super::item_move::MoveRules,
     gear: Option<&mut Gear<'_>>,
 ) -> Result<super::item_move::MoveDone, MoveRefused> {
-    use super::item_move::{declined, done, is_flat_window, MoveKind};
+    use super::item_move::{declined, done, MoveKind};
 
-    if !super::inventory::is_valid_item_position(at) {
-        return Err(MoveRefused::InvalidSource);
-    }
-    if !is_flat_window(at.window_type) {
-        return Err(MoveRefused::NotPorted(Unported::SourceWindow(
-            at.window_type,
-        )));
-    }
-    let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
-    if items.is_exchanging(item.id) {
-        return Err(MoveRefused::Exchanging);
-    }
+    let item = use_source(items, at)?;
     let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
     let proto = gear
         .protos
@@ -955,51 +1013,10 @@ pub fn use_item(
     if !potion && !book && !quest && !USED_BY_WEARING.contains(&proto.item_type) {
         return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
-    let race = gear.points.race();
-    if proto.anti_flags & job_anti_flag(race) != 0 {
-        return Err(MoveRefused::NotUsableByJob);
-    }
-    if proto.anti_flags & sex_anti_flag(race) != 0 {
-        return Err(MoveRefused::WrongSex);
-    }
-    if rules.questing {
-        return Err(MoveRefused::UsedWhileQuesting);
-    }
-    for limit in &proto.limits {
-        let (have, refused) = match limit.kind {
-            LIMIT_LEVEL => (i32::from(gear.points.level()), MoveRefused::UseLevelTooLow),
-            LIMIT_CHAMPION => (
-                i32::from(gear.points.conqueror_level()),
-                MoveRefused::ChampionTooLow,
-            ),
-            _ => continue,
-        };
-        if have < limit.value {
-            return Err(refused);
-        }
-    }
-    if super::inventory::is_belt_inventory_position(item.pos) {
-        let grade = rules.belt_grade.ok_or(MoveRefused::NoBeltWorn)?;
-        if !super::items::belt_cell_is_available(item.pos.cell - BELT_INVENTORY_SLOT_START, grade) {
-            return Err(MoveRefused::BeltCellLocked);
-        }
-    }
-    // `REAL_TIME_FIRST_USE` starts the item's clock here, before the switch; a timed item is
-    // not ported, so it is refused before that change.
-    if proto
-        .limits
-        .iter()
-        .any(|limit| limit.kind == LIMIT_REAL_TIME_START_FIRST_USE)
-    {
-        return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)));
-    }
+    use_checks(&item, proto, rules, gear.points)?;
     if quest {
-        // `RENEWAL_PICKUP_AFFECT` (`prodomodefines.h:151`) gives 70002 its own arm, which
-        // adds the pick-up affect; it is not ported.
-        if item.vnum == PICKUP_AFFECT_ITEM {
-            return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
-        }
-        // `case ITEM_QUEST` changes nothing here: the caller runs the item's quest.
+        // `case ITEM_QUEST` changes nothing here: the caller runs the item's quest, or the
+        // pick-up arm `RENEWAL_PICKUP_AFFECT` gives 70002 (`G/char_item.cpp:2852-2872`).
         return Ok(done(MoveKind::QuestUsed, Trail::default()));
     }
     if potion {
@@ -1032,6 +1049,83 @@ pub fn use_item(
         Ok(kind) => Ok(done(kind, trail)),
         Err(refused) => declined(refused, trail),
     }
+}
+
+/// `UseItem`'s source checks (`G/char_item.cpp:7177-7190`): a valid cell of a window this
+/// build lays flat, holding an item that is not offered in a trade.
+///
+/// # Errors
+///
+/// [`MoveRefused::InvalidSource`], [`MoveRefused::NotPorted`] for another window,
+/// [`MoveRefused::Empty`] and [`MoveRefused::Exchanging`].
+pub fn use_source(items: &CharacterItems, at: ItemPos) -> Result<Item, MoveRefused> {
+    if !super::inventory::is_valid_item_position(at) {
+        return Err(MoveRefused::InvalidSource);
+    }
+    if !super::item_move::is_flat_window(at.window_type) {
+        return Err(MoveRefused::NotPorted(Unported::SourceWindow(
+            at.window_type,
+        )));
+    }
+    let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
+    if items.is_exchanging(item.id) {
+        return Err(MoveRefused::Exchanging);
+    }
+    Ok(item)
+}
+
+/// `UseItem`'s and `UseItemEx`'s checks of the item used, in legacy's order, after the
+/// source cell, the trade and the proto: the job (`CanUsedBy`), the sex, a waiting script
+/// (`@fixme150`), the level and conqueror level limits, and the belt cell
+/// (`G/char_item.cpp:7168-7400`, `:2718-2800`). A `REAL_TIME_FIRST_USE` item is refused as
+/// not ported, before its clock would start.
+///
+/// # Errors
+///
+/// The first check that refuses; none changes anything.
+pub fn use_checks(
+    item: &Item,
+    proto: &ItemProto,
+    rules: &super::item_move::MoveRules,
+    points: &Points,
+) -> Result<(), MoveRefused> {
+    let race = points.race();
+    if proto.anti_flags & job_anti_flag(race) != 0 {
+        return Err(MoveRefused::NotUsableByJob);
+    }
+    if proto.anti_flags & sex_anti_flag(race) != 0 {
+        return Err(MoveRefused::WrongSex);
+    }
+    if rules.questing {
+        return Err(MoveRefused::UsedWhileQuesting);
+    }
+    for limit in &proto.limits {
+        let (have, refused) = match limit.kind {
+            LIMIT_LEVEL => (i32::from(points.level()), MoveRefused::UseLevelTooLow),
+            LIMIT_CHAMPION => (
+                i32::from(points.conqueror_level()),
+                MoveRefused::ChampionTooLow,
+            ),
+            _ => continue,
+        };
+        if have < limit.value {
+            return Err(refused);
+        }
+    }
+    if super::inventory::is_belt_inventory_position(item.pos) {
+        let grade = rules.belt_grade.ok_or(MoveRefused::NoBeltWorn)?;
+        if !super::items::belt_cell_is_available(item.pos.cell - BELT_INVENTORY_SLOT_START, grade) {
+            return Err(MoveRefused::BeltCellLocked);
+        }
+    }
+    if proto
+        .limits
+        .iter()
+        .any(|limit| limit.kind == LIMIT_REAL_TIME_START_FIRST_USE)
+    {
+        return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1206,11 +1300,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         })
     }
 
@@ -1801,10 +1898,10 @@ mod tests {
         let mut case = Case::new(&[(inv(3), Item::new(7, HIGH_QUEST_BOOK))]);
         assert_eq!(case.use_refused(inv(3)), MoveRefused::UseLevelTooLow);
         let mut case = Case::new(&[(inv(3), Item::new(7, PICKUP_AFFECT_ITEM))]);
-        assert_eq!(
-            case.use_refused(inv(3)),
-            MoveRefused::NotPorted(Unported::Use(gamedata::item_kind::ITEM_QUEST))
-        );
+        let used = case
+            .use_with(inv(3), &RULES)
+            .expect("70002 passes the checks");
+        assert_eq!(used.kind, MoveKind::QuestUsed);
     }
 
     /// `UseItem` (`@fixme150`, `G/char_item.cpp:7349-7354`): while a script waits nothing is
@@ -1995,5 +2092,49 @@ mod tests {
             wear_of(ItemPos::new(EWindows::DragonSoulInventory as u8, 0)),
             None
         );
+    }
+
+    /// `wear_full_set` strips the six first cells and the shield, then puts each
+    /// made piece where `FindEquipCell` says, skipping what cannot go on.
+    #[test]
+    fn a_full_set_strips_then_kits_in_order() {
+        use gamedata::item_kind::ARMOR_BODY;
+        let protos = ItemProtos::from_rows(vec![
+            proto(SWORD, ITEM_WEAPON, 0, WEARABLE_WEAPON),
+            proto(ARMOUR, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY),
+        ]);
+        let mut items = holding(&[
+            (wear_pos(BODY), Item::new(3, ARMOUR)),
+            (inv(0), Item::new(4, SWORD)),
+        ]);
+        let mut points = warrior();
+        let mut dice = Fixed(5);
+        let mut gear = Gear {
+            points: &mut points,
+            protos: &protos,
+            dice: &mut dice,
+            recently_fought: false,
+        };
+        let mut next = 10;
+        let done = wear_full_set(&mut items, &mut gear, 90, &[ARMOUR, SWORD, 999], |vnum| {
+            protos.get(vnum)?;
+            next += 1;
+            Some(Item::new(next, vnum))
+        });
+        assert_eq!(done.kind, MoveKind::FullSet);
+        // The old body went to the first free base cell; the fresh pieces went on.
+        assert!(items
+            .item_at(wear_pos(BODY))
+            .is_some_and(|item| item.vnum == ARMOUR));
+        assert!(items
+            .item_at(wear_pos(WEAPON))
+            .is_some_and(|item| item.vnum == SWORD));
+        assert!(items.item_at(inv(1)).is_some_and(|item| item.id == 3));
+        let created = done
+            .changes
+            .iter()
+            .filter(|change| matches!(change, ItemChange::Created(_)))
+            .count();
+        assert_eq!(created, 2, "the unknown vnum makes nothing");
     }
 }

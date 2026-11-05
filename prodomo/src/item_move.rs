@@ -406,6 +406,13 @@ pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
                 id: *id,
                 sockets: *sockets,
             },
+            ItemChange::Attributes { id, attributes } => RowChange::Attributes {
+                id: *id,
+                attributes: std::array::from_fn(|index| Attribute {
+                    b_type: attributes[index].b_type,
+                    s_value: attributes[index].s_value,
+                }),
+            },
             ItemChange::Stored { id, account, pos } => RowChange::Stored {
                 id: *id,
                 account: *account,

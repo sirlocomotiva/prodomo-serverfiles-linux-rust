@@ -387,6 +387,24 @@ pub async fn save_position(
     Ok(updated.rows_affected() == 1)
 }
 
+/// The horse columns of one character row: `THorseInfo` (`C/tables.h:473-480`) and
+/// `horse_skill_point`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayerHorse {
+    /// `horse_level`, 0 to 30.
+    pub level: u8,
+    /// `horse_riding`.
+    pub riding: bool,
+    /// `horse_hp`.
+    pub health: i16,
+    /// `horse_hp_droptime`: the `get_global_time()` the health next drops at.
+    pub health_drop_time: u32,
+    /// `horse_stamina`.
+    pub stamina: i16,
+    /// `horse_skill_point`, `POINT_HORSE_SKILL`.
+    pub skill_point: i16,
+}
+
 /// The mutable columns of one character row, which is what a save writes.
 ///
 /// Legacy builds the same set in `CHARACTER::CreatePlayerProto` (`G/char.cpp:1478-1654`) and
@@ -415,6 +433,10 @@ pub struct PlayerSave {
     pub conqueror_level: u8,
     /// The conqueror experience, the conqueror counterpart of `tab.exp`.
     pub conqueror_exp: i64,
+    /// `tab.conqueror_level_step`, the quarters of the next conqueror level's cost banked.
+    pub conqueror_level_step: i16,
+    /// `tab.conqueror_point`, the unspent conqueror points.
+    pub conqueror_point: i16,
     /// `tab.sRandomHP`, the hit points the level-ups rolled.
     pub random_hp: i16,
     /// `tab.sRandomSP`, the spell points the level-ups rolled.
@@ -427,6 +449,8 @@ pub struct PlayerSave {
     pub sub_skill_point: i16,
     /// `tab.level_step`, the quarters of the next level's cost banked.
     pub level_step: i16,
+    /// `tab.stat_reset_count`, the lowers `/stat-` may still spend.
+    pub stat_reset_count: i16,
     /// `tab.st`.
     pub st: u8,
     /// `tab.ht`.
@@ -471,6 +495,18 @@ pub struct PlayerSave {
     pub playtime_minutes: i32,
     /// `tab.lAlignment`, the character's alignment.
     pub alignment: i32,
+    /// `tab.sungma_str`, the conqueror strength.
+    pub sungma_str: u8,
+    /// `tab.sungma_hp`.
+    pub sungma_hp: u8,
+    /// `tab.sungma_move`.
+    pub sungma_move: u8,
+    /// `tab.sungma_immune`.
+    pub sungma_immune: u8,
+    /// `tab.gaya`, the gaya currency.
+    pub gaya: i32,
+    /// The horse and its skill points.
+    pub horse: PlayerHorse,
 }
 
 /// Write every mutable column of one character row.
@@ -498,12 +534,15 @@ pub async fn save_character(
     let updated = sqlx::query(
         "UPDATE player SET level = $3, exp = $4, conqueror_level = $5, conqueror_exp = $6, \
          random_hp = $7, random_sp = $8, stat_point = $9, skill_point = $10, \
-         sub_skill_point = $11, level_step = $12, \
+         sub_skill_point = $11, level_step = $12, stat_reset_count = $34, \
          st = $13, ht = $14, dx = $15, iq = $16, hp = $17, sp = $18, stamina = $19, \
          voice = $20, part_base = $21, part_main = $22, part_hair = $23, part_sash = $24, \
          x = $25, y = $26, map_index = $27, exit_x = $28, exit_y = $29, exit_map_index = $30, \
          skill_group = $31, playtime_minutes = $32, \
-         alignment = $33 \
+         alignment = $33, sungma_str = $35, sungma_hp = $36, sungma_move = $37, \
+         sungma_immune = $38, gaya = $39, conqueror_level_step = $40, conqueror_point = $41, \
+         horse_level = $42, horse_riding = $43, horse_hp = $44, horse_hp_droptime = $45, \
+         horse_stamina = $46, horse_skill_point = $47, last_play_at = now() \
          WHERE account_id = $1 AND id = $2",
     )
     .bind(account.to_column()?)
@@ -539,8 +578,49 @@ pub async fn save_character(
     .bind(i16::from(save.skill_group))
     .bind(save.playtime_minutes)
     .bind(save.alignment)
+    .bind(save.stat_reset_count)
+    .bind(i16::from(save.sungma_str))
+    .bind(i16::from(save.sungma_hp))
+    .bind(i16::from(save.sungma_move))
+    .bind(i16::from(save.sungma_immune))
+    .bind(save.gaya)
+    .bind(save.conqueror_level_step)
+    .bind(save.conqueror_point)
+    .bind(i16::from(save.horse.level))
+    .bind(save.horse.riding)
+    .bind(save.horse.health)
+    .bind(i64::from(save.horse.health_drop_time))
+    .bind(save.horse.stamina)
+    .bind(save.horse.skill_point)
     .execute(store.pool())
     .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Write one character's race (`job`) and skill group by its row id, for `/set race`
+/// and `/set job` on another character (ledger section 352).
+///
+/// The caller found the row by name, and the name is unique regardless of case, so the
+/// row needs no account. Returns `false` when no row holds the id.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for a player ID above `i32::MAX`, and
+/// [`AccountError::Database`] otherwise. Every value is a bound parameter; no SQL is
+/// formatted.
+pub async fn store_identity(
+    store: &Store,
+    player: u32,
+    job: u8,
+    skill_group: u8,
+) -> Result<bool, AccountError> {
+    let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
+    let updated = sqlx::query("UPDATE player SET job = $2, skill_group = $3 WHERE id = $1")
+        .bind(player_id)
+        .bind(i16::from(job))
+        .bind(i16::from(skill_group))
+        .execute(store.pool())
+        .await?;
     Ok(updated.rows_affected() == 1)
 }
 
@@ -676,8 +756,15 @@ pub struct Character {
     /// Gold carried. Legacy is unsigned 64-bit; the column holds the low 63 bits of that
     /// range and the check refuses anything wider.
     pub gold: i64,
+    /// The gaya currency. Legacy is an unsigned int (`TPlayerTable.gaya`); the column
+    /// holds the 0 to `GAYA_MAX` range the point arm keeps.
+    pub gaya: i32,
     /// Conqueror experience banked towards the next conqueror level.
     pub conqueror_exp: i64,
+    /// The quarters of the next conqueror level's cost banked (`conqueror_level_step`).
+    pub conqueror_level_step: i16,
+    /// The unspent conqueror points (`conqueror_point`).
+    pub conqueror_point: i16,
     /// The random hit points the level-ups added (`sRandomHP`).
     pub random_hp: i16,
     /// The random spell points the level-ups added (`sRandomSP`).
@@ -690,6 +777,8 @@ pub struct Character {
     pub sub_skill_point: i16,
     /// The quarters of the next level's cost banked (`level_step`), 0 to 4.
     pub level_step: i16,
+    /// The lowers `/stat-` may still spend (`stat_reset_count`).
+    pub stat_reset_count: i16,
     /// `POINT_SUNGMA_STR`, the conqueror strength measured against a map's will.
     pub sungma_str: u8,
     /// `POINT_SUNGMA_HP`.
@@ -729,6 +818,166 @@ pub struct Character {
     pub playtime_minutes: i32,
     /// Whether the player must choose a new Name before playing.
     pub change_name: bool,
+    /// The horse and its skill points.
+    pub horse: PlayerHorse,
+    /// `logoff_interval`: the seconds since the row was last saved, 0 for a row never saved.
+    /// Legacy reads `UNIX_TIMESTAMP(NOW())-UNIX_TIMESTAMP(last_play)`
+    /// (`D/ClientManagerPlayer.cpp:480`).
+    pub logoff_interval: u32,
+}
+
+/// The player ID behind a character Name, or `None` when no row carries it.
+/// The match is case-insensitive, as names are unique regardless of case;
+/// `/setskillother` resolves its target through the world's `FindPC` first, so
+/// a miss here is only a character deleted mid-line.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`] when the store cannot answer.
+pub async fn id_by_name(store: &Store, name: &str) -> Result<Option<u32>, AccountError> {
+    let row: Option<(i32,)> = sqlx::query_as("SELECT id FROM player WHERE lower(name) = lower($1)")
+        .bind(name)
+        .fetch_optional(store.pool())
+        .await?;
+    Ok(row.and_then(|(id,)| u32::try_from(id).ok()))
+}
+
+/// The level columns of one character row, which is what `/advance` writes.
+///
+/// `/level` moves the caller's held row and the disconnect save banks it, but
+/// `/advance` resets another character whose row this descriptor never held,
+/// so the step writes the reset straight to the store. The columns are the
+/// ones `ResetPoint`, `ClearSkill` and `ClearSubSkill` move; the rest of the
+/// row is left for the target's own save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelReset {
+    /// The new level.
+    pub level: u8,
+    /// The four starts.
+    pub st: u8,
+    /// The four starts.
+    pub ht: u8,
+    /// The four starts.
+    pub dx: u8,
+    /// The four starts.
+    pub iq: u8,
+    /// The random hit points the rolls set.
+    pub random_hp: i16,
+    /// The random spell points the rolls set.
+    pub random_sp: i16,
+    /// `tab.stat_point`.
+    pub stat_point: i16,
+    /// `tab.skill_point`.
+    pub skill_point: i16,
+    /// `tab.sub_skill_point`.
+    pub sub_skill_point: i16,
+    /// The refilled hit points.
+    pub hp: i32,
+    /// The refilled spell points.
+    pub sp: i32,
+    /// `tab.conqueror_level`.
+    pub conqueror_level: u8,
+    /// The conqueror experience.
+    pub conqueror_exp: i64,
+    /// The four sungma.
+    pub sungma: [i16; 4],
+}
+
+/// One `t*` line's moved columns: the target's four attributes and stat pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatSet {
+    /// The new strength.
+    pub st: u8,
+    /// The new constitution.
+    pub ht: u8,
+    /// The new dexterity.
+    pub dx: u8,
+    /// The new intelligence.
+    pub iq: u8,
+    /// `tab.stat_point`.
+    pub stat_point: i16,
+}
+
+/// Write one character's stat columns by player ID alone.
+///
+/// A `t*` line names the target by its shown name, and the world's `FindPC`
+/// already proved it online; the account is not named because the caller
+/// never held the target's claim. Returns `false` when no row carries the
+/// ID, so the step reports a target deleted mid-line rather than a write
+/// that reached nothing.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for a player ID above `i32::MAX`,
+/// and [`AccountError::Database`] otherwise. Every value is a bound
+/// parameter; no SQL is formatted.
+pub async fn save_stat_set(
+    store: &Store,
+    player: u32,
+    set: &StatSet,
+) -> Result<bool, AccountError> {
+    let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
+    let updated = sqlx::query(
+        "UPDATE player SET st = $2, ht = $3, dx = $4, iq = $5, stat_point = $6 WHERE id = $1",
+    )
+    .bind(player_id)
+    .bind(i16::from(set.st))
+    .bind(i16::from(set.ht))
+    .bind(i16::from(set.dx))
+    .bind(i16::from(set.iq))
+    .bind(set.stat_point)
+    .execute(store.pool())
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Write one character's level columns by player ID alone.
+///
+/// `/advance` names the target by its shown name, and the world's `FindPC`
+/// already proved it online; the account is not named because the caller
+/// never held the target's claim. Returns `false` when no row carries the
+/// ID, so the step reports a target deleted mid-line rather than a write
+/// that reached nothing.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for a player ID above `i32::MAX`,
+/// and [`AccountError::Database`] otherwise. Every value is a bound
+/// parameter; no SQL is formatted.
+pub async fn save_level_reset(
+    store: &Store,
+    player: u32,
+    reset: &LevelReset,
+) -> Result<bool, AccountError> {
+    let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
+    let updated = sqlx::query(
+        "UPDATE player SET level = $2, st = $3, ht = $4, dx = $5, iq = $6, random_hp = $7, \
+         random_sp = $8, stat_point = $9, skill_point = $10, sub_skill_point = $11, hp = $12, \
+         sp = $13, conqueror_level = $14, conqueror_exp = $15, sungma_str = $16, \
+         sungma_hp = $17, sungma_move = $18, sungma_immune = $19 WHERE id = $1",
+    )
+    .bind(player_id)
+    .bind(i16::from(reset.level))
+    .bind(i16::from(reset.st))
+    .bind(i16::from(reset.ht))
+    .bind(i16::from(reset.dx))
+    .bind(i16::from(reset.iq))
+    .bind(reset.random_hp)
+    .bind(reset.random_sp)
+    .bind(reset.stat_point)
+    .bind(reset.skill_point)
+    .bind(reset.sub_skill_point)
+    .bind(reset.hp)
+    .bind(reset.sp)
+    .bind(i16::from(reset.conqueror_level))
+    .bind(reset.conqueror_exp)
+    .bind(reset.sungma[0])
+    .bind(reset.sungma[1])
+    .bind(reset.sungma[2])
+    .bind(reset.sungma[3])
+    .execute(store.pool())
+    .await?;
+    Ok(updated.rows_affected() == 1)
 }
 
 /// Read one character of an account for the loading phase.
@@ -747,12 +996,17 @@ pub async fn load_character(
 ) -> Result<Character, AccountError> {
     let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
     let row = sqlx::query(
-        "SELECT p.slot, p.id, p.name, p.job, p.level, p.exp, p.conqueror_level, p.conqueror_exp, p.st, p.ht, \
+        "SELECT p.slot, p.id, p.name, p.job, p.level, p.exp, p.conqueror_level, p.conqueror_exp, \
+         p.conqueror_level_step, p.conqueror_point, p.st, p.ht, \
          p.dx, p.iq, p.sungma_str, p.sungma_hp, p.sungma_move, p.sungma_immune, \
          p.random_hp, p.random_sp, p.stat_point, p.skill_point, p.sub_skill_point, p.level_step, \
-         p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, p.alignment, \
+         p.stat_reset_count, \
+         p.hp, p.sp, p.stamina, p.gold, p.gaya, p.voice, p.part_base, p.part_main, p.alignment, \
          p.part_hair, p.part_sash, p.x, p.y, p.map_index, p.exit_x, p.exit_y, p.exit_map_index, \
          p.skill_group, p.playtime_minutes, \
+         p.horse_level, p.horse_riding, p.horse_hp, p.horse_hp_droptime, p.horse_stamina, \
+         p.horse_skill_point, \
+         COALESCE(EXTRACT(EPOCH FROM now() - p.last_play_at), 0)::bigint AS logoff_interval, \
          p.change_name, a.empire \
          FROM player AS p JOIN account AS a ON a.id = p.account_id \
          WHERE p.account_id = $1 AND p.id = $2",
@@ -772,12 +1026,15 @@ pub async fn load_character(
         exp: row.try_get("exp")?,
         conqueror_level: narrow(row.try_get::<i16, _>("conqueror_level")?, "conqueror")?,
         conqueror_exp: row.try_get("conqueror_exp")?,
+        conqueror_level_step: row.try_get("conqueror_level_step")?,
+        conqueror_point: row.try_get("conqueror_point")?,
         random_hp: row.try_get("random_hp")?,
         random_sp: row.try_get("random_sp")?,
         stat_point: row.try_get("stat_point")?,
         skill_point: row.try_get("skill_point")?,
         sub_skill_point: row.try_get("sub_skill_point")?,
         level_step: row.try_get("level_step")?,
+        stat_reset_count: row.try_get("stat_reset_count")?,
         sungma_str: narrow(row.try_get::<i16, _>("sungma_str")?, "sungma_str")?,
         sungma_hp: narrow(row.try_get::<i16, _>("sungma_hp")?, "sungma_hp")?,
         sungma_move: narrow(row.try_get::<i16, _>("sungma_move")?, "sungma_move")?,
@@ -791,6 +1048,7 @@ pub async fn load_character(
         sp: row.try_get("sp")?,
         stamina: row.try_get("stamina")?,
         gold: row.try_get("gold")?,
+        gaya: row.try_get("gaya")?,
         voice: narrow(row.try_get::<i16, _>("voice")?, "voice")?,
         part_base: narrow(row.try_get::<i16, _>("part_base")?, "part_base")?,
         main_part: narrow(row.try_get::<i32, _>("part_main")?, "part_main")?,
@@ -805,6 +1063,20 @@ pub async fn load_character(
         skill_group: narrow(row.try_get::<i16, _>("skill_group")?, "skill_group")?,
         playtime_minutes: row.try_get("playtime_minutes")?,
         change_name: row.try_get("change_name")?,
+        horse: PlayerHorse {
+            level: narrow(row.try_get::<i16, _>("horse_level")?, "horse_level")?,
+            riding: row.try_get("horse_riding")?,
+            health: row.try_get("horse_hp")?,
+            health_drop_time: narrow(
+                row.try_get::<i64, _>("horse_hp_droptime")?,
+                "horse_hp_droptime",
+            )?,
+            stamina: row.try_get("horse_stamina")?,
+            skill_point: row.try_get("horse_skill_point")?,
+        },
+        // A clock set back past the save reads as no time away.
+        logoff_interval: u32::try_from(row.try_get::<i64, _>("logoff_interval")?.max(0))
+            .unwrap_or(u32::MAX),
     })
 }
 

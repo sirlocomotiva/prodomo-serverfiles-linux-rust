@@ -377,6 +377,27 @@ pub async fn record_login(store: &Store, id: AccountId, language: u8) -> Result<
     Ok(())
 }
 
+/// Keep a `CG_CHANGE_LANGUAGE` the client sent in the game phase: the language it chose.
+///
+/// Legacy forwards it to the DB process (`HEADER_GD_REQUEST_CHANGE_LANGUAGE`,
+/// `G/input_main.cpp:3594`), which runs the same `UPDATE account SET language` its login does.
+///
+/// # Errors
+///
+/// As [`record_login`].
+pub async fn set_language(store: &Store, id: AccountId, language: u8) -> Result<(), AccountError> {
+    let updated = sqlx::query("UPDATE account SET language = $2 WHERE id = $1")
+        .bind(id.to_column()?)
+        .bind(i16::from(language))
+        .execute(store.pool())
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Err(AccountError::NoSuchAccountId(id));
+    }
+    Ok(())
+}
+
 /// Add `delta` to a balance, which may be negative, and return the new balance.
 ///
 /// The row is locked for the change, so concurrent changes add up.

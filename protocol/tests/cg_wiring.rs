@@ -1428,7 +1428,7 @@ fn the_client_only_game_to_client_records_are_usable_through_the_public_api() {
 fn the_game_to_client_inventory_and_the_small_codec_agree() {
     use protocol::gc_inventory::{gc_missing_codec_count, resolve_gc_packet, GcFraming};
 
-    assert_eq!(gc_missing_codec_count(), 23);
+    assert_eq!(gc_missing_codec_count(), 17);
     // Every header this module decodes must be a registered client row that the
     // inventory marks implemented. This is the check that keeps the metric and
     // the codecs from drifting apart.
@@ -1652,7 +1652,7 @@ fn the_fishing_game_to_client_record_exposes_both_meanings_of_info() {
 fn the_game_to_client_inventory_agrees_with_the_thirty_two_bit_value_codecs() {
     use protocol::gc_inventory::{gc_missing_codec_count, resolve_gc_packet, GcFraming};
 
-    assert_eq!(gc_missing_codec_count(), 23);
+    assert_eq!(gc_missing_codec_count(), 17);
     let mut checked = 0usize;
     for header in [
         HEADER_GC_CHARACTER_DEL,
@@ -1898,7 +1898,7 @@ fn the_two_64_bit_game_to_client_records_use_opposite_signedness() {
 fn the_field_inventory_agrees_with_the_eighteen_field_records() {
     use protocol::gc_inventory::{gc_missing_codec_count, resolve_gc_packet, GcFraming};
 
-    assert_eq!(gc_missing_codec_count(), 23);
+    assert_eq!(gc_missing_codec_count(), 17);
     let mut checked = 0usize;
     for header in [
         HEADER_GC_PLAYER_POINTS,
@@ -2000,8 +2000,8 @@ fn the_gc_inventory_marks_the_twelve_nested_records_implemented() {
         .filter(|e| e.implemented_in_rust)
         .map(|e| e.client_name)
         .collect();
-    assert_eq!(done.len(), 111, "implemented game-to-client rows");
-    assert_eq!(gc_missing_codec_count(), 23, "missing game-to-client rows");
+    assert_eq!(done.len(), 117, "implemented game-to-client rows");
+    assert_eq!(gc_missing_codec_count(), 17, "missing game-to-client rows");
     for name in [
         "HEADER_GC_AFFECT_ADD",
         "HEADER_GC_PLAYER_POINT_CHANGE",
@@ -2226,4 +2226,29 @@ fn the_gc_inventory_records_the_actor_rows_as_implemented() {
             .unwrap_or_else(|| panic!("{name} is not in the inventory"));
         assert!(row.implemented_in_rust, "{name} is not marked implemented");
     }
+}
+
+/// The sash record agrees with its inventory row: byte 231, `TPacketSash`,
+/// 23 bytes, and the open's golden prefix.
+#[test]
+fn the_sash_record_agrees_with_the_inventory_row() {
+    use protocol::gc_inventory::{resolve_gc_packet, LEGACY_GC_PACKET_INVENTORY};
+    use protocol::gc_sash::{GcSash, GC_SASH_WIRE_SIZE};
+    let row = resolve_gc_packet(0xe7).expect("byte 231 is registered");
+    assert_eq!(row.client_name, "HEADER_GC_SASH");
+    assert_eq!(row.cpp_type, "TPacketSash");
+    assert!(
+        row.implemented_in_rust,
+        "the sash row is marked implemented"
+    );
+    assert_eq!(GcSash::open(true).encode().len(), GC_SASH_WIRE_SIZE);
+    assert_eq!(GC_SASH_WIRE_SIZE, 23);
+    assert_eq!(
+        &GcSash::open(true).encode()[..8],
+        &[0xe7, 0, 1, 0, 0, 0, 0, 0],
+        "the open's header, subheader, window, price and pos"
+    );
+    assert!(LEGACY_GC_PACKET_INVENTORY
+        .iter()
+        .any(|row| row.client_name == "HEADER_GC_SASH" && row.implemented_in_rust));
 }

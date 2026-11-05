@@ -134,6 +134,23 @@ impl Server {
         lines: &str,
         game: &str,
     ) -> Self {
+        Self::start_with_npcs_channels(binary, store_url, map, lines, &default_channels(), game)
+    }
+
+    /// [`Server::start_with_npcs_configured`] with a chosen set of Channels.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start_with_npcs`].
+    #[must_use]
+    pub fn start_with_npcs_channels(
+        binary: &Path,
+        store_url: &str,
+        map: &str,
+        lines: &str,
+        channels: &[ChannelSpec],
+        game: &str,
+    ) -> Self {
         let root = unique_root();
         let owner = legacy_dir().join("gamedata");
         let data = root.join("gamedata");
@@ -142,8 +159,82 @@ impl Server {
         let mut text = fs::read(owner.join(&npc)).expect("the map folder should have an npc.txt");
         text.extend_from_slice(lines.as_bytes());
         fs::write(data.join(&npc), text).expect("the extended npc.txt should be writable");
-        let config = config_text_on(&data, store_url, &default_channels(), game);
+        let config = config_text_on(&data, store_url, channels, game);
         Self::start_in(root, binary, &config)
+    }
+
+    /// A server on [`default_channels`] whose Game data is the owner's with `files`
+    /// replaced: each `(path, bytes)` writes `bytes` to `path` under the data folder (a
+    /// path relative to the owner's `gamedata`, such as `locale/europe/fishing.txt`).
+    /// The caller writes which file lands first; the server reads them at boot as the
+    /// owner's reads do. The folder is built in the server's own directory as links to
+    /// the owner's files, with the replaced files copied, so the owner's data is never
+    /// written and `Drop` removes the links with the directory.
+    ///
+    /// Every path a scenario later rewrites must be in `files` (even with the owner's
+    /// own bytes): any other path is a link to the owner's file, and writing through
+    /// it would poison the owner's data. [`Server::replace`] refuses such a path.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a replaced file's folder cannot be linked or the bytes cannot be
+    /// written, and as [`Server::start`].
+    #[must_use]
+    pub fn start_with_files(
+        binary: &Path,
+        store_url: &str,
+        files: &[(&str, &[u8])],
+    ) -> (Self, PathBuf) {
+        Self::start_with_files_configured(binary, store_url, files, "")
+    }
+
+    /// [`Server::start_with_files`] with `game` as the `[game]` table's keys.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start_with_files`].
+    #[must_use]
+    pub fn start_with_files_configured(
+        binary: &Path,
+        store_url: &str,
+        files: &[(&str, &[u8])],
+        game: &str,
+    ) -> (Self, PathBuf) {
+        let root = unique_root();
+        let owner = legacy_dir().join("gamedata");
+        let data = root.join("gamedata");
+        for (path, bytes) in files {
+            let path = Path::new(path);
+            link_all_but(&owner, &data, path);
+            let target = data.join(path);
+            // An earlier file's pass may have linked this one; remove the link so the
+            // write lands a copy instead of following it into the owner's data.
+            drop(fs::remove_file(&target));
+            fs::write(&target, bytes).expect("the replaced file should be writable");
+        }
+        let config = config_text_on(&data, store_url, &default_channels(), game);
+        let server = Self::start_in(root, binary, &config);
+        (server, data)
+    }
+
+    /// Rewrite `bytes` to `path` under the Game data folder [`Server::start_with_files`]
+    /// returned: `path` relative to that folder, such as `locale/europe/fishing.txt`.
+    /// The path must be a real file the server started with, not a link to the owner's
+    /// data; a scenario that rewrites a file passes it in `files` first, so this refuses
+    /// anything else rather than writing through a link into `legacy/`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `path` is a link or the bytes cannot be written.
+    pub fn replace(data: &Path, path: &str, bytes: &[u8]) {
+        let target = data.join(path);
+        assert!(
+            !fs::symlink_metadata(&target)
+                .expect("the replaced file should exist")
+                .is_symlink(),
+            "the replaced file should be a copy, not a link to the owner's data: {path}"
+        );
+        fs::write(&target, bytes).expect("the replaced file should be writable");
     }
 
     /// A server whose Operator console reads a named pipe, and the path of that pipe.
@@ -354,6 +445,13 @@ impl Server {
         self.role("auth")[0]
     }
 
+    /// The server's working directory, where it reads beside-the-process files (such as
+    /// `state_user_count`) and writes its log: the `current_dir` it was started in.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// The first listener of Channel `number`.
     ///
     /// # Panics
@@ -401,16 +499,32 @@ fn legacy_dir() -> PathBuf {
 
 /// Make `to` a copy of `from` made of links, except along `path`: each folder on it is made,
 /// and every entry beside it linked, down to the last component, which is left for the caller
-/// to write.
+/// to write. Entries already present are left alone, so several calls can share one folder; a
+/// folder an earlier call linked is replaced by a made one, so nothing is written through the
+/// link into the owner's data.
 fn link_all_but(from: &Path, to: &Path, path: &Path) {
     let mut from = from.to_owned();
     let mut to = to.to_owned();
     for component in path.components() {
+        if fs::symlink_metadata(&to).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            fs::remove_file(&to).expect("a link of the linked Game data should be removable");
+        }
         fs::create_dir_all(&to).expect("the linked Game data folder should be creatable");
-        let entries = fs::read_dir(&from).expect("the owner's Game data folder should be readable");
+        // A folder the owner's data lacks (a scenario's new one) has nothing to link.
+        let entries = match fs::read_dir(&from) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                from.push(component);
+                to.push(component);
+                continue;
+            }
+            Err(error) => panic!("the owner's Game data folder should be readable: {error}"),
+        };
         for entry in entries {
             let entry = entry.expect("the owner's Game data folder should be readable");
-            if entry.file_name() != component.as_os_str() {
+            if entry.file_name() != component.as_os_str()
+                && fs::symlink_metadata(to.join(entry.file_name())).is_err()
+            {
                 std::os::unix::fs::symlink(entry.path(), to.join(entry.file_name()))
                     .expect("a link to the owner's Game data should be creatable");
             }

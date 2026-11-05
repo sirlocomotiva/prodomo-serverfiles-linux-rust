@@ -20,11 +20,12 @@
 //! The damage map is `NpcCombat.damage`, filled by `after_damage` before the recovery
 //! starts. `dead_npc` calls `reward_exp` after the stun cancel and before `GC_DEAD`.
 //! Party attackers group into one row per party, after the solos; there is no stone link
-//! (OQ11), no priv manager, no premium, no mounts, no marriage, and no ring of exp (its
-//! group does not exist). The devil-tower arm is dead on a hostile map (no hosted map is
-//! in 660000-669999), `AdjustExpByLevel` is a no-op at level 99 and below, and the tower
-//! of the instant `POINT_EXP` percent is always 0 (Defect D3). What is not ported is a
-//! hook, and every hook is named where its term would run.
+//! (OQ11), no premium, no mounts, no marriage, and no ring of exp (its group does not
+//! exist). The empire privs feed the exp, gold and drop terms; the guild and character
+//! arms are 0, as nothing grants them. The devil-tower arm is dead on a hostile map (no
+//! hosted map is in 660000-669999), `AdjustExpByLevel` is a no-op at level 99 and below,
+//! and the tower of the instant `POINT_EXP` percent is always 0 (Defect D3). What is not
+//! ported is a hook, and every hook is named where its term would run.
 //!
 //! Two deliberate differences from legacy:
 //!
@@ -47,7 +48,9 @@ use common::point_slot as point;
 use common::vid::Vid;
 use protocol::gc_fields::GcCreateFly;
 use std::sync::Arc;
-use world::character::{number, Dice, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, SUNGMA_WILL_MAPS};
+use world::character::{
+    number, Dice, FLY_CONQUEROR_EXP, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, SUNGMA_WILL_MAPS,
+};
 use world::character::{DropAsk, DropMade, DropRefused};
 use world::item::Item;
 
@@ -79,8 +82,6 @@ const DOUBLE_EXP: u32 = 70_005;
 const FASTER_ALIGNMENT_UP_BY_KILL: u32 = 70_051;
 /// `DistributeExp`'s reach (`G/char_battle.cpp:2848`): attackers beyond it earn nothing.
 const EXP_RANGE: i32 = 5000;
-/// `UpdateAlignment`'s clamp (`G/char_battle.cpp:3486`).
-const ALIGNMENT_CLAMP: i32 = 200_000;
 
 /// One row of `DistributeExp`'s damage table (`TDamageInfo`, `G/char_battle.cpp:2769`):
 /// a solo attacker, or a party by its leader PID, and the damage dealt. Solos row in
@@ -363,7 +364,7 @@ impl GameState {
     /// bonus terms on `exp`, granted to `to` for a kill of a level-`from_level` monster
     /// under `from`, with the exp orb around the monster. The math runs in `i64` (D1);
     /// each term truncates exactly where legacy's `int` division truncates.
-    fn give_exp(&mut self, from: u32, to: Vid, from_level: u8, exp: i64) {
+    pub(super) fn give_exp(&mut self, from: u32, to: Vid, from_level: u8, exp: i64) {
         let Ok(character) = self.characters.find_by_vid(to) else {
             return;
         };
@@ -378,7 +379,7 @@ impl GameState {
             levels::next_exp(level),
         );
         let mut exp = levels::exp_level_delta_share(level, from_level, exp);
-        // No priv manager: `PRIV_EXP_PCT` is 0 (hook).
+        exp += exp * i64::from(self.priv_of(to, super::empire_priv::PRIV_EXP_PCT)) / 100;
         if self.wears_unique(to, LARBOR_MEDAL) {
             exp += exp * 20 / 100;
         }
@@ -402,9 +403,12 @@ impl GameState {
         let conqueror = points.conqueror_level();
         let map = self.place_of(to.raw()).map_or(0, |(_, map)| map);
         if conqueror > 0 && is_new_world_map(map) {
-            // The conqueror grant (`POINT_CONQUEROR_EXP`) waits for its level-up chain
-            // (hook): a conqueror on a new-world map takes nothing here. Legacy's
-            // `__CONQUEROR_LEVEL__` arm (`:2654-2673`).
+            // Legacy's `__CONQUEROR_LEVEL__` arm (`:2658-2662`): the grant is champion
+            // experience, and its orb is the conqueror one.
+            self.grant_conqueror_exp(to, exp);
+            let mut orb = Vec::new();
+            GcCreateFly::new(FLY_CONQUEROR_EXP, from, to.raw()).encode_into(&mut orb);
+            self.packet_around(EntityKey::Npc(from), &orb, None);
             return;
         }
         self.gain_pc_exp(to, exp);
@@ -413,38 +417,26 @@ impl GameState {
         self.packet_around(EntityKey::Npc(from), &orb, None);
     }
 
-    /// `CHARACTER_MANAGER::GetMobExpRate` (`G/char_manager.cpp:1035-1058`): 100, or the
-    /// `mob_exp` event flag while a quest set it (`G/questmanager.cpp:1374-1377`). No
+    /// `CHARACTER_MANAGER::GetMobExpRate` (`G/char_manager.cpp:1035-1058`): 100 until the
+    /// `mob_exp` event flag sets it (`G/questmanager.cpp:1374-1377`), 0 included. No
     /// premium time exists, so the buyer rate never applies.
     fn mob_exp_rate(&self) -> i32 {
-        self.quests
-            .as_ref()
-            .map(|quests| quests.manager().event_flag(b"mob_exp"))
-            .filter(|&rate| rate != 0)
-            .unwrap_or(100)
+        self.mob_rates.exp
     }
 
-    /// `CHARACTER_MANAGER::GetMobDamageRate` (`G/char_manager.cpp:980-983`): 100, or the
-    /// `mob_dam` event flag while a quest set it (`G/questmanager.cpp:1354-1357`).
+    /// `CHARACTER_MANAGER::GetMobDamageRate` (`G/char_manager.cpp:980-983`): 100 until the
+    /// `mob_dam` event flag sets it (`G/questmanager.cpp:1354-1357`), 0 included.
     /// `BONUS_PTC` is a typo legacy never defines, so the `RESIST_COMBAT` factor of
     /// `G/battle.cpp:314-315` never applies and the rate is a plain `int`.
     pub(super) fn mob_damage_rate(&self) -> i32 {
-        self.quests
-            .as_ref()
-            .map(|quests| quests.manager().event_flag(b"mob_dam"))
-            .filter(|&rate| rate != 0)
-            .unwrap_or(100)
+        self.mob_rates.damage
     }
 
-    /// `CHARACTER_MANAGER::GetUserDamageRate` (`G/char_manager.cpp:1060-1070`): 100, or
-    /// the `user_dam` event flag while a quest set it (`G/questmanager.cpp:1362-1365`).
+    /// `CHARACTER_MANAGER::GetUserDamageRate` (`G/char_manager.cpp:1060-1070`): 100 until
+    /// the `user_dam` event flag sets it (`G/questmanager.cpp:1362-1365`).
     /// No premium time exists, so the buyer rate never applies.
     pub(super) fn user_damage_rate(&self) -> i32 {
-        self.quests
-            .as_ref()
-            .map(|quests| quests.manager().event_flag(b"user_dam"))
-            .filter(|&rate| rate != 0)
-            .unwrap_or(100)
+        self.mob_rates.user_damage
     }
 
     /// Whether the player under `vid` wears unique item `vnum`
@@ -463,10 +455,9 @@ impl GameState {
     }
 
     /// The alignment arm (`G/char_battle.cpp:794-807`): a kill of a monster at most 10
-    /// levels below raises the killer's alignment, and a crossing of a /10 boundary
-    /// sends the update (`UpdateAlignment`, `G/char_battle.cpp:3477-3494`). The value
-    /// lives on the body's card until `sys.char.pk` stores it. The `ALIGNMENT_BONUS`
-    /// affects wait for their system (hook).
+    /// levels below raises the killer's alignment by 2, or by 7 (14 with the unique item
+    /// 70051) while it is negative. [`GameState::update_alignment`] clamps the value, sends
+    /// the crossing update, and moves the band affects.
     fn raise_alignment(&mut self, _victim: u32, attacker: Vid, victim_level: u8) {
         let Some(body) = self.bodies.get(&attacker) else {
             return;
@@ -484,19 +475,7 @@ impl GameState {
         } else {
             2
         };
-        // Both legacy's `int / 10` and Rust's `/` truncate toward zero, so `-8 / 10` is 0
-        // on both sides and the quotient compares directly.
-        let before = alignment / 10;
-        let after = (alignment + amount).clamp(-ALIGNMENT_CLAMP, ALIGNMENT_CLAMP);
-        if let Some(body) = self.bodies.get_mut(&attacker) {
-            body.card.alignment = after;
-        }
-        // `m_iAlignment == m_iRealAlignment` always holds here (no second value is
-        // tracked), so `bShow` is true and only the /10 crossing sends.
-        if before != after / 10 {
-            let flags = self.affect_flags_of(attacker);
-            self.send_affect_update(attacker, flags);
-        }
+        self.update_alignment(attacker, amount);
     }
 
     /// The quest kill (`G/char_battle.cpp:810-811`): `SetQuestNPCID` then
@@ -592,8 +571,10 @@ impl GameState {
             .get(usize::from(rank))
             .copied()
             .unwrap_or(0);
-        // No priv manager: `PRIV_GOLD_DROP` is 0 (hook). No premium gold (hook).
+        percent += percent * self.priv_of(attacker, super::empire_priv::PRIV_GOLD_DROP) / 100;
         percent += percent * mall / 100;
+        percent = percent * self.mob_rates.gold_drop / 100;
+        // No premium gold (hook).
         percent = percent.min(100);
         let boss = rank >= EMobRank::Boss as u8;
         let chance = levels::gold_level_delta_share(killer_level, level, percent, boss);
@@ -612,10 +593,18 @@ impl GameState {
         if double != 0 && number(&mut self.dice, 1, 100) <= double {
             multiplier *= 2;
         }
-        // No priv manager: `PRIV_GOLD10_DROP` is 0, so the ten-drop chance is 1 (hook).
+        let ten_chance =
+            100 * 100 / (100 + self.priv_of(attacker, super::empire_priv::PRIV_GOLD10_DROP));
         let gold_max = gold[1];
         let wide = boss && !stone && gold_max != 0;
-        let piles = Self::draw_gold_piles(&mut self.dice, wide, boss, low, high, &mut multiplier);
+        let piles = Self::draw_gold_piles(
+            &mut self.dice,
+            wide,
+            boss,
+            (low, high, self.mob_rates.gold_amount),
+            &mut multiplier,
+            ten_chance,
+        );
         let mut total = 0_i64;
         for pile in piles {
             // The boss scatter is ±28 cells of 23; the common scatter ±7 cells of 20.
@@ -643,38 +632,41 @@ impl GameState {
     }
 
     /// `RewardGold`'s split (`G/char_battle.cpp:612-749`): the boss many-pile draw, the
-    /// 1-in-100 ten piles, or the single roll split 1..3 (a boss under 3 gold splits
-    /// 3..10 unless the quotient is 0). Zero piles are dropped. The boss arm's 1-in-100
-    /// folds into `multiplier`.
+    /// ten piles on 1-in-`ten_chance` (`iGold10DropPct`, 100 with no priv), or the single
+    /// roll split 1..3 (a boss under 3 gold splits 3..10 unless the quotient is 0). Zero
+    /// piles are dropped. The boss arm's draw folds into `multiplier`. `gold` is the
+    /// proto's range and `GetMobGoldAmountRate`, which scales each roll before the
+    /// multiplier (`:646`, `:682`, `:709`).
     fn draw_gold_piles(
         dice: &mut dyn Dice,
         wide: bool,
         boss: bool,
-        low: i32,
-        high: i32,
+        (low, high, rate): (i32, i32, i32),
         multiplier: &mut i32,
+        ten_chance: i32,
     ) -> Vec<i32> {
+        let scaled = |gold: i32| gold.saturating_mul(rate) / 100;
         let mut piles: Vec<i32> = Vec::new();
         if wide {
-            if 1 == number(dice, 1, 100) {
+            if 1 == number(dice, 1, ten_chance) {
                 *multiplier *= 10;
             }
             let split = number(dice, 25, 35);
             for _ in 0..split {
-                let pile = number(dice, low, high) / split * *multiplier;
+                let pile = scaled(number(dice, low, high) / split) * *multiplier;
                 if pile != 0 {
                     piles.push(pile);
                 }
             }
-        } else if 1 == number(dice, 1, 100) {
+        } else if 1 == number(dice, 1, ten_chance) {
             for _ in 0..10 {
-                let pile = number(dice, low, high) * *multiplier;
+                let pile = scaled(number(dice, low, high)) * *multiplier;
                 if pile != 0 {
                     piles.push(pile);
                 }
             }
         } else {
-            let gold = number(dice, low, high) * *multiplier;
+            let gold = scaled(number(dice, low, high)) * *multiplier;
             let mut split = 1;
             if gold >= 3 {
                 split = number(dice, 1, 3);
@@ -794,17 +786,21 @@ impl GameState {
             return;
         };
         if hits.len() == 1 {
-            // One item (`:870-890`): the attacker's ownership, then the two draws for a `pos`
-            // nobody uses.
+            // One item (`:870-890`): a direct pick-up gives it to the attacker with no draw;
+            // else the attacker's ownership, then the two draws for a `pos` nobody uses.
             let mut one = hits;
             let item = one.pop().expect("one hit");
-            let ground = self.lay_drop_hit(channel, map, (px, py, z), item);
-            if let Some(ground) = ground {
-                self.set_drop_owner(ground, attacker);
+            if self.can_pickup_directly(attacker) {
+                self.give_drop_directly(attacker, item);
+            } else {
+                let ground = self.lay_drop_hit(channel, map, (px, py, z), item);
+                if let Some(ground) = ground {
+                    self.set_drop_owner(ground, attacker);
+                }
+                px = x.saturating_add(number(&mut self.dice, -7, 7) * 20);
+                py = y.saturating_add(number(&mut self.dice, -7, 7) * 20);
+                let _ = (px, py);
             }
-            px = x.saturating_add(number(&mut self.dice, -7, 7) * 20);
-            py = y.saturating_add(number(&mut self.dice, -7, 7) * 20);
-            let _ = (px, py);
             if let Some(combat) = self.npc_combat.get_mut(&vid) {
                 combat.damage.clear();
             }
@@ -823,6 +819,11 @@ impl GameState {
                 next += 1;
                 Some(owner)
             };
+            // A direct pick-up gives the item to its owner and skips the draws (`continue`).
+            if let Some(owner) = owner.filter(|owner| self.can_pickup_directly(*owner)) {
+                self.give_drop_directly(owner, item);
+                continue;
+            }
             let ground = self.lay_drop_hit(channel, map, (px, py, z), item);
             if let (Some(ground), Some(owner)) = (ground, owner) {
                 self.set_drop_owner(ground, owner);
@@ -869,8 +870,7 @@ impl GameState {
 
     /// `SetOwnership(ch)` on the ground item under `ground` (`G/item.cpp:1733-1775`): the
     /// character's store id and 25-byte name, for the header's default 10 s (which the
-    /// `<= 10` rule turns into 30). No pickup-affect system exists, so the
-    /// `CanPickupDirectly` hook is always false and the grounding always runs.
+    /// `<= 10` rule turns into 30).
     fn set_drop_owner(&mut self, ground: u32, owner: Vid) {
         let Ok(character) = self.characters.find_by_vid(owner) else {
             return;
@@ -933,7 +933,7 @@ impl GameState {
 
     /// The `CQuestManager` event flag `flag`, or 0 with no quest host
     /// (`GetEventFlag`, `G/questmanager.cpp:1374-1377`).
-    fn event_rate(&self, flag: &[u8]) -> i32 {
+    pub(super) fn event_rate(&self, flag: &[u8]) -> i32 {
         self.quests
             .as_ref()
             .map_or(0, |quests| quests.manager().event_flag(flag))
@@ -963,7 +963,7 @@ impl GameState {
 
     /// `CHARACTER::CountSpecifyItem` ([`world::character::count_specify_item`]): how many of
     /// `vnum` the player under `vid` holds in its unlocked cells and its custom banks.
-    fn count_specify_item(&self, vid: Vid, vnum: u32) -> i32 {
+    pub(super) fn count_specify_item(&self, vid: Vid, vnum: u32) -> i32 {
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return 0;
         };
@@ -971,12 +971,22 @@ impl GameState {
         world::character::count_specify_item(character.items(), usable, vnum)
     }
 
-    /// `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the fixed
-    /// [`DROP_RAND_RANGE`]. The delta is the boss table from rank BOSS up unless the victim
-    /// is a stone, plus 1000 on 1-in-50000 else 500 on 1-in-10000, times the item rate
-    /// (100: no premium, no China check). The premium/unique doubling and the `bonus` dead
-    /// code never run (hooks).
-    fn drop_pct(&mut self, stone: bool, rank: u8, mob_level: u8, killer_level: u8) -> (i32, i32) {
+    /// `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the range.
+    /// The delta is the boss table from rank BOSS up unless the victim is a stone, plus
+    /// 1000 on 1-in-50000 else 500 on 1-in-10000, times `GetMobItemRate` (`:891`: 100
+    /// until `mob_item` sets it; no premium, no China check). The range is
+    /// `4000000 * 100 / (100 + priv + worn)`: the
+    /// precedence Defect at `:906-911` is fixed (see [`DROP_RAND_RANGE`]), and the worn
+    /// double-item is 0 (hook). The premium/unique doubling and the `bonus` dead code
+    /// never run (hooks).
+    fn drop_pct(
+        &mut self,
+        stone: bool,
+        rank: u8,
+        mob_level: u8,
+        killer: Vid,
+        killer_level: u8,
+    ) -> (i32, i32) {
         use common::enums::EMobRank;
         let boss = !stone && rank >= EMobRank::Boss as u8;
         let table = if boss {
@@ -991,7 +1001,10 @@ impl GameState {
         } else if 1 == number(&mut self.dice, 1, 10_000) {
             delta += 500;
         }
-        (delta, DROP_RAND_RANGE)
+        delta = delta * self.mob_rates.item / 100;
+        let range = DROP_RAND_RANGE * 100
+            / (100 + self.priv_of(killer, super::empire_priv::PRIV_ITEM_DROP));
+        (delta, range)
     }
 
     /// One `CreateItem(vnum, count, 0, true, rare_pct)` the draw chain asks for: the made
@@ -999,7 +1012,7 @@ impl GameState {
     /// refusal warns naming the vnum, as the 229p seam did; no proto skips silently, as
     /// legacy's `if (item)` does. No hosted kill reaches a hit (every table is empty or
     /// unhosted, every event flag 0).
-    fn make_drop_hit(&mut self, vnum: u32, count: i32, rare_pct: i32) -> Option<Item> {
+    pub(super) fn make_drop_hit(&mut self, vnum: u32, count: i32, rare_pct: i32) -> Option<Item> {
         use world::character::make_drop_item;
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1063,7 +1076,7 @@ impl GameState {
             return Vec::new();
         };
         let killer_level = points.level();
-        let (delta, range) = self.drop_pct(stone, rank, mob_level, killer_level);
+        let (delta, range) = self.drop_pct(stone, rank, mob_level, attacker, killer_level);
         let mut hits: Vec<Item> = Vec::new();
         // Common (`:1111-1148`): the rank's rows whose level band holds the killer.
         // `POLYMORPH_ITEM` is 0 on every proto (C3): the polymorph arm is dead and its

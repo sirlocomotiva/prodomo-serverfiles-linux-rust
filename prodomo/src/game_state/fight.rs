@@ -61,7 +61,9 @@ use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::enums::EWearPositions;
 use common::point_slot as point;
 use common::vid::Vid;
-use gamedata::mob_proto::{AIFLAG_AGGRESSIVE, AIFLAG_NOMOVE, CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
+use gamedata::mob_proto::{
+    AIFLAG_AGGRESSIVE, AIFLAG_NOMOVE, CHAR_TYPE_DOOR, CHAR_TYPE_MONSTER, CHAR_TYPE_STONE,
+};
 use protocol::cg_attack::CgAttack;
 use protocol::gc_actors::GcCharacterGoldChange;
 use protocol::gc_fields::GcCreateFly;
@@ -307,21 +309,26 @@ impl GameState {
             | GameCommand::PartyRequest { .. }
             | GameCommand::PartyRequestAccept { .. }
             | GameCommand::PartyRequestDeny { .. }
+            | GameCommand::Ungroup { .. }
             | GameCommand::PartyRemove { .. }
             | GameCommand::PartySetState { .. }
             | GameCommand::PartyParameter { .. }
             | GameCommand::PartyUseSkill { .. }
             | GameCommand::PartyOf { .. }) => self.apply_party_pick(command),
-            GameCommand::Target {
-                vid,
-                target,
-                settled,
-            } => {
-                self.target(vid, target);
-                drop(settled);
-            }
+            command @ (GameCommand::Target { .. }
+            | GameCommand::TargetInfo { .. }
+            | GameCommand::EventInfo { .. }) => self.apply_settled_pick(command),
             GameCommand::GuildOf { vid, reply } => {
                 let _heard = reply.send(self.holds_guild(vid));
+            }
+            GameCommand::QuestConfirm {
+                vid,
+                answer,
+                request_pid,
+                reply,
+            } => {
+                self.answer_confirm(vid, answer, request_pid);
+                let _heard = reply.send(());
             }
             GameCommand::MarkUpload {
                 guild_id,
@@ -392,6 +399,41 @@ impl GameState {
             ),
         }
     }
+    /// Runs one pick command answered by records to the asker: the handler's `settled`
+    /// is dropped once its records are queued.
+    fn apply_settled_pick(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Target {
+                vid,
+                target,
+                settled,
+            } => {
+                self.target(vid, target);
+                drop(settled);
+            }
+            GameCommand::TargetInfo {
+                vid,
+                target,
+                settled,
+            } => {
+                self.target_info(vid, target);
+                drop(settled);
+            }
+            GameCommand::EventInfo {
+                vid,
+                month,
+                settled,
+            } => {
+                self.send_event_info(vid, month);
+                drop(settled);
+            }
+            _ => debug_assert!(
+                false,
+                "only target, target info and event info commands reach apply_settled_pick"
+            ),
+        }
+    }
+
     /// Runs one party command: each handler's `settled` is dropped once its records
     /// are queued.
     fn apply_party_pick(&mut self, command: GameCommand) {
@@ -423,6 +465,10 @@ impl GameState {
             }
             GameCommand::PartyRequestDeny { vid, rest, settled } => {
                 self.party_request_deny(vid, &rest);
+                drop(settled);
+            }
+            GameCommand::Ungroup { vid, pid, settled } => {
+                self.ungroup(vid, pid);
                 drop(settled);
             }
             GameCommand::PartyRemove { vid, pid, settled } => {
@@ -603,14 +649,18 @@ impl GameState {
             self.begin_fight(target, vid);
         }
         // `BATTLE_DAMAGE` or `BATTLE_DEAD`: `OnMove(true)` (`G/char.cpp:6148-6179`). The victim's
-        // `OnMove` holds nothing for a non-player, and no Eunhyung or mining is ported.
+        // `OnMove` holds nothing for a non-player, and no Eunhyung is ported.
         let now = self.clock.now();
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.last_move = now;
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(vid);
-        AttackAnswer { gold: stolen }
+        self.cancel_mining(vid);
+        AttackAnswer {
+            gold: stolen,
+            spent: Vec::new(),
+        }
     }
 
     /// The non-player `vid` names on `place`, a Channel and map.
@@ -714,7 +764,11 @@ impl GameState {
         // may fight whatever the PK policy says, and the arm answers before the castle,
         // the arena and the policy do.
         if !self.guild_war_allows(vid, victim) {
-            let attacker = self.pk_actor(vid, empire, false);
+            // `CanAttack`'s duel tail (`G/pvp.cpp:508-528`): the live fight of the two
+            // PIDs, with its fresh fight touch.
+            let fight = self.pvp_is_fight(self.pvp_pid_of(vid), self.pvp_pid_of(victim));
+            let mut attacker = self.pk_actor(vid, empire, false);
+            attacker.consensual_fight = fight;
             let target_actor = self.pk_actor(
                 victim,
                 victim_empire,
@@ -748,7 +802,10 @@ impl GameState {
         let gold = self.pvp_strike(vid, victim, damage);
         // `SetSyncOwner` (`G/char.cpp:5469-5555`) and `OnMove(true)` (`:6148-6179`).
         self.pvp_claim(vid, victim);
-        AttackAnswer { gold }
+        AttackAnswer {
+            gold,
+            spent: Vec::new(),
+        }
     }
 
     /// `CalcMeleeDamage` of a player attacker on a player victim (`G/battle.cpp:489-666`),
@@ -811,7 +868,9 @@ impl GameState {
             } else {
                 Posture::Standing
             },
-            observer: false,
+            // `pkVictim->IsObserverMode() || pkChr->IsObserverMode()` (`G/pvp.cpp:422`):
+            // either side observing refuses the attack.
+            observer: self.is_observing(vid),
             ban_pk: false,
             empire,
             map_empire,
@@ -932,6 +991,7 @@ impl GameState {
                 HitEvent::Chat(index) => self.monster_say(victim, index),
                 HitEvent::DamageInfo { damage, flag } => {
                     self.send_damage_packet(victim, attacker, damage, flag);
+                    self.log_npc_damage(attacker, victim);
                 }
             }
         }
@@ -1642,7 +1702,8 @@ impl GameState {
     /// `recovery_event` of a non-player (`G/char.cpp:3187-3240`): a poisoned one heals
     /// nothing and reschedules (`:3187-3194`); else `bRegenPercent` of its maximum, at
     /// least 1 and held to the maximum, shown to its targeters; again `bRegenCycle`
-    /// seconds on until it is full. No regen stands race 2493, and no door is hit.
+    /// seconds on until it is full. A healed non-door logs the gain (`:3218`). No regen
+    /// stands race 2493, and no door is hit.
     pub(super) fn recovery_event(&mut self, vid: u32) {
         if let Some(combat) = self.npc_combat.get_mut(&vid) {
             combat.recovery_due = None;
@@ -1661,16 +1722,22 @@ impl GameState {
         // `PointChange(POINT_HP)` changes nothing on a dead or stunned character
         // (`G/char.cpp:4250-4251`).
         let changed = !npc.dead && !npc.stunned;
+        let gain = i64::from(npc.max_hp) * i64::from(npc.fight.regen_percent) / 100;
+        let gain = gain.max(1);
         if changed {
-            let share = i64::from(npc.max_hp) * i64::from(npc.fight.regen_percent) / 100;
             let room = i64::from(npc.max_hp) - i64::from(npc.hp);
-            let amount = share.max(1).min(room);
+            let amount = gain.min(room);
             npc.hp = i32::try_from(i64::from(npc.hp) + amount).unwrap_or(npc.max_hp);
         }
+        let door = npc.char_type == CHAR_TYPE_DOOR;
         let full = npc.hp >= npc.max_hp;
         let cycle = recovery_pulses(npc);
         if changed {
             self.broadcast_npc_target(vid);
+        }
+        if changed && !door {
+            let line = format!("HP_REGEN +{gain}");
+            self.monster_log(vid, line.as_bytes());
         }
         if full {
             return;

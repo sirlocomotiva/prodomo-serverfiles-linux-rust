@@ -57,8 +57,9 @@
 //! never believe a level-up happened.
 //!
 //! - `POINT_LEVEL`, `POINT_EXP`, `POINT_LEVEL_STEP`, `POINT_CONQUEROR_LEVEL`,
-//!   `POINT_CONQUEROR_EXP` and `POINT_CONQUEROR_LEVEL_STEP`: the level-up chain, with its
-//!   quest trigger, guild and party updates, and save.
+//!   `POINT_CONQUEROR_EXP` and `POINT_CONQUEROR_LEVEL_STEP` through this entry point: the
+//!   level-up chains run through [`Points::gain_exp`] and [`Points::gain_conqueror_exp`],
+//!   whose callers own the quest trigger, guild and party updates, and save.
 //! - `POINT_GOLD`, `POINT_GAYA` and `POINT_INVEN`: the currencies and the inventory unlocks.
 //! - `POINT_POLYMORPH`, `POINT_MOUNT`, `POINT_ENERGY`, `POINT_COSTUME_ATTR_BONUS`, the three
 //!   biologist arms and the two protected-inventory arms: each drives its own system.
@@ -97,6 +98,11 @@ use common::point_slot as point;
 use super::apply::ApplyArm;
 use super::dice::{number, Dice};
 use super::equipment::{Equipment, PARTS};
+use super::horse::Horse;
+
+mod conqueror;
+
+pub use conqueror::ConquerorEvent;
 
 /// The slots in each point array (`POINT_MAX_NUM`).
 const SLOTS: usize = point::POINT_MAX_NUM;
@@ -245,8 +251,9 @@ pub struct PassiveBonuses {
 /// What `SetPlayerProto` reads into the points from a stored character.
 ///
 /// The columns the Rewrite does not store yet are absent and read as 0, as a fresh legacy
-/// row has them: the horse-skill points, the stat-reset count, the conqueror point and level
-/// step, the gaya, and the private-shop slots.
+/// row has them: the private-shop slots. The conqueror progress, the horse and its skill
+/// points are set after the load ([`Points::set_conqueror_progress`],
+/// [`Points::set_horse`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointsRow {
     /// The race, 0 to 7.
@@ -287,8 +294,12 @@ pub struct PointsRow {
     pub sub_skill_point: i32,
     /// The level step, 0 to 4.
     pub level_step: i32,
+    /// The stat-reset count, the lowers `/stat-` may still spend.
+    pub stat_reset_count: i32,
     /// The map the character stands on, which picks the sungma will.
     pub map_index: i32,
+    /// The gaya currency.
+    pub gaya: i32,
     /// `part_base`, the body shape the main part falls back to when no armour is worn.
     pub part_base: u8,
     /// The stored hair part, which a hair costume replaces.
@@ -297,6 +308,8 @@ pub struct PointsRow {
     pub sash_part: u16,
     /// `playtime`, the whole minutes the character has played.
     pub playtime: i32,
+    /// Conqueror experience banked towards the next conqueror level.
+    pub conqueror_exp: i64,
 }
 
 /// The four sungma slots, in the order of [`PointsRow::sungma`].
@@ -461,7 +474,7 @@ const COUNTERS: [usize; 5] = [
 ];
 
 /// The arms whose side effects are not ported. See the module note.
-const NOT_PORTED: [usize; 18] = [
+const NOT_PORTED: [usize; 17] = [
     point::POINT_CONQUEROR_LEVEL,
     point::POINT_CONQUEROR_EXP,
     point::POINT_CONQUEROR_LEVEL_STEP,
@@ -469,7 +482,6 @@ const NOT_PORTED: [usize; 18] = [
     point::POINT_EXP,
     point::POINT_LEVEL_STEP,
     point::POINT_INVEN,
-    point::POINT_GAYA,
     point::POINT_GOLD,
     point::POINT_POLYMORPH,
     point::POINT_MOUNT,
@@ -516,6 +528,7 @@ pub struct Points {
     level: u8,
     exp: i64,
     conqueror_level: u8,
+    conqueror_exp: i64,
     real: [i32; SLOTS],
     instant: [i32; SLOTS],
     hp: i32,
@@ -529,6 +542,9 @@ pub struct Points {
     random_hp: i32,
     random_sp: i32,
     inven_point: i32,
+    /// The gaya currency (`m_points.gaya`): the `POINT_GAYA` arm keeps it, refused at
+    /// `GAYA_MAX`.
+    gaya: i32,
     immune_flag: u32,
     map_will: SungmaWill,
     armour: i32,
@@ -536,14 +552,27 @@ pub struct Points {
     skill_damage_bonus: BTreeMap<u8, i32>,
     part_base: u8,
     parts: [u16; PARTS],
+    /// The costume-hide mask (`pc_hide_costume`, `G/char.cpp:5386-5414`): bit 0 hides the
+    /// body, 1 the hair, 2 the sash, 3 the aura, 4 the weapon. The parts recompute reads
+    /// it; 0 until the first hide.
+    hidden: u8,
     /// `m_pointsInstant.gm_level` (`char.h:468`): the character's GM level, which legacy
     /// reads with `GetGMLevel()` (`char.h:771`) and which the death penalty checks
     /// (`G/char_battle.cpp:1341`). The load reads it from the GM list, not from the player
     /// row, so it is set after the load and is 0 (`GM_PLAYER`) until then.
     gm_level: u8,
+    /// `m_dwPolymorphRace` (`G/char.h:930`): the mob vnum the character shows as, or 0.
+    /// Set by `SetPolymorph` (`G/char.cpp:7680-7724`) only; the save never writes it, so a
+    /// relogin unmorphs.
+    polymorph_race: u32,
+    /// `m_bPolyMaintainStat` (`G/char.h:931`): whether the morph keeps the character's
+    /// own attribute points instead of the mob's.
+    poly_maintain_stat: bool,
     /// The hit points and their maximum each time the `POINT_HP` arm ran, oldest first: what
     /// `BroadcastTargetPacket` sends the characters targeting this one (`char.cpp:4259`).
     target_broadcasts: Vec<(i32, i32)>,
+    /// The character's horse (`CHorseRider`, which `CHARACTER` derives from).
+    horse: Horse,
 }
 
 /// One call of the `PointChange(POINT_EXP, iExpBalance)` recursion, as a loop frame: each
@@ -576,6 +605,7 @@ impl Points {
             level: row.level,
             exp: row.exp,
             conqueror_level: row.conqueror_level,
+            conqueror_exp: row.conqueror_exp,
             real: [0; SLOTS],
             instant: [0; SLOTS],
             hp: 0,
@@ -588,6 +618,7 @@ impl Points {
             random_hp: row.random_hp,
             random_sp: row.random_sp,
             inven_point: i32::from(row.inven_point),
+            gaya: row.gaya,
             immune_flag: 0,
             map_will: sungma_will(row.map_index),
             armour: 0,
@@ -595,8 +626,12 @@ impl Points {
             skill_damage_bonus: BTreeMap::new(),
             part_base: row.part_base,
             parts: [0; PARTS],
+            hidden: 0,
             gm_level: 0,
+            polymorph_race: 0,
+            poly_maintain_stat: false,
             target_broadcasts: Vec::new(),
+            horse: Horse::default(),
         };
         // `SetPlayerProto` sets the base part, the hair and the sash from the row before it
         // computes (`char.cpp:2258-2265`); the computation then puts the base part in the
@@ -617,12 +652,13 @@ impl Points {
             points.instant[slot] = i32::from(value);
         }
         // `SetPlayerProto` sets the point counters from the row before it computes
-        // (`char.cpp:2306-2314`): the stat, skill and sub-skill points into the instant array
-        // only, the level step into both. The horse-skill points and the stat-reset count are
-        // not stored, so both arrays keep 0.
+        // (`char.cpp:2306-2314`): the stat, skill, sub-skill and reset counts into the
+        // instant array only, the level step into both. The horse-skill points are not
+        // stored, so both arrays keep 0.
         points.instant[point::POINT_STAT] = row.stat_point;
         points.instant[point::POINT_SKILL] = row.skill_point;
         points.instant[point::POINT_SUB_SKILL] = row.sub_skill_point;
+        points.instant[point::POINT_STAT_RESET_COUNT] = row.stat_reset_count;
         points.instant[point::POINT_LEVEL_STEP] = row.level_step;
         points.real[point::POINT_LEVEL_STEP] = row.level_step;
         // `SetRealPoint(POINT_PLAYTIME, t->playtime)` (`char.cpp:2296`): the real array only.
@@ -639,6 +675,37 @@ impl Points {
     #[must_use]
     pub fn parts(&self) -> [u16; PARTS] {
         self.parts
+    }
+    /// The costume-hide mask `pc.hide_costume` keeps, bit per part (body, hair, sash, aura,
+    /// weapon).
+    #[must_use]
+    pub const fn hidden(&self) -> u8 {
+        self.hidden
+    }
+
+    /// `SetXCostumeHidden` (`G/char.cpp:11382-11413`): bit `part - 1` of the mask, for part
+    /// 1-5; any other part leaves the mask alone.
+    pub fn set_hidden(&mut self, part: u8, hide: bool) {
+        if (1..=5).contains(&part) {
+            let bit = 1 << (part - 1);
+            if hide {
+                self.hidden |= bit;
+            } else {
+                self.hidden &= !bit;
+            }
+        }
+    }
+
+    /// The parts recomputed with the current hide mask, for `pc.hide_costume`'s
+    /// `UpdatePacket`: what `equipment.parts` answers now.
+    #[must_use]
+    pub fn hidden_parts(&self, equipment: &Equipment<'_>) -> [u16; PARTS] {
+        equipment.parts(u16::from(self.part_base), self.parts, self.hidden)
+    }
+
+    /// The recomputed parts land, as `UpdatePacket` sends them.
+    pub fn set_parts(&mut self, parts: [u16; PARTS]) {
+        self.parts = parts;
     }
 
     /// The level the battle points are computed from.
@@ -669,6 +736,101 @@ impl Points {
     #[must_use]
     pub fn conqueror_level(&self) -> u8 {
         self.conqueror_level
+    }
+
+    /// `SetConqueror(true)` (`G/char.cpp:11659-11700`) past its gates: the conqueror
+    /// level becomes 1 and the step, point, exp and sungma reset in both arrays. Answers
+    /// the level arm's records; the caller gates (the level-120 filled marble),
+    /// recomputes and sends the points.
+    pub fn become_conqueror(&mut self, max_level: i32) -> Vec<PointRecord> {
+        self.reset_conqueror(1, 0, max_level)
+    }
+
+    /// The horse half of `SetPlayerProto` (`G/char.cpp:2311`, `:2381`): the stored horse and
+    /// the horse-skill points, which go to both arrays as the counters do.
+    pub fn set_horse(&mut self, horse: Horse, skill_point: i32) {
+        self.horse = horse;
+        self.real[point::POINT_HORSE_SKILL] = skill_point;
+        self.instant[point::POINT_HORSE_SKILL] = skill_point;
+    }
+
+    /// The character's horse.
+    #[must_use]
+    pub const fn horse(&self) -> &Horse {
+        &self.horse
+    }
+
+    /// The character's horse, to move.
+    pub fn horse_mut(&mut self) -> &mut Horse {
+        &mut self.horse
+    }
+
+    /// `SetPlayerProto`'s conqueror progress (`G/char.cpp:2337-2340`): the stored step
+    /// goes into both arrays, and the stored point too, as its `PointChange` arm keeps it.
+    pub fn set_conqueror_progress(&mut self, step: i32, conqueror_point: i32) {
+        self.real[point::POINT_CONQUEROR_LEVEL_STEP] = step;
+        self.instant[point::POINT_CONQUEROR_LEVEL_STEP] = step;
+        self.real[point::POINT_CONQUEROR_POINT] = conqueror_point;
+        self.instant[point::POINT_CONQUEROR_POINT] = conqueror_point;
+    }
+
+    /// `SetRandomHP` (`char.h:812`): the random hit points become `value`.
+    pub fn set_random_hp(&mut self, value: i32) {
+        self.random_hp = value;
+    }
+
+    /// `SetRandomSP` (`char.h:813`): the random spell points become `value`.
+    pub fn set_random_sp(&mut self, value: i32) {
+        self.random_sp = value;
+    }
+
+    /// The `POINT_LEVEL` arm of `PointChange` (`G/char.cpp:4025-4071`) for a `/level`
+    /// reset to `new`: the cap refusal, the level, the conqueror-off gate, the nested
+    /// next-experience, and the level record. Answers the records with whether the
+    /// conqueror switched off, or `None` when the level plus the delta is past `max`
+    /// and the arm returns before changing anything.
+    ///
+    /// The quest `LevelUp` raise, the reward, and the guild and party level are the
+    /// caller's: they need the quest runtime and the member maps, which live above
+    /// this layer. The conqueror-off gate is `SetConqueror(false)`'s state half
+    /// (`:11678-11697`): the conqueror-level change with its nested next-experience,
+    /// the step, point and sungma zeros in both arrays, the cleared conqueror
+    /// experience, and the conqueror-experience record `UpdatePointsPacket` writes
+    /// (`:11700`).
+    /// The gate's compute and packets are the caller's too: they ride the caller's
+    /// record stream between these records and the rest of the reset.
+    pub fn reset_level(&mut self, new: u8, max: i32) -> Option<(Vec<PointRecord>, bool)> {
+        if i32::from(new) > max {
+            return None;
+        }
+        let mut records = Vec::new();
+        let conqu_off = self.conqueror_level > 0 && i32::from(new) < max;
+        if conqu_off {
+            let amount = 0 - i32::from(self.conqueror_level);
+            self.conqueror_level = 0;
+            let byte = u8::try_from(point::POINT_CONQUEROR_LEVEL).unwrap_or(0);
+            self.nested(point::POINT_CONQUEROR_NEXT_EXP, 0, &mut records);
+            self.emit(byte, amount, false, false, 0, &mut records);
+            for slot in [
+                point::POINT_CONQUEROR_LEVEL_STEP,
+                point::POINT_CONQUEROR_POINT,
+                point::POINT_SUNGMA_STR,
+                point::POINT_SUNGMA_HP,
+                point::POINT_SUNGMA_MOVE,
+                point::POINT_SUNGMA_IMMUNE,
+            ] {
+                self.real[slot] = 0;
+                self.instant[slot] = 0;
+            }
+            self.conqueror_exp = 0;
+            let byte = u8::try_from(point::POINT_CONQUEROR_EXP).unwrap_or(0);
+            self.emit(byte, 0, false, false, 0, &mut records);
+        }
+        self.level = new;
+        self.nested(point::POINT_NEXT_EXP, 0, &mut records);
+        let byte = u8::try_from(point::POINT_LEVEL).unwrap_or(0);
+        self.emit(byte, 0, false, false, i64::from(new), &mut records);
+        Some((records, conqu_off))
     }
 
     /// `bBasePart`, the body part the character shows with no armour.
@@ -705,6 +867,31 @@ impl Points {
     #[must_use]
     pub fn real_point(&self, kind: usize) -> i32 {
         self.real.get(kind).copied().unwrap_or(0)
+    }
+
+    /// `SetRealPoint` and `SetPoint` together: `/stat` and `/stat-` move both arrays
+    /// before they compute (`G/cmd_general.cpp:830-832`, `:748-750`). A slot past the
+    /// array leaves both alone, as the legacy setter's bounds do nothing there.
+    pub fn set_both_points(&mut self, kind: usize, value: i32) {
+        if let Some(real) = self.real.get_mut(kind) {
+            *real = value;
+        }
+        if let Some(instant) = self.instant.get_mut(kind) {
+            *instant = value;
+        }
+    }
+
+    /// `SetRealPoint` to one value and `SetPoint` to another: `do_set_stat`
+    /// writes the goal to the real array and the instant plus the delta to
+    /// the instant one (`G/cmd_gm.cpp:4671-4672`). A slot past the array
+    /// leaves both alone, as the legacy setters' bounds do nothing there.
+    pub fn set_split_points(&mut self, kind: usize, real: i32, instant: i32) {
+        if let Some(slot) = self.real.get_mut(kind) {
+            *slot = real;
+        }
+        if let Some(slot) = self.instant.get_mut(kind) {
+            *slot = instant;
+        }
     }
 
     /// `SetRealPoint(POINT_PLAYTIME, minutes)`, which `CreatePlayerProto` writes when a save
@@ -749,6 +936,17 @@ impl Points {
     #[must_use]
     pub fn exp(&self) -> i64 {
         self.exp
+    }
+
+    /// The conqueror experience held, which `/level`'s conqueror-off gate clears.
+    #[must_use]
+    pub fn conqueror_exp(&self) -> i64 {
+        self.conqueror_exp
+    }
+
+    /// `SetConquerorExp(0)` (`G/char.cpp:11697`): the conqueror experience clears.
+    pub fn clear_conqueror_exp(&mut self) {
+        self.conqueror_exp = 0;
     }
 
     /// Locks the three pools while the character is stunned or dead, and unlocks them when it
@@ -1046,6 +1244,70 @@ impl Points {
         self.inven_point
     }
 
+    /// `GetGaya`: the gaya currency.
+    #[must_use]
+    pub fn gaya(&self) -> i32 {
+        self.gaya
+    }
+
+    /// `SetRace` (`G/char.cpp:2188-2196`): the race becomes `race`. A race past the
+    /// eight main ones logs and leaves the race alone.
+    pub fn set_race(&mut self, race: u8) {
+        if race < 8 {
+            self.race = race;
+        }
+    }
+
+    /// `GetRaceNum` (`G/char.cpp:2177-2187`): the polymorph race while morphed, else the
+    /// stored race. The caller narrows to the record's `u16`, as the legacy `WORD` return
+    /// does.
+    #[must_use]
+    pub fn shown_race(&self) -> u32 {
+        if self.polymorph_race != 0 {
+            self.polymorph_race
+        } else {
+            u32::from(self.race)
+        }
+    }
+
+    /// `IsPolymorphed` (`G/char.h:901`): whether a morph is on.
+    #[must_use]
+    pub fn is_polymorphed(&self) -> bool {
+        self.polymorph_race != 0
+    }
+
+    /// `GetPolymorphVnum` (`G/char.h:904`): the morphed-into vnum, or 0.
+    #[must_use]
+    pub fn polymorph_race(&self) -> u32 {
+        self.polymorph_race
+    }
+
+    /// `IsPolyMaintainStat` (`G/char.h:902`): whether the morph keeps the character's
+    /// own attribute points.
+    #[must_use]
+    pub fn poly_maintain_stat(&self) -> bool {
+        self.poly_maintain_stat
+    }
+
+    /// The state half of `SetPolymorph` (`G/char.cpp:7680-7694`): a vnum below
+    /// `JOB_MAX_NUM` (4) clears the morph and drops the maintain flag; an unchanged vnum
+    /// leaves everything alone. Returns whether anything changed. The caller stops the
+    /// ride, reencodes with the spawn words, runs the four zero changes, resets the combo
+    /// and recomputes the battle points.
+    pub fn set_polymorph(&mut self, race: u32, maintain_stat: bool) -> bool {
+        let (race, maintain_stat) = if race < 4 {
+            (0, false)
+        } else {
+            (race, maintain_stat)
+        };
+        if self.polymorph_race == race {
+            return false;
+        }
+        self.poly_maintain_stat = maintain_stat;
+        self.polymorph_race = race;
+        true
+    }
+
     /// The `IMMUNE_*` bits the immunity slots have set.
     #[must_use]
     pub fn immune_flag(&self) -> u32 {
@@ -1121,6 +1383,65 @@ impl Points {
     pub fn compute_battle_points_with(&mut self, equipment: &Equipment<'_>) -> Vec<PointRecord> {
         self.armour = equipment.armour();
         self.compute_battle_points()
+    }
+
+    /// The polymorphed arm of `ComputeBattlePoints` (`G/char.cpp:2689-2707`): the attack
+    /// grade is twice the level plus twice the polymorph strength, the defence grade the
+    /// level plus the polymorph vitality plus the mob's `wDef`, and each magic grade copies
+    /// its plain one. `mob` is the morphed-into row's `(str, con, def)` (`dex` and `int`
+    /// never enter the grades); `None` (an unknown vnum, as `CMobManager::Get` missing)
+    /// zeroes both grades. `power` is `GetPolymorphPower` (`G/char.cpp:7669-7678`): the
+    /// level-129 skill's climb through `aiPolymorphPowerByLevel`, or the `poly` event flag
+    /// on the test server. `skill_group` feeds the strength read: a shaman, or a sura of
+    /// group 2, adds its own intelligence instead of its own strength
+    /// (`GetPolymorphPoint`, `G/char.cpp:3673-3701`).
+    pub fn compute_polymorph_battle_points(
+        &mut self,
+        mob: Option<(u8, u8, u16)>,
+        power: i32,
+        skill_group: u8,
+    ) -> Vec<PointRecord> {
+        let mut records = Vec::new();
+        // `SetPoint` zeroes first here, as the plain compute does: legacy reads the zeroed
+        // slots back for the magic copies (`G/char.cpp:2706-2707`).
+        self.instant[point::POINT_ATT_GRADE] = 0;
+        self.instant[point::POINT_DEF_GRADE] = 0;
+        self.instant[point::POINT_CLIENT_DEF_GRADE] = 0;
+        self.instant[point::POINT_MAGIC_ATT_GRADE] = 0;
+        self.instant[point::POINT_MAGIC_DEF_GRADE] = 0;
+        let (attack, defence) = match mob {
+            Some((str_, con, def)) => {
+                let own = i64::from(self.polymorph_strength_own(skill_group));
+                let strength = i64::from(str_) * i64::from(power) / 100 + own;
+                let vitality = i64::from(con) * i64::from(power) / 100
+                    + i64::from(self.instant[point::POINT_HT]);
+                (
+                    2 * i64::from(self.level) + 2 * strength,
+                    i64::from(self.level) + vitality + i64::from(def),
+                )
+            }
+            None => (0, 0),
+        };
+        self.nested(point::POINT_ATT_GRADE, narrow(attack), &mut records);
+        self.nested(point::POINT_DEF_GRADE, narrow(defence), &mut records);
+        let attack = self.instant[point::POINT_ATT_GRADE];
+        let defence = self.instant[point::POINT_DEF_GRADE];
+        self.nested(point::POINT_MAGIC_ATT_GRADE, attack, &mut records);
+        self.nested(point::POINT_MAGIC_DEF_GRADE, defence, &mut records);
+        records
+    }
+
+    /// `GetPolymorphPoint(POINT_ST)` with the caller's skill group: a shaman, or a sura of
+    /// group 2, adds its own intelligence to the mob's scaled strength instead of its own
+    /// strength (`G/char.cpp:3688-3691`).
+    #[must_use]
+    pub fn polymorph_strength_own(&self, skill_group: u8) -> i32 {
+        let job = race_to_job(self.race);
+        if job == 3 || (job == 2 && skill_group == 2) {
+            self.instant[point::POINT_IQ]
+        } else {
+            self.instant[point::POINT_ST]
+        }
     }
 
     /// [`Points::compute_points_with`] for a character that wears nothing.
@@ -1211,6 +1532,21 @@ impl Points {
 
     fn job_points(&self) -> &'static JobInitialPoints {
         &levels::JOB_INITIAL_POINTS[usize::from(race_to_job(self.race))]
+    }
+
+    /// `JobInitialPoints[GetJob()]`'s start for one of the four attributes, which
+    /// `/stat-` reads as the floor it may not lower past
+    /// (`G/cmd_general.cpp:739-771`). Any other slot reads 0 and refuses.
+    #[must_use]
+    pub fn job_start(&self, kind: usize) -> u8 {
+        let job = self.job_points();
+        match kind {
+            point::POINT_ST => job.st,
+            point::POINT_HT => job.ht,
+            point::POINT_DX => job.dx,
+            point::POINT_IQ => job.iq,
+            _ => 0,
+        }
     }
 
     /// The body of `ApplyPoint` (`char.cpp:4826-5043`).
@@ -1403,6 +1739,18 @@ impl Points {
                 self.real[kind] = value;
                 i64::from(value)
             }
+            // `POINT_GAYA` (`char.cpp:4371-4403`): the total refuses at `GAYA_MAX`; the
+            // CIBN overtime halves and zeroes never run, because the Rewrite is the
+            // `europe` locale, where `LC_IsNewCIBN` is false.
+            point::POINT_GAYA => {
+                let total = i64::from(self.gaya) + i64::from(amount);
+                if total >= i64::from(crate::character::GAYA_MAX) {
+                    return Applied::Silent;
+                }
+                self.gaya = self.gaya.saturating_add(amount);
+                self.instant[kind] = self.gaya;
+                i64::from(self.gaya)
+            }
             point::POINT_RAMADAN_CANDY_BONUS_EXP => {
                 self.instant[kind] = amount;
                 i64::from(amount)
@@ -1441,6 +1789,13 @@ impl Points {
             _ => return Applied::NotPool,
         };
         Applied::Changed { amount, value }
+    }
+
+    /// The slots the recompute keeps from the fields legacy holds outside the array: the
+    /// inventory unlocks and the gaya (`char.cpp:2917-2926` reads the parts the same way).
+    fn seed_kept_slots(&mut self) {
+        self.instant[point::POINT_INVEN] = self.inven_point;
+        self.instant[point::POINT_GAYA] = self.gaya;
     }
 
     /// An immunity slot: add, then set its `IMMUNE_*` bit while the slot is non-zero.
@@ -1575,9 +1930,8 @@ impl Points {
         self.instant[point::POINT_CONQUEROR_POINT] = conqueror_point;
         self.instant[point::POINT_CONQUEROR_LEVEL_STEP] = conqueror_step;
         // The parts go back to `GetOriginalPart` and the worn loop's parts switch sets them
-        // (`char.cpp:2917-2926`); no other step reads them, so both happen here.
-        self.parts = equipment.parts(u16::from(self.part_base), self.parts);
-        self.instant[point::POINT_INVEN] = self.inven_point;
+        self.parts = equipment.parts(u16::from(self.part_base), self.parts, self.hidden);
+        self.seed_kept_slots();
 
         let job = self.job_points();
         let ht = i64::from(self.instant[point::POINT_HT]);
@@ -1730,7 +2084,7 @@ mod tests {
 
     /// A fresh level-1 character of a race, with its job's starting attributes, full pools,
     /// and no conqueror level, on map 1.
-    fn fresh(race: u8) -> PointsRow {
+    pub(super) fn fresh(race: u8) -> PointsRow {
         let job = &levels::JOB_INITIAL_POINTS[usize::from(race_to_job(race))];
         PointsRow {
             race,
@@ -1752,11 +2106,14 @@ mod tests {
             skill_point: 0,
             sub_skill_point: 0,
             level_step: 0,
+            stat_reset_count: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
             playtime: 0,
+            conqueror_exp: 0,
+            gaya: 0,
         }
     }
 
@@ -2636,6 +2993,39 @@ mod tests {
     }
 
     #[test]
+    fn the_gaya_arm_keeps_the_currency_and_refuses_at_the_cap() {
+        let mut points = warrior();
+        assert_eq!(points.gaya(), 0);
+        let records = points
+            .point_change(point::POINT_GAYA, 500, true, false)
+            .unwrap();
+        assert_eq!(points.gaya(), 500);
+        assert_eq!(points.get_point(point::POINT_GAYA), 500);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            (records[0].kind, records[0].amount, records[0].value),
+            (207, 500, 500)
+        );
+        // At the cap the arm refuses silently: nothing moves, nothing writes.
+        let mut points = warrior();
+        points.gaya = crate::character::GAYA_MAX - 1;
+        let records = points
+            .point_change(point::POINT_GAYA, 1, true, false)
+            .unwrap();
+        assert!(records.is_empty());
+        assert_eq!(points.gaya(), crate::character::GAYA_MAX - 1);
+    }
+
+    #[test]
+    fn the_race_sets_within_the_eight_and_holds_past_them() {
+        let mut points = warrior();
+        points.set_race(5);
+        assert_eq!(points.race(), 5);
+        points.set_race(8);
+        assert_eq!(points.race(), 5, "a race past the eight logs and holds");
+    }
+
+    #[test]
     fn the_none_slot_changes_nothing_and_writes_nothing() {
         let before = warrior();
         let mut points = before.clone();
@@ -3184,5 +3574,86 @@ mod tests {
         assert_eq!(quarter_cost(346_970_000), 86_742_496);
         assert_eq!(quarter_cost(188_537_554), 47_134_388);
         assert_eq!(quarter_cost(2_500_000_000), 625_000_000);
+    }
+
+    /// `SetPolymorph`'s state half: a job vnum clears and drops the flag, an unchanged
+    /// vnum reports no change, and the shown race follows the morph.
+    #[test]
+    fn a_job_vnum_clears_and_an_unchanged_vnum_reports_no_change() {
+        let mut points = Points::load(&fresh(0));
+        assert!(!points.is_polymorphed());
+        assert_eq!(points.shown_race(), 0);
+        assert!(points.set_polymorph(101, false));
+        assert!(points.is_polymorphed());
+        assert_eq!(points.polymorph_race(), 101);
+        assert_eq!(points.shown_race(), 101);
+        assert!(!points.set_polymorph(101, false), "unchanged");
+        assert!(points.set_polymorph(3, true), "a job vnum clears");
+        assert!(!points.is_polymorphed());
+        assert!(!points.poly_maintain_stat());
+        assert_eq!(points.shown_race(), 0);
+        assert!(!points.set_polymorph(2, false), "clearing a clear morph");
+    }
+
+    /// The morphed battle compute on the stray dog's row (str 3, con 5, def 4): a level-1
+    /// warrior (st 6, ht 4) at power 100 takes 2 + 2*(3 + 6) = 20 attack and
+    /// 1 + (5 + 4) + 4 = 14 defence, each magic grade copying its plain one. The defence
+    /// write nests the client's own record, so five records land, the client's after the
+    /// plain grade's.
+    #[test]
+    fn a_morph_grades_from_the_dogs_row_and_the_power() {
+        let mut points = Points::load(&fresh(0));
+        points.set_polymorph(101, false);
+        let records = points.compute_polymorph_battle_points(Some((3, 5, 4)), 100, 0);
+        assert_eq!(points.get_point(point::POINT_ATT_GRADE), 20);
+        assert_eq!(points.get_point(point::POINT_DEF_GRADE), 14);
+        assert_eq!(points.get_point(point::POINT_MAGIC_ATT_GRADE), 20);
+        assert_eq!(points.get_point(point::POINT_MAGIC_DEF_GRADE), 14);
+        let kinds: Vec<usize> = records
+            .iter()
+            .map(|record| usize::from(record.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                point::POINT_ATT_GRADE,
+                point::POINT_CLIENT_DEF_GRADE,
+                point::POINT_DEF_GRADE,
+                point::POINT_MAGIC_ATT_GRADE,
+                point::POINT_MAGIC_DEF_GRADE
+            ]
+        );
+        let unknown = points.compute_polymorph_battle_points(None, 100, 0);
+        assert_eq!(points.get_point(point::POINT_ATT_GRADE), 0);
+        assert_eq!(points.get_point(point::POINT_DEF_GRADE), 0);
+        assert_eq!(unknown.len(), 5);
+    }
+
+    /// A shaman's morphed strength reads its own intelligence, not its strength; a
+    /// warrior's reads its strength, and a group-2 sura's its intelligence.
+    #[test]
+    fn a_shaman_and_a_group_two_sura_share_strength_with_intelligence() {
+        let shaman = Points::load(&fresh(3));
+        assert_eq!(
+            shaman.polymorph_strength_own(0),
+            shaman.get_point(point::POINT_IQ)
+        );
+        let warrior = Points::load(&fresh(0));
+        assert_eq!(
+            warrior.polymorph_strength_own(0),
+            warrior.get_point(point::POINT_ST)
+        );
+        // A fresh sura holds 5 and 5, which cannot tell the arms apart; one stat point
+        // moves strength to 7.
+        let mut sura = Points::load(&fresh(2));
+        sura.set_both_points(point::POINT_ST, 7);
+        assert_eq!(
+            sura.polymorph_strength_own(2),
+            sura.get_point(point::POINT_IQ)
+        );
+        assert_eq!(
+            sura.polymorph_strength_own(1),
+            sura.get_point(point::POINT_ST)
+        );
     }
 }

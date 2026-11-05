@@ -1265,6 +1265,89 @@ async fn a_socket_change_stores_every_socket_and_only_for_its_owner() {
     );
 }
 
+/// `do_attr_full_set` forces five attributes on a worn piece (`item_attribute.cpp:357-378`),
+/// and the line stores every attribute with the move, under the owner.
+#[tokio::test]
+async fn an_attribute_change_stores_every_attribute_and_only_for_its_owner() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let owner = player(store, "acctattr", "AttrOne").await;
+    let other = player(store, "acctattr2", "AttrTwo").await;
+    let mut helm = row(1_000_241, owner, 2, 1);
+    helm.sockets = [9, 8, 7, 6, 5, 4];
+    save_owner_items(store, &[helm.clone()]).await.unwrap();
+    let forced = [
+        Attribute {
+            b_type: 7,
+            s_value: 8,
+        },
+        Attribute {
+            b_type: 10,
+            s_value: 30,
+        },
+        Attribute {
+            b_type: 11,
+            s_value: 30,
+        },
+        Attribute {
+            b_type: 28,
+            s_value: 15,
+        },
+        Attribute {
+            b_type: 24,
+            s_value: 10,
+        },
+        Attribute {
+            b_type: 0,
+            s_value: 0,
+        },
+        Attribute {
+            b_type: 0,
+            s_value: 0,
+        },
+    ];
+    apply_row_changes(
+        store,
+        owner,
+        &[RowChange::Attributes {
+            id: 1_000_241,
+            attributes: forced,
+        }],
+    )
+    .await
+    .unwrap();
+    let stored = load_item(store, 1_000_241).await.unwrap().unwrap();
+    assert_eq!(stored.attributes, forced);
+    assert_eq!(stored.sockets, helm.sockets);
+
+    let refused = apply_row_changes(
+        store,
+        other,
+        &[RowChange::Attributes {
+            id: 1_000_241,
+            attributes: [Attribute {
+                b_type: 0,
+                s_value: 0,
+            }; 7],
+        }],
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(ItemError::NotOwned { id: 1_000_241, .. })),
+        "{refused:?}"
+    );
+    assert_eq!(
+        load_item(store, 1_000_241)
+            .await
+            .unwrap()
+            .unwrap()
+            .attributes,
+        forced
+    );
+}
+
 #[tokio::test]
 async fn a_change_the_owner_cannot_make_rolls_back_the_whole_move() {
     let Some(db) = ScratchDatabase::create().await else {

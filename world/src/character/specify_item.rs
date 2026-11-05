@@ -10,6 +10,7 @@
 
 use common::item_slots::{EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START};
 use gamedata::item_proto::ItemProtos;
+use protocol::gc_item_window::ItemAttribute;
 use protocol::item_pos::ItemPos;
 
 use super::item_move::{ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord};
@@ -110,6 +111,32 @@ pub fn set_item_socket(
         done.records.push(MoveRecord::Item(update));
     }
     done.changes.push(ItemChange::Sockets { id, sockets });
+    done
+}
+
+/// `CItem::SetForceAttribute(index, type, value)` (`G/item_attribute.cpp:357-378`) of the
+/// held item `id`: the attribute takes the pair, the client's cell is updated
+/// (`UpdatePacket`), and the row is saved. An item the character does not hold, or an index
+/// past the attributes, changes and sends nothing.
+#[must_use]
+pub fn force_worn_attribute(
+    items: &mut CharacterItems,
+    id: ItemId,
+    (index, b_type, s_value): (usize, u8, i16),
+) -> MoveDone {
+    let mut done = MoveDone {
+        kind: MoveKind::Attributed,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    let Ok(attributes) = items.set_attribute(id, index, ItemAttribute::new(b_type, s_value)) else {
+        return done;
+    };
+    if let Some(item) = items.item(id) {
+        let update = ItemRecord::Update(item.gc_item_update());
+        done.records.push(MoveRecord::Item(update));
+    }
+    done.changes.push(ItemChange::Attributes { id, attributes });
     done
 }
 
@@ -349,5 +376,35 @@ mod tests {
             assert!(done.records.is_empty() && done.changes.is_empty());
         }
         assert_eq!(items.item(9).expect("held").sockets[0], 0);
+    }
+
+    /// `force_worn_attribute` writes the pair, updates the cell and saves the row;
+    /// an unheld id or a past-end index changes and sends nothing.
+    #[test]
+    fn a_force_write_updates_the_held_item_and_nothing_else() {
+        let mut items = holding(&[(4, stack(9, ORE, 2))]);
+        let done = force_worn_attribute(&mut items, 9, (1, 7, 8));
+        assert_eq!(done.kind, MoveKind::Attributed);
+        let item = items.item(9).expect("held");
+        assert_eq!(item.attributes[1], ItemAttribute::new(7, 8));
+        assert_eq!(
+            done.changes,
+            [ItemChange::Attributes {
+                id: 9,
+                attributes: item.attributes
+            }]
+        );
+        assert_eq!(
+            done.records,
+            [MoveRecord::Item(ItemRecord::Update(item.gc_item_update()))]
+        );
+        for (id, index) in [(8, 0), (9, crate::item::ATTRIBUTES)] {
+            let done = force_worn_attribute(&mut items, id, (index, 7, 8));
+            assert!(done.records.is_empty() && done.changes.is_empty());
+        }
+        assert_eq!(
+            items.item(9).expect("held").attributes[1],
+            ItemAttribute::new(7, 8)
+        );
     }
 }

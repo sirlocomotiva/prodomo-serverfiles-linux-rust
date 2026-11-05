@@ -79,6 +79,24 @@ impl Dice for Pcg32 {
     }
 }
 
+/// A source that answers one `number(1, 100)` draw: a caller that drew before its storage
+/// borrowed replays the draw inside the step.
+pub struct FixedDraw(i32);
+
+impl FixedDraw {
+    /// Replay `draw`, a `number(1, 100)` outcome.
+    #[must_use]
+    pub const fn new(draw: i32) -> Self {
+        Self(draw)
+    }
+}
+
+impl Dice for FixedDraw {
+    fn random31(&mut self) -> u32 {
+        u32::try_from(self.0 - 1).unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

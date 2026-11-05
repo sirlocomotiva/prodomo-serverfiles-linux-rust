@@ -62,6 +62,8 @@ use gamedata::mob_proto::{
     CHAR_TYPE_NPC, MOB_RANK_BOSS,
 };
 use protocol::gc_actors::GcCharacterMove;
+use protocol::gc_inventory::HEADER_GC_SYNC_POSITION;
+use protocol::gc_position::GcSyncPositionElement;
 use world::character::number;
 use world::npc::Npc;
 
@@ -69,7 +71,7 @@ use super::mob_ai::{delta_by_degree, pulses, Victim};
 use super::motion::{calculate_duration, distance_sqrt, get_move_speed, rotation_to_xy};
 use super::view::EntityKey;
 use super::GameState;
-use crate::loading_phase::AFF_REVIVE_INVISIBLE;
+use crate::loading_phase::{AFFECT_BOW_DISTANCE, AFF_REVIVE_INVISIBLE};
 use crate::movement::FUNC_ATTACK;
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
@@ -273,19 +275,47 @@ impl GameState {
 
     /// `BeginFight` of the monster under `mob` on `victim` (`:116-122`): the victim is held
     /// through `SetVictim` (which stamps the switch window's time), Battle is asked, and
-    /// the next update is the next Pulse.
+    /// the next update is the next Pulse. Holding the victim logs, taking the fighting
+    /// stand logs, and asking the next Pulse logs, in legacy's order.
     pub(super) fn begin_fight(&mut self, mob: u32, victim: Vid) {
         let Some(npc) = self.npc_by_vid(mob) else {
             return;
         };
         let fresh = super::mob_ai::Mind::new(npc);
-        let mind = self.minds.ensure(mob, fresh);
-        mind.victim = Some(Victim::Here(victim));
-        mind.fighting = true;
-        mind.asked = Some(super::mob_ai::Fsm::Battle);
-        mind.next_pulse = self.last_pulse.saturating_add(1);
-        let now = self.clock.now();
-        self.npc_combat.entry(mob).or_default().last_victim_set_ms = Some(now);
+        let _mind = self.minds.ensure(mob, fresh);
+        self.set_victim(mob, Some(victim));
+        self.set_fighting(mob, true);
+        if let Some(mind) = self.minds.get_mut(mob) {
+            mind.next_pulse = self.last_pulse.saturating_add(1);
+        }
+        self.monster_log(mob, super::detail_log::LOG_NEXT_STATE);
+    }
+
+    /// `SetPosition(POS_FIGHTING)` or `SetPosition(POS_STANDING)` on the NPC under `mob`
+    /// (`G/char.cpp:1436-1469`): the fighting stand flips, and a changed stand logs the
+    /// position's line.
+    pub(super) fn set_fighting(&mut self, mob: u32, fighting: bool) {
+        let changed = self.minds.get(mob).is_some_and(|mind| {
+            let standing = !mind.fighting;
+            standing == fighting
+        });
+        let Some(mind) = self.minds.get_mut(mob) else {
+            return;
+        };
+        mind.fighting = fighting;
+        mind.asked = Some(if fighting {
+            super::mob_ai::Fsm::Battle
+        } else {
+            super::mob_ai::Fsm::Idle
+        });
+        if changed {
+            let line = if fighting {
+                super::detail_log::LOG_BATTLE_FIGHTING
+            } else {
+                super::detail_log::LOG_IDLE_RESTARTING
+            };
+            self.monster_log(mob, line);
+        }
     }
 
     /// `BeginFight` of the guard under `mob` on the monster `victim`: the twin of
@@ -297,17 +327,29 @@ impl GameState {
         let fresh = super::mob_ai::Mind::new(npc);
         let mind = self.minds.ensure(mob, fresh);
         mind.victim_npc = Some(victim);
-        mind.fighting = true;
-        mind.asked = Some(super::mob_ai::Fsm::Battle);
-        mind.next_pulse = self.last_pulse.saturating_add(1);
+        self.set_fighting(mob, true);
+        if let Some(mind) = self.minds.get_mut(mob) {
+            mind.next_pulse = self.last_pulse.saturating_add(1);
+        }
         let now = self.clock.now();
         self.npc_combat.entry(mob).or_default().last_victim_set_ms = Some(now);
+        self.monster_log(mob, super::detail_log::LOG_NEXT_STATE);
     }
 
     /// `SetVictim` (`G/char_battle.cpp:3411-3428`): `None` stands a fighting monster down to
     /// Idle (`battle_end`), clearing both victim slots, and leaves the switch window's
-    /// time; `Some` stores the victim and stamps it (`:3427`).
+    /// time; `Some` stores the victim and stamps it (`:3427`). A cleared held victim logs
+    /// `???????????` and a changed one `Set attack target: %s` (`:3413-3424`).
     pub(super) fn set_victim(&mut self, mob: u32, victim: Option<Vid>) {
+        let held =
+            self.minds
+                .get(mob)
+                .and_then(|mind| mind.victim)
+                .and_then(|victim| match victim {
+                    Victim::Here(victim) => self.bodies.contains_key(&victim).then_some(victim),
+                    Victim::Gone => None,
+                });
+        let held_npc = self.minds.get(mob).and_then(|mind| mind.victim_npc);
         let Some(mind) = self.minds.get_mut(mob) else {
             return;
         };
@@ -327,6 +369,19 @@ impl GameState {
         if victim.is_some() {
             let now = self.clock.now();
             self.npc_combat.entry(mob).or_default().last_victim_set_ms = Some(now);
+        }
+        match victim {
+            None if held.is_some() || held_npc.is_some() => {
+                self.monster_log(mob, super::detail_log::LOG_VICTIM_LOST);
+            }
+            Some(found) if held != Some(found) => {
+                if let Ok(character) = self.characters.find_by_vid(found) {
+                    let mut line = super::detail_log::LOG_SET_ATTACK_TARGET.to_vec();
+                    line.extend_from_slice(character.name().as_bytes());
+                    self.monster_log(mob, &line);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -830,6 +885,7 @@ impl GameState {
             target.at.1.saturating_sub(fighter.at.1),
         ));
         if dist >= VICTIM_DROP {
+            self.monster_log(mob, super::detail_log::LOG_TARGET_LOST_FAR);
             self.set_victim(mob, None);
             // The protege follow (`:1090-1096`): past 1000 of its group's leader, a
             // dead-ended member walks back to within `number(150, 400)` of it.
@@ -1121,9 +1177,7 @@ impl GameState {
     /// or dead monster is skipped (B26). The dropped victim's damage row goes too: with no
     /// row the next hit re-inserts `(dam, 0)` instead of adding to a stale grudge.
     ///
-    /// No live caller yet: the white flag 70008 waits for `USE_SPECIAL`, and `/forgetme` for
-    /// the GM levels.
-    #[cfg(test)]
+    /// No live caller yet besides `/forgetme`: the white flag 70008 waits for `USE_SPECIAL`.
     pub(super) fn forget_my_attacker(&mut self, vid: Vid) {
         let Some(place) = self.place_of(vid.raw()) else {
             return;
@@ -1155,6 +1209,154 @@ impl GameState {
             }
         }
         self.revive_invisible(vid);
+    }
+
+    /// `AggregateMonster` of `vid` (`G/char_battle.cpp:3644-3669`): each victimless monster
+    /// around the caller within 5000 of it, with a one-in-two draw, begins to fight the
+    /// caller when it can. PCs and non-monsters pass, as do held victims (`GetVictim`).
+    pub(super) fn aggregate_monster(&mut self, vid: Vid) {
+        let Some(place) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return;
+        };
+        let Some(index) = self.maps.get(&place) else {
+            return;
+        };
+        let around: Vec<u32> = index
+            .around_of(EntityKey::Character(vid.raw()))
+            .into_iter()
+            .filter_map(|key| match key {
+                EntityKey::Npc(raw) => Some(raw),
+                EntityKey::Character(_) | EntityKey::Ground(_) => None,
+            })
+            .collect();
+        for mob in around {
+            let Some(npc) = self.npc_by_vid(mob) else {
+                continue;
+            };
+            if npc.char_type != CHAR_TYPE_MONSTER {
+                continue;
+            }
+            if self.victim_of(mob).is_some() {
+                continue;
+            }
+            if number(&mut self.dice, 1, 100) > 50 {
+                continue;
+            }
+            let Some(at) = self.npc_spot(mob) else {
+                continue;
+            };
+            if distance_approx(at.0.saturating_sub(spot.x), at.1.saturating_sub(spot.y)) >= 5000 {
+                continue;
+            }
+            if self.can_begin_fight(mob) {
+                self.begin_fight(mob, vid);
+            }
+        }
+    }
+
+    /// `AttractRanger` of `vid` (`G/char_battle.cpp:3671-3701`): each monster around whose
+    /// victim is none or the caller and whose attack range is past 150 is cut to 150 for 3
+    /// minutes (`AddAffect(225, POINT_BOW_DISTANCE, 150 - range, 0, 180, 0, false)`).
+    /// `iNewRange` is a constant 150, so the `if` inside never fires.
+    pub(super) fn attract_ranger(&mut self, vid: Vid) {
+        let Some(place) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let Some(index) = self.maps.get(&place) else {
+            return;
+        };
+        let around: Vec<u32> = index
+            .around_of(EntityKey::Character(vid.raw()))
+            .into_iter()
+            .filter_map(|key| match key {
+                EntityKey::Npc(raw) => Some(raw),
+                EntityKey::Character(_) | EntityKey::Ground(_) => None,
+            })
+            .collect();
+        for mob in around {
+            let Some(npc) = self.npc_by_vid(mob) else {
+                continue;
+            };
+            if npc.char_type != CHAR_TYPE_MONSTER {
+                continue;
+            }
+            if self.victim_of(mob).is_some_and(|victim| victim != vid) {
+                continue;
+            }
+            let range = world::character::mob_attack_range(npc);
+            if range <= 150 {
+                continue;
+            }
+            let affect = super::affect::Affect {
+                kind: AFFECT_BOW_DISTANCE,
+                apply_on: u8::try_from(point::POINT_BOW_DISTANCE).unwrap_or(u8::MAX),
+                value: 150 - i32::from(range),
+                flag: 0,
+                remaining: 180,
+                sp_cost: 0,
+            };
+            self.add_npc_affect(mob, affect);
+        }
+    }
+
+    /// `PullMonster` of `vid` (`G/char_battle.cpp:3702-3747`): each monster around 100 to
+    /// 3000 out is teleported 300 toward the caller, no nearer than 100, then told to walk
+    /// there and synced around. `GetDegreeFromPositionXY` aims the step; the cast to `long`
+    /// cuts toward zero.
+    pub(super) fn pull_monster(&mut self, vid: Vid) {
+        let Some(place) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return;
+        };
+        let Some(index) = self.maps.get(&place) else {
+            return;
+        };
+        let around: Vec<u32> = index
+            .around_of(EntityKey::Character(vid.raw()))
+            .into_iter()
+            .filter_map(|key| match key {
+                EntityKey::Npc(raw) => Some(raw),
+                EntityKey::Character(_) | EntityKey::Ground(_) => None,
+            })
+            .collect();
+        for mob in around {
+            let Some(npc) = self.npc_by_vid(mob) else {
+                continue;
+            };
+            if npc.char_type != CHAR_TYPE_MONSTER {
+                continue;
+            }
+            let Some(at) = self.npc_spot(mob) else {
+                continue;
+            };
+            let approx = distance_approx(spot.x.saturating_sub(at.0), spot.y.saturating_sub(at.1));
+            let dist = i32_to_f32(approx);
+            if !(100.0..=3000.0).contains(&dist) {
+                continue;
+            }
+            let mut fresh = dist - 300.0;
+            if fresh < 100.0 {
+                fresh = 100.0;
+            }
+            let degree = rotation_to_xy(spot.x.saturating_sub(at.0), spot.y.saturating_sub(at.1));
+            let (fx, fy) = delta_by_degree(degree, dist - fresh);
+            let (tx, ty) = (
+                at.0.saturating_add(f32_to_i32(fx)),
+                at.1.saturating_add(f32_to_i32(fy)),
+            );
+            self.npc_move(mob, tx, ty);
+            self.npc_goto(mob, tx, ty);
+            let mut record = vec![HEADER_GC_SYNC_POSITION.value(), 0, 0];
+            record.extend_from_slice(&GcSyncPositionElement::new(mob, tx, ty).encode());
+            let size = u16::try_from(record.len()).unwrap_or(u16::MAX);
+            record[1..3].copy_from_slice(&size.to_le_bytes());
+            self.packet_around(super::view::EntityKey::Npc(mob), &record, None);
+        }
     }
 
     /// Every Mind whose victim is `vid` now holds `Gone`, and every damage row of `vid`
@@ -2368,6 +2570,122 @@ mod tests {
                 .iter()
                 .any(|record| record.first() == Some(&HEADER_GC_PLAYER_POINT_CHANGE.value())),
             "no exp share: {heard:?}"
+        );
+    }
+
+    /// `attract_ranger` cuts a ranged monster past 150 to 150 for 3 minutes (G28):
+    /// the 225 row lands with `150 - range`, the melee at 175 keeps no row, and a
+    /// monster fighting another player keeps its range.
+    #[test]
+    fn attract_ranger_cuts_only_the_ranged_victimless_or_mine() {
+        use crate::loading_phase::AFFECT_BOW_DISTANCE;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let ranger = a_fighter(ME, 406, BATTLE_TYPE_RANGE, (1000, 2000), 0, SPOT, 10_000);
+        let melee = a_fighter(
+            ME + 1,
+            406,
+            BATTLE_TYPE_MELEE,
+            (150, 2000),
+            0,
+            (SPOT.0 + 50, SPOT.1),
+            10_000,
+        );
+        let busy = a_fighter(
+            ME + 2,
+            406,
+            BATTLE_TYPE_RANGE,
+            (1000, 2000),
+            0,
+            (SPOT.0, SPOT.1 + 50),
+            10_000,
+        );
+        let mut world = stand_field(&clock, vec![ranger, melee, busy], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        let mut beta = enter(&mut world, 2, (SPOT.0, SPOT.1 + 60), 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.start_pc_recovery(Vid::new(2));
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        drained(&mut beta);
+        world.begin_fight(ME + 2, Vid::new(2));
+        world.attract_ranger(Vid::new(1));
+        let rows = &world.npc_affects[&ME].affects;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, AFFECT_BOW_DISTANCE);
+        assert_eq!(rows[0].value, 150 - 1000);
+        assert_eq!(rows[0].remaining, 180);
+        let npc = world.npc_by_vid(ME).expect("the ranger stands");
+        assert_eq!(world::character::mob_attack_range(npc), 150);
+        assert!(
+            !world.npc_affects.contains_key(&(ME + 1)),
+            "the melee keeps no row"
+        );
+        assert!(
+            !world.npc_affects.contains_key(&(ME + 2)),
+            "another player's victim keeps its range"
+        );
+    }
+
+    /// `pull_monster` drags each monster 100 to 3000 out 300 toward the caller (G29):
+    /// the mid one lands 300 nearer, the far one holds, the near one holds, and a
+    /// `GC_SYNC_POSITION` goes around for the moved one.
+    #[test]
+    fn pull_monster_drags_the_mid_monsters_300_nearer() {
+        use protocol::gc_inventory::HEADER_GC_SYNC_POSITION;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mid = a_fighter(
+            ME,
+            406,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            0,
+            (4200, 3200),
+            10_000,
+        );
+        let far = a_fighter(
+            ME + 1,
+            406,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            0,
+            (7000, 3200),
+            10_000,
+        );
+        let near = a_fighter(
+            ME + 2,
+            406,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            0,
+            (NEAR.0 + 50, NEAR.1),
+            10_000,
+        );
+        let mut world = stand_field(&clock, vec![mid, far, near], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        world.pull_monster(Vid::new(1));
+        let at = world.npc_spot(ME).expect("the dragged one stands");
+        assert_eq!(at, (3900, 3200));
+        assert_eq!(
+            world.npc_spot(ME + 1),
+            Some((7000, 3200)),
+            "past 3000 holds"
+        );
+        assert_eq!(
+            world.npc_spot(ME + 2),
+            Some((NEAR.0 + 50, NEAR.1)),
+            "within 100 holds"
+        );
+        let heard = drained(&mut alpha);
+        assert!(
+            heard
+                .iter()
+                .any(|record| record.first() == Some(&HEADER_GC_SYNC_POSITION.value())),
+            "the pull syncs around: {heard:?}"
         );
     }
 }

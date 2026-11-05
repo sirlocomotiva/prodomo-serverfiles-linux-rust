@@ -10,7 +10,8 @@ use db::credentials::{DeleteCode, Login, NewPassword};
 use db::messenger::add_pair;
 use db::players::{
     change_name, create_player, delete_player, load_character, lobby, save_character,
-    save_position, select_empire, Created, LobbyPlayer, NewPlayer, PlayerDelete, PlayerSave,
+    save_position, select_empire, store_identity, Created, LobbyPlayer, NewPlayer, PlayerDelete,
+    PlayerSave,
 };
 use db::sqlx::{self, Row};
 use db::store::Store;
@@ -653,38 +654,22 @@ async fn a_saved_position_takes_the_origin_and_negative_coordinates() {
     }
 }
 
-/// A whole-row save writes every mutable column, and the next load reads them all back. The
-/// values are chosen so that no two columns share a byte pattern, so a column bound to the wrong
-/// parameter is visible.
-#[tokio::test]
-async fn a_whole_row_save_is_what_the_next_load_reads() {
-    let Some(scratch) = ScratchDatabase::create().await else {
-        return;
-    };
-    let store = &scratch.store;
-    let alice = account(store, "alice").await;
-    let bob = account(store, "bob").await;
-    let hero = created(store, alice, 0, "Hero").await;
-    let other = created(store, bob, 0, "Other").await;
-
-    // The gold a Transfer left, which the save must not touch.
-    db::sqlx::query("UPDATE player SET gold = $2 WHERE id = $1")
-        .bind(i32::try_from(hero).unwrap())
-        .bind(0x0012_3456_789a_bcde_i64)
-        .execute(store.pool())
-        .await
-        .unwrap();
-    let save = PlayerSave {
+/// A save whose columns share no byte pattern, for [`a_whole_row_save_is_what_the_next_load_reads`].
+fn whole_save() -> PlayerSave {
+    PlayerSave {
         level: 41,
         exp: 0x0102_0304_0506,
         conqueror_level: 7,
         conqueror_exp: 0x00fe_dcba_9876,
+        conqueror_level_step: 3,
+        conqueror_point: 0x0123,
         random_hp: 37,
         random_sp: -41,
         stat_point: 43,
         skill_point: 47,
         sub_skill_point: 53,
         level_step: 3,
+        stat_reset_count: 5,
         st: 51,
         ht: 52,
         dx: 53,
@@ -706,16 +691,60 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         skill_group: 9,
         playtime_minutes: 137,
         alignment: -4321,
+        sungma_str: 11,
+        sungma_hp: 13,
+        sungma_move: 17,
+        sungma_immune: 19,
+        gaya: 12345,
+        horse: db::players::PlayerHorse {
+            level: 23,
+            riding: true,
+            health: 0x0102,
+            health_drop_time: 0xfedc_ba98,
+            stamina: 0x0304,
+            skill_point: 0x0506,
+        },
+    }
+}
+
+/// A whole-row save writes every mutable column, and the next load reads them all back. The
+/// values are chosen so that no two columns share a byte pattern, so a column bound to the wrong
+/// parameter is visible.
+#[tokio::test]
+async fn a_whole_row_save_is_what_the_next_load_reads() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
     };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let hero = created(store, alice, 0, "Hero").await;
+    let other = created(store, bob, 0, "Other").await;
+
+    // The gold a Transfer left, which the save must not touch.
+    db::sqlx::query("UPDATE player SET gold = $2 WHERE id = $1")
+        .bind(i32::try_from(hero).unwrap())
+        .bind(0x0012_3456_789a_bcde_i64)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let save = whole_save();
     assert!(save_character(store, alice, hero, &save).await.unwrap());
     // The other account's row is untouched: the write names the account as well as the player.
     assert!(load_character(store, bob, other).await.is_ok());
 
     let read = load_character(store, alice, hero).await.unwrap();
+    assert!(
+        read.logoff_interval < 60,
+        "the save stamps the last play: {}",
+        read.logoff_interval
+    );
     assert_eq!(read.level, save.level);
     assert_eq!(read.exp, save.exp);
     assert_eq!(read.conqueror_level, save.conqueror_level);
     assert_eq!(read.conqueror_exp, save.conqueror_exp);
+    assert_eq!(read.conqueror_level_step, save.conqueror_level_step);
+    assert_eq!(read.conqueror_point, save.conqueror_point);
     assert_eq!(read.random_hp, save.random_hp);
     assert_eq!(read.random_sp, save.random_sp);
     assert_eq!(read.stat_point, save.stat_point);
@@ -748,6 +777,12 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
     assert_eq!(read.skill_group, save.skill_group);
     assert_eq!(read.playtime_minutes, save.playtime_minutes);
     assert_eq!(read.alignment, save.alignment);
+    assert_eq!(read.sungma_str, save.sungma_str);
+    assert_eq!(read.sungma_hp, save.sungma_hp);
+    assert_eq!(read.sungma_move, save.sungma_move);
+    assert_eq!(read.sungma_immune, save.sungma_immune);
+    assert_eq!(read.gaya, save.gaya, "the gaya rides with the save");
+    assert_eq!(read.horse, save.horse, "the horse rides with the save");
 }
 
 /// A save cannot reach a row of another account, and a player ID above the column's range is
@@ -769,12 +804,15 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         exp: 1,
         conqueror_level: 0,
         conqueror_exp: 0,
+        conqueror_level_step: 0,
+        conqueror_point: 0,
         random_hp: 2,
         random_sp: 3,
         stat_point: 5,
         skill_point: 7,
         sub_skill_point: 11,
         level_step: 2,
+        stat_reset_count: 1,
         st: 1,
         ht: 1,
         dx: 1,
@@ -796,6 +834,12 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         skill_group: 1,
         playtime_minutes: 1,
         alignment: 0,
+        sungma_str: 1,
+        sungma_hp: 1,
+        sungma_move: 1,
+        sungma_immune: 1,
+        gaya: 12345,
+        horse: db::players::PlayerHorse::default(),
     };
     // Bob's account naming Alice's character is a miss, not a write.
     assert!(!save_character(store, bob, hero, &save).await.unwrap());
@@ -815,4 +859,99 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
             Err(AccountError::NoSuchPlayer(missing)) if missing == too_wide
         ));
     }
+}
+/// A Name resolves to its row's ID whatever the case, and a Name no row
+/// carries is a miss, not an error.
+#[tokio::test]
+async fn a_name_resolves_to_its_row_whatever_the_case() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice1").await;
+    let hero = created(store, alice, 0, "Hero12").await;
+    assert_eq!(
+        db::players::id_by_name(store, "Hero12").await.unwrap(),
+        Some(hero)
+    );
+    assert_eq!(
+        db::players::id_by_name(store, "hero12").await.unwrap(),
+        Some(hero)
+    );
+    assert_eq!(
+        db::players::id_by_name(store, "HERO12").await.unwrap(),
+        Some(hero)
+    );
+    assert_eq!(
+        db::players::id_by_name(store, "Nobody").await.unwrap(),
+        None
+    );
+}
+
+/// A level reset writes the reset columns and leaves the rest of the row
+/// alone; a wide ID is refused and a missing row is a miss.
+#[tokio::test]
+async fn a_level_reset_writes_the_reset_columns_by_id_alone() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice1").await;
+    let hero = created(store, alice, 0, "Hero12").await;
+    let before = load_character(store, alice, hero).await.unwrap();
+    let reset = db::players::LevelReset {
+        level: 10,
+        st: 4,
+        ht: 5,
+        dx: 6,
+        iq: 7,
+        random_hp: 100,
+        random_sp: 50,
+        stat_point: 27,
+        skill_point: 9,
+        sub_skill_point: 1,
+        hp: 1000,
+        sp: 500,
+        conqueror_level: 0,
+        conqueror_exp: 0,
+        sungma: [0; 4],
+    };
+    assert!(db::players::save_level_reset(store, hero, &reset)
+        .await
+        .unwrap());
+    let after = load_character(store, alice, hero).await.unwrap();
+    assert_eq!(after.level, 10);
+    assert_eq!((after.st, after.ht, after.dx, after.iq), (4, 5, 6, 7));
+    assert_eq!((after.random_hp, after.random_sp), (100, 50));
+    assert_eq!(
+        (after.stat_point, after.skill_point, after.sub_skill_point),
+        (27, 9, 1)
+    );
+    assert_eq!((after.hp, after.sp), (1000, 500));
+    assert_eq!(after.exp, before.exp, "the rest of the row stays");
+    assert_eq!(after.gold, before.gold, "the rest of the row stays");
+    assert_eq!(after.x, before.x, "the rest of the row stays");
+    assert!(!db::players::save_level_reset(store, 1_000_000, &reset)
+        .await
+        .unwrap());
+    assert!(matches!(
+        db::players::save_level_reset(store, u32::MAX, &reset).await,
+        Err(AccountError::NoSuchPlayer(missing)) if missing == u32::MAX
+    ));
+}
+
+/// `/set race` and `/set job` on another character write the race and group by the
+/// row id, and report a row that is gone.
+#[tokio::test]
+async fn the_identity_store_writes_race_and_group_by_row() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    let hero = created(store, alice, 0, "Hero").await;
+    assert!(store_identity(store, hero, 6, 2).await.unwrap());
+    let read = load_character(store, alice, hero).await.unwrap();
+    assert_eq!((read.job, read.skill_group), (6, 2));
+    assert!(!store_identity(store, hero + 1000, 0, 0).await.unwrap());
 }

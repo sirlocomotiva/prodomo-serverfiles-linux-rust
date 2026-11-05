@@ -31,7 +31,7 @@ use protocol::gc_small::{GcHeaderAndByte, GcHeaderOnly};
 use protocol::item_pos::ItemPos;
 use world::character::{
     checkin, checkout, move_stored, sync_quickslots, MoveRules, Safebox, SafeboxRefused,
-    StoreChange, MALL_ROWS, SAFEBOX_ROWS,
+    StoreChange, MALL_ROWS, SAFEBOX_PAGE_SIZE, SAFEBOX_ROWS,
 };
 use world::item::Item;
 
@@ -67,6 +67,14 @@ pub(super) struct Storage {
     opening: bool,
     load_time: Option<u64>,
     mall_load_time: Option<u64>,
+}
+
+impl Storage {
+    /// Hold `safebox` open, for a test's busy gate.
+    #[cfg(test)]
+    pub(super) fn set_safebox_for_test(&mut self, safebox: Safebox) {
+        self.safebox = Some(safebox);
+    }
 }
 
 /// One safebox or mall step of a character.
@@ -114,6 +122,11 @@ pub enum SafeboxStep {
         to: ItemPos,
         /// Whether the mall is the source.
         mall: bool,
+    },
+    /// `do_safebox_size`: the GM's size word.
+    Resize {
+        /// The clamped size: 0 to 3 pages, in rows.
+        rows: u8,
     },
     /// `HEADER_CG_SAFEBOX_ITEM_MOVE`.
     Move {
@@ -178,6 +191,7 @@ impl GameState {
             }
             SafeboxStep::Close => close(storage, pulse, false, mover, locale),
             SafeboxStep::CloseMall => close(storage, pulse, true, mover, locale),
+            SafeboxStep::Resize { rows } => resize(storage, rows, mover, locale),
             SafeboxStep::Open { account, items } => {
                 storage.opening = false;
                 if self.trading.contains_key(&vid) || self.browsing.contains_key(&vid) {
@@ -394,6 +408,23 @@ fn close(
     }
     let line = chat_packet(mover.recipient(locale), CHAT_TYPE_COMMAND, command, &[]);
     SafeboxAnswer::Sent(vec![line])
+}
+
+/// `CHARACTER::ChangeSafeboxSize` (`G/char.cpp:7161-7177`): the size record always
+/// rides, and the open safebox grows when the size passes what it holds.
+fn resize(storage: &mut Storage, rows: u8, mover: Mover, locale: &LocaleStrings) -> SafeboxAnswer {
+    if let Some(safebox) = storage.safebox.as_mut() {
+        safebox.change_size(rows);
+    }
+    let mut size = Vec::new();
+    GcHeaderAndByte::new(HEADER_GC_SAFEBOX_SIZE.value(), rows).encode_into(&mut size);
+    let line = chat_packet(
+        mover.recipient(locale),
+        CHAT_TYPE_INFO,
+        b"Safebox size set to %d",
+        &[Arg::Int(i64::from(rows) / i64::from(SAFEBOX_PAGE_SIZE))],
+    );
+    SafeboxAnswer::Sent(vec![size, line])
 }
 
 /// `LoadSafebox` or `LoadMall`: the size record and a SET for each stored item.
@@ -624,6 +655,28 @@ mod tests {
             step(&mut state, SafeboxStep::BeginOpen),
             SafeboxAnswer::Proceed
         ));
+    }
+
+    #[test]
+    fn a_resize_sends_the_size_and_grows_the_open_grid() {
+        let mut state = a_holder(&[]);
+        let records = sent(step(&mut state, SafeboxStep::Resize { rows: 18 }));
+        assert_eq!(records[0], vec![HEADER_GC_SAFEBOX_SIZE.value(), 18]);
+        assert_eq!(
+            vec![records[1].clone()],
+            info(&state, "Safebox size set to 2")
+        );
+        let open = sent(step(
+            &mut state,
+            SafeboxStep::Open {
+                account: ACCOUNT,
+                items: Vec::new(),
+            },
+        ));
+        assert_eq!(open[0], vec![HEADER_GC_SAFEBOX_SIZE.value(), 9]);
+        let grown = sent(step(&mut state, SafeboxStep::Resize { rows: 18 }));
+        assert_eq!(grown[0], vec![HEADER_GC_SAFEBOX_SIZE.value(), 18]);
+        assert!(state.safebox_open(HOLDER), "the safebox stays open");
     }
 
     #[test]

@@ -56,6 +56,7 @@ use common::item_slots::{
     DRAGON_SOUL_INVENTORY_MAX_NUM, FLAT_STACK_STRIDE, INVENTORY_AND_EQUIP_SLOT_MAX,
     INVENTORY_MAX_NUM, INVENTORY_PAGE_SIZE, SWITCHBOT_SLOT_COUNT,
 };
+use protocol::gc_item_window::ItemAttribute;
 use protocol::item_pos::ItemPos;
 
 use super::inventory::{
@@ -351,6 +352,26 @@ impl core::fmt::Display for SocketRefused {
 
 impl std::error::Error for SocketRefused {}
 
+/// Why an attribute was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeRefused {
+    /// This storage does not hold the id.
+    NotHeld(ItemId),
+    /// The index is past the attributes.
+    Index(crate::item::AttributeOutOfRange),
+}
+
+impl core::fmt::Display for AttributeRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotHeld(id) => write!(f, "item {id} is not held here"),
+            Self::Index(reason) => reason.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for AttributeRefused {}
+
 /// `CBeltInventoryHelper::GetAvailableRuleTableByGrade` (`belt_inventory_helper.h:53-58`):
 /// the belt grade a belt cell needs before it may hold an item, in cell order.
 const BELT_RULE_BY_CELL: [i32; 16] = [1, 2, 4, 6, 3, 3, 4, 6, 5, 5, 5, 6, 7, 7, 7, 7];
@@ -454,6 +475,28 @@ impl CharacterItems {
         body.set_socket(index, value)
             .map_err(SocketRefused::Index)?;
         Ok(body.sockets)
+    }
+
+    /// Write one attribute of a stored item and answer its attributes after the write.
+    ///
+    /// # Errors
+    ///
+    /// [`AttributeRefused::NotHeld`] when this storage does not hold the id, and
+    /// [`AttributeRefused::Index`] for an index past the attributes. Nothing changes on
+    /// either.
+    pub fn set_attribute(
+        &mut self,
+        id: ItemId,
+        index: usize,
+        attr: ItemAttribute,
+    ) -> Result<[ItemAttribute; crate::item::ATTRIBUTES], AttributeRefused> {
+        let body = self
+            .bodies
+            .get_mut(&id)
+            .ok_or(AttributeRefused::NotHeld(id))?;
+        body.set_attribute(index, attr)
+            .map_err(AttributeRefused::Index)?;
+        Ok(body.attributes)
     }
 
     /// How many cells the flat array has.
@@ -964,11 +1007,12 @@ impl CharacterItems {
         Ok(pos)
     }
 
-    /// Clear every flat cell whose anchor is this item's.
+    /// Clear every flat cell whose anchor is this item's: the footprint walks the
+    /// stride from the anchor (`SetItem`, `G/char_item.cpp:447-464`), so the scan runs
+    /// to the window's end, guarded by the anchor match itself.
     fn clear_flat_footprint(&mut self, cell: u16) {
         let anchor = cell + 1;
-        let end = usize::from(INVENTORY_AND_EQUIP_SLOT_MAX)
-            .min(usize::from(anchor) + usize::from(FLAT_STACK_STRIDE));
+        let end = usize::from(INVENTORY_AND_EQUIP_SLOT_MAX);
         for p in usize::from(cell)..end {
             if self.grid.get(p).copied() == Some(anchor) {
                 if let Some(slot) = self.grid.get_mut(p) {

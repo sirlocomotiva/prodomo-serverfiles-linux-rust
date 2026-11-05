@@ -174,6 +174,7 @@ async fn a_written_row_is_in_the_table_and_the_world_is_untouched() {
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -267,6 +268,7 @@ async fn a_duplicate_id_is_refused_and_leaves_the_held_row_alone() {
             target: "Shaman".to_owned(),
             vnum: a_plain_vnum(),
             count: None,
+            socket0: None,
         }),
     )
     .await
@@ -458,6 +460,7 @@ async fn a_granted_item_is_written_and_then_reaches_the_client() {
                 target: "Shaman".to_owned(),
                 vnum: a_plain_vnum(),
                 count: None,
+                socket0: None,
             },
         ),
     )
@@ -534,6 +537,7 @@ async fn grant_one(
                 target: target.to_owned(),
                 vnum: a_plain_vnum(),
                 count: None,
+                socket0: None,
             },
         ),
     )

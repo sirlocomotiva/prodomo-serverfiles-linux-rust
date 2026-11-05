@@ -1,4 +1,5 @@
-//! `HEADER_GC_WHISPER` (0x22): a private line, from one player to another.
+//! `HEADER_GC_WHISPER` (0x22): a private line, from one player to another, and
+//! `HEADER_GC_WHISPER_DETAILS` (0xf6): the language of a whisper's partner.
 //!
 //! # Provenance
 //!
@@ -49,13 +50,35 @@
 //! system lines carry their terminator, because their length is
 //! `strlen(msg) + 1` (`G/input_main.cpp:484`, `G/input_db.cpp:2466`). The
 //! Rewrite relays the exact bytes and never transcodes them.
+//!
+//! # The partner's language
+//!
+//! `server/server/game/packet.h:3262-3269`, behind `__EXTENDED_WHISPER_DETAILS__`
+//! with `__MULTI_LANGUAGE_SYSTEM__` (`server/server/common/prodomodefines.h:133-134`):
+//!
+//! ```ignore
+//! typedef struct SPacketGCWhisperDetails
+//! {
+//!     BYTE header;
+//!     char name[CHARACTER_NAME_MAX_LEN + 1];
+//! #ifdef __MULTI_LANGUAGE_SYSTEM__
+//!     BYTE bLanguage;
+//! #endif
+//! } TPacketGCWhisperDetails;
+//! ```
+//!
+//! The verbatim body measured 27 bytes, with `bLanguage` at offset 26, under
+//! `g++ -m32 -fsyntax-only` and `#pragma pack(1)`; the packed two-`long` control
+//! held at 8 bytes there and failed on the native target. Every field is a byte,
+//! so the width does not depend on the target. `CInputMain::WhisperDetails`
+//! (`G/input_main.cpp:3603-3638`) is the one producer.
 
 #![warn(missing_docs)]
 
 use std::error::Error;
 use std::fmt;
 
-use crate::gc_inventory::HEADER_GC_WHISPER;
+use crate::gc_inventory::{HEADER_GC_WHISPER, HEADER_GC_WHISPER_DETAILS};
 
 /// `sizeof(struct packet_whisper)` with `LOCALE_STRING_RENEWAL` defined.
 pub const GC_WHISPER_WIRE_SIZE: usize = 30;
@@ -114,16 +137,20 @@ impl Default for GcWhisper {
     }
 }
 
-/// Why a whisper record could not be read.
+/// Why a whisper or whisper-details record could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcWhisperError {
-    /// The buffer is shorter than the fixed part.
+    /// The buffer is shorter than the record.
     Truncated {
+        /// The bytes the record needs.
+        needed: usize,
         /// Bytes actually present.
         actual: usize,
     },
-    /// The leading byte is not [`HEADER_GC_WHISPER`].
+    /// The leading byte is not the record's header.
     Header {
+        /// The record's header.
+        expected: u8,
         /// The byte that was found.
         actual: u8,
     },
@@ -137,13 +164,14 @@ pub enum GcWhisperError {
 impl fmt::Display for GcWhisperError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Truncated { actual } => write!(
+            Self::Truncated { needed, actual } => write!(
                 formatter,
-                "a whisper record needs {GC_WHISPER_WIRE_SIZE} bytes, got {actual}"
+                "a whisper record needs {needed} bytes, got {actual}"
             ),
-            Self::Header { actual } => {
-                write!(formatter, "expected a whisper record, got byte {actual}")
-            }
+            Self::Header { expected, actual } => write!(
+                formatter,
+                "expected whisper header {expected:#04x}, got byte {actual:#04x}"
+            ),
             Self::Size { size } => {
                 write!(
                     formatter,
@@ -214,11 +242,15 @@ impl GcWhisper {
     pub fn decode(bytes: &[u8]) -> Result<Self, GcWhisperError> {
         if bytes.len() < GC_WHISPER_WIRE_SIZE {
             return Err(GcWhisperError::Truncated {
+                needed: GC_WHISPER_WIRE_SIZE,
                 actual: bytes.len(),
             });
         }
         if bytes[0] != Self::header() {
-            return Err(GcWhisperError::Header { actual: bytes[0] });
+            return Err(GcWhisperError::Header {
+                expected: Self::header(),
+                actual: bytes[0],
+            });
         }
         let size = u16::from_le_bytes([bytes[1], bytes[2]]);
         if usize::from(size) < GC_WHISPER_WIRE_SIZE {
@@ -227,6 +259,7 @@ impl GcWhisper {
         let size = usize::from(size);
         if bytes.len() < size {
             return Err(GcWhisperError::Truncated {
+                needed: size,
                 actual: bytes.len(),
             });
         }
@@ -254,6 +287,76 @@ impl GcWhisper {
             .position(|&byte| byte == 0)
             .unwrap_or(self.name_from.len());
         &self.name_from[..end]
+    }
+}
+
+/// `sizeof(TPacketGCWhisperDetails)` with `__MULTI_LANGUAGE_SYSTEM__` defined.
+pub const GC_WHISPER_DETAILS_WIRE_SIZE: usize = 27;
+
+/// A whisper partner's language, as `CInputMain::WhisperDetails` answers it
+/// (`G/input_main.cpp:3603-3638`).
+///
+/// `name` echoes the asked name: legacy `strncpy`s at most 24 bytes of it into
+/// a stack record it never clears, so the 25th byte is whatever the stack
+/// held. A producer in the Rewrite writes 0 there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcWhisperDetails {
+    /// The 25 raw name bytes. No NUL is required and none is implied.
+    pub name: [u8; GC_WHISPER_NAME_FIELD_SIZE],
+    /// `bLanguage`: the partner's `ELocale`, which the record never
+    /// range-checks.
+    pub language: u8,
+}
+
+impl GcWhisperDetails {
+    /// The fixed header this record always carries.
+    #[must_use]
+    pub const fn header() -> u8 {
+        HEADER_GC_WHISPER_DETAILS.value()
+    }
+
+    /// Appends the whole packed record to `out`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        out.push(Self::header());
+        out.extend_from_slice(&self.name);
+        out.push(self.language);
+    }
+
+    /// Encodes to a fresh buffer.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_WHISPER_DETAILS_WIRE_SIZE);
+        self.encode_into(&mut out);
+        out
+    }
+
+    /// Decodes the whole packed record from the start of `bytes`; trailing
+    /// bytes are left alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GcWhisperError::Truncated`] when the buffer is shorter than
+    /// 27 bytes, and [`GcWhisperError::Header`] when the leading byte is not
+    /// [`HEADER_GC_WHISPER_DETAILS`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, GcWhisperError> {
+        if bytes.len() < GC_WHISPER_DETAILS_WIRE_SIZE {
+            return Err(GcWhisperError::Truncated {
+                needed: GC_WHISPER_DETAILS_WIRE_SIZE,
+                actual: bytes.len(),
+            });
+        }
+        if bytes[0] != Self::header() {
+            return Err(GcWhisperError::Header {
+                expected: Self::header(),
+                actual: bytes[0],
+            });
+        }
+        let mut name = [0_u8; GC_WHISPER_NAME_FIELD_SIZE];
+        name.copy_from_slice(&bytes[1..=GC_WHISPER_NAME_FIELD_SIZE]);
+        Ok(Self {
+            name,
+            language: bytes[GC_WHISPER_DETAILS_WIRE_SIZE - 1],
+        })
     }
 }
 
@@ -354,14 +457,26 @@ mod tests {
         let mut bytes = vec![0x04, 0x1e, 0x00];
         bytes.extend(std::iter::repeat(0_u8).take(27));
         let error = GcWhisper::decode(&bytes).expect_err("the header is not a whisper");
-        assert_eq!(error, GcWhisperError::Header { actual: 0x04 });
+        assert_eq!(
+            error,
+            GcWhisperError::Header {
+                expected: 0x22,
+                actual: 0x04
+            }
+        );
     }
 
     #[test]
     fn a_truncated_record_is_refused() {
         let bytes = vec![0x22, 0x1e, 0x00];
         let error = GcWhisper::decode(&bytes).expect_err("the record is short");
-        assert_eq!(error, GcWhisperError::Truncated { actual: 3 });
+        assert_eq!(
+            error,
+            GcWhisperError::Truncated {
+                needed: 30,
+                actual: 3
+            }
+        );
     }
 
     #[test]
@@ -390,5 +505,69 @@ mod tests {
         let bytes = record.encode().expect("the record fits");
         let decoded = GcWhisper::decode(&bytes).expect("a valid record");
         assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn the_details_record_is_twenty_seven_bytes_behind_header_0xf6() {
+        assert_eq!(GC_WHISPER_DETAILS_WIRE_SIZE, 27);
+        assert_eq!(GcWhisperDetails::header(), 0xf6);
+    }
+
+    #[test]
+    fn encodes_the_details_as_golden_bytes() {
+        // header f6 | "Yankee" and 19 NULs | language 05 (LOCALE_DE)
+        let mut golden = vec![0xf6, b'Y', b'a', b'n', b'k', b'e', b'e'];
+        golden.extend_from_slice(&[0_u8; 19]);
+        golden.push(0x05);
+        let record = GcWhisperDetails {
+            name: name(b"Yankee"),
+            language: 5,
+        };
+        assert_eq!(record.encode(), golden);
+    }
+
+    #[test]
+    fn decodes_the_details_from_golden_bytes() {
+        // Every name byte is carried raw, the 25th too, and the language is the 27th byte.
+        let mut golden = vec![0xf6];
+        golden.extend(1..=25_u8);
+        golden.push(0xab);
+        golden.push(0xcd);
+        let decoded = GcWhisperDetails::decode(&golden).expect("a valid record");
+        let expected: Vec<u8> = (1..=25_u8).collect();
+        assert_eq!(decoded.name.as_slice(), expected.as_slice());
+        assert_eq!(decoded.language, 0xab, "the trailing byte is not read");
+    }
+
+    #[test]
+    fn every_language_byte_survives() {
+        for language in 0..=u8::MAX {
+            let record = GcWhisperDetails {
+                name: name(b"Bob"),
+                language,
+            };
+            let decoded = GcWhisperDetails::decode(&record.encode()).expect("a valid record");
+            assert_eq!(decoded.language, language);
+        }
+    }
+
+    #[test]
+    fn a_short_or_foreign_details_record_is_refused() {
+        let error = GcWhisperDetails::decode(&[0xf6; 26]).expect_err("one byte short");
+        assert_eq!(
+            error,
+            GcWhisperError::Truncated {
+                needed: 27,
+                actual: 26
+            }
+        );
+        let error = GcWhisperDetails::decode(&[0x22; 27]).expect_err("a whisper header");
+        assert_eq!(
+            error,
+            GcWhisperError::Header {
+                expected: 0xf6,
+                actual: 0x22
+            }
+        );
     }
 }

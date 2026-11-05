@@ -366,11 +366,18 @@ impl GameState {
         if dead {
             return;
         }
-        // `CFSM::Update` (`G/FSM.cpp:22-38`); every Begin and End is empty.
-        if let Some(asked) = mind.asked.take() {
-            mind.state = asked;
+        // `CFSM::Update` (`G/FSM.cpp:22-38`); every Begin and End is empty but the
+        // shared `BeginStateEmpty`, which logs `!` (`G/char.cpp:7528-7531`).
+        let (entered, state) = {
+            let entered = mind.asked.take().map(|asked| {
+                mind.state = asked;
+            });
+            (entered.is_some(), mind.state)
+        };
+        if entered {
+            self.monster_log(vid, super::detail_log::LOG_BEGIN_EMPTY);
         }
-        match mind.state {
+        match state {
             Fsm::Initial => {}
             Fsm::Idle => self.state_idle(vid),
             Fsm::Move => self.state_move(vid),
@@ -510,8 +517,10 @@ impl GameState {
         };
         self.set_duration(vid, pulses(wait));
         // The protege follow (`:704-717`): past 1000 of its group's leader, a follower
-        // walks back to within `number(150, 400)` of it, before the wander draw.
+        // walks back to within `number(150, 400)` of it, before the wander draw. A walk
+        // logs (`:713`).
         if self.idle_follow_leader(vid, 1000, (150, 400)) {
+            self.monster_log(vid, super::detail_log::LOG_IDLE_TOO_FAR);
             return;
         }
         if !self.minds.no_wander
@@ -725,7 +734,8 @@ impl GameState {
         Some((npc.x, npc.y))
     }
 
-    /// `SetNowWalking` (`G/char.cpp:7345-7380`): a change tells the view.
+    /// `SetNowWalking` (`G/char.cpp:7345-7380`): a change tells the view, and a non-player's
+    /// change logs the walk or the run (`:7371-7376`).
     fn set_now_walking(&mut self, vid: u32, walking: bool) {
         let Some(mind) = self.minds.machines.get_mut(&vid) else {
             return;
@@ -737,6 +747,12 @@ impl GameState {
         let mode = if walking { WALKMODE_WALK } else { 0 };
         let me = EntityKey::Npc(vid);
         self.packet_around(me, &walk_mode(vid, mode), None);
+        let line = if walking {
+            super::detail_log::LOG_WALKING
+        } else {
+            super::detail_log::LOG_RUNNING
+        };
+        self.monster_log(vid, line);
     }
 
     /// `CHARACTER::Goto` (`G/char.cpp:3471-3508`) for an NPC. Returns true when a new
@@ -772,10 +788,19 @@ impl GameState {
         mind.duration = MOVE_STEP_PULSES;
         let chats = mind.state != Fsm::Move;
         mind.asked = Some(Fsm::Move);
-        // Entering Move with a held victim that is still online chats first (`:3500-3503`).
-        // `Gone` gives `NULL`, so there is no chat.
-        if chats && self.victim_of(vid).is_some() {
-            self.monster_chat_attack(vid);
+        // Entering Move logs first, then chats when a held victim is still online
+        // (`:3497-3503`). `Gone` gives `NULL`, so there is no chat.
+        if chats {
+            let tracked = self.victim_of(vid).is_some();
+            let line = if tracked {
+                super::detail_log::LOG_MOVE_TRACKING
+            } else {
+                super::detail_log::LOG_MOVE_JUST
+            };
+            self.monster_log(vid, line);
+            if tracked {
+                self.monster_chat_attack(vid);
+            }
         }
         true
     }
@@ -843,20 +868,37 @@ impl GameState {
         if let Some((_, true)) = step {
             // With a victim that is not a coward's, Battle after one Pulse; only the
             // `MonsterLog` sits under legacy's `if (!IsState(m_stateBattle))` (`:907-918`).
-            let to_battle = self.victim_of(vid).is_some()
+            let victim = self.victim_of(vid);
+            let to_battle = victim.is_some()
                 && self
                     .npc_by_vid(vid)
                     .is_none_or(|npc| npc.ai_flags & AIFLAG_COWARD == 0);
+            let entered = self
+                .minds
+                .get(vid)
+                .is_some_and(|mind| mind.state != Fsm::Move);
             if to_battle {
                 if let Some(mind) = self.minds.machines.get_mut(&vid) {
                     mind.asked = Some(Fsm::Battle);
                     mind.duration = 1;
+                }
+                if entered {
+                    if let Some(found) = victim {
+                        if let Ok(character) = self.characters.find_by_vid(found) {
+                            let mut line = super::detail_log::LOG_BATTLE_APPROACH.to_vec();
+                            line.extend_from_slice(character.name().as_bytes());
+                            self.monster_log(vid, &line);
+                        }
+                    }
                 }
             } else {
                 let wait = number(&mut self.dice, 1, 3);
                 if let Some(mind) = self.minds.machines.get_mut(&vid) {
                     mind.asked = Some(Fsm::Idle);
                     mind.duration = pulses(wait);
+                }
+                if entered {
+                    self.monster_log(vid, super::detail_log::LOG_IDLE_LOITERING);
                 }
             }
         }

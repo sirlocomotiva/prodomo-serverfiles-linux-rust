@@ -218,7 +218,7 @@ impl GameState {
 
     /// The character `wanted` names on the Channel and map the player under `vid` stands on: a
     /// player with a body there, or an NPC standing there.
-    fn targeted(&self, vid: Vid, wanted: u32) -> Option<u32> {
+    pub(super) fn targeted(&self, vid: Vid, wanted: u32) -> Option<u32> {
         // No character has VID 0, so it finds none.
         let place = self.place_of(vid.raw())?;
         if self.place_of(wanted) == Some(place) {

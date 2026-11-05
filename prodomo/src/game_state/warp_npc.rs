@@ -100,6 +100,9 @@ pub const WINDOW_HACK_NOTICE: &[u8] = b"[LS;851]";
 /// `IsHack`'s third and fourth refusals: a trade, or a shop, within the portal limit.
 pub const RECENT_HACK_NOTICE: &[u8] = b"[LS;852;%d]";
 
+/// `IsHack`'s last refusal: a refine within the portal limit (`G/char.cpp:8283-8288`).
+pub const REFINE_HACK_NOTICE: &[u8] = b"[LS;437;%d]";
+
 /// The `z` `CHARACTER::Show` is given when the caller names none: the default `LONG_MAX` of
 /// its declaration (`G/char.h:879`), which is `i32::MAX` on the 32-bit legacy target. A goto
 /// NPC names none (`G/char.cpp:7971`), so the insert record the client then receives carries
@@ -156,6 +159,8 @@ pub(super) struct PortalTimes {
     exchange: Option<u64>,
     /// `m_iMyShopTime`: a shop bought from, or its window closed.
     shop: Option<u64>,
+    /// `m_iRefineTime`: a refine request that named an item.
+    refine: Option<u64>,
 }
 
 /// `sscanf(name, " %s %ld %ld ", ...)` as glibc reads it: whether it assigns all three, and the
@@ -286,6 +291,11 @@ impl GameState {
         self.portal_times.entry(vid).or_default().shop = Some(self.last_pulse);
     }
 
+    /// `SetRefineTime` for the character under `vid`.
+    pub(super) fn set_refine_time(&mut self, vid: Vid) {
+        self.portal_times.entry(vid).or_default().refine = Some(self.last_pulse);
+    }
+
     /// Forget the portal times of the character under `vid`, as its departure does.
     pub(super) fn forget_portal_times(&mut self, vid: Vid) {
         let _times = self.portal_times.remove(&vid);
@@ -313,6 +323,9 @@ impl GameState {
         };
         if recent(times.exchange) || recent(times.shop) {
             return Some(line(RECENT_HACK_NOTICE, &limit));
+        }
+        if recent(times.refine) {
+            return Some(line(REFINE_HACK_NOTICE, &limit));
         }
         None
     }
@@ -396,6 +409,7 @@ impl GameState {
                                     private_map_index: 0,
                                     channel: None,
                                     exit: None,
+                                    sorted_until: self.sort_lock(vid),
                                 },
                             ));
                         }
