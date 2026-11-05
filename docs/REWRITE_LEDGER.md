@@ -45935,3 +45935,57 @@ set: 4756 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 pass
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 401. The uncalled quest API
+
+The owner chose, when asked on 2026-11-05, to mark the quest-api names no Lua file calls as
+`unused` with evidence rather than port them. A client reaches a quest function only through a
+script, so a name no script or library references is never reached. 366 of the 477 `missing`
+quest-api rows are now `unused`, each with the same note. Owner question 37 lists them for
+confirmation, grouped by namespace: `pc` 108, `d` 58, globals 38, `item` 25, `npc` 23, and so
+on. A name a future quest needs is ported then.
+
+What was swept: every file under `legacy/gamedata/locale/europe/quest` (scripts, libraries,
+`object/` state files, `locale.lua`), except `quest_functions` (the `qc` name list), plus every
+`locale/europe/*.lua`. That is 164 files and 1.6 MB, read as Latin-1 bytes. It includes files
+legacy never loads (`questing.lua`, `questlib_extra.lua`, `BlueDragon.lua`,
+`monkey_dungeon.lua`), so the sweep errs toward keeping a name. One tokenizer pass counts every
+identifier as `ns.fn` (with optional spaces), `ns["fn"]` or `ns['fn']`, and a bare `fn` for
+globals. So a call, a string or table call (`f "x"`, `f{}`), an assignment and a mention in a
+string or comment all count as a reference.
+
+Controls:
+- Positive: `pc.setqf` 27, `pc.getqf` 40, `say` 896, `pc.get_level` 14, `d.setf` 5.
+- Negative: the fabricated `pc.zz_never_defined` and `zz_never_global` count 0.
+- `quest_functions` exclusion: `pc.unmount` appears in `quest_functions` and counts 0 elsewhere.
+
+Indirect reaches checked:
+- The `pc`, `npc` and `item` `__index` metatables (`questlib.lua:503-532`) resolve properties
+  through `pc_index_table`, `npc_index_table` and `item_index_table`. Those tables name their
+  getters literally (`pc.get_level`, `npc.getrace`, `item.get_vnum`, ...), so the tokenizer sees
+  them.
+- `rawget` there falls back to the raw table.
+- `loadstring` occurs only in `questing.lua`, which legacy never loads.
+- `_G[...]` in `dungeonInformationLibrary.lua:39` writes a global and calls nothing.
+- No file aliases a namespace table: every bare `d`, `item`, `target`, `guild` or `q` is a local
+  of the same spelling or a parameter.
+- The C++ loads into the quest state are `settings.lua`, `questlib.lua` (with its `dofile`
+  chain), `translate.lua`, `quest/locale.lua`, `object/state/*` and `oxquiz.lua`
+  (`G/questlua.cpp:736-812`, `G/event_manager.cpp:1497`, `G/questlua_oxevent.cpp:70-74`). All
+  of them are in the sweep.
+- The one GM path that loads a Lua buffer, `do_priv_guild`'s `ADMIN_QUEST`
+  (`G/cmd_gm.cpp:3191-3197`), formats the one-byte empty `msg`, so it runs nothing.
+
+25 `partial` rows are also unreferenced (`setleftimage`, `getnpcid`, `pc.get_wear`, and others).
+They stay `partial`: the owner's choice covered the `missing` rows.
+
+Inventory: quest-api 139 ported, 82 partial, 111 missing, 367 unused (366 new, plus
+`horse.set_stat0`). No code changed.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4756 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 passed.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

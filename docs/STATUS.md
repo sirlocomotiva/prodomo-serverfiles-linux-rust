@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 400 (the `/ride` toggle).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 401
+Last reviewed: 2026-11-05, after ledger section 401 (the uncalled quest API).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 402
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -399,7 +399,8 @@ no monster and, outside a guild war, no player (`CanAttack`'s horse gate). Since
 computation lays every held affect's point again (`RefreshAffect`), and `pc.mount`,
 `pc.mount_bonus`, `pc.unmount` and `/unmount` mount and dismount; a login takes a saved mount
 off again. Since 400 `/ride` stops a ride, dismounts, rides a summoned horse or uses the first
-ride item or seal it holds. The
+ride item or seal it holds. Since 401 the 366 quest-api names no Lua file references are
+`unused`, pending owner question 37; 111 called names remain. The
 next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
