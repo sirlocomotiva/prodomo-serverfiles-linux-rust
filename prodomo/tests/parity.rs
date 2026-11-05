@@ -33757,13 +33757,13 @@ fn quest_unsummons_and_revives(alice: &mut Keyed, vein: u32, revived: u32) {
 }
 
 /// A ride probe: by the click count, `horse.ride`, then `horse.unride`, saying the count and
-/// whether the clicker rides.
+/// whether the clicker rides, by `horse.is_riding` and by `pc.is_riding`.
 const HORSE_RIDE_PROBE: &[u8] = b"quest horse_ride_probe begin\n\
     state start begin\n\
     when 20047.click begin\n\
     local n = pc.getqf(\"n\") + 1\n\
     pc.setqf(\"n\", n)\n\
-    syschat(\"r \" .. n .. \" \" .. horse.is_riding())\n\
+    syschat(\"r \" .. n .. \" \" .. horse.is_riding() .. \" \" .. tostring(pc.is_riding()))\n\
     if n == 1 then\n\
     horse.ride()\n\
     else\n\
@@ -33856,16 +33856,16 @@ fn user_ride_stops(alice: &mut Keyed, vid: u32) {
 /// began, and the quest ride's re-show mounts.
 fn quest_rides_and_unrides(alice: &mut Keyed, vein: u32, vid: u32) {
     alice.send_record(&client_click(vein));
-    assert_eq!(alice.read_game(), an_info_line(b"r 1 0"));
+    assert_eq!(alice.read_game(), an_info_line(b"r 1 0 false"));
     let read = read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
     assert_eq!(shown_mount(&read, vid), 20_107, "the quest ride's re-show");
     alice.send_record(&client_click(vein));
-    assert_eq!(alice.read_game(), an_info_line(b"r 2 1"));
+    assert_eq!(alice.read_game(), an_info_line(b"r 2 1 true"));
     read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
 }
 
 /// `cmd.horse_ride`, `cmd.user_horse_ride`, `lua.horse.ride`, `lua.horse.unride`,
-/// `lua.horse.is_riding`, `lua.pc.is_mount`: the ride by the GM line, the player's line and
+/// `lua.horse.is_riding`, `lua.pc.is_riding`, `lua.pc.is_mount`: the ride by the GM line, the player's line and
 /// the quest names; the mount vnum in the re-show's additional record and in the update;
 /// the horse stat floor and the mounted attack in the compute; the dismount's four zero
 /// changes, its re-show and the horse summoned back; and the riding save.
@@ -34188,4 +34188,99 @@ fn a_summoned_horse_is_fed_by_its_rider_until_the_food_runs_out() {
         "NOT EXISTS (SELECT 1 FROM item WHERE id = 61) AND (SELECT horse_hp = 22 FROM player \
          WHERE name = 'Alpha')",
     );
+}
+
+/// The riding gates (`IsRiding`, the horse ridden): mounted, Alpha's `/dance1` hears
+/// `[LS;1043]` (`G/cmd_emotion.cpp:158-162`), and its wear hears why not
+/// (`G/char_item.cpp:8401-8412`): the body armour and the costume body each by their line. A
+/// polymorph then stops the ride, and a polymorphed character wears nothing but arrows
+/// (`[LS;450]`, `:8336-8340`). The owner's mount costumes all carry the first-use timer,
+/// which the use refuses before the ride-item gate, so `equip`'s unit test pins that one.
+#[test]
+fn a_rider_neither_emotes_nor_changes_its_body_and_a_morph_wears_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _) = vein_stage(&database, HORSE_RIDE_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    for (id, cell, vnum) in [(60, 0, 9004), (61, 1, 41002)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_ride"));
+    let _ = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dance1"));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;1043]"));
+    for (cell, line) in [
+        (0, &b"<Info:> Nu poti schimba armura cand calaresti."[..]),
+        (1, b"<Info:> Nu poti schimba costumul cand calaresti."),
+    ] {
+        alice.send_record(&client_item_use(cell));
+        assert_eq!(alice.read_game(), an_info_line(line), "cell {cell}");
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let _ = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    alice.send_record(&client_item_use(0));
+    read_until_all(&mut alice, &[an_info_line(b"[LS;450]")]);
+}
+
+/// `do_emotion`'s victim gates (`G/cmd_emotion.cpp:200-216`): a kiss naming nobody hears
+/// `[LS;436]` and goes no further, and a kiss at Yankee, who enters riding his stored horse,
+/// hears `[LS;1044]`; neither reaches Yankee.
+#[test]
+fn a_kiss_at_nobody_or_at_a_rider_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "disable_emotion_mask = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y, horse_level, horse_riding, \
+         horse_hp, horse_stamina, horse_hp_droptime) SELECT id, 0, 'Yankee', 0, 470100, 950100, \
+         25, true, 40, 140, extract(epoch FROM now())::bigint FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+    // The remount's re-show lands ahead of the quest login event, so Yankee's burst is
+    // drained rather than read in order.
+    let (mut yankee, _yankee_listed) = enter_world_reading(&server, b"bob", 0);
+    let _ = alice.drain_game(Duration::from_secs(1), game_len);
+    let _ = yankee.drain_game(Duration::from_secs(1), game_len);
+
+    alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/kiss"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;436]")
+    );
+    alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/kiss Yankee"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;1044]")
+    );
+    alice.still("nothing follows");
+    yankee.quiet("neither kiss reaches the rider");
 }

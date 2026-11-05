@@ -23,7 +23,9 @@
 //! reports a failure it can meet (`G/char_item.cpp:8237-8250`). Here every check runs first,
 //! so a swap either happens whole or changes nothing.
 //!
-//! Unreachable here, and so not written: riding and polymorph, the unique unstack, the
+//! The riding gates read `IsRiding` (the horse ridden or a mount vnum) and the polymorph gate
+//! the points' polymorph race. Unreachable here, and so not written: the ride item's wedding
+//! check (a unique, which is not ported, refuses later), the unique unstack, the
 //! wedding checks `__FIX_COSTUM_NUNTA_PESTE_COSTUM_NORMAL__` repeats (the `ENABLE_WEDDING_FIX`
 //! ones return first), the special item group effect (a dangling `else` binds it to the sash
 //! arm), `REAL_TIME_FIRST_USE`, the mount quest, the aura window, `IsSecured`, the quickslot
@@ -37,7 +39,7 @@ use common::item_slots::{
 use common::point_slot as point;
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
 use gamedata::item_kind::{
-    COSTUME_AURA, COSTUME_BODY, COSTUME_HAIR, COSTUME_MOUNT, COSTUME_PET, COSTUME_SASH,
+    ARMOR_BODY, COSTUME_AURA, COSTUME_BODY, COSTUME_HAIR, COSTUME_MOUNT, COSTUME_PET, COSTUME_SASH,
     COSTUME_WEAPON, ITEM_ANTIFLAG_ASSASSIN, ITEM_ANTIFLAG_FEMALE, ITEM_ANTIFLAG_MALE,
     ITEM_ANTIFLAG_SHAMAN, ITEM_ANTIFLAG_SURA, ITEM_ANTIFLAG_WARRIOR, ITEM_ARMOR, ITEM_BELT,
     ITEM_COSTUME, ITEM_DS, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_SKILLBOOK, ITEM_SPECIAL_DS,
@@ -274,6 +276,14 @@ pub fn wear_pos(wear: u16) -> ItemPos {
 }
 
 /// The item a wear cell holds.
+/// `CItem::IsRideItem` (`G/item.cpp:2389-2400`, with `ENABLE_MOUNT_COSTUME_SYSTEM`): a
+/// unique of `UNIQUE_SPECIAL_RIDE` (2) or `UNIQUE_SPECIAL_MOUNT_RIDE` (3), or a mount
+/// costume.
+fn is_ride_item(proto: &ItemProto) -> bool {
+    (proto.item_type == ITEM_UNIQUE && matches!(proto.sub_type, 2 | 3))
+        || (proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_MOUNT)
+}
+
 fn worn_at(items: &CharacterItems, wear: u16) -> Option<Item> {
     items.item_at(wear_pos(wear)).cloned()
 }
@@ -798,6 +808,14 @@ impl<'s, 'g> Equipper<'s, 'g> {
         }
         self.can_equip_now(item, proto)?;
         let wear = find_equip_cell(self.items, proto).ok_or(MoveRefused::NoEquipCell)?;
+        let points = &*self.gear.points;
+        let riding = points.horse().riding() || points.mount_vnum() != 0;
+        if wear == EWearPositions::Body as u16 && riding && WEDDING_ARMOURS.contains(&item.vnum) {
+            return Err(MoveRefused::RiderWeddingArmour);
+        }
+        if wear != EWearPositions::Arrow as u16 && points.is_polymorphed() {
+            return Err(MoveRefused::Polymorphed);
+        }
         let armour = worn_at(self.items, EWearPositions::Body as u16);
         let wedding_armour = armour.is_some_and(|armour| WEDDING_ARMOURS.contains(&armour.vnum));
         if wear == EWearPositions::CostumeBody as u16
@@ -813,6 +831,17 @@ impl<'s, 'g> Equipper<'s, 'g> {
         }
         if proto.anti_flags & sex_anti_flag(self.gear.points.race()) != 0 {
             return Err(MoveRefused::WrongSex);
+        }
+        if riding {
+            if is_ride_item(proto) {
+                return Err(MoveRefused::RiderRideItem);
+            }
+            if proto.item_type == ITEM_ARMOR && proto.sub_type == ARMOR_BODY {
+                return Err(MoveRefused::RiderArmour);
+            }
+            if proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_BODY {
+                return Err(MoveRefused::RiderCostume);
+            }
         }
         if wear != EWearPositions::Arrow as u16 && self.gear.recently_fought {
             return Err(MoveRefused::RecentlyFought);
@@ -1146,6 +1175,7 @@ mod tests {
     const BODY: u16 = EWearPositions::Body as u16;
     const SASH: u16 = EWearPositions::CostumeSash as u16;
     const COSTUME_BODY_CELL: u16 = EWearPositions::CostumeBody as u16;
+    const MOUNT_CELL: u16 = EWearPositions::CostumeMount as u16;
 
     const SWORD: u32 = 11;
     const ARMOUR: u32 = 11_210;
@@ -1155,6 +1185,8 @@ mod tests {
     const SASH_GRADE_2: u32 = 85_002;
     const COSTUME: u32 = 41_001;
     const WEDDING: u32 = 11_901;
+    /// A mount costume without the first-use timer the owner's rows carry.
+    const MOUNT_COSTUME: u32 = 52_001;
     const MALE_ONLY: u32 = 11_230;
     const UNIQUE: u32 = 71_001;
     const LEVEL_TEN_SWORD: u32 = 31;
@@ -1264,6 +1296,7 @@ mod tests {
             grade_4,
             grade_2,
             proto(COSTUME, ITEM_COSTUME, COSTUME_BODY, 0),
+            proto(MOUNT_COSTUME, ITEM_COSTUME, COSTUME_MOUNT, 0),
             proto(WEDDING, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY),
             male_only,
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
@@ -1707,6 +1740,32 @@ mod tests {
             MoveRefused::RecentlyFought
         );
         assert_eq!(MoveRefused::RecentlyFought.notice(), Some("[LS;451]"));
+    }
+
+    /// The riding gates (`G/char_item.cpp:8330-8412`): a rider puts on no wedding armour, no
+    /// ride item, no body armour and no costume body; a polymorphed character wears nothing
+    /// but arrows; and a walker puts the armour on.
+    #[test]
+    fn a_rider_and_a_morph_are_refused_their_wear() {
+        for (vnum, cell, refused) in [
+            (WEDDING, BODY, MoveRefused::RiderWeddingArmour),
+            (MOUNT_COSTUME, MOUNT_CELL, MoveRefused::RiderRideItem),
+            (ARMOUR, BODY, MoveRefused::RiderArmour),
+            (COSTUME, COSTUME_BODY_CELL, MoveRefused::RiderCostume),
+        ] {
+            let mut case = Case::new(&[(inv(3), Item::new(7, vnum))]);
+            case.points.horse_mut().set_level(25, 0);
+            assert!(case.points.horse_mut().start_riding());
+            assert_eq!(case.refused(inv(3), wear_pos(cell)), refused, "{vnum}");
+        }
+        let mut case = Case::new(&[(inv(3), Item::new(7, ARMOUR))]);
+        assert!(case.points.set_polymorph(101, false));
+        assert_eq!(
+            case.refused(inv(3), wear_pos(BODY)),
+            MoveRefused::Polymorphed
+        );
+        let mut case = Case::new(&[(inv(3), Item::new(7, ARMOUR))]);
+        assert!(case.run(inv(3), wear_pos(BODY)).is_ok(), "a walker dresses");
     }
 
     #[test]

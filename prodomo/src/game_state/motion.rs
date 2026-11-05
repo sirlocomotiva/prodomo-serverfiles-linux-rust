@@ -577,8 +577,8 @@ impl GameState {
             map,
             x: spot.x,
             y: spot.y,
-            // The Rewrite has no mount yet, so nothing is riding.
-            riding: false,
+            // `IsRiding()`: a rider may step up to 999 at once, a walker 750 (`:1788`).
+            riding: self.is_riding(raw),
             // `IsDead()`: legacy shows a dead mover back where it lies (`:1786-1811`).
             dead: self.is_dead(raw),
             // `CanMove` holds unless stunned (D9: legacy tests `AFF_STUN`, which `Stun` never
@@ -1544,6 +1544,32 @@ mod tests {
             world.bodies[&Vid::new(7)].rotation.to_bits(),
             turned.to_bits(),
             "the rotation stays"
+        );
+    }
+
+    /// A rider may step up to 999 at once (`G/input_main.cpp:1788`): the 768 a walker is
+    /// refused for passes once the horse is ridden.
+    #[test]
+    fn a_rider_steps_past_the_walkers_limit() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _mover = enter(&mut world, 7, (3200, 3200), 820);
+        let far = CgMove::new(FUNC_MOVE, 0, 54, 80_000, 3200, 77);
+        let walked = world.run_move(Vid::new(7), &far);
+        assert!(
+            matches!(
+                walked,
+                Some(MoveOutcome::Refuse(MoveRefusal::TooFar { .. }))
+            ),
+            "{walked:?}"
+        );
+        let horse = world.pc_points_mut(7).expect("a player").horse_mut();
+        horse.set_level(25, 0);
+        assert!(horse.start_riding(), "a fresh level-25 horse is ridden");
+        let ridden = world.run_move(Vid::new(7), &far);
+        assert!(
+            !matches!(ridden, Some(MoveOutcome::Refuse(_))),
+            "{ridden:?}"
         );
     }
 

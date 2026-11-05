@@ -3276,6 +3276,8 @@ fn pc_readers(lua: &Lua, cx: &mut Cx<'_>, name: &[u8]) -> mlua::Result<Option<Va
         }
         // `pc_is_mount` (`G/questlua_pc.cpp:1385-1390`): whether the mount vnum stands.
         b"pc.is_mount" => Some(Value::Boolean(cx.game.is_mount())),
+        // `IsRiding` (`G/questlua_pc.cpp:2658-2672`): the horse ridden, or a mount.
+        b"pc.is_riding" => Some(Value::Boolean(cx.game.horse().riding || cx.game.is_mount())),
         // `pc_get_channel_id` (`G/questlua_pc.cpp:2767-2772`): the Channel.
         b"pc.get_channel_id" => Some(Value::Number(f64::from(cx.game.channel_id()))),
         _ => return Ok(None),

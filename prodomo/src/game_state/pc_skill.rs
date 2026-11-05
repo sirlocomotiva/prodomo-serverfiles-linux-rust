@@ -116,6 +116,14 @@ const SKILL_TERROR: u32 = 64;
 const SKILL_EUNHYUNG: u32 = 34;
 /// `SKILL_MUYEONG` (`G/skill.h:100`): 78.
 const SKILL_MUYEONG: u32 = 78;
+/// `SKILL_HORSE_SUMMON` (`G/skill.h:153`): 131, whose cast only says whether a horse is
+/// there.
+const SKILL_HORSE_SUMMON: u32 = 131;
+/// `SKILL_TYPE_HORSE` (`G/skill.h:43`): the `bType` of the horse rows.
+const SKILL_TYPE_HORSE: u8 = 5;
+/// The horse-summon skill's answers: no horse (`[LS;966]`) or a horse (`[LS;967]`).
+const HORSE_SUMMON_NONE: &[u8] = b"[LS;966]";
+const HORSE_SUMMON_THERE: &[u8] = b"[LS;967]";
 /// `SKILL_TUSOK` (`G/skill.h:103`): 80, the cure's last removal.
 const SKILL_TUSOK: u32 = 80;
 /// `SKILL_CHUNKEON` (`G/skill.h:65`): 19, whose buff carries
@@ -1297,6 +1305,43 @@ impl GameState {
         self.affect_flags_of(vid)[0] & (1 << (AFF_TANHWAN_DASH - 1)) != 0
     }
 
+    /// `UseSkill`'s horse-summon arm (`G/char_skill.cpp:2933-2944`): unlearnt, the cast
+    /// fails; learnt, the caster hears `[LS;966]` without a horse level and `[LS;967]` with
+    /// one, and the cast succeeds with nothing summoned.
+    fn horse_summon_skill(&mut self, vid: Vid) -> bool {
+        if self.pc_skill_level(vid.raw(), SKILL_HORSE_SUMMON) == 0 {
+            return false;
+        }
+        let level = self
+            .pc_points_mut(vid.raw())
+            .map_or(0, |points| points.horse().level());
+        let line = if level == 0 {
+            HORSE_SUMMON_NONE
+        } else {
+            HORSE_SUMMON_THERE
+        };
+        if let Some(mover) = self.own_mover(vid) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);
+        }
+        true
+    }
+
+    /// `ComputeSkill`'s gates before the row's own (`G/char_skill.cpp:2445-2478`): past
+    /// `SKILL_MUYEONG`, a rider off a grade-3 horse computes nothing and the grade-3 rider
+    /// only horse rows, which no one else computes; a polymorphed caster computes nothing.
+    fn computes_nothing(&self, vid: Vid, vnum: u32, skill_type: u8) -> bool {
+        let polymorphed = self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed);
+        if vnum == SKILL_MUYEONG {
+            return polymorphed;
+        }
+        let horse = self.can_use_horse_skill(vid.raw());
+        (!horse && self.is_riding(vid.raw()))
+            || polymorphed
+            || horse != (skill_type == SKILL_TYPE_HORSE)
+    }
+
     /// `CInputMain::UseSkill` + `CHARACTER::UseSkill`'s entry half
     /// (`G/input_main.cpp:2173-2178`, `G/char_skill.cpp:2896-3112`): the
     /// `CanUseSkill`, stun, row and level gates, the revive-invisible removal,
@@ -1310,19 +1355,40 @@ impl GameState {
             Some(body) => (body.card.job, body.card.skill_group),
             None => return false,
         };
-        if !gamedata::pc_skill_data::can_use(job, group, false, skill_vnum) {
+        let riding = self.is_riding(vid.raw());
+        if !gamedata::pc_skill_data::can_use(job, group, riding, skill_vnum) {
             return false;
         }
         // `g_bSkillDisable`, the observer mode, `CanMove`, the polymorph: the middle arm
         // (`G/char_skill.cpp:2914`) refuses, though every caller gates first; only the stun
-        // arm of `CanMove` is ported (no shop, riding, or polymorph).
+        // arm of `CanMove` is ported (no private shop).
         if self.is_observing(vid) {
             return false;
         }
         if self.affect_flags_of(vid)[0] & AFF_STUN_WORD != 0 {
             return false;
         }
-        if self.pc_skill_tables.get(skill_vnum).is_none() {
+        let polymorphed = self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed);
+        if polymorphed {
+            return false;
+        }
+        // The horse-summon arm (`:2933-2944`): with the skill learnt, the caster hears
+        // whether it has a horse, and the cast ends there.
+        if skill_vnum == SKILL_HORSE_SUMMON {
+            return self.horse_summon_skill(vid);
+        }
+        // The riding gates (`:2947-2961`): a rider off a grade-3 horse casts nothing, and the
+        // grade-3 rider casts only horse rows, which no one else casts.
+        let horse_skill = self.can_use_horse_skill(vid.raw());
+        if !horse_skill && riding {
+            return false;
+        }
+        let Some(row) = self.pc_skill_tables.get(skill_vnum) else {
+            return false;
+        };
+        if horse_skill != (row.record.skill_type == SKILL_TYPE_HORSE) {
             return false;
         }
         // The charge arm (`:2979-2995`): with the DASH held, or a victim that is
@@ -1647,7 +1713,8 @@ impl GameState {
             None => return false,
         };
         let skill_vnum = u32::from(skill_vnum);
-        if !gamedata::pc_skill_data::can_use(job, group, false, skill_vnum) {
+        let riding = self.is_riding(vid.raw());
+        if !gamedata::pc_skill_data::can_use(job, group, riding, skill_vnum) {
             return false;
         }
         if SHOOT_LIST.contains(&skill_vnum) {
@@ -1772,8 +1839,10 @@ impl GameState {
         if level == 0 {
             return;
         }
-        // No riding and no polymorph is ported, so both gates pass; no hosted cast is a
-        // horse row. `AFF_PABEOP` waits for the buffs.
+        // The riding, polymorph and horse-type gates; `AFF_PABEOP` waits for the buffs.
+        if self.computes_nothing(vid, row.record.vnum, row.record.skill_type) {
+            return;
+        }
         let Some(body) = self.bodies.get(&vid) else {
             return;
         };
@@ -1885,8 +1954,10 @@ impl GameState {
             None => return,
         };
         let flag = row.record.flag;
-        // No riding and no polymorph is ported, so both gates pass; no hosted cast is a
-        // horse row. `AFF_PABEOP` waits for the buffs.
+        // The riding, polymorph and horse-type gates; `AFF_PABEOP` waits for the buffs.
+        if self.computes_nothing(vid, vnum, row.record.skill_type) {
+            return;
+        }
         let Some(body) = self.bodies.get(&vid) else {
             return;
         };
@@ -1985,8 +2056,10 @@ impl GameState {
             Some(row) => row.clone(),
             None => return,
         };
-        // No riding and no polymorph is ported, so both gates pass; no hosted
-        // buff is a horse row.
+        // The riding, polymorph and horse-type gates.
+        if self.computes_nothing(vid, vnum, row.record.skill_type) {
+            return;
+        }
         let centre = if row.record.flag & SKILL_FLAG_SELFONLY != 0 {
             vid.raw()
         } else {
@@ -3515,6 +3588,78 @@ mod tests {
         // `UseSkill` stamps).
         assert!(!world.use_skill(Vid::new(1), 1, ME));
         assert_eq!(sp_of(&world, 1), before - 90);
+    }
+
+    /// `UseSkill`'s riding gates (`G/char_skill.cpp:2947-2961`): a rider off a grade-3
+    /// horse casts nothing, the grade-3 rider casts no row that is not a horse row, and
+    /// the walker casts again; nothing is charged while refused.
+    #[test]
+    fn a_rider_casts_no_job_skill() {
+        let (_clock, mut world, _inbox) = a_cast();
+        world.set_pc_skill_level(1, 1, 1);
+        let before = sp_of(&world, 1);
+        for level in [5, 25] {
+            let horse = world.pc_points_mut(1).unwrap().horse_mut();
+            horse.set_level(level, 0);
+            assert!(horse.start_riding(), "level {level} rides");
+            assert!(!world.use_skill(Vid::new(1), 1, ME), "level {level}");
+            assert_eq!(sp_of(&world, 1), before, "level {level}");
+            let _stopped = world.pc_points_mut(1).unwrap().horse_mut().stop_riding();
+        }
+        assert!(world.use_skill(Vid::new(1), 1, ME));
+        assert_eq!(sp_of(&world, 1), before - 45);
+    }
+
+    /// The compute gates (`ComputeSkill`, `G/char_skill.cpp:2445-2478`, and its siblings): a
+    /// walker computes its job rows and no horse row; a rider off a grade-3 horse computes
+    /// nothing but MUYEONG; the grade-3 rider computes only horse rows; a morph computes
+    /// nothing, MUYEONG included.
+    #[test]
+    fn the_rider_and_the_morph_compute_what_they_may() {
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        let job = (1, 0);
+        let horse_row = (137, SKILL_TYPE_HORSE);
+        let muyeong = (SKILL_MUYEONG, 0);
+        let nothing =
+            |world: &GameState, (vnum, kind): (u32, u8)| world.computes_nothing(me, vnum, kind);
+        assert!(!nothing(&world, job) && nothing(&world, horse_row));
+        let horse = world.pc_points_mut(1).unwrap().horse_mut();
+        horse.set_level(5, 0);
+        assert!(horse.start_riding());
+        assert!(nothing(&world, job) && nothing(&world, horse_row));
+        assert!(!nothing(&world, muyeong), "MUYEONG minds only the morph");
+        world.pc_points_mut(1).unwrap().horse_mut().set_level(25, 0);
+        assert!(nothing(&world, job) && !nothing(&world, horse_row));
+        let _stopped = world.pc_points_mut(1).unwrap().horse_mut().stop_riding();
+        assert!(world.pc_points_mut(1).unwrap().set_polymorph(101, false));
+        assert!(nothing(&world, job) && nothing(&world, muyeong));
+    }
+
+    /// The horse-summon skill (`G/char_skill.cpp:2933-2944`): unlearnt it fails; learnt
+    /// it answers whether the caster has a horse level and charges nothing.
+    #[test]
+    fn the_horse_summon_skill_names_the_horse() {
+        let (_clock, mut world, mut inbox) = a_cast();
+        assert!(!world.use_skill(Vid::new(1), SKILL_HORSE_SUMMON, 0));
+        world.set_pc_skill_level(1, SKILL_HORSE_SUMMON, 1);
+        let _ = std::iter::from_fn(|| inbox.try_recv().ok()).count();
+        for (level, line) in [(0, HORSE_SUMMON_NONE), (25, HORSE_SUMMON_THERE)] {
+            world
+                .pc_points_mut(1)
+                .unwrap()
+                .horse_mut()
+                .set_level(level, 0);
+            let _ = std::iter::from_fn(|| inbox.try_recv().ok()).count();
+            let before = sp_of(&world, 1);
+            assert!(world.use_skill(Vid::new(1), SKILL_HORSE_SUMMON, 0));
+            assert_eq!(sp_of(&world, 1), before);
+            let heard: Vec<_> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+            assert!(
+                heard.iter().any(|sent| sent.ends_with(line)),
+                "level {level}: {heard:?}"
+            );
+        }
     }
 
     /// The combo toggle chats and stamps no cooldown: level-1 122 flips the

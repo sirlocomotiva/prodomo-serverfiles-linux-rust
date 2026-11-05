@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 213] = [
+pub const BRIDGED: [&str; 214] = [
     "ds.open_refine_window",
     "ds.open_attr_change_window",
     "ds.give_qualification",
@@ -426,6 +426,7 @@ pub const BRIDGED: [&str; 213] = [
     "pc.diamond_refine",
     "pc.set_skill_level",
     "pc.send_block_mode",
+    "pc.is_riding",
     "pc.can_warp",
     "pc.get_channel_id",
     "pc.open_sash",

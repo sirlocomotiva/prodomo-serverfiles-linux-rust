@@ -429,12 +429,22 @@ pub enum MoveRefused {
     NotEquipable,
     /// `FindEquipCell` found no cell.
     NoEquipCell,
+    /// A wedding armour onto a rider's body cell.
+    RiderWeddingArmour,
+    /// A polymorphed character wears anything but an arrow.
+    Polymorphed,
     /// A costume body onto a wedding armour.
     WeddingCostume,
     /// A wedding armour under a costume body.
     WeddingArmour,
     /// The item's anti-flags refuse the character's sex.
     WrongSex,
+    /// A ride item onto a rider.
+    RiderRideItem,
+    /// A body armour onto a rider.
+    RiderArmour,
+    /// A costume body onto a rider.
+    RiderCostume,
     /// The character attacked in the last 1.5 s.
     RecentlyFought,
     /// The worn costume weapon could not be taken off (`UnequipItem`, `EquipItem`).
@@ -536,6 +546,10 @@ impl MoveRefused {
             ),
             // `char_item.cpp:10210`.
             Self::NoRoomToUnequip => Some("[1130]There isn't enough space in your inventory."),
+            // `char_item.cpp:8332`.
+            Self::RiderWeddingArmour => Some("[LS;883]"),
+            // `char_item.cpp:8338`.
+            Self::Polymorphed => Some("[LS;450]"),
             // `char_item.cpp:8371`.
             Self::WeddingCostume => {
                 Some("Non puoi usare un Costume con uno Smoking o Abito da Sposa.")
@@ -544,6 +558,12 @@ impl MoveRefused {
             Self::WeddingArmour => Some("Devi rimuovere il Costume per usarlo."),
             // `char_item.cpp:8390`.
             Self::WrongSex => Some("[LS;1005]"),
+            // `char_item.cpp:8397`.
+            Self::RiderRideItem => Some("[LS;1054]"),
+            // `char_item.cpp:8404`.
+            Self::RiderArmour => Some("<Info:> Nu poti schimba armura cand calaresti."),
+            // `char_item.cpp:8410`.
+            Self::RiderCostume => Some("<Info:> Nu poti schimba costumul cand calaresti."),
             // `char_item.cpp:8421`.
             Self::RecentlyFought => Some("[LS;451]"),
             // `char_item.cpp:8275`, `:8465`, `:8474`.
@@ -623,9 +643,14 @@ impl core::fmt::Display for MoveRefused {
             Self::NoRoomToUnequip => f.write_str("no inventory cell has room for the worn item"),
             Self::NotEquipable => f.write_str("the item is not equipable"),
             Self::NoEquipCell => f.write_str("the item has no wear cell"),
+            Self::RiderWeddingArmour => f.write_str("a rider may not put on a wedding armour"),
+            Self::Polymorphed => f.write_str("a polymorphed character wears only arrows"),
             Self::WeddingCostume => f.write_str("a costume body may not cover a wedding armour"),
             Self::WeddingArmour => f.write_str("a wedding armour may not go under a costume"),
             Self::WrongSex => f.write_str("the item refuses this sex"),
+            Self::RiderRideItem => f.write_str("a rider may not put on a ride item"),
+            Self::RiderArmour => f.write_str("a rider may not change its body armour"),
+            Self::RiderCostume => f.write_str("a rider may not change its costume body"),
             Self::RecentlyFought => f.write_str("the character fought in the last 1.5 s"),
             Self::CostumeWeaponStuck | Self::CostumeWeaponStuckOnMove => {
                 f.write_str("the costume weapon could not be taken off")

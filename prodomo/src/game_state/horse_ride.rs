@@ -205,6 +205,28 @@ impl GameState {
         }
     }
 
+    /// `CHARACTER::IsRiding` (`G/char.cpp:8783-8786`) of the player under `vid`: its horse
+    /// ridden, or a mount vnum. False for anything that is not a player.
+    pub(super) fn is_riding(&self, vid: u32) -> bool {
+        self.points_of(vid)
+            .is_some_and(|points| points.horse().riding() || points.mount_vnum() != 0)
+    }
+
+    /// `IsHorseRiding` (`G/horse_rider.h:54`) of the player under `vid`: its horse ridden.
+    pub(super) fn is_horse_riding(&self, vid: u32) -> bool {
+        self.points_of(vid)
+            .is_some_and(|points| points.horse().riding())
+    }
+
+    /// `CanUseHorseSkill` (`G/char_horse.cpp:369-393`): riding on a grade-3 horse. The mount
+    /// arms after the grade's `return` never run.
+    pub(super) fn can_use_horse_skill(&self, vid: u32) -> bool {
+        self.is_riding(vid)
+            && self
+                .points_of(vid)
+                .is_some_and(|points| points.horse().grade() == 3)
+    }
+
     /// `MountVnum`'s recursion (`G/char.cpp:7857-7860`): a mount swapped for another
     /// clears first.
     fn mount_swaps(&mut self, vid: Vid, vnum: u32) {

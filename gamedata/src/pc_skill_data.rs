@@ -71,8 +71,8 @@ pub const SHOOT_LIST: [u32; 14] = [20, 35, 46, 47, 48, 50, 66, 76, 80, 81, 91, 1
 
 /// `CanUseSkill` (`G/char_skill.cpp:4135-4183`): the vnum is 0-refused, then
 /// readable from the job/group `SkillList` past group 0, the riding arms while
-/// riding, or the always list. No riding or mount is ported, so callers pass
-/// `riding = false`.
+/// riding (`IsRiding`), or the always list. `SkillLevelUp`'s callers pass
+/// `riding = false`: their own list already holds the riding arms.
 #[must_use]
 pub const fn can_use(job: u8, group: u8, riding: bool, vnum: u32) -> bool {
     if vnum == 0 {

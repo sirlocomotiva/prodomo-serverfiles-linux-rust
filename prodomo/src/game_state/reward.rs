@@ -80,6 +80,8 @@ const DOUBLE_EXP: u32 = 70_005;
 /// `UNIQUE_ITEM_FASTER_ALIGNMENT_UP_BY_KILL` (`G/unique_item.h:31`): worn, a kill that
 /// raises a negative alignment raises it by 14 instead of 7.
 const FASTER_ALIGNMENT_UP_BY_KILL: u32 = 70_051;
+/// `ITEM_HORSE_SKILL_TRAIN_BOOK` (`G/unique_item.h:71`): the book a riding killer may draw.
+const HORSE_SKILL_TRAIN_BOOK: u32 = 50_060;
 /// `DistributeExp`'s reach (`G/char_battle.cpp:2848`): attackers beyond it earn nothing.
 const EXP_RANGE: i32 = 5000;
 
@@ -1145,7 +1147,14 @@ impl GameState {
             }
         }
         // Stone drop (`:1279-1293`): `ENABLE_STONE_DROP_ON_METIN` is undefined (C15).
-        // Horse book (`:1295-1302`): no riding, and the `&&` short-circuits before the draw.
+        // Horse book (`:1295-1302`): a killer riding its horse draws for the horse skill
+        // book; one not riding never draws, as the `&&` short-circuits.
+        if self.is_horse_riding(attacker.raw())
+            && self.drop_per_kill_pct(1000, 1_000_000, delta, b"horse_skill_book_drop")
+                >= number(&mut self.dice, 1, range)
+        {
+            hits.extend(self.make_drop_hit(HORSE_SKILL_TRAIN_BOOK, 1, -1));
+        }
         // Lotto (`:1304-1319`): the draw always runs; the DB insert waits for a lotto table
         // (hook) and the flag is 0, so it never passes.
         let _ = self.drop_per_kill_pct(100, 1000, delta, b"lotto_drop")
@@ -1372,4 +1381,40 @@ impl GameState {
 /// of the seven `SungMaWillMap` entries.
 fn is_new_world_map(map: i32) -> bool {
     SUNGMA_WILL_MAPS.iter().any(|&(index, _)| index == map)
+}
+
+#[cfg(test)]
+mod tests {
+    use common::vid::Vid;
+    use world::character::{number, Pcg32};
+    use world::npc::FIRST_NPC_VID;
+
+    use super::super::fixtures::{a_fighter, enter, open_cells, stand_field, TestClock};
+
+    /// The horse book's `pkKiller->IsHorseRiding() && ...` (`G/item_manager.cpp:1295-1302`):
+    /// the rider's kill draws for the book, so its dice stand one draw past the walker's,
+    /// whose `&&` short-circuits before the draw.
+    #[test]
+    fn only_a_riding_killer_draws_for_the_horse_book() {
+        let after_the_drops = |riding: bool| {
+            let clock = TestClock::default();
+            let npc = a_fighter(FIRST_NPC_VID, 101, 0, (175, 2000), 0, (3200, 3200), 100);
+            let mut world = stand_field(&clock, vec![npc], open_cells(), true);
+            let _inbox = enter(&mut world, 7, (3100, 3200), 820);
+            if riding {
+                let horse = world.pc_points_mut(7).expect("a player").horse_mut();
+                horse.set_level(25, 0);
+                assert!(horse.start_riding());
+            }
+            world.dice = Pcg32::new(9, 0);
+            let _drops = world.create_drop_item(FIRST_NPC_VID, Vid::new(7));
+            world.dice
+        };
+        let mut walked = after_the_drops(false);
+        let mut ridden = after_the_drops(true);
+        let _book_draw = number(&mut walked, 1, 2);
+        let next = (0..4).map(|_| number(&mut walked, 1, 1_000_000));
+        let rider_next = (0..4).map(|_| number(&mut ridden, 1, 1_000_000));
+        assert!(next.eq(rider_next), "the rider took one draw more");
+    }
 }

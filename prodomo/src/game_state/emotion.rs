@@ -8,8 +8,8 @@
 //! is `ACMD(do_emotion_allow)` (`:112-128`): the arena gate, then the `(VID, number)` consent
 //! insert.
 //!
-//! What legacy reads that this build does not track: the arena (no character is on one),
-//! riding (no character rides), and marriage (no character is married). The wedding map
+//! What legacy reads that this build does not track: the arena (no character is on one)
+//! and marriage (no character is married). The wedding map
 //! (81) and the two mask uniques (71011, 71033) are read for real; the owner's config sets
 //! `disable_emotion_mask`, so the mask gate passes by default. `NEED_TARGET` never appears
 //! in the table, the disarm flags are never checked, and the consent set is never cleared:
@@ -157,10 +157,10 @@ impl GameState {
     /// gate, the woman gate, the victim in view, the NEED gates, the victim gates, the
     /// consent insert, and the command line to the view.
     ///
-    /// No character of this build rides (`sys.char.horse` is missing) or is married
-    /// (`sys.marriage` is missing), so the ride gates always pass and the marriage branch
-    /// always refuses `[LS;481]` without the consent pair. Returns the number the answer
-    /// line carries for the victim: its VID, or 0 with none.
+    /// A rider hears `[LS;1043]` and a ridden victim `[LS;1044]` (`IsRiding`, the horse or
+    /// a mount vnum). No character of this build is married (`sys.marriage` is missing), so
+    /// the marriage branch always refuses `[LS;481]` without the consent pair. Returns the
+    /// number the answer line carries for the victim: its VID, or 0 with none.
     pub(super) fn run_emotion(
         &mut self,
         vid: Vid,
@@ -168,6 +168,10 @@ impl GameState {
         rest: &[u8],
         mover: Mover,
     ) -> u32 {
+        if self.is_riding(vid.raw()) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1043]", &[]);
+            return 0;
+        }
         let Some((_, flags)) = EMOTIONS.iter().find(|(name, _)| *name == command) else {
             return 0;
         };
@@ -187,15 +191,20 @@ impl GameState {
             self.find_in_view(vid, &word, flags & NEED_PC != 0)
         };
         // `IS_SET(flag, NEED_TARGET | NEED_PC)`: `IS_SET` is a nonzero `&`, so either bit
-        // arms it — but the refusal only tells `[LS;436]` and runs on.
+        // arms it, and the refusal ends the line (`G/cmd_emotion.cpp:200-207`).
         if flags & (NEED_TARGET | NEED_PC) != 0 && victim.is_none() {
             self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;436]", &[]);
+            return 0;
         }
         let Some(victim) = victim else {
             self.send_emotion(vid, command, 0, mover);
             return 0;
         };
         if !self.is_player(victim) || victim == vid.raw() {
+            return 0;
+        }
+        if self.is_riding(victim) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1044]", &[]);
             return 0;
         }
         let Some(answer) = self.check_emotion_target(vid, victim, flags, mover) else {

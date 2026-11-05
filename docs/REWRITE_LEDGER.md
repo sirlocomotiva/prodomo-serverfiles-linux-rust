@@ -45648,3 +45648,98 @@ set: 4741 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 pass
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 397. The riding gates
+
+Legacy's three riding reads now have one home each in
+`prodomo/src/game_state/horse_ride.rs`. Each reads the horse and the mount through the
+existing `points_of`:
+- `is_riding` is `IsRiding`: the horse ridden, or a mount vnum.
+- `is_horse_riding` is `IsHorseRiding`.
+- `can_use_horse_skill` is `CanUseHorseSkill`, which reduces to riding on a grade-3 horse.
+  Its mount arms follow the grade's `return` and are dead.
+
+The sites that read them:
+- **Emotions** (`emotion.rs` `run_emotion`, `G/cmd_emotion.cpp:158-216`): a rider hears
+  `[LS;1043]` before any other gate. A victim who rides gives `[LS;1044]`, checked after the
+  player and self checks.
+- **Fixed porting bug:** a target-less emotion that needs one used to tell `[LS;436]` and then
+  still send the emotion with victim 0. It now returns, as legacy's `return` at `:200-207`
+  does.
+- **Moves** (`motion.rs` `run_move`): the move judge's riding arm reads `is_riding` instead of
+  `false`.
+- **Drops** (`reward.rs`): a riding killer draws for the horse book 50060 with
+  `GetDropPerKillPct(1000, 1000000, delta, "horse_skill_book_drop")` before the lotto draw
+  (`G/item_manager.cpp:1295-1302`). A walker's `&&` short-circuits before the draw.
+- **Skills** (`pc_skill.rs`):
+  - `UseSkill` (`G/char_skill.cpp:2920-2961`) passes the ride to `can_use`, refuses a
+    polymorphed caster, and answers skill 131 with `[LS;967]` when the caster has a horse
+    level and `[LS;966]` without, charging nothing.
+  - A rider off a grade-3 horse casts nothing, and the grade-3 rider casts only horse rows
+    (type 5), which no one else casts. `skill_attack` passes the ride to `can_use` too.
+  - `computes_nothing` gates `compute_skill_melee`, `compute_skill` and `compute_skill_affect`
+    the way `ComputeSkill` (`:2445-2478`) does. MUYEONG minds only the polymorph.
+  - The level-up callers of `can_use` still pass `false`, because their own list holds
+    137-140.
+- **Wear** (`world/src/character/equip.rs` `equip_checks`, `G/char_item.cpp:8330-8412`):
+  - Five new `MoveRefused` variants, each with its notice: `RiderWeddingArmour` (`[LS;883]`),
+    `Polymorphed` (`[LS;450]`, anything but the arrow cell), `RiderRideItem` (`[LS;1054]`),
+    `RiderArmour` and `RiderCostume` (legacy's two Romanian lines).
+  - `is_ride_item` covers a unique of sub type 2 or 3, or a mount costume.
+  - The ride item's unique-cell wedding check is not ported, since uniques are not.
+- **Quests:** `pc.is_riding` is bridged (`G/questlua_pc.cpp:2658-2672`) as a boolean of
+  `IsRiding`.
+
+Not yet: the polymorph item use (`[LS;1053]`, the 70104 ball is not ported), the attack
+speed and combo while riding, the PvP horse-level gate, the stamina drain, `pc.mount`, and
+the arena and guild-war silences.
+
+Scenarios:
+- `a_rider_neither_emotes_nor_changes_its_body_and_a_morph_wears_nothing`: Alpha, a
+  level-154 shaman, rides at horse level 25.
+  - `/dance1` hears `[LS;1043]`.
+  - The use of body armour 9004 and of costume body 41002 each hears its Romanian line.
+  - `/polymorph 101` then stops the ride, and the armour hears `[LS;450]`.
+  - The owner's 182 mount costumes all carry `LIMIT_REAL_TIME_START_FIRST_USE`, which the
+    use refuses as not ported before the ride gate. The unit test
+    `a_rider_and_a_morph_are_refused_their_wear` pins the ride item with a timer-less proto,
+    along with the other four refusals and a walker's success.
+- `a_kiss_at_nobody_or_at_a_rider_is_refused`: Yankee enters riding his stored horse, which
+  is saved as level 25 and ridden.
+  - Alpha's `/kiss` hears `[LS;436]` alone.
+  - `/kiss Yankee` hears `[LS;1044]`.
+  - Yankee hears neither.
+- `a_rider_mounts_by_line_and_quest_and_the_mount_shows_and_pays`: the ride probe also says
+  `tostring(pc.is_riding())`, so `r 1 0 false` and then `r 2 1 true`.
+
+New unit tests:
+- `a_rider_steps_past_the_walkers_limit`
+- `a_rider_casts_no_job_skill`: level 5 and level 25 riders are refused with SP unchanged,
+  and the walker casts.
+- `the_horse_summon_skill_names_the_horse`
+- `the_rider_and_the_morph_compute_what_they_may`
+- `only_a_riding_killer_draws_for_the_horse_book`: the rider's dice stand one draw past the
+  walker's.
+
+Eight runs of each new scenario passed. The existing emotion scenarios
+`a_dance_broadcasts_and_a_kiss_needs_consent` and
+`a_pose_reaches_the_view_including_its_sender` pass unchanged.
+
+Twelve mutants were applied to the pristine files and restored by checksum. All twelve are
+semantic kills:
+- the 1043, 1044 and 436-return gates;
+- the move judge's riding term;
+- the horse-book gate;
+- `use_skill`'s riding gate and its row-type gate;
+- `computes_nothing` reduced to the polymorph, which first survived and was then killed by
+  the new compute test;
+- the rider armour, polymorph and ride-item wear gates;
+- `pc.is_riding` always false.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4749 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 passed.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
