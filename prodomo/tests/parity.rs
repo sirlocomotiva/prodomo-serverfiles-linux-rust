@@ -19861,7 +19861,7 @@ fn the_time_spiral_shortens_the_attr67_wait() {
     assert_eq!(
         set_fields(&alpha.read_game()),
         (inventory, 0, 0, 0),
-        "the spiral leaves its cell"
+        "the essence leaves its cell"
     );
     alpha.still("the script sends no dialog");
     drop(alpha);
@@ -35964,6 +35964,92 @@ const EMPIRE_PROBE: &[u8] = b"quest empire_probe begin\n\
     end\n\
     end\n\
     end\n";
+
+/// The probe quest the item scenario adds: Alpha's use of the Blue Essence reads the
+/// quest item's name, size, refined vnum and refine level, then removes it.
+const ITEM_PROBE: &[u8] = b"quest item_probe begin\n\
+    state start begin\n\
+    when 31005.use begin\n\
+    notice(item.get_name())\n\
+    notice(\"size \" .. item.get_size())\n\
+    notice(\"refine \" .. item.get_refine_vnum())\n\
+    notice(\"level \" .. item.get_level())\n\
+    item.remove()\n\
+    notice(\"gone \" .. (item.get_id() == 0 and 1 or 0))\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Ledger 406: `item.remove`, `item.get_name`, `item.get_size`, `item.get_refine_vnum`
+/// and `item.get_level` over the wire. Alpha holds one Blue Essence (31005, whose proto
+/// size is 1, refined vnum 0, and whose name carries no `+`): its use reads the name,
+/// the size, the refined vnum and level 0, then removes the quest item. The cell
+/// clears, the row goes, and the pointer reads 0.
+#[test]
+fn a_use_reads_and_removes_its_quest_item() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _data) = Server::start_with_files(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/item_probe.lua", ITEM_PROBE)],
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    // 31005 has no owner `use` script, so the probe is the only script that runs.
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_lines(&mut alpha, 0, None);
+    let _marks = read_login_letters(&mut alpha, true);
+    read_login_update(&mut alpha);
+    alpha.still("nothing follows");
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, 31005 FROM player WHERE name = 'Alpha'",
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    // The loading burst carries the essence's own set; the update settles the entry.
+    let (mut alpha, _character, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items.len(), 1, "the essence's own set");
+    assert_eq!(set_fields(&items[0]), (inventory, 0, 31_005, 1));
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_lines(&mut alpha, 0, None);
+    let _marks = read_login_letters(&mut alpha, true);
+    read_login_update(&mut alpha);
+    alpha.still("nothing follows");
+    alpha.send_record(&client_item_use(0));
+    for line in [
+        b"Esenta Cristal Albastru".as_slice(),
+        b"size 1".as_slice(),
+        b"refine 0".as_slice(),
+        b"level 0".as_slice(),
+    ] {
+        assert_eq!(
+            alpha.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, 1, line),
+            "the probe's reads"
+        );
+    }
+    // The removal lands in the call, like `set_socket` does, so its clear comes
+    // between the reads and the last notice.
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 0, 0, 0),
+        "the essence leaves its cell"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"gone 1"),
+        "the pointer reads 0"
+    );
+    alpha.still("the script sends no dialog");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(&database, "(SELECT count(*) = 0 FROM item)");
+}
 
 /// Ledger 405: `pc.change_empire`, `pc.get_change_empire_count`, `pc.is_polymorphed`,
 /// `pc.is_engaged`, `pc.is_married`, `char_log` and `sys_err` over the wire. Alpha stands

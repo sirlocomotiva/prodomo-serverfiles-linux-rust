@@ -89,6 +89,77 @@ pub fn remove_specify_item(
     done
 }
 
+/// `ITEM_MANAGER::RemoveItem` of the held item `id` at `pos` (`G/item_manager.cpp:566-595`,
+/// as `item_remove` calls it, `G/questlua_item.cpp:91-105`): the whole stack leaves whatever
+/// window holds it (`release`), its slots are deleted (`SyncQuickslot(..., 255)`), its cell
+/// clears, and its row is destroyed. An item the character does not hold at `pos` changes
+/// and sends nothing. The shop and safebox arms do not exist: this build has no personal
+/// shops, and the quest item pointer never names a safebox item (`GetInventoryItem` and the
+/// `use`/`take` entries hand it inventory items only).
+#[must_use]
+pub fn remove_quest_item(
+    items: &mut CharacterItems,
+    slots: &mut Quickslots,
+    id: ItemId,
+    pos: ItemPos,
+) -> MoveDone {
+    let mut done = MoveDone {
+        kind: MoveKind::Removed,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    if items.item_at(pos).is_none_or(|item| item.id != id) {
+        return done;
+    }
+    let sync = QuickslotSync {
+        from: pos.cell,
+        to: SyncTo::Delete,
+    };
+    let deleted = slots.sync(sync, items);
+    done.records
+        .extend(deleted.into_iter().map(MoveRecord::Quickslot));
+    if items.release(id).is_err() {
+        return done;
+    }
+    done.records
+        .push(MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))));
+    done.changes.push(ItemChange::Destroyed { id });
+    done
+}
+
+/// `CItem::GetRefineLevel` (`G/item.cpp:1869-1892`) of proto name `name`: the number after
+/// its last `+` (`strtol`, so a missing number is 0 and a negative one stays negative), and
+/// 0 with no `+`. The locale-name cross-check only logs, so it reads nothing.
+#[must_use]
+pub fn refine_level(name: &[u8]) -> i32 {
+    let Some(plus) = name.iter().rposition(|byte| *byte == b'+') else {
+        return 0;
+    };
+    let mut tail = &name[plus + 1..];
+    while tail
+        .first()
+        .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+    {
+        tail = &tail[1..];
+    }
+    let (negative, digits) = match tail.first() {
+        Some(b'-') => (true, &tail[1..]),
+        Some(b'+') => (false, &tail[1..]),
+        _ => (false, tail),
+    };
+    let mut value: i32 = 0;
+    for byte in digits.iter().take_while(|byte| byte.is_ascii_digit()) {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i32::from(byte - b'0'));
+    }
+    if negative {
+        value.saturating_neg()
+    } else {
+        value
+    }
+}
+
 /// `CItem::SetSocket(index, value)` (`G/item.cpp:1643-1656`) of the held item `id`: the socket
 /// takes the value, the client's cell is updated (`UpdatePacket`), and the row is saved. An
 /// item the character does not hold, or an index past the sockets, changes and sends nothing.
@@ -202,6 +273,41 @@ mod tests {
         item.count = count;
         item.flags = ITEM_FLAG_STACKABLE;
         item
+    }
+
+    /// `refine_level` reads the number after the last `+`, 0 with none or no digits.
+    #[test]
+    fn the_refine_level_reads_the_last_plus() {
+        assert_eq!(refine_level(b"Sword+3"), 3);
+        assert_eq!(refine_level(b"Sword+3+5"), 5);
+        assert_eq!(refine_level(b"Sword"), 0);
+        assert_eq!(refine_level(b"Sword+"), 0);
+        assert_eq!(refine_level(b"Sword+ 12x"), 12);
+        assert_eq!(refine_level(b"Sword+-2"), -2);
+    }
+
+    /// `remove_quest_item` takes the whole stack at its position, deletes its slots,
+    /// clears its cell and destroys its row; one held elsewhere takes nothing.
+    #[test]
+    fn the_quest_removal_takes_only_its_stack() {
+        let mut items = holding(&[(7, stack(9, ORE, 4)), (8, stack(10, ORE, 2))]);
+        let mut slots = Quickslots::default();
+        let _ = slots.set(3, item_slot(7), &mut Vec::new());
+        let pos = ItemPos::new(INV, 7);
+        let done = remove_quest_item(&mut items, &mut slots, 9, pos);
+        assert_eq!(done.kind, MoveKind::Removed);
+        assert!(items.item(9).is_none());
+        assert!(items.item(10).is_some(), "the other stack stays");
+        assert_eq!(done.changes, [ItemChange::Destroyed { id: 9 }]);
+        assert_eq!(
+            done.records,
+            [
+                MoveRecord::Quickslot(QuickslotRecord::Del { slot: 3 }),
+                MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))),
+            ]
+        );
+        let missed = remove_quest_item(&mut items, &mut slots, 10, pos);
+        assert!(missed.records.is_empty() && missed.changes.is_empty());
     }
 
     fn holding(placed: &[(u16, Item)]) -> CharacterItems {

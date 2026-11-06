@@ -46238,3 +46238,36 @@ passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warning
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 406. The quest item (`item.remove`, `item.get_name`, `item.get_size`, `item.get_refine_vnum`, `item.get_level`)
+
+The readers sit only in `questlib.lua`'s `item_index_table`, which no quest indexes
+through the metatable, and `item.remove`'s only callers are the battle-pass reset and
+the ship-defense timber turn-in, both behind unported gates — so one probe calls all
+five: `ITEM_PROBE` answers 31005's `use` (a vnum with no owner script, so the probe is
+the only script that runs), reads the name, size, refined vnum and level, removes the
+quest item, and reads the cleared pointer. The scenario
+`a_use_reads_and_removes_its_quest_item` proves the notices, the clear between the
+reads and the last notice, and the row's absence after the relog.
+
+The `Game` trait gains `held_refine`, `held_refine_level` and `remove_quest_item`;
+`BRIDGED` grows 248 to 253, and the new `item_remove_api` family holds the five arms so
+`item_api` stays under the line lint. `held_refine` answers the locale name, the
+proto's `bSize` and `dwRefinedVnum`; `refine_level` parses the number after the last
+`+` in the proto's `szName` (`strtol`, saturating); `remove_quest_item` releases the
+stack at its position, deletes its slots, clears its cell and destroys its row. The
+removal lands in the call, like `set_socket` does, so its clear rides the step's own
+records ahead of the last notice. The owner check is the held lookup itself: an item
+the character holds nowhere answers `None` and takes nothing. Unit tests: the bridge
+removal clearing the pointer, the `+` parser, and the single-stack removal.
+
+Two scenario lessons: the probe's fourth `end` was one too many (no `if`), which `qc`
+refused silently at load, and a global vnum swap briefly renamed the spiral scenario's
+assertion — both reverted, and the spiral is the control that still passes.
+
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4790 passed 0 failed in 42 targets; `cargo test --workspace --doc` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

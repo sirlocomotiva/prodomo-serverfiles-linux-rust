@@ -456,6 +456,24 @@ pub trait Game {
     /// with no proto (`CItem::GetType`, `G/item.h:108-109`).
     fn held_shape(&self, id: u32) -> Option<(u16, u8, u8)>;
 
+    /// `GetName()`, `GetSize()` and `GetRefinedVnum()` of the item of ID `id`
+    /// (`G/questlua_item.cpp:233-310`): the quest item's locale name, its proto's size
+    /// and refined vnum, and `None` when the character holds no such item. The name
+    /// is empty with no proto (`CItem::GetName`, `G/item.h:64-66`); the numbers are 0
+    /// (`GetSize`, `GetRefinedVnum`, `G/item.h:69,181`).
+    fn held_refine(&self, id: u32) -> Option<(Vec<u8>, u8, u32)>;
+
+    /// The refine level the item of ID `id` reads (`CItem::GetRefineLevel`,
+    /// `G/item.cpp:1869-1892`): the number after the last `+` in its proto's `szName`.
+    /// `None` when the character holds no such item; 0 with no proto or no `+`.
+    fn held_refine_level(&self, id: u32) -> Option<i32>;
+
+    /// `ITEM_MANAGER::RemoveItem` on the item of ID `id` (`G/questlua_item.cpp:91-105`):
+    /// the quest item the character holds leaves its window and its cell clears, with
+    /// the quickslot and store rows a removal makes. One the character holds nowhere
+    /// takes nothing.
+    fn remove_quest_item(&mut self, id: u32);
+
     /// `GetGuild()` of the character the script runs for (`G/questlua_pc.cpp:325-336`): its
     /// guild id, and 0 with none.
     fn guild_id(&self) -> u32;
@@ -4823,6 +4841,59 @@ fn item_api(
             set_socket(lua, cx, args)?;
             None
         }
+        _ => return item_remove_api(lua, cx, name),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// The quest item's removal and its name, size, refined vnum and refine level:
+/// `item_remove` (`G/questlua_item.cpp:91-105`), `item_get_name` (`:233-245`),
+/// `item_get_size` (`:246-258`), `item_get_refine_vnum` (`:298-310`) and
+/// `item_get_level` (`:330-342`). Split out so `item_api` stays under the line lint.
+fn item_remove_api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8]) -> mlua::Result<Option<MultiValue>> {
+    let number = |value: u32| Some(Value::Number(f64::from(value)));
+    let result = match name {
+        // `item_remove`: the quest item leaves when the character holds it (the owner
+        // check: the held readers answer `None` for one it holds nowhere), and the
+        // pointer clears either way (`ClearCurrentItem`). Pushes nothing.
+        b"item.remove" => {
+            if cx.item != 0 {
+                cx.game.remove_quest_item(cx.item);
+                cx.item = 0;
+            }
+            None
+        }
+        // `item_get_name`: the quest item's locale name, empty with none or no proto.
+        b"item.get_name" => {
+            let name = (cx.item != 0)
+                .then(|| cx.game.held_refine(cx.item))
+                .flatten()
+                .map_or(Vec::new(), |(name, _, _)| name);
+            Some(Value::String(lua.create_string(name)?))
+        }
+        // `item_get_size`: the quest item's proto size, 0 with none or no proto.
+        b"item.get_size" => {
+            let size = (cx.item != 0)
+                .then(|| cx.game.held_refine(cx.item))
+                .flatten();
+            number(u32::from(size.map_or(0, |(_, size, _)| size)))
+        }
+        // `item_get_refine_vnum`: the quest item's proto refined vnum, 0 with none
+        // or no proto.
+        b"item.get_refine_vnum" => {
+            let refined = (cx.item != 0)
+                .then(|| cx.game.held_refine(cx.item))
+                .flatten();
+            number(refined.map_or(0, |(_, _, refined)| refined))
+        }
+        // `item_get_level`: the quest item's refine level, 0 with none, no proto or
+        // no `+`.
+        b"item.get_level" => {
+            let level = (cx.item != 0)
+                .then(|| cx.game.held_refine_level(cx.item))
+                .flatten();
+            Some(Value::Number(f64::from(level.unwrap_or(0))))
+        }
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
@@ -5139,6 +5210,12 @@ mod tests {
         held_values: BTreeMap<(u32, usize), i32>,
         /// The shape `held_shape` finds by item ID.
         held_shapes: BTreeMap<u32, (u16, u8, u8)>,
+        /// The name, size and refined vnum `held_refine` finds by item ID.
+        held_refines: BTreeMap<u32, (Vec<u8>, u8, u32)>,
+        /// The refine level `held_refine_level` finds by item ID.
+        held_levels: BTreeMap<u32, i32>,
+        /// Every `remove_quest_item` call, in order.
+        removed_quest_items: Vec<u32>,
         guild_id: u32,
         is_guild_master: bool,
         /// Whether the deployment runs in test-server mode.
@@ -5590,6 +5667,18 @@ mod tests {
 
         fn held_shape(&self, id: u32) -> Option<(u16, u8, u8)> {
             self.held_shapes.get(&id).copied()
+        }
+
+        fn held_refine(&self, id: u32) -> Option<(Vec<u8>, u8, u32)> {
+            self.held_refines.get(&id).cloned()
+        }
+
+        fn held_refine_level(&self, id: u32) -> Option<i32> {
+            self.held_levels.get(&id).copied()
+        }
+
+        fn remove_quest_item(&mut self, id: u32) {
+            self.removed_quest_items.push(id);
         }
         fn guild_id(&self) -> u32 {
             self.guild_id
@@ -6318,6 +6407,38 @@ mod tests {
         );
         manager.disconnect(PID);
     }
+    /// The quest item's name, size, refined vnum, refine level and removal: the readers
+    /// answer the held rows, and the removal takes the quest item and clears the pointer
+    /// (`ClearCurrentItem`), so the second read answers the empty name and 0.
+    #[test]
+    fn the_quest_items_name_size_refine_and_removal_answer() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake {
+            held_refines: [(9, (b"Time Spiral".to_vec(), 1, 72_348))]
+                .into_iter()
+                .collect(),
+            held_levels: [(9, 3)].into_iter().collect(),
+            ..Fake::default()
+        };
+        let source = b"say(item.get_name()) say(item.get_size())             say(item.get_refine_vnum()) say(item.get_level()) item.remove()             say(item.get_id()) say(item.get_name()) say(item.get_level())";
+        let code = host::load_chunk(manager.host.lua(), source, "=test");
+        assert!(!manager.use_item(PID, (9, 50_000), &mut game));
+        manager.operate(PID, &mut game, |run, pc, _| {
+            run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+        });
+        assert_eq!(
+            game.take(),
+            [(
+                1,
+                "Time Spiral[ENTER]1[ENTER]72348[ENTER]3[ENTER]0[ENTER][ENTER]0[ENTER][DONE]"
+                    .to_owned()
+            )]
+        );
+        assert_eq!(game.removed_quest_items, [9]);
+        manager.disconnect(PID);
+    }
+
     /// The GM gate, the room check and the quest item's readers: `pc.is_gm` answers the
     /// level-3 gate and `pc.get_gm_level` the level; `pc.enough_inventory` answers the
     /// room by vnum and false for a non-number; the socket and value read `(int)` of

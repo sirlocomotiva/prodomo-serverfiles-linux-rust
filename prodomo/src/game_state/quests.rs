@@ -2269,6 +2269,50 @@ impl Game for Session<'_> {
         let sub = u8::try_from(sub).unwrap_or(0);
         Some((item.count, kind, sub))
     }
+
+    fn held_refine(&self, id: u32) -> Option<(Vec<u8>, u8, u32)> {
+        let giver = self.giver.as_ref()?;
+        let item = giver.items.item(id)?;
+        let proto = self.items.get(item.vnum)?;
+        Some((
+            self.item_names
+                .find(item.vnum, self.mover.language)
+                .to_vec(),
+            u8::try_from(proto.size).unwrap_or(0),
+            proto.refined_vnum,
+        ))
+    }
+
+    fn held_refine_level(&self, id: u32) -> Option<i32> {
+        let giver = self.giver.as_ref()?;
+        let item = giver.items.item(id)?;
+        let proto = self.items.get(item.vnum)?;
+        Some(world::character::refine_level(&proto.name))
+    }
+
+    fn remove_quest_item(&mut self, id: u32) {
+        let Some(giver) = self.giver.as_mut().filter(|giver| giver.stores) else {
+            warn!(
+                id,
+                "a quest removed an item where no descriptor stores it; none removed"
+            );
+            return;
+        };
+        let Some(pos) = giver.items.cell_of(id) else {
+            return;
+        };
+        let done = world::character::remove_quest_item(giver.items, giver.slots, id, pos);
+        let moved = crate::item_move::MovedItems::new(
+            giver.owner_id,
+            self.reader.raw(),
+            done,
+            self.mover,
+            self.items,
+            self.locale,
+        );
+        self.records.extend(moved.records);
+        self.item_rows.extend(moved.changes);
+    }
     fn guild_id(&self) -> u32 {
         self.guild_id
     }
