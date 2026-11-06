@@ -4717,7 +4717,7 @@ mod tests {
                 Vid::new(1),
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the read runs");
         assert_eq!(used.kind, world::character::MoveKind::Used);
@@ -4762,7 +4762,7 @@ mod tests {
                 Vid::new(1),
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the step answers");
         assert!(used.changes.is_empty(), "nothing was consumed");
@@ -4797,7 +4797,7 @@ mod tests {
                 Vid::new(1),
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the step answers");
         assert!(used.changes.is_empty(), "nothing was consumed");
@@ -4830,7 +4830,7 @@ mod tests {
                 Vid::new(1),
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the read runs");
         assert_eq!(used.kind, world::character::MoveKind::Used);
@@ -4865,7 +4865,7 @@ mod tests {
                 Vid::new(1),
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the first read runs");
         let mut book = world::item::Item::new(12, 50301);
@@ -4883,7 +4883,7 @@ mod tests {
                 Vid::new(1),
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the step answers");
         assert!(used.changes.is_empty(), "nothing was consumed");
@@ -5000,6 +5000,7 @@ mod tests {
                 .and_then(|character| character.items_and_points_mut().1),
             climbs: Vec::new(),
             guild_ops: Vec::new(),
+            observes: Vec::new(),
             test_server: true,
             pcs: Vec::new(),
             online: std::collections::HashMap::new(),
@@ -5023,6 +5024,7 @@ mod tests {
             confirm_timeouts: Vec::new(),
             rank: crate::game_state::rank_global::RankStep::default(),
             account_pids: Vec::new(),
+            login: String::new(),
             empire_changes: 0,
             empire_moves: Vec::new(),
             party_flags: std::collections::HashMap::new(),

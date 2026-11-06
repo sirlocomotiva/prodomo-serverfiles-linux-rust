@@ -2171,8 +2171,10 @@ impl GameState {
                 stored,
                 marks,
                 symbols,
+                reservations,
+                bets,
                 reply,
-            } => self.answer_install_guilds(&stored, &marks, &symbols, reply),
+            } => self.answer_install_guilds(&stored, &marks, &symbols, &reservations, &bets, reply),
             GameCommand::InstallEvents { events, reply } => {
                 self.answer_install_events(events, reply);
             }
@@ -2392,7 +2394,7 @@ impl GameState {
             // `ch->ReadOfflineMessages()` (`G/input_login.cpp:728-729`): the lines
             // that waited for this character are read when it enters.
             self.deliver_offline_messages(vid, name);
-            let account = loaded.account;
+            let account = loaded.account.clone();
             let shown = self.shown_on_admit(vid, player_id, name, loaded);
             // `EnterHorse` (`G/input_login.cpp:647-650`) and the `__FIX_NIVEL_CAL__` horse
             // refresh (`:887-897`), the last `Entergame` lines before the quest login.
@@ -2405,7 +2407,7 @@ impl GameState {
             // records ride the outbox, which the descriptor drains after the burst.
             // A `pc.change_empire` call that landed rides the answer for the
             // descriptor's account store, as a dialog step's does.
-            let landed = self.quest_login(vid, account);
+            let landed = self.quest_login(vid, &account);
             Shown { landed, ..shown }
         });
         if reply.send(answer).is_err() {
@@ -2752,12 +2754,15 @@ impl GameState {
         stored: &db::guilds::StoredGuilds,
         marks: &[db::guilds::StoredMark],
         symbols: &[db::guilds::StoredSymbol],
+        reservations: &[db::guilds::StoredReservation],
+        bets: &[db::guilds::StoredBet],
         reply: oneshot::Sender<bool>,
     ) {
         let installed = if self.guilds.installed {
             false
         } else {
             self.install_guilds(stored, marks, symbols);
+            self.install_reservations(reservations, bets);
             self.guilds.installed = true;
             true
         };
@@ -3373,7 +3378,7 @@ impl GameState {
             vid,
             at,
             actor,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
         )
     }
 
@@ -3499,7 +3504,7 @@ impl GameState {
         vid: common::vid::Vid,
         at: protocol::item_pos::ItemPos,
         actor: Mover,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
     ) -> Result<MovedItems, MoveItemRefused> {
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
@@ -3946,7 +3951,7 @@ impl GameState {
                 mover,
                 account,
                 reply,
-            } => answer_item_step(vid, reply, self.use_item(vid, at, mover, account)),
+            } => answer_item_step(vid, reply, self.use_item(vid, at, mover, &account)),
             GameCommand::Shop {
                 vid,
                 step,
@@ -3958,7 +3963,7 @@ impl GameState {
                 // As with a move, a dropped answer leaves the world ahead of the store.
                 let place = self.live_place(vid, place);
                 if reply
-                    .send(self.shop(vid, step, place, mover, account))
+                    .send(self.shop(vid, step, place, mover, &account))
                     .is_err()
                 {
                     warn!(
@@ -4026,7 +4031,7 @@ impl GameState {
                 mover,
                 account,
                 reply,
-            } => self.answer_quest_step(vid, &step, place, mover, account, reply),
+            } => self.answer_quest_step(vid, &step, place, mover, &account, reply),
             _ => debug_assert!(false, "only item steps reach apply_item_step"),
         }
     }
@@ -4111,7 +4116,7 @@ impl GameState {
         step: &QuestStep,
         place: GroundPlace,
         mover: crate::item_move::Mover,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
         reply: tokio::sync::oneshot::Sender<Result<QuestStepOutcome, MoveItemRefused>>,
     ) {
         let place = self.live_place(vid, place);
@@ -4593,7 +4598,7 @@ impl GameState {
             actor,
             level,
             pid,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
             |manager, game| {
                 manager.set_quest_npc(target);
                 manager.take(pid, (id, race), game);
@@ -5477,13 +5482,13 @@ mod tests {
         };
         let mut state = a_state();
         let (first_reply, first_answer) = tokio::sync::oneshot::channel();
-        state.answer_install_guilds(&stored, &[], &[], first_reply);
+        state.answer_install_guilds(&stored, &[], &[], &[], &[], first_reply);
         assert!(
             first_answer.blocking_recv().expect("an answer"),
             "the first install takes"
         );
         let (second_reply, second_answer) = tokio::sync::oneshot::channel();
-        state.answer_install_guilds(&stored, &[], &[], second_reply);
+        state.answer_install_guilds(&stored, &[], &[], &[], &[], second_reply);
         assert!(
             !second_answer.blocking_recv().expect("an answer"),
             "the second install is refused"
@@ -6652,7 +6657,7 @@ mod tests {
             Vid::new(7),
             inventory(0),
             a_mover(),
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
         );
         assert_eq!(
             used.map(|moved| moved.kind),
@@ -6681,7 +6686,7 @@ mod tests {
             Vid::new(7),
             inventory(0),
             a_mover(),
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
         );
         assert_eq!(
             used.map(|moved| moved.kind),
@@ -7194,7 +7199,7 @@ mod tests {
                 Vid::new(7),
                 inventory(0),
                 a_mover(),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the potion is drunk");
         assert_eq!(moved.kind, world::character::MoveKind::Used);
@@ -7251,7 +7256,7 @@ mod tests {
                 Vid::new(7),
                 inventory(0),
                 a_mover(),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the first potion is drunk");
         state.process_pulse(10);
@@ -7260,7 +7265,7 @@ mod tests {
                 Vid::new(7),
                 inventory(0),
                 a_mover(),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the second potion is drunk");
         assert_eq!(
@@ -7277,7 +7282,7 @@ mod tests {
                 Vid::new(7),
                 inventory(0),
                 a_mover(),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the potion is drunk");
         let expected = points_at_seven(&state);

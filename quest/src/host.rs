@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 257] = [
+pub const BRIDGED: [&str; 262] = [
     "ds.open_refine_window",
     "ds.open_attr_change_window",
     "ds.give_qualification",
@@ -298,7 +298,11 @@ pub const BRIDGED: [&str; 257] = [
     "guild.level",
     "guild.war_enter",
     "guild.get_any_war",
+    "guild.get_reserve_war_table",
     "guild.get_name",
+    "guild.war_bet",
+    "guild.is_bet",
+    "guild.get_warp_war_list",
     "guild.get_member_count",
     "guild.change_master",
     "guild.change_master_with_limit",
@@ -445,6 +449,7 @@ pub const BRIDGED: [&str; 257] = [
     "pc.mount",
     "pc.mount_bonus",
     "pc.unmount",
+    "pc.warp_to_guild_war_observer_position",
     "pc.learn_grand_master_skill",
     "pc.is_skill_book_no_delay",
     "pc.remove_skill_book_no_delay",

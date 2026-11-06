@@ -261,7 +261,7 @@ impl GameState {
                 vid,
                 protocol::item_pos::ItemPos::new(EWindows::Inventory as u8, 0),
                 actor,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             );
         };
         self.tell(vid, mover, CHAT_TYPE_INFO, b"COSTUME status:", &[]);
@@ -306,7 +306,7 @@ impl GameState {
             vid,
             at,
             actor,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
         )
     }
 

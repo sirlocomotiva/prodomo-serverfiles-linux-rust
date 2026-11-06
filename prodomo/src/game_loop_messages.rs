@@ -100,18 +100,21 @@ impl Default for GameLoopConfig {
         }
     }
 }
-/// What a quest-running command carries of the reader's account, for `pc.change_empire`
-/// and `pc.get_change_empire_count`: the account's character PIDs, in slot order with
-/// 0 for an empty slot (legacy's `player_index` row), and how many times the account
-/// changed its empire (legacy's `change_empire` row). The descriptor reads both from
-/// its account table and the store; the session's shadow judges the change's guild
-/// arm off the PIDs, and the world's judge answers the landing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What a quest-running command carries of the reader's account, for `pc.change_empire`,
+/// `pc.get_change_empire_count` and the war bets: the account's character PIDs, in slot
+/// order with 0 for an empty slot (legacy's `player_index` row), how many times the
+/// account changed its empire (legacy's `change_empire` row), and the account's login
+/// (`GetAccountTable().login`, which the bet chat reads). The descriptor reads all
+/// three from its account table and the store; the session's shadow judges the change's
+/// guild arm off the PIDs, and the world's judge answers the landing and the bets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QuestAccount {
     /// The account's character PIDs, in slot order, 0 for an empty slot.
     pub pids: [u32; 4],
     /// How many times the account changed its empire.
     pub changes: u32,
+    /// The account's login, as stored.
+    pub login: String,
 }
 
 /// Correlates an asynchronous completion with the request known by game state.
@@ -221,6 +224,10 @@ pub enum GameCommand {
         marks: Vec<db::guilds::StoredMark>,
         /// Every stored symbol row.
         symbols: Vec<db::guilds::StoredSymbol>,
+        /// The boot's war reservations (`BootReserveWar`).
+        reservations: Vec<db::guilds::StoredReservation>,
+        /// The boot's war bets (`CGuildWarReserve::Initialize`).
+        bets: Vec<db::guilds::StoredBet>,
         /// Where the game thread reports whether it installed.
         reply: oneshot::Sender<bool>,
     },
@@ -3330,12 +3337,16 @@ impl GameLoopController {
         stored: db::guilds::StoredGuilds,
         marks: Vec<db::guilds::StoredMark>,
         symbols: Vec<db::guilds::StoredSymbol>,
+        reservations: Vec<db::guilds::StoredReservation>,
+        bets: Vec<db::guilds::StoredBet>,
     ) -> Result<Result<(), InstallError>, InstallError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::InstallGuilds {
             stored,
             marks,
             symbols,
+            reservations,
+            bets,
             reply,
         })
         .await

@@ -860,7 +860,7 @@ mod tests {
                     click,
                     at(0),
                     of(empire),
-                    crate::game_loop_messages::QuestAccount::default(),
+                    &crate::game_loop_messages::QuestAccount::default(),
                 )
                 .unwrap();
             assert!(matches!(answer, ShopAnswer::Sent(_)), "{answer:?}");
@@ -901,7 +901,7 @@ mod tests {
                 ShopStep::End,
                 at(0),
                 of(empire),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             );
         }
 
@@ -1960,7 +1960,7 @@ mod tests {
                 click,
                 stale,
                 of(1),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .unwrap();
         assert!(
@@ -2387,7 +2387,7 @@ mod tests {
                 buy,
                 at(2100),
                 of(1),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .unwrap();
         assert!(matches!(far, ShopAnswer::Declined { .. }), "{far:?}");
@@ -2408,7 +2408,7 @@ mod tests {
                 sold,
                 at(0),
                 of(1),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .unwrap();
         assert!(matches!(sale, ShopAnswer::Moved(_)), "{sale:?}");
@@ -2425,7 +2425,7 @@ mod tests {
                 buy,
                 at(0),
                 of(1),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .unwrap();
         assert!(matches!(bought, ShopAnswer::Declined { .. }), "{bought:?}");

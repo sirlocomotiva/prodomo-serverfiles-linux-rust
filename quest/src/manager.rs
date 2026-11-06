@@ -481,6 +481,10 @@ pub trait Game {
     /// Whether the character the script runs for leads its guild (`G/questlua_pc.cpp:339-350`).
     fn is_guild_master(&self) -> bool;
 
+    /// `CGuildManager::FindGuild` (`G/guild_manager.cpp:224`): whether a guild holds `id`.
+    /// The observer warp's `no such guild` line asks it.
+    fn guild_known(&self, id: u32) -> bool;
+
     /// `test_server` (`G/config.cpp:72`): whether the deployment runs in test-server mode.
     fn test_server(&self) -> bool;
 
@@ -549,6 +553,14 @@ pub trait Game {
     /// unless `IsHack` refuses. Answers whether the warp runs. The test-server line stays
     /// with the audit, as the anywhere spawn's does.
     fn warp(&mut self, x: i32, y: i32, private: i32) -> bool;
+
+    /// `pc_warp_to_guild_war_observer_position`
+    /// (`G/questlua_pc.cpp:406-443`): the character joins the war between the two guilds
+    /// as an observer — the flag cleared, the exit remembered, and the warp to the
+    /// war map's observer position. Answers the position when the war has one, so the
+    /// bridge can tell a missing guild from a guildless war; the `luaL_error` lines are
+    /// the bridge's. Quiet under `IsHack`, like `pc_warp`.
+    fn war_observe(&mut self, first: u32, second: u32) -> Option<(i32, i32, i32)>;
 
     /// `game_drop_item_with_ownership` (`G/questlua_game.cpp:168-213`): `count` of `vnum`
     /// lie at the character's feet, owned by it for `secs` seconds (`None` with no
@@ -848,6 +860,9 @@ pub enum GuildAnswer {
     Boolean(bool),
     /// `lua_pushstring`.
     Text(Vec<u8>),
+    /// A `lua_newtable` of rows, each row's numbers in index order
+    /// (`guild.get_reserve_war_table`, `guild.get_warp_war_list`).
+    Table(Vec<Vec<f64>>),
 }
 
 /// A compiled chunk, or why it could not be compiled; the error ends the script that runs it.
@@ -3059,6 +3074,47 @@ fn pc_warp(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<bool> 
     };
     Ok(cx.game.warp(x, y, private))
 }
+/// `pc_warp_to_guild_war_observer_position` (`G/questlua_pc.cpp:406-443`):
+/// `luaL_checknumber` reads both guild ids (a non-number errors `bad argument #N`),
+/// an unknown guild errors `no such guild with id`, and a war with no observer
+/// position errors `not under warp guild war between guild`.
+fn war_observe(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
+    let mut ids = [0_u32; 2];
+    for (position, id) in ids.iter_mut().enumerate() {
+        let arg = args.get(position).cloned().unwrap_or(Value::Nil);
+        let Some(number) = lua.coerce_number(arg.clone())? else {
+            let got = if args.len() < position + 1 {
+                "no value"
+            } else {
+                match arg {
+                    Value::Nil => "nil",
+                    Value::Boolean(_) => "boolean",
+                    Value::Table(_) => "table",
+                    Value::Function(_) => "function",
+                    Value::UserData(_) => "userdata",
+                    Value::Thread(_) => "thread",
+                    _ => "string",
+                }
+            };
+            return Err(mlua::Error::runtime(format!(
+                "bad argument #{} to 'pc.warp_to_guild_war_observer_position' (number                  expected, got {got})",
+                position + 1,
+            )));
+        };
+        *id = dword(number);
+    }
+    let [first, second] = ids;
+    match cx.game.war_observe(first, second) {
+        Some(_) => Ok(()),
+        None if !cx.game.guild_known(first) || !cx.game.guild_known(second) => Err(
+            mlua::Error::runtime(format!("no such guild with id {first} {second}")),
+        ),
+        None => Err(mlua::Error::runtime(format!(
+            "not under warp guild war between guild {first} {second}"
+        ))),
+    }
+}
+
 /// `pc_ore_refine` (`G/questlua_pc.cpp:1912-1937`) and `pc_diamond_refine` (`:1889-1910`):
 /// the quest item melts for the fee of the first argument and the odds of the second
 /// (both `(int)`, 0 for a second that is not a number). The first must be a number or
@@ -3790,6 +3846,11 @@ fn pc_api(
         b"pc.get_skill_group" => number(u32::from(cx.game.skill_group())),
         // `pc_warp` (see `pc_warp`).
         b"pc.warp" => Some(Value::Boolean(pc_warp(lua, cx, args)?)),
+        // `pc_warp_to_guild_war_observer_position` (see `war_observe`).
+        b"pc.warp_to_guild_war_observer_position" => {
+            war_observe(lua, cx, args)?;
+            None
+        }
         // `pc_enough_inventory` (`:478-499`): a vnum that is not number-like, or names no
         // proto, answers false; otherwise whether a fresh base cell below the unlocked
         // count is empty.
@@ -3942,6 +4003,10 @@ fn guild_api(
             | b"level"
             | b"war_enter"
             | b"get_any_war"
+            | b"get_reserve_war_table"
+            | b"war_bet"
+            | b"is_bet"
+            | b"get_warp_war_list"
             | b"get_name"
             | b"get_member_count"
             | b"change_master"
@@ -3986,6 +4051,17 @@ fn guild_api(
         GuildAnswer::Boolean(value) => MultiValue::from_iter([Value::Boolean(value)]),
         GuildAnswer::Text(text) => {
             MultiValue::from_iter([Value::String(lua.create_string(&text)?)])
+        }
+        GuildAnswer::Table(rows) => {
+            let table = lua.create_table()?;
+            for (row, cells) in rows.iter().enumerate() {
+                let inner = lua.create_table()?;
+                for (cell, value) in cells.iter().enumerate() {
+                    inner.set(cell + 1, *value)?;
+                }
+                table.set(row + 1, inner)?;
+            }
+            MultiValue::from_iter([Value::Table(table)])
         }
     };
     Ok(Some(pushed))
@@ -5274,6 +5350,8 @@ mod tests {
         draws: Vec<(i32, i32)>,
         learned: BTreeSet<u32>,
         guild_calls: Vec<(Vec<u8>, Vec<GuildArg>)>,
+        /// What `get_reserve_war_table` answers once.
+        reserve_table: Vec<Vec<f64>>,
         map_index: i32,
         war_map: i32,
         gold: u64,
@@ -5310,6 +5388,8 @@ mod tests {
         removed_quest_items: Vec<u32>,
         guild_id: u32,
         is_guild_master: bool,
+        /// Whether `guild_known` names the guild.
+        guild_known: bool,
         /// Whether the deployment runs in test-server mode.
         test_server: bool,
         /// The VID `find_pc_vid` answers for each PC name.
@@ -5338,6 +5418,8 @@ mod tests {
         deleted: Vec<(u32, Option<Vec<u8>>)>,
         /// Every `warp` call, in order.
         warps: Vec<(i32, i32, i32)>,
+        /// What [`Game::war_observe`] was asked.
+        observes: Vec<(u32, u32)>,
         /// Whether `IsHack` refuses the character.
         hack: bool,
         /// Every `drop_with_ownership` call, in order.
@@ -5780,6 +5862,10 @@ mod tests {
             self.is_guild_master
         }
 
+        fn guild_known(&self, _id: u32) -> bool {
+            self.guild_known
+        }
+
         fn test_server(&self) -> bool {
             self.test_server
         }
@@ -5817,6 +5903,9 @@ mod tests {
             match name {
                 b"get_any_war" => GuildAnswer::Number(self.any_war),
                 b"name" => GuildAnswer::Text(b"Knights".to_vec()),
+                b"get_reserve_war_table" => {
+                    GuildAnswer::Table(std::mem::take(&mut self.reserve_table))
+                }
                 _ => GuildAnswer::None,
             }
         }
@@ -5859,6 +5948,11 @@ mod tests {
         fn warp(&mut self, x: i32, y: i32, private: i32) -> bool {
             self.warps.push((x, y, private));
             !self.hack
+        }
+
+        fn war_observe(&mut self, first: u32, second: u32) -> Option<(i32, i32, i32)> {
+            self.observes.push((first, second));
+            (!self.hack && self.guild_known).then_some((0, 0, 0))
         }
 
         fn drop_with_ownership(&mut self, vnum: u32, count: i32, secs: Option<i32>) {
@@ -7417,6 +7511,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("not ported: guild.is_war"), "{error}");
+        // A table answer arrives as nested 1-based tables.
+        probe.game.reserve_table = vec![vec![3.0, 9.0, 7.0, 2.0]];
+        let pushed = probe.call("guild.get_reserve_war_table", &[]).unwrap();
+        assert_eq!(pushed.len(), 1);
+        let Value::Table(outer) = &pushed[0] else {
+            panic!("a table, not {pushed:?}");
+        };
+        assert_eq!(outer.len().unwrap(), 1);
+        let row: mlua::Table = outer.get(1).unwrap();
+        assert_eq!(row.len().unwrap(), 4);
+        let cells: Vec<f64> = vec![
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+            row.get(3).unwrap(),
+            row.get(4).unwrap(),
+        ];
+        assert_eq!(cells, [3.0, 9.0, 7.0, 2.0]);
     }
 
     /// The `pc.*` item arms: the give, and the count under both names.
@@ -7847,6 +7958,82 @@ mod tests {
                 ("unmount", 0, 0, 0),
             ]
         );
+    }
+
+    /// The observer warp's errors: a non-number errors `bad argument #N`, an unknown
+    /// guild (the Fake names none) errors `no such guild`, and a known pair warps —
+    /// the Fake's `guild_known` is flipped through a second probe.
+    #[test]
+    fn the_observer_warp_names_its_errors() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake {
+                guild_known: false,
+                ..Fake::default()
+            },
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let word = Value::String(manager.host.lua().create_string(b"seven").unwrap());
+        let error = probe
+            .call(
+                "pc.warp_to_guild_war_observer_position",
+                &[word, Value::Number(2.0)],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bad argument #1") && error.contains("got string"),
+            "{error}"
+        );
+        let error = probe
+            .call(
+                "pc.warp_to_guild_war_observer_position",
+                &[Value::Number(7.0)],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bad argument #2") && error.contains("got no value"),
+            "{error}"
+        );
+        let error = probe
+            .call(
+                "pc.warp_to_guild_war_observer_position",
+                &[Value::Number(7.0), Value::Number(9.0)],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no such guild with id 7 9"), "{error}");
+        // The war with no map: known guilds, but the Fake is hacked, so no
+        // position — `not under warp guild war between guild`.
+        probe.game.guild_known = true;
+        probe.game.hack = true;
+        let error = probe
+            .call(
+                "pc.warp_to_guild_war_observer_position",
+                &[Value::Number(7.0), Value::Number(9.0)],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("not under warp guild war between guild 7 9"),
+            "{error}"
+        );
+        // Unhacked, the pair warps and pushes nothing.
+        probe.game.hack = false;
+        let pushed = probe
+            .call(
+                "pc.warp_to_guild_war_observer_position",
+                &[Value::Number(7.0), Value::Number(9.0)],
+            )
+            .unwrap();
+        assert!(pushed.is_empty(), "the warp pushes nothing");
+        assert_eq!(probe.game.observes, [(7, 9), (7, 9), (7, 9)]);
     }
 
     /// `d.select`'s adoption (`G/questmanager.cpp:1252-1264`): with a character the

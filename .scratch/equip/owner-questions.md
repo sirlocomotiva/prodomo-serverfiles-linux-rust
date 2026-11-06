@@ -376,3 +376,12 @@ owner answers.
     - `ba` (1): `ba.start`.
     - `dance_event` (1): `dance_event.gohome`.
     - `target` (1): `target.pos`.
+38. **The guild-war bet quest cannot complete (ledger 408).** `guild_war_bet.lua:39` formats
+    `_80_say`'s three verbs with one argument, so `string.format` errors and the dialog ends
+    after the title — on the legacy server too, since 5.0.3 errors the same way. No bet on
+    any reservation can complete through the owner quest on either server. The Rewrite runs
+    the source as-is (ADR-0004) and records it as a Defect. If the owner wants the bet path
+    playable, the quest source needs the fix (one argument per verb); say the word and the
+    Rewrite will carry the fixed line as a Divergence. Waits on it: nothing blocks; the
+    bridges (`guild.get_reserve_war_table`, `guild.is_bet`, `guild.war_bet`) are ported and
+    proved by probe.

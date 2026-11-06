@@ -46296,3 +46296,53 @@ passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warning
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 408. The guild-war bets and the watchers' warp
+
+Five names, all behind the guild observer's two entries (`locale/europe/quest/guild_war_observer.lua`):
+`lua.guild.get_reserve_war_table`, `lua.guild.war_bet`, `lua.guild.is_bet`,
+`lua.guild.get_warp_war_list`, and `lua.pc.warp_to_guild_war_observer_position`.
+
+`get_reserve_war_table` lists the battle reservations as (id, stronger, weaker, handicap),
+ties to To (`G/guild_manager.cpp:876-910`, pushed in reverse order). `war_bet` runs the
+`mapBet` rules (`G/guild_war.cpp:436-467`): the war's first bet raises its total and stores
+the row, a second bet by the same login is quiet, and a backed guild outside the pair or a
+non-number takes nothing; the login comes from a new `QuestAccount::login` field, filled at
+the descriptor and threaded through the quest sessions to the shadow. `is_bet` is true for
+an unknown war or a non-number (`G/guild_manager.cpp:912-920`), else whether the reader's
+login bet that war. `get_warp_war_list` is the on-war non-field pairs. Reservations and
+bets are stored (`guild_war_reserve`, `guild_war_bet`), loaded at boot, and installed with
+the guilds; a reservation whose guild pair left drops, and a bet whose war left takes its
+gold back.
+
+`pc.warp_to_guild_war_observer_position` clears `IsObserved`, remembers the exit, and warps
+to the war map's watchers' start (`G/questlua_pc.cpp:3926-3944`).
+
+Bridge notes. The guild observer's bet entry calls `guild.get_reserve_war_table.00_say` —
+`get_reserve_war_table` returns a table, on which `.00_say` is nil and legacy errors at
+`_string_find` (`G/questlua.cpp:222`, `type 2` for `LUA_TTABLE`). No bet completes through
+it, on legacy either; the script's failure is ported — a recorded owner question (38) asks
+whether to fix the script. An earlier reading of the bridge also miswired `observer_start_x`
+and `observer_start_y` (`pc_index_table` in `quest/questlib.lua`): they answer the watcher's
+start cell of the *observer's* map, not the war map's observer coordinates — the script's
+`game.get_observer_start_x` is the war map's, a different name. Both are recorded so the
+next reader does not repeat them.
+
+Three scenarios: the reserve table and legacy's error, the one bet and `is_bet`, and the
+observers' warp.
+
+The `QuestAccount` change (a `login: String` field, so `Clone` not `Copy`) moved the
+quest/item/shop entry chain from by-value to by-reference accounts; the async game-handle
+calls still move theirs into their messages.
+
+Flakes. The stray-dog scenario failed once (byte `3e` past a swing, the known unrelated
+load flake) and passed on rerun. `boot_hands_the_regens` failed once with `FIRST_NPC_VID +
+2`: each vein draws its lifetime from 7-15 minutes (`G/char.cpp:2569`), so two short draws
+in a row respawn twice inside the fixed 901-second loop; the draw is Parity, the test
+window is the flake. Both reruns passed alone; the second full suite was green.
+
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean;
+4800 passed 0 failed in 42 targets (rerun; the first run lost one target to each flake
+above); doc-tests clean; `cargo clippy --workspace --all-targets` clean;
+`RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.

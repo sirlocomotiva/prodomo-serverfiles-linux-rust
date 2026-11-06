@@ -1694,6 +1694,7 @@ async fn quest_account(
     Some(QuestAccount {
         pids: account.lobby.slot_ids(),
         changes,
+        login: account.login.as_str().to_owned(),
     })
 }
 
@@ -5306,6 +5307,11 @@ where
                     return false;
                 }
             }
+            GuildQuestStore::Bet { .. } => {
+                if !store_quest_guild_bet(addr, context, store).await {
+                    return false;
+                }
+            }
             GuildQuestStore::Leave { .. } | GuildQuestStore::Disband { .. } => {
                 if !store_quest_guild_parting(addr, context, store).await {
                     return false;
@@ -5314,6 +5320,36 @@ where
         }
     }
     true
+}
+/// Store one quest bet: `place_bet` inserts the row or takes it back when the war left.
+/// Answers whether the step may be sent.
+async fn store_quest_guild_bet(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    store: &GuildQuestStore,
+) -> bool
+where
+{
+    let GuildQuestStore::Bet {
+        war_id,
+        login,
+        gold,
+        guild,
+    } = store
+    else {
+        return true;
+    };
+    match db::guilds::place_bet(&context.store, *war_id, login, *gold, *guild).await {
+        Ok(true) => true,
+        Ok(false) => {
+            warn!(%addr, "A quest bet landed nowhere; closing");
+            false
+        }
+        Err(error) => {
+            warn!(%addr, %error, "A quest bet could not be stored; closing");
+            false
+        }
+    }
 }
 /// Store one quest parting: the leave's member row or the disband's guild row with every
 /// member's stamp. Answers whether the step may be sent.
@@ -8961,15 +8997,20 @@ async fn install_guilds(
     let symbols = db::guilds::load_symbols(store)
         .await
         .map_err(|error| format!("Stored guild symbols are unusable: {error}"))?;
+    let (reservations, bets) = db::guilds::load_reservations(store)
+        .await
+        .map_err(|error| format!("Stored war reservations are unusable: {error}"))?;
     info!(
         guilds = stored.guilds.len(),
         marks = marks.len(),
         symbols = symbols.len(),
+        reservations = reservations.len(),
+        bets = bets.len(),
         "Stored guilds loaded"
     );
     match game_loop
         .controller()
-        .install_guilds(stored, marks, symbols)
+        .install_guilds(stored, marks, symbols, reservations, bets)
         .await?
     {
         Ok(()) => Ok(()),

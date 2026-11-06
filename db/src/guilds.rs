@@ -991,3 +991,200 @@ pub async fn save_symbol(store: &Store, guild_id: u32, data: &[u8]) -> Result<()
     .await?;
     Ok(())
 }
+
+/// One reservation row, as [`load_reservations`] reads it: the columns the DB boot's
+/// two queries read (`db/GuildManager.cpp:896-897`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredReservation {
+    /// `id`.
+    pub id: u32,
+    /// `guild1`, `guild2`.
+    pub pair: (u32, u32),
+    /// `UNIX_TIMESTAMP(time)`.
+    pub starts_at: i32,
+    /// `type`.
+    pub war_type: u8,
+    /// `warprice`, `initscore`.
+    pub price: i32,
+    /// `initscore`.
+    pub initial_score: i32,
+    /// `bet_from`, `bet_to`.
+    pub bets: (i32, i32),
+    /// `power1`, `power2`.
+    pub powers: (i32, i32),
+    /// `handicap`.
+    pub handicap: i32,
+}
+
+/// One bet row, as [`load_reservations`] reads it: `login, guild, gold`
+/// (`db/GuildManager.cpp:1210`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBet {
+    /// `war_id`.
+    pub war_id: u32,
+    /// `login`.
+    pub login: String,
+    /// `gold`.
+    pub gold: i32,
+    /// `guild`.
+    pub guild: u32,
+}
+
+/// Load the reservations the boot keeps (`CGuildManager::BootReserveWar`,
+/// `db/GuildManager.cpp:887-950`): the unstarted rows and the started ones with no
+/// winner yet, each with its bets (`CGuildWarReserve::Initialize`,
+/// `db/GuildManager.cpp:1207-1230`). Every loaded row counts as unstarted
+/// (`t.bStarted = 0`, `:928`).
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`], including for a stored value outside its range,
+/// which the migration's checks make unreachable.
+pub async fn load_reservations(
+    store: &Store,
+) -> Result<(Vec<StoredReservation>, Vec<StoredBet>), AccountError> {
+    let rows = sqlx::query(
+        "SELECT id, guild1, guild2, starts_at, war_type, war_price, initial_score,          bet_from, bet_to, power1, power2, handicap FROM guild_war_reservation WHERE          NOT started OR (started AND winner = -1) ORDER BY id",
+    )
+    .fetch_all(store.pool())
+    .await?;
+    let mut reservations = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: i32 = row.try_get("id")?;
+        let guild1: i32 = row.try_get("guild1")?;
+        let guild2: i32 = row.try_get("guild2")?;
+        let war_type: i16 = row.try_get("war_type")?;
+        reservations.push(StoredReservation {
+            id: u32::try_from(id).map_err(|_| AccountError::NoSuchPlayer(0))?,
+            pair: (
+                u32::try_from(guild1).map_err(|_| AccountError::NoSuchPlayer(0))?,
+                u32::try_from(guild2).map_err(|_| AccountError::NoSuchPlayer(0))?,
+            ),
+            starts_at: row.try_get("starts_at")?,
+            war_type: u8::try_from(war_type).map_err(|_| AccountError::NoSuchPlayer(0))?,
+            price: row.try_get("war_price")?,
+            initial_score: row.try_get("initial_score")?,
+            bets: (row.try_get("bet_from")?, row.try_get("bet_to")?),
+            powers: (row.try_get("power1")?, row.try_get("power2")?),
+            handicap: row.try_get("handicap")?,
+        });
+    }
+    let rows = sqlx::query(
+        "SELECT b.war_id, b.login, b.gold, b.guild FROM guild_war_bet b JOIN          guild_war_reservation r ON r.id = b.war_id WHERE NOT r.started OR (r.started          AND r.winner = -1) ORDER BY b.war_id, b.login",
+    )
+    .fetch_all(store.pool())
+    .await?;
+    let mut bets = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let war_id: i32 = row.try_get("war_id")?;
+        let guild: i32 = row.try_get("guild")?;
+        bets.push(StoredBet {
+            war_id: u32::try_from(war_id).map_err(|_| AccountError::NoSuchPlayer(0))?,
+            login: row.try_get("login")?,
+            gold: row.try_get("gold")?,
+            guild: u32::try_from(guild).map_err(|_| AccountError::NoSuchPlayer(0))?,
+        });
+    }
+    Ok((reservations, bets))
+}
+
+/// Insert the reservation a battle or flag accept made
+/// (`CGuildManager::ReserveWar`'s insert, `db/GuildManager.cpp:1062-1068`): the sorted
+/// pair, the start 180 seconds out, the type's price and score, and zeroed powers and
+/// handicap (the empty polys; see the migration). Answers the new row's id.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for an id above `i32::MAX`, and
+/// [`AccountError::Database`] otherwise.
+pub async fn insert_reservation(
+    store: &Store,
+    guild1: u32,
+    guild2: u32,
+    starts_at: i32,
+    war_type: u8,
+    price: i32,
+    initial_score: i32,
+) -> Result<u32, AccountError> {
+    let (lo, hi) = if guild1 <= guild2 {
+        (guild1, guild2)
+    } else {
+        (guild2, guild1)
+    };
+    let low = i32::try_from(lo).map_err(|_| AccountError::NoSuchPlayer(lo))?;
+    let high = i32::try_from(hi).map_err(|_| AccountError::NoSuchPlayer(hi))?;
+    let typed = i16::from(war_type);
+    let id: i32 = sqlx::query_scalar(
+        "INSERT INTO guild_war_reservation (guild1, guild2, starts_at, war_type, war_price,          initial_score) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(low)
+    .bind(high)
+    .bind(starts_at)
+    .bind(typed)
+    .bind(price)
+    .bind(initial_score)
+    .fetch_one(store.pool())
+    .await?;
+    u32::try_from(id).map_err(|_| AccountError::NoSuchPlayer(0))
+}
+
+/// Land one bet (`CGuildWarReserve::Bet`, `db/GuildManager.cpp:1260-1321`): the bet row
+/// and the reservation's raised total, in one transaction. The row fails when the war
+/// is unknown, already started, or the login bet it already — legacy logs each and
+/// takes nothing.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for an id above `i32::MAX`, and
+/// [`AccountError::Database`] otherwise.
+pub async fn place_bet(
+    store: &Store,
+    war_id: u32,
+    login: &str,
+    gold: i32,
+    guild: u32,
+) -> Result<bool, AccountError> {
+    let war = i32::try_from(war_id).map_err(|_| AccountError::NoSuchPlayer(war_id))?;
+    let backed = i32::try_from(guild).map_err(|_| AccountError::NoSuchPlayer(guild))?;
+    let mut tx = store.pool().begin().await?;
+    let row: Option<(i32, i32, bool)> =
+        sqlx::query_as("SELECT guild1, guild2, started FROM guild_war_reservation WHERE id = $1")
+            .bind(war)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((guild1, guild2, started)) = row else {
+        return Ok(false);
+    };
+    if started || (backed != guild1 && backed != guild2) {
+        return Ok(false);
+    }
+    let done = sqlx::query(
+        "INSERT INTO guild_war_bet (war_id, login, gold, guild) VALUES ($1, $2, $3, $4) ON          CONFLICT DO NOTHING",
+    )
+    .bind(war)
+    .bind(login)
+    .bind(gold)
+    .bind(backed)
+    .execute(&mut *tx)
+    .await?;
+    if done.rows_affected() == 0 {
+        return Ok(false);
+    }
+    // `m_data.dwBetFrom += dwGold` else `dwBetTo` (`db/GuildManager.cpp:1301-1305`),
+    // then the row's update (`:1304-1309`).
+    if backed == guild1 {
+        sqlx::query("UPDATE guild_war_reservation SET bet_from = bet_from + $2 WHERE id = $1")
+            .bind(war)
+            .bind(gold)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query("UPDATE guild_war_reservation SET bet_to = bet_to + $2 WHERE id = $1")
+            .bind(war)
+            .bind(gold)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}

@@ -272,7 +272,7 @@ impl GameState {
                 vid,
                 ItemPos::new(EWindows::Inventory as u8, cell),
                 actor,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             ),
             None => self.nothing_used(vid, actor),
         }

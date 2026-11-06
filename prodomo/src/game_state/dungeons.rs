@@ -552,7 +552,7 @@ impl super::GameState {
             place,
             (mover, 0, 0),
             super::quests::Giving::Nothing,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
             |manager, game| manager.server_timer(&name, arg, game),
         ) {
             if !take_sides.is_empty() {

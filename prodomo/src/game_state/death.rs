@@ -2263,7 +2263,7 @@ mod tests {
                 ALPHA,
                 cell,
                 mover(),
-                crate::game_loop_messages::QuestAccount::default()
+                &crate::game_loop_messages::QuestAccount::default()
             ),
             refused(MoveRefused::UsedWhileDown)
         );
@@ -2286,7 +2286,7 @@ mod tests {
                 ALPHA,
                 cell,
                 mover(),
-                crate::game_loop_messages::QuestAccount::default()
+                &crate::game_loop_messages::QuestAccount::default()
             ),
             refused(MoveRefused::UsedWhileDown)
         );

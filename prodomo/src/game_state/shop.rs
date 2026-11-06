@@ -310,7 +310,7 @@ impl GameState {
         step: ShopStep,
         place: GroundPlace,
         mover: Mover,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
     ) -> Result<ShopAnswer, MoveItemRefused> {
         if self.characters.find_by_vid(vid).is_err() {
             return Err(MoveItemRefused::NoSuchCharacter { vid });
@@ -345,7 +345,7 @@ impl GameState {
         target: u32,
         place: GroundPlace,
         mover: Mover,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
     ) -> ShopAnswer {
         if self.is_dead(vid.raw()) {
             return ShopAnswer::silent(ShopDeclined::Dead);
@@ -809,7 +809,7 @@ mod tests {
                 step,
                 place,
                 of(1),
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .unwrap()
     }
@@ -989,7 +989,7 @@ mod tests {
                     click,
                     at(0),
                     of(empire),
-                    crate::game_loop_messages::QuestAccount::default(),
+                    &crate::game_loop_messages::QuestAccount::default(),
                 )
                 .unwrap();
             let shown = window(opened);
@@ -1003,7 +1003,7 @@ mod tests {
                         paid,
                         at(0),
                         of(empire),
-                        crate::game_loop_messages::QuestAccount::default(),
+                        &crate::game_loop_messages::QuestAccount::default(),
                     )
                     .unwrap(),
             );
@@ -1023,7 +1023,7 @@ mod tests {
                     click,
                     at(0),
                     of(2),
-                    crate::game_loop_messages::QuestAccount::default(),
+                    &crate::game_loop_messages::QuestAccount::default(),
                 )
                 .unwrap(),
         );
@@ -1035,7 +1035,7 @@ mod tests {
                     paid,
                     at(0),
                     of(2),
-                    crate::game_loop_messages::QuestAccount::default()
+                    &crate::game_loop_messages::QuestAccount::default()
                 )
                 .unwrap(),
             answered(ShopRefused::NotEnoughMoney, 5)
@@ -1507,7 +1507,7 @@ mod tests {
                     request,
                     at(0),
                     of(1),
-                    crate::game_loop_messages::QuestAccount::default(),
+                    &crate::game_loop_messages::QuestAccount::default(),
                 ),
                 Err(MoveItemRefused::NoSuchCharacter { vid: nobody })
             );

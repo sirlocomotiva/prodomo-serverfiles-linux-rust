@@ -422,7 +422,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     let before = game.real_alignment();
                     game.change_alignment(12_000);
@@ -488,7 +488,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     let held = game.has_skill_book_no_delay();
                     game.remove_skill_book_no_delay();
@@ -525,7 +525,7 @@ mod tests {
                 vid,
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the use runs");
         assert_eq!(used.kind, world::character::MoveKind::QuestUsed);
@@ -538,7 +538,7 @@ mod tests {
                 &QuestStep::Answer(0),
                 place,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the answer runs");
         assert!(!warning.0.is_empty());
@@ -552,7 +552,7 @@ mod tests {
                 &QuestStep::Answer(0),
                 place,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the choice runs");
         assert!(
@@ -576,7 +576,7 @@ mod tests {
                 &QuestStep::Answer(0),
                 place,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the read runs");
         assert!(!world.quest_running(vid), "the script ends");

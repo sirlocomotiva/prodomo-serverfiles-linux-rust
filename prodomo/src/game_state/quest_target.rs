@@ -314,14 +314,14 @@ impl GameState {
         if distance <= ARRIVE_DISTANCE {
             (taken, _) = self.run_quest_event(
                 vid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |manager, game| manager.target(pid, mark, b"arrive", game),
             );
         }
         if found == Marked::Gone {
             let (_ran, _) = self.run_quest_event(
                 vid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |manager, game| manager.target(pid, mark, b"die", game),
             );
             for record in self.quest_targets.delete(pid, mark.0, Some(mark.1)) {
@@ -376,7 +376,7 @@ impl GameState {
     pub(super) fn run_quest_event<R: Default>(
         &mut self,
         vid: Vid,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> (R, Option<u8>) {
         let Ok(character) = self.characters.find_by_vid(vid) else {

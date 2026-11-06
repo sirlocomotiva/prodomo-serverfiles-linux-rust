@@ -135,7 +135,7 @@ impl GameState {
                 vid,
                 at,
                 actor,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             );
         }
         if self.is_down(vid.raw()) {

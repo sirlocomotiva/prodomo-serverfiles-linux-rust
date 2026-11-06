@@ -17704,6 +17704,365 @@ fn a_war_with_a_map_asks_its_member_and_the_member_joins_the_war_map() {
     yankee.quiet("the other master does not join");
 }
 
+/// The guild observers' point on map 1: `npc.txt:53`'s observer of the first empire at
+/// (657, 619), 100 past map 1's base.
+const OBSERVER1_POINT: (i32, i32) = (475_300, 957_900);
+
+/// The battle map's watchers' start position (`GetStartPosition(idx, 2)`,
+/// `G/war_map.cpp:1019-1040`): the third of map 110's starts.
+const WAR_MAP_START_WATCH: (i32, i32) = (46_100, 11_700);
+
+/// The skill teacher's point on map 1: `npc.txt`'s 20300 at (622, 556), 100 past map 1's
+/// base. Bound in `questnpc.txt` but named by no owner quest, so a probe's `click` runs
+/// alone on it.
+const TEACHER1_POINT: (i32, i32) = (471_800, 951_600);
+
+/// The `say_title` colors (`color256`, `questlib.lua:39`): 255/230/186 around the
+/// title, 196/196/196 after it, in Lua 5.1's `%.14g`, with the `[ENTER]` `say` ends
+/// every line with.
+fn bet_title(name: &[u8]) -> Vec<u8> {
+    [
+        b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]".as_slice(),
+        name,
+        b"[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]".as_slice(),
+    ]
+    .concat()
+}
+
+/// As [`a_war_pair_ready_on`], with Alpha standing at `point`, 100000 gold in hand, and
+/// a battle reservation of the war pair kept before the boot: the boot loads it
+/// unstarted with no bets. `files` overlays the quest files (the bet probe's); `None`
+/// boots the owner's data as-is (an empty overlay would link no Game data at all).
+#[allow(clippy::type_complexity)]
+fn a_betting_pair_ready_on(
+    point: (i32, i32),
+    files: Option<&[(&str, &[u8])]>,
+) -> Option<(
+    ScratchDatabase,
+    Server,
+    Keyed,
+    Listed,
+    Keyed,
+    Listed,
+    Entered,
+)> {
+    let database = ScratchDatabase::create()?;
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1,          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        &format!(
+            "UPDATE player SET x = {}, y = {}, gold = 100000 WHERE name = 'Alpha'",
+            point.0, point.1
+        ),
+    );
+    seed_war_pair(&database);
+    // The reservation the battle accept would insert: the sorted pair, the start 180
+    // seconds out, the battle type, and zeroed powers and handicap (the empty polys).
+    sql(
+        &database,
+        "INSERT INTO guild_war_reservation (guild1, guild2, starts_at, war_type) VALUES (1, 2,          180, 1)",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD'          FROM account WHERE login = 'alice'",
+    );
+    let server = match files {
+        Some(files) => {
+            Server::start_with_files_channels(binary(), database.url(), files, &war_channels(), "")
+                .0
+        }
+        None => Server::start_configured(binary(), database.url(), &war_channels(), ""),
+    };
+    let (mut alice, alpha_listed, alice_entered) =
+        enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    let (yankee, yankee_listed, _yankee_entered) =
+        enter_world_seeing_guilded_with_team(&server, b"bob", 0, 1, Some(b"Alpha"));
+    alice.still("yankee enters out of view");
+    Some((
+        database,
+        server,
+        alice,
+        alpha_listed,
+        yankee,
+        yankee_listed,
+        alice_entered,
+    ))
+}
+
+/// The VID of the shown insert of race `vnum`: the one NPC of it in view.
+fn shown_vid(entered: &Entered, vnum: u16, note: &str) -> u32 {
+    let found: Vec<u32> = entered
+        .shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == vnum.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(found.len(), 1, "{note}");
+    found[0]
+}
+
+/// `sys.guild.war`, `quest.guild.get_reserve_war_table`, `cg.game.on_click`, `gc.script`:
+/// the boot kept the war pair's battle reservation, and Alice clicks the first empire's
+/// guild observer (`guild_war_observer.lua` and `guild_war_bet.lua` on vnum 11001). The
+/// chat menu names the bet entry first (the lower quest index), then the watch list,
+/// then `Inchide`. The bet entry explains, then lists the one war — Wolves first (the
+/// tie goes to `To`), the `_35_table` legs unformatted, then `Anuleaza`.
+///
+/// Picking the war ends the dialog after the title: the quest formats `_80_say`'s three
+/// verbs with one argument, and `string.format` errors (`luaL_argerror`, 5.1's
+/// `lstrlib.c:772-773`; 5.0.3 errors the same way), which the server logs. Legacy runs
+/// the same source, so it errors at the same pick: a quest-source Defect, not a
+/// Divergence. No bet row is stored — the script died before `guild.war_bet`.
+#[test]
+fn a_bet_quest_lists_the_reserved_war_and_errors_where_legacy_errors() {
+    let Some((database, mut server, mut alice, _alpha, _yankee, _yankee_listed, entered)) =
+        a_betting_pair_ready_on((475_300, 957_000), None)
+    else {
+        return;
+    };
+    assert_eq!(OBSERVER1_POINT, (475_300, 957_900));
+    let observer = shown_vid(
+        &entered,
+        11_001,
+        "map 1 shows one observer of the first empire",
+    );
+    alice.send_record(&client_click(observer));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Pariul pentru razboiul breslelor|2;Lista razboaielor dintre bresle|3;Inchide]"
+        ),
+        "the observer's menu"
+    );
+    // The bet entry: the explainer ends in `[NEXT]`.
+    alice.send_record(&client_script_answer(0));
+    let first = [
+        bet_title(b"Pariul breslelor").as_slice(),
+        b"Cumpara bilete de pariuri pentru regatul tau.[ENTER][ENTER]1. La fiercare razboi al Gildelor exista o[ENTER]stacheta, anuntata in prealabil, pentru Gilde[ENTER]care va castiga.[ENTER]2. Poti cumpara un bilet pentru pariuri pe care[ENTER]ghicesti daca Gide, despre care tu crezi ca va[ENTER]castiga, va reusi sa depaseasca aceasta stacheta.[ENTER]3. Alegerea va fi determinata de proportia[ENTER]pariurilor, iar dupa razboi vei fi anuntat daca[ENTER]pierzi sau castigi.[ENTER][ENTER]* 10% din castigul pariurilor va fi platit[ENTER]regatului."
+            .as_slice(),
+        b"[ENTER][NEXT]".as_slice(),
+    ]
+    .concat();
+    assert_eq!(alice.read_game(), server_script(1, &first));
+    // The one war, then `Anuleaza`.
+    alice.send_record(&client_script_answer(254));
+    let wars = [
+        bet_title(b"Administratorul luptelor:").as_slice(),
+        b"Pentru care razboi de bresle vrei sa cumperi un[ENTER]cupon de pariu?[ENTER][QUESTION 1;Wolves%s impotriva %sMyGuild|2;Anuleaza]"
+            .as_slice(),
+    ]
+    .concat();
+    assert_eq!(alice.read_game(), server_script(1, &wars));
+    // The war pick: the format error ends the dialog after the title.
+    alice.send_record(&client_script_answer(0));
+    let ended = [
+        bet_title(b"Administratorul luptelor:").as_slice(),
+        b"[DONE]".as_slice(),
+    ]
+    .concat();
+    assert_eq!(alice.read_game(), server_script(1, &ended));
+    alice.quiet("the error is the click's end");
+    server.wait_for("LUA_ERROR");
+    assert!(
+        server.logged("bad argument #3 to 'format' (no value)"),
+        "the format names its missing argument:{}",
+        server.console()
+    );
+    check(&database, "NOT EXISTS (SELECT 1 FROM guild_war_bet)");
+}
+
+/// Ledger 408's bet probe: the skill teacher (vnum 20300, bound but questless) answers
+/// a click with the bet state of the reservation: `open` and the bet when `is_bet` is
+/// false, `already` when it is true.
+const BET_PROBE: &[u8] = b"quest bet_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    if guild.is_bet(1) then say('already') else say('open') guild.war_bet(1, 1, 30000) end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `quest.guild.is_bet`, `quest.guild.war_bet`: the probe bets the reservation through
+/// the quest bridges. The first click says `open` and the bet lands — the row with the
+/// login, the stake and the backed guild, and the pair's raised total. The second click
+/// says `already` and stores nothing: one login bets once.
+#[test]
+fn a_bet_probe_bets_once_and_is_bet_turns_true() {
+    let Some((database, _server, mut alice, _alpha, _yankee, _yankee_listed, entered)) =
+        a_betting_pair_ready_on(
+            (475_800, 953_100),
+            Some(&[("locale/europe/quest/zz_probe/bet_probe.lua", BET_PROBE)]),
+        )
+    else {
+        return;
+    };
+    assert_eq!(TEACHER1_POINT, (471_800, 951_600));
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"open[ENTER][DONE]"),
+        "the first click bets"
+    );
+    alice.quiet("the bet is the click's end");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM guild_war_bet WHERE war_id = 1 AND login = 'alice' AND gold =          30000 AND guild = 1)",
+    );
+    check(
+        &database,
+        "(SELECT bet_from FROM guild_war_reservation WHERE id = 1) = 30000",
+    );
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"already[ENTER][DONE]"),
+        "the second click is refused"
+    );
+    alice.quiet("the refusal is the click's end");
+    check(&database, "(SELECT count(*) FROM guild_war_bet) = 1");
+}
+
+/// Declare and accept the battle war when the pair entered out of view: each side's
+/// declare leads with the opp NAME it never heard, then the accept's fans run.
+fn declare_and_accept_out_of_view(alice: &mut Keyed, yankee: &mut Keyed) {
+    // Yankee entered out of view, so the declare fans the opp NAME Alice never heard
+    // (the join fixture's `sees_enter` already named it there); the accept's fans then
+    // run as `declare_and_accept_a_battle_war` reads them.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves 1"));
+    let named = alice.read_game();
+    assert_eq!(
+        guild_subheader(&named),
+        GUILD_SUBHEADER_GC_GUILD_NAME,
+        "the opp NAME leads: {named:02x?}"
+    );
+    assert_eq!(named[4..8], 2_u32.to_le_bytes(), "the opp is guild 2");
+    assert_eq!(&named[8..14], b"Wolves", "the opp NAME");
+    assert_eq!(alice.read_game()[13], 1, "bWarState is SEND_DECLARE");
+    let named = yankee.read_game();
+    assert_eq!(
+        guild_subheader(&named),
+        GUILD_SUBHEADER_GC_GUILD_NAME,
+        "Yankee's opp NAME leads: {named:02x?}"
+    );
+    assert_eq!(&named[8..15], b"MyGuild", "Yankee's opp NAME");
+    assert_eq!(yankee.read_game()[13], 3, "bWarState is RECV_DECLARE");
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Alice hears the declare"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Yankee hears the declare"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/war MyGuild 1"));
+    for (side, client) in [("Alice", &mut *alice), ("Yankee", &mut *yankee)] {
+        assert_eq!(
+            client.read_game(),
+            an_info_line(b"[LS;558]"),
+            "{side} hears the start"
+        );
+        let war = client.read_game();
+        assert_eq!(
+            guild_subheader(&war),
+            GUILD_SUBHEADER_GC_WAR,
+            "{side}'s fan: {war:02x?}"
+        );
+        assert_eq!(war[12], 1, "{side}'s bType is the war's type");
+        assert_eq!(war[13], 6, "{side}'s bWarState is ON_WAR");
+        let letter = client.read_game();
+        assert_eq!(letter[0], GC_SCRIPT, "{side}'s letter: {letter:02x?}");
+        let list = client.read_game();
+        assert_eq!(
+            guild_subheader(&list),
+            GUILD_SUBHEADER_GC_GUILD_WAR_LIST,
+            "{side}'s list: {list:02x?}"
+        );
+    }
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Alice hears the declaration"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Yankee hears the declaration"
+    );
+}
+
+/// `sys.guild.war`, `quest.guild.get_warp_war_list`,
+/// `quest.pc.warp_to_guild_war_observer_position`, `gc.warp`: the war pair declares and
+/// accepts a battle war, and Alice clicks the first empire's guild observer. The watch
+/// entry lists the one war (`MyGuild vs Wolves`, then `Confirma!`); Alice picks it and
+/// lands on the battle map's watchers' start (`GetStartPosition(idx, 2)`), leaving her
+/// map like a join does. The other master sees her leave and nothing more.
+#[test]
+fn an_observer_warps_to_the_wars_watchers_start() {
+    let Some((_database, server, mut alice, alpha_listed, mut yankee, _yankee_listed, entered)) =
+        a_betting_pair_ready_on((475_300, 957_000), None)
+    else {
+        return;
+    };
+    declare_and_accept_out_of_view(&mut alice, &mut yankee);
+    let observer = shown_vid(
+        &entered,
+        11_001,
+        "map 1 shows one observer of the first empire",
+    );
+    alice.send_record(&client_click(observer));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Pariul pentru razboiul breslelor|2;Lista razboaielor dintre bresle|3;Inchide]"
+        ),
+        "the observer's menu"
+    );
+    // The watch entry: the one war and `Confirma!`.
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Acum au loc urmatoarele razboaie: Daca doresti sa[ENTER]participi ca spectator alege una dintre breslele[ENTER]participante.[ENTER][QUESTION 1;MyGuild vs Wolves|2;Confirma!]"
+        ),
+        "the watch list"
+    );
+    // Alice picks the war: the quest ends, then she leaves her map for the watchers'
+    // start.
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the quest ends"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "the observer leaves its map");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record(WAR_MAP_START_WATCH, port),
+        "the watchers' start"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    // Yankee stands out of Alice's view, so he sees nothing of the leave.
+    yankee.still("the other master sees nothing out of view");
+}
+
 /// The flag war map's start positions (`CWarMapManager::LoadWarMapInfo`,
 /// `G/war_map.cpp:1003-1008`): map 111's two teams, the lower guild id's first.
 const FLAG_MAP_START: (i32, i32) = (64_400, 6_900);

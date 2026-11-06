@@ -332,6 +332,11 @@ pub(super) struct Guilds {
     /// `m_GuildWar` (`G/guild_manager.h`): the live wars as sorted `(lo, hi)` pairs, in
     /// pair order (`std::set`). Memory-only, as the declares are.
     pub(super) wars: BTreeSet<(u32, u32)>,
+    /// `m_map_kReserveWar` + `m_vec_kReserveWar` (`G/guild_manager.h:92-93`): the war
+    /// reservations by id, in id order (the vector's insertion order, which the boot
+    /// and the accepts grow in id order too). Each holds the boot's bets as well
+    /// (`CGuildWarReserveForGame::mapBet`).
+    reserves: BTreeMap<u32, WarReserve>,
     /// The DB-side end-time map (`m_mapGuildWarEndTime`, `db/GuildManager.h`): the sorted
     /// pair each ended war stamped, in epoch seconds. `IsHalfWinLadderPoint` reads it
     /// (`db/GuildManager.cpp:389-401`); the game side's same-named map is write-only and
@@ -340,6 +345,27 @@ pub(super) struct Guilds {
     /// The war ends the tick judged but no descriptor stored yet: the tick has no
     /// session, so it queues the outcomes here and a poll command drains them.
     pub(in crate::game_state) pending_war_ends: Vec<WarEndOutcome>,
+}
+
+/// `CGuildWarReserveForGame` (`G/guild_manager.h:9-14`): one war reservation — the
+/// `TGuildWarReserve` facts the bet chat reads (`G/questlua_guild.cpp:228-278`) plus
+/// the bets by login (`mapBet`).
+#[derive(Debug, Clone, Default)]
+struct WarReserve {
+    /// `dwID`.
+    id: u32,
+    /// `dwGuildFrom`, `dwGuildTo`.
+    pair: (u32, u32),
+    /// `bType`.
+    war_type: u8,
+    /// `lPowerFrom`, `lPowerTo`.
+    powers: (i32, i32),
+    /// `lHandicap`.
+    handicap: i32,
+    /// `bStarted`: the countdown's end flips it, and a started war takes no bet.
+    started: bool,
+    /// `mapBet`: each betting login's backed guild and stake.
+    bets: BTreeMap<Vec<u8>, (u32, i32)>,
 }
 
 /// What one `CG_ANSWER_MAKE_GUILD` step judged.
@@ -710,6 +736,18 @@ impl GuildQuestJudged {
 /// the step, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuildQuestStore {
+    /// A war bet: `CGuildWarReserve::Bet`'s row and raised total
+    /// (`db/GuildManager.cpp:1260-1321`). The world already landed it.
+    Bet {
+        /// The reservation id.
+        war_id: u32,
+        /// The bettor's login.
+        login: String,
+        /// The stake.
+        gold: i32,
+        /// The backed guild, one of the pair.
+        guild: u32,
+    },
     /// A master change: the guild row's new master, the new master's grade 1, the old
     /// master's grade 15 (`db/GuildManager.cpp:1175-1192`).
     Master {
@@ -1175,6 +1213,43 @@ impl GameState {
             );
         }
         self.install_marks(marks, symbols);
+    }
+
+    /// Load the boot's war reservations with their bets, as `CGuildManager::BootReserveWar`
+    /// loads them (`db/GuildManager.cpp:887-950`) through `CGuildWarReserve::Initialize`
+    /// (`:1207-1230`): rows whose pair names two stored guilds. Every loaded row counts
+    /// as unstarted (`t.bStarted = 0`, `:928`); bets of unknown wars are dropped, as the
+    /// initialize only runs for a loaded row.
+    pub fn install_reservations(
+        &mut self,
+        reservations: &[db::guilds::StoredReservation],
+        bets: &[db::guilds::StoredBet],
+    ) {
+        for kept in reservations {
+            if !self.guilds.by_id.contains_key(&kept.pair.0)
+                || !self.guilds.by_id.contains_key(&kept.pair.1)
+            {
+                continue;
+            }
+            self.guilds.reserves.insert(
+                kept.id,
+                WarReserve {
+                    id: kept.id,
+                    pair: kept.pair,
+                    war_type: kept.war_type,
+                    powers: kept.powers,
+                    handicap: kept.handicap,
+                    started: false,
+                    bets: BTreeMap::new(),
+                },
+            );
+        }
+        for bet in bets {
+            if let Some(kept) = self.guilds.reserves.get_mut(&bet.war_id) {
+                kept.bets
+                    .insert(bet.login.as_bytes().to_vec(), (bet.guild, bet.gold));
+            }
+        }
     }
 
     /// Seed the mark images and the symbols from the stored rows (`LoadMarkIndex` +
@@ -5817,6 +5892,7 @@ impl GameState {
         name: &[u8],
         args: &[quest::manager::GuildArg],
         now: u32,
+        login: &str,
     ) -> GuildQuestJudged {
         use quest::manager::{GuildAnswer, GuildArg};
         let number = |value: u32| GuildAnswer::Number(f64::from(value));
@@ -5910,10 +5986,108 @@ impl GameState {
                 let enemy = own.and_then(|id| self.guild_any_war(id)).unwrap_or(0);
                 quiet(number(enemy))
             }
+            b"get_reserve_war_table" | b"is_bet" | b"get_warp_war_list" | b"war_bet" => {
+                self.quest_war_bet_call(name, caller, first, second, third, login)
+            }
             b"war_enter" => self.quest_war_enter(vid, caller, own, first),
             b"destroy_guild" => self.quest_destroy_guild(vid, caller, own, now),
             b"remove_from_guild" => self.quest_remove_from_guild(vid, caller, own),
             _ => quiet(GuildAnswer::None),
+        }
+    }
+
+    /// The bet table's four calls after the step: the reserve table, the bet check,
+    /// the warp list, and the bet itself. Split out so [`Self::answer_guild_quest`]
+    /// stays under the line lint.
+    fn quest_war_bet_call(
+        &mut self,
+        name: &[u8],
+        caller: Option<u32>,
+        first: Option<&quest::manager::GuildArg>,
+        second: Option<&quest::manager::GuildArg>,
+        third: Option<&quest::manager::GuildArg>,
+        login: &str,
+    ) -> GuildQuestJudged {
+        use quest::manager::{GuildAnswer, GuildArg};
+        let quiet = GuildQuestJudged::silent;
+        match name {
+            b"get_reserve_war_table" => {
+                quiet(GuildAnswer::Table(self.guilds.shadow_reserve_table()))
+            }
+            b"get_warp_war_list" => quiet(GuildAnswer::Table(self.guilds.shadow_warp_war_list())),
+            b"is_bet" => {
+                let Some(GuildArg::Number(id)) = first else {
+                    return quiet(GuildAnswer::Boolean(true));
+                };
+                let bet = Self::guild_is_bet_login(&self.guilds, login, *id);
+                quiet(GuildAnswer::Boolean(bet))
+            }
+            _ => self.quest_war_bet(caller, first, second, third, login),
+        }
+    }
+
+    /// `CGuildManager::IsBet` (`G/guild_manager.cpp:912-920`): true for an unknown war,
+    /// else whether the reader's login bet it. The live guilds are the shadow's rows,
+    /// so the shadow answers.
+    fn guild_is_bet_login(guilds: &Guilds, login: &str, id: u32) -> bool {
+        guilds.shadow_is_bet_login(id, login)
+    }
+
+    /// `guild_war_bet` (`G/questlua_guild.cpp:181-203`) with the DB round trip collapsed:
+    /// the bet lands when all three arguments are numbers, the war is reserved, the
+    /// login has not bet it, and the backed guild is one of the pair
+    /// (`CGuildWarReserve::Bet`, `db/GuildManager.cpp:1260-1321`). The gold is the
+    /// script's own: the bet chat spends it with `pc.changegold` before the call.
+    fn quest_war_bet(
+        &mut self,
+        caller: Option<u32>,
+        first: Option<&quest::manager::GuildArg>,
+        second: Option<&quest::manager::GuildArg>,
+        third: Option<&quest::manager::GuildArg>,
+        login: &str,
+    ) -> GuildQuestJudged {
+        use quest::manager::{GuildAnswer, GuildArg};
+        let quiet = GuildQuestJudged::silent(GuildAnswer::None);
+        if caller.is_none() {
+            return quiet;
+        }
+        // `lua_isnumber(L, 1) && lua_isnumber(L, 2) && lua_isnumber(L, 3)`: a non-number
+        // logs and bets nothing. The bridge dworded numbers and nulled text, so a
+        // `Text` here is a non-number there.
+        let (
+            Some(GuildArg::Number(id)),
+            Some(GuildArg::Number(backed)),
+            Some(GuildArg::Number(gold)),
+        ) = (first, second, third)
+        else {
+            return quiet;
+        };
+        let Some(kept) = self.guilds.reserves.get_mut(id) else {
+            return quiet;
+        };
+        if kept.started {
+            return quiet;
+        }
+        let (from, to) = kept.pair;
+        if *backed != from && *backed != to {
+            return quiet;
+        }
+        if kept.bets.contains_key(login.as_bytes()) {
+            return quiet;
+        }
+        kept.bets.insert(
+            login.as_bytes().to_vec(),
+            (*backed, i32::try_from(*gold).unwrap_or(i32::MAX)),
+        );
+        GuildQuestJudged {
+            answer: GuildAnswer::None,
+            own: Vec::new(),
+            stores: vec![GuildQuestStore::Bet {
+                war_id: *id,
+                login: login.to_owned(),
+                gold: i32::try_from(*gold).unwrap_or(i32::MAX),
+                guild: *backed,
+            }],
         }
     }
 
@@ -5986,6 +6160,36 @@ impl GameState {
         };
         self.order_war_warp(vid, x, y, map_index, Some(channel));
         quiet
+    }
+
+    /// `pc_warp_to_guild_war_observer_position` (`G/questlua_pc.cpp:406-443`) after the
+    /// step: the shadow already answered the position in the call, so the world judges
+    /// the same pair again — the flag cleared (`SetQuestFlag("war.is_war_member", 0)`),
+    /// the exit remembered (`SaveExitLocation`), and the warp to the map's observer
+    /// position (`GetStartPosition(idx, 2)`). Quiet when the pair holds no war or the
+    /// war holds no map, as the call's errors already fired.
+    pub(super) fn answer_observe(&mut self, vid: Vid, first: u32, second: u32) {
+        let Some(character) = self.characters.find_by_vid(vid).ok() else {
+            return;
+        };
+        let pid = character.player_id();
+        let Some((x, y, map_index)) = self.guilds.shadow_observe(first, second) else {
+            return;
+        };
+        if let Some(quests) = self.quests.as_mut() {
+            quests
+                .manager_mut()
+                .set_quest_flag(pid, b"war.is_war_member", 0);
+        }
+        let Some(channel) = self.war_map_channel(map_index) else {
+            warn!(
+                vid = vid.raw(),
+                map = map_index,
+                "a war observe found no Channel that holds the war's map"
+            );
+            return;
+        };
+        self.order_war_warp(vid, x, y, map_index, Some(channel));
     }
     /// `pc_destroy_guild` (`G/questlua_pc.cpp:352-370`, plus `RequestDisband`,
     /// `G/guild.cpp:1034-1046`, and `DisbandGuild`, `G/guild_manager.cpp:259-273`): the
@@ -7138,6 +7342,7 @@ impl Guilds {
         caller: Option<u32>,
         name: &[u8],
         args: &[quest::manager::GuildArg],
+        login: &str,
     ) -> quest::manager::GuildAnswer {
         use quest::manager::{GuildAnswer, GuildArg};
         let number = |value: u32| GuildAnswer::Number(f64::from(value));
@@ -7220,9 +7425,97 @@ impl Guilds {
                 number(GUILD_LEVELUP_EXP[usize::try_from(clamped).unwrap_or(0)])
             }
             b"get_any_war" => number(own.and_then(|id| self.any_war(id)).unwrap_or(0)),
+            b"get_reserve_war_table" => GuildAnswer::Table(self.shadow_reserve_table()),
+            b"is_bet" => {
+                // `guild_is_bet` (`G/questlua_guild.cpp:205-219`): a non-number logs and
+                // pushes true; an unknown war pushes true (`IsBet`, `:912-920`); else
+                // whether the caller's login bet the war.
+                let Some(GuildArg::Number(id)) = first else {
+                    return GuildAnswer::Boolean(true);
+                };
+                GuildAnswer::Boolean(Self::shadow_is_bet_login(self, *id, login))
+            }
+            b"get_warp_war_list" => GuildAnswer::Table(self.shadow_warp_war_list()),
             // Writers push nothing; their judges land after the step.
             _ => GuildAnswer::None,
         }
+    }
+
+    /// `guild_get_reserve_war_table` (`G/questlua_guild.cpp:228-278`) over the shadow:
+    /// each battle reservation in id order as `(id, stronger, weaker, handicap)` —
+    /// the stronger side is the higher power, ties going to `From`
+    /// (`lPowerFrom > lPowerTo`, `:257-268`).
+    fn shadow_reserve_table(&self) -> Vec<Vec<f64>> {
+        self.reserves
+            .values()
+            .filter(|kept| kept.war_type == GUILD_WAR_TYPE_BATTLE)
+            .map(|kept| {
+                let (from, to) = kept.pair;
+                let (stronger, weaker) = if kept.powers.0 > kept.powers.1 {
+                    (from, to)
+                } else {
+                    (to, from)
+                };
+                vec![
+                    f64::from(kept.id),
+                    f64::from(stronger),
+                    f64::from(weaker),
+                    f64::from(kept.handicap),
+                ]
+            })
+            .collect()
+    }
+
+    /// `FBuildLuaGuildWarList` (`G/questlua.h:138-145`, `G/questlua.cpp:152-171`) over
+    /// the shadow: each on-war pair that is not a field war, in pair order. The guild
+    /// lookup cannot fail here — every war names two stored guilds.
+    fn shadow_warp_war_list(&self) -> Vec<Vec<f64>> {
+        self.wars
+            .iter()
+            .filter(|(lo, hi)| {
+                self.by_id
+                    .get(lo)
+                    .and_then(|guild| guild.enemies.get(hi))
+                    .is_some_and(|enemy| {
+                        enemy.war_type != GUILD_WAR_TYPE_FIELD && enemy.state == GUILD_WAR_ON_WAR
+                    })
+            })
+            .map(|(lo, hi)| vec![f64::from(*lo), f64::from(*hi)])
+            .collect()
+    }
+
+    /// `CGuildManager::IsBet` (`G/guild_manager.cpp:912-920`) over the shadow: true for
+    /// an unknown war, else whether `login` bet it.
+    fn shadow_is_bet_login(&self, id: u32, login: &str) -> bool {
+        self.reserves
+            .get(&id)
+            .is_none_or(|kept| kept.bets.contains_key(login.as_bytes()))
+    }
+
+    /// `CGuildManager::FindGuild` (`G/guild_manager.cpp:224`) over the shadow: whether
+    /// a guild holds `id`.
+    pub(super) fn shadow_has(&self, id: u32) -> bool {
+        self.by_id.contains_key(&id)
+    }
+
+    /// The observer position of the war the first guild holds against the second
+    /// (`pc_warp_to_guild_war_observer_position`, `G/questlua_pc.cpp:406-443`): the
+    /// first guild's war-map index against the second, with the map's third start
+    /// position (`GetStartPosition(idx, 2)`, `G/war_map.cpp:1019-1040`). `None` when
+    /// either guild is unknown or the map has no such position — the bridge tells
+    /// the two apart through [`Guilds::shadow_has`].
+    pub(super) fn shadow_observe(&self, first: u32, second: u32) -> Option<(i32, i32, i32)> {
+        let index = self
+            .by_id
+            .get(&first)?
+            .enemies
+            .get(&second)
+            .map(|enemy| enemy.map_index)?;
+        if index == 0 || !self.by_id.contains_key(&second) {
+            return None;
+        }
+        let (x, y) = super::war_map::start_position(index, 2)?;
+        Some((x, y, index))
     }
 
     /// One unsigned counter of the caller's shadow guild, 0 when it holds none.
@@ -7672,7 +7965,7 @@ mod tests {
         // The war arm first: the line chats and the guild stays.
         world.declare_war(GUILD_ID, 4242, GUILD_WAR_TYPE_FIELD, GUILD_WAR_ON_WAR);
         heard(&mut master);
-        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"destroy_guild", &[], NOW);
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"destroy_guild", &[], NOW, "");
         assert_eq!(judged.answer, GuildAnswer::None);
         assert!(judged.stores.is_empty());
         let lines = heard(&mut master);
@@ -7690,13 +7983,13 @@ mod tests {
             .enemies
             .clear();
         // A non-master member and a guildless caller are quiet.
-        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"destroy_guild", &[], NOW);
+        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"destroy_guild", &[], NOW, "");
         assert_eq!(judged.answer, GuildAnswer::None);
         assert!(judged.stores.is_empty());
         assert!(heard(&mut guest).is_empty());
         // The master disbands: one REMOVE (one online member), the stores carry the
         // guild, the member and the stamp.
-        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"destroy_guild", &[], NOW);
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"destroy_guild", &[], NOW, "");
         assert_eq!(judged.answer, GuildAnswer::None);
         assert_eq!(
             judged.stores,
@@ -7734,11 +8027,13 @@ mod tests {
         heard(&mut master);
         heard(&mut guest);
         // The leader's and the guildless caller's quiet refusal.
-        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"remove_from_guild", &[], NOW);
+        let judged =
+            world.answer_guild_quest(Vid::new(MASTER_VID), b"remove_from_guild", &[], NOW, "");
         assert_eq!(judged.answer, GuildAnswer::None);
         assert!(judged.stores.is_empty());
         assert!(heard(&mut master).is_empty());
-        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"remove_from_guild", &[], NOW);
+        let judged =
+            world.answer_guild_quest(Vid::new(GUEST_VID), b"remove_from_guild", &[], NOW, "");
         assert_eq!(judged.answer, GuildAnswer::None);
         assert!(judged.stores.is_empty());
         // The guest joins as a follower, then leaves: the master hears the REMOVE and
@@ -7764,7 +8059,8 @@ mod tests {
             );
         heard(&mut master);
         heard(&mut guest);
-        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"remove_from_guild", &[], NOW);
+        let judged =
+            world.answer_guild_quest(Vid::new(GUEST_VID), b"remove_from_guild", &[], NOW, "");
         assert_eq!(judged.answer, GuildAnswer::None);
         assert_eq!(judged.stores, [GuildQuestStore::Leave { pid: GUEST_VID }]);
         let fanned = heard(&mut master);
@@ -8823,6 +9119,7 @@ mod tests {
                 b"change_master_with_limit",
                 &full,
                 NOW,
+                "",
             )
             .answer
     }
@@ -8896,6 +9193,7 @@ mod tests {
                     GuildArg::Number(0),
                 ],
                 NOW,
+                "",
             )
             .answer;
         assert_eq!(answer, GuildAnswer::Number(1.0));
@@ -8912,6 +9210,7 @@ mod tests {
                     GuildArg::Number(0),
                 ],
                 NOW,
+                "",
             )
             .answer;
         assert_eq!(answer, GuildAnswer::Number(0.0));
@@ -9154,6 +9453,226 @@ mod tests {
             &[],
         );
         world.link_guild(Vid::new(MASTER_VID));
+    }
+
+    /// A battle reservation of `id` between the war pair, kept with `powers` and
+    /// `handicap`: what a battle accept inserts, without the countdown.
+    fn install_battle_reserve(world: &mut GameState, id: u32, powers: (i32, i32), handicap: i32) {
+        world.install_reservations(
+            &[db::guilds::StoredReservation {
+                id,
+                pair: (GUILD_ID.min(SECOND_ID), GUILD_ID.max(SECOND_ID)),
+                starts_at: 1_800,
+                war_type: GUILD_WAR_TYPE_BATTLE,
+                price: 0,
+                initial_score: 0,
+                bets: (0, 0),
+                powers,
+                handicap,
+            }],
+            &[],
+        );
+    }
+
+    /// The reservations land as unstarted — a forgotten pair drops — and the reserve
+    /// table names the stronger side first (ties to `To`), from the world and the
+    /// shadow alike.
+    #[test]
+    fn the_reserve_table_names_the_stronger_side_first() {
+        use quest::manager::GuildAnswer;
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        // A reservation for a forgotten pair drops, as the initialize only runs for
+        // a loaded row.
+        world.install_reservations(
+            &[db::guilds::StoredReservation {
+                id: 8,
+                pair: (GUILD_ID, 999),
+                starts_at: 1_800,
+                war_type: GUILD_WAR_TYPE_BATTLE,
+                price: 0,
+                initial_score: 0,
+                bets: (0, 0),
+                powers: (0, 0),
+                handicap: 0,
+            }],
+            &[],
+        );
+        install_battle_reserve(&mut world, 3, (5, 9), 2);
+        install_battle_reserve(&mut world, 4, (9, 5), 0);
+        let (lo, hi) = (GUILD_ID.min(SECOND_ID), GUILD_ID.max(SECOND_ID));
+        let table = GuildAnswer::Table(vec![
+            vec![3.0, f64::from(hi), f64::from(lo), 2.0],
+            vec![4.0, f64::from(lo), f64::from(hi), 0.0],
+        ]);
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"get_reserve_war_table",
+            &[],
+            NOW,
+            "master",
+        );
+        assert_eq!(judged.answer, table, "the stronger side first, ties to To");
+        // The shadow answers the same, so the bet chat sees the table in the call.
+        assert_eq!(
+            world
+                .guilds
+                .judge_shadow(Some(MASTER_VID), b"get_reserve_war_table", &[], "master"),
+            table
+        );
+        // The forgotten pair dropped: no row names it.
+        assert!(
+            !format!("{table:?}").contains('8'),
+            "the forgotten pair dropped"
+        );
+    }
+
+    /// `is_bet`/`war_bet` run the `mapBet` rules: an unknown war pushes true and takes
+    /// nothing, the login's first bet lands with its store, and its second bet is
+    /// quiet — and a backed guild outside the pair or a non-number bets nothing.
+    #[test]
+    fn the_login_bets_once() {
+        use quest::manager::{GuildAnswer, GuildArg};
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        install_battle_reserve(&mut world, 3, (5, 9), 2);
+        let (lo, hi) = (GUILD_ID.min(SECOND_ID), GUILD_ID.max(SECOND_ID));
+        // An unknown war pushes true.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"is_bet",
+            &[GuildArg::Number(77)],
+            NOW,
+            "master",
+        );
+        assert_eq!(judged.answer, GuildAnswer::Boolean(true));
+        // A non-number pushes true.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"is_bet",
+            &[GuildArg::Text(b"x".to_vec())],
+            NOW,
+            "master",
+        );
+        assert_eq!(judged.answer, GuildAnswer::Boolean(true));
+        // Unbet: false, from the world and the shadow.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"is_bet",
+            &[GuildArg::Number(3)],
+            NOW,
+            "master",
+        );
+        assert_eq!(judged.answer, GuildAnswer::Boolean(false));
+        assert_eq!(
+            world.guilds.judge_shadow(
+                Some(MASTER_VID),
+                b"is_bet",
+                &[GuildArg::Number(3)],
+                "master"
+            ),
+            GuildAnswer::Boolean(false)
+        );
+        // The first bet lands with its store.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_bet",
+            &[
+                GuildArg::Number(3),
+                GuildArg::Number(hi),
+                GuildArg::Number(30_000),
+            ],
+            NOW,
+            "master",
+        );
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert_eq!(
+            judged.stores,
+            vec![GuildQuestStore::Bet {
+                war_id: 3,
+                login: "master".to_owned(),
+                gold: 30_000,
+                guild: hi,
+            }]
+        );
+        // Now bet: true, from the world and the shadow.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"is_bet",
+            &[GuildArg::Number(3)],
+            NOW,
+            "master",
+        );
+        assert_eq!(judged.answer, GuildAnswer::Boolean(true));
+        assert_eq!(
+            world.guilds.judge_shadow(
+                Some(MASTER_VID),
+                b"is_bet",
+                &[GuildArg::Number(3)],
+                "master"
+            ),
+            GuildAnswer::Boolean(true)
+        );
+        // Another login is still unbet.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"is_bet",
+            &[GuildArg::Number(3)],
+            NOW,
+            "guest",
+        );
+        assert_eq!(judged.answer, GuildAnswer::Boolean(false));
+        // The second bet of one login is quiet.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_bet",
+            &[
+                GuildArg::Number(3),
+                GuildArg::Number(lo),
+                GuildArg::Number(10_000),
+            ],
+            NOW,
+            "master",
+        );
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert!(judged.stores.is_empty(), "a second bet stores nothing");
+    }
+
+    /// A backed guild outside the pair and a non-number bet nothing: no store, no row.
+    #[test]
+    fn the_war_bet_refuses_an_outside_guild_and_a_non_number() {
+        use quest::manager::{GuildAnswer, GuildArg};
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        install_battle_reserve(&mut world, 3, (5, 9), 2);
+        // A backed guild outside the pair takes nothing.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_bet",
+            &[
+                GuildArg::Number(3),
+                GuildArg::Number(999),
+                GuildArg::Number(10_000),
+            ],
+            NOW,
+            "guest",
+        );
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert!(judged.stores.is_empty(), "an outside guild takes nothing");
+        // A non-number bets nothing.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_bet",
+            &[
+                GuildArg::Number(3),
+                GuildArg::Text(b"x".to_vec()),
+                GuildArg::Number(10_000),
+            ],
+            NOW,
+            "guest",
+        );
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert!(judged.stores.is_empty(), "a non-number bets nothing");
     }
 
     /// The chat text of the first CHAT record in `records`.
@@ -9676,6 +10195,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(SECOND_ID)],
             NOW,
+            "",
         );
         assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
         assert!(
@@ -9770,7 +10290,7 @@ mod tests {
                 &QuestStep::Button(quest),
                 place,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the world holds the master");
         assert!(
@@ -9785,7 +10305,7 @@ mod tests {
             &QuestStep::Answer(0),
             place,
             mover,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
         );
         let order = orders.try_recv().ok();
         assert!(
@@ -9805,6 +10325,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(SECOND_ID)],
             NOW,
+            "",
         );
         assert_eq!(
             judged.answer,
@@ -9854,6 +10375,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(SECOND_ID)],
             NOW,
+            "",
         );
         assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
         assert!(
@@ -9956,6 +10478,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(SECOND_ID)],
             NOW,
+            "",
         );
         assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
         assert!(matches!(
@@ -10024,6 +10547,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(SECOND_ID)],
             NOW,
+            "",
         );
         assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
         assert!(orders.try_recv().is_err(), "a field war warps no one");
@@ -10056,6 +10580,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(SECOND_ID)],
             NOW,
+            "",
         );
         assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
         assert!(
@@ -10077,7 +10602,7 @@ mod tests {
     #[test]
     fn get_any_war_answers_the_enemy_of_the_war_that_has_begun() {
         let (mut world, _orders, _lease, _master) = a_war_on(" 1");
-        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"get_any_war", &[], NOW);
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"get_any_war", &[], NOW, "");
         assert_eq!(
             judged.answer,
             quest::manager::GuildAnswer::Number(f64::from(SECOND_ID)),
@@ -10086,12 +10611,64 @@ mod tests {
         // The shadow answers the same, so the script sees the value before the step.
         let shadow = world
             .guilds
-            .judge_shadow(Some(MASTER_VID), b"get_any_war", &[]);
+            .judge_shadow(Some(MASTER_VID), b"get_any_war", &[], "");
         assert_eq!(
             shadow,
             quest::manager::GuildAnswer::Number(f64::from(SECOND_ID)),
             "the shadow answers the same"
         );
+    }
+
+    /// A battle reservation's boot bets land with it: the bet chat pushes true for
+    /// the login that bet, false for one that did not.
+    #[test]
+    fn the_boot_bets_land_with_the_reserve() {
+        use quest::manager::{GuildAnswer, GuildArg};
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        world.install_reservations(
+            &[db::guilds::StoredReservation {
+                id: 5,
+                pair: (GUILD_ID.min(SECOND_ID), GUILD_ID.max(SECOND_ID)),
+                starts_at: 1_800,
+                war_type: GUILD_WAR_TYPE_BATTLE,
+                price: 0,
+                initial_score: 0,
+                bets: (50_000, 0),
+                powers: (0, 0),
+                handicap: 0,
+            }],
+            &[db::guilds::StoredBet {
+                war_id: 5,
+                login: "bettor".to_owned(),
+                gold: 50_000,
+                guild: GUILD_ID.min(SECOND_ID),
+            }],
+        );
+        let mut bet = |login: &str| {
+            world.answer_guild_quest(
+                Vid::new(MASTER_VID),
+                b"is_bet",
+                &[GuildArg::Number(5)],
+                NOW,
+                login,
+            )
+        };
+        assert_eq!(bet("bettor").answer, GuildAnswer::Boolean(true));
+        assert_eq!(bet("stranger").answer, GuildAnswer::Boolean(false));
+        // The bettor's second bet is quiet: the boot row already named it.
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_bet",
+            &[
+                GuildArg::Number(5),
+                GuildArg::Number(GUILD_ID.min(SECOND_ID)),
+                GuildArg::Number(10_000),
+            ],
+            NOW,
+            "bettor",
+        );
+        assert!(judged.stores.is_empty(), "a boot bettor bets no more");
     }
 
     /// `/war`'s type word parses as `strtoul` does: garbage is field, a past-max
@@ -10715,6 +11292,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(SECOND_ID)],
             NOW,
+            "",
         );
         assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
         assert!(matches!(
@@ -10895,6 +11473,7 @@ mod tests {
             b"war_enter",
             &[quest::manager::GuildArg::Number(GUILD_ID)],
             NOW,
+            "",
         );
         assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
         world.join_war_map(Vid::new(200), 1_100_000);

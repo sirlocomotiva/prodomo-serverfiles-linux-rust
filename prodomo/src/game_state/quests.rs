@@ -385,6 +385,7 @@ struct WorldMoves {
     /// The reader's account PIDs the session judged with, for the empire change's
     /// guild arm after the step: legacy checks every character of the account.
     account_pids: Vec<u32>,
+    observes: Vec<(u32, u32)>,
 }
 
 impl WorldMoves {
@@ -420,6 +421,7 @@ impl WorldMoves {
             rank_points: std::mem::take(&mut session.rank.points),
             empire_moves: std::mem::take(&mut session.empire_moves),
             account_pids: session.account_pids.clone(),
+            observes: std::mem::take(&mut session.observes),
         }
     }
 }
@@ -559,6 +561,9 @@ pub(super) struct Session<'s> {
     /// The `guild.*` calls and the `pc.destroy_guild` / `pc.remove_from_guild` calls the
     /// scripts made, in order, each for [`GameState::answer_guild_quest`] after the step.
     pub(super) guild_ops: Vec<super::guild::GuildQuestOp>,
+    /// Every `pc.warp_to_guild_war_observer_position` pair, in order, each for
+    /// [`GameState::answer_observe`] after the step (legacy warps in the call).
+    pub(super) observes: Vec<(u32, u32)>,
     /// `test_server` (`G/config.cpp:72`): whether the deployment runs in test-server mode.
     pub(super) test_server: bool,
     /// Every online PC's shown name and VID, for `find_pc_by_name`: the characters are
@@ -669,6 +674,9 @@ pub(super) struct Session<'s> {
     /// The PIDs of the reader's account, read at the step's start, for the empire
     /// change's guild arm: legacy checks every character of the account.
     pub(super) account_pids: Vec<u32>,
+    /// The reader's account login, read at the step's start: what `guild.is_bet`
+    /// pushes off (`GetAccountTable().login`).
+    pub(super) login: String,
     /// How many times the reader's account changed its empire, read at the step's
     /// start: what `pc.get_change_empire_count` pushes.
     pub(super) empire_changes: u32,
@@ -1408,6 +1416,19 @@ impl Game for Session<'_> {
         }
         self.warps.push((x, y, private));
         true
+    }
+
+    fn war_observe(&mut self, first: u32, second: u32) -> Option<(i32, i32, i32)> {
+        if self.gates.hack() {
+            return None;
+        }
+        // The shadow answers now, so the script's `luaL_error` lines fire in the call;
+        // the world judges the same pair again after the step for its flag and warp.
+        let seen = self.guilds.shadow_observe(first, second);
+        if seen.is_some() {
+            self.observes.push((first, second));
+        }
+        seen
     }
 
     fn drop_with_ownership(&mut self, vnum: u32, count: i32, secs: Option<i32>) {
@@ -2325,6 +2346,10 @@ impl Game for Session<'_> {
         self.is_guild_master
     }
 
+    fn guild_known(&self, id: u32) -> bool {
+        self.guilds.shadow_has(id)
+    }
+
     fn test_server(&self) -> bool {
         self.test_server
     }
@@ -2400,7 +2425,7 @@ impl Game for Session<'_> {
             args: args.to_vec(),
         });
         let caller = self.caller;
-        self.guilds.judge_shadow(caller, name, args)
+        self.guilds.judge_shadow(caller, name, args, &self.login)
     }
 
     fn find_npc(&self, race: u32) -> u32 {
@@ -2513,7 +2538,7 @@ impl GameState {
         step: &QuestStep,
         place: GroundPlace,
         mover: Mover,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
     ) -> Result<QuestStepOutcome, MoveItemRefused> {
         let character = self
             .characters
@@ -2523,6 +2548,7 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
+        let login = account.login.clone();
         let answered = self.run_quests_giving(
             place,
             (mover, level, pid),
@@ -2570,7 +2596,7 @@ impl GameState {
         let now = quest_now();
         let mut stores = Vec::new();
         for op in &ops {
-            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now);
+            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now, &login);
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
@@ -2609,7 +2635,7 @@ impl GameState {
             mover,
             level,
             pid,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
             |manager, game| {
                 manager.letter(pid, quest, 0, game);
             },
@@ -2636,7 +2662,7 @@ impl GameState {
     pub(super) fn quest_login(
         &mut self,
         vid: Vid,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
     ) -> Option<u8> {
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return None;
@@ -2656,7 +2682,7 @@ impl GameState {
         (target, race): (u32, u16),
         place: GroundPlace,
         mover: Mover,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
     ) -> (bool, QuestStepOutcome) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return (false, QuestStepOutcome::default());
@@ -2665,6 +2691,7 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
+        let login = account.login.clone();
         let Some((
             taken,
             (mut records, climbs, ops, block_mode, _, gold_moves, _),
@@ -2693,7 +2720,7 @@ impl GameState {
         let now = quest_now();
         let mut stores = Vec::new();
         for op in &ops {
-            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now);
+            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now, &login);
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
@@ -2718,7 +2745,7 @@ impl GameState {
         vid: Vid,
         at: protocol::item_pos::ItemPos,
         mover: Mover,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
         step: &mut crate::item_move::MovedItems,
     ) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
@@ -2752,6 +2779,7 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
+        let login = account.login.clone();
         let Some(((), (records, climbs, ops, block_mode, _, _, _), items, _, take_sides, landed)) =
             self.run_quests_giving(
                 place,
@@ -2781,7 +2809,7 @@ impl GameState {
         let now = quest_now();
         let mut stores = Vec::new();
         for op in &ops {
-            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now);
+            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now, &login);
             step.records.extend(judged.own);
             stores.extend(judged.stores);
         }
@@ -2812,7 +2840,7 @@ impl GameState {
         let pid = character.player_id();
         self.run_quest_event(
             vid,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
             |manager, game| {
                 manager.logout(pid, game);
             },
@@ -2858,7 +2886,7 @@ impl GameState {
         };
         let (heard, _) = self.run_quest_event(
             waiter,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
             |manager, game| manager.confirm(request_pid, answer, Some(replier), game),
         );
         if heard {
@@ -2887,7 +2915,7 @@ impl GameState {
             };
             self.run_quest_event(
                 vid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |manager, game| {
                     manager.confirm(waiter, quest::manager::CONFIRM_TIMEOUT, None, game);
                 },
@@ -2923,7 +2951,7 @@ impl GameState {
             mover,
             level,
             pid,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
             |manager, game| {
                 manager.levelup(pid, game);
             },
@@ -2968,7 +2996,7 @@ impl GameState {
             mover,
             level,
             pid,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
             |manager, game| {
                 manager.set_quest_npc(victim);
                 manager.kill(pid, race, leader, game);
@@ -2994,7 +3022,7 @@ impl GameState {
         mover: Mover,
         level: u8,
         pid: u32,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<(R, QuestRun)> {
         let (answer, run, _, _, take_sides, _) =
@@ -3022,7 +3050,7 @@ impl GameState {
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<GivingOutcome<R>> {
         let (answer, mut run, rows, claimed, take_sides, landed) =
@@ -3049,7 +3077,7 @@ impl GameState {
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<GivingOutcome<R>> {
         let (answer, run, item_rows, queued, reader, takes, claimed) = {
@@ -3115,7 +3143,7 @@ impl GameState {
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
-        account: crate::game_loop_messages::QuestAccount,
+        account: &crate::game_loop_messages::QuestAccount,
     ) -> Option<ArmedSession<'_>> {
         let reader = self
             .characters
@@ -3168,7 +3196,7 @@ impl GameState {
             context.gates.set_hack(true);
             context.gates.set_able(false);
         }
-        (context.account_pids, context.empire_changes) = reader_account(&account);
+        (context.account_pids, context.empire_changes, context.login) = reader_account(account);
         let Quests {
             manager,
             protos,
@@ -3613,6 +3641,7 @@ impl GameState {
             rank_points,
             empire_moves,
             account_pids,
+            observes,
         } = queued;
         for item in laid {
             self.lay_given(reader, place, item);
@@ -3679,10 +3708,27 @@ impl GameState {
             self.add_rank_point(reader, kind, count);
         }
         let landed = self.apply_empire_moves(reader, pid, &account_pids, empire_moves, mover);
+        self.apply_quest_warps(reader, warps, observes, mover);
+        landed
+    }
+
+    /// A step's `pc.warp` calls and `pc.warp_to_guild_war_observer_position` pairs, in
+    /// call order within each kind: the observer warps queued after the script's own,
+    /// like the join's (legacy warps in the call, after the script's earlier records).
+    /// Split out so [`Self::apply_world_moves`] stays under the line lint.
+    fn apply_quest_warps(
+        &mut self,
+        reader: Vid,
+        warps: Vec<(i32, i32, i32)>,
+        observes: Vec<(u32, u32)>,
+        mover: Mover,
+    ) {
         for (x, y, private) in warps {
             self.order_quest_warp(reader, x, y, private, mover);
         }
-        landed
+        for (first, second) in observes {
+            self.answer_observe(reader, first, second);
+        }
     }
 
     /// A step's `pc.change_empire` calls, in call order: each the shadow passed runs
@@ -3891,7 +3937,7 @@ impl GameState {
             (1, test_place::OX_MANAGER),
             test_place::AT,
             test_place::MOVER,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
         );
         assert!(
             taken && self.quest_running(vid),
@@ -3907,7 +3953,7 @@ impl GameState {
             &answer,
             test_place::AT,
             test_place::MOVER,
-            crate::game_loop_messages::QuestAccount::default(),
+            &crate::game_loop_messages::QuestAccount::default(),
         );
         assert!(
             !self.quest_running(vid),
@@ -4008,6 +4054,9 @@ struct ReaderContext {
     /// How many times the reader's account changed its empire, read at the step's
     /// start: what `pc.get_change_empire_count` pushes.
     empire_changes: u32,
+    /// The reader's account login, read at the step's start: what `guild.is_bet`
+    /// pushes off.
+    login: String,
 }
 
 /// Every borrow [`GameState::arm_quest_session`] threads into its [`Session`], as
@@ -4138,6 +4187,7 @@ fn reader_context(
             .unwrap_or_default(),
         account_pids: Vec::new(),
         empire_changes: 0,
+        login: String::new(),
     }
 }
 
@@ -4458,6 +4508,7 @@ fn session_head<'s>(
         points,
         climbs: Vec::new(),
         guild_ops: Vec::new(),
+        observes: Vec::new(),
         block_mode: None,
         guilds: guilds.clone(),
         party_leader: context.party_leader,
@@ -4494,6 +4545,7 @@ fn session_head<'s>(
         rank: RankStep::default(),
         account_pids: context.account_pids,
         empire_changes: context.empire_changes,
+        login: context.login,
         empire_moves: Vec::new(),
     }
 }
@@ -4576,10 +4628,16 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
 /// The account half of a session's reader context: the character PIDs without the
 /// empty slots, with the stored empire-change count. Split out so `session_head`
 /// stays under the line lint.
-fn reader_account(account: &crate::game_loop_messages::QuestAccount) -> (Vec<u32>, u32) {
+fn reader_account(account: &crate::game_loop_messages::QuestAccount) -> (Vec<u32>, u32, String) {
     (
-        account.pids.into_iter().filter(|pid| *pid != 0).collect(),
+        account
+            .pids
+            .iter()
+            .filter(|pid| **pid != 0)
+            .copied()
+            .collect(),
         account.changes,
+        account.login.clone(),
     )
 }
 
@@ -4665,6 +4723,7 @@ mod tests {
             points: params.points,
             climbs: Vec::new(),
             guild_ops: Vec::new(),
+            observes: Vec::new(),
             test_server: true,
             pcs: Vec::new(),
             online: std::collections::HashMap::new(),
@@ -4690,6 +4749,7 @@ mod tests {
             rank: RankStep::default(),
             account_pids: Vec::new(),
             empire_changes: 0,
+            login: String::new(),
             empire_moves: Vec::new(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
@@ -5810,7 +5870,7 @@ mod tests {
                 .load_flags(1, [(b"game_option.block_whisper".to_vec(), 1)]);
         }
 
-        world.quest_login(vid, crate::game_loop_messages::QuestAccount::default());
+        world.quest_login(vid, &crate::game_loop_messages::QuestAccount::default());
         assert_eq!(world.block_modes.get(&vid), Some(&8));
         let mut lines = Vec::new();
         while let Ok(line) = inbox.try_recv() {
@@ -5852,7 +5912,7 @@ mod tests {
                 &QuestStep::Button(quest | QUEST_INFO_BIT),
                 place,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the world holds the character");
         records
@@ -5899,7 +5959,7 @@ mod tests {
         let records = press_info_button(&mut world, vid, quest, place, mover);
         assert!(records.is_empty(), "{records:?}");
 
-        world.quest_login(vid, crate::game_loop_messages::QuestAccount::default());
+        world.quest_login(vid, &crate::game_loop_messages::QuestAccount::default());
         let mut lines = Vec::new();
         while let Ok(line) = inbox.try_recv() {
             lines.push(line);
@@ -6003,7 +6063,7 @@ mod tests {
                     &QuestStep::Button(quest | QUEST_INFO_BIT),
                     place,
                     mover,
-                    crate::game_loop_messages::QuestAccount::default(),
+                    &crate::game_loop_messages::QuestAccount::default(),
                 )
                 .expect("the world holds the character");
             let info = records
@@ -6356,7 +6416,7 @@ mod tests {
                 (THEOWAHDAN, 60_003),
                 beside(),
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             );
         assert!(taken);
         assert_eq!(records[0], [124, 1, 0, 0, 0], "{records:?}");
@@ -6442,7 +6502,7 @@ mod tests {
             .find_by_vid_mut(vid)
             .expect("the reader is in the world")
             .set_points(Some(crate::game_state::fixtures::points_at(30, 10_000, 0)));
-        world.quest_login(vid, crate::game_loop_messages::QuestAccount::default());
+        world.quest_login(vid, &crate::game_loop_messages::QuestAccount::default());
         let quest = world
             .quests
             .as_ref()
@@ -6464,7 +6524,7 @@ mod tests {
                 &QuestStep::Button(quest),
                 place,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the button runs");
         assert!(
@@ -6476,7 +6536,7 @@ mod tests {
                 vid,
                 cell,
                 mover,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the use runs");
         assert_eq!(used.kind, world::character::MoveKind::QuestUsed);
@@ -6540,7 +6600,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.drop_with_ownership(2145, 1, Some(300));
                     game.drop_with_ownership(2145, 1, None);
@@ -6614,7 +6674,7 @@ mod tests {
                     mover,
                     10,
                     pid,
-                    crate::game_loop_messages::QuestAccount::default(),
+                    &crate::game_loop_messages::QuestAccount::default(),
                     |_manager, game| {
                         game.set_conqueror();
                     },
@@ -6719,7 +6779,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.open_sash(true);
                 },
@@ -6735,7 +6795,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.open_sash(true);
                 },
@@ -6750,7 +6810,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.open_sash(false);
                 },
@@ -6796,7 +6856,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.open_changelook();
                 },
@@ -6811,7 +6871,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.open_changelook();
                 },
@@ -6853,7 +6913,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.set_party_flag(flag.clone(), 210);
                     (game.party_flag(&flag), game.party_leader_pid())
@@ -6870,7 +6930,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| {
                     game.set_party_flag(flag.clone(), 210);
                 },
@@ -6883,7 +6943,7 @@ mod tests {
                 mover,
                 10,
                 pid,
-                crate::game_loop_messages::QuestAccount::default(),
+                &crate::game_loop_messages::QuestAccount::default(),
                 |_manager, game| (game.party_flag(&flag), game.party_leader_pid()),
             )
             .expect("the quests are loaded")

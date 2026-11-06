@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-06, after ledger section 407 (the window clock).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 408
+Last reviewed: 2026-11-06, after ledger section 408 (the war bets).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 409
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -421,7 +421,11 @@ item reads its name, size, refined vnum and refine level and removes itself
 `item.get_level`): the removal lands in the call, like `set_socket` does. Since 407 a
 script sets its window's clock and counter (`q.set_clock_name`, `q.set_clock_value`,
 `q.set_counter_name`, `q.set_counter_value`), which go out in one `GC_QUEST_INFO`
-when it ends. The
+when it ends. Since 408 the boot keeps the war reservations with their bets
+(`guild.get_reserve_war_table`, `guild.is_bet`, `guild.war_bet`), an observer warps to
+the war's watchers' start (`guild.get_warp_war_list`,
+`pc.warp_to_guild_war_observer_position`), and the bet quest's format error is recorded:
+no bet completes through it, on legacy either. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1354,6 +1358,11 @@ owner should know about (178.5):
   `(change_count, account_id)`, `G/char_change_empire.cpp:105-185`); a second account at the
   same pids or empire would be moved and counted wrongly. The Rewrite keys on the account and
   counts up (ledger 405).
+- The guild-war bet quest formats `_80_say`'s three verbs (`%s`, `%s`, `%d`) with one argument
+  (`guild_war_bet.lua:39`), so `string.format` errors (`luaL_argerror`, 5.1's `lstrlib.c:772-773`;
+  5.0.3 errors the same way) and the dialog ends after the title: no bet on any reservation can
+  complete through the owner quest, on legacy either. The Rewrite runs the source as-is
+  (ADR-0004) and errors at the same pick (ledger 408).
 
 ## Environment
 

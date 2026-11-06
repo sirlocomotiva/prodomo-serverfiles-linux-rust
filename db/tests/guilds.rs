@@ -7,10 +7,10 @@ mod support;
 use db::accounts::{create_account, AccountId, Name, NewAccount};
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::guilds::{
-    add_member, add_offer, add_power, board, create_guild, delete_comment, delete_mark, load_all,
-    load_marks, load_symbols, lobby_guilds, post_comment, remove_member, save_mark, save_symbol,
-    set_grade_auth, set_grade_name, set_member_general, set_member_grade, set_skills, spend_power,
-    CreateGuildError, GuildOffer,
+    add_member, add_offer, add_power, board, create_guild, delete_comment, delete_mark,
+    insert_reservation, load_all, load_marks, load_reservations, load_symbols, lobby_guilds,
+    place_bet, post_comment, remove_member, save_mark, save_symbol, set_grade_auth, set_grade_name,
+    set_member_general, set_member_grade, set_skills, spend_power, CreateGuildError, GuildOffer,
 };
 use db::players::{create_player, lobby, Created, NewPlayer};
 use db::store::Store;
@@ -495,4 +495,60 @@ async fn lobby_guilds_answers_each_slot_s_linked_guild() {
     assert_eq!(linked[1], None, "an empty slot answers none");
     assert_eq!(linked[2], None, "an unguilded slot answers none");
     assert_eq!(linked[3], None, "an empty slot answers none");
+}
+
+#[tokio::test]
+async fn a_reservation_lands_its_bets_and_the_boot_loads_them() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let owner = account(store, "betmaster").await;
+    let one = created(store, owner, 0, "BetOne").await;
+    let two = created(store, owner, 1, "BetTwo").await;
+    let first = create_guild(store, "BetFirst", one, &grades())
+        .await
+        .expect("the first guild should store");
+    let second = create_guild(store, "BetSecond", two, &grades())
+        .await
+        .expect("the second guild should store");
+    // The insert sorts the pair (`db/GuildManager.cpp:991-992`), whatever the order.
+    let id = insert_reservation(store, second, first, 1_800, 1, 0, 0)
+        .await
+        .expect("the reservation should store");
+    assert!(place_bet(store, id, "betmaster", 30_000, second)
+        .await
+        .unwrap());
+    assert!(
+        !place_bet(store, id, "betmaster", 10_000, first)
+            .await
+            .unwrap(),
+        "a second bet of one login takes nothing"
+    );
+    assert!(
+        !place_bet(store, 999, "betmaster", 10_000, first)
+            .await
+            .unwrap(),
+        "an unknown war takes nothing"
+    );
+    let (reservations, bets) = load_reservations(store).await.unwrap();
+    assert_eq!(reservations.len(), 1);
+    let kept = &reservations[0];
+    assert_eq!(kept.id, id);
+    assert_eq!(kept.pair, (first.min(second), first.max(second)));
+    assert_eq!(kept.starts_at, 1_800);
+    assert_eq!(kept.war_type, 1);
+    assert_eq!(kept.powers, (0, 0), "the empty polys evaluate to 0");
+    assert_eq!(kept.handicap, 0);
+    assert_eq!(bets.len(), 1);
+    assert_eq!(bets[0].war_id, id);
+    assert_eq!(bets[0].login, "betmaster");
+    assert_eq!(bets[0].gold, 30_000);
+    assert_eq!(bets[0].guild, second);
+    let total: i32 = if second == kept.pair.0 {
+        kept.bets.0
+    } else {
+        kept.bets.1
+    };
+    assert_eq!(total, 30_000, "the backed side's total rose");
 }
