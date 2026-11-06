@@ -417,13 +417,20 @@ mod tests {
         while inbox.try_recv().is_ok() {}
 
         let read = world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                let before = game.real_alignment();
-                game.change_alignment(12_000);
-                let after = game.real_alignment();
-                game.change_alignment(-250);
-                (before, after, game.real_alignment())
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    let before = game.real_alignment();
+                    game.change_alignment(12_000);
+                    let after = game.real_alignment();
+                    game.change_alignment(-250);
+                    (before, after, game.real_alignment())
+                },
+            )
             .expect("the quests are loaded");
         assert_eq!(
             read.0,
@@ -476,11 +483,18 @@ mod tests {
             },
         );
         let read = world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                let held = game.has_skill_book_no_delay();
-                game.remove_skill_book_no_delay();
-                (held, game.has_skill_book_no_delay())
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    let held = game.has_skill_book_no_delay();
+                    game.remove_skill_book_no_delay();
+                    (held, game.has_skill_book_no_delay())
+                },
+            )
             .expect("the quests are loaded");
         assert_eq!(read.0, (true, false));
         assert!(affect_kinds(&world, vid).is_empty());
@@ -506,13 +520,26 @@ mod tests {
         let (mut inbox, vid, cell, place, mover) = grand_reader(&mut world);
         while inbox.try_recv().is_ok() {}
 
-        let used = world.use_item(vid, cell, mover).expect("the use runs");
+        let used = world
+            .use_item(
+                vid,
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the use runs");
         assert_eq!(used.kind, world::character::MoveKind::QuestUsed);
         assert!(world.quest_running(vid), "the first page asks");
 
         // "Yes" to the warning.
         let warning = world
-            .quest(vid, &QuestStep::Answer(0), place, mover)
+            .quest(
+                vid,
+                &QuestStep::Answer(0),
+                place,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the answer runs");
         assert!(!warning.0.is_empty());
         assert!(world.quest_running(vid), "the skill list asks");
@@ -520,7 +547,13 @@ mod tests {
         // The ward: the script reads the real alignment, then the no-delay affect skips
         // the rest gate and is removed.
         let choice = world
-            .quest(vid, &QuestStep::Answer(0), place, mover)
+            .quest(
+                vid,
+                &QuestStep::Answer(0),
+                place,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the choice runs");
         assert!(
             choice
@@ -538,7 +571,13 @@ mod tests {
         // "Yes" to the read: no skill row is hosted, so it fails and the script moves the
         // alignment, then takes the book.
         let done = world
-            .quest(vid, &QuestStep::Answer(0), place, mover)
+            .quest(
+                vid,
+                &QuestStep::Answer(0),
+                place,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the read runs");
         assert!(!world.quest_running(vid), "the script ends");
         assert!(done.1.is_empty(), "the read did not climb");

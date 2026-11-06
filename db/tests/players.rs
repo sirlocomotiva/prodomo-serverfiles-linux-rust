@@ -9,9 +9,9 @@ use db::accounts::{create_account, AccountError, AccountId, Name, NewAccount};
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::messenger::add_pair;
 use db::players::{
-    change_name, create_player, delete_player, load_character, lobby, save_character,
-    save_position, select_empire, store_identity, Created, LobbyPlayer, NewPlayer, PlayerDelete,
-    PlayerSave,
+    change_empire, change_empire_count, change_name, create_player, delete_player, load_character,
+    lobby, save_character, save_position, select_empire, store_identity, Created, LobbyPlayer,
+    NewPlayer, PlayerDelete, PlayerSave,
 };
 use db::sqlx::{self, Row};
 use db::store::Store;
@@ -512,6 +512,34 @@ async fn an_empire_is_chosen_until_the_account_has_a_character() {
     assert!(matches!(
         select_empire(store, missing, 1, (0, 0)).await,
         Err(AccountError::NoSuchAccountId(id)) if id == missing
+    ));
+}
+
+/// Ledger 405: `change_empire` moves the account row and counts the change in one
+/// transaction; a second call for the same empire changes nothing.
+#[tokio::test]
+async fn an_empire_change_moves_the_account_and_counts() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    assert_eq!(change_empire_count(store, alice).await.unwrap(), 0);
+    assert!(change_empire(store, alice, 2).await.unwrap());
+    assert_eq!(lobby(store, alice).await.unwrap().empire, 2);
+    assert_eq!(change_empire_count(store, alice).await.unwrap(), 1);
+    assert!(change_empire(store, alice, 1).await.unwrap());
+    assert_eq!(change_empire_count(store, alice).await.unwrap(), 2);
+    assert!(!change_empire(store, alice, 1).await.unwrap());
+    assert_eq!(change_empire_count(store, alice).await.unwrap(), 2);
+    let missing = AccountId::new(0x7fff_fff0);
+    assert!(matches!(
+        change_empire(store, missing, 1).await,
+        Err(AccountError::NoSuchAccountId(id)) if id == missing
+    ));
+    assert!(matches!(
+        change_empire_count(store, missing).await.unwrap(),
+        0
     ));
 }
 

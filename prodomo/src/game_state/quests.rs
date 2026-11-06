@@ -37,7 +37,7 @@ use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE, CHA
 use protocol::gc_quest_info::{c_field, GcQuestInfo};
 use protocol::gc_script::GcScript;
 use quest::manager::{ChatKind, Game, Manager, QuestInfo, Target};
-use tracing::warn;
+use tracing::{info, warn};
 use world::character::{number, Pcg32};
 use world::npc::MapNpcs;
 
@@ -164,14 +164,15 @@ impl QuestStep {
 }
 
 /// What a giving quest step answers: the `op`'s answer, the run, the reader's item
-/// rows, whether the step claimed the reader's prizes, and the blocked takes'
-/// rows by owner PID.
+/// rows, whether the step claimed the reader's prizes, the blocked takes'
+/// rows by owner PID, and the empire a `pc.change_empire` call landed, if one did.
 type GivingOutcome<R> = (
     R,
     QuestRun,
     Vec<db::items::RowChange>,
     bool,
     Vec<(u32, Vec<db::items::RowChange>)>,
+    Option<u8>,
 );
 
 /// What a quest step reports: the records its scripts sent for the client, the GRAND
@@ -179,8 +180,9 @@ type GivingOutcome<R> = (
 /// writers the scripts ran (each for the descriptor to drain after the step, in order),
 /// the item rows its gives changed (for the descriptor to store before it sends), the
 /// gold its `pc.change_money` moves and its melts left the character holding, whether
-/// the step claimed the reader's prizes, and the blocked takes' rows by owner PID (for
-/// the descriptor to store with the reader's, in one transaction).
+/// the step claimed the reader's prizes, the blocked takes' rows by owner PID (for
+/// the descriptor to store with the reader's, in one transaction), and the empire a
+/// `pc.change_empire` call landed, if one did (for the descriptor's account store).
 pub type QuestStepOutcome = (
     Vec<Vec<u8>>,
     Vec<(u8, u8, i32)>,
@@ -189,8 +191,8 @@ pub type QuestStepOutcome = (
     Option<u64>,
     bool,
     Vec<(u32, Vec<db::items::RowChange>)>,
+    Option<u8>,
 );
-
 /// `MOB_RANK_KNIGHT` (`common/length.h:458-466`), the rank `GetMobRank` gives a PC.
 const MOB_RANK_KNIGHT: u8 = 3;
 
@@ -379,6 +381,10 @@ struct WorldMoves {
     confirm_records: Vec<(u32, Vec<u8>)>,
     confirm_timeouts: Vec<(u32, i32)>,
     rank_points: Vec<(u8, i32)>,
+    empire_moves: Vec<u8>,
+    /// The reader's account PIDs the session judged with, for the empire change's
+    /// guild arm after the step: legacy checks every character of the account.
+    account_pids: Vec<u32>,
 }
 
 impl WorldMoves {
@@ -396,59 +402,32 @@ impl WorldMoves {
             ds_refines: session.ds_refines,
             ds_attrs: session.ds_attrs,
             party_sets: std::mem::take(&mut session.party_sets),
-            dungeon_sets: std::mem::take(&mut session.dungeon_sets),
-            dungeon_jumps: std::mem::take(&mut session.dungeon_jumps),
-            dungeon_notices: std::mem::take(&mut session.dungeon_notices),
-            dungeon_warps: std::mem::take(&mut session.dungeon_warps),
-            dungeon_exits: std::mem::take(&mut session.dungeon_exits),
-            dungeon_spawns: std::mem::take(&mut session.dungeon_spawns),
-            dungeon_singles: std::mem::take(&mut session.dungeon_singles),
-            dungeon_clears: std::mem::take(&mut session.dungeon_clears),
-            dungeon_kills: std::mem::take(&mut session.dungeon_kills),
-            damage_race_sets: std::mem::take(&mut session.damage_race_sets),
-            damage_affect_sets: std::mem::take(&mut session.damage_affect_sets),
-            server_timer_ops: std::mem::take(&mut session.server_timer_ops),
-            event_sets: std::mem::take(&mut session.event_sets),
+            dungeon_sets: std::mem::take(&mut session.queues.dungeon_sets),
+            dungeon_jumps: std::mem::take(&mut session.queues.dungeon_jumps),
+            dungeon_notices: std::mem::take(&mut session.queues.dungeon_notices),
+            dungeon_warps: std::mem::take(&mut session.queues.dungeon_warps),
+            dungeon_exits: std::mem::take(&mut session.queues.dungeon_exits),
+            dungeon_spawns: std::mem::take(&mut session.queues.dungeon_spawns),
+            dungeon_singles: std::mem::take(&mut session.queues.dungeon_singles),
+            dungeon_clears: std::mem::take(&mut session.queues.dungeon_clears),
+            dungeon_kills: std::mem::take(&mut session.queues.dungeon_kills),
+            damage_race_sets: std::mem::take(&mut session.queues.damage_race_sets),
+            damage_affect_sets: std::mem::take(&mut session.queues.damage_affect_sets),
+            server_timer_ops: std::mem::take(&mut session.queues.server_timer_ops),
+            event_sets: std::mem::take(&mut session.queues.event_sets),
             confirm_records: std::mem::take(&mut session.confirm_records),
             confirm_timeouts: std::mem::take(&mut session.confirm_timeouts),
             rank_points: std::mem::take(&mut session.rank.points),
+            empire_moves: std::mem::take(&mut session.empire_moves),
+            account_pids: session.account_pids.clone(),
         }
     }
 }
 
 /// What a running script reaches: the character's map, its client and the world's dice.
-pub(super) struct Session<'s> {
-    /// `GetLevel()` of the character the script runs for.
-    pub(super) level: u8,
-    /// The NPCs of the character's map.
-    pub(super) npcs: Option<&'s MapNpcs>,
-    /// Which monsters exist.
-    pub(super) protos: &'s MobProtos,
-    /// Their names.
-    pub(super) names: &'s MobNamesByLanguage,
-    /// `ITEM_MANAGER::GetTable`: an item with no proto has no name.
-    pub(super) items: &'s ItemProtos,
-    /// The items' names.
-    pub(super) item_names: &'s ItemNamesByLanguage,
-    /// The chat lines' formats.
-    pub(super) locale: &'s LocaleStrings,
-    /// The character's language and empire.
-    pub(super) mover: Mover,
-    /// `GetMapIndex()` of the character the script runs for: the map it stands on, the
-    /// private index when it stands on a private map.
-    pub(super) map_index: i32,
-    /// The war map the character stands on, and 0 when it stands on none
-    /// (`CWarMapManager::Find(GetMapIndex())`, `G/input_login.cpp:780`).
-    pub(super) war_map: i32,
-    /// The private index the reader stands in a dungeon under, and 0 when it stands
-    /// in none: what `pc.in_dungeon` and `d.get_map_index` read (`m_pkDungeon`,
-    /// `G/input_login.cpp:788`).
-    pub(super) dungeon: i32,
-    /// The living dungeons' flags at the step's start, by private index, so `d.getf`
-    /// and `d.getf_from_map_index` answer what the world would judge: the flags as
-    /// `d.setf` leaves them. The world applies the sets after the step.
-    pub(super) dungeon_flags:
-        std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
+/// A quest step's dungeon and event queues, empty at the step's start.
+#[derive(Default)]
+pub(super) struct SessionQueues {
     /// Every `d.setf` call's index, name and value, in order, for the world's flags
     /// after the step (legacy writes in the call).
     pub(super) dungeon_sets: Vec<(i32, Vec<u8>, i32)>,
@@ -485,6 +464,44 @@ pub(super) struct Session<'s> {
     /// Every `game.set_event_flag` call's name and value, in order, for the world's
     /// flags after the step.
     pub(super) event_sets: Vec<(Vec<u8>, i32)>,
+}
+
+pub(super) struct Session<'s> {
+    /// `GetLevel()` of the character the script runs for.
+    pub(super) level: u8,
+    /// The NPCs of the character's map.
+    pub(super) npcs: Option<&'s MapNpcs>,
+    /// Which monsters exist.
+    pub(super) protos: &'s MobProtos,
+    /// Their names.
+    pub(super) names: &'s MobNamesByLanguage,
+    /// `ITEM_MANAGER::GetTable`: an item with no proto has no name.
+    pub(super) items: &'s ItemProtos,
+    /// The items' names.
+    pub(super) item_names: &'s ItemNamesByLanguage,
+    /// The chat lines' formats.
+    pub(super) locale: &'s LocaleStrings,
+    /// The character's language and empire.
+    pub(super) mover: Mover,
+    /// `GetMapIndex()` of the character the script runs for: the map it stands on, the
+    /// private index when it stands on a private map.
+    pub(super) map_index: i32,
+    /// The war map the character stands on, and 0 when it stands on none
+    /// (`CWarMapManager::Find(GetMapIndex())`, `G/input_login.cpp:780`).
+    pub(super) war_map: i32,
+    /// The private index the reader stands in a dungeon under, and 0 when it stands
+    /// in none: what `pc.in_dungeon` and `d.get_map_index` read (`m_pkDungeon`,
+    /// `G/input_login.cpp:788`).
+    pub(super) dungeon: i32,
+    /// The living dungeons' flags at the step's start, by private index, so `d.getf`
+    /// and `d.getf_from_map_index` answer what the world would judge: the flags as
+    /// `d.setf` leaves them. The world applies the sets after the step.
+    pub(super) dungeon_flags:
+        std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
+    /// The step's dungeon and event queues: every `d.*` call's staged moves, the server
+    /// timer ops, and the event-flag sets, in call order, for the world after the step.
+    /// A nested struct so the two session constructors stay under the line lint.
+    pub(super) queues: SessionQueues,
     /// The skill rows, for the GRAND read's gates.
     pub(super) tables: &'s gamedata::pc_skill_data::PcSkills,
     /// `number()`'s draw, and the GRAND read's.
@@ -649,6 +666,15 @@ pub(super) struct Session<'s> {
     /// and the reader's prizes, open when the step's descriptor stores a claim
     /// ([`Giving::ItemsAndPrizes`]).
     pub(super) rank: RankStep,
+    /// The PIDs of the reader's account, read at the step's start, for the empire
+    /// change's guild arm: legacy checks every character of the account.
+    pub(super) account_pids: Vec<u32>,
+    /// How many times the reader's account changed its empire, read at the step's
+    /// start: what `pc.get_change_empire_count` pushes.
+    pub(super) empire_changes: u32,
+    /// Every `pc.change_empire` call's empire, in order, for the world's moves after
+    /// the step (legacy moves in the call).
+    pub(super) empire_moves: Vec<u8>,
 }
 
 /// A blocked PC's snapshot: the fields a script in its block reads, cloned at the
@@ -698,6 +724,27 @@ pub(super) struct Giver<'s> {
 }
 
 impl<'s> Session<'s> {
+    /// The shadow of `CHARACTER::ChangeEmpire`'s refusals (`G/char_change_empire.cpp:23-103`):
+    /// 1 for the empire the session holds, 4 in a party, 2 with a guilded character on
+    /// the account, else 999. No character of this build is engaged or married, so the
+    /// marriage arm never fires. The world judges the same call again after the step.
+    fn judge_change_empire(&self, empire: u8) -> i32 {
+        if self.empire == empire {
+            return 1;
+        }
+        if self.party.party() {
+            return 4;
+        }
+        if self
+            .account_pids
+            .iter()
+            .any(|pid| self.guilds.shadow_guild_of(*pid).is_some())
+        {
+            return 2;
+        }
+        999
+    }
+
     /// The skill rows, for the GRAND read's gates.
     pub(super) fn skill_tables(&self) -> &'s gamedata::pc_skill_data::PcSkills {
         self.tables
@@ -1462,9 +1509,9 @@ impl Game for Session<'_> {
     /// dungeon the jump lands on.
     fn dungeon_new_jump_party(&mut self, map: i32, x: i32, y: i32) {
         let staged = -1
-            - i32::try_from(self.dungeon_jumps.len() + self.dungeon_singles.len())
+            - i32::try_from(self.queues.dungeon_jumps.len() + self.queues.dungeon_singles.len())
                 .unwrap_or(i32::MAX);
-        self.dungeon_jumps.push((staged, map, x, y));
+        self.queues.dungeon_jumps.push((staged, map, x, y));
         self.dungeon = staged;
         self.dungeon_flags.entry(staged).or_default();
     }
@@ -1479,7 +1526,7 @@ impl Game for Session<'_> {
                 .entry(self.dungeon)
                 .or_default()
                 .insert(name.clone(), value);
-            self.dungeon_sets.push((self.dungeon, name, value));
+            self.queues.dungeon_sets.push((self.dungeon, name, value));
         }
     }
     fn dungeon_get_flag(&self, name: &[u8]) -> i32 {
@@ -1503,28 +1550,28 @@ impl Game for Session<'_> {
     /// with none.
     fn dungeon_notice(&mut self, text: Vec<u8>) {
         if self.dungeon != 0 {
-            self.dungeon_notices.push((self.dungeon, text));
+            self.queues.dungeon_notices.push((self.dungeon, text));
         }
     }
     /// Queued with the reader's dungeon for the warp spots after the step; quiet
     /// with none.
     fn dungeon_set_warp_location(&mut self, map: i32, x: i32, y: i32) {
         if self.dungeon != 0 {
-            self.dungeon_warps.push((self.dungeon, map, x, y));
+            self.queues.dungeon_warps.push((self.dungeon, map, x, y));
         }
     }
     /// Queued with the reader's dungeon for the exits after the step; quiet
     /// with none.
     fn dungeon_exit_all(&mut self) {
         if self.dungeon != 0 {
-            self.dungeon_exits.push(self.dungeon);
+            self.queues.dungeon_exits.push(self.dungeon);
         }
     }
     /// Queued with the reader's dungeon for the spawns after the step; quiet
     /// with none.
     fn dungeon_spawn_mob(&mut self, vnum: u32, x: i32, y: i32) {
         if self.dungeon != 0 {
-            self.dungeon_spawns.push((self.dungeon, vnum, x, y));
+            self.queues.dungeon_spawns.push((self.dungeon, vnum, x, y));
         }
     }
     /// Staged like the party jump: the slot, the create's (map, x, y), and the
@@ -1532,9 +1579,9 @@ impl Game for Session<'_> {
     /// the slot count, so a step's party and single jumps never share a slot.
     fn dungeon_new_jump(&mut self, map: i32, x: i32, y: i32) {
         let staged = -1
-            - i32::try_from(self.dungeon_jumps.len() + self.dungeon_singles.len())
+            - i32::try_from(self.queues.dungeon_jumps.len() + self.queues.dungeon_singles.len())
                 .unwrap_or(i32::MAX);
-        self.dungeon_singles.push((staged, map, x, y));
+        self.queues.dungeon_singles.push((staged, map, x, y));
         self.dungeon = staged;
         self.dungeon_flags.entry(staged).or_default();
     }
@@ -1542,25 +1589,25 @@ impl Game for Session<'_> {
     /// with none.
     fn dungeon_clear_regen(&mut self) {
         if self.dungeon != 0 {
-            self.dungeon_clears.push(self.dungeon);
+            self.queues.dungeon_clears.push(self.dungeon);
         }
     }
     /// Queued with the reader's dungeon for the kills after the step; quiet
     /// with none.
     fn dungeon_kill_all(&mut self) {
         if self.dungeon != 0 {
-            self.dungeon_kills.push(self.dungeon);
+            self.queues.dungeon_kills.push(self.dungeon);
         }
     }
     /// Queued for the world's flags after the step. No dungeon is needed: legacy
     /// finds the character by VID.
     fn dungeon_set_damage_from_race(&mut self, flag: u32, vid: u32) {
-        self.damage_race_sets.push((flag, vid));
+        self.queues.damage_race_sets.push((flag, vid));
     }
     /// Queued for the world's flags after the step. No dungeon is needed: legacy
     /// finds the character by VID.
     fn dungeon_set_damage_from_affect(&mut self, flag: u32, vid: u32) {
-        self.damage_affect_sets.push((flag, vid));
+        self.queues.damage_affect_sets.push((flag, vid));
     }
     /// The `d.select` adoption while no character runs: the session's dungeon
     /// becomes the selection, or 0 when the select missed.
@@ -1569,16 +1616,18 @@ impl Game for Session<'_> {
     }
     /// Queued for the world's flags after the step.
     fn set_event_flag(&mut self, name: Vec<u8>, value: i32) {
-        self.event_sets.push((name, value));
+        self.queues.event_sets.push((name, value));
     }
     /// Queued in call order with the clears for the timers after the step.
     fn set_server_timer(&mut self, name: Vec<u8>, secs: f64, arg: u32) {
-        self.server_timer_ops
+        self.queues
+            .server_timer_ops
             .push(super::dungeons::ServerTimerOp::Set { name, secs, arg });
     }
     /// Queued in call order with the arms for the clears after the step.
     fn clear_server_timer(&mut self, name: &[u8], arg: u32) {
-        self.server_timer_ops
+        self.queues
+            .server_timer_ops
             .push(super::dungeons::ServerTimerOp::Clear {
                 name: name.to_vec(),
                 arg,
@@ -2329,6 +2378,64 @@ impl Game for Session<'_> {
     fn target_at(&self, vid: u32) -> Option<(u32, Vec<u8>)> {
         self.targets.at(self.pid, vid)
     }
+
+    fn is_polymorphed(&self) -> bool {
+        self.run_points()
+            .is_some_and(world::character::Points::is_polymorphed)
+    }
+
+    fn is_engaged(&self) -> bool {
+        false
+    }
+
+    fn is_married(&self) -> bool {
+        false
+    }
+
+    fn change_empire(&mut self, empire: u8) -> i32 {
+        // The shadow answers now, so the script's control flow sees the pushed value;
+        // the world judges the same call again after the step for its records and move.
+        let judged = self.judge_change_empire(empire);
+        self.empire_moves.push(empire);
+        if judged == 4 {
+            let to = self.mover.recipient(self.locale);
+            self.records.push(chat_packet(
+                to,
+                CHAT_TYPE_INFO,
+                b"You can't change your empire while you are in party",
+                &[],
+            ));
+        }
+        judged
+    }
+
+    fn change_empire_count(&self) -> u32 {
+        self.empire_changes
+    }
+
+    fn char_log(&mut self, what: u32, how: &[u8], hint: &[u8]) {
+        info!(
+            pid = self.pid,
+            what,
+            how = String::from_utf8_lossy(how).as_ref(),
+            hint = String::from_utf8_lossy(hint).as_ref(),
+            "CHAR_LOG"
+        );
+    }
+
+    fn sys_err(&mut self, quest: &[u8], text: &[u8]) {
+        warn!(
+            quest = String::from_utf8_lossy(quest).as_ref(),
+            player = String::from_utf8_lossy(&self.char_name).as_ref(),
+            text = String::from_utf8_lossy(text).as_ref(),
+            "QUEST"
+        );
+        let to = self.mover.recipient(self.locale);
+        let mut line = b"QUEST_SYSERR ".to_vec();
+        line.extend_from_slice(text);
+        self.records
+            .push(chat_packet(to, CHAT_TYPE_INFO, b"%s", &[Arg::Text(&line)]));
+    }
 }
 
 impl GameState {
@@ -2358,6 +2465,7 @@ impl GameState {
         step: &QuestStep,
         place: GroundPlace,
         mover: Mover,
+        account: crate::game_loop_messages::QuestAccount,
     ) -> Result<QuestStepOutcome, MoveItemRefused> {
         let character = self
             .characters
@@ -2371,6 +2479,7 @@ impl GameState {
             place,
             (mover, level, pid),
             Giving::ItemsAndPrizes,
+            account,
             |manager, game| match step {
                 QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
                 QuestStep::Input(text) => manager.input(pid, text, game),
@@ -2394,6 +2503,7 @@ impl GameState {
             items,
             claimed,
             take_sides,
+            landed,
         )) = answered
         else {
             return Ok(QuestStepOutcome::default());
@@ -2416,7 +2526,9 @@ impl GameState {
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
-        Ok((records, climbs, stores, items, gold, claimed, take_sides))
+        Ok((
+            records, climbs, stores, items, gold, claimed, take_sides, landed,
+        ))
     }
 
     /// `CQuestManager::Letter` (`G/questmanager.cpp:502-514`) for the character under
@@ -2444,11 +2556,16 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, _, _, block_mode, _, _, _))) =
-            self.run_quests(place, mover, level, pid, |manager, game| {
+        let Some(((), (records, _, _, block_mode, _, _, _))) = self.run_quests(
+            place,
+            mover,
+            level,
+            pid,
+            crate::game_loop_messages::QuestAccount::default(),
+            |manager, game| {
                 manager.letter(pid, quest, 0, game);
-            })
-        else {
+            },
+        ) else {
             return;
         };
         if let Some(mode) = block_mode {
@@ -2468,12 +2585,18 @@ impl GameState {
     /// descriptor is in `PHASE_GAME`, or at once when `QuestLoad` finds it there already
     /// (`:1104-1115`). The Rewrite loads the flags as the world admits the character, which
     /// is the `CG_ENTER_GAME` that sets that phase, so the event runs there.
-    pub(super) fn quest_login(&mut self, vid: Vid) {
+    pub(super) fn quest_login(
+        &mut self,
+        vid: Vid,
+        account: crate::game_loop_messages::QuestAccount,
+    ) -> Option<u8> {
         let Ok(character) = self.characters.find_by_vid(vid) else {
-            return;
+            return None;
         };
         let pid = character.player_id();
-        let _ran = self.run_quest_event(vid, |manager, game| manager.login(pid, game));
+        let (_ran, landed) =
+            self.run_quest_event(vid, account, |manager, game| manager.login(pid, game));
+        landed
     }
 
     /// `CQuestManager::Click` for the character under `vid` clicking the NPC `target` of race
@@ -2485,6 +2608,7 @@ impl GameState {
         (target, race): (u32, u16),
         place: GroundPlace,
         mover: Mover,
+        account: crate::game_loop_messages::QuestAccount,
     ) -> (bool, QuestStepOutcome) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return (false, QuestStepOutcome::default());
@@ -2499,10 +2623,12 @@ impl GameState {
             items,
             claimed,
             take_sides,
+            landed,
         )) = self.run_quests_giving(
             place,
             (mover, level, pid),
             Giving::ItemsAndPrizes,
+            account,
             |manager, game| manager.click(pid, target, u32::from(race), game),
         )
         else {
@@ -2525,7 +2651,9 @@ impl GameState {
         }
         (
             taken,
-            (records, climbs, stores, items, gold, claimed, take_sides),
+            (
+                records, climbs, stores, items, gold, claimed, take_sides, landed,
+            ),
         )
     }
 
@@ -2542,6 +2670,7 @@ impl GameState {
         vid: Vid,
         at: protocol::item_pos::ItemPos,
         mover: Mover,
+        account: crate::game_loop_messages::QuestAccount,
         step: &mut crate::item_move::MovedItems,
     ) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
@@ -2575,11 +2704,12 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, climbs, ops, block_mode, _, _, _), items, _, take_sides)) = self
-            .run_quests_giving(
+        let Some(((), (records, climbs, ops, block_mode, _, _, _), items, _, take_sides, landed)) =
+            self.run_quests_giving(
                 place,
                 (mover, level, pid),
                 Giving::Items,
+                account,
                 |manager, game| {
                     manager.use_item(pid, (id, vnum), game);
                 },
@@ -2607,7 +2737,7 @@ impl GameState {
             step.records.extend(judged.own);
             stores.extend(judged.stores);
         }
-        step.quest = (climbs, stores);
+        step.quest = (climbs, stores, landed);
         if let Ok(character) = self.characters.find_by_vid(vid) {
             step.quickslots = Some(character.quickslots().clone());
         }
@@ -2632,9 +2762,13 @@ impl GameState {
             return;
         };
         let pid = character.player_id();
-        self.run_quest_event(vid, |manager, game| {
-            manager.logout(pid, game);
-        });
+        self.run_quest_event(
+            vid,
+            crate::game_loop_messages::QuestAccount::default(),
+            |manager, game| {
+                manager.logout(pid, game);
+            },
+        );
         self.quest_targets.logout(pid);
         self.confirm_timeouts.remove(&pid);
     }
@@ -2674,9 +2808,11 @@ impl GameState {
         else {
             return;
         };
-        let heard = self.run_quest_event(waiter, |manager, game| {
-            manager.confirm(request_pid, answer, Some(replier), game)
-        });
+        let (heard, _) = self.run_quest_event(
+            waiter,
+            crate::game_loop_messages::QuestAccount::default(),
+            |manager, game| manager.confirm(request_pid, answer, Some(replier), game),
+        );
         if heard {
             self.confirm_timeouts.remove(&request_pid);
         }
@@ -2701,9 +2837,13 @@ impl GameState {
             else {
                 continue;
             };
-            self.run_quest_event(vid, |manager, game| {
-                manager.confirm(waiter, quest::manager::CONFIRM_TIMEOUT, None, game);
-            });
+            self.run_quest_event(
+                vid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |manager, game| {
+                    manager.confirm(waiter, quest::manager::CONFIRM_TIMEOUT, None, game);
+                },
+            );
         }
     }
 
@@ -2730,9 +2870,16 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        let landed = self.run_quests(place, mover, level, pid, |manager, game| {
-            manager.levelup(pid, game);
-        });
+        let landed = self.run_quests(
+            place,
+            mover,
+            level,
+            pid,
+            crate::game_loop_messages::QuestAccount::default(),
+            |manager, game| {
+                manager.levelup(pid, game);
+            },
+        );
         let Some(((), (records, _, _, block_mode, _, _, _))) = landed else {
             return Vec::new();
         };
@@ -2768,10 +2915,17 @@ impl GameState {
         let leader = self
             .quest_kill_leader(vid)
             .or(if partied { None } else { Some(pid) });
-        let landed = self.run_quests(place, mover, level, pid, |manager, game| {
-            manager.set_quest_npc(victim);
-            manager.kill(pid, race, leader, game);
-        });
+        let landed = self.run_quests(
+            place,
+            mover,
+            level,
+            pid,
+            crate::game_loop_messages::QuestAccount::default(),
+            |manager, game| {
+                manager.set_quest_npc(victim);
+                manager.kill(pid, race, leader, game);
+            },
+        );
         let Some(((), (records, _, _, block_mode, _, _, _))) = landed else {
             return Vec::new();
         };
@@ -2792,10 +2946,11 @@ impl GameState {
         mover: Mover,
         level: u8,
         pid: u32,
+        account: crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<(R, QuestRun)> {
-        let (answer, run, _, _, take_sides) =
-            self.run_quests_giving(place, (mover, level, pid), Giving::Nothing, op)?;
+        let (answer, run, _, _, take_sides, _) =
+            self.run_quests_giving(place, (mover, level, pid), Giving::Nothing, account, op)?;
         if !take_sides.is_empty() {
             warn!(
                 pid,
@@ -2819,10 +2974,11 @@ impl GameState {
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
+        account: crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<GivingOutcome<R>> {
-        let (answer, mut run, rows, claimed, take_sides) =
-            self.run_quests_giving_raw(place, (mover, level, pid), giving, op)?;
+        let (answer, mut run, rows, claimed, take_sides, landed) =
+            self.run_quests_giving_raw(place, (mover, level, pid), giving, account, op)?;
         let vid = self
             .characters
             .find_by_pid(pid)
@@ -2835,7 +2991,7 @@ impl GameState {
             self.packet_around(me, &frame, Some(me));
             run.0.push(frame);
         }
-        Some((answer, run, rows, claimed, take_sides))
+        Some((answer, run, rows, claimed, take_sides, landed))
     }
 
     /// The step behind [`Self::run_quests_giving`], which then applies the alignment amounts.
@@ -2845,10 +3001,11 @@ impl GameState {
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
+        account: crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<GivingOutcome<R>> {
         let (answer, run, item_rows, queued, reader, takes, claimed) = {
-            let mut armed = self.arm_quest_session(place, (mover, level, pid), giving)?;
+            let mut armed = self.arm_quest_session(place, (mover, level, pid), giving, account)?;
             let answer = op(armed.manager, &mut armed.session);
             let queued = WorldMoves::take(&mut armed.session);
             let Session {
@@ -2886,7 +3043,7 @@ impl GameState {
         if claimed {
             self.rank.forget_prizes(pid);
         }
-        self.apply_world_moves(reader, place, mover, pid, queued);
+        let landed = self.apply_world_moves(reader, place, mover, pid, queued);
         let mut take_sides: Vec<(u32, Vec<db::items::RowChange>)> = Vec::new();
         for (take_pid, vnum, count) in takes {
             let rows = self.apply_blocked_take(take_pid, (vnum, count));
@@ -2898,7 +3055,7 @@ impl GameState {
                 None => take_sides.push((take_pid, rows)),
             }
         }
-        Some((answer, run, item_rows, claimed, take_sides))
+        Some((answer, run, item_rows, claimed, take_sides, landed))
     }
 
     /// A [`Session`] borrowed from the world, with its manager and reader: the split-out
@@ -2910,6 +3067,7 @@ impl GameState {
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
+        account: crate::game_loop_messages::QuestAccount,
     ) -> Option<ArmedSession<'_>> {
         let reader = self
             .characters
@@ -2962,6 +3120,7 @@ impl GameState {
             context.gates.set_hack(true);
             context.gates.set_able(false);
         }
+        (context.account_pids, context.empire_changes) = reader_account(&account);
         let Quests {
             manager,
             protos,
@@ -3238,6 +3397,51 @@ impl GameState {
             .unwrap_or((0, 0));
         self.order_quest_warp(reader, at.0, at.1, 0, mover);
     }
+    /// One `pc.change_empire` call that the shadow passed: `CHARACTER::ChangeEmpire`'s
+    /// fourth arm (`G/char_change_empire.cpp:105-128`) re-judged on the live world. The
+    /// same empire, a party, or a guilded character on the account refuses silently —
+    /// the shadow already pushed the answer and chatted the party line — and the dead
+    /// account row arm (0) never fires: the account row is the store's key. Else the
+    /// body's empire becomes `empire`, the body is shown again where it stands
+    /// (`RestartAtSamePos`), and its update goes to its view (`UpdatePacket`). The
+    /// store move follows after the step, through the outcome's empire half.
+    fn run_empire_move(
+        &mut self,
+        reader: Vid,
+        pid: u32,
+        account_pids: &[u32],
+        empire: u8,
+        mover: Mover,
+    ) -> bool {
+        let current = self.bodies.get(&reader).map_or(0, |body| body.card.empire);
+        if current == empire {
+            return false;
+        }
+        if self.parties.leader_of(pid).is_some() {
+            let to = mover.recipient(&self.locale);
+            let line = chat_packet(
+                to,
+                CHAT_TYPE_INFO,
+                b"You can't change your empire while you are in party",
+                &[],
+            );
+            let _sent = self.write_to_client(reader, line);
+            return false;
+        }
+        if account_pids
+            .iter()
+            .any(|sibling| self.guild_of(*sibling).is_some())
+        {
+            return false;
+        }
+        if let Some(body) = self.bodies.get_mut(&reader) {
+            body.card.empire = empire;
+        }
+        self.restart_at_same_pos(reader);
+        let flags = self.affect_flags_of(reader);
+        self.send_affect_update(reader, flags);
+        true
+    }
 
     /// One `pc.set_conqueror` call: `SetConqueror(true)` (`G/char.cpp:11659-11700`).
     /// A conqueror already, or below the level-120 filled marble, chats its line and
@@ -3329,7 +3533,7 @@ impl GameState {
         mover: Mover,
         pid: u32,
         queued: WorldMoves,
-    ) {
+    ) -> Option<u8> {
         let WorldMoves {
             laid,
             warps,
@@ -3359,6 +3563,8 @@ impl GameState {
             confirm_records,
             confirm_timeouts,
             rank_points,
+            empire_moves,
+            account_pids,
         } = queued;
         for item in laid {
             self.lay_given(reader, place, item);
@@ -3424,11 +3630,32 @@ impl GameState {
         for (kind, count) in rank_points {
             self.add_rank_point(reader, kind, count);
         }
+        let landed = self.apply_empire_moves(reader, pid, &account_pids, empire_moves, mover);
         for (x, y, private) in warps {
             self.order_quest_warp(reader, x, y, private, mover);
         }
+        landed
     }
 
+    /// A step's `pc.change_empire` calls, in call order: each the shadow passed runs
+    /// [`Self::run_empire_move`], and the last landing answers for the descriptor's
+    /// account store. Split out so [`Self::apply_world_moves`] stays under the line lint.
+    fn apply_empire_moves(
+        &mut self,
+        reader: Vid,
+        pid: u32,
+        account_pids: &[u32],
+        empires: Vec<u8>,
+        mover: Mover,
+    ) -> Option<u8> {
+        let mut landed = None;
+        for empire in empires {
+            if self.run_empire_move(reader, pid, account_pids, empire, mover) {
+                landed = Some(empire);
+            }
+        }
+        landed
+    }
     /// The `ds.*` window calls a step queued: the refine opens and the attr-change
     /// opens, in call order within each kind. The grants need no pass: each landed in
     /// its call, beside the script's own records.
@@ -3616,6 +3843,7 @@ impl GameState {
             (1, test_place::OX_MANAGER),
             test_place::AT,
             test_place::MOVER,
+            crate::game_loop_messages::QuestAccount::default(),
         );
         assert!(
             taken && self.quest_running(vid),
@@ -3626,7 +3854,13 @@ impl GameState {
     /// Answer the OX manager's menu with its last entry, which ends the script.
     pub(super) fn end_the_quest(&mut self, vid: Vid) {
         let answer = QuestStep::Answer(1);
-        let _records = self.quest(vid, &answer, test_place::AT, test_place::MOVER);
+        let _records = self.quest(
+            vid,
+            &answer,
+            test_place::AT,
+            test_place::MOVER,
+            crate::game_loop_messages::QuestAccount::default(),
+        );
         assert!(
             !self.quest_running(vid),
             "the menu's last entry ends the script"
@@ -3720,6 +3954,12 @@ struct ReaderContext {
     party_member_pids: Vec<u32>,
     /// The manager's name for the reader.
     horse_name: Vec<u8>,
+    /// The account's character PIDs, without the empty slots, for the empire change's
+    /// guild arm: legacy checks every character of the account.
+    account_pids: Vec<u32>,
+    /// How many times the reader's account changed its empire, read at the step's
+    /// start: what `pc.get_change_empire_count` pushes.
+    empire_changes: u32,
 }
 
 /// Every borrow [`GameState::arm_quest_session`] threads into its [`Session`], as
@@ -3848,6 +4088,8 @@ fn reader_context(
             .and_then(|pid| horse_names.get(&pid))
             .cloned()
             .unwrap_or_default(),
+        account_pids: Vec::new(),
+        empire_changes: 0,
     }
 }
 
@@ -4113,9 +4355,10 @@ fn session_head<'s>(
     name_rules: crate::select_phase::NameRules,
 ) -> Session<'s> {
     let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
-    let (pcs, online) = (quest_step_pcs(characters), quest_step_online(characters));
-    let (points, item_giver) = arm_item_giver(
-        characters.find_by_vid_mut(reader).ok(),
+    let pcs = quest_step_pcs(characters);
+    let online = quest_step_online(characters);
+    let giver = session_giver(session_giver_inputs(
+        characters,
         count_limit,
         ids,
         gauss,
@@ -4123,7 +4366,9 @@ fn session_head<'s>(
         masks,
         stores,
         pid,
-    );
+        reader,
+    ));
+    let (points, item_giver) = giver;
     Session {
         level,
         npcs: map_npcs(npcs, place),
@@ -4137,19 +4382,7 @@ fn session_head<'s>(
         war_map: context.war_map,
         dungeon: context.dungeon,
         dungeon_flags,
-        dungeon_sets: Vec::new(),
-        dungeon_jumps: Vec::new(),
-        dungeon_notices: Vec::new(),
-        dungeon_warps: Vec::new(),
-        dungeon_exits: Vec::new(),
-        dungeon_spawns: Vec::new(),
-        dungeon_singles: Vec::new(),
-        dungeon_clears: Vec::new(),
-        dungeon_kills: Vec::new(),
-        damage_race_sets: Vec::new(),
-        damage_affect_sets: Vec::new(),
-        server_timer_ops: Vec::new(),
-        event_sets: Vec::new(),
+        queues: SessionQueues::default(),
         tables,
         dice,
         reader,
@@ -4211,7 +4444,95 @@ fn session_head<'s>(
         confirm_records: Vec::new(),
         confirm_timeouts: Vec::new(),
         rank: RankStep::default(),
+        account_pids: context.account_pids,
+        empire_changes: context.empire_changes,
+        empire_moves: Vec::new(),
     }
+}
+
+/// The reader's points for a session.
+type SessionPoints<'s> = Option<&'s mut world::character::Points>;
+
+/// The reader's armed item giver for a session.
+type SessionGiver<'s> = Option<Giver<'s>>;
+
+/// What [`session_giver`] arms the item giver from: the character manager, the grant
+/// inputs, and the reader. One struct so the helper stays under the argument lint.
+struct SessionGiverInputs<'a, 's> {
+    characters: &'a mut world::character::CharacterManager,
+    count_limit: &'a u16,
+    ids: &'a mut Option<world::item::ItemIds>,
+    gauss: &'a mut world::character::Gauss,
+    attrs: &'a [gamedata::records::ItemAttrRecord],
+    masks: &'a gamedata::item_mask::ItemMasks,
+    stores: bool,
+    pid: u32,
+    reader: Vid,
+    phantom: std::marker::PhantomData<&'s ()>,
+}
+
+/// The inputs bundle for [`session_giver`].
+#[allow(clippy::too_many_arguments)]
+fn session_giver_inputs<'a, 's>(
+    characters: &'a mut world::character::CharacterManager,
+    count_limit: &'a u16,
+    ids: &'a mut Option<world::item::ItemIds>,
+    gauss: &'a mut world::character::Gauss,
+    attrs: &'a [gamedata::records::ItemAttrRecord],
+    masks: &'a gamedata::item_mask::ItemMasks,
+    stores: bool,
+    pid: u32,
+    reader: Vid,
+) -> SessionGiverInputs<'a, 's> {
+    SessionGiverInputs {
+        characters,
+        count_limit,
+        ids,
+        gauss,
+        attrs,
+        masks,
+        stores,
+        pid,
+        reader,
+        phantom: std::marker::PhantomData,
+    }
+}
+
+/// The item-giver half of [`session_head`]: the reader's points and its armed giver.
+/// Split out so the head stays under the line lint.
+fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, SessionGiver<'s>) {
+    let SessionGiverInputs {
+        characters,
+        count_limit,
+        ids,
+        gauss,
+        attrs,
+        masks,
+        stores,
+        pid,
+        reader,
+        phantom: _,
+    } = inputs;
+    arm_item_giver(
+        characters.find_by_vid_mut(reader).ok(),
+        count_limit,
+        ids,
+        gauss,
+        attrs,
+        masks,
+        stores,
+        pid,
+    )
+}
+
+/// The account half of a session's reader context: the character PIDs without the
+/// empty slots, with the stored empire-change count. Split out so `session_head`
+/// stays under the line lint.
+fn reader_account(account: &crate::game_loop_messages::QuestAccount) -> (Vec<u32>, u32) {
+    (
+        account.pids.into_iter().filter(|pid| *pid != 0).collect(),
+        account.changes,
+    )
 }
 
 #[cfg(test)]
@@ -4236,48 +4557,46 @@ mod tests {
         assert_eq!(input(&full), QuestStep::Input(vec![b'x'; 64]));
     }
 
-    /// Runs `f` with a session of character 1, in the mover's language, that names the
-    /// monsters of `protos` from `names` and the items of `items` from `item_names`.
-    fn with_session<R>(
-        (protos, names): (&MobProtos, &MobNamesByLanguage),
-        (items, item_names): (&ItemProtos, &ItemNamesByLanguage),
-        f: impl FnOnce(&mut Session<'_>) -> R,
-    ) -> R {
-        let locale = LocaleStrings::default();
-        let mut dice = Pcg32::new(1, 1);
-        let tables = gamedata::pc_skill_data::PcSkills::default();
-        let mut slots = super::super::pc_skill::PcSkillState::default();
-        let mut targets = QuestTargets::default();
-        let mut session = Session {
+    /// What varies across the test sessions: the tables, the card's job, and the armed
+    /// borrows. Everything else in a test session is empty or zero.
+    struct TestSession<'s> {
+        protos: &'s MobProtos,
+        names: &'s MobNamesByLanguage,
+        items: &'s ItemProtos,
+        item_names: &'s ItemNamesByLanguage,
+        locale: &'s LocaleStrings,
+        tables: &'s gamedata::pc_skill_data::PcSkills,
+        dice: &'s mut Pcg32,
+        slots: &'s mut super::super::pc_skill::PcSkillState,
+        targets: &'s mut QuestTargets,
+        job: u8,
+        affects: Option<&'s mut super::super::affect::AffectEvent>,
+        points: Option<&'s mut world::character::Points>,
+        giver: Option<Giver<'s>>,
+    }
+
+    /// A test session of character 1, in the mover's language, naming the monsters of
+    /// `params` from its names and the items from its item names. One constructor so the
+    /// five call sites stay under the line lint.
+    fn test_session(params: TestSession<'_>) -> Session<'_> {
+        Session {
             map_index: 0,
             war_map: 0,
             dungeon: 0,
             dungeon_flags: std::collections::BTreeMap::new(),
-            dungeon_sets: Vec::new(),
-            dungeon_jumps: Vec::new(),
-            dungeon_notices: Vec::new(),
-            dungeon_warps: Vec::new(),
-            dungeon_exits: Vec::new(),
-            dungeon_spawns: Vec::new(),
-            dungeon_singles: Vec::new(),
-            dungeon_clears: Vec::new(),
-            dungeon_kills: Vec::new(),
-            damage_race_sets: Vec::new(),
-            damage_affect_sets: Vec::new(),
-            server_timer_ops: Vec::new(),
-            event_sets: Vec::new(),
+            queues: SessionQueues::default(),
             level: 1,
             npcs: None,
-            protos,
-            names,
-            items,
-            item_names,
-            locale: &locale,
+            protos: params.protos,
+            names: params.names,
+            items: params.items,
+            item_names: params.item_names,
+            locale: params.locale,
             mover: test_place::MOVER,
-            tables: &tables,
-            dice: &mut dice,
+            tables: params.tables,
+            dice: params.dice,
             reader: Vid::new(1),
-            card: (3, 1),
+            card: (params.job, 1),
             pc_level: 10,
             caller: None,
             horse_name: Vec::new(),
@@ -4289,13 +4608,13 @@ mod tests {
             leadership: 0,
             guild_id: 0,
             is_guild_master: false,
-            slots: &mut slots,
-            affects: None,
+            slots: params.slots,
+            affects: params.affects,
             alignment: 0,
             alignment_changes: Vec::new(),
             gold_changes: Vec::new(),
             hides: Vec::new(),
-            points: None,
+            points: params.points,
             climbs: Vec::new(),
             guild_ops: Vec::new(),
             test_server: true,
@@ -4305,9 +4624,9 @@ mod tests {
             records: Vec::new(),
             block_mode: None,
             pid: 1,
-            targets: &mut targets,
+            targets: params.targets,
             pulse: 0,
-            giver: None,
+            giver: params.giver,
             item_rows: Vec::new(),
             laid: Vec::new(),
             gates: WarpGates::armed(),
@@ -4321,6 +4640,9 @@ mod tests {
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
             rank: RankStep::default(),
+            account_pids: Vec::new(),
+            empire_changes: 0,
+            empire_moves: Vec::new(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -4335,7 +4657,36 @@ mod tests {
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
-        };
+        }
+    }
+
+    /// Runs `f` with a session of character 1, in the mover's language, that names the
+    /// monsters of `protos` from `names` and the items of `items` from `item_names`.
+    fn with_session<R>(
+        (protos, names): (&MobProtos, &MobNamesByLanguage),
+        (items, item_names): (&ItemProtos, &ItemNamesByLanguage),
+        f: impl FnOnce(&mut Session<'_>) -> R,
+    ) -> R {
+        let locale = LocaleStrings::default();
+        let mut dice = Pcg32::new(1, 1);
+        let tables = gamedata::pc_skill_data::PcSkills::default();
+        let mut slots = super::super::pc_skill::PcSkillState::default();
+        let mut targets = QuestTargets::default();
+        let mut session = test_session(TestSession {
+            protos,
+            names,
+            items,
+            item_names,
+            locale: &locale,
+            tables: &tables,
+            dice: &mut dice,
+            slots: &mut slots,
+            targets: &mut targets,
+            job: 3,
+            affects: None,
+            points: None,
+            giver: None,
+        });
         f(&mut session)
     }
 
@@ -4363,21 +4714,21 @@ mod tests {
         with_session((&protos, &names), (&items, &item_names), |session| {
             session.dungeon_clear_regen();
             session.dungeon_kill_all();
-            assert!(session.dungeon_clears.is_empty());
-            assert!(session.dungeon_kills.is_empty());
+            assert!(session.queues.dungeon_clears.is_empty());
+            assert!(session.queues.dungeon_kills.is_empty());
             session.dungeon_set_damage_from_race(3, 777);
             session.dungeon_set_damage_from_affect(7, 778);
             session.dungeon_new_jump(210, 7824, 15021);
             assert_eq!(session.dungeon, -1);
-            assert_eq!(session.dungeon_singles, [(-1, 210, 7824, 15021)]);
+            assert_eq!(session.queues.dungeon_singles, [(-1, 210, 7824, 15021)]);
             session.dungeon_new_jump_party(107, 1, 2);
-            assert_eq!(session.dungeon_jumps, [(-2, 107, 1, 2)]);
+            assert_eq!(session.queues.dungeon_jumps, [(-2, 107, 1, 2)]);
             session.dungeon_clear_regen();
             session.dungeon_kill_all();
-            assert_eq!(session.dungeon_clears, [-2]);
-            assert_eq!(session.dungeon_kills, [-2]);
-            assert_eq!(session.damage_race_sets, [(3, 777)]);
-            assert_eq!(session.damage_affect_sets, [(7, 778)]);
+            assert_eq!(session.queues.dungeon_clears, [-2]);
+            assert_eq!(session.queues.dungeon_kills, [-2]);
+            assert_eq!(session.queues.damage_race_sets, [(3, 777)]);
+            assert_eq!(session.queues.damage_affect_sets, [(7, 778)]);
         });
     }
 
@@ -4678,94 +5029,21 @@ mod tests {
         let mut slots = super::super::pc_skill::PcSkillState::default();
         let mut targets = QuestTargets::default();
         let mut event = fresh_affect_event();
-        let mut session = Session {
-            map_index: 0,
-            war_map: 0,
-            dungeon: 0,
-            dungeon_flags: std::collections::BTreeMap::new(),
-            dungeon_sets: Vec::new(),
-            dungeon_jumps: Vec::new(),
-            dungeon_notices: Vec::new(),
-            dungeon_warps: Vec::new(),
-            dungeon_exits: Vec::new(),
-            dungeon_spawns: Vec::new(),
-            dungeon_singles: Vec::new(),
-            dungeon_clears: Vec::new(),
-            dungeon_kills: Vec::new(),
-            damage_race_sets: Vec::new(),
-            damage_affect_sets: Vec::new(),
-            server_timer_ops: Vec::new(),
-            event_sets: Vec::new(),
-            level: 1,
-            npcs: None,
+        let mut session = test_session(TestSession {
             protos: &protos,
             names: &names,
             items: &items,
             item_names: &item_names,
             locale: &locale,
-            mover: test_place::MOVER,
             tables: &tables,
             dice: &mut dice,
-            reader: Vid::new(1),
-            card: (3, 1),
-            pc_level: 10,
-            caller: None,
-            horse_name: Vec::new(),
-            name_rules: crate::select_phase::NameRules::default(),
-            gold: 0,
-            empire: 0,
-            char_name: Vec::new(),
-            position: (0, 0, 0, 0),
-            leadership: 0,
-            guild_id: 0,
-            is_guild_master: false,
             slots: &mut slots,
-            affects: Some(&mut event),
-            alignment: 0,
-            alignment_changes: Vec::new(),
-            gold_changes: Vec::new(),
-            hides: Vec::new(),
-            points: None,
-            climbs: Vec::new(),
-            guild_ops: Vec::new(),
-            test_server: true,
-            pcs: Vec::new(),
-            online: std::collections::HashMap::new(),
-            guilds: super::super::guild::GuildShadow::default(),
-            records: Vec::new(),
-            block_mode: None,
-            pid: 1,
             targets: &mut targets,
-            pulse: 0,
+            job: 3,
+            affects: Some(&mut event),
+            points: None,
             giver: None,
-            item_rows: Vec::new(),
-            laid: Vec::new(),
-            gates: WarpGates::armed(),
-            conqueror_level: 0,
-            party: PartyFlags::default(),
-            party_leader: None,
-            party_member_pids: Vec::new(),
-            blocked: Vec::new(),
-            switched: false,
-            takes: Vec::new(),
-            confirm_records: Vec::new(),
-            confirm_timeouts: Vec::new(),
-            rank: RankStep::default(),
-            party_flags: std::collections::HashMap::new(),
-            party_sets: Vec::new(),
-            channel: 1,
-            warps: Vec::new(),
-            drops: Vec::new(),
-            villages: 0,
-            conquerors: 0,
-            sash_opens: Vec::new(),
-            changelooks: 0,
-            minings: Vec::new(),
-            horse_ops: Vec::new(),
-            ds_gives: 0,
-            ds_refines: 0,
-            ds_attrs: 0,
-        };
+        });
         grant_ds_and_open(&mut session);
         assert_ds_grant(&session);
     }
@@ -4944,99 +5222,26 @@ mod tests {
         let mut targets = QuestTargets::default();
         let (mut held, mut quickslots) = (CharacterItems::new(), Quickslots::default());
         let (mut gauss, mut points) = (Gauss::new(), god_points());
-        let mut session = Session {
-            map_index: 0,
-            war_map: 0,
-            dungeon: 0,
-            dungeon_flags: std::collections::BTreeMap::new(),
-            dungeon_sets: Vec::new(),
-            dungeon_jumps: Vec::new(),
-            dungeon_notices: Vec::new(),
-            dungeon_warps: Vec::new(),
-            dungeon_exits: Vec::new(),
-            dungeon_spawns: Vec::new(),
-            dungeon_singles: Vec::new(),
-            dungeon_clears: Vec::new(),
-            dungeon_kills: Vec::new(),
-            damage_race_sets: Vec::new(),
-            damage_affect_sets: Vec::new(),
-            server_timer_ops: Vec::new(),
-            event_sets: Vec::new(),
-            level: 1,
-            npcs: None,
+        let mut session = test_session(TestSession {
             protos: &mobs,
             names: &names,
             items: &items_protos,
             item_names: &item_names,
             locale: &locale,
-            mover: test_place::MOVER,
             tables: &tables,
             dice: &mut dice,
-            reader: Vid::new(1),
-            card: (0, 1),
-            pc_level: 10,
-            caller: None,
-            horse_name: Vec::new(),
-            name_rules: crate::select_phase::NameRules::default(),
-            gold: 0,
-            empire: 0,
-            char_name: Vec::new(),
-            position: (0, 0, 0, 0),
-            leadership: 0,
-            guild_id: 0,
-            is_guild_master: false,
             slots: &mut slots,
-            affects: None,
-            alignment: 0,
-            alignment_changes: Vec::new(),
-            gold_changes: Vec::new(),
-            hides: Vec::new(),
-            points: Some(&mut points),
-            climbs: Vec::new(),
-            guild_ops: Vec::new(),
-            test_server: true,
-            pcs: Vec::new(),
-            online: std::collections::HashMap::new(),
-            guilds: super::super::guild::GuildShadow::default(),
-            records: Vec::new(),
-            block_mode: None,
-            pid: 1,
             targets: &mut targets,
-            pulse: 0,
+            job: 0,
+            affects: None,
+            points: Some(&mut points),
             giver: Some(giving_giver(
                 &mut held,
                 &mut quickslots,
                 &mut ids,
                 &mut gauss,
             )),
-            item_rows: Vec::new(),
-            laid: Vec::new(),
-            gates: WarpGates::armed(),
-            conqueror_level: 0,
-            party: PartyFlags::default(),
-            party_leader: None,
-            party_member_pids: Vec::new(),
-            blocked: Vec::new(),
-            switched: false,
-            takes: Vec::new(),
-            confirm_records: Vec::new(),
-            confirm_timeouts: Vec::new(),
-            rank: RankStep::default(),
-            party_flags: std::collections::HashMap::new(),
-            party_sets: Vec::new(),
-            channel: 1,
-            warps: Vec::new(),
-            drops: Vec::new(),
-            villages: 0,
-            conquerors: 0,
-            sash_opens: Vec::new(),
-            changelooks: 0,
-            minings: Vec::new(),
-            horse_ops: Vec::new(),
-            ds_gives: 0,
-            ds_refines: 0,
-            ds_attrs: 0,
-        };
+        });
         f(&mut session)
     }
 
@@ -5366,94 +5571,23 @@ mod tests {
         let mut dice = Pcg32::new(1, 1);
         let tables = gamedata::pc_skill_data::PcSkills::default();
         let mut slots = super::super::pc_skill::PcSkillState::default();
-        let mut session = Session {
-            map_index: 0,
-            war_map: 0,
-            dungeon: 0,
-            dungeon_flags: std::collections::BTreeMap::new(),
-            dungeon_sets: Vec::new(),
-            dungeon_jumps: Vec::new(),
-            dungeon_notices: Vec::new(),
-            dungeon_warps: Vec::new(),
-            dungeon_exits: Vec::new(),
-            dungeon_spawns: Vec::new(),
-            dungeon_singles: Vec::new(),
-            dungeon_clears: Vec::new(),
-            dungeon_kills: Vec::new(),
-            damage_race_sets: Vec::new(),
-            damage_affect_sets: Vec::new(),
-            server_timer_ops: Vec::new(),
-            event_sets: Vec::new(),
-            level: 1,
-            npcs: None,
+        let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
+        let mut targets = QuestTargets::default();
+        let mut session = test_session(TestSession {
             protos: &protos,
             names: &names,
-            items: &ItemProtos::default(),
-            item_names: &ItemNamesByLanguage::default(),
+            items: &items,
+            item_names: &item_names,
             locale: &locale,
-            mover: test_place::MOVER,
             tables: &tables,
             dice: &mut dice,
-            reader: Vid::new(1),
-            card: (0, 1),
-            pc_level: 10,
-            caller: None,
-            horse_name: Vec::new(),
-            name_rules: crate::select_phase::NameRules::default(),
-            gold: 0,
-            empire: 0,
-            char_name: Vec::new(),
-            position: (0, 0, 0, 0),
-            leadership: 0,
-            guild_id: 0,
-            is_guild_master: false,
             slots: &mut slots,
+            targets: &mut targets,
+            job: 0,
             affects: None,
-            alignment: 0,
-            alignment_changes: Vec::new(),
-            gold_changes: Vec::new(),
-            hides: Vec::new(),
             points: None,
-            climbs: Vec::new(),
-            guild_ops: Vec::new(),
-            test_server: true,
-            pcs: Vec::new(),
-            online: std::collections::HashMap::new(),
-            guilds: super::super::guild::GuildShadow::default(),
-            records: Vec::new(),
-            block_mode: None,
-            pid: 1,
-            targets: &mut QuestTargets::default(),
-            pulse: 0,
             giver: None,
-            item_rows: Vec::new(),
-            laid: Vec::new(),
-            gates: WarpGates::armed(),
-            conqueror_level: 0,
-            party: PartyFlags::default(),
-            party_leader: None,
-            party_member_pids: Vec::new(),
-            blocked: Vec::new(),
-            switched: false,
-            takes: Vec::new(),
-            confirm_records: Vec::new(),
-            confirm_timeouts: Vec::new(),
-            rank: RankStep::default(),
-            party_flags: std::collections::HashMap::new(),
-            party_sets: Vec::new(),
-            channel: 1,
-            warps: Vec::new(),
-            drops: Vec::new(),
-            villages: 0,
-            conquerors: 0,
-            sash_opens: Vec::new(),
-            changelooks: 0,
-            minings: Vec::new(),
-            horse_ops: Vec::new(),
-            ds_gives: 0,
-            ds_refines: 0,
-            ds_attrs: 0,
-        };
+        });
         send_quest_info_pair(&mut session);
         assert_quest_info_records(&session.records);
     }
@@ -5520,94 +5654,23 @@ mod tests {
         let mut dice = Pcg32::new(1, 1);
         let tables = gamedata::pc_skill_data::PcSkills::default();
         let mut slots = super::super::pc_skill::PcSkillState::default();
-        let mut session = Session {
-            map_index: 0,
-            war_map: 0,
-            dungeon: 0,
-            dungeon_flags: std::collections::BTreeMap::new(),
-            dungeon_sets: Vec::new(),
-            dungeon_jumps: Vec::new(),
-            dungeon_notices: Vec::new(),
-            dungeon_warps: Vec::new(),
-            dungeon_exits: Vec::new(),
-            dungeon_spawns: Vec::new(),
-            dungeon_singles: Vec::new(),
-            dungeon_clears: Vec::new(),
-            dungeon_kills: Vec::new(),
-            damage_race_sets: Vec::new(),
-            damage_affect_sets: Vec::new(),
-            server_timer_ops: Vec::new(),
-            event_sets: Vec::new(),
-            level: 1,
-            npcs: None,
+        let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
+        let mut targets = QuestTargets::default();
+        let mut session = test_session(TestSession {
             protos: &protos,
             names: &names,
-            items: &ItemProtos::default(),
-            item_names: &ItemNamesByLanguage::default(),
+            items: &items,
+            item_names: &item_names,
             locale: &locale,
-            mover: test_place::MOVER,
             tables: &tables,
             dice: &mut dice,
-            reader: Vid::new(1),
-            card: (0, 1),
-            pc_level: 10,
-            caller: None,
-            horse_name: Vec::new(),
-            name_rules: crate::select_phase::NameRules::default(),
-            gold: 0,
-            empire: 0,
-            char_name: Vec::new(),
-            position: (0, 0, 0, 0),
-            leadership: 0,
-            guild_id: 0,
-            is_guild_master: false,
             slots: &mut slots,
+            targets: &mut targets,
+            job: 0,
             affects: None,
-            alignment: 0,
-            alignment_changes: Vec::new(),
-            gold_changes: Vec::new(),
-            hides: Vec::new(),
             points: None,
-            climbs: Vec::new(),
-            guild_ops: Vec::new(),
-            test_server: true,
-            pcs: Vec::new(),
-            online: std::collections::HashMap::new(),
-            guilds: super::super::guild::GuildShadow::default(),
-            records: Vec::new(),
-            block_mode: None,
-            pid: 1,
-            targets: &mut QuestTargets::default(),
-            pulse: 0,
             giver: None,
-            item_rows: Vec::new(),
-            laid: Vec::new(),
-            gates: WarpGates::armed(),
-            conqueror_level: 0,
-            party: PartyFlags::default(),
-            party_leader: None,
-            party_member_pids: Vec::new(),
-            blocked: Vec::new(),
-            switched: false,
-            takes: Vec::new(),
-            confirm_records: Vec::new(),
-            confirm_timeouts: Vec::new(),
-            rank: RankStep::default(),
-            party_flags: std::collections::HashMap::new(),
-            party_sets: Vec::new(),
-            channel: 1,
-            warps: Vec::new(),
-            drops: Vec::new(),
-            villages: 0,
-            conquerors: 0,
-            sash_opens: Vec::new(),
-            changelooks: 0,
-            minings: Vec::new(),
-            horse_ops: Vec::new(),
-            ds_gives: 0,
-            ds_refines: 0,
-            ds_attrs: 0,
-        };
+        });
         send_block_mode_twice(&mut session);
         assert_eq!(session.records.len(), 2);
         let to = test_place::MOVER.recipient(&locale);
@@ -5682,7 +5745,7 @@ mod tests {
                 .load_flags(1, [(b"game_option.block_whisper".to_vec(), 1)]);
         }
 
-        world.quest_login(vid);
+        world.quest_login(vid, crate::game_loop_messages::QuestAccount::default());
         assert_eq!(world.block_modes.get(&vid), Some(&8));
         let mut lines = Vec::new();
         while let Ok(line) = inbox.try_recv() {
@@ -5709,6 +5772,27 @@ mod tests {
     /// (`quest::PC::EndRunning`, `G/questpc.cpp:342-346`) follows the button's `GC_SCRIPT`,
     /// and the quest window's entry (`CInputMain::ScriptButton` with the high bit,
     /// `G/input_main.cpp`) runs the quest's `info` script.
+    /// Press a quest window's info button: run the step for `quest | QUEST_INFO_BIT` and
+    /// answer its records.
+    fn press_info_button(
+        world: &mut crate::game_state::GameState,
+        vid: Vid,
+        quest: u32,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Vec<Vec<u8>> {
+        let (records, _climbs, _stores, _items, _gold, _claimed, _takes, _landed) = world
+            .quest(
+                vid,
+                &QuestStep::Button(quest | QUEST_INFO_BIT),
+                place,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the world holds the character");
+        records
+    }
+
     #[test]
     fn the_letter_titles_its_quest_and_the_window_runs_its_info() {
         use crate::game_state::fixtures::{a_world, enter, points_at, TestClock, PLACE};
@@ -5747,17 +5831,10 @@ mod tests {
         let mover = world.own_mover(vid).expect("in the world");
         // Before the login no state names the quest, so the window's entry runs nothing,
         // where the letter's own button would have started it (`NPC::OnInfo`).
-        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
-            .quest(
-                vid,
-                &QuestStep::Button(quest | QUEST_INFO_BIT),
-                place,
-                mover,
-            )
-            .expect("the world holds the character");
+        let records = press_info_button(&mut world, vid, quest, place, mover);
         assert!(records.is_empty(), "{records:?}");
 
-        world.quest_login(vid);
+        world.quest_login(vid, crate::game_loop_messages::QuestAccount::default());
         let mut lines = Vec::new();
         while let Ok(line) = inbox.try_recv() {
             lines.push(line);
@@ -5786,14 +5863,7 @@ mod tests {
             "the title follows its button"
         );
 
-        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
-            .quest(
-                vid,
-                &QuestStep::Button(quest | QUEST_INFO_BIT),
-                place,
-                mover,
-            )
-            .expect("the world holds the character");
+        let records = press_info_button(&mut world, vid, quest, place, mover);
         let info = records
             .iter()
             .find_map(|record| GcScript::decode(record).ok())
@@ -5805,18 +5875,9 @@ mod tests {
             "{info:?}"
         );
         // The dialog moved the quest to `talk`; a second press finds no script there.
-        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
-            .quest(
-                vid,
-                &QuestStep::Button(quest | QUEST_INFO_BIT),
-                place,
-                mover,
-            )
-            .expect("the world holds the character");
+        let records = press_info_button(&mut world, vid, quest, place, mover);
         assert!(records.is_empty(), "{records:?}");
-        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
-            .quest(vid, &QuestStep::Button(999 | QUEST_INFO_BIT), place, mover)
-            .expect("the world holds the character");
+        let records = press_info_button(&mut world, vid, 999, place, mover);
         assert!(records.is_empty(), "an unknown quest is quiet: {records:?}");
     }
 
@@ -5871,12 +5932,13 @@ mod tests {
         };
         let mover = world.own_mover(vid).expect("in the world");
         let left = |world: &mut GameState, minutes: i32| {
-            let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
+            let (records, _climbs, _stores, _items, _gold, _claimed, _takes, _landed) = world
                 .quest(
                     vid,
                     &QuestStep::Button(quest | QUEST_INFO_BIT),
                     place,
                     mover,
+                    crate::game_loop_messages::QuestAccount::default(),
                 )
                 .expect("the world holds the character");
             let info = records
@@ -6223,8 +6285,14 @@ mod tests {
         let (mut world, _inbox, _records, sash) = marked_theowahdan(&clock);
         let vid = Vid::new(1);
         let mover = world.own_mover(vid).expect("in the world");
-        let (taken, (records, _climbs, _stores, _items, _gold, _claimed, _takes)) =
-            world.quest_click(vid, (THEOWAHDAN, 60_003), beside(), mover);
+        let (taken, (records, _climbs, _stores, _items, _gold, _claimed, _takes, _landed)) = world
+            .quest_click(
+                vid,
+                (THEOWAHDAN, 60_003),
+                beside(),
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            );
         assert!(taken);
         assert_eq!(records[0], [124, 1, 0, 0, 0], "{records:?}");
         let page = GcScript::decode(&records[1]).expect("the first page");
@@ -6243,27 +6311,24 @@ mod tests {
     /// a `wait_time` an hour out the spiral's use reads the proto value (`item.get_value`
     /// answers the `VALUE3` 10), shortens the wait by a tenth, banks the new stamp, and
     /// takes the spiral. No dialog waits.
-    #[test]
-    fn the_time_spiral_shortens_the_attr67_wait_through_the_live_script() {
-        use crate::game_state::fixtures::{a_world, enter_seeing_with, TestClock, PLACE};
-        use common::item_slots::EWindows;
+    /// Enter character 1 holding a time spiral, load the owner quests, and bank an hour's
+    /// attr67 wait for it. Answer the inbox, its player ID, and the banked stamp.
+    fn enter_spiral_wait(
+        world: &mut crate::game_state::GameState,
+        cell: protocol::item_pos::ItemPos,
+    ) -> (tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, u32, i32) {
+        use crate::game_state::fixtures::{enter_seeing_with, PLACE};
         use gamedata::mob_locale_names::MobNamesByLanguage;
-        use protocol::item_pos::ItemPos;
         use quest::manager::Manager;
         use std::sync::Arc;
         use world::item::Item;
 
-        let clock = TestClock::default();
-        let mut world = a_world(&clock);
-        let vid = Vid::new(1);
-        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
         let mut spiral = Item::new(11, 72_347);
         spiral.set_size(1).expect("a positive footprint");
         spiral.set_count(1).expect("a positive count");
         let (mut inbox, _shown) =
-            enter_seeing_with(&mut world, PLACE, 1, (5, 5), 10_000, &[(cell, spiral)]);
+            enter_seeing_with(world, PLACE, 1, (5, 5), 10_000, &[(cell, spiral)]);
         while inbox.try_recv().is_ok() {}
-
         let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../legacy/gamedata/locale/europe");
         let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
@@ -6272,6 +6337,7 @@ mod tests {
             Arc::default(),
             MobNamesByLanguage::default(),
         ));
+        let vid = Vid::new(1);
         let pid = world
             .characters()
             .find_by_vid(vid)
@@ -6291,13 +6357,27 @@ mod tests {
             .expect("the quests are loaded")
             .manager_mut()
             .load_flags(pid, [(b"attr67add_item.wait_time".to_vec(), seeded)]);
+        (inbox, pid, seeded)
+    }
+
+    #[test]
+    fn the_time_spiral_shortens_the_attr67_wait_through_the_live_script() {
+        use crate::game_state::fixtures::{a_world, TestClock, PLACE};
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let vid = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let (mut inbox, pid, seeded) = enter_spiral_wait(&mut world, cell);
         // Thirty levels open the login's letter gate.
         world
             .characters
             .find_by_vid_mut(vid)
             .expect("the reader is in the world")
             .set_points(Some(crate::game_state::fixtures::points_at(30, 10_000, 0)));
-        world.quest_login(vid);
+        world.quest_login(vid, crate::game_loop_messages::QuestAccount::default());
         let quest = world
             .quests
             .as_ref()
@@ -6314,13 +6394,26 @@ mod tests {
         };
         let mover = world.own_mover(vid).expect("in the world");
         world
-            .quest(vid, &QuestStep::Button(quest), place, mover)
+            .quest(
+                vid,
+                &QuestStep::Button(quest),
+                place,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the button runs");
         assert!(
             !world.quest_running(vid),
             "the button's page ends without a wait"
         );
-        let used = world.use_item(vid, cell, mover).expect("the use runs");
+        let used = world
+            .use_item(
+                vid,
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the use runs");
         assert_eq!(used.kind, world::character::MoveKind::QuestUsed);
         assert!(!world.quest_running(vid), "no dialog waits");
         let left = world
@@ -6377,12 +6470,19 @@ mod tests {
         let mover = world.own_mover(vid).expect("the entrant has a body");
         while inbox.try_recv().is_ok() {}
         world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.drop_with_ownership(2145, 1, Some(300));
-                game.drop_with_ownership(2145, 1, None);
-                game.drop_with_ownership(2145, 1, Some(10));
-                game.drop_with_ownership(85_000, 1, Some(300));
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.drop_with_ownership(2145, 1, Some(300));
+                    game.drop_with_ownership(2145, 1, None);
+                    game.drop_with_ownership(2145, 1, Some(10));
+                    game.drop_with_ownership(85_000, 1, Some(300));
+                },
+            )
             .expect("the quests are loaded");
         let mut ground: Vec<_> = world.ground.values().collect();
         ground.sort_by_key(|lying| lying.ground.vid);
@@ -6444,9 +6544,16 @@ mod tests {
                 .expect("the reader stands")
                 .set_points(Some(points));
             world
-                .run_quests(place, mover, 10, pid, |_manager, game| {
-                    game.set_conqueror();
-                })
+                .run_quests(
+                    place,
+                    mover,
+                    10,
+                    pid,
+                    crate::game_loop_messages::QuestAccount::default(),
+                    |_manager, game| {
+                        game.set_conqueror();
+                    },
+                )
                 .expect("the quests are loaded");
         };
         // A conqueror already: the first line, and nothing moves.
@@ -6542,26 +6649,47 @@ mod tests {
         while inbox.try_recv().is_ok() {}
         // Fresh: the combination window opens.
         world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.open_sash(true);
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.open_sash(true);
+                },
+            )
             .expect("the quests are loaded");
         let open = protocol::gc_sash::GcSash::open(true).encode();
         assert_eq!(inbox.try_recv().expect("the open record"), open);
         while inbox.try_recv().is_ok() {}
         // Same window again: `SASH_OPEN`, and nothing moves.
         world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.open_sash(true);
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.open_sash(true);
+                },
+            )
             .expect("the quests are loaded");
         assert_eq!(inbox.try_recv().expect("the already line"), already);
         while inbox.try_recv().is_ok() {}
         // Absorption over combination: `COMBINE_CLOSE`.
         world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.open_sash(false);
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.open_sash(false);
+                },
+            )
             .expect("the quests are loaded");
         assert_eq!(inbox.try_recv().expect("the close line"), close);
         while inbox.try_recv().is_ok() {}
@@ -6598,17 +6726,31 @@ mod tests {
         );
         while inbox.try_recv().is_ok() {}
         world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.open_changelook();
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.open_changelook();
+                },
+            )
             .expect("the quests are loaded");
         let open = protocol::gc_changelook::GcChangeLook::open().encode();
         assert_eq!(inbox.try_recv().expect("the open record"), open);
         while inbox.try_recv().is_ok() {}
         world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.open_changelook();
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.open_changelook();
+                },
+            )
             .expect("the quests are loaded");
         assert_eq!(inbox.try_recv().expect("the already line"), already);
         while inbox.try_recv().is_ok() {}
@@ -6641,25 +6783,44 @@ mod tests {
         let flag = b"frt_dungeon_index".to_vec();
         // No party: the set is quiet, the reads answer 0 and -1.
         let (read, leader) = world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.set_party_flag(flag.clone(), 210);
-                (game.party_flag(&flag), game.party_leader_pid())
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.set_party_flag(flag.clone(), 210);
+                    (game.party_flag(&flag), game.party_leader_pid())
+                },
+            )
             .expect("the quests are loaded")
             .0;
         assert_eq!((read, leader), (0, -1));
         // In a party: the set lands and the next step reads it back.
         world.create_party(pid);
         world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                game.set_party_flag(flag.clone(), 210);
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| {
+                    game.set_party_flag(flag.clone(), 210);
+                },
+            )
             .expect("the quests are loaded");
         assert_eq!(world.parties.flag_of(pid, &flag), 210);
         let (read, leader) = world
-            .run_quests(place, mover, 10, pid, |_manager, game| {
-                (game.party_flag(&flag), game.party_leader_pid())
-            })
+            .run_quests(
+                place,
+                mover,
+                10,
+                pid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |_manager, game| (game.party_flag(&flag), game.party_leader_pid()),
+            )
             .expect("the quests are loaded")
             .0;
         assert_eq!(

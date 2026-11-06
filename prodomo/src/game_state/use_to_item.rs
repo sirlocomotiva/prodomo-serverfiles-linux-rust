@@ -131,7 +131,12 @@ impl GameState {
     ) -> Result<MovedItems, MoveItemRefused> {
         let arm = self.use_arm(vid, at);
         if matches!(arm, Arm::Plain) {
-            return self.use_item(vid, at, actor);
+            return self.use_item(
+                vid,
+                at,
+                actor,
+                crate::game_loop_messages::QuestAccount::default(),
+            );
         }
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));

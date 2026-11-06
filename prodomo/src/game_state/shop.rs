@@ -227,6 +227,8 @@ pub enum ShopAnswer {
         claimed: bool,
         /// The blocked takes' rows by owner PID, for the same store.
         takes: Vec<(u32, Vec<db::items::RowChange>)>,
+        /// The empire a `pc.change_empire` call landed, if one did, for the account store.
+        empire: Option<u8>,
     },
 }
 
@@ -308,12 +310,13 @@ impl GameState {
         step: ShopStep,
         place: GroundPlace,
         mover: Mover,
+        account: crate::game_loop_messages::QuestAccount,
     ) -> Result<ShopAnswer, MoveItemRefused> {
         if self.characters.find_by_vid(vid).is_err() {
             return Err(MoveItemRefused::NoSuchCharacter { vid });
         }
         match step {
-            ShopStep::Click { target } => Ok(self.open_shop(vid, target, place, mover)),
+            ShopStep::Click { target } => Ok(self.open_shop(vid, target, place, mover, account)),
             ShopStep::Buy { pos } => self.buy(vid, pos, place, mover),
             ShopStep::Sell { cell, count } => self.sell(vid, cell, count, place, mover),
             ShopStep::End => Ok(self.close_shop(vid)),
@@ -336,7 +339,14 @@ impl GameState {
     }
 
     /// `CHARACTER::OnClick` on an NPC: the quests first, then its click trigger.
-    fn open_shop(&mut self, vid: Vid, target: u32, place: GroundPlace, mover: Mover) -> ShopAnswer {
+    fn open_shop(
+        &mut self,
+        vid: Vid,
+        target: u32,
+        place: GroundPlace,
+        mover: Mover,
+        account: crate::game_loop_messages::QuestAccount,
+    ) -> ShopAnswer {
         if self.is_dead(vid.raw()) {
             return ShopAnswer::silent(ShopDeclined::Dead);
         }
@@ -346,10 +356,16 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
-        let (taken, (mut records, climbs, guild_ops, items, gold, claimed, take_sides)) =
-            self.quest_click(vid, (target, race), place, mover);
+        let (taken, (mut records, climbs, guild_ops, items, gold, claimed, take_sides, landed)) =
+            self.quest_click(vid, (target, race), place, mover, account);
         // A give's rows are stored even when no script took the click.
-        if taken || !items.is_empty() || gold.is_some() || claimed || !take_sides.is_empty() {
+        if taken
+            || !items.is_empty()
+            || gold.is_some()
+            || claimed
+            || !take_sides.is_empty()
+            || landed.is_some()
+        {
             return ShopAnswer::Quest {
                 records,
                 climbs,
@@ -358,6 +374,7 @@ impl GameState {
                 gold,
                 claimed,
                 takes: take_sides,
+                empire: landed,
             };
         }
         match self.open_window(vid, target, place, mover) {
@@ -786,7 +803,15 @@ mod tests {
     }
 
     fn step(state: &mut GameState, step: ShopStep, place: GroundPlace) -> ShopAnswer {
-        state.shop(SHOPPER, step, place, of(1)).unwrap()
+        state
+            .shop(
+                SHOPPER,
+                step,
+                place,
+                of(1),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .unwrap()
     }
 
     fn click(state: &mut GameState, target: u32, place: GroundPlace) -> ShopAnswer {
@@ -958,12 +983,30 @@ mod tests {
         ] {
             let mut state = a_market(9000, &[], true).with_shop_price_3x_disabled(disabled);
             let click = ShopStep::Click { target: WEAPONS };
-            let opened = state.shop(SHOPPER, click, at(0), of(empire)).unwrap();
+            let opened = state
+                .shop(
+                    SHOPPER,
+                    click,
+                    at(0),
+                    of(empire),
+                    crate::game_loop_messages::QuestAccount::default(),
+                )
+                .unwrap();
             let shown = window(opened);
             assert_eq!(shown.items[1].price, price, "{disabled} {empire}");
             assert_eq!(shown.items[0].price, price / 3000 * 110_000);
             let paid = ShopStep::Buy { pos: 1 };
-            let bought = moved(state.shop(SHOPPER, paid, at(0), of(empire)).unwrap());
+            let bought = moved(
+                state
+                    .shop(
+                        SHOPPER,
+                        paid,
+                        at(0),
+                        of(empire),
+                        crate::game_loop_messages::QuestAccount::default(),
+                    )
+                    .unwrap(),
+            );
             assert_eq!(bought.gold, Some(-i64::try_from(price).unwrap()));
             assert_eq!(
                 gold(&state),
@@ -973,10 +1016,28 @@ mod tests {
         }
         let mut short = a_market(8999, &[], true);
         let click = ShopStep::Click { target: WEAPONS };
-        let _window = window(short.shop(SHOPPER, click, at(0), of(2)).unwrap());
+        let _window = window(
+            short
+                .shop(
+                    SHOPPER,
+                    click,
+                    at(0),
+                    of(2),
+                    crate::game_loop_messages::QuestAccount::default(),
+                )
+                .unwrap(),
+        );
         let paid = ShopStep::Buy { pos: 1 };
         assert_eq!(
-            short.shop(SHOPPER, paid, at(0), of(2)).unwrap(),
+            short
+                .shop(
+                    SHOPPER,
+                    paid,
+                    at(0),
+                    of(2),
+                    crate::game_loop_messages::QuestAccount::default()
+                )
+                .unwrap(),
             answered(ShopRefused::NotEnoughMoney, 5)
         );
         assert_eq!((gold(&short), held(&short, 0)), (8999, None));
@@ -1356,6 +1417,7 @@ mod tests {
             gold: None,
             claimed: false,
             takes: Vec::new(),
+            empire: None,
         };
         assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
         assert!(state.browsing.is_empty());
@@ -1440,7 +1502,13 @@ mod tests {
             ShopStep::End,
         ] {
             assert_eq!(
-                state.shop(nobody, request, at(0), of(1)),
+                state.shop(
+                    nobody,
+                    request,
+                    at(0),
+                    of(1),
+                    crate::game_loop_messages::QuestAccount::default(),
+                ),
                 Err(MoveItemRefused::NoSuchCharacter { vid: nobody })
             );
         }
@@ -1476,6 +1544,7 @@ mod tests {
             step: ShopStep::Click { target: WEAPONS },
             place: at(0),
             mover: of(1),
+            account: crate::game_loop_messages::QuestAccount::default(),
             reply,
         });
         let opened = answer.blocking_recv().unwrap().unwrap();
@@ -1487,6 +1556,7 @@ mod tests {
             step: ShopStep::End,
             place: at(0),
             mover: of(1),
+            account: crate::game_loop_messages::QuestAccount::default(),
             reply,
         });
         assert!(

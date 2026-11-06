@@ -673,6 +673,64 @@ pub async fn select_empire(
     Ok(true)
 }
 
+/// How many times the account changed its empire (`CHARACTER::GetChangeEmpireCount`,
+/// `G/char_change_empire.cpp:131-162`): the `change_empire` row, and 0 with none.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`] or [`AccountError::Database`].
+pub async fn change_empire_count(store: &Store, account: AccountId) -> Result<u32, AccountError> {
+    let count: Option<i32> =
+        sqlx::query_scalar("SELECT change_count FROM change_empire WHERE account_id = $1")
+            .bind(account.to_column()?)
+            .fetch_optional(store.pool())
+            .await?;
+    count.map_or(Ok(0), |count| narrow(count, "change_count"))
+}
+
+/// Move the account to `empire` and count the change (`CHARACTER::ChangeEmpire`'s fourth
+/// arm, `G/char_change_empire.cpp:105-128`, with `SetChangeEmpireCount`, `:164-185`): the
+/// account row takes the empire and the `change_empire` row counts one more, in one
+/// transaction. Returns `false`, and changes nothing, when the account already holds the
+/// empire. Legacy's update keys on the pids and the old empire and its count insert swaps
+/// the columns (`VALUES(account_id, count)` into `(change_count, account_id)`), both
+/// Defects; here the account is the key and the row counts up.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`] or [`AccountError::Database`].
+pub async fn change_empire(
+    store: &Store,
+    account: AccountId,
+    empire: u8,
+) -> Result<bool, AccountError> {
+    let account_id = account.to_column()?;
+    let mut transaction = store.pool().begin().await?;
+    let current: i16 = sqlx::query_scalar("SELECT empire FROM account WHERE id = $1 FOR UPDATE")
+        .bind(account_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(AccountError::NoSuchAccountId(account))?;
+    if current == i16::from(empire) {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE account SET empire = $2 WHERE id = $1")
+        .bind(account_id)
+        .bind(i16::from(empire))
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO change_empire (account_id, change_count) VALUES ($1, 1) \
+         ON CONFLICT (account_id) DO UPDATE SET change_count = change_empire.change_count + 1, \
+         changed_at = now()",
+    )
+    .bind(account_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
 /// Give a character the new Name it was asked to choose, and clear the request. Returns `false`,
 /// and changes nothing, when another character has the Name regardless of case (legacy
 /// `HEADER_DG_PLAYER_CREATE_ALREADY`, `D/ClientManagerLogin.cpp:618-660`).

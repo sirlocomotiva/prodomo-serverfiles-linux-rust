@@ -982,7 +982,7 @@ impl GameState {
 
     /// `RestartAtSamePos` (`G/char.cpp:1021-1056`): the body is shown again where it stands,
     /// which removes and re-inserts it for itself and its view.
-    fn restart_at_same_pos(&mut self, vid: Vid) {
+    pub(super) fn restart_at_same_pos(&mut self, vid: Vid) {
         let raw = vid.raw();
         let Some(spot) = self.spot_of(raw) else {
             return;
@@ -2259,7 +2259,12 @@ mod tests {
 
         field.struck_down(ALPHA);
         assert_eq!(
-            field.world.use_item(ALPHA, cell, mover()),
+            field.world.use_item(
+                ALPHA,
+                cell,
+                mover(),
+                crate::game_loop_messages::QuestAccount::default()
+            ),
             refused(MoveRefused::UsedWhileDown)
         );
         let dropped = field.world.drop_item(ALPHA, cell, 1, here(), mover());
@@ -2277,7 +2282,12 @@ mod tests {
         assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1, None));
         assert!(field.world.trading.is_empty(), "the death ends the trade");
         assert_eq!(
-            field.world.use_item(ALPHA, cell, mover()),
+            field.world.use_item(
+                ALPHA,
+                cell,
+                mover(),
+                crate::game_loop_messages::QuestAccount::default()
+            ),
             refused(MoveRefused::UsedWhileDown)
         );
         assert_eq!(

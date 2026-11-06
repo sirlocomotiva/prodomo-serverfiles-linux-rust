@@ -4713,7 +4713,12 @@ mod tests {
         let cell =
             protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
         let used = world
-            .use_item(Vid::new(1), cell, mover)
+            .use_item(
+                Vid::new(1),
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the read runs");
         assert_eq!(used.kind, world::character::MoveKind::Used);
         assert_eq!(world.pc_skill_level(1, SKILL_LEADERSHIP), 1);
@@ -4753,7 +4758,12 @@ mod tests {
         let cell =
             protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
         let used = world
-            .use_item(Vid::new(1), cell, mover)
+            .use_item(
+                Vid::new(1),
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the step answers");
         assert!(used.changes.is_empty(), "nothing was consumed");
         assert!(
@@ -4783,7 +4793,12 @@ mod tests {
         let cell =
             protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
         let used = world
-            .use_item(Vid::new(1), cell, mover)
+            .use_item(
+                Vid::new(1),
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the step answers");
         assert!(used.changes.is_empty(), "nothing was consumed");
         let frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
@@ -4811,7 +4826,12 @@ mod tests {
         let cell =
             protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
         let used = world
-            .use_item(Vid::new(1), cell, mover)
+            .use_item(
+                Vid::new(1),
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the read runs");
         assert_eq!(used.kind, world::character::MoveKind::Used);
         assert_eq!(
@@ -4841,7 +4861,12 @@ mod tests {
         let cell =
             protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
         let _ = world
-            .use_item(Vid::new(1), cell, mover)
+            .use_item(
+                Vid::new(1),
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the first read runs");
         let mut book = world::item::Item::new(12, 50301);
         book.set_size(1).expect("a positive footprint");
@@ -4854,7 +4879,12 @@ mod tests {
             .expect("a second book is held");
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
         let used = world
-            .use_item(Vid::new(1), cell, mover)
+            .use_item(
+                Vid::new(1),
+                cell,
+                mover,
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the step answers");
         assert!(used.changes.is_empty(), "nothing was consumed");
         let frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
@@ -4933,19 +4963,7 @@ mod tests {
             war_map: 0,
             dungeon: 0,
             dungeon_flags: std::collections::BTreeMap::new(),
-            dungeon_sets: Vec::new(),
-            dungeon_jumps: Vec::new(),
-            dungeon_notices: Vec::new(),
-            dungeon_warps: Vec::new(),
-            dungeon_exits: Vec::new(),
-            dungeon_spawns: Vec::new(),
-            dungeon_singles: Vec::new(),
-            dungeon_clears: Vec::new(),
-            dungeon_kills: Vec::new(),
-            damage_race_sets: Vec::new(),
-            damage_affect_sets: Vec::new(),
-            server_timer_ops: Vec::new(),
-            event_sets: Vec::new(),
+            queues: super::super::quests::SessionQueues::default(),
             takes: Vec::new(),
             level: pc_level,
             npcs: None,
@@ -5004,6 +5022,9 @@ mod tests {
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
             rank: crate::game_state::rank_global::RankStep::default(),
+            account_pids: Vec::new(),
+            empire_changes: 0,
+            empire_moves: Vec::new(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -5041,6 +5062,7 @@ mod tests {
                 None,
                 false,
                 Vec::new(),
+                None,
             ),
         )
     }
@@ -5054,7 +5076,7 @@ mod tests {
         world.bodies.get_mut(&Vid::new(1)).unwrap().card.skill_group = 1;
         world.set_pc_skill_level(1, 1, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _, _, _, _)) = grand_read(&mut world, 1, 6);
+        let (climbed, (records, climbs, _, _, _, _, _, _)) = grand_read(&mut world, 1, 6);
         assert!(climbed);
         assert_eq!(world.pc_skill_level(1, 1), 31);
         assert_eq!(climbs.len(), 1, "the climb is queued for the store");
@@ -5091,7 +5113,7 @@ mod tests {
         let (mut world, mut inbox) = a_reader(50301, 25_000);
         world.set_pc_skill_level(1, SKILL_LEADERSHIP, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _, _, _, _)) =
+        let (climbed, (records, climbs, _, _, _, _, _, _)) =
             grand_read(&mut world, SKILL_LEADERSHIP, 1);
         assert!(!climbed);
         assert!(climbs.is_empty(), "no climb, no store");

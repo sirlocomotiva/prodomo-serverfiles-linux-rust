@@ -261,6 +261,7 @@ impl GameState {
                 vid,
                 protocol::item_pos::ItemPos::new(EWindows::Inventory as u8, 0),
                 actor,
+                crate::game_loop_messages::QuestAccount::default(),
             );
         };
         self.tell(vid, mover, CHAT_TYPE_INFO, b"COSTUME status:", &[]);
@@ -301,7 +302,12 @@ impl GameState {
         let Some(at) = asked_at else {
             return self.empty_costume_step(vid, actor);
         };
-        self.use_item(vid, at, actor)
+        self.use_item(
+            vid,
+            at,
+            actor,
+            crate::game_loop_messages::QuestAccount::default(),
+        )
     }
 
     /// The status chat lines of one costume piece's attributes: each attribute up to the

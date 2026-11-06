@@ -2392,6 +2392,7 @@ impl GameState {
             // `ch->ReadOfflineMessages()` (`G/input_login.cpp:728-729`): the lines
             // that waited for this character are read when it enters.
             self.deliver_offline_messages(vid, name);
+            let account = loaded.account;
             let shown = self.shown_on_admit(vid, player_id, name, loaded);
             // `EnterHorse` (`G/input_login.cpp:647-650`) and the `__FIX_NIVEL_CAL__` horse
             // refresh (`:887-897`), the last `Entergame` lines before the quest login.
@@ -2402,8 +2403,10 @@ impl GameState {
             // `CQuestManager::Login` (`G/input_db.cpp:1005-1048`) runs once the
             // descriptor is in `PHASE_GAME`, after everything `Entergame` sent; its
             // records ride the outbox, which the descriptor drains after the burst.
-            self.quest_login(vid);
-            shown
+            // A `pc.change_empire` call that landed rides the answer for the
+            // descriptor's account store, as a dialog step's does.
+            let landed = self.quest_login(vid, account);
+            Shown { landed, ..shown }
         });
         if reply.send(answer).is_err() {
             debug!(
@@ -2948,6 +2951,7 @@ impl GameState {
             priv_lines,
             letters_event,
             observer: self.is_observing(vid),
+            landed: None,
         }
     }
 
@@ -3365,7 +3369,12 @@ impl GameState {
             }
             return self.nothing_used(vid, actor);
         }
-        self.use_item(vid, at, actor)
+        self.use_item(
+            vid,
+            at,
+            actor,
+            crate::game_loop_messages::QuestAccount::default(),
+        )
     }
 
     /// A use line's answer when nothing was used: an empty step with the points as they
@@ -3490,6 +3499,7 @@ impl GameState {
         vid: common::vid::Vid,
         at: protocol::item_pos::ItemPos,
         actor: Mover,
+        account: crate::game_loop_messages::QuestAccount,
     ) -> Result<MovedItems, MoveItemRefused> {
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
@@ -3549,7 +3559,7 @@ impl GameState {
             if pickup {
                 self.use_pickup_item(vid, actor);
             } else {
-                self.use_quest_item(vid, at, actor, &mut moved);
+                self.use_quest_item(vid, at, actor, account, &mut moved);
             }
         }
         // `StartAffectEvent`: a potion that left recovery starts the event, one second out,
@@ -3934,18 +3944,23 @@ impl GameState {
                 vid,
                 at,
                 mover,
+                account,
                 reply,
-            } => answer_item_step(vid, reply, self.use_item(vid, at, mover)),
+            } => answer_item_step(vid, reply, self.use_item(vid, at, mover, account)),
             GameCommand::Shop {
                 vid,
                 step,
                 place,
                 mover,
+                account,
                 reply,
             } => {
                 // As with a move, a dropped answer leaves the world ahead of the store.
                 let place = self.live_place(vid, place);
-                if reply.send(self.shop(vid, step, place, mover)).is_err() {
+                if reply
+                    .send(self.shop(vid, step, place, mover, account))
+                    .is_err()
+                {
                     warn!(
                         ?vid,
                         ?step,
@@ -4009,8 +4024,9 @@ impl GameState {
                 step,
                 place,
                 mover,
+                account,
                 reply,
-            } => self.answer_quest_step(vid, &step, place, mover, reply),
+            } => self.answer_quest_step(vid, &step, place, mover, account, reply),
             _ => debug_assert!(false, "only item steps reach apply_item_step"),
         }
     }
@@ -4095,10 +4111,14 @@ impl GameState {
         step: &QuestStep,
         place: GroundPlace,
         mover: crate::item_move::Mover,
+        account: crate::game_loop_messages::QuestAccount,
         reply: tokio::sync::oneshot::Sender<Result<QuestStepOutcome, MoveItemRefused>>,
     ) {
         let place = self.live_place(vid, place);
-        if reply.send(self.quest(vid, step, place, mover)).is_err() {
+        if reply
+            .send(self.quest(vid, step, place, mover, account))
+            .is_err()
+        {
             debug!(
                 ?vid,
                 ?step,
@@ -4568,10 +4588,17 @@ impl GameState {
         let level = self.characters.find_by_vid(vid).map_or(1, |giver| {
             giver.points().map_or(1, world::character::Points::level)
         });
-        let landed = self.run_quests(place, actor, level, pid, |manager, game| {
-            manager.set_quest_npc(target);
-            manager.take(pid, (id, race), game);
-        });
+        let landed = self.run_quests(
+            place,
+            actor,
+            level,
+            pid,
+            crate::game_loop_messages::QuestAccount::default(),
+            |manager, game| {
+                manager.set_quest_npc(target);
+                manager.take(pid, (id, race), game);
+            },
+        );
         let Some(((), (records, _, _, block_mode, _, _, _))) = landed else {
             return Vec::new();
         };
@@ -6621,7 +6648,12 @@ mod tests {
         drop_at(&mut state, 6, 0);
         state.start_a_quest(Vid::new(7));
         let refused = |reason| Err(MoveItemRefused::Refused(reason));
-        let used = state.use_item(Vid::new(7), inventory(0), a_mover());
+        let used = state.use_item(
+            Vid::new(7),
+            inventory(0),
+            a_mover(),
+            crate::game_loop_messages::QuestAccount::default(),
+        );
         assert_eq!(
             used.map(|moved| moved.kind),
             refused(MoveRefused::UsedWhileQuesting)
@@ -6645,7 +6677,12 @@ mod tests {
             picked.map(|moved| moved.kind),
             Ok(world::character::MoveKind::PickedUp)
         );
-        let used = state.use_item(Vid::new(7), inventory(0), a_mover());
+        let used = state.use_item(
+            Vid::new(7),
+            inventory(0),
+            a_mover(),
+            crate::game_loop_messages::QuestAccount::default(),
+        );
         assert_eq!(
             used.map(|moved| moved.kind),
             Ok(world::character::MoveKind::Used)
@@ -7153,7 +7190,12 @@ mod tests {
         let before = points_at_seven(&state);
         state.process_pulse(3);
         let moved = state
-            .use_item(Vid::new(7), inventory(0), a_mover())
+            .use_item(
+                Vid::new(7),
+                inventory(0),
+                a_mover(),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the potion is drunk");
         assert_eq!(moved.kind, world::character::MoveKind::Used);
         assert_eq!(
@@ -7205,11 +7247,21 @@ mod tests {
     fn a_second_potion_does_not_restart_a_running_recovery() {
         let (mut state, _inbox) = a_hurt_drinker();
         let _ = state
-            .use_item(Vid::new(7), inventory(0), a_mover())
+            .use_item(
+                Vid::new(7),
+                inventory(0),
+                a_mover(),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the first potion is drunk");
         state.process_pulse(10);
         let _ = state
-            .use_item(Vid::new(7), inventory(0), a_mover())
+            .use_item(
+                Vid::new(7),
+                inventory(0),
+                a_mover(),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the second potion is drunk");
         assert_eq!(
             state.affect_events.get(&Vid::new(7)).map(|event| event.due),
@@ -7221,7 +7273,12 @@ mod tests {
     fn leaving_hands_back_the_points_and_ends_the_recovery() {
         let (mut state, _inbox) = a_hurt_drinker();
         let _ = state
-            .use_item(Vid::new(7), inventory(0), a_mover())
+            .use_item(
+                Vid::new(7),
+                inventory(0),
+                a_mover(),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("the potion is drunk");
         let expected = points_at_seven(&state);
         let (reply, answer) = tokio::sync::oneshot::channel();
@@ -7360,6 +7417,7 @@ mod tests {
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
                 horse_name: Vec::new(),
+                account: crate::game_loop_messages::QuestAccount::default(),
             }),
             outbox,
             reply,
@@ -7411,6 +7469,7 @@ mod tests {
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
                 horse_name: Vec::new(),
+                account: crate::game_loop_messages::QuestAccount::default(),
             }),
             outbox,
             reply,

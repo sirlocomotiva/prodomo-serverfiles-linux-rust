@@ -74,8 +74,8 @@ use prodomo::command::{
 };
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{
-    Departure, GameLoopController, GameLoopTerminal, GroundPlace, Kept, RelayScope, RestartKind,
-    Settled, Shown, WhisperOutcome,
+    Departure, GameLoopController, GameLoopTerminal, GroundPlace, Kept, QuestAccount, RelayScope,
+    RestartKind, Settled, Shown, WhisperOutcome,
 };
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
@@ -1181,7 +1181,11 @@ where
         return true;
     };
     let actor = item_actor(held);
-    let answer = context.game.use_item(vid, record.cell, actor).await;
+    let account = quest_account(context, addr, held).await.unwrap_or_default();
+    let answer = context
+        .game
+        .use_item(vid, record.cell, actor, account)
+        .await;
     // A book read climbed a slot: store it as `Save()` writes the skills with the row.
     // The store runs before the item rows, so a failure closes without a half-written step.
     if let Ok(Ok(moved)) = &answer {
@@ -1198,13 +1202,16 @@ where
             }
             info!(%addr, vnum, level, "Skill read from a book");
         }
-        // A used quest item's scripts: their GRAND climbs and `guild.*` stores, as a click's
-        // are stored. Their item rows are among the step's own.
-        let (climbs, stores) = &moved.quest;
+        // A used quest item's scripts: their GRAND climbs, `guild.*` stores and landed
+        // empire, as a click's are stored. Their item rows are among the step's own.
+        let (climbs, stores, landed) = &moved.quest;
         if !store_quest_climbs(addr, context, held, climbs).await {
             return false;
         }
         if !store_quest_guild_stores(session, addr, context, held, stores).await {
+            return false;
+        }
+        if !store_quest_empire(addr, context, held, *landed).await {
             return false;
         }
     }
@@ -1665,6 +1672,29 @@ fn item_actor(held: &Held) -> Mover {
         // The world sets it from the character's guild, as the PK mode.
         view_guild: (0, 0),
     }
+}
+
+/// What a quest-running command carries of the descriptor's account: the lobby's slot
+/// PIDs (legacy's `player_index` row) and the stored empire-change count (legacy's
+/// `change_empire` row). A missing count reads 0, as a missing row does. `None` with
+/// no account table; the step's scripts then judge no siblings and no changes.
+async fn quest_account(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &Held,
+) -> Option<QuestAccount> {
+    let account = held.account.as_ref()?;
+    let changes = match db::players::change_empire_count(&context.store, account.id).await {
+        Ok(count) => count,
+        Err(error) => {
+            warn!(%addr, %error, "The empire-change count could not be read; closing");
+            return None;
+        }
+    };
+    Some(QuestAccount {
+        pids: account.lobby.slot_ids(),
+        changes,
+    })
 }
 
 /// `DESC::GetLanguage`: the language of the account table the Channel login filled
@@ -4987,7 +5017,8 @@ where
         return true;
     };
     let actor = item_actor(held);
-    let answer = match context.game.shop(vid, step, place, actor).await {
+    let account = quest_account(context, addr, held).await.unwrap_or_default();
+    let answer = match context.game.shop(vid, step, place, actor, account).await {
         Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(moved)),
         Ok(Ok(ShopAnswer::Sent(records))) => {
             info!(%addr, ?step, "Shop step answered");
@@ -5005,6 +5036,7 @@ where
             gold,
             claimed,
             takes,
+            empire,
         })) => {
             info!(%addr, ?step, "A quest took the click");
             if !store_quest_items(addr, context, held, &items, &takes, (gold, claimed)).await {
@@ -5014,6 +5046,9 @@ where
                 return false;
             }
             if !store_quest_guild_stores(session, addr, context, held, &guild_ops).await {
+                return false;
+            }
+            if !store_quest_empire(addr, context, held, empire).await {
                 return false;
             }
             return send_shop_records(session, addr, &records).await;
@@ -5142,6 +5177,39 @@ async fn store_quest_climbs(
             return false;
         }
     }
+    true
+}
+/// Store the empire a quest step's `pc.change_empire` call landed: the account row
+/// takes it and the change counts one more (`db::players::change_empire`), then the
+/// held account table and character take it too, as `DESC::SetNewEmpire` and
+/// `CHARACTER::SetEmpire` hold it (`G/char_change_empire.cpp:119-123`). `None` stores
+/// nothing. A failure closes, as a climb's does. Answers whether the step may be
+/// sent.
+async fn store_quest_empire(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    landed: Option<u8>,
+) -> bool {
+    let Some(empire) = landed else {
+        return true;
+    };
+    let (Some(account), Some(character)) = (held.account.as_ref(), held.character.as_ref()) else {
+        return true;
+    };
+    let id = account.id;
+    let already = character.empire;
+    if let Err(error) = db::players::change_empire(&context.store, id, empire).await {
+        warn!(%addr, %error, empire, "An empire change could not be stored; closing");
+        return false;
+    }
+    if let Some(account) = held.account.as_mut() {
+        account.lobby.empire = empire;
+    }
+    if let Some(character) = held.character.as_mut() {
+        character.empire = empire;
+    }
+    tracing::info!(%addr, from = already, to = empire, "Empire changed");
     true
 }
 
@@ -5408,8 +5476,13 @@ where
         info!(%addr, ?step, "Quest step without a character in the world; ignoring");
         return true;
     };
-    match context.game.quest(vid, step, place, item_actor(held)).await {
-        Ok(Ok((records, climbs, stores, items, gold, claimed, takes))) => {
+    let account = quest_account(context, addr, held).await.unwrap_or_default();
+    match context
+        .game
+        .quest(vid, step, place, item_actor(held), account)
+        .await
+    {
+        Ok(Ok((records, climbs, stores, items, gold, claimed, takes, landed))) => {
             if !store_quest_items(addr, context, held, &items, &takes, (gold, claimed)).await {
                 return false;
             }
@@ -5417,6 +5490,9 @@ where
                 return false;
             }
             if !store_quest_guild_stores(session, addr, context, held, &stores).await {
+                return false;
+            }
+            if !store_quest_empire(addr, context, held, landed).await {
                 return false;
             }
             send_shop_records(session, addr, &records).await
@@ -6437,36 +6513,15 @@ where
     else {
         return false;
     };
-    let loaded = loaded_state(held, Some(show), messenger);
+    let account = quest_account(context, addr, held).await.unwrap_or_default();
+    let loaded = loaded_state(held, Some(show), messenger, account);
     let Some((world_vid, shown)) =
         join_the_world(context, addr, character, vid, (items, loaded), outbox).await
     else {
         return false;
     };
     held.world = Some(world_vid);
-    // A war map's watch sets its observers at admission, so the gate reads the flag here. A
-    // character that never warped and never watches enters unflagged.
-    held.observer = shown.observer;
-    // From here a failed write closes the connection, whose close path takes the character
-    // out of the world, so the characters that see it are sent its removal.
-    let Some(burst) = entering_burst(context, addr, seat.number, held, shown).await else {
-        return false;
-    };
-    info!(
-        %addr,
-        vid,
-        channel = seat.number,
-        "Entering the game; sending the enter-game burst",
-    );
-    let delivery = async {
-        send_all(session, &burst.before_phase).await?;
-        // `SetPhase(PHASE_GAME)` writes `GC_PHASE` through the boundary the loading phase left
-        // installed, which is the encrypted one.
-        session.set_phase(PostHandshakePhase::Game).await?;
-        send_all(session, &burst.after_phase).await
-    };
-    if let Err(error) = delivery.await {
-        warn!(%addr, %error, "Client session stopped");
+    if !burst_entering_character(session, addr, context, seat.number, held, shown).await {
         return false;
     }
     held.avatar = Some(Avatar {
@@ -6487,6 +6542,50 @@ where
         });
     }
     if !check_client_version(session, addr, context, held).await {
+        return false;
+    }
+    true
+}
+
+/// Store the quest empire of an entered character, flag its watch, and send the
+/// enter-game burst: the records before the phase change, `GC_PHASE` through the
+/// encrypted boundary the loading phase left installed, then the records after it.
+async fn burst_entering_character<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    channel: u8,
+    held: &mut Held,
+    shown: prodomo::game_loop_messages::Shown,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if !store_quest_empire(addr, context, held, shown.landed).await {
+        return false;
+    }
+    // A war map's watch sets its observers at admission, so the gate reads the flag here. A
+    // character that never warped and never watches enters unflagged.
+    held.observer = shown.observer;
+    // From here a failed write closes the connection, whose close path takes the character
+    // out of the world, so the characters that see it are sent its removal.
+    let Some(burst) = entering_burst(context, addr, channel, held, shown).await else {
+        return false;
+    };
+    info!(
+        %addr,
+        channel,
+        "Entering the game; sending the enter-game burst",
+    );
+    let delivery = async {
+        send_all(session, &burst.before_phase).await?;
+        // `SetPhase(PHASE_GAME)` writes `GC_PHASE` through the boundary the loading phase left
+        // installed, which is the encrypted one.
+        session.set_phase(PostHandshakePhase::Game).await?;
+        send_all(session, &burst.after_phase).await
+    };
+    if let Err(error) = delivery.await {
+        warn!(%addr, %error, "Client session stopped");
         return false;
     }
     true
@@ -6619,6 +6718,7 @@ fn loaded_state(
     held: &Held,
     show: Option<prodomo::game_loop_messages::Showing>,
     messenger: MessengerLoad,
+    account: prodomo::game_loop_messages::QuestAccount,
 ) -> prodomo::game_loop_messages::Loaded {
     let mut points = held.points.clone();
     // `m_pointsInstant.gm_level` (`char.h:468`) rides the admission, so the world reads it
@@ -6644,6 +6744,7 @@ fn loaded_state(
             .character
             .as_ref()
             .map_or_else(Vec::new, |character| character.horse.name.clone()),
+        account,
     }
 }
 
@@ -10217,11 +10318,14 @@ where
             }
             info!(%addr, vnum, level, "Skill read from a book");
         }
-        let (climbs, stores) = &moved.quest;
+        let (climbs, stores, landed) = &moved.quest;
         if !store_quest_climbs(addr, context, held, climbs).await {
             return false;
         }
         if !store_quest_guild_stores(session, addr, context, held, stores).await {
+            return false;
+        }
+        if !store_quest_empire(addr, context, held, *landed).await {
             return false;
         }
     }

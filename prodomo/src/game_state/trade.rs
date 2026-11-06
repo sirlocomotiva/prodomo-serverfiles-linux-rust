@@ -853,7 +853,16 @@ mod tests {
         fn browse(&mut self, who: usize) {
             let (vid, _, _, empire) = PEOPLE[who];
             let click = ShopStep::Click { target: KEEPER };
-            let answer = self.state.shop(vid, click, at(0), of(empire)).unwrap();
+            let answer = self
+                .state
+                .shop(
+                    vid,
+                    click,
+                    at(0),
+                    of(empire),
+                    crate::game_loop_messages::QuestAccount::default(),
+                )
+                .unwrap();
             assert!(matches!(answer, ShopAnswer::Sent(_)), "{answer:?}");
         }
 
@@ -887,7 +896,13 @@ mod tests {
 
         fn leave_shop(&mut self, who: usize) {
             let (vid, _, _, empire) = PEOPLE[who];
-            let _ended = self.state.shop(vid, ShopStep::End, at(0), of(empire));
+            let _ended = self.state.shop(
+                vid,
+                ShopStep::End,
+                at(0),
+                of(empire),
+                crate::game_loop_messages::QuestAccount::default(),
+            );
         }
 
         /// Let every load so far stop holding back a trade.
@@ -1938,7 +1953,16 @@ mod tests {
         );
 
         let click = ShopStep::Click { target: KEEPER };
-        let far = square.state.shop(ZULU, click, stale, of(1)).unwrap();
+        let far = square
+            .state
+            .shop(
+                ZULU,
+                click,
+                stale,
+                of(1),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .unwrap();
         assert!(
             matches!(
                 far,
@@ -1955,6 +1979,7 @@ mod tests {
             step: click,
             place: stale,
             mover: of(1),
+            account: crate::game_loop_messages::QuestAccount::default(),
             reply,
         });
         let opened = answer.blocking_recv().unwrap().unwrap();
@@ -2355,7 +2380,16 @@ mod tests {
         square.browse(A);
         square.state.process_pulse(600);
         let _window = square.heard(A);
-        let far = square.state.shop(ALPHA, buy, at(2100), of(1)).unwrap();
+        let far = square
+            .state
+            .shop(
+                ALPHA,
+                buy,
+                at(2100),
+                of(1),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .unwrap();
         assert!(matches!(far, ShopAnswer::Declined { .. }), "{far:?}");
         square.state.stop_browsing(ALPHA);
         square.state.process_pulse(612);
@@ -2367,7 +2401,16 @@ mod tests {
 
         square.browse(A);
         let sold = ShopStep::Sell { cell: 0, count: 0 };
-        let sale = square.state.shop(ALPHA, sold, at(0), of(1)).unwrap();
+        let sale = square
+            .state
+            .shop(
+                ALPHA,
+                sold,
+                at(0),
+                of(1),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .unwrap();
         assert!(matches!(sale, ShopAnswer::Moved(_)), "{sale:?}");
         square.state.stop_browsing(ALPHA);
         let _heard = square.heard(A);
@@ -2375,7 +2418,16 @@ mod tests {
         assert_eq!(square.ordered(A), vec![to_a3()], "a sale stamps nothing");
 
         square.browse(A);
-        let bought = square.state.shop(ALPHA, buy, at(0), of(1)).unwrap();
+        let bought = square
+            .state
+            .shop(
+                ALPHA,
+                buy,
+                at(0),
+                of(1),
+                crate::game_loop_messages::QuestAccount::default(),
+            )
+            .unwrap();
         assert!(matches!(bought, ShopAnswer::Declined { .. }), "{bought:?}");
         square.state.stop_browsing(ALPHA);
         let _heard = square.heard(A);

@@ -46198,3 +46198,43 @@ never-remove flags (survived the scenario — no scenario disconnects a flagged 
 the clear's game body is vacuous (an empty `if`: no regen store). Both scenarios passed
 8/8 parallel runs. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
 width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 405. The empire exchange (`pc.change_empire` and its count, the polymorph and wedding readers, the quest logs)
+
+No owner quest calls these seven names either — the sweep's tail: `pc.change_empire`'s
+only caller is the unloaded `_basic/change_empire.lua`, `pc.is_polymorphed` sits only in
+`questlib_extra.lua`'s uncalled helpers, and `pc.is_engaged`, `pc.is_married`, `char_log`
+and `sys_err` sit only in library code no quest calls. One probe calls them instead:
+`EMPIRE_PROBE` reads the readers at Alpha's login (unmorphed, unwed, unguilded, on
+empire 1, count 0), then moves her to empire 2, and the scenario
+`the_empire_exchange_moves_the_account` proves the re-show carries the new empire, the
+account row and the change row land, and the `QUEST_SYSERR` line chats.
+
+The `Game` trait gains the seven arms; `BRIDGED` grows 241 to 248. `pc.change_empire`
+shadows `CHARACTER::ChangeEmpire`'s refusals in the call (1 for the held empire, 4 in
+a party with the info line, 2 with a guilded character on the account, else 999; the
+marriage arm never fires since no character of this build is engaged or married) so
+the script's control flow sees the pushed value, queues the move, and the world judges
+the same call again after the step for its records and the re-show. `main.rs` reads the
+account's pids and change count into each quest step (`QuestAccount`) and stores a
+landed move after the step: migration 0027 adds `change_empire`, and
+`db::players::change_empire` moves the account row and counts the change in one
+transaction, keyed on the account — legacy keys its update on the old empire and the
+pids and swaps its insert's columns (`G/char_change_empire.cpp:105-185`), both Defects
+recorded in `docs/STATUS.md`. `char_log` logs the quest-log row server-side and pushes
+nothing; `sys_err` logs `QUEST: quest: <quest> player: <name> : <text>` and chats
+`QUEST_SYSERR <text>`.
+
+Refactors the slice forced: the thirteen dungeon and event queues move into
+`Session.queues` (`SessionQueues`, `Default`), so `session_head` and the new
+`test_session` constructor stay under the line lint; `enter_game`'s burst delivery is
+`burst_entering_character`; the parity helper `read_reseen_map` reads the re-seen map.
+Unit tests: the store move-and-count, the judges, the log lines, and the empire move
+landing through a step.
+
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4786 passed 0 failed in 42 targets; `cargo test --workspace --doc` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -701,6 +701,41 @@ pub trait Game {
     /// (`G/questlua_dragonsoul.cpp:30-41`, `G/char.cpp:11235-11242`): its client
     /// hears `HEADER_GC_DS_PLUS_CHANGE_ATTR_OPEN`.
     fn open_ds_attr_change(&mut self);
+
+    /// `IsPolymorphed()` of the character the script runs for
+    /// (`G/questlua_pc.cpp:1361-1366`, `G/char.h:901`): whether a morph is on.
+    fn is_polymorphed(&self) -> bool;
+
+    /// `IsEngaged(player_id)` of the character the script runs for
+    /// (`G/questlua_pc.cpp:1846-1851`): whether it is engaged. No character of
+    /// this build is (`sys.marriage` is missing), so this answers false.
+    fn is_engaged(&self) -> bool;
+
+    /// `IsMarried(player_id)` of the character the script runs for
+    /// (`G/questlua_pc.cpp:1853-1858`): whether it is married. No character of
+    /// this build is (`sys.marriage` is missing), so this answers false.
+    fn is_married(&self) -> bool;
+
+    /// `CHARACTER::ChangeEmpire(empire)` (`G/char_change_empire.cpp:23-129`) for the
+    /// character the script runs for: 1 for the empire it holds, 4 in a party, 2 with
+    /// a guilded character on the account, 3 with an engaged or married one (never:
+    /// no character of this build is), and 999 when the move lands. The world judges
+    /// it now, while the script that asked still waits, and the move's records land
+    /// beside the script's own. The store move and the count follow after the step.
+    fn change_empire(&mut self, empire: u8) -> i32;
+
+    /// `CHARACTER::GetChangeEmpireCount()` (`G/char_change_empire.cpp:131-162`): how
+    /// many times the account changed its empire, which the world read at the step's
+    /// start.
+    fn change_empire_count(&self) -> u32;
+
+    /// `LogManager::CharLog(ch, what, how, hint)` (`G/log.cpp:110-121`): the quest log
+    /// row. It is server-side only, so the Rewrite logs the line and pushes nothing.
+    fn char_log(&mut self, what: u32, how: &[u8], hint: &[u8]);
+
+    /// `_syserr` (`G/questlua_global.cpp:385-403`): the server log line `QUEST: quest:
+    /// <quest> player: <name> : <text>` and the `QUEST_SYSERR <text>` info chat.
+    fn sys_err(&mut self, quest: &[u8], text: &[u8]);
 }
 
 /// The horse a quest reads (`CHorseRider`'s getters).
@@ -3709,17 +3744,7 @@ fn pc_api(
         }
         b"pc.get_skill_level" => return get_skill_level(lua, cx, first),
         b"pc.send_block_mode" => {
-            // `pc_send_block_mode` (`G/questlua_pc.cpp:2190-2197`): the number
-            // becomes the character's own block mode; a non-number is zero
-            // (`(BYTE)lua_tonumber`), and only the low byte survives.
-            let mode = match lua.coerce_number(first.clone())? {
-                Some(number) => {
-                    let bytes = dword(number).to_le_bytes();
-                    bytes[0]
-                }
-                None => 0,
-            };
-            cx.game.send_block_mode(mode);
+            send_block_mode(lua, cx, first)?;
             None
         }
         // `pc_can_warp` (`G/questlua_pc.cpp:2723-2737`).
@@ -3739,10 +3764,70 @@ fn pc_api(
             cx.game.remove_from_guild();
             None
         }
+        // The polymorph, wedding and empire readers (see `pc_state`).
+        b"pc.is_polymorphed"
+        | b"pc.is_engaged"
+        | b"pc.is_married"
+        | b"pc.change_empire"
+        | b"pc.get_change_empire_count" => {
+            return pc_state(lua, cx, name, first);
+        }
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
 }
+/// `pc_send_block_mode` (`G/questlua_pc.cpp:2190-2197`): the number becomes the
+/// character's own block mode; a non-number is zero (`(BYTE)lua_tonumber`), and only
+/// the low byte survives. Split out so `pc_api` stays under the line lint.
+fn send_block_mode(lua: &Lua, cx: &mut Cx<'_>, first: &Value) -> mlua::Result<()> {
+    let mode = match lua.coerce_number(first.clone())? {
+        Some(number) => {
+            let bytes = dword(number).to_le_bytes();
+            bytes[0]
+        }
+        None => 0,
+    };
+    cx.game.send_block_mode(mode);
+    Ok(())
+}
+
+/// The polymorph, wedding and empire bridge: `pc_is_polymorphed`
+/// (`G/questlua_pc.cpp:1361-1366`), `pc_is_engaged` (`:1846-1851`), `pc_is_married`
+/// (`:1853-1858`), `pc_change_empire` (`:2199-2213`) and `pc_get_change_empire_count`
+/// (`:2215-2221`). Split out so `pc_api` stays under the line lint.
+fn pc_state(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    first: &Value,
+) -> mlua::Result<Option<MultiValue>> {
+    let result = match name {
+        // `pc_is_polymorphed` (`G/questlua_pc.cpp:1361-1366`).
+        b"pc.is_polymorphed" => Some(Value::Boolean(cx.game.is_polymorphed())),
+        // `pc_is_engaged` (`:1846-1851`) and `pc_is_married` (`:1853-1858`).
+        b"pc.is_engaged" => Some(Value::Boolean(cx.game.is_engaged())),
+        b"pc.is_married" => Some(Value::Boolean(cx.game.is_married())),
+        // `pc_change_empire` (`G/questlua_pc.cpp:2199-2213`): `(BYTE)lua_tonumber` of the
+        // first argument is the empire, and `ChangeEmpire` answers 0, 1, 2, 3, 4 or 999.
+        // The party chat after it is legacy's own second push: `ChangeEmpire` returned
+        // 4 already, the chat warns, and the pushed 4 stays the pushed 4 — so the
+        // bridge pushes the world's answer once, and the world chats the line.
+        b"pc.change_empire" => {
+            let empire = match lua.coerce_number(first.clone())? {
+                Some(number) => dword(number).to_le_bytes()[0],
+                None => 0,
+            };
+            Some(Value::Number(f64::from(cx.game.change_empire(empire))))
+        }
+        // `pc_get_change_empire_count` (`:2215-2221`).
+        b"pc.get_change_empire_count" => {
+            Some(Value::Number(f64::from(cx.game.change_empire_count())))
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
 /// `pc_get_skill_level` (`G/questlua_pc.cpp:1734-1749`): a non-number logs and answers 0;
 /// a number answers the level. Split out so `pc_api` stays under the line lint.
 fn get_skill_level(lua: &Lua, cx: &mut Cx<'_>, first: &Value) -> mlua::Result<Option<MultiValue>> {
@@ -4838,6 +4923,54 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             };
             number(vid)
         }
+        // The game, NPC and warp arms (see `game_npc_api`).
+        b"game.get_event_flag"
+        | b"game.request_make_guild"
+        | b"game.drop_item_with_ownership"
+        | b"warp_to_village"
+        | b"npc.getrace"
+        | b"npc.get_race"
+        | b"npc.get_empire"
+        | b"npc.get_guild" => {
+            return game_npc_api(lua, cx, name, args, first);
+        }
+        b"set_state" | b"q.setstate" | b"q.set_state" => {
+            match host::c_string(lua, last)? {
+                Some(state) if !state.is_empty() => {
+                    cx.pending_state = Some(state);
+                }
+                _ => tracing::warn!("QUEST state name is empty"),
+            }
+            None
+        }
+        // The quest-log pair (see `quest_log`).
+        b"char_log" | b"sys_err" => {
+            quest_log(lua, cx, name, args, &first)?;
+            None
+        }
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "not ported: {}",
+                String::from_utf8_lossy(name)
+            )))
+        }
+    };
+    Ok(result.into_iter().collect())
+}
+
+/// The game, NPC and village-warp arms: `game.get_event_flag`
+/// (`G/questlua_game.cpp`), `game_request_make_guild` (`:51-62`),
+/// `game_drop_item_with_ownership`, `_warp_to_village` (`G/questlua_global.cpp:1060-1071`),
+/// `npc_getrace`, `npc_get_empire` (`G/questlua_npc.cpp:43-52`) and `npc_get_guild`
+/// (`:60-70`). Split out so `api` stays under the line lint.
+fn game_npc_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+    first: Value,
+) -> mlua::Result<MultiValue> {
+    let result = match name {
         b"game.get_event_flag" => {
             let value = host::c_string(lua, first)?
                 .and_then(|flag| cx.event_flags.get(&flag).copied())
@@ -4862,29 +4995,54 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             cx.game.warp_to_village();
             None
         }
-        b"npc.getrace" | b"npc.get_race" => number(cx.game.race_of(cx.npc_vid).unwrap_or(0)),
+        b"npc.getrace" | b"npc.get_race" => Some(Value::Number(f64::from(
+            cx.game.race_of(cx.npc_vid).unwrap_or(0),
+        ))),
         // `npc_get_empire` (`G/questlua_npc.cpp:43-52`): the NPC's empire, 0 with no NPC.
-        b"npc.get_empire" => number(u32::from(cx.game.empire_of(cx.npc_vid).unwrap_or(0))),
+        b"npc.get_empire" => Some(Value::Number(f64::from(u32::from(
+            cx.game.empire_of(cx.npc_vid).unwrap_or(0),
+        )))),
         // `npc_get_guild` (`G/questlua_npc.cpp:60-70`): the NPC's guild ID, 0 with no NPC
         // or no guild. No NPC holds one: no building stands.
-        b"npc.get_guild" => number(cx.game.npc_guild(cx.npc_vid)),
-        b"set_state" | b"q.setstate" | b"q.set_state" => {
-            match host::c_string(lua, last)? {
-                Some(state) if !state.is_empty() => {
-                    cx.pending_state = Some(state);
-                }
-                _ => tracing::warn!("QUEST state name is empty"),
-            }
-            None
-        }
-        _ => {
-            return Err(mlua::Error::runtime(format!(
-                "not ported: {}",
-                String::from_utf8_lossy(name)
-            )))
-        }
+        b"npc.get_guild" => Some(Value::Number(f64::from(cx.game.npc_guild(cx.npc_vid)))),
+        _ => None,
     };
     Ok(result.into_iter().collect())
+}
+
+/// The quest-log pair: `_char_log` (`G/questlua_global.cpp:316-332`) and `_syserr`
+/// (`:385-403`). Split out so `api` stays under the line lint.
+fn quest_log(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+    first: &Value,
+) -> mlua::Result<()> {
+    match name {
+        // `_char_log` (`G/questlua_global.cpp:316-332`): `(DWORD)` of a number-like first
+        // argument is `what`, a string or number-like second is `how`, and any
+        // string-like third (`lua_tostring`, so a number formats) is `hint`. Pushes
+        // nothing.
+        b"char_log" => {
+            let what = lua.coerce_number(first.clone())?.map_or(0, dword);
+            let how = host::c_string(lua, args.get(1).cloned().unwrap_or(Value::Nil))?
+                .unwrap_or_default();
+            let hint = host::c_string(lua, args.get(2).cloned().unwrap_or(Value::Nil))?
+                .unwrap_or_default();
+            cx.game.char_log(what, &how, &hint);
+        }
+        // `_syserr` (`G/questlua_global.cpp:385-403`): a string-like first argument
+        // (`lua_isstring`, so a number formats) logs and chats; anything else is
+        // quiet. Pushes nothing.
+        b"sys_err" => {
+            if let Some(text) = host::c_string(lua, first.clone())? {
+                cx.game.sys_err(&cx.quest, &text);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5667,6 +5825,30 @@ mod tests {
         fn open_ds_attr_change(&mut self) {
             self.ds_attrs += 1;
         }
+
+        fn is_polymorphed(&self) -> bool {
+            false
+        }
+
+        fn is_engaged(&self) -> bool {
+            false
+        }
+
+        fn is_married(&self) -> bool {
+            false
+        }
+
+        fn change_empire(&mut self, _empire: u8) -> i32 {
+            999
+        }
+
+        fn change_empire_count(&self) -> u32 {
+            0
+        }
+
+        fn char_log(&mut self, _what: u32, _how: &[u8], _hint: &[u8]) {}
+
+        fn sys_err(&mut self, _quest: &[u8], _text: &[u8]) {}
     }
 
     /// The text a Lua expression evaluates to, through the loaded libraries.

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 404 (the dungeon tail).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 405
+Last reviewed: 2026-11-06, after ledger section 405 (the empire exchange).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 406
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -412,7 +412,10 @@ sends both home (`d.get_map_index`, `d.setf`, `d.getf`, `d.getf_from_map_index`,
 dungeon at the entry (`d.new_jump`, unscaled where the party jump scales), the tail clears
 nothing and kills the dog (`d.clear_regen`, `d.kill_all`), and the flagged hit is silent
 (`d.set_damage_from_race`, `d.set_damage_from_affect`, which ride the character past a
-warp and die on disconnect). The
+warp and die on disconnect). Since 405 a script's empire exchange moves the account
+(`pc.change_empire`, `pc.get_change_empire_count`, `pc.is_polymorphed`, `pc.is_engaged`,
+`pc.is_married`, `char_log`, `sys_err`): the session shadows the refusal, the world judges it
+again after the step, and the re-show carries the new empire. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1340,6 +1343,11 @@ owner should know about (178.5):
 - `d.new_jump` dereferences the current character without checking it
   (`G/questlua_dungeon.cpp:342-345`), so a reader-less call (a server timer's step) crashes the
   core. The Rewrite lets the create stand and jumps nobody (ledger 404).
+- `CHARACTER::ChangeEmpire` keys its account update on the old empire and the account's pids
+  and its count insert swaps the columns (`VALUES(account_id, count)` into
+  `(change_count, account_id)`, `G/char_change_empire.cpp:105-185`); a second account at the
+  same pids or empire would be moved and counted wrongly. The Rewrite keys on the account and
+  counts up (ledger 405).
 
 ## Environment
 

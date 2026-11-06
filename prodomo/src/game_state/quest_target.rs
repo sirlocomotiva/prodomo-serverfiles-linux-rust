@@ -45,6 +45,7 @@ use super::GameState;
 use crate::game_loop_messages::GroundPlace;
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
+use tracing::warn;
 
 /// `TARGET_TYPE_VID` (`G/target.h:7`): a target on a character.
 const TARGET_TYPE_VID: u8 = 1 << 1;
@@ -311,13 +312,18 @@ impl GameState {
         let mark = (target.quest, target.name.as_slice());
         let mut taken = true;
         if distance <= ARRIVE_DISTANCE {
-            taken = self.run_quest_event(vid, |manager, game| {
-                manager.target(pid, mark, b"arrive", game)
-            });
+            (taken, _) = self.run_quest_event(
+                vid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |manager, game| manager.target(pid, mark, b"arrive", game),
+            );
         }
         if found == Marked::Gone {
-            let _ran =
-                self.run_quest_event(vid, |manager, game| manager.target(pid, mark, b"die", game));
+            let (_ran, _) = self.run_quest_event(
+                vid,
+                crate::game_loop_messages::QuestAccount::default(),
+                |manager, game| manager.target(pid, mark, b"die", game),
+            );
             for record in self.quest_targets.delete(pid, mark.0, Some(mark.1)) {
                 let _sent = self.write_to_client(vid, record);
             }
@@ -365,40 +371,56 @@ impl GameState {
     /// Runs `op` for the character under `vid` outside any step of its own, as the login and
     /// a target's event do: the records its scripts sent go to its client, the block byte
     /// they set becomes its own, and their GRAND climbs and guild calls are dropped.
+    /// Answers the `op`'s answer with the empire a `pc.change_empire` call landed, if
+    /// one did, for the login's account store.
     pub(super) fn run_quest_event<R: Default>(
         &mut self,
         vid: Vid,
+        account: crate::game_loop_messages::QuestAccount,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
-    ) -> R {
+    ) -> (R, Option<u8>) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
-            return R::default();
+            return (R::default(), None);
         };
         let pid = character.player_id();
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
         let Some(mover) = self.own_mover(vid) else {
-            return R::default();
+            return (R::default(), None);
         };
         let Some((channel, map)) = self.place_of(vid.raw()) else {
-            return R::default();
+            return (R::default(), None);
         };
         let (x, y) = self
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some((answer, (records, _, _, block_mode, _, _, _))) =
-            self.run_quests(place, mover, level, pid, op)
-        else {
-            return R::default();
+        let Some((answer, run, _, _, take_sides, landed)) = self.run_quests_giving(
+            place,
+            (mover, level, pid),
+            super::quests::Giving::Nothing,
+            account,
+            op,
+        ) else {
+            return (R::default(), None);
         };
+        if !take_sides.is_empty() {
+            warn!(
+                pid,
+                sides = take_sides.len(),
+                "a quest took blocked items outside a dialog step; their rows are dropped"
+            );
+        }
+        debug_assert!(take_sides.is_empty(), "take rows outside a dialog step");
+        let (records, _, _, block_mode, _, _, _) = run;
         if let Some(mode) = block_mode {
             self.block_modes.insert(vid, mode);
         }
         for record in records {
             let _sent = self.write_to_client(vid, record);
         }
-        answer
+        (answer, landed)
     }
 }
 

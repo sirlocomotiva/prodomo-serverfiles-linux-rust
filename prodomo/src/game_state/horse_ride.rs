@@ -268,7 +268,12 @@ impl GameState {
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
         match self.ride_toggle(vid) {
-            Some(cell) => self.use_item(vid, ItemPos::new(EWindows::Inventory as u8, cell), actor),
+            Some(cell) => self.use_item(
+                vid,
+                ItemPos::new(EWindows::Inventory as u8, cell),
+                actor,
+                crate::game_loop_messages::QuestAccount::default(),
+            ),
             None => self.nothing_used(vid, actor),
         }
     }

@@ -7108,6 +7108,12 @@ impl Guild {
 }
 
 impl Guilds {
+    /// The guild id of `pid`'s guild in the shadow, if any: what the empire change's
+    /// guild arm reads of the account's characters.
+    pub(super) fn shadow_guild_of(&self, pid: u32) -> Option<u32> {
+        self.of.get(&pid).copied()
+    }
+
     /// The enemy of `id` whose war has begun (`CGuild::UnderAnyWar`,
     /// `G/guild_war.cpp:164-177`): the first enemy in id order whose state is on-war, and
     /// none when there is no such enemy. Legacy returns the enemy's guild id, which the
@@ -9758,12 +9764,13 @@ mod tests {
         // The letter asks the client for the button.
         world.quest_letter(Vid::new(MASTER_VID), quest);
         // The button runs the quest's button event, which asks the player to confirm.
-        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed, _takes, _landed) = world
             .quest(
                 Vid::new(MASTER_VID),
                 &QuestStep::Button(quest),
                 place,
                 mover,
+                crate::game_loop_messages::QuestAccount::default(),
             )
             .expect("the world holds the master");
         assert!(
@@ -9773,7 +9780,13 @@ mod tests {
             "the player is asked to confirm: {records:?}"
         );
         // The player's yes: the first entry of the menu.
-        let _ = world.quest(Vid::new(MASTER_VID), &QuestStep::Answer(0), place, mover);
+        let _ = world.quest(
+            Vid::new(MASTER_VID),
+            &QuestStep::Answer(0),
+            place,
+            mover,
+            crate::game_loop_messages::QuestAccount::default(),
+        );
         let order = orders.try_recv().ok();
         assert!(
             matches!(order, Some(ClientOrder::Warp { .. })),

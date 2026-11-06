@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 241] = [
+pub const BRIDGED: [&str; 248] = [
     "ds.open_refine_window",
     "ds.open_attr_change_window",
     "ds.give_qualification",
@@ -261,6 +261,8 @@ pub const BRIDGED: [&str; 241] = [
     "game.get_event_flag",
     "game.set_event_flag",
     "game.drop_item_with_ownership",
+    "sys_err",
+    "char_log",
     "set_state",
     "set_skin",
     "setskin",
@@ -433,6 +435,7 @@ pub const BRIDGED: [&str; 241] = [
     "pc.get_empire",
     "pc.get_skill_group",
     "pc.warp",
+    "pc.is_polymorphed",
     "pc.is_mount",
     "pc.mount",
     "pc.mount_bonus",
@@ -446,6 +449,8 @@ pub const BRIDGED: [&str; 241] = [
     "pc.revive_horse",
     "pc.get_war_map",
     "pc.get_skill_level",
+    "pc.is_married",
+    "pc.is_engaged",
     "pc.is_gm",
     "pc.get_gm_level",
     "pc.mining",
@@ -453,6 +458,8 @@ pub const BRIDGED: [&str; 241] = [
     "pc.diamond_refine",
     "pc.set_skill_level",
     "pc.send_block_mode",
+    "pc.change_empire",
+    "pc.get_change_empire_count",
     "pc.is_riding",
     "pc.can_warp",
     "pc.get_channel_id",

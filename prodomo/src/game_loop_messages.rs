@@ -100,6 +100,19 @@ impl Default for GameLoopConfig {
         }
     }
 }
+/// What a quest-running command carries of the reader's account, for `pc.change_empire`
+/// and `pc.get_change_empire_count`: the account's character PIDs, in slot order with
+/// 0 for an empty slot (legacy's `player_index` row), and how many times the account
+/// changed its empire (legacy's `change_empire` row). The descriptor reads both from
+/// its account table and the store; the session's shadow judges the change's guild
+/// arm off the PIDs, and the world's judge answers the landing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QuestAccount {
+    /// The account's character PIDs, in slot order, 0 for an empty slot.
+    pub pids: [u32; 4],
+    /// How many times the account changed its empire.
+    pub changes: u32,
+}
 
 /// Correlates an asynchronous completion with the request known by game state.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -427,6 +440,8 @@ pub enum GameCommand {
         at: protocol::item_pos::ItemPos,
         /// What the descriptor knows of the character that the use reads.
         mover: Mover,
+        /// The reader's account, for a used quest item's scripts.
+        account: QuestAccount,
         /// Where the game thread reports what the use did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
@@ -561,6 +576,8 @@ pub enum GameCommand {
         place: GroundPlace,
         /// What the descriptor knows of the character.
         mover: Mover,
+        /// The reader's account, for a quest's scripts.
+        account: QuestAccount,
         /// Where the game thread reports what the step did.
         reply: oneshot::Sender<Result<ShopAnswer, MoveItemRefused>>,
     },
@@ -966,6 +983,8 @@ pub enum GameCommand {
         place: GroundPlace,
         /// What the descriptor knows of the character.
         mover: Mover,
+        /// The reader's account, for the step's scripts.
+        account: QuestAccount,
         /// Where the game thread reports the records the step's script sent and the
         /// GRAND climbs its reads landed.
         reply: oneshot::Sender<Result<super::game_state::QuestStepOutcome, MoveItemRefused>>,
@@ -2837,6 +2856,9 @@ pub struct Shown {
     /// Whether the character observes: a war map's watch sets the flag at admission
     /// (`CWarMap::IncMember`, `G/war_map.cpp:384`). The descriptor gates the records by it.
     pub observer: bool,
+    /// The empire a login script's `pc.change_empire` call landed, if one did (for
+    /// the descriptor's account store, as a dialog step's).
+    pub landed: Option<u8>,
 }
 
 /// Where a character stands, as the descriptor holds it. The world reads the point of a
@@ -3116,6 +3138,10 @@ pub struct Loaded {
     /// The horse name the load read (`player.horse_name`), which the world holds from the
     /// admission on (`HEADER_GD_REQ_HORSE_NAME`, `G/input_login.cpp:891-892`).
     pub horse_name: Vec<u8>,
+    /// The account's character PIDs and empire-change count, which the login event's
+    /// scripts judge by. The descriptor reads them before it sends the admission, as
+    /// the dialog steps do before theirs.
+    pub account: QuestAccount,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -3622,12 +3648,14 @@ impl GameLoopController {
         vid: common::vid::Vid,
         at: protocol::item_pos::ItemPos,
         mover: Mover,
+        account: QuestAccount,
     ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::UseItem {
             vid,
             at,
             mover,
+            account,
             reply,
         })
         .await
@@ -3843,6 +3871,7 @@ impl GameLoopController {
         step: ShopStep,
         place: GroundPlace,
         mover: Mover,
+        account: QuestAccount,
     ) -> Result<Result<ShopAnswer, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Shop {
@@ -3850,6 +3879,7 @@ impl GameLoopController {
             step,
             place,
             mover,
+            account,
             reply,
         })
         .await
@@ -4566,6 +4596,7 @@ impl GameLoopController {
         step: QuestStep,
         place: GroundPlace,
         mover: Mover,
+        account: QuestAccount,
     ) -> Result<Result<super::game_state::QuestStepOutcome, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Quest {
@@ -4573,6 +4604,7 @@ impl GameLoopController {
             step,
             place,
             mover,
+            account,
             reply,
         })
         .await

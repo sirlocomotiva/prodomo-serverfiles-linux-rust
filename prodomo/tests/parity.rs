@@ -2992,6 +2992,29 @@ fn stamina(database: &ScratchDatabase, name: &str, value: i32) {
     );
 }
 
+/// Read the re-seen map behind an empire move's re-show: the map's inserts, the
+/// view's update, and the record after them. Answers the insert count, the update,
+/// and that record.
+fn read_reseen_map(keyed: &mut Keyed, vid: [u8; 4]) -> (usize, Option<Vec<u8>>, Vec<u8>) {
+    let mut seen = 0;
+    let mut update = None;
+    loop {
+        let record = keyed.read_game();
+        if matches!(
+            record[0],
+            GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE
+        ) {
+            seen += 1;
+            continue;
+        }
+        if record[0] == GC_CHARACTER_UPDATE && record[1..5] == vid {
+            update = Some(record);
+            continue;
+        }
+        return (seen, update, record);
+    }
+}
+
 /// Read what [`Shown`] describes, answering it with the record that follows it.
 fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
     let mut records = Vec::new();
@@ -35916,4 +35939,129 @@ fn a_kill_scores_the_killer_and_the_season_awards_and_empties() {
         "(SELECT COUNT(*) FROM rank_global_winner WHERE NOT done) = 0",
     );
     wait_for(&database, "(SELECT COUNT(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha') AND vnum = 19) = 1");
+}
+
+/// Ledger 405: the empire exchange's probe. The owner's `change_empire` quest does not
+/// compile under `qc` (an `end` on line 132 closes its `if` chain early, as ledger 227
+/// records), so the probe replays its `move_pc` spine against the seven ported names:
+/// the polymorph and wedding gates, the change, the count, and the log pair. The
+/// exchange runs at the login event, as a server timer has no character to move.
+const EMPIRE_PROBE: &[u8] = b"quest empire_probe begin\n\
+    state start begin\n\
+    when login begin\n\
+    if pc.get_name() == \"Alpha\" then\n\
+    notice(\"poly \" .. (pc.is_polymorphed() and 1 or 0))\n\
+    notice(\"engaged \" .. (pc.is_engaged() and 1 or 0))\n\
+    notice(\"married \" .. (pc.is_married() and 1 or 0))\n\
+    notice(\"count \" .. pc.get_change_empire_count())\n\
+    local old = pc.get_empire()\n\
+    local ret = pc.change_empire(2)\n\
+    notice(\"ret \" .. ret)\n\
+    notice(\"count \" .. pc.get_change_empire_count())\n\
+    char_log(0, \"CHANGE_EMPIRE\", old .. \" -> 2\")\n\
+    sys_err(\"moved\")\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Ledger 405: `pc.change_empire`, `pc.get_change_empire_count`, `pc.is_polymorphed`,
+/// `pc.is_engaged`, `pc.is_married`, `char_log` and `sys_err` over the wire. Alpha stands
+/// unmorphed, unwed and unguilded on empire 1; the probe's login script moves her to
+/// empire 2. The re-show carries the new empire, the account row and the change row
+/// land, and the `QUEST_SYSERR` line chats.
+#[test]
+fn the_empire_exchange_moves_the_account() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // The probe stages as an unlisted script: `quest_list` keeps the owner's entries, so
+    // every quest number the login letters carry stays the one the helpers expect.
+    let (server, _data) = Server::start_with_files(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/empire_probe.lua",
+            EMPIRE_PROBE,
+        )],
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    // The burst's own pair first; the login event re-shows the body after the map's
+    // records, so the map's readers would trip on the removal. The pair is read here,
+    // the map and the tail read as usual, and the re-show with the login event follow.
+    alpha.send_record(&client_enter_game());
+    let add = alpha.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    let info = alpha.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let entered = finish_enter_game(&mut alpha, add, info);
+    let _ = entered;
+    read_rank_login(&mut alpha, 0, &[], &[]);
+    // The login event's re-show follows the rank lines that close `Entergame`.
+    let removal = alpha.read_game();
+    assert_eq!(removal, [GC_CHARACTER_DEL, 1, 0, 0, 0][..], "the removal");
+    let re_add = alpha.read_game();
+    assert_eq!(re_add[0], GC_CHARACTER_ADD);
+    assert_eq!(re_add[1..5], vid.to_le_bytes());
+    let re_info = alpha.read_game();
+    assert_eq!(re_info[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(re_info[1..5], vid.to_le_bytes());
+    assert_eq!(re_info[42], 2, "the re-show carries the new empire");
+    // The viewers are re-seen: the map reads again behind the pair with the view's
+    // update, then `dungeon_info` leads the lines.
+    let (seen, update, trailer) = read_reseen_map(&mut alpha, vid.to_le_bytes());
+    assert!(seen > 0, "the map is seen again");
+    assert!(update.is_some(), "the update goes to its view");
+    alpha.unread(vec![trailer]);
+    read_login_lines_hiding(&mut alpha, 0, None, [false; 5], None);
+    // The login pass's letters with the probe's records behind them: the probe runs
+    // among the login scripts, after the letters, and its move's frames batch behind
+    // its records, as `costume_option`'s hides do (`pc_hide_costume` sends
+    // `UpdatePacket` per call, `G/questlua_pc.cpp:3598`, one frame after the step).
+    read_letter(
+        &mut alpha,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let mut next_id = None;
+    let first = read_marking_letters(&mut alpha, &[], &mut next_id);
+    assert!(!first.is_empty(), "the login pass moves the marking quests");
+    for line in [
+        b"poly 0".as_slice(),
+        b"engaged 0",
+        b"married 0",
+        b"count 0",
+        b"ret 999",
+        b"count 0",
+    ] {
+        assert_eq!(
+            alpha.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, 1, line),
+            "the probe's six notices"
+        );
+    }
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"QUEST_SYSERR moved"),
+        "the syserr line chats"
+    );
+    // The letter pass replaces the marks the login pass made; the batched update
+    // follows it.
+    let _marks = read_marking_letters(&mut alpha, &first, &mut next_id);
+    read_login_update(&mut alpha);
+    alpha.still("the burst settles");
+    check(
+        &database,
+        "(SELECT empire FROM account WHERE login = 'alice') = 2",
+    );
+    check(
+        &database,
+        "(SELECT change_count FROM change_empire WHERE account_id = (SELECT id FROM account WHERE \
+         login = 'alice')) = 1",
+    );
+    alpha.still("the exchange settles");
 }

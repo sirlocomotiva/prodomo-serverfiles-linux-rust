@@ -548,10 +548,11 @@ impl super::GameState {
             view_guild: (0, 0),
         };
         let name = name.to_vec();
-        if let Some((_, _, _, _, take_sides)) = self.run_quests_giving(
+        if let Some((_, _, _, _, take_sides, _)) = self.run_quests_giving(
             place,
             (mover, 0, 0),
             super::quests::Giving::Nothing,
+            crate::game_loop_messages::QuestAccount::default(),
             |manager, game| manager.server_timer(&name, arg, game),
         ) {
             if !take_sides.is_empty() {
