@@ -5217,8 +5217,16 @@ const GC_REQUEST_CHANGE_LANGUAGE: u8 = 245;
 /// record, `WORD index`, `WORD c_index` and the `flag` byte, eight bytes measured for i686,
 /// then one part per flag bit (`quest::PC::SendQuestInfoPakcet`, `G/questpc.cpp:231-308`).
 const GC_QUEST_INFO: u8 = 81;
-/// `QUEST_SEND_TITLE`, the flag bit of the 31-byte `title` part (`G/quest.h`).
+/// `QUEST_SEND_TITLE`, the flag bit of the 31-byte `title` part (`G/questpc.h:37-44`).
 const QUEST_SEND_TITLE: u8 = 1 << 1;
+/// `QUEST_SEND_CLOCK_NAME` and `QUEST_SEND_CLOCK_VALUE`, the flag bits of the 17-byte
+/// clock name and the 4-byte clock value.
+const QUEST_SEND_CLOCK_NAME: u8 = 1 << 2;
+const QUEST_SEND_CLOCK_VALUE: u8 = 1 << 3;
+/// `QUEST_SEND_COUNTER_NAME` and `QUEST_SEND_COUNTER_VALUE`, the flag bits of the 17-byte
+/// counter name and the 4-byte counter value.
+const QUEST_SEND_COUNTER_NAME: u8 = 1 << 4;
+const QUEST_SEND_COUNTER_VALUE: u8 = 1 << 5;
 /// `HEADER_CG_SCRIPT_ANSWER`: the header and the answer byte, `TPacketCGScriptAnswer`.
 const CG_SCRIPT_ANSWER: u8 = 0x1d;
 /// `HEADER_CG_QUEST_INPUT_STRING`: the header and `msg[65]`, `TPacketCGQuestInputString`.
@@ -5270,6 +5278,34 @@ fn server_quest_title(index: u16, title: &[u8]) -> Vec<u8> {
     let mut field = [0; 31];
     field[..title.len()].copy_from_slice(title);
     record.extend_from_slice(&field);
+    record
+}
+
+/// `HEADER_GC_QUEST_INFO` with the clock and the counter the script set: the 17-byte
+/// names and the 4-byte values behind the 8-byte head, in flag-bit order.
+fn server_quest_clock(
+    index: u16,
+    (clock, clock_value): (&[u8], i32),
+    (counter, counter_value): (&[u8], i32),
+) -> Vec<u8> {
+    let mut record = vec![GC_QUEST_INFO];
+    record.extend_from_slice(&(8_u16 + 17 + 4 + 17 + 4).to_le_bytes());
+    record.extend_from_slice(&index.to_le_bytes());
+    record.extend_from_slice(&0_u16.to_le_bytes());
+    record.push(
+        QUEST_SEND_CLOCK_NAME
+            | QUEST_SEND_CLOCK_VALUE
+            | QUEST_SEND_COUNTER_NAME
+            | QUEST_SEND_COUNTER_VALUE,
+    );
+    let mut name = [0; 17];
+    name[..clock.len()].copy_from_slice(clock);
+    record.extend_from_slice(&name);
+    record.extend_from_slice(&clock_value.to_le_bytes());
+    let mut name = [0; 17];
+    name[..counter.len()].copy_from_slice(counter);
+    record.extend_from_slice(&name);
+    record.extend_from_slice(&counter_value.to_le_bytes());
     record
 }
 
@@ -35979,6 +36015,70 @@ const ITEM_PROBE: &[u8] = b"quest item_probe begin\n\
     end\n\
     end\n\
     end\n";
+
+/// The probe quest the clock scenario adds: Alpha's login sets the quest window's
+/// clock and counter, which go out in one `GC_QUEST_INFO` when the script ends.
+const CLOCK_PROBE: &[u8] = b"quest clock_probe begin\n\
+    state start begin\n\
+    when login begin\n\
+    if pc.get_name() == \"Alpha\" then\n\
+    q.set_clock_name(\"Tick\")\n\
+    q.set_clock_value(90)\n\
+    q.set_counter_name(\"Kill\")\n\
+    q.set_counter_value(3)\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Ledger 407: `q.set_clock_name`, `q.set_clock_value`, `q.set_counter_name` and
+/// `q.set_counter_value` over the wire. The probe is the last script the load numbers,
+/// so its index is one past the owner's last; its login sets the window's clock and
+/// counter, and the script's end sends them in one `GC_QUEST_INFO` behind the letters.
+#[test]
+fn a_login_sets_the_windows_clock_and_counter() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _data) = Server::start_with_files(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/clock_probe.lua", CLOCK_PROBE)],
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_lines(&mut alpha, 0, None);
+    read_letter(
+        &mut alpha,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let mut next_id = None;
+    let first = read_marking_letters(&mut alpha, &[], &mut next_id);
+    assert!(!first.is_empty(), "the login pass moves the marking quests");
+    // The probe's index rides its own record: the load numbers it last, past the
+    // owner's quests, so the index is read back and the rest is golden.
+    let info = alpha.read_game();
+    assert_eq!(info[0], GC_QUEST_INFO, "the window's clock and counter");
+    let index = u16::from_le_bytes([info[3], info[4]]);
+    assert!(
+        index > QUEST_YOHARA,
+        "the unlisted probe numbers past the owner's quests: {index}"
+    );
+    assert_eq!(
+        info,
+        server_quest_clock(index, (b"Tick", 90), (b"Kill", 3)),
+        "the window's clock and counter"
+    );
+    let _marks = read_marking_letters(&mut alpha, &first, &mut next_id);
+    read_login_update(&mut alpha);
+    alpha.still("the burst settles");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+}
 
 /// Ledger 406: `item.remove`, `item.get_name`, `item.get_size`, `item.get_refine_vnum`
 /// and `item.get_level` over the wire. Alpha holds one Blue Essence (31005, whose proto

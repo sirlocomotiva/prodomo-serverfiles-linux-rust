@@ -805,7 +805,7 @@ pub struct Target {
 
 /// What `SendQuestInfoPakcet` (`G/questpc.cpp:231-308`) sends when a script that changed its
 /// quest's window ends: the quest's number and category, and the parts the script changed.
-/// The clock, the counter and the icon are not ported, so no script changes them.
+/// The icon is not ported, so no script changes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestInfo {
     /// `iIndex`, the low half the record's `WORD` keeps: the number of the quest that ran.
@@ -817,6 +817,14 @@ pub struct QuestInfo {
     pub begin: Option<bool>,
     /// `_title`, when `q.set_title` set `QUEST_SEND_TITLE`: the text up to its first zero.
     pub title: Option<Vec<u8>>,
+    /// `_clock_name`, when `q.set_clock_name` set `QUEST_SEND_CLOCK_NAME`.
+    pub clock_name: Option<Vec<u8>>,
+    /// `_clock_value`, when `q.set_clock_value` set `QUEST_SEND_CLOCK_VALUE`.
+    pub clock_value: Option<i32>,
+    /// `_counter_name`, when `q.set_counter_name` set `QUEST_SEND_COUNTER_NAME`.
+    pub counter_name: Option<Vec<u8>>,
+    /// `_counter_value`, when `q.set_counter_value` set `QUEST_SEND_COUNTER_VALUE`.
+    pub counter_value: Option<i32>,
 }
 
 /// One argument of a `guild.*` quest call: a dworded number or the raw bytes.
@@ -2188,6 +2196,36 @@ struct Running {
 /// The part of a running script's `QuestState` the client's quest window reads, with the
 /// bits of `m_iSendToClient` that say what the script changed. Each run starts a new one
 /// (`OpenState`, and `PC::SetQuest` with `m_iSendToClient = 0`, `G/questpc.cpp:140-162`).
+/// `m_iSendToClient` (`G/questpc.h:35-44`): which parts of the quest's window the script
+/// changed, as the flag byte `SendQuestInfoPakcet` sends (`G/questpc.cpp:231-308`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SendFlags(u8);
+
+impl SendFlags {
+    /// `QUEST_SEND_ISBEGIN`: `q.start` or `q.done` moved `bStart`.
+    const BEGIN: u8 = 1 << 0;
+    /// `QUEST_SEND_TITLE`: `q.set_title` set the title.
+    const TITLE: u8 = 1 << 1;
+    /// `QUEST_SEND_CLOCK_NAME`: `q.set_clock_name` set the clock name.
+    const CLOCK_NAME: u8 = 1 << 2;
+    /// `QUEST_SEND_CLOCK_VALUE`: `q.set_clock_value` set the clock value.
+    const CLOCK_VALUE: u8 = 1 << 3;
+    /// `QUEST_SEND_COUNTER_NAME`: `q.set_counter_name` set the counter name.
+    const COUNTER_NAME: u8 = 1 << 4;
+    /// `QUEST_SEND_COUNTER_VALUE`: `q.set_counter_value` set the counter value.
+    const COUNTER_VALUE: u8 = 1 << 5;
+
+    /// `SetSendFlag`: the flag of the part the script changed.
+    fn set(&mut self, flag: u8) {
+        self.0 |= flag;
+    }
+
+    /// Whether the flag of the part is set.
+    fn has(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+}
+
 #[derive(Debug, Default)]
 struct Window {
     /// `iIndex`: `PC::SetQuest` gives it the number of the quest that runs.
@@ -2196,10 +2234,16 @@ struct Window {
     start: bool,
     /// `_title`.
     title: Vec<u8>,
-    /// `QUEST_SEND_ISBEGIN`: `q.start` or `q.done` moved `bStart`.
-    send_begin: bool,
-    /// `QUEST_SEND_TITLE`: `q.set_title` set the title.
-    send_title: bool,
+    /// `_clock_name`.
+    clock_name: Vec<u8>,
+    /// `_clock_value`.
+    clock_value: i32,
+    /// `_counter_name`.
+    counter_name: Vec<u8>,
+    /// `_counter_value`.
+    counter_value: i32,
+    /// `m_iSendToClient`: which parts the script changed.
+    send: SendFlags,
 }
 
 impl Window {
@@ -2207,7 +2251,7 @@ impl Window {
     /// (`if (m_iSendToClient)`, `G/questpc.cpp:342-346`). The category is looked up by the
     /// index the record carries.
     fn info(&self, categories: &BTreeMap<u16, u32>) -> Option<QuestInfo> {
-        if !self.send_begin && !self.send_title {
+        if self.send == SendFlags::default() {
             return None;
         }
         let [low, high, ..] = self.index.to_le_bytes();
@@ -2216,8 +2260,24 @@ impl Window {
         Some(QuestInfo {
             index,
             category: u16::from_le_bytes([low, high]),
-            begin: self.send_begin.then_some(self.start),
-            title: self.send_title.then(|| self.title.clone()),
+            begin: self.send.has(SendFlags::BEGIN).then_some(self.start),
+            title: self.send.has(SendFlags::TITLE).then(|| self.title.clone()),
+            clock_name: self
+                .send
+                .has(SendFlags::CLOCK_NAME)
+                .then(|| self.clock_name.clone()),
+            clock_value: self
+                .send
+                .has(SendFlags::CLOCK_VALUE)
+                .then_some(self.clock_value),
+            counter_name: self
+                .send
+                .has(SendFlags::COUNTER_NAME)
+                .then(|| self.counter_name.clone()),
+            counter_value: self
+                .send
+                .has(SendFlags::COUNTER_VALUE)
+                .then_some(self.counter_value),
         })
     }
 }
@@ -4657,7 +4717,7 @@ fn window_api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], last: Value) -> mlua::Res
             // anything else changes nothing.
             if let Some(title) = host::c_string(lua, last)? {
                 cx.window.title = title;
-                cx.window.send_title = true;
+                cx.window.send.set(SendFlags::TITLE);
             }
         }
         b"q.start" => {
@@ -4672,7 +4732,7 @@ fn window_api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], last: Value) -> mlua::Res
                     .get(cx.quest.as_slice())
                     .copied()
                     .unwrap_or(0);
-                cx.window.send_begin = true;
+                cx.window.send.set(SendFlags::BEGIN);
             }
         }
         b"q.done" => {
@@ -4680,7 +4740,39 @@ fn window_api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], last: Value) -> mlua::Res
             // `ClearCurrentQuestBeginFlag` (`:433-439`): a quest with a number ends.
             if cx.window.index != 0 {
                 cx.window.start = false;
-                cx.window.send_begin = true;
+                cx.window.send.set(SendFlags::BEGIN);
+            }
+        }
+        // `quest_set_clock_name` (`G/questlua_quest.cpp:57-66`): the last argument, when
+        // string-like, is the clock name; anything else changes nothing.
+        b"q.set_clock_name" => {
+            if let Some(name) = host::c_string(lua, last)? {
+                cx.window.clock_name = name;
+                cx.window.send.set(SendFlags::CLOCK_NAME);
+            }
+        }
+        // `quest_set_clock_value` (`:68-77`): the last argument, when number-like, is
+        // the clock value (`(int)rint`); anything else changes nothing.
+        b"q.set_clock_value" => {
+            if let Some(value) = lua.coerce_number(last.clone())? {
+                cx.window.clock_value = host::c_int(lua, Value::Number(value.round_ties_even()))?;
+                cx.window.send.set(SendFlags::CLOCK_VALUE);
+            }
+        }
+        // `quest_set_counter_name` (`:79-88`): the last argument, when string-like, is
+        // the counter name; anything else changes nothing.
+        b"q.set_counter_name" => {
+            if let Some(name) = host::c_string(lua, last)? {
+                cx.window.counter_name = name;
+                cx.window.send.set(SendFlags::COUNTER_NAME);
+            }
+        }
+        // `quest_set_counter_value` (`:90-99`): the last argument, when number-like, is
+        // the counter value (`(int)rint`); anything else changes nothing.
+        b"q.set_counter_value" => {
+            if let Some(value) = lua.coerce_number(last.clone())? {
+                cx.window.counter_value = host::c_int(lua, Value::Number(value.round_ties_even()))?;
+                cx.window.send.set(SendFlags::COUNTER_VALUE);
             }
         }
         _ => return Ok(false),
@@ -6773,7 +6865,8 @@ mod tests {
 
     /// `quest_set_title`, `quest_start` and `quest_done` (`G/questlua_quest.cpp:17-45`): the
     /// title is the last argument when it is text or a number; `q.start` begins only a quest
-    /// whose window has no number yet, and `q.done` ends only one that has.
+    /// whose window has no number yet, and `q.done` ends only one that has. The clock and
+    /// the counter (`:57-99`) take the last argument the same way, `(int)rint` for the values.
     #[test]
     fn the_quest_window_names_follow_legacys_argument_rules() {
         let manager = manager().lock().unwrap();
@@ -6791,20 +6884,59 @@ mod tests {
         let table = Value::Table(lua.create_table().unwrap());
         probe.call("q.set_title", &[table]).unwrap();
         probe.call("q.set_title", &[]).unwrap();
-        assert!(!probe.window.send_title, "no text, no title");
+        assert!(
+            !probe.window.send.has(SendFlags::TITLE),
+            "no text, no title"
+        );
         probe
             .call("q.set_title", &[string(b"first"), string(b"la\0st")])
             .unwrap();
         assert_eq!(probe.window.title, b"la");
         probe.call("q.set_title", &[Value::Number(12.5)]).unwrap();
         assert_eq!(probe.window.title, b"12.5");
-        assert!(probe.window.send_title);
+        assert!(probe.window.send.has(SendFlags::TITLE));
+
+        // The clock and the counter (`G/questlua_quest.cpp:57-99`): the last argument,
+        // string-like for the names and number-like for the values (`(int)rint`, ties
+        // to even), and anything else changes nothing.
+        let table = Value::Table(lua.create_table().unwrap());
+        probe.call("q.set_clock_name", &[table.clone()]).unwrap();
+        probe.call("q.set_clock_value", &[table.clone()]).unwrap();
+        probe.call("q.set_counter_name", &[table.clone()]).unwrap();
+        probe.call("q.set_counter_value", &[table]).unwrap();
+        assert!(
+            !probe.window.send.has(SendFlags::CLOCK_NAME)
+                && !probe.window.send.has(SendFlags::CLOCK_VALUE)
+                && !probe.window.send.has(SendFlags::COUNTER_NAME)
+                && !probe.window.send.has(SendFlags::COUNTER_VALUE),
+            "no text or number, nothing set"
+        );
+        probe
+            .call("q.set_clock_name", &[string(b"ti\0ck")])
+            .unwrap();
+        probe
+            .call("q.set_clock_value", &[Value::Number(2.5)])
+            .unwrap();
+        probe
+            .call("q.set_counter_name", &[Value::Number(7.0)])
+            .unwrap();
+        probe.call("q.set_counter_value", &[string(b"12")]).unwrap();
+        assert_eq!(probe.window.clock_name, b"ti");
+        assert_eq!(probe.window.clock_value, 2, "ties to even");
+        assert_eq!(probe.window.counter_name, b"7");
+        assert_eq!(probe.window.counter_value, 12);
+        assert!(
+            probe.window.send.has(SendFlags::CLOCK_NAME)
+                && probe.window.send.has(SendFlags::CLOCK_VALUE)
+                && probe.window.send.has(SendFlags::COUNTER_NAME)
+                && probe.window.send.has(SendFlags::COUNTER_VALUE)
+        );
 
         // The probe's quest `q` has no number, so its window has none either.
         probe.call("q.done", &[]).unwrap();
-        assert!(!probe.window.send_begin, "nothing to end");
+        assert!(!probe.window.send.has(SendFlags::BEGIN), "nothing to end");
         probe.call("q.start", &[]).unwrap();
-        assert!(probe.window.start && probe.window.send_begin);
+        assert!(probe.window.start && probe.window.send.has(SendFlags::BEGIN));
         assert_eq!(probe.window.index, 0, "`q` names no quest");
 
         probe.window = Window {
@@ -6813,11 +6945,11 @@ mod tests {
         };
         probe.call("q.start", &[]).unwrap();
         assert!(
-            !probe.window.start && !probe.window.send_begin,
+            !probe.window.start && !probe.window.send.has(SendFlags::BEGIN),
             "a numbered quest is never begun"
         );
         probe.call("q.done", &[]).unwrap();
-        assert!(!probe.window.start && probe.window.send_begin);
+        assert!(!probe.window.start && probe.window.send.has(SendFlags::BEGIN));
         let categories = [(40, 0x0002_0003)].into_iter().collect();
         assert_eq!(
             probe.window.info(&categories),
@@ -6826,6 +6958,10 @@ mod tests {
                 category: 3,
                 begin: Some(false),
                 title: None,
+                clock_name: None,
+                clock_value: None,
+                counter_name: None,
+                counter_value: None,
             })
         );
         assert_eq!(Window::default().info(&categories), None);
@@ -8533,6 +8669,10 @@ mod tests {
                 category: 0,
                 begin: None,
                 title: Some(title.as_bytes().to_vec()),
+                clock_name: None,
+                clock_value: None,
+                counter_name: None,
+                counter_value: None,
             };
             ((QUEST_SKIN_NOWINDOW, script), info)
         };
@@ -9202,6 +9342,10 @@ end
                 category: 0,
                 begin: None,
                 title: Some(b"Sixth and Seventh Bonus".to_vec()),
+                clock_name: None,
+                clock_value: None,
+                counter_name: None,
+                counter_value: None,
             }]
         );
 
@@ -9258,7 +9402,7 @@ end
         let titled = Window {
             index: 0x0001_0028,
             title: b"Sixth".to_vec(),
-            send_title: true,
+            send: SendFlags(SendFlags::TITLE),
             ..Window::default()
         };
         assert_eq!(
@@ -9268,12 +9412,16 @@ end
                 category: 7,
                 begin: None,
                 title: Some(b"Sixth".to_vec()),
+                clock_name: None,
+                clock_value: None,
+                counter_name: None,
+                counter_value: None,
             })
         );
         let begun = Window {
             index: 41,
             start: true,
-            send_begin: true,
+            send: SendFlags(SendFlags::BEGIN),
             ..Window::default()
         };
         assert_eq!(
@@ -9283,11 +9431,15 @@ end
                 category: 9,
                 begin: Some(true),
                 title: None,
+                clock_name: None,
+                clock_value: None,
+                counter_name: None,
+                counter_value: None,
             })
         );
         let done = Window {
             index: 42,
-            send_begin: true,
+            send: SendFlags(SendFlags::BEGIN),
             ..Window::default()
         };
         assert_eq!(

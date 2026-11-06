@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-06, after ledger section 406 (the quest item).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 407
+Last reviewed: 2026-11-06, after ledger section 407 (the window clock).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 408
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -418,7 +418,10 @@ warp and die on disconnect). Since 405 a script's empire exchange moves the acco
 again after the step, and the re-show carries the new empire. Since 406 a used quest
 item reads its name, size, refined vnum and refine level and removes itself
 (`item.remove`, `item.get_name`, `item.get_size`, `item.get_refine_vnum`,
-`item.get_level`): the removal lands in the call, like `set_socket` does. The
+`item.get_level`): the removal lands in the call, like `set_socket` does. Since 407 a
+script sets its window's clock and counter (`q.set_clock_name`, `q.set_clock_value`,
+`q.set_counter_name`, `q.set_counter_value`), which go out in one `GC_QUEST_INFO`
+when it ends. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

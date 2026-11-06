@@ -46271,3 +46271,28 @@ passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warning
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 407. The window clock (`q.set_clock_name`, `q.set_clock_value`, `q.set_counter_name`, `q.set_counter_value`)
+
+No owner quest calls these four names — they sit only in `questlib.lua`'s `q.set_clock`
+and `q.set_counter` wrappers, which no quest calls — so one probe calls them: `CLOCK_PROBE`
+sets the window's clock and counter at Alpha's login, and the scenario
+`a_login_sets_the_windows_clock_and_counter` proves the script's end sends them in one
+`GC_QUEST_INFO` behind the letters, golden but for the probe's own index, which the load
+numbers past the owner's quests.
+
+`Window` gains the clock and counter names and values; `QuestInfo` carries the four
+parts; `window_api` gains the four arms (the last argument, string-like for the names
+and `(int)rint`, ties to even, for the values; anything else changes nothing); and
+`Session::quest_info` encodes them. `BRIDGED` grows 253 to 257. The six send bools
+become `SendFlags`, the flag byte `SendQuestInfoPakcet` sends, which the bool-count
+lint forced and legacy's own `m_iSendToClient` blesses. Unit tests: the argument rules
+(a NUL-cut name, 2.5 tying to 2, a number-like name) and the golden pair record with
+flag `0b11_1111` and size 82.
+
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4791 passed 0 failed in 42 targets; `cargo test --workspace --doc` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

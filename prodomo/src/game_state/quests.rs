@@ -2104,6 +2104,10 @@ impl Game for Session<'_> {
             category: info.category,
             begin: info.begin,
             title: info.title.as_deref().map(c_field),
+            clock_name: info.clock_name.as_deref().map(c_field),
+            clock_value: info.clock_value,
+            counter_name: info.counter_name.as_deref().map(c_field),
+            counter_value: info.counter_value,
             ..GcQuestInfo::default()
         };
         let mut out = Vec::new();
@@ -5636,28 +5640,45 @@ mod tests {
         assert_quest_info_records(&session.records);
     }
 
-    /// The window's pair: a titled begin, then an untitled end.
+    /// The window's pair: a titled begin with a clock and a counter, then an untitled end.
     fn send_quest_info_pair(session: &mut Session<'_>) {
         session.quest_info(&QuestInfo {
             index: 0x0128,
             category: 0x0203,
             begin: Some(true),
             title: Some(b"Bonus".to_vec()),
+            clock_name: Some(b"Tick".to_vec()),
+            clock_value: Some(90),
+            counter_name: Some(b"Kill".to_vec()),
+            counter_value: Some(3),
         });
         session.quest_info(&QuestInfo {
             index: 0x0128,
             category: 0,
             begin: Some(false),
             title: None,
+            clock_name: None,
+            clock_value: None,
+            counter_name: None,
+            counter_value: None,
         });
     }
 
-    /// The window's two records: the titled begin and the untitled end.
+    /// The window's two records: the titled begin with its clock and counter, and the
+    /// untitled end.
     fn assert_quest_info_records(records: &[Vec<u8>]) {
-        let mut titled = vec![81, 40, 0, 0x28, 0x01, 0x03, 0x02, 0b11, 1];
+        let mut titled = vec![81, 82, 0, 0x28, 0x01, 0x03, 0x02, 0b11_1111, 1];
         let mut title = [0; 31];
         title[..5].copy_from_slice(b"Bonus");
         titled.extend_from_slice(&title);
+        let mut clock = [0; 17];
+        clock[..4].copy_from_slice(b"Tick");
+        titled.extend_from_slice(&clock);
+        titled.extend_from_slice(&90i32.to_le_bytes());
+        let mut counter = [0; 17];
+        counter[..4].copy_from_slice(b"Kill");
+        titled.extend_from_slice(&counter);
+        titled.extend_from_slice(&3i32.to_le_bytes());
         assert_eq!(records, [titled, vec![81, 9, 0, 0x28, 0x01, 0, 0, 0b01, 0]]);
     }
 
