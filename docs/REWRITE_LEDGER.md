@@ -46401,3 +46401,45 @@ passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warning
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 410. The party's near count
+
+`lua.party.get_near_count` (`G/questlua_party.cpp:195-204`) is ported. The quest
+snapshot carries the cached `m_iCountNearPartyMember` of the reader's party (`None`
+with no party reads 0), through a new `Parties::near_count_of` accessor and a
+`party_near_count` field on the session and its reader context; the bridge arm pushes
+it as a Lua number, and `BRIDGED` grows to 269. The call itself updates nothing: only
+the two cinematic calls run `CParty::Update` at quest time, and they are unreachable
+(the sweep in 401 found their only references the two commented-out lines in
+`questlib.lua:35-36`).
+
+The count's own rules were already ported (the Update's near flags, the `<= 1` zeroing
+without a dungeon, the 5000-unit `DISTANCE_APPROX` range, the 3 s tick with its resend):
+the one name rides them. Its callers are the ship-defense gate
+(`_basic/ship_defense.lua:112`) and the entry guard in
+`luaLibrary/dungeonFunctions.lua:151`, whose library is dofile'd by `questlib.lua` but
+whose own functions no owner quest calls; the library is loaded but its guard is dead
+code today.
+
+One scenario: `a_probe_reports_the_party_near_count_two_then_none`. Both enter side by
+side, Alpha invites Yankee, the join walk drains, and the first Update's resend reaches
+both members (the walk's tail holds one LINK more than `drain_party_walk` counted, so
+the scenario reads to the first UPDATE). A click on the teacher says `near 2`. Yankee
+then walks 6000 units out — 5000 units reads only 4804 under the octagonal
+approximation, so the walk overshoots — the relay and the view's own records pass, the
+resends drain until the wire holds nothing but heartbeats, and a click says `near 0`.
+The walk crosses the 5000-unit range, which lands the solo reader in the `<= 1` arm, so
+the count is 0 rather than 1.
+
+Bridge notes. The walking outpost crosses view cells, so the drain allows the view's
+own records and the walker's grade changes (16-23) beside the UPDATE and PARAMETER
+records. The first click's script line arrives behind the standing Update's resends,
+so `read_near_line` reads through them. The scenario runs 27 s and passed 4/4 in
+parallel.
+
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4810 passed 0 failed in 42 targets; `cargo test --workspace --doc` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

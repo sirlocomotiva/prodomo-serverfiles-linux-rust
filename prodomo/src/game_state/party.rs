@@ -176,6 +176,12 @@ impl Parties {
             .unwrap_or(0)
     }
 
+    /// `CParty::GetNearMemberCount` of the party led by `leader` (`G/party.h:125`): the
+    /// cached near count, for a quest step's snapshot. `None` with no such party.
+    pub(super) fn near_count_of(&self, leader: CharacterId) -> Option<usize> {
+        self.by_leader.get(&leader).map(|party| party.near_count)
+    }
+
     /// The flags of the party led by `leader`, cloned for a quest step's snapshot.
     pub(super) fn flags_of(
         &self,

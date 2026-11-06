@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 268] = [
+pub const BRIDGED: [&str; 269] = [
     "attr67add.holding",
     "attr67add.success",
     "attr67add.collect",
@@ -379,6 +379,7 @@ pub const BRIDGED: [&str; 268] = [
     "party.get_leader_pid",
     "party.setf",
     "party.getf",
+    "party.get_near_count",
     "party.get_member_pids",
     "pc.get_wear",
     "pc.get_level",

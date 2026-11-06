@@ -582,6 +582,9 @@ pub(super) struct Session<'s> {
     /// The PIDs of the party members on the reader's map at the step's start, in
     /// ascending PID order: what `party.get_member_pids` pushes.
     pub(super) party_member_pids: Vec<u32>,
+    /// The reader's party near count, read at the step's start: what
+    /// `party.get_near_count` answers, 0 with no party.
+    pub(super) party_near_count: u32,
     /// The reader's party flags, read at the step's start: what `party.getf`
     /// answers, and what `party.setf` changes before the world applies them.
     pub(super) party_flags: std::collections::HashMap<Vec<u8>, i32>,
@@ -1606,6 +1609,10 @@ impl Game for Session<'_> {
 
     fn party_member_pids(&self) -> Vec<u32> {
         self.party_member_pids.clone()
+    }
+
+    fn party_near_count(&self) -> u32 {
+        self.party_near_count
     }
 
     fn begin_other_pc(&mut self, pid: u32) {
@@ -4168,6 +4175,7 @@ struct ReaderContext {
     party_leader: Option<u32>,
     party_flags: std::collections::HashMap<Vec<u8>, i32>,
     party_member_pids: Vec<u32>,
+    party_near_count: u32,
     /// The manager's name for the reader.
     horse_name: Vec<u8>,
     /// The account's character PIDs, without the empty slots, for the empire change's
@@ -4321,6 +4329,9 @@ fn reader_context(
     let party_member_pids = party_leader
         .and_then(|leader| parties.on_map_members(leader, map_index, bodies))
         .unwrap_or_default();
+    let party_near_count = party_leader
+        .and_then(|leader| parties.near_count_of(leader))
+        .unwrap_or(0);
     ReaderContext {
         card,
         pc_level,
@@ -4341,6 +4352,7 @@ fn reader_context(
         party_leader,
         party_flags,
         party_member_pids,
+        party_near_count: u32::try_from(party_near_count).unwrap_or(u32::MAX),
         horse_name: caller
             .and_then(|pid| horse_names.get(&pid))
             .cloned()
@@ -4681,6 +4693,7 @@ fn session_head<'s>(
         guilds: guilds.clone(),
         party_leader: context.party_leader,
         party_member_pids: context.party_member_pids,
+        party_near_count: context.party_near_count,
         party_flags: context.party_flags,
         party_sets: Vec::new(),
         records: Vec::new(),
@@ -4914,6 +4927,7 @@ mod tests {
             party: PartyFlags::default(),
             party_leader: None,
             party_member_pids: Vec::new(),
+            party_near_count: 0,
             blocked: Vec::new(),
             switched: false,
             takes: Vec::new(),

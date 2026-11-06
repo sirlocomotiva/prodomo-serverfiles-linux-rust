@@ -36862,3 +36862,139 @@ fn part_after_collect(alpha: Keyed, server: &mut Server, database: &ScratchDatab
         "SELECT window_type = 1 AND pos = 0 AND attrtype5 != 0 FROM item WHERE id = 31",
     );
 }
+
+/// Read until the click's script line, through the Update resends a waiting party
+/// earns: each is a `GC_PARTY_UPDATE` for one of `vids`.
+fn read_near_line(who: &mut Keyed, vids: &[u32], note: &str) -> Vec<u8> {
+    for _ in 0..8 {
+        let record = who.read_game();
+        if record[0] != GC_PARTY_UPDATE {
+            return record;
+        }
+        let pid = u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
+        assert!(vids.contains(&pid), "{note}: {record:02x?}");
+    }
+    panic!("{note}: no script line behind the resends");
+}
+
+/// Ledger 410's near probe: the skill teacher (vnum 20300, bound but questless)
+/// answers a click with the cached near count.
+const NEAR_PROBE: &[u8] = b"quest near_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('near '..party.get_near_count())\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `party.get_near_count`: both enter beside the teacher, Alpha invites Yankee, the
+/// Update counts two, a click says `near 2`; Yankee walks out of the 5000-unit
+/// range, the Update counts none, and a click says `near 0`.
+#[test]
+fn a_probe_reports_the_party_near_count_two_then_none() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/near_probe.lua", NEAR_PROBE)],
+        "no_wander = true",
+    );
+    let (mut alice, alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let yankee_vid = u32::from_le_bytes(yankee_entered.add[1..5].try_into().unwrap());
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let _ = alpha;
+    // Alice invites Yankee; Yankee answers yes; the join walk drains by header.
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&yankee_vid.to_le_bytes());
+    alice.send_record(&invite);
+    let asked = yankee.read_game();
+    assert_eq!(asked[0], GC_PARTY_INVITE, "{asked:02x?}");
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    yankee.send_record(&answer);
+    drain_party_walk(&mut yankee, "the guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
+    // The first Update runs a full tick after the party's birth; both then stand
+    // side by side, so the probe sees two.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let teacher = shown_vid(&alice_entered, 20_300, "the teacher stands in view");
+    // The first Update's resend reaches both members: the near-count change. The
+    // drain stops at the join walk's own UPDATE, so the walk's tail (one more LINK
+    // each) comes first.
+    for (who, note) in [(&mut yankee, "guest"), (&mut alice, "leader")] {
+        let mut walk = Vec::new();
+        for _ in 0..4 {
+            let record = who.read_game();
+            walk.push(record[0]);
+            if record[0] == GC_PARTY_UPDATE {
+                break;
+            }
+            assert_eq!(record[0], GC_PARTY_LINK, "{note}: {walk:02x?}");
+        }
+        assert_eq!(
+            *walk.last().unwrap(),
+            GC_PARTY_UPDATE,
+            "{note}: {walk:02x?}"
+        );
+    }
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        read_near_line(&mut alice, &[alpha_vid, yankee_vid], "the first click"),
+        server_script(1, b"near 2[ENTER][DONE]"),
+        "side by side the count is two"
+    );
+    // Yankee walks 6000 units out (`DISTANCE_APPROX` reads 5765, past the 5000
+    // range); the walk's relay and the next Update pass, and the probe sees zero.
+    let sent = std::time::Instant::now();
+    yankee.send_record(&client_move(FUNC_MOVE, 0, 0, 476_000, 950_000, 0x7000));
+    assert_insert_move(&alice.read_game(), yankee_vid, (476_000, 950_000), 14_000);
+    wait_out_walk(sent, 14_000);
+    // The walk outlasts several Updates; each member's resends arrive mixed with the
+    // exp-bonus PARAMETERs, the walked view's own records, and the walker's attack
+    // and defence rolls' grade changes (16-23). Reads run until the wire holds nothing
+    // but heartbeats, and at least one UPDATE showed.
+    for (who, note) in [(&mut yankee, "guest"), (&mut alice, "leader")] {
+        let mut updates = 0;
+        loop {
+            let deadline = std::time::Instant::now() + Duration::from_millis(400);
+            match who.read_game_until(deadline) {
+                Some(record) => {
+                    assert!(
+                        record[0] == GC_PARTY_UPDATE
+                            || record[0] == GC_PARTY_PARAMETER
+                            || record[0] == GC_CHARACTER_ADD
+                            || record[0] == GC_CHAR_ADDITIONAL_INFO
+                            || record[0] == GC_MOVE
+                            || record[0] == GC_CHARACTER_DEL
+                            || (record[0] == GC_POINT_CHANGE && (16..=23).contains(&record[8])),
+                        "{note}: {record:02x?}"
+                    );
+                    updates += usize::from(record[0] == GC_PARTY_UPDATE);
+                }
+                None => break,
+            }
+        }
+        assert!(updates >= 1, "{note}: no resend arrived");
+    }
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        read_near_line(&mut alice, &[alpha_vid, yankee_vid], "the second click"),
+        server_script(1, b"near 0[ENTER][DONE]"),
+        "out of range the count is zero"
+    );
+    alice.quiet("the second click is the end");
+}

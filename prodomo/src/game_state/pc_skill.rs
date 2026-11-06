@@ -5018,6 +5018,7 @@ mod tests {
             party: super::super::quests::PartyFlags::default(),
             party_leader: None,
             party_member_pids: Vec::new(),
+            party_near_count: 0,
             blocked: Vec::new(),
             switched: false,
             confirm_records: Vec::new(),

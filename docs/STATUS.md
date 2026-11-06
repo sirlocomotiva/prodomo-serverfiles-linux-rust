@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-06, after ledger section 409 (the 6th and 7th bonus).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 410
+Last reviewed: 2026-11-06, after ledger section 410 (the party near count).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 411
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -430,7 +430,8 @@ into the 6th/7th-bonus window (`CG_ATTR67_ADD`), spends the level's fragment and
 support, and rolls the success the quest reads back (`attr67add.holding`,
 `attr67add.success`, `attr67add.collect`, `attr67add.item_vnum`, `attr67add.window_type`,
 `attr67add.window_cell`): the wait page, the won roll's rare attribute, and the collect
-home. The
+home. Since 410 a script reads its party's cached near count (`party.get_near_count`),
+which the Update's resend keeps. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

@@ -637,6 +637,11 @@ pub trait Game {
     /// `party.get_member_pids` pushes. Empty with no party.
     fn party_member_pids(&self) -> Vec<u32>;
 
+    /// `GetParty()->GetNearMemberCount()` of the character the script runs for
+    /// (`G/questlua_party.cpp:195-204`): its party's cached near count, 0 with no
+    /// party. The count is the last Update's; the call itself updates nothing.
+    fn party_near_count(&self) -> u32;
+
     /// `CQuestManager::BeginOtherPCBlock(pid)`
     /// (`G/questmanager.cpp:2051-2076`): the character `pid` names becomes the
     /// one the script runs for, and the bridge answers for it until
@@ -4096,6 +4101,9 @@ fn party_api(
         b"party.is_leader" => Some(Value::Boolean(cx.game.is_party_leader())),
         // `party_get_leader_pid` (`G/questlua_party.cpp:243-255`): -1 with none.
         b"party.get_leader_pid" => Some(Value::Number(f64::from(cx.game.party_leader_pid()))),
+        // `party_get_near_count` (`G/questlua_party.cpp:195-204`): the cached near
+        // count, 0 with no party.
+        b"party.get_near_count" => Some(Value::Number(f64::from(cx.game.party_near_count()))),
         // `party_get_member_pids` (`G/questlua_party.cpp:424-442`) pushes one value
         // per PID, so it returns early with its own arity.
         b"party.get_member_pids" => {
@@ -5580,6 +5588,8 @@ mod tests {
         leader_pid: i32,
         /// What `party_member_pids` answers.
         member_pids: Vec<u32>,
+        /// What `party_near_count` answers.
+        near_count: u32,
         /// The PIDs `begin_other_pc` switches to; any other PID is offline.
         online: Vec<u32>,
         /// Whether the last `begin_other_pc` switched.
@@ -6130,6 +6140,10 @@ mod tests {
 
         fn party_member_pids(&self) -> Vec<u32> {
             self.member_pids.clone()
+        }
+
+        fn party_near_count(&self) -> u32 {
+            self.near_count
         }
 
         fn begin_other_pc(&mut self, pid: u32) {
