@@ -46521,3 +46521,37 @@ flake under load, unrelated: this slice touches no sort path); `cargo test
 in parallel. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
 width was measured. Afterwards no `prodomo\_%` database remained. No ADR
 changed.
+
+## 412. The pc tail
+Eleven names the owner quests call (`quest-api.md` 203 ported, 46 missing):
+`pc.get_player_id`, `pc.get_account_id`, `pc.get_empty_inventory_count`,
+`pc.is_trade0`, `pc.is_busy0`, `pc.give_exp2`, `pc.set_skill_group`, `pc.select`,
+`pc.get_killee_drop_pct` (`G/questlua_pc.cpp`), `pc.warp_local` (`:242-316`), and
+`game.drop_item` (`G/questlua_game.cpp:132-142`).
+Bridge notes. The id readers push `GetPlayerID()` and the account triple, which
+`run_quests_giving_raw` now carries in. The empty count is the unlocked base minus
+the full cells, so the 3-page expansion (a Divergence, ledger 340) answers 235 empty
+at boot. The gates push trade and the four-window OR (the private shop bit never
+sets: unported). `give_exp2` grants `(DWORD)rint` and `set_skill_group` sets on
+numbers, matching the legacy logs on junk; the group arm keeps the level-5 gate.
+`pc.select` stacks the running PC and returns the old VID, or 0 with none. The
+killee's pair answers `quest_drop_pct` for the quest NPC (a stone check, the boss
+table, the two lucky rolls, the mob rate and the fixed parse of the `:906-911`
+precedence Defect); the null killee answers (-1, -1). `warp_local` lands on the
+region's base plus the pair, `monster()` said, `war_map` re-armed, like `goto_info`.
+`game.drop_item` lays a plain owned drop with no rare timer. The scenario's dialog
+lands its own numbers: `20047 {vid} {player} {account} 88 1 4000000[DONE]` and
+`false false[DONE]`, the 2500 grant, the group arm, the 11200 on the ground, and the
+second click's warp to map 1's base plus (100, 200). `pc_api` shed `pc_give` and the
+killee moved into `pc_tail`; the session's window bits grouped into `WindowFlags`
+and its tail half into `SessionTail`, so the lint stays satisfied; the dead
+`DROP_RAND_RANGE` cite moved onto `quest_drop_pct`, which already holds the formula.
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4819 passed 0 failed in 42 targets; `cargo test
+--workspace --doc` 1 passed; `cargo clippy --workspace --all-targets --locked
+--offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean. The tail scenario passed 8/8
+in parallel. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
+width was measured. Afterwards no `prodomo\_%` database remained. No ADR
+changed.

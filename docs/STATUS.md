@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-06, after ledger section 411 (the Okey card game).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 412
+Last reviewed: 2026-11-06, after ledger section 412 (the pc tail).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 413
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -433,7 +433,7 @@ support, and rolls the success the quest reads back (`attr67add.holding`,
 home. Since 410 a script reads its party's cached near count (`party.get_near_count`),
 which the Update's resend keeps. Since 411 `/cards` opens, pulls, ends, destroys,
 accepts and restores the Okey hand, the ended games log to the Okey table, and the owner
-quest's chats read both ranks (`pc.get_okay_global_rank`, `pc.get_okay_rund_rank`). The
+quest's chats read both ranks (`pc.get_okay_global_rank`, `pc.get_okay_rund_rank`). Since 412 a script reads the tail names (`pc.get_player_id`, `pc.get_account_id`, `pc.get_empty_inventory_count`, `pc.is_trade0`, `pc.is_busy0`, `pc.give_exp2`, `pc.set_skill_group`, `pc.select`, `pc.get_killee_drop_pct`, `pc.warp_local`, `game.drop_item`). The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
