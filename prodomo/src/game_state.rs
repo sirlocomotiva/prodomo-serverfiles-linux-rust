@@ -64,6 +64,7 @@ use world::character::{add_from_client, sync_quickslots};
 mod affect;
 mod alignment;
 mod attr67;
+mod cards;
 mod conqueror;
 mod costume;
 mod death;
@@ -495,13 +496,9 @@ pub struct GameState {
     gold_lifetime: u64,
     /// The Channel's client registry: who a trade or a warp NPC finds online.
     clients: Option<Arc<ChannelClients>>,
-    /// The lines left for a character that was not online when they were sent
-    /// (`CClientManager::m_OfflineMessage`, `server/server/db/ClientManager.cpp:4631`),
-    /// keyed by the name they wait for.
-    offline_messages: HashMap<Vec<u8>, Vec<whisper::OfflineMessage>>,
-    /// `get_dword_time()` when each character last left a line for an absent target
-    /// (`dwLastOfflinePMTime`, `G/char.h:2177`). A session's own: the leave forgets it.
-    last_offline_pm: HashMap<common::vid::Vid, u32>,
+    /// The offline mail (`whisper::OfflineMail`): the lines waiting for an absent
+    /// target and when each sender last left one.
+    offline_mail: whisper::OfflineMail,
     /// The block mode of each character (`m_pointsInstant.bBlockMode`, `G/char.h:471`):
     /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist. A
     /// session's own: the leave forgets it.
@@ -590,6 +587,10 @@ pub struct GameState {
     horse_names: HashMap<u32, Vec<u8>>,
     /// The global rank's board (`rank_global`), which boot installs.
     rank: rank_global::RankBoard,
+    /// The Okey card tables (`cards::CardTables`): each character's hand and the ended
+    /// games. Neither persists: a relogin finds a fresh hand, and the ranks read what
+    /// this boot ended.
+    card_tables: cards::CardTables,
     /// The dragon soul table, which `/ds_change_attr` redraws a stone's attributes from.
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
@@ -738,6 +739,11 @@ pub struct Released {
     pub owner_id: u32,
 }
 
+/// The game thread's dice: `Pcg32` seeded from a fresh random state.
+fn fresh_dice() -> Pcg32 {
+    Pcg32::new(RandomState::new().hash_one(0_u8), 0)
+}
+
 impl GameState {
     /// Build a state from the Game data alone.
     ///
@@ -764,6 +770,7 @@ impl GameState {
     #[must_use]
     pub fn new(protos: impl Into<Arc<ItemProtos>>) -> Self {
         Self {
+            card_tables: cards::CardTables::default(),
             characters: CharacterManager::new(),
             item_ids: None,
             protos: protos.into(),
@@ -772,14 +779,13 @@ impl GameState {
             last_pulse: 0,
             outboxes: HashMap::new(),
             item_count_limit: common::item_slots::ITEM_COUNT_LIMIT,
-            dice: Pcg32::new(RandomState::new().hash_one(0_u8), 0),
+            dice: fresh_dice(),
             ground: BTreeMap::new(),
             next_ground_vid: 1,
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             gold_lifetime: drop_lifetime_pulses(DEFAULT_GOLD_LIFETIME_SECS),
             clients: None,
-            offline_messages: HashMap::new(),
-            last_offline_pm: HashMap::new(),
+            offline_mail: whisper::OfflineMail::default(),
             block_modes: HashMap::new(),
             no_damage: HashMap::new(),
             detail_logs: std::collections::HashSet::new(),
@@ -1418,6 +1424,7 @@ impl GameState {
                 | GameCommand::FullSet { .. }
                 | GameCommand::ToolRefineLine { .. }
                 | GameCommand::UseItemLine { .. }
+                | GameCommand::CardsLine { .. }
                 | GameCommand::RideLine { .. }
                 | GameCommand::ClearAffect { .. }
                 | GameCommand::DragonSoul { .. }
@@ -1549,6 +1556,7 @@ impl GameState {
             | GameCommand::FullSet { .. }
             | GameCommand::ToolRefineLine { .. }
             | GameCommand::UseItemLine { .. }
+            | GameCommand::CardsLine { .. }
             | GameCommand::RideLine { .. }
             | GameCommand::ClearAffect { .. }
             | GameCommand::DragonSoul { .. }
@@ -1664,6 +1672,7 @@ impl GameState {
             | GameCommand::SetAttr { .. }
             | GameCommand::ToolRefineLine { .. }
             | GameCommand::UseItemLine { .. }
+            | GameCommand::CardsLine { .. }
             | GameCommand::RideLine { .. }
             | GameCommand::DragonSoul { .. }
             | GameCommand::Costume { .. }
@@ -1739,6 +1748,9 @@ impl GameState {
                 reply,
             } => {
                 answer_item_step(vid, reply, self.run_use_item_line(vid, &rest, mover));
+            }
+            GameCommand::CardsLine { vid, rest, reply } => {
+                answer_item_step(vid, reply, self.run_cards_line(vid, &rest));
             }
             GameCommand::RideLine { vid, mover, reply } => {
                 answer_item_step(vid, reply, self.run_ride_line(vid, mover));

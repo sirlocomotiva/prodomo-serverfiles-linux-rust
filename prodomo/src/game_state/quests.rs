@@ -683,6 +683,9 @@ pub(super) struct Session<'s> {
     /// How many times the reader's account changed its empire, read at the step's
     /// start: what `pc.get_change_empire_count` pushes.
     pub(super) empire_changes: u32,
+    /// The Okey table's rank texts, read at the step's start: what
+    /// `pc.get_okay_global_rank` and `pc.get_okay_rund_rank` push.
+    pub(super) okay_ranks: (Vec<u8>, Vec<u8>),
     /// Every `pc.change_empire` call's empire, in order, for the world's moves after
     /// the step (legacy moves in the call).
     pub(super) empire_moves: Vec<u8>,
@@ -2587,6 +2590,14 @@ impl Game for Session<'_> {
             .is_some_and(world::character::Points::is_polymorphed)
     }
 
+    fn okay_global_rank(&self) -> Vec<u8> {
+        self.okay_ranks.0.clone()
+    }
+
+    fn okay_round_rank(&self) -> Vec<u8> {
+        self.okay_ranks.1.clone()
+    }
+
     fn is_engaged(&self) -> bool {
         false
     }
@@ -3308,10 +3319,11 @@ impl GameState {
             horse_names,
             name_rules,
             rank,
+            card_tables,
             ..
         } = self;
         let quests = quests.as_mut()?;
-        let context = arm_context(
+        let mut context = arm_context(
             characters,
             horse_names,
             bodies,
@@ -3325,6 +3337,7 @@ impl GameState {
             hacked,
             account,
         );
+        context.okay_ranks = card_tables.okay.ranks();
         let Quests {
             manager,
             protos,
@@ -4184,6 +4197,8 @@ struct ReaderContext {
     /// How many times the reader's account changed its empire, read at the step's
     /// start: what `pc.get_change_empire_count` pushes.
     empire_changes: u32,
+    /// The Okey table's rank texts, read at the step's start.
+    okay_ranks: (Vec<u8>, Vec<u8>),
     /// The reader's account login, read at the step's start: what `guild.is_bet`
     /// pushes off.
     login: String,
@@ -4360,6 +4375,7 @@ fn reader_context(
         account_pids: Vec::new(),
         empire_changes: 0,
         login: String::new(),
+        okay_ranks: (Vec::new(), Vec::new()),
     }
 }
 
@@ -4727,6 +4743,7 @@ fn session_head<'s>(
         account_pids: context.account_pids,
         empire_changes: context.empire_changes,
         login: context.login,
+        okay_ranks: context.okay_ranks,
         empire_moves: Vec::new(),
     }
 }
@@ -4936,6 +4953,7 @@ mod tests {
             rank: RankStep::default(),
             account_pids: Vec::new(),
             empire_changes: 0,
+            okay_ranks: (Vec::new(), Vec::new()),
             login: String::new(),
             empire_moves: Vec::new(),
             party_flags: std::collections::HashMap::new(),

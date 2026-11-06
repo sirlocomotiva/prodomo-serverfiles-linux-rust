@@ -5027,6 +5027,7 @@ mod tests {
             account_pids: Vec::new(),
             login: String::new(),
             empire_changes: 0,
+            okay_ranks: (Vec::new(), Vec::new()),
             empire_moves: Vec::new(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),

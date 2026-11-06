@@ -36998,3 +36998,141 @@ fn a_probe_reports_the_party_near_count_two_then_none() {
     );
     alice.quiet("the second click is the end");
 }
+/// A cards player ready on map 1: Alpha with 100,000 gold and one card set, at the
+/// teacher's point with the Okey table in view.
+fn a_cards_player_ready() -> Option<(ScratchDatabase, Server, Keyed, Listed, Entered, u32)> {
+    let database = ScratchDatabase::create()?;
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET gold = 100000, x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0,          1, 79506 FROM player WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/map/metin2_map_a1/npc.txt",
+            &a1_npc_with_okey_table(),
+        )],
+        "no_wander = true",
+    );
+    let (alice, alpha, entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let alpha_vid = u32::from_le_bytes(entered.add[1..5].try_into().unwrap());
+    Some((database, server, alice, alpha, entered, alpha_vid))
+}
+
+/// Map 1's `npc.txt` with the Okey table (20417) stood one cell east of the skill
+/// teacher (622, 556), at (471900, 951600), so the owner quest's chats run on it.
+fn a1_npc_with_okey_table() -> Vec<u8> {
+    let mut text = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe/map/metin2_map_a1/npc.txt"),
+    )
+    .expect("the owner's npc.txt reads");
+    text.extend_from_slice(b"m\t623\t556\t0\t0\t0\t1\t1s\t100\t1\t20417\n");
+    text
+}
+
+/// `cmd.cards`, `quest.cards_event`, `pc.get_okay_global_rank`,
+/// `pc.get_okay_rund_rank`: Alpha holds one
+/// card set and 100,000 gold. `/cards open 1` spends 30,000 and the set, hears the
+/// open and the two empty info lines; `/cards pullout` deals one card; `/cards
+/// destroy 0` clears the hand; `/cards end` with no points logs a zero game and hears
+/// the emptied info lines; and the teacher's click names Alpha's zero game on both
+/// ranks.
+#[test]
+fn a_cards_game_opens_pulls_ends_and_ranks() {
+    let Some((_database, _server, mut alice, _alpha, entered, alpha_vid)) = a_cards_player_ready()
+    else {
+        return;
+    };
+    // The open spends the gold and the set, and the two empty info lines follow.
+    // The gold change's first byte is the int header's low byte (225).
+    alice.send_record(&client_chat(CHAT_TALKING, b"/cards open 1"));
+    let spent = alice.read_game();
+    assert_eq!(spent[0], GC_GOLD_CHANGE, "{spent:02x?}");
+    assert_eq!(&spent[4..8], &alpha_vid.to_le_bytes(), "the purse's VID");
+    assert_eq!(&spent[8..16], &0_i64.to_le_bytes(), "a spend amounts 0");
+    assert_eq!(&spent[16..24], &70_000_u64.to_le_bytes(), "70,000 left");
+    let cleared = alice.read_game();
+    assert_eq!(cleared[0], ITEM_SET, "{cleared:02x?}");
+    assert_eq!(&cleared[1..4], &[1, 0, 0], "window 1 cell 0 clears");
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"cards open 1"),
+        "the open line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"cards info 0 0 0 0 0 0 0 0 0 0 24 0"),
+        "the fresh hand is empty"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"cards finfo 0 0 0 0 0 0 0"),
+        "the fresh field is empty"
+    );
+    // The pullout deals one card; the destroy clears the hand again.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/cards pullout"));
+    let info = alice.read_game();
+    assert_eq!(info[0], GC_CHAT, "{info:02x?}");
+    assert!(
+        info[10..].starts_with(b"cards info "),
+        "the dealt hand: {info:02x?}"
+    );
+    let finfo = alice.read_game();
+    assert_eq!(&finfo[10..], b"cards finfo 0 0 0 0 0 0 0");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/cards destroy 0"));
+    // The dealt card sits in hand slot 0; if the draw filled another slot first the
+    // destroy runs nothing and the hand keeps it, so the info line is read loosely.
+    let info = alice.read_game();
+    assert!(
+        info[10..].starts_with(b"cards info "),
+        "after destroy: {info:02x?}"
+    );
+    assert_eq!(alice.read_game()[10..], b"cards finfo 0 0 0 0 0 0 0"[..]);
+    // The end with no points logs a zero game; both ranks name it.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/cards end"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"cards info 0 0 0 0 0 0 0 0 0 0 0 0"),
+        "the end cleans the list"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"cards finfo 0 0 0 0 0 0 0"),
+    );
+    // The Okey table's menu: the trade, the two ranks, and the close.
+    let table = shown_vid(&entered, 20_417, "the Okey table stands in view");
+    alice.send_record(&client_click(table));
+    assert_eq!(
+        alice.read_script_past_ticks(),
+        server_script(1, b"[QUESTION 1;Card set|2;All rank|3;Rund rank|4;Inchide]"),
+        "the owner quest offers its chats"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_script_past_ticks(),
+        server_script(1, b"[ENTER]1. Place - Alpha - 0 points.[ENTER][DONE]"),
+        "the global rank names the zero game"
+    );
+    alice.send_record(&client_click(table));
+    assert_eq!(
+        alice.read_script_past_ticks(),
+        server_script(1, b"[QUESTION 1;Card set|2;All rank|3;Rund rank|4;Inchide]"),
+        "the menu returns"
+    );
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_script_past_ticks(),
+        server_script(1, b"[ENTER]1. Place - Alpha - 0 points.[ENTER][DONE]"),
+        "the round rank names the zero game"
+    );
+    alice.quiet("the ranks are the chats' end");
+}

@@ -80,6 +80,19 @@ const OFFLINE_MESSAGE_DELAY_MS: u32 = 10 * 1000;
 /// The five hours a waiting line lives (`iHour`,
 /// `CClientManager::OfflineMessageGarbage`, `server/server/db/ClientManager.cpp:4642`).
 const OFFLINE_MESSAGE_LIFETIME_MS: u32 = 5 * 60 * 60 * 1000;
+/// The offline mail: the lines waiting for an absent target and when each sender last
+/// left one.
+#[derive(Debug, Default)]
+pub(super) struct OfflineMail {
+    /// The lines left for a character that was not online when they were sent
+    /// (`CClientManager::m_OfflineMessage`, `server/server/db/ClientManager.cpp:4631`),
+    /// keyed by the name they wait for.
+    pub(super) messages: std::collections::HashMap<Vec<u8>, Vec<OfflineMessage>>,
+    /// `get_dword_time()` when each character last left a line for an absent target
+    /// (`dwLastOfflinePMTime`, `G/char.h:2177`). A session's own: the leave forgets it.
+    pub(super) last_pm: std::collections::HashMap<Vid, u32>,
+}
+
 /// What a `/dc` line did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DcOutcome {
@@ -589,7 +602,7 @@ impl GameState {
         text: &[u8],
     ) -> WhisperOutcome {
         let now = self.clock.now();
-        let last = self.last_offline_pm.get(&vid).copied().unwrap_or(0);
+        let last = self.offline_mail.last_pm.get(&vid).copied().unwrap_or(0);
         if now.wrapping_sub(last) > OFFLINE_MESSAGE_DELAY_MS {
             if text.is_empty() {
                 // `else return (iExtraLen);` (`G/input_main.cpp:474`): an empty
@@ -604,7 +617,8 @@ impl GameState {
                     .find_by_vid(vid)
                     .map(|character| character.name().to_owned())
                     .unwrap_or_default();
-                self.offline_messages
+                self.offline_mail
+                    .messages
                     .entry(name.to_vec())
                     .or_default()
                     .push(OfflineMessage {
@@ -612,7 +626,7 @@ impl GameState {
                         text: text.to_vec(),
                         left_at: now,
                     });
-                self.last_offline_pm.insert(vid, now);
+                self.offline_mail.last_pm.insert(vid, now);
             }
             self.answer_offline(vid, name, OFFLINE_MESSAGE_SENT);
         } else {
@@ -684,7 +698,7 @@ impl GameState {
     /// (`CClientManager::RequestReadOfflineMessages`,
     /// `server/server/db/ClientManager.cpp:4613-4629`).
     pub(super) fn take_offline_messages(&mut self, name: &[u8]) -> Vec<OfflineMessage> {
-        self.offline_messages.remove(name).unwrap_or_default()
+        self.offline_mail.messages.remove(name).unwrap_or_default()
     }
 
     /// The lines that waited for the character that just entered.
@@ -728,7 +742,7 @@ impl GameState {
     /// a line goes at five hours to the millisecond.
     pub(super) fn expire_offline_messages(&mut self) {
         let now = self.clock.now();
-        self.offline_messages.retain(|_, messages| {
+        self.offline_mail.messages.retain(|_, messages| {
             messages
                 .retain(|message| now.wrapping_sub(message.left_at) < OFFLINE_MESSAGE_LIFETIME_MS);
             !messages.is_empty()
@@ -744,7 +758,7 @@ impl GameState {
     /// under the same key. Only `/setblockmode` and the quest login's
     /// `pc.send_block_mode` write the byte again.
     pub(super) fn forget_whisper_session(&mut self, vid: Vid) {
-        let _clock = self.last_offline_pm.remove(&vid);
+        let _clock = self.offline_mail.last_pm.remove(&vid);
         let _mode = self.block_modes.remove(&vid);
         self.forget_logs(vid);
     }
@@ -2222,7 +2236,7 @@ mod tests {
     fn the_lines_waiting_for_a_character_are_read_when_it_enters() {
         let (mut world, clock, _sender) = a_world_with_a_player();
         clock.set(20_000);
-        world.offline_messages.insert(
+        world.offline_mail.messages.insert(
             b"Nobody".to_vec(),
             vec![OfflineMessage {
                 from: "P100".to_owned(),
@@ -2264,7 +2278,7 @@ mod tests {
     fn a_character_who_blocks_whispers_loses_the_lines_that_waited() {
         let (mut world, clock, _sender) = a_world_with_a_player();
         clock.set(20_000);
-        world.offline_messages.insert(
+        world.offline_mail.messages.insert(
             b"Nobody".to_vec(),
             vec![OfflineMessage {
                 from: "P100".to_owned(),
@@ -2304,10 +2318,12 @@ mod tests {
             left_at,
         };
         world
-            .offline_messages
+            .offline_mail
+            .messages
             .insert(b"Nobody".to_vec(), vec![line(1_000), line(1_001)]);
         world
-            .offline_messages
+            .offline_mail
+            .messages
             .insert(b"Somebody".to_vec(), vec![line(1_000)]);
         clock.set(1_000 + OFFLINE_MESSAGE_LIFETIME_MS);
 
@@ -2318,7 +2334,10 @@ mod tests {
             "the five-hour line went and the younger one stayed"
         );
         assert!(
-            !world.offline_messages.contains_key(b"Somebody".as_slice()),
+            !world
+                .offline_mail
+                .messages
+                .contains_key(b"Somebody".as_slice()),
             "a name with no line left is forgotten"
         );
     }
@@ -2381,7 +2400,7 @@ mod tests {
             0,
             "the leave forgets the byte"
         );
-        world.offline_messages.insert(
+        world.offline_mail.messages.insert(
             b"P101".to_vec(),
             vec![OfflineMessage {
                 from: "P100".to_owned(),

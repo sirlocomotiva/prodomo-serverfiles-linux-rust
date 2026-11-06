@@ -754,6 +754,14 @@ pub trait Game {
     /// (`G/questlua_pc.cpp:1361-1366`, `G/char.h:901`): whether a morph is on.
     fn is_polymorphed(&self) -> bool;
 
+    /// `GetGlobalRank` (`G/char_cards.cpp:336-369`): the Okey table's summed rank text,
+    /// empty with no ended game.
+    fn okay_global_rank(&self) -> Vec<u8>;
+
+    /// `GetRundRank` (`G/char_cards.cpp:371-403`): the Okey table's round rank text,
+    /// empty with no ended game.
+    fn okay_round_rank(&self) -> Vec<u8>;
+
     /// `IsEngaged(player_id)` of the character the script runs for
     /// (`G/questlua_pc.cpp:1846-1851`): whether it is engaged. No character of
     /// this build is (`sys.marriage` is missing), so this answers false.
@@ -3921,14 +3929,14 @@ fn pc_api(
             cx.game.remove_from_guild();
             None
         }
-        // The polymorph, wedding and empire readers (see `pc_state`).
+        // The polymorph, wedding, empire and Okey readers (see `pc_state`).
         b"pc.is_polymorphed"
         | b"pc.is_engaged"
         | b"pc.is_married"
         | b"pc.change_empire"
-        | b"pc.get_change_empire_count" => {
-            return pc_state(lua, cx, name, first);
-        }
+        | b"pc.get_change_empire_count"
+        | b"pc.get_okay_global_rank"
+        | b"pc.get_okay_rund_rank" => return pc_state(lua, cx, name, first),
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
@@ -3961,6 +3969,14 @@ fn pc_state(
     let result = match name {
         // `pc_is_polymorphed` (`G/questlua_pc.cpp:1361-1366`).
         b"pc.is_polymorphed" => Some(Value::Boolean(cx.game.is_polymorphed())),
+        // `pc_get_okay_global_rank` (`G/questlua_pc.cpp:80-91`) and
+        // `pc_get_okay_rund_rank` (`:93-104`): the rank text, empty with no game.
+        b"pc.get_okay_global_rank" => Some(Value::String(
+            lua.create_string(cx.game.okay_global_rank())?,
+        )),
+        b"pc.get_okay_rund_rank" => {
+            Some(Value::String(lua.create_string(cx.game.okay_round_rank())?))
+        }
         // `pc_is_engaged` (`:1846-1851`) and `pc_is_married` (`:1853-1858`).
         b"pc.is_engaged" => Some(Value::Boolean(cx.game.is_engaged())),
         b"pc.is_married" => Some(Value::Boolean(cx.game.is_married())),
@@ -6238,6 +6254,14 @@ mod tests {
 
         fn is_polymorphed(&self) -> bool {
             false
+        }
+
+        fn okay_global_rank(&self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn okay_round_rank(&self) -> Vec<u8> {
+            Vec::new()
         }
 
         fn is_engaged(&self) -> bool {

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-06, after ledger section 410 (the party near count).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 411
+Last reviewed: 2026-11-06, after ledger section 411 (the Okey card game).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 412
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -431,7 +431,9 @@ support, and rolls the success the quest reads back (`attr67add.holding`,
 `attr67add.success`, `attr67add.collect`, `attr67add.item_vnum`, `attr67add.window_type`,
 `attr67add.window_cell`): the wait page, the won roll's rare attribute, and the collect
 home. Since 410 a script reads its party's cached near count (`party.get_near_count`),
-which the Update's resend keeps. The
+which the Update's resend keeps. Since 411 `/cards` opens, pulls, ends, destroys,
+accepts and restores the Okey hand, the ended games log to the Okey table, and the owner
+quest's chats read both ranks (`pc.get_okay_global_rank`, `pc.get_okay_rund_rank`). The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1369,6 +1371,10 @@ owner should know about (178.5):
   5.0.3 errors the same way) and the dialog ends after the title: no bet on any reservation can
   complete through the owner quest, on legacy either. The Rewrite runs the source as-is
   (ADR-0004) and errors at the same pick (ledger 408).
+- `CHARACTER::CardsRestore` and `RestoreField` write the restored card to
+  `cards_in_hand[GetEmptySpaceInHand()]` without checking for -1
+  (`G/char_cards.cpp:193-205`, `:301-312`), so a restore with a full hand writes past the
+  hand. The Rewrite runs nothing when no hand slot is free (ledger 411).
 
 ## Environment
 

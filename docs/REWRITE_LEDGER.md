@@ -46443,3 +46443,81 @@ passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warning
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 411. The Okey card game
+
+`do_cards` (`G/cmd_general.cpp:3812-3864`) is ported: a new
+`prodomo/src/game_state/cards.rs` holds each character's hand (5 hand slots, 3
+field slots, the cards left, the field and game points, the 24 drawn cards) and
+the Okey table of ended games, behind `GameState::run_cards_line` on a new
+`GameCommand::CardsLine`, with `Command::Cards` and `cards_line_step` wiring the
+chat line through `finish_use_line` so the deck's spends and the end's box store
+as a use does. The first word's first byte names the arm; the `o`, `d`, `a` and
+`r` arms read the second word as a DWORD only when its first byte is a digit,
+else they run nothing.
+
+The open refuses with `Please close all windows first.` under a trade, a shop, a
+safebox or the cube browse, and with `You don't have enough money` or `You don't
+have any Okey Card Set(s)` when the deck is out and 30,000 gold or a card set
+(79506) is missing; else it spends both, cleans both lists and refills 24. The
+pullout refuses a full hand, an empty deck and five cards across hand and field
+with their lines, else draws type 1-3 value 1-8, redrawing repeats. The end's
+points buy the golden (71194), silver (71195) or bronze (71196) box through
+`AutoGiveItem`, log the game to the Okey table, clean the lists, and send the
+two info lines. The accept pays three of a kind 150, a suited run 100, three of
+a value lowest*10+10, any run lowest*10, sends `cards reward` and resets the
+field on a win, and restores the field to the hand on a loss. The destroy and
+restore run nothing past their slots or on empty ones. Every arm sends the two
+info lines (`cards info`, `cards finfo`) on the paths legacy does.
+
+The Okey table lives in the world's memory, not the store: legacy reads
+`log.okay_event` through the DB manager, which the Rewrite retired (ADR-0001),
+and no scenario reboots across a rank read. Both ranks cut to the 4096-byte
+buffer the way `snprintf` cuts them, NUL slot included.
+
+One legacy Defect is not reproduced: `CardsRestore` and `RestoreField` write to
+`cards_in_hand[GetEmptySpaceInHand()]` unchecked (`G/char_cards.cpp:193-205`,
+`:301-312`), so a restore with a full hand writes past the hand. The Rewrite
+runs nothing when no hand slot is free (STATUS defect bullet). The cube check
+names the cube browse; the private shop and the cube-open flag are not ported,
+so neither refuses here (module doc).
+
+`pc.get_okay_global_rank` and `pc.get_okay_rund_rank`
+(`G/questlua_pc.cpp:80-104`) are bridged: the quest snapshot carries both rank
+texts read at the step's start, `BRIDGED` grows to 271, and the `pc_api` arm
+reaches them through `pc_state`. `quest.cards_event` is ported with them: its
+login icon, its card-set trade and its two rank chats all run, though no
+scenario trades the set yet (inventory note).
+
+One scenario: `a_cards_game_opens_pulls_ends_and_ranks`. Alpha holds one set and
+100,000 gold at the teacher's point, with the Okey table (20417) staged one cell
+east in map 1's `npc.txt`. `/cards open 1` spends 30,000 and the set (the gold
+change's int-header low byte is 225) and hears the open and the empty info
+lines; `/cards pullout` deals one card; `/cards destroy 0` clears the slot the
+draw filled; `/cards end` with no points logs a zero game and hears the emptied
+lines; and the table's menu offers the trade and both ranks, each rank naming
+`1. Place - Alpha - 0 points.` Six unit tests cover the open's spends and
+refusals, the pullout's five-card cap, a three-of-a-kind win with its bronze
+box, the ranks' sums and order, and the `snprintf` cut. The Okey table is
+staged, not probed: an early probe on the teacher proved the quest's 20417
+chats were never the failure (a missing `pc_api` dispatch arm was: the bridges
+sat in `pc_state` but no name reached them, so the click died silently).
+
+Bridge notes. The revive tick (affect 215's remove and a character update) can
+land between the click and its dialog, so the dialog reads
+`read_script_past_ticks`. `GameState::new` tripped the line lint with the new
+table, so the two card fields grouped into `CardTables`, the two offline-mail
+fields into `whisper::OfflineMail`, and the dice seed split into `fresh_dice`.
+
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4816 passed 1 failed in 42 targets, the failure
+`a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks` on its
+second-sort wait line, which passes alone and 4/4 in parallel (a wall-clock
+flake under load, unrelated: this slice touches no sort path); `cargo test
+--workspace --doc` 1 passed; `cargo clippy --workspace --all-targets --locked
+--offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean. The cards scenario passed 8/8
+in parallel. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
+width was measured. Afterwards no `prodomo\_%` database remained. No ADR
+changed.

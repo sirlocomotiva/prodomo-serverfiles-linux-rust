@@ -1803,6 +1803,16 @@ pub enum GameCommand {
         /// Where the game thread reports the moved items.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Run one `/cards` line: the Okey game's open, pull, end, destroy, accept and
+    /// restore arms. See `GameState::run_cards_line`.
+    CardsLine {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Run one `/ride` line: the ride toggle, or the use of the ride item or mount seal it
     /// finds. See `GameState::run_ride_line`.
     RideLine {
@@ -2562,6 +2572,7 @@ impl GameCommand {
                 | GameCommand::FullSet { .. }
                 | GameCommand::ToolRefineLine { .. }
                 | GameCommand::UseItemLine { .. }
+                | GameCommand::CardsLine { .. }
                 | GameCommand::RideLine { .. }
                 | GameCommand::ClearAffect { .. }
                 | GameCommand::DragonSoul { .. }
@@ -6085,6 +6096,23 @@ impl GameLoopController {
         })
         .await
         .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/cards` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_cards_line(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CardsLine { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

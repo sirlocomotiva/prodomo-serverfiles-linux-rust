@@ -121,7 +121,7 @@ in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that tur
 | `sys.custom.biologist` | `G/Biologist.cpp`, `__ENABLE_BIOLOGIST_RENEWAL_SYSTEM__` | Biologist | `sys.item.core` | missing | | |
 | `sys.custom.premium` | `__ENABLE_PREMIUM_PLAYERS__` | Premium players | `sys.login.enter` | missing | | |
 | `sys.custom.reward` | `ENABLE_REWARD_SYSTEM` | Reward info | `sys.login.enter` | missing | | |
-| `sys.custom.cards` | `G/char_cards.cpp` | Card game | `sys.item.core` | missing | | |
+| `sys.custom.cards` | `G/char_cards.cpp` | Card game | `sys.item.core` | ported | `a_cards_game_opens_pulls_ends_and_ranks` | Ledger 411: the hands, the field, the Okey table and both ranks. |
 | `sys.custom.multi_farm` | `ENABLE_MULTI_FARM_BLOCK` | HWID multi-farm block | `sys.login.enter` | missing | | |
 | `sys.custom.new_set_bonus` | `__NEW_SET_BONUS__`, `G/buff_on_attributes.cpp` | Set bonuses | `sys.item.core` | missing | | |
 | `sys.gm.core` | `G/gm.cpp`, `G/cmd*.cpp`, `C/gm` rules | GM authority, GM commands, observer mode | `sys.login.enter` | partial | | `db::accounts::gm_authority` and `prodomo gm` exist. See `commands.md`. |

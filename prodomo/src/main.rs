@@ -9468,6 +9468,7 @@ where
         LineCommand::FullSet => full_set_step(session, addr, context, held).await,
         LineCommand::UseItem => use_item_line_step(session, addr, context, held, rest).await,
         LineCommand::Ride => ride_line_step(session, addr, context, held).await,
+        LineCommand::Cards => cards_line_step(session, addr, context, held, rest).await,
         command @ (LineCommand::RefineRod | LineCommand::RefinePick | LineCommand::MaxPick) => {
             tool_refine_line_step(command, session, addr, context, held, rest).await
         }
@@ -10371,6 +10372,26 @@ where
         return true;
     };
     let answer = context.game.run_ride_line(vid, item_actor(held)).await;
+    finish_use_line(session, addr, context, held, answer).await
+}
+
+/// `do_cards` (`G/cmd_general.cpp:3812-3864`): the Okey arm runs in the world, and the
+/// deck's spends or the end's box land as `/use_item`'s use does.
+async fn cards_line_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Cards without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context.game.run_cards_line(vid, rest).await;
     finish_use_line(session, addr, context, held, answer).await
 }
 

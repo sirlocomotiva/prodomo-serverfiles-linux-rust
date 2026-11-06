@@ -168,6 +168,7 @@ impl CommandEntry {
             "do_user_horse_ride" => Command::Horse(HorseLine::UserRide),
             "do_unmount" => Command::Horse(HorseLine::Unmount),
             "do_ride" => Command::Ride,
+            "do_cards" => Command::Cards,
             "do_open_global_rank" => Command::RankLine(RankLine::Open),
             "do_global_rank_end_season" => Command::RankLine(RankLine::EndSeason),
             _ => self.mid_name(),
@@ -801,6 +802,9 @@ pub enum Command {
     /// `do_ride`: the ride toggle, which may use a ride item
     /// (`G/cmd_general.cpp:3516-3642`).
     Ride,
+    /// `do_cards`: the Okey card game, whose arms open, pull, end, destroy, accept
+    /// and restore (`G/cmd_general.cpp:3812-3864`).
+    Cards,
     /// `do_clear_affect`: `ClearAffect(true)` on the caller
     /// (`G/cmd_gm.cpp:5019-5022`).
     ClearAffect,
