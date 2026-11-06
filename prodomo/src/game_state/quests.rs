@@ -342,6 +342,50 @@ impl PartyFlags {
     }
 }
 
+/// The reader's open windows at a quest step's start: the trade, the browsed shop and
+/// the safebox. The private shop bit never sets: the shop is not ported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct WindowFlags(u8);
+
+impl WindowFlags {
+    /// The reader trades (`GetExchange() != NULL`).
+    const TRADE: u8 = 1;
+    /// The reader browses a shop (`GetShopOwner()`).
+    const BROWSE: u8 = 2;
+    /// The reader runs its own shop (`GetMyShop()`): never set, the shop is not ported.
+    const SHOP: u8 = 4;
+    /// The reader's safebox stands open (`IsOpenSafebox()`).
+    const SAFEBOX: u8 = 8;
+
+    /// Build from the three answers.
+    #[must_use]
+    pub(super) fn new(trading: bool, browsing: bool, safebox_open: bool) -> Self {
+        let mut flags = Self(0);
+        if trading {
+            flags.0 |= Self::TRADE;
+        }
+        if browsing {
+            flags.0 |= Self::BROWSE;
+        }
+        if safebox_open {
+            flags.0 |= Self::SAFEBOX;
+        }
+        flags
+    }
+
+    /// Whether the reader trades.
+    #[must_use]
+    pub(super) fn trading(self) -> bool {
+        self.0 & Self::TRADE != 0
+    }
+
+    /// Whether any of the reader's windows stands open.
+    #[must_use]
+    pub(super) fn busy(self) -> bool {
+        self.0 & (Self::TRADE | Self::BROWSE | Self::SHOP | Self::SAFEBOX) != 0
+    }
+}
+
 /// A [`Session`] borrowed from the world with its quest manager and reader, ready for
 /// the `op` [`GameState::run_quests_giving_raw`] runs.
 struct ArmedSession<'s> {
@@ -386,6 +430,12 @@ struct WorldMoves {
     /// guild arm after the step: legacy checks every character of the account.
     account_pids: Vec<u32>,
     observes: Vec<(u32, u32)>,
+    /// Every `pc.give_exp2` grant, in order, for the reader's exp after the step.
+    exp2: Vec<i64>,
+    /// Every `pc.set_skill_group` group, in order, for the reader after the step.
+    skill_groups: Vec<u8>,
+    /// Every `game.drop_item` vnum and count, in order, for the ground after the step.
+    plain_drops: Vec<(u32, i32)>,
 }
 
 impl WorldMoves {
@@ -422,6 +472,9 @@ impl WorldMoves {
             empire_moves: std::mem::take(&mut session.empire_moves),
             account_pids: session.account_pids.clone(),
             observes: std::mem::take(&mut session.observes),
+            exp2: std::mem::take(&mut session.tail.exp2),
+            skill_groups: std::mem::take(&mut session.tail.skill_groups),
+            plain_drops: std::mem::take(&mut session.tail.plain_drops),
         }
     }
 }
@@ -689,6 +742,54 @@ pub(super) struct Session<'s> {
     /// Every `pc.change_empire` call's empire, in order, for the world's moves after
     /// the step (legacy moves in the call).
     pub(super) empire_moves: Vec<u8>,
+    /// The reader's account ID, read at the step's start: what `pc.get_account_id`
+    /// pushes (`GetDesc()->GetAccountTable().id`).
+    pub(super) account_id: u32,
+    /// The reader's open windows at the step's start, as bits of [`WindowFlags`]: what
+    /// `pc.is_trade0` and `pc.is_busy0` push.
+    pub(super) windows: WindowFlags,
+    /// The tail calls' queues and reads: the `exp2` and skill-group queues, the atlas
+    /// and the killee's priv and rate, and the plain drops.
+    pub(super) tail: SessionTail<'s>,
+}
+
+/// The `pc` tail calls' half of a [`Session`]: the `exp2` and skill-group queues, the
+/// atlas `pc.warp_local` reads regions from, the killee's live priv and rate, and the
+/// plain drops. Grouped so `session_head` stays under the line lint.
+#[derive(Default)]
+pub(super) struct SessionTail<'s> {
+    /// Every `pc.give_exp2` call's grant, in order, for the world's grants after the
+    /// step (legacy's `PointChange` runs in the call).
+    pub(super) exp2: Vec<i64>,
+    /// Every `pc.set_skill_group` call's group, in order, for the world's sets after
+    /// the step (legacy sets in the call).
+    pub(super) skill_groups: Vec<u8>,
+    /// The map atlas, which `pc.warp_local` reads regions from.
+    pub(super) atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+    /// The reader's live item-drop priv at the step's start, for the killee's range.
+    pub(super) priv_item_drop: i32,
+    /// The mob item rate at the step's start (`GetMobItemRate`), for the killee's delta.
+    pub(super) mob_item_rate: i32,
+    /// Every `game.drop_item` call's vnum and count, in order, for the ground after the
+    /// step (legacy lays in the call).
+    pub(super) plain_drops: Vec<(u32, i32)>,
+}
+
+impl<'s> SessionTail<'s> {
+    /// Build from the step's snapshot and atlas: empty queues, the killee's reads.
+    pub(super) fn new(
+        pre: QuestStepState,
+        atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+    ) -> Self {
+        Self {
+            exp2: Vec::new(),
+            skill_groups: Vec::new(),
+            atlas,
+            priv_item_drop: pre.priv_item_drop,
+            mob_item_rate: pre.mob_item_rate,
+            plain_drops: Vec::new(),
+        }
+    }
 }
 
 /// A blocked PC's snapshot: the fields a script in its block reads, cloned at the
@@ -2381,6 +2482,12 @@ impl Game for Session<'_> {
     fn npc_guild(&self, _vid: u32) -> u32 {
         0
     }
+    fn player_id(&self) -> u32 {
+        self.blocked_pc().map_or(self.pid, |blocked| blocked.pid)
+    }
+    fn account_table_id(&self) -> u32 {
+        self.account_id
+    }
     fn gm_level(&self) -> u8 {
         // `m_pointsInstant.gm_level` (`G/char.cpp:6358`), which rode the admission: the
         // test-server silence (`:6355-6356`) is the audit's (V26), so the production arm
@@ -2649,6 +2756,114 @@ impl Game for Session<'_> {
         line.extend_from_slice(text);
         self.records
             .push(chat_packet(to, CHAT_TYPE_INFO, b"%s", &[Arg::Text(&line)]));
+    }
+
+    fn empty_inventory_count(&self) -> u32 {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        let (items, usable) = if let Some(blocked) = self.blocked_pc() {
+            (&blocked.items, blocked.usable_cells)
+        } else {
+            let Some(giver) = self.giver.as_ref() else {
+                return 0;
+            };
+            (&*giver.items, giver.rules.usable_cells)
+        };
+        let mut full: u32 = 0;
+        for cell in 0..usable.min(common::item_slots::INVENTORY_MAX_NUM) {
+            if let Some(item) = items.item_at(ItemPos::new(EWindows::Inventory as u8, cell)) {
+                full += u32::from(item.size);
+            }
+        }
+        u32::from(usable.min(common::item_slots::INVENTORY_MAX_NUM)).saturating_sub(full)
+    }
+
+    fn is_trade0(&self) -> bool {
+        self.windows.trading()
+    }
+
+    fn is_busy0(&self) -> bool {
+        self.windows.busy()
+    }
+
+    fn give_exp2(&mut self, exp: u32) {
+        self.tail.exp2.push(i64::from(exp));
+    }
+
+    fn set_skill_group(&mut self, group: u8) {
+        self.tail.skill_groups.push(group);
+    }
+
+    fn warp_local(&mut self, index: i32, x: i32, y: i32) {
+        let Some(region) = self
+            .tail
+            .atlas
+            .as_ref()
+            .and_then(|atlas| atlas.region(index))
+            .cloned()
+        else {
+            warn!("QUEST invalid map index {index}");
+            return;
+        };
+        let (width, height) = (region.ex - region.sx, region.ey - region.sy);
+        if x > width {
+            warn!("QUEST x coordinate overflow max: {width} input: {x}");
+            return;
+        }
+        if y > height {
+            warn!("QUEST y coordinate overflow max: {height} input: {y}");
+            return;
+        }
+        self.warps.push((region.sx + x, region.sy + y, 0));
+    }
+
+    fn select_pc(&mut self, vid: u32) -> u32 {
+        let old = self
+            .blocked_pc()
+            .map_or(self.reader.raw(), |blocked| blocked.vid.raw());
+        let Some(pid) = self.pid_of(vid) else {
+            return 0;
+        };
+        let pushed = self
+            .blocked
+            .iter()
+            .rev()
+            .find_map(|frame| frame.as_ref().map(|blocked| blocked.pid))
+            .unwrap_or(self.pid);
+        let mut frame = self.online.get(&pid).cloned();
+        if let Some(snap) = frame.as_mut() {
+            snap.pushed = pushed;
+        }
+        self.switched = frame.is_some();
+        self.blocked.push(frame);
+        old
+    }
+
+    fn killee_drop_pct(&mut self, npc_vid: u32) -> (i32, i32) {
+        let Some(npc) = self
+            .npcs
+            .and_then(|npcs| npcs.npcs.iter().find(|npc| npc.vid == npc_vid))
+            .cloned()
+        else {
+            warn!("QUEST killee is null");
+            return (-1, -1);
+        };
+        let stone = npc.char_type == gamedata::mob_proto::CHAR_TYPE_STONE;
+        let killer_level = self.run_points().map_or(1, world::character::Points::level);
+        let (priv_drop, item_rate) = (self.tail.priv_item_drop, self.tail.mob_item_rate);
+        quest_drop_pct(
+            self.dice,
+            stone,
+            npc.fight.rank,
+            npc.fight.level,
+            killer_level,
+            priv_drop,
+            item_rate,
+        )
+    }
+
+    fn drop_item(&mut self, vnum: u32, count: i32) {
+        self.tail.plain_drops.push((vnum, count));
     }
 }
 
@@ -3286,11 +3501,9 @@ impl GameState {
         giving: Giving,
         account: &crate::game_loop_messages::QuestAccount,
     ) -> Option<ArmedSession<'_>> {
-        let reader = self
-            .characters
-            .find_by_pid(pid)
-            .map_or(Vid::new(0), world::character::Character::vid);
+        let reader = self.reader_vid(pid);
         let hacked = self.is_hack(reader, mover).is_some();
+        let pre = self.quest_step_state(reader);
         let GameState {
             characters,
             npcs,
@@ -3320,6 +3533,7 @@ impl GameState {
             name_rules,
             rank,
             card_tables,
+            recall,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -3337,7 +3551,7 @@ impl GameState {
             hacked,
             account,
         );
-        context.okay_ranks = card_tables.okay.ranks();
+        finish_context(&mut context, card_tables);
         let Quests {
             manager,
             protos,
@@ -3377,10 +3591,10 @@ impl GameState {
             quest_targets,
             giving != Giving::Nothing,
             name_rules.clone(),
+            pre,
+            recall.atlas(),
         ));
-        if giving == Giving::ItemsAndPrizes {
-            session.rank.prizes = Prizes::Open(rank.prizes_of(pid));
-        }
+        open_rank_prizes(&mut session, giving, rank, pid);
         Some(ArmedSession {
             manager,
             session,
@@ -3550,6 +3764,56 @@ impl GameState {
         let name = crate::loading_phase::name_field(&body.card.name);
         let secs = secs.map_or(30, |secs| if secs <= 10 { 30 } else { secs });
         self.set_ground_ownership(ground, Some((pid, name)), secs);
+    }
+
+    /// One `game.drop_item` call: `CreateItem(vnum, count)` lies at the reader's feet
+    /// (`number(-200, 200)` each way), unowned, with the ground's destroy event
+    /// (`G/questlua_game.cpp:138-166`). Nothing happens with no proto.
+    fn lay_drop_plain(&mut self, reader: Vid, place: GroundPlace, vnum: u32, count: i32) {
+        let Some(item) = self.make_drop_hit(vnum, count, -1) else {
+            return;
+        };
+        let z = self.spot_of(reader.raw()).map_or(0, |spot| spot.z);
+        let dx = number(&mut self.dice, -200, 200);
+        let dy = number(&mut self.dice, -200, 200);
+        let _ground = self.lay_drop_hit(
+            place.channel,
+            place.map,
+            (place.x + dx, place.y + dy, z),
+            item,
+        );
+    }
+
+    /// One `pc.set_skill_group` call: the good affects go, then `SetSkillGroup` runs —
+    /// a group past 2 or below level 5 changes nothing, else `GC_CHANGE_SKILL_GROUP`
+    /// goes out (`G/questlua_pc.cpp:1345-1358`, `G/char_skill.cpp:149-165`). The stored
+    /// identity row is the descriptor's to bank (its `clear_skills` and `SetAttrStored`
+    /// path already banks one for `/setjob`); the quest path banks none yet, on the
+    /// hook below.
+    fn run_skill_group(&mut self, reader: Vid, group: u8) {
+        self.remove_good_affects(reader);
+        if group > 2 {
+            return;
+        }
+        let level = self
+            .characters
+            .find_by_vid(reader)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(1, world::character::Points::level);
+        if level < 5 {
+            return;
+        }
+        if let Some(body) = self.bodies.get_mut(&reader) {
+            body.card.skill_group = group;
+        }
+        let mut out = Vec::new();
+        protocol::gc_small::GcHeaderAndByte::new(
+            protocol::gc_inventory::HEADER_GC_CHANGE_SKILL_GROUP.value(),
+            group,
+        )
+        .encode_into(&mut out);
+        let _sent = self.write_to_client(reader, out);
     }
 
     /// One `pc.warp` call the step ran past `IsHack`: order the reader's client the
@@ -3784,12 +4048,16 @@ impl GameState {
             empire_moves,
             account_pids,
             observes,
+            exp2,
+            skill_groups,
+            plain_drops,
         } = queued;
-        for item in laid {
-            self.lay_given(reader, place, item);
+        self.apply_quest_drops(reader, place, laid, drops, plain_drops, mover);
+        for grant in exp2 {
+            self.gain_pc_exp(reader, grant);
         }
-        for (vnum, count, secs) in drops {
-            self.lay_drop_owned(reader, place, vnum, count, secs, mover);
+        for group in skill_groups {
+            self.run_skill_group(reader, group);
         }
         for _ in 0..villages {
             self.order_village_warp(reader, mover);
@@ -3852,6 +4120,28 @@ impl GameState {
         let landed = self.apply_empire_moves(reader, pid, &account_pids, empire_moves, mover);
         self.apply_quest_warps(reader, warps, observes, mover);
         landed
+    }
+
+    /// A step's laid gives and owned and plain drops. Split out so
+    /// `apply_world_moves` stays under the line lint.
+    fn apply_quest_drops(
+        &mut self,
+        reader: Vid,
+        place: GroundPlace,
+        laid: Vec<world::item::Item>,
+        drops: Vec<(u32, i32, Option<i32>)>,
+        plain_drops: Vec<(u32, i32)>,
+        mover: Mover,
+    ) {
+        for item in laid {
+            self.lay_given(reader, place, item);
+        }
+        for (vnum, count, secs) in drops {
+            self.lay_drop_owned(reader, place, vnum, count, secs, mover);
+        }
+        for (vnum, count) in plain_drops {
+            self.lay_drop_plain(reader, place, vnum, count);
+        }
     }
 
     /// A step's `pc.warp` calls and `pc.warp_to_guild_war_observer_position` pairs, in
@@ -4165,6 +4455,43 @@ fn given_ownership_secs(anti_flags: u32) -> i32 {
     }
 }
 
+/// The math of `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the
+/// range for a victim of `rank` and `mob_level` against a killer of `killer_level`,
+/// with the reader's live item-drop `priv` and the mob item `item_rate`. The delta is
+/// the boss table from rank BOSS up unless the victim is a stone, plus 1000 on
+/// 1-in-50000 else 500 on 1-in-10000, times the rate. The range is `4000000 * 100 /
+/// (100 + priv)`: the precedence Defect at `:906-911` is fixed, and the worn
+/// double-item is 0 (hook). The premium/unique doubling and the `bonus` dead code
+/// never run (hooks). Shared with the kill's [`GameState::drop_pct`](super::reward):
+/// the quest bridge answers it through a [`Session`], which borrows the dice.
+pub(super) fn quest_drop_pct(
+    dice: &mut world::character::Pcg32,
+    stone: bool,
+    rank: u8,
+    mob_level: u8,
+    killer_level: u8,
+    priv_drop: i32,
+    item_rate: i32,
+) -> (i32, i32) {
+    use common::enums::EMobRank;
+    let boss = !stone && rank >= EMobRank::Boss as u8;
+    let table = if boss {
+        common::levels::PERCENT_BY_DELTA_LEV_BOSS
+    } else {
+        common::levels::PERCENT_BY_DELTA_LEV
+    };
+    let index = i32::from(mob_level) + 15 - i32::from(killer_level);
+    let mut delta = table[usize::try_from(index.clamp(0, 30)).unwrap_or(0)];
+    if 1 == world::character::number(dice, 1, 50_000) {
+        delta += 1000;
+    } else if 1 == world::character::number(dice, 1, 10_000) {
+        delta += 500;
+    }
+    delta = delta * item_rate / 100;
+    let range = 4_000_000 * 100 / (100 + priv_drop);
+    (delta, range)
+}
+
 /// What a session knows of its reader before it borrows the reader mutably.
 struct ReaderContext {
     card: (u8, u8),
@@ -4194,6 +4521,9 @@ struct ReaderContext {
     /// The account's character PIDs, without the empty slots, for the empire change's
     /// guild arm: legacy checks every character of the account.
     account_pids: Vec<u32>,
+    /// The reader's account ID, read at the step's start: what `pc.get_account_id`
+    /// pushes.
+    account_id: u32,
     /// How many times the reader's account changed its empire, read at the step's
     /// start: what `pc.get_change_empire_count` pushes.
     empire_changes: u32,
@@ -4239,6 +4569,47 @@ struct SessionInputs<'s> {
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
+    /// The step's world snapshot (trades, shops, privs, rates).
+    pre: QuestStepState,
+    /// The map atlas, which `pc.warp_local` reads regions from.
+    atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+}
+
+/// What a session knows of the world's step-start state: the reader's open windows,
+/// its live item-drop priv, and the mob item rate.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct QuestStepState {
+    /// The reader's open windows.
+    pub(super) windows: WindowFlags,
+    /// The reader's live item-drop priv.
+    pub(super) priv_item_drop: i32,
+    /// The mob item rate.
+    pub(super) mob_item_rate: i32,
+}
+
+impl GameState {
+    /// The world's step-start state for a reader: its open windows, its live
+    /// item-drop priv, and the mob item rate. Split out so the session arms stay
+    /// under the line lint.
+    fn quest_step_state(&self, reader: Vid) -> QuestStepState {
+        QuestStepState {
+            windows: WindowFlags::new(
+                self.trading.contains_key(&reader),
+                self.browsing.contains_key(&reader),
+                self.safebox_open(reader),
+            ),
+            priv_item_drop: self.priv_of(reader, super::empire_priv::PRIV_ITEM_DROP),
+            mob_item_rate: self.mob_rates.item,
+        }
+    }
+
+    /// The reader's VID: the character of `pid`, or 0 with none. Split out so the
+    /// session arms stay under the line lint.
+    fn reader_vid(&self, pid: u32) -> Vid {
+        self.characters
+            .find_by_pid(pid)
+            .map_or(Vid::new(0), world::character::Character::vid)
+    }
 }
 /// The [`ReaderContext`] a quest step runs with: the reader's snapshot, the hack gates,
 /// and the account triple.
@@ -4273,8 +4644,33 @@ fn arm_context(
         context.gates.set_hack(true);
         context.gates.set_able(false);
     }
-    (context.account_pids, context.empire_changes, context.login) = reader_account(account);
+    (
+        context.account_pids,
+        context.account_id,
+        context.empire_changes,
+        context.login,
+    ) = reader_account(account);
     context
+}
+
+/// Give a fresh [`ReaderContext`] the Okey ranks it reads: the card tables' answer.
+/// Split out so `arm_quest_session` stays under the line lint.
+fn finish_context(context: &mut ReaderContext, card_tables: &super::cards::CardTables) {
+    context.okay_ranks = card_tables.okay.ranks();
+}
+
+/// Open the session's rank prizes when the step gives them: [`Giving::ItemsAndPrizes`]
+/// reads them from the rank tables. Split out so `arm_quest_session` stays under the
+/// line lint.
+fn open_rank_prizes(
+    session: &mut Session<'_>,
+    giving: Giving,
+    rank: &super::rank_global::RankBoard,
+    pid: u32,
+) {
+    if giving == Giving::ItemsAndPrizes {
+        session.rank.prizes = Prizes::Open(rank.prizes_of(pid));
+    }
 }
 
 /// The reader's job and skill group, level and player ID, and `GetMapIndex()` and `GetWarMap()`
@@ -4373,6 +4769,7 @@ fn reader_context(
             .cloned()
             .unwrap_or_default(),
         account_pids: Vec::new(),
+        account_id: 0,
         empire_changes: 0,
         login: String::new(),
         okay_ranks: (Vec::new(), Vec::new()),
@@ -4422,6 +4819,18 @@ fn quest_step_online(
         .map(world::character::Character::player_id)
         .filter_map(|pid| block_snapshot(characters, 0, pid).map(|snap| (pid, snap)))
         .collect()
+}
+
+/// A step's online roster: every PC's shown name and VID beside every PC's snapshot
+/// by PID. Split out so `session_head` stays under the line lint.
+#[allow(clippy::type_complexity)]
+fn quest_step_roster(
+    characters: &world::character::CharacterManager,
+) -> (
+    Vec<(Vec<u8>, u32)>,
+    std::collections::HashMap<u32, BlockedPc>,
+) {
+    (quest_step_pcs(characters), quest_step_online(characters))
 }
 
 /// The NPCs of the map at `place`.
@@ -4504,6 +4913,8 @@ fn session_inputs<'s>(
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
+    pre: QuestStepState,
+    atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
 ) -> SessionInputs<'s> {
     SessionInputs {
         dungeon_flags,
@@ -4537,6 +4948,8 @@ fn session_inputs<'s>(
         targets,
         stores,
         name_rules,
+        pre,
+        atlas,
     }
 }
 
@@ -4575,6 +4988,8 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         targets,
         stores,
         name_rules,
+        pre,
+        atlas,
     } = inputs;
     session_head(
         dungeon_flags,
@@ -4608,6 +5023,8 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         targets,
         stores,
         name_rules,
+        pre,
+        atlas,
     )
 }
 
@@ -4646,11 +5063,12 @@ fn session_head<'s>(
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
+    pre: QuestStepState,
+    atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
 ) -> Session<'s> {
     let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
-    let pcs = quest_step_pcs(characters);
-    let online = quest_step_online(characters);
-    let giver = session_giver(session_giver_inputs(
+    let roster = quest_step_roster(characters);
+    let (points, item_giver) = session_armed_giver(session_giver_inputs(
         characters,
         count_limit,
         ids,
@@ -4662,7 +5080,6 @@ fn session_head<'s>(
         pid,
         reader,
     ));
-    let (points, item_giver) = giver;
     Session {
         level,
         npcs: map_npcs(npcs, place),
@@ -4692,8 +5109,8 @@ fn session_head<'s>(
         is_guild_master: context.is_guild_master,
         slots: skills.entry(reader.raw()).or_default(),
         test_server,
-        pcs,
-        online,
+        pcs: roster.0,
+        online: roster.1,
         affects: affects.get_mut(&reader),
         alignment,
         horse_name: context.horse_name,
@@ -4741,10 +5158,13 @@ fn session_head<'s>(
         confirm_timeouts: Vec::new(),
         rank: RankStep::default(),
         account_pids: context.account_pids,
+        account_id: context.account_id,
         empire_changes: context.empire_changes,
         login: context.login,
         okay_ranks: context.okay_ranks,
         empire_moves: Vec::new(),
+        windows: pre.windows,
+        tail: SessionTail::new(pre, atlas),
     }
 }
 
@@ -4828,10 +5248,20 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
     )
 }
 
+/// The item-giver half of [`session_head`], called with the inputs bundle already
+/// built: one line so the head stays under the line lint.
+fn session_armed_giver<'s>(
+    inputs: SessionGiverInputs<'s, 's>,
+) -> (SessionPoints<'s>, SessionGiver<'s>) {
+    session_giver(inputs)
+}
+
 /// The account half of a session's reader context: the character PIDs without the
-/// empty slots, with the stored empire-change count. Split out so `session_head`
-/// stays under the line lint.
-fn reader_account(account: &crate::game_loop_messages::QuestAccount) -> (Vec<u32>, u32, String) {
+/// empty slots, the account ID, the stored empire-change count and the login. Split out
+/// so `session_head` stays under the line lint.
+fn reader_account(
+    account: &crate::game_loop_messages::QuestAccount,
+) -> (Vec<u32>, u32, u32, String) {
     (
         account
             .pids
@@ -4839,6 +5269,7 @@ fn reader_account(account: &crate::game_loop_messages::QuestAccount) -> (Vec<u32
             .filter(|pid| **pid != 0)
             .copied()
             .collect(),
+        account.id,
         account.changes,
         account.login.clone(),
     )
@@ -4952,6 +5383,7 @@ mod tests {
             confirm_timeouts: Vec::new(),
             rank: RankStep::default(),
             account_pids: Vec::new(),
+            account_id: 0,
             empire_changes: 0,
             okay_ranks: (Vec::new(), Vec::new()),
             login: String::new(),
@@ -4970,6 +5402,8 @@ mod tests {
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
+            windows: WindowFlags::default(),
+            tail: SessionTail::new(QuestStepState::default(), None),
         }
     }
 

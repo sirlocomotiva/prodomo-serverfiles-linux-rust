@@ -101,14 +101,17 @@ impl Default for GameLoopConfig {
     }
 }
 /// What a quest-running command carries of the reader's account, for `pc.change_empire`,
-/// `pc.get_change_empire_count` and the war bets: the account's character PIDs, in slot
-/// order with 0 for an empty slot (legacy's `player_index` row), how many times the
-/// account changed its empire (legacy's `change_empire` row), and the account's login
-/// (`GetAccountTable().login`, which the bet chat reads). The descriptor reads all
-/// three from its account table and the store; the session's shadow judges the change's
-/// guild arm off the PIDs, and the world's judge answers the landing and the bets.
+/// `pc.get_change_empire_count`, `pc.get_account_id` and the war bets: the account's ID
+/// (`GetAccountTable().id`), its character PIDs, in slot order with 0 for an empty slot
+/// (legacy's `player_index` row), how many times the account changed its empire (legacy's
+/// `change_empire` row), and the account's login (`GetAccountTable().login`, which the bet
+/// chat reads). The descriptor reads all four from its account table and the store; the
+/// session's shadow judges the change's guild arm off the PIDs, and the world's judge
+/// answers the landing and the bets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QuestAccount {
+    /// The account's ID, as the account table holds it.
+    pub id: u32,
     /// The account's character PIDs, in slot order, 0 for an empty slot.
     pub pids: [u32; 4],
     /// How many times the account changed its empire.

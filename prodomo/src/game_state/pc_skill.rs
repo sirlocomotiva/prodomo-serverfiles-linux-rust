@@ -5025,6 +5025,7 @@ mod tests {
             confirm_timeouts: Vec::new(),
             rank: crate::game_state::rank_global::RankStep::default(),
             account_pids: Vec::new(),
+            account_id: 0,
             login: String::new(),
             empire_changes: 0,
             okay_ranks: (Vec::new(), Vec::new()),
@@ -5043,6 +5044,8 @@ mod tests {
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
+            windows: super::super::quests::WindowFlags::default(),
+            tail: super::super::quests::SessionTail::default(),
         };
         grand_outcome(session, vnum, total)
     }

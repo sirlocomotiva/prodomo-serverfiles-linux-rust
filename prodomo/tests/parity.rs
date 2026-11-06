@@ -37136,3 +37136,132 @@ fn a_cards_game_opens_pulls_ends_and_ranks() {
     );
     alice.quiet("the ranks are the chats' end");
 }
+
+/// The tail probe: the diamond vein (vnum 20047) answers with the script's own numbers —
+/// its quest NPC's race, the count, its player and account IDs, its trade and busy gates
+/// (both shut for a plain click), its empty cells, and its killee's drop pair — then
+/// grants the clicker 2500 exp, sets its skill group to 1, and lays one 11200. The
+/// second click warps the clicker onto map 1's base plus (100, 200).
+const PC_TAIL_PROBE: &[u8] = b"quest tail_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    local n = pc.getqf(\"n\") + 1\n\
+    pc.setqf(\"n\", n)\n\
+    if n == 2 then\n\
+    pc.warp_local(1, 100, 200)\n\
+    else\n\
+    local old = pc.select(pc.get_vid())\n\
+    local delta, range = pc.get_killee_drop_pct()\n\
+    say(npc.get_race()..' '..old..' '..pc.get_player_id()..' '..pc.get_account_id()..' \
+ '..pc.get_empty_inventory_count()..' '..delta..' '..range)\n\
+    say(tostring(pc.is_trade0())..' '..tostring(pc.is_busy0()))\n\
+    pc.give_exp2(2500)\n\
+    pc.set_skill_group(1)\n\
+    game.drop_item(11200, 1)\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// The `id` of the row of `table` whose `column` is `value`.
+fn query_id(database: &ScratchDatabase, table: &str, column: &str, value: &str) -> i32 {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime should start")
+        .block_on(async {
+            use db::sqlx::Connection;
+            let mut connection = db::sqlx::PgConnection::connect(database.url())
+                .await
+                .expect("the scenario database should connect");
+            let row: (i32,) =
+                db::sqlx::query_as(&format!("SELECT id FROM {table} WHERE {column} = $1"))
+                    .bind(value)
+                    .fetch_one(&mut connection)
+                    .await
+                    .expect("the row should be there");
+            connection.close().await.expect("the close should succeed");
+            row.0
+        })
+}
+
+/// `lua.pc.get_player_id`, `lua.pc.get_account_id`, `lua.pc.get_empty_inventory_count`,
+/// `lua.pc.is_trade0`, `lua.pc.is_busy0`, `lua.pc.give_exp2`, `lua.pc.set_skill_group`,
+/// `lua.pc.select`, `lua.pc.get_killee_drop_pct`, `lua.pc.warp_local`,
+/// `lua.game.drop_item`: the vein's clicker hears its own numbers — the NPC's race, the
+/// self-select echo, its player and account IDs, its empty cells, and the vein's drop
+/// pair against it (a level-1 stone against level 154: row 0's 1, range 4000000) — and
+/// its shut gates; the grant raises its exp by 2500, the group sets with the record,
+/// and one 11200 lies near its feet. A second vein's `warp_local` lands the clicker on
+/// the region's base plus its offset.
+#[test]
+fn a_probe_reports_the_tail_numbers_and_lands_the_tail_moves() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, digger) = vein_stage(&database, PC_TAIL_PROBE);
+    // One 11200 in cell 0: size 2, so the count answers 88 with one cell held.
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+         11200 FROM player WHERE name = 'Alpha'",
+    );
+    let account = query_id(&database, "account", "login", "alice");
+    let player = query_id(&database, "player", "name", "Alpha");
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let vein = shown_vein(&entered);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_click(vein));
+    let line =
+        format!("20047 {vid} {player} {account} 88 1 4000000[ENTER]false false[ENTER][DONE]");
+    assert_eq!(
+        alice.read_script_past_ticks(),
+        server_script(1, line.as_bytes()),
+        "the clicker's own numbers and its shut gates"
+    );
+    let drop = alice.read_game();
+    assert_eq!(drop[0], GROUND_ADD, "the 11200 lies");
+    assert_eq!(
+        u32::from_le_bytes(drop[17..21].try_into().expect("four bytes")),
+        11200
+    );
+    assert_eq!(
+        u32::from_le_bytes(drop[13..17].try_into().expect("four bytes")),
+        1,
+        "the first ground VID"
+    );
+    assert_eq!(
+        alice.read_game(),
+        point_change(vid, POINT_EXP, 2500, 2500),
+        "the grant"
+    );
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_CHANGE_SKILL_GROUP, 1],
+        "the group sets"
+    );
+    let (x, y) = (
+        i32::from_le_bytes(drop[1..5].try_into().expect("four bytes")),
+        i32::from_le_bytes(drop[5..9].try_into().expect("four bytes")),
+    );
+    assert!(
+        (x - digger.0).abs() <= 200 && (y - digger.1).abs() <= 200,
+        "at the feet: {x},{y} near {digger:?}"
+    );
+    alice.send_record(&client_click(vein));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&vid.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((409_700, 896_200), port),
+        "the local warp names the region's base plus its offset"
+    );
+    alice.quiet("the warp is the step's end");
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 409700 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 896200",
+    );
+}

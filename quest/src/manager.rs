@@ -443,6 +443,13 @@ pub trait Game {
     /// `GetGuild()->GetID()` of the NPC `vid` (`G/questlua_npc.cpp:60-70`), and 0 when no
     /// NPC stands under it or it holds no guild. No NPC holds one: no building stands.
     fn npc_guild(&self, vid: u32) -> u32;
+    /// `GetPlayerID()` of the character the script runs for (`G/questlua_pc.cpp:2608-2621`).
+    fn player_id(&self) -> u32;
+
+    /// `GetDesc()->GetAccountTable().id` of the character the script runs for
+    /// (`G/questlua_pc.cpp:2624-2638`): its account's ID, 0 with no descriptor. The
+    /// Rewrite always has the descriptor's account table, so the ID answers.
+    fn account_table_id(&self) -> u32;
 
     /// `GetGMLevel()` of the character the script runs for (`G/questlua_pc.cpp:1867-1877`):
     /// its `m_pointsInstant.gm_level`, which rode the admission. The test-server silence
@@ -792,6 +799,54 @@ pub trait Game {
     /// `_syserr` (`G/questlua_global.cpp:385-403`): the server log line `QUEST: quest:
     /// <quest> player: <name> : <text>` and the `QUEST_SYSERR <text>` info chat.
     fn sys_err(&mut self, quest: &[u8], text: &[u8]);
+
+    /// `CountEmptyInventory()` of the character the script runs for
+    /// (`G/questlua_pc.cpp:2576-2590`, `G/char_item.cpp:1331-1347`): the unlocked cells
+    /// minus the sizes of the items anchored in them.
+    fn empty_inventory_count(&self) -> u32;
+
+    /// `GetExchange() != NULL` (`G/questlua_pc.cpp:3379-3384`) of the character the
+    /// script runs for: whether it trades.
+    fn is_trade0(&self) -> bool;
+
+    /// `GetExchange() || GetMyShop() || GetShopOwner() || IsOpenSafebox() || IsCubeOpen()`
+    /// (`G/questlua_pc.cpp:3386-3392`) of the character the script runs for: whether any
+    /// of its windows stands open. The private shop and the cube are not ported, so
+    /// those two never answer true.
+    fn is_busy0(&self) -> bool;
+
+    /// `pc_give_exp2(exp)` (`G/questlua_pc.cpp:1245-1261`): `PointChange(POINT_EXP, exp)`
+    /// on the character the script runs for. It pushes nothing, and the rewards log is
+    /// not ported (as `pc.give_item2`'s). Legacy's `exp` is `(DWORD)rint` of the first
+    /// argument; a non-number runs nothing.
+    fn give_exp2(&mut self, exp: u32);
+
+    /// `pc_set_skillgroup(group)` (`G/questlua_pc.cpp:1345-1358`): the good affects go,
+    /// then `SetSkillGroup` (`G/char_skill.cpp:149-165`) runs — a group past 2 or below
+    /// level 5 changes nothing. It pushes nothing. The group's record lands after the
+    /// step, with the skill rows the descriptor stores.
+    fn set_skill_group(&mut self, group: u8);
+
+    /// `pc_warp_local(index, x, y)` (`G/questlua_pc.cpp:242-316`): the character warps to
+    /// the region's base plus (`x`, `y`), unless the map index names no region or a
+    /// coordinate stands past the region's width. It pushes nothing; a refusal only logs.
+    /// The commented window checks never ran, so no window refuses.
+    fn warp_local(&mut self, index: i32, x: i32, y: i32);
+
+    /// `pc_select_vid(vid)` (`G/questlua_pc.cpp:1814-1836`): the script runs for the
+    /// character under `vid` from now on, and the old one's VID is pushed; with none
+    /// under it, nothing switches and 0 is pushed.
+    fn select_pc(&mut self, vid: u32) -> u32;
+
+    /// `pc_get_killee_drop_pct()` (`G/questlua_pc.cpp:2962-2980`): `GetDropPct` of the
+    /// NPC under `npc_vid` against the character the script runs for. With no such NPC
+    /// on the step's map, `(-1, -1)`.
+    fn killee_drop_pct(&mut self, npc_vid: u32) -> (i32, i32);
+
+    /// `game_drop_item(vnum, count)` (`G/questlua_game.cpp:138-166`): `count` of `vnum`
+    /// lie on the ground at the character's feet, unowned, with the 300-second destroy
+    /// event. It pushes nothing; with no proto nothing is made.
+    fn drop_item(&mut self, vnum: u32, count: i32);
 }
 
 /// The horse a quest reads (`CHorseRider`'s getters).
@@ -3589,6 +3644,9 @@ fn pc_readers(lua: &Lua, cx: &mut Cx<'_>, name: &[u8]) -> mlua::Result<Option<Va
         }
         // `pc_get_vid` (`:880-884`).
         b"pc.get_vid" => Some(Value::Number(f64::from(cx.game.char_vid()))),
+        // `pc_get_player_id` (`:2608-2621`) and `pc_get_account_id` (`:2624-2638`).
+        b"pc.get_player_id" => Some(Value::Number(f64::from(cx.game.player_id()))),
+        b"pc.get_account_id" => Some(Value::Number(f64::from(cx.game.account_table_id()))),
         // `pc_get_leadership` (`:862-866`) under both names (`:3843-3844`).
         b"pc.getleadership" | b"pc.get_leadership" => {
             Some(Value::Number(f64::from(cx.game.leadership())))
@@ -3852,21 +3910,15 @@ fn pc_api(
             None
         }
         b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
-        b"pc.give_item2" => number(give_item2(lua, cx, args)?),
-        b"pc.give_item2_select" => {
-            give_item2_select(lua, cx, args)?;
-            None
-        }
-        b"pc.ore_refine" | b"pc.diamond_refine" => {
-            Some(Value::Boolean(ore_refine(lua, cx, name, args)?))
-        }
-        b"pc.count_item" | b"pc.countitem" => {
-            Some(Value::Number(f64::from(count_item(lua, cx, args)?)))
-        }
-        b"pc.remove_item" | b"pc.removeitem" => {
-            remove_item(lua, cx, args)?;
-            None
-        }
+        // The give, count and refine arms (see `pc_give`).
+        b"pc.give_item2"
+        | b"pc.give_item2_select"
+        | b"pc.ore_refine"
+        | b"pc.diamond_refine"
+        | b"pc.count_item"
+        | b"pc.countitem"
+        | b"pc.remove_item"
+        | b"pc.removeitem" => return pc_give(lua, cx, name, args),
         b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
         // `pc_get_skillgroup` (`G/questlua_pc.cpp:1339-1343`).
         b"pc.get_skill_group" => number(u32::from(cx.game.skill_group())),
@@ -3937,6 +3989,47 @@ fn pc_api(
         | b"pc.get_change_empire_count"
         | b"pc.get_okay_global_rank"
         | b"pc.get_okay_rund_rank" => return pc_state(lua, cx, name, first),
+        // The tail readers and writers (see `pc_tail`), the killee's pair among them.
+        b"pc.get_empty_inventory_count"
+        | b"pc.is_trade0"
+        | b"pc.is_busy0"
+        | b"pc.give_exp2"
+        | b"pc.set_skill_group"
+        | b"pc.warp_local"
+        | b"pc.select"
+        | b"pc.get_killee_drop_pct" => return pc_tail(lua, cx, name, args, first),
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// The `pc.*` give, count and refine arms: `pc.give_item2` (see `give_item2`),
+/// `pc.give_item2_select` (see `give_item2_select`), the ore and diamond refines (see
+/// `ore_refine`), and the count and remove pair (see `count_item` and `remove_item`).
+/// Split out so `pc_api` stays under the line lint.
+fn pc_give(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let number = |value: u32| Some(Value::Number(f64::from(value)));
+    let result = match name {
+        b"pc.give_item2" => number(give_item2(lua, cx, args)?),
+        b"pc.give_item2_select" => {
+            give_item2_select(lua, cx, args)?;
+            None
+        }
+        b"pc.ore_refine" | b"pc.diamond_refine" => {
+            Some(Value::Boolean(ore_refine(lua, cx, name, args)?))
+        }
+        b"pc.count_item" | b"pc.countitem" => {
+            Some(Value::Number(f64::from(count_item(lua, cx, args)?)))
+        }
+        b"pc.remove_item" | b"pc.removeitem" => {
+            remove_item(lua, cx, args)?;
+            None
+        }
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
@@ -3999,6 +4092,93 @@ fn pc_state(
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
+}
+
+/// The `pc.*` tail readers and writers: the empty count, the trade and busy gates, the
+/// exp grant, the skill group, the local warp, the VID switch and the killee's drop pair
+/// (`G/questlua_pc.cpp`). Split out so `pc_api` stays under the line lint.
+fn pc_tail(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+    first: &Value,
+) -> mlua::Result<Option<MultiValue>> {
+    let result: Option<Value> = match name {
+        // `pc_get_empty_inventory_count` (`:2576-2590`).
+        b"pc.get_empty_inventory_count" => {
+            Some(Value::Number(f64::from(cx.game.empty_inventory_count())))
+        }
+        // `pc_is_trade0` (`:3379-3384`) and `pc_is_busy0` (`:3386-3392`).
+        b"pc.is_trade0" => Some(Value::Boolean(cx.game.is_trade0())),
+        b"pc.is_busy0" => Some(Value::Boolean(cx.game.is_busy0())),
+        // `pc_give_exp2` (`:1245-1261`): `(DWORD)rint` of a number is the grant; a
+        // non-number runs nothing. Pushes nothing.
+        b"pc.give_exp2" => {
+            if let Some(number) = lua.coerce_number(first.clone())? {
+                cx.game.give_exp2(dword(number.round_ties_even()));
+            }
+            None
+        }
+        // `pc_set_skillgroup` (`:1345-1358`): a number sets; anything else only logs.
+        // Pushes nothing.
+        b"pc.set_skill_group" => {
+            if let Some(number) = lua.coerce_number(first.clone())? {
+                let group = dword(number).to_le_bytes()[0];
+                cx.game.set_skill_group(group);
+            } else {
+                tracing::warn!("QUEST wrong skillgroup number");
+            }
+            None
+        }
+        // `pc_warp_local` (`:242-316`): three numbers warp to the region's base plus
+        // the pair; anything else only logs. Pushes nothing.
+        b"pc.warp_local" => {
+            let index = args.front().cloned().unwrap_or(Value::Nil);
+            let x = args.get(1).cloned().unwrap_or(Value::Nil);
+            let y = args.get(2).cloned().unwrap_or(Value::Nil);
+            let numbers = (
+                lua.coerce_number(index.clone())?,
+                lua.coerce_number(x.clone())?,
+                lua.coerce_number(y.clone())?,
+            );
+            match numbers {
+                (Some(_), Some(_), Some(_)) => {
+                    let index = host::c_int(lua, index)?;
+                    let x = host::c_int(lua, x)?;
+                    let y = host::c_int(lua, y)?;
+                    cx.game.warp_local(index, x, y);
+                }
+                (None, _, _) => tracing::warn!("QUEST no map index argument"),
+                _ => tracing::warn!("QUEST no coodinate argument"),
+            }
+            None
+        }
+        // `pc_select_vid` (`:1814-1836`): `lua_tonumber` of the first argument is the
+        // VID; the old VID is pushed, or 0 with none under it.
+        b"pc.select" => {
+            let vid = dword(lua.coerce_number(first.clone())?.unwrap_or(0.0));
+            Some(Value::Number(f64::from(cx.game.select_pc(vid))))
+        }
+        // `pc_get_killee_drop_pct` (`:2962-2980`): two pushes, so its own return.
+        b"pc.get_killee_drop_pct" => {
+            let (delta, range) = killee_drop_pct(cx);
+            return Ok(Some(MultiValue::from_iter([delta, range])));
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// `pc_get_killee_drop_pct` (`G/questlua_pc.cpp:2962-2980`): the killee's drop pair for
+/// the quest NPC (`cx.npc_vid`, which the kill's `SetQuestNPCID` recorded). Split out
+/// so `pc_tail` stays under the line lint.
+fn killee_drop_pct(cx: &mut Cx<'_>) -> (Value, Value) {
+    let (delta, range) = cx.game.killee_drop_pct(cx.npc_vid);
+    (
+        Value::Number(f64::from(delta)),
+        Value::Number(f64::from(range)),
+    )
 }
 
 /// `pc_get_skill_level` (`G/questlua_pc.cpp:1734-1749`): a non-number logs and answers 0;
@@ -5289,6 +5469,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         // The game, NPC and warp arms (see `game_npc_api`).
         b"game.get_event_flag"
         | b"game.request_make_guild"
+        | b"game.drop_item"
         | b"game.drop_item_with_ownership"
         | b"warp_to_village"
         | b"npc.getrace"
@@ -5346,6 +5527,14 @@ fn game_npc_api(
         // `HEADER_GC_REQUEST_MAKE_GUILD`. It pushes nothing.
         b"game.request_make_guild" => {
             cx.game.request_make_guild();
+            None
+        }
+        // `game_drop_item` (`G/questlua_game.cpp:138-166`): `(DWORD)` of the first
+        // argument is the vnum, `(int)` of the second the count. Pushes nothing.
+        b"game.drop_item" => {
+            let vnum = u32::from_le_bytes(host::c_int(lua, first)?.to_le_bytes());
+            let count = host::c_int(lua, args.get(1).cloned().unwrap_or(Value::Nil))?;
+            cx.game.drop_item(vnum, count);
             None
         }
         // `game_drop_item_with_ownership` (see `drop_with_ownership`): pushes nothing.
@@ -5495,6 +5684,16 @@ mod tests {
         position: (i32, i32, i32, i32),
         worn: BTreeMap<u8, u32>,
         empires: BTreeMap<u32, u8>,
+        player_id: u32,
+        account_table_id: u32,
+        empty_cells: u32,
+        trading: bool,
+        busy: bool,
+        exp2: Vec<u32>,
+        skill_groups: Vec<u8>,
+        local_warps: Vec<(i32, i32, i32)>,
+        killee: (i32, i32),
+        drops_plain: Vec<(u32, i32)>,
         gm_level: u8,
         /// Whether `has_empty_inventory` answers true, by vnum.
         room: BTreeMap<u32, bool>,
@@ -5970,6 +6169,12 @@ mod tests {
         fn npc_guild(&self, _vid: u32) -> u32 {
             0
         }
+        fn player_id(&self) -> u32 {
+            self.player_id
+        }
+        fn account_table_id(&self) -> u32 {
+            self.account_table_id
+        }
         fn gm_level(&self) -> u8 {
             self.gm_level
         }
@@ -6283,6 +6488,40 @@ mod tests {
         fn char_log(&mut self, _what: u32, _how: &[u8], _hint: &[u8]) {}
 
         fn sys_err(&mut self, _quest: &[u8], _text: &[u8]) {}
+        fn empty_inventory_count(&self) -> u32 {
+            self.empty_cells
+        }
+        fn is_trade0(&self) -> bool {
+            self.trading
+        }
+        fn is_busy0(&self) -> bool {
+            self.busy
+        }
+        fn give_exp2(&mut self, exp: u32) {
+            self.exp2.push(exp);
+        }
+        fn set_skill_group(&mut self, group: u8) {
+            self.skill_groups.push(group);
+        }
+        fn warp_local(&mut self, index: i32, x: i32, y: i32) {
+            self.local_warps.push((index, x, y));
+        }
+        fn select_pc(&mut self, vid: u32) -> u32 {
+            let old = self.char_vid;
+            if let Some(pid) = self.vids.get(&vid).copied() {
+                self.player_id = pid;
+                self.char_vid = vid;
+                old
+            } else {
+                0
+            }
+        }
+        fn killee_drop_pct(&mut self, _npc_vid: u32) -> (i32, i32) {
+            self.killee
+        }
+        fn drop_item(&mut self, vnum: u32, count: i32) {
+            self.drops_plain.push((vnum, count));
+        }
     }
 
     /// The text a Lua expression evaluates to, through the loaded libraries.
@@ -8116,6 +8355,85 @@ mod tests {
                 ("mount_bonus", 8, 10, 0),
                 ("unmount", 0, 0, 0),
             ]
+        );
+    }
+
+    /// The tail names: the IDs answer the Fake's, the empty count and the trade and
+    /// busy gates answer its flags, `give_exp2` queues its `rint` grant and a
+    /// non-number runs nothing, the skill group keeps its low byte, the local warp
+    /// keeps its `rint` triple (`rint` rounds half to even), `select` answers the
+    /// old VID (0: the Fake starts vidless) and 0 without one, the killee answers
+    /// its pair, and the plain drop queues its vnum and count (a text vnum reads 0).
+    #[test]
+    fn the_tail_names_read_their_arguments() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake {
+                player_id: 9,
+                account_table_id: 4,
+                empty_cells: 171,
+                trading: true,
+                busy: true,
+                killee: (1500, 4000),
+                vids: [(4321, 11)].into_iter().collect(),
+                ..Fake::default()
+            },
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let num = |value: f64| Value::Number(value);
+        let one = |values: Vec<Value>| values;
+        assert_eq!(
+            one(probe.call("pc.get_player_id", &[]).unwrap()),
+            [num(9.0)]
+        );
+        assert_eq!(
+            one(probe.call("pc.get_account_id", &[]).unwrap()),
+            [num(4.0)]
+        );
+        assert_eq!(
+            one(probe.call("pc.get_empty_inventory_count", &[]).unwrap()),
+            [num(171.0)]
+        );
+        assert_eq!(
+            one(probe.call("pc.is_trade0", &[]).unwrap()),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(
+            one(probe.call("pc.is_busy0", &[]).unwrap()),
+            [Value::Boolean(true)]
+        );
+        let text = |bytes: &[u8]| Value::String(lua.create_string(bytes).unwrap());
+        for (name, args) in [
+            ("pc.give_exp2", vec![num(2500.6)]),
+            ("pc.give_exp2", vec![text(b"nope")]),
+            ("pc.set_skill_group", vec![num(513.0)]),
+            ("pc.warp_local", vec![num(1.0), num(100.4), num(200.5)]),
+            ("game.drop_item", vec![num(19.0), num(3.0)]),
+            ("game.drop_item", vec![text(b"vnum?"), num(3.0)]),
+        ] {
+            assert!(probe.call(name, &args).unwrap().is_empty(), "{name}");
+        }
+        assert_eq!(probe.game.exp2, [2501]);
+        assert_eq!(probe.game.skill_groups, [1]);
+        assert_eq!(probe.game.local_warps, [(1, 100, 200)]);
+        assert_eq!(probe.game.drops_plain, [(19, 3), (0, 3)]);
+        assert_eq!(
+            one(probe.call("pc.select", &[num(4321.0)]).unwrap()),
+            [num(0.0)]
+        );
+        assert_eq!(
+            one(probe.call("pc.select", &[num(999.0)]).unwrap()),
+            [num(0.0)]
+        );
+        assert_eq!(
+            one(probe.call("pc.get_killee_drop_pct", &[]).unwrap()),
+            [num(1500.0), num(4000.0)]
         );
     }
 

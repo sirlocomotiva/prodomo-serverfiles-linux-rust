@@ -129,6 +129,32 @@ pub const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 /// and removes.
 pub const AFFECT_INVISIBILITY: u32 = 203;
 
+/// The kinds `CHARACTER::RemoveGoodAffect` removes (`G/char_affect.cpp:892-916`): the six
+/// potion affects and `CHINA_FIREWORK`, then the fourteen skill affects.
+pub const GOOD_AFFECT_KINDS: [u32; 21] = [
+    200, // `AFFECT_MOV_SPEED` (`G/affect.h:23`)
+    201, // `AFFECT_ATT_SPEED`
+    204, // `AFFECT_STR`
+    205, // `AFFECT_DEX`
+    206, // `AFFECT_CON`
+    207, // `AFFECT_INT`
+    224, // `AFFECT_CHINA_FIREWORK`
+    3,   // `SKILL_JEONGWI` (`G/skill.h:55`)
+    4,   // `SKILL_GEOMKYUNG`
+    19,  // `SKILL_CHUNKEON`
+    34,  // `SKILL_EUNHYUNG`
+    49,  // `SKILL_GYEONGGONG`
+    63,  // `SKILL_GWIGEOM`
+    64,  // `SKILL_TERROR`
+    65,  // `SKILL_JUMAGAP`
+    79,  // `SKILL_MANASHILED`
+    94,  // `SKILL_HOSIN`
+    95,  // `SKILL_REFLECT`
+    110, // `SKILL_KWAESOK`
+    111, // `SKILL_JEUNGRYEOK`
+    97,  // `SKILL_GICHEON`
+];
+
 /// `AFFECT_POISON` (`G/affect.h:33`): `AttackedByPoison`'s affect.
 pub const AFFECT_POISON: u32 = 209;
 

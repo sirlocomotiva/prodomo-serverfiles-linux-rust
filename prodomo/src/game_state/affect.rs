@@ -500,6 +500,32 @@ impl GameState {
             let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
         }
     }
+
+    /// `CHARACTER::RemoveGoodAffect` (`G/char_affect.cpp:892-916`): every good-affect
+    /// row goes, each uncomputed through `RemoveAffect` with its remove packet sent,
+    /// the flags updated once at the end.
+    pub(super) fn remove_good_affects(&mut self, vid: Vid) {
+        use crate::loading_phase::GOOD_AFFECT_KINDS;
+        let flags_before = self.affect_flags_of(vid);
+        let mut removed = Vec::new();
+        if let Some(event) = self.affect_events.get_mut(&vid) {
+            for kind in GOOD_AFFECT_KINDS {
+                removed.extend(take_affects_of_kind(&mut event.affects, kind));
+            }
+        }
+        if removed.is_empty() {
+            return;
+        }
+        for affect in &removed {
+            self.compute_affect(vid, affect, false);
+            let frame = affect_remove_frame(affect);
+            let _retired = self.write_to_client(vid, frame);
+        }
+        let flags_after = self.affect_flags_of(vid);
+        if flags_after != flags_before {
+            self.send_affect_update(vid, flags_after);
+        }
+    }
     /// `ACMD(do_invisibility)` (`G/cmd_gm.cpp:2253-2264`): with the
     /// invisibility flag the 203 rows go (each uncomputed through
     /// `RemoveAffect`, its remove packet sent, the flags updated last), else

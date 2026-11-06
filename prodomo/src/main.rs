@@ -1736,6 +1736,7 @@ async fn quest_account(
         }
     };
     Some(QuestAccount {
+        id: account.id.get(),
         pids: account.lobby.slot_ids(),
         changes,
         login: account.login.as_str().to_owned(),

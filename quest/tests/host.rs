@@ -203,9 +203,9 @@ fn every_api_name_is_registered_and_the_unported_ones_refuse() {
     let say_title: Function = host.lua().globals().get("say_title").unwrap();
     assert_eq!(say_title.info().what, "Lua");
     assert!(eval::<bool>(&host, "return rawequal(q.yield, coroutine.yield)").unwrap());
-    let error = eval::<()>(&host, "pc.warp_local(1)").unwrap_err();
+    let error = eval::<()>(&host, "pc.set_level(1)").unwrap_err();
     assert!(
-        error.to_string().contains("not ported: pc.warp_local"),
+        error.to_string().contains("not ported: pc.set_level"),
         "{error}"
     );
     let base: mlua::String = eval(&host, "return get_locale_base_path()").unwrap();

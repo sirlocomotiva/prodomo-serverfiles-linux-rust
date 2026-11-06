@@ -56,11 +56,6 @@ use world::item::Item;
 
 /// `ITEM_WHITEDAY_ROSE` and `ITEM_WHITEDAY_CANDY` (`G/unique_item.h:62-63`).
 const WHITEDAY_ITEMS: [u32; 2] = [50_031, 50_032];
-/// The fixed `iRandRange`: the precedence Defect at `G/item_manager.cpp:906-911` parses as
-/// `(100 + priv + worn) ? 4000000 : 0`, which is always 4000000 (the owner's custom
-/// Item-Drop Boost Event never raised it). The Rewrite fixes the parse but the priv manager
-/// does not exist yet, so the rate stays 4000000 with this cite.
-const DROP_RAND_RANGE: i32 = 4_000_000;
 /// `GetThreeSkillLevelAdjust`'s bands (`G/item_manager.cpp:1336-1350`): the divisor for a
 /// mob of the level.
 const THREE_SKILL_BANDS: [(u8, i32); 6] =
@@ -973,14 +968,13 @@ impl GameState {
         world::character::count_specify_item(character.items(), usable, vnum)
     }
 
-    /// `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the range.
-    /// The delta is the boss table from rank BOSS up unless the victim is a stone, plus
-    /// 1000 on 1-in-50000 else 500 on 1-in-10000, times `GetMobItemRate` (`:891`: 100
-    /// until `mob_item` sets it; no premium, no China check). The range is
-    /// `4000000 * 100 / (100 + priv + worn)`: the
-    /// precedence Defect at `:906-911` is fixed (see [`DROP_RAND_RANGE`]), and the worn
-    /// double-item is 0 (hook). The premium/unique doubling and the `bonus` dead code
-    /// never run (hooks).
+    /// `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the range,
+    /// answered by [`super::quests::quest_drop_pct`]. The delta is the boss table from
+    /// rank BOSS up unless the victim is a stone, plus 1000 on 1-in-50000 else 500 on
+    /// 1-in-10000, times `GetMobItemRate` (`:891`: 100 until `mob_item` sets it; no
+    /// premium, no China check). The range is `4000000 * 100 / (100 + priv)`: the
+    /// precedence Defect at `:906-911` is fixed, and the worn double-item is 0 (hook).
+    /// The premium/unique doubling and the `bonus` dead code never run (hooks).
     fn drop_pct(
         &mut self,
         stone: bool,
@@ -989,24 +983,17 @@ impl GameState {
         killer: Vid,
         killer_level: u8,
     ) -> (i32, i32) {
-        use common::enums::EMobRank;
-        let boss = !stone && rank >= EMobRank::Boss as u8;
-        let table = if boss {
-            levels::PERCENT_BY_DELTA_LEV_BOSS
-        } else {
-            levels::PERCENT_BY_DELTA_LEV
-        };
-        let index = i32::from(mob_level) + 15 - i32::from(killer_level);
-        let mut delta = table[usize::try_from(index.clamp(0, 30)).unwrap_or(0)];
-        if 1 == number(&mut self.dice, 1, 50_000) {
-            delta += 1000;
-        } else if 1 == number(&mut self.dice, 1, 10_000) {
-            delta += 500;
-        }
-        delta = delta * self.mob_rates.item / 100;
-        let range = DROP_RAND_RANGE * 100
-            / (100 + self.priv_of(killer, super::empire_priv::PRIV_ITEM_DROP));
-        (delta, range)
+        let priv_drop = self.priv_of(killer, super::empire_priv::PRIV_ITEM_DROP);
+        let item_rate = self.mob_rates.item;
+        super::quests::quest_drop_pct(
+            &mut self.dice,
+            stone,
+            rank,
+            mob_level,
+            killer_level,
+            priv_drop,
+            item_rate,
+        )
     }
 
     /// One `CreateItem(vnum, count, 0, true, rare_pct)` the draw chain asks for: the made
