@@ -1248,17 +1248,11 @@ impl CharacterItems {
                 present,
             });
         }
-        // The single slot has no grid, so a footprint above one has nowhere to
-        // be recorded and the item would occupy the slot while its extra cells
-        // looked free.
-        if item.size > 1 {
-            return Err(Rejected::FootprintCutOff {
-                window: pos.window_type,
-                cell: pos.cell,
-                size: item.size,
-                covered: 1,
-            });
-        }
+        // The single slot has no grid, like legacy's bare pointer (`SetItem`'s
+        // `ATTR67_ADD` arm stores whatever the regist moves, `G/char_item.cpp:522-531`),
+        // so a weapon of any size sits here whole. The size is read so a future
+        // gridless-slot check notices this arm ignores it deliberately.
+        assert!(item.size >= 1, "an item covers at least its slot");
         self.attr67[0] = item.id;
         Ok(())
     }
@@ -2101,22 +2095,18 @@ mod tests {
             .set(pos(A67, 0), &one_cell(111))
             .expect("the one slot");
         assert_eq!(items.get(pos(A67, 0)), Lookup::Occupied(111));
-        // A two-cell item has nowhere to record its second cell, so it is
-        // refused instead of occupying the slot while looking partly free.
+        // A second item is refused while one sits here, whatever its size.
         assert!(matches!(
             items.set(pos(A67, 0), &sized(112, 2)),
             Err(Rejected::AlreadyOccupied { .. })
         ));
         items.remove(pos(A67, 0), &one_cell(111)).expect("remove");
-        assert_eq!(
-            items.set(pos(A67, 0), &sized(113, 2)),
-            Err(Rejected::FootprintCutOff {
-                window: A67,
-                cell: 0,
-                size: 2,
-                covered: 1
-            })
-        );
+        // A two-cell weapon sits here whole: legacy's arm stores the pointer with
+        // no size check, and every real regist item is wider than one.
+        items
+            .set(pos(A67, 0), &sized(113, 2))
+            .expect("a weapon sits whole");
+        assert_eq!(items.get(pos(A67, 0)), Lookup::Occupied(113));
     }
 
     #[test]

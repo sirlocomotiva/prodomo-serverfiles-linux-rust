@@ -36610,3 +36610,255 @@ fn the_empire_exchange_moves_the_account() {
     );
     alpha.still("the exchange settles");
 }
+
+/// `HEADER_CG_ATTR67_ADD`: the header, the sub-header, and the regist's 6 payload bytes.
+const CG_ATTR67_ADD: u8 = 0xa9;
+
+/// A `CG_ATTR67_ADD` with `sub_header` naming cells and counts: the regist item's flat
+/// cell, the fragment count, the support item's flat cell, and the support count.
+fn client_attr67(
+    sub_header: u8,
+    regist: u16,
+    materials: u8,
+    support: u16,
+    supports: u8,
+) -> Vec<u8> {
+    let mut record = vec![CG_ATTR67_ADD, sub_header];
+    record.extend_from_slice(&regist.to_le_bytes());
+    record.push(materials);
+    record.extend_from_slice(&support.to_le_bytes());
+    record.push(supports);
+    record
+}
+
+/// `cg.game.attr67_add`, the six `lua.attr67add.*` names, `quest.item_attr67add`,
+/// `sys.custom.attr67`: Alpha, a `HIGH_WIZARD`, stands at `talk`; Seon-Hae 20095 stands
+/// beside her on map 1. A click with an empty window opens the client's dialog
+/// (the `cmdchat __OpenAttr67AddDlg` line, then `[DONE]` in skin 0). She opens the window,
+/// registers the sword
+/// with 255 fragments (level 0 names 39070, 2% each, so the roll cannot fail), and the
+/// fragments' cell clears, her cell clears, and the window's one cell fills. A click now
+/// reads the wait page, whose reward names a day out; the GM's yes zeroes the wait. The
+/// next click rolls the rare onto the window's sword (an `ITEM_UPDATE` whose first rare
+/// slot fills), reads the won page, and on OK the sword comes home with its bonus: the
+/// window clears, cell 0 fills, and the three flags go.
+#[test]
+fn an_attr67_regist_waits_and_collects() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, mut alpha, seon) = attr67_stage(&database);
+    let menu = seon_hae_menu();
+    click_attr67_entry_for_dialog(&mut alpha, seon, &menu);
+    regist_sword_with_fragments(&mut alpha, &database);
+    read_wait_page_and_zero_it(&mut alpha, seon, &menu);
+    collect_the_sword_home(&mut alpha, seon, &menu);
+    part_after_collect(alpha, &mut server, &database);
+}
+
+/// [`an_attr67_regist_waits_and_collects`]'s stage: Seon-Hae 20095 beside Alpha on map 1,
+/// Alpha a `HIGH_WIZARD` at `talk` with sword 10 in cell 0 and 3 fragments 39070 in cell
+/// 2. Answers the server, the entered client, and Seon-Hae's VID.
+fn attr67_stage(database: &ScratchDatabase) -> (Server, Keyed, u32) {
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(b"m\t606\t540\t0\t0\t0\t1\t1000s\t100\t1\t20095\n");
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(npc, &npc_text)],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    // `item_attr67add.__status` is the CRC32 of `talk`, 0x9f24_d5bb, as a signed `long`.
+    sql(
+        database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+         'item_attr67add.__status'::bytea, -1624975941 FROM player WHERE name = 'Alpha'",
+    );
+    // Alpha is a `HIGH_WIZARD`, so the wait page offers the GM's zeroing.
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    for (id, cell, count, vnum) in [(31, 0, 1, 10), (32, 2, 3, 39_070)] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, \
+                 id, 1, {cell}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_lines(&mut alpha, 0, None);
+    // The quest stands at `talk`, so its letter never comes; the marking quests move on.
+    let _marks = read_login_letters(&mut alpha, false);
+    read_login_update(&mut alpha);
+    alpha.still("nothing follows");
+    let seon = vid_shown_at(entered.shown.inserts(), (470_200, 950_000));
+    (server, alpha, seon)
+}
+
+/// Seon-Hae's chat menu: the attr67 entry first, then the two gaya entries and `Inchide`.
+fn seon_hae_menu() -> Vec<u8> {
+    [
+        &b"[QUESTION 1;Add 6th and 7th Bonus|2;Pietre Str\xE3lucitoare|3;Ce bonusuri "[..],
+        &b"\xEE\x6Di aduce Gaya? |4;Inchide]"[..],
+    ]
+    .concat()
+}
+
+/// A click on Seon-Hae and the pick of the attr67 entry, answering the menu.
+fn click_attr67_entry(alpha: &mut Keyed, seon: u32, menu: &[u8]) {
+    alpha.send_record(&client_click(seon));
+    assert_eq!(alpha.read_game(), server_script(1, menu));
+    alpha.send_record(&client_script_answer(0));
+}
+
+/// [`an_attr67_regist_waits_and_collects`]'s empty-window click: the `cmdchat` line, then
+/// `[DONE]` in skin 0.
+fn click_attr67_entry_for_dialog(alpha: &mut Keyed, seon: u32, menu: &[u8]) {
+    click_attr67_entry(alpha, seon, menu);
+    assert_eq!(
+        alpha.read_game(),
+        a_command_line(b"__OpenAttr67AddDlg"),
+        "the empty window opens the client's dialog"
+    );
+    assert_eq!(alpha.read_game(), server_script(0, b"[DONE]"));
+    alpha.quiet("the click settles");
+}
+
+/// [`an_attr67_regist_waits_and_collects`]'s regist: the open answers nothing, and the
+/// regist with 255 fragments clears the fragments' cell and the sword's cell and fills
+/// the window's one cell; the rows follow.
+fn regist_sword_with_fragments(alpha: &mut Keyed, database: &ScratchDatabase) {
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let window = common::item_slots::EWindows::Attr67Add as u8;
+    alpha.send_record(&client_attr67(1, 0, 0, 0, 0));
+    alpha.quiet("the open answers nothing");
+    alpha.send_record(&client_attr67(2, 0, 255, 5, 0));
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 2, 0, 0),
+        "the fragments' cell clears"
+    );
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 0, 0, 0),
+        "the sword's cell clears"
+    );
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (window, 0, 10, 1),
+        "the window's cell fills"
+    );
+    alpha.quiet("the regist settles");
+    check(database, "SELECT count(*) = 0 FROM item WHERE id = 32");
+    check(
+        database,
+        "SELECT window_type = 6 AND pos = 0 FROM item WHERE id = 31",
+    );
+}
+
+/// [`an_attr67_regist_waits_and_collects`]'s wait page: the reward names a day out, and
+/// the GM's yes zeroes the wait.
+fn read_wait_page_and_zero_it(alpha: &mut Keyed, seon: u32, menu: &[u8]) {
+    click_attr67_entry(alpha, seon, menu);
+    let page = alpha.read_game();
+    assert_eq!(
+        (page[0], page[3]),
+        (GC_SCRIPT, 1),
+        "a skin-1 dialog: {page:02x?}"
+    );
+    let text = &page[6..];
+    let a_day_out = text
+        .windows(b"24 hrs. 0 min.".len())
+        .any(|window| window == b"24 hrs. 0 min.")
+        || text
+            .windows(b"23 hrs. 59 min.".len())
+            .any(|window| window == b"23 hrs. 59 min.");
+    assert!(a_day_out, "the reward names a day out: {text:02x?}");
+    assert!(
+        text.ends_with(b"GM - Should the time be set to zero?[ENTER][QUESTION 1;Yes|2;No]"),
+        "the GM's question: {text:02x?}"
+    );
+    // When: Alpha says yes. Then: the wait flag is zeroed (it banks at the disconnect).
+    // The menu's own skin is 0 once the entry ran, as the first click showed.
+    alpha.send_record(&client_script_answer(0));
+    assert_eq!(alpha.read_game(), server_script(0, b"[DONE]"));
+}
+
+/// [`an_attr67_regist_waits_and_collects`]'s collect: the click rolls the rare onto the
+/// window's sword (an `ITEM_UPDATE` whose first rare slot fills) and reads the won page,
+/// and on OK the sword comes home with its bonus.
+fn collect_the_sword_home(alpha: &mut Keyed, seon: u32, menu: &[u8]) {
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let window = common::item_slots::EWindows::Attr67Add as u8;
+    click_attr67_entry(alpha, seon, menu);
+    let update = alpha.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (window, 0, 1),
+        "the rare roll updates the window's cell"
+    );
+    // The header, the 3-byte cell, the count, the element and the transmutation, the
+    // six sockets: the seven 3-byte attributes start at 38, the rare two at 53.
+    let attrs = &update[38..38 + 7 * 3];
+    assert_ne!(
+        attrs[15..18],
+        [0, 0, 0],
+        "the first rare slot fills: {update:02x?}"
+    );
+    let page = alpha.read_game();
+    let text = &page[7..];
+    assert!(
+        text.windows(b"Bonus added successfully!".len())
+            .any(|window| window == b"Bonus added successfully!"),
+        "the won roll says so: {text:02x?}"
+    );
+    assert!(
+        text.ends_with(b"[QUESTION 1;OK]"),
+        "the OK question: {text:02x?}"
+    );
+    alpha.send_record(&client_script_answer(0));
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (window, 0, 0, 0),
+        "the window's cell clears"
+    );
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 0, 10, 1),
+        "the sword comes home"
+    );
+    assert_eq!(alpha.read_game(), server_script(0, b"[DONE]"));
+}
+
+/// [`an_attr67_regist_waits_and_collects`]'s parting: the collect settles, the disconnect
+/// banks the character, and no `attr67add_item.*` flag banks while the sword is home with
+/// its bonus.
+fn part_after_collect(alpha: Keyed, server: &mut Server, database: &ScratchDatabase) {
+    let mut alpha = alpha;
+    alpha.quiet("the collect settles");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    // The regist's success won and was read, the wait was zeroed, and the collect reset
+    // all three — so no `attr67add_item.*` flag banks.
+    wait_for(
+        database,
+        "(SELECT count(*) = 0 FROM quest_flag WHERE name LIKE 'attr67add_item.%'::bytea)",
+    );
+    wait_for(
+        database,
+        "SELECT window_type = 1 AND pos = 0 AND attrtype5 != 0 FROM item WHERE id = 31",
+    );
+}

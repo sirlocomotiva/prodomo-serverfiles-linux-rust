@@ -46346,3 +46346,58 @@ above); doc-tests clean; `cargo clippy --workspace --all-targets` clean;
 `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+## 409. The 6th and 7th bonus (`CG_ATTR67_ADD`, the six `attr67add.*` names)
+
+Seven entry points, one scenario (`an_attr67_regist_waits_and_collects`): `cg.game.attr67_add`,
+the six `lua.attr67add.*` names, `quest.item_attr67add` (now `ported`), and `sys.custom.attr67`.
+
+`CG_ATTR67_ADD` (169) runs `CInputMain::Attr67Add` (`G/input_main.cpp:3489-3507`) with no
+observer gate: the open stands the window up, the close drops it, and the regist runs only
+while it stands; an unknown sub-header is absorbed, a malformed record closes the connection.
+`CHARACTER::Attr67Add` (`G/char_item.cpp:10478-10611`) runs its guards in legacy's order (no
+trade, shop browse, safebox, or changelook window; the window empty; a regist item in the named
+cell; a weapon or armor), the material count through legacy's actual precedence
+(`!CountSpecifyItem(v) >= n` parses as `(!Count) >= n`, so any held stack passes and the spend
+takes what is there), the level band's fragment (`CItemVnumHelper`, `C/VnumHelper.h:25-52`;
+the pendant's 39079 arm sits behind `__PENDANT_SYSTEM__`, which this build lacks), and the
+support percent (the named cell's proto `value3` / 5 × count). The success is
+`number(1, 100) <= total`, stored with the wait (`get_global_time() + 86400`) and the rare-add
+control (0); the regist item moves from its cell to the window, the client's old cell clears
+and the window's fills, and the rows store as a move's do. Not ported: the sealed arm
+(`__SOUL_BIND_SYSTEM__` is not in this build), the lock arm (only blend expiry locks, and no
+blend item is a regist type), the logout destroy of a window legacy never saves (the Rewrite's
+store owns the row, which the character keeps), and the item logs.
+
+The bridge (`G/questlua_attr67add.cpp:28-137`) reads the window the script runs for (the
+blocked PC's in a switched block, the reader's own otherwise): `holding`, `item_vnum`,
+`window_type` (`ATTR67_ADD`), `window_cell` (0), `success` (false with no window item; else
+whether the won flag stands, rolling the rare onto the window's item first when the control
+is 0 or below), and `collect` (nothing with no window item; else the move to the first free
+base cell and the three flags reset, or `Not enough inventory space.` with no room). The rare
+roll is `CItem::AddRareAttribute` through the existing `add_rare_attribute` (the session now
+carries the `item_attr_rare` rows); its cell updates and its row saves. `BRIDGED` grows 262
+to 268. Unit tests: the material bands, the regist's spends/moves/flags and its silent
+refusals, the bridge's window and flag rules, and the collect's move home.
+
+The scenario stages Seon-Hae 20095 beside Alpha on map 1, Alpha a `HIGH_WIZARD` at `talk`
+with sword 10 and 3 fragments: the empty-window click opens the client's dialog (the
+`cmdchat` line, then `[DONE]` in skin 0), the regist with 255 fragments cannot fail, the
+wait page's reward names a day out (23:59 or 24:00, to the minute), the GM's yes zeroes the
+wait, the next click updates the window's cell with the rare in its first rare slot and reads
+the won page, and on OK the sword comes home with its bonus while the three flags go. The
+quest flags bank with the character's own save, so the scenario reads them at the disconnect.
+Seon-Hae also runs the gaya entries, so the menu is golden with all four.
+
+Bridge notes. `GameCommand::Attr67` was first answered by `apply_ground`'s new arm but never
+reached it: `apply_delegated` did not route the command, so the game thread gave no answer
+and the descriptor closed. The delegation list now names it. The wait page's skin is 1 but
+its `[DONE]` and the collect's come in skin 0, as the menu's entry ran in the menu's skin.
+`pc.is_gm` gates at level 3, so the GM's zeroing needs `HIGH_WIZARD`, not `LOW_WIZARD`.
+
+Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4809 passed 0 failed in 42 targets; `cargo test --workspace --doc` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

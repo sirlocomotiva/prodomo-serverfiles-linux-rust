@@ -114,7 +114,7 @@ in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that tur
 | `sys.custom.dragon_soul` | `G/DragonSoul.cpp`, `G/char_dragonsoul.cpp`, `G/dragon_soul_table.cpp`, `ENABLE_DRAGONSOUL_ALCHEMY_PLUS` | Dragon soul alchemy and refine | `sys.item.core` | missing | | |
 | `sys.custom.cube` | `G/cuberenewal.cpp`, `ENABLE_CUBE_RENEWAL_WORLDARD` | Cube crafting | `sys.item.core` | missing | | |
 | `sys.custom.gaya` | `G/char_gaya.cpp`, `ENABLE_GAYA_SYSTEM` | Gaya market and craft | `sys.item.core` | missing | | |
-| `sys.custom.attr67` | `G/questlua_attr67add.cpp` | 6th and 7th bonus add | `sys.item.attr` | missing | | |
+| `sys.custom.attr67` | `G/questlua_attr67add.cpp` | 6th and 7th bonus add | `sys.item.attr` | ported | `an_attr67_regist_waits_and_collects` | Ledger 409: the window, the regist, and the quest's wait, success and collect. |
 | `sys.custom.battle_pass` | `G/BattlePassManager.cpp`, `ENABLE_BATTLE_PASS` | Battle pass (`battlepass.json`) | `sys.quest.runtime` | missing | | |
 | `sys.custom.switchbot` | `G/refactorized_switchbot.cpp`, `ENABLE_SWITCHBOT` | Switchbot | `sys.item.attr` | missing | | |
 | `sys.custom.daily_gift` | `G/char_daily_gifts.cpp`, `__DAILY_GIFT_SYSTEM__` | Daily gift | `sys.item.core` | missing | | |

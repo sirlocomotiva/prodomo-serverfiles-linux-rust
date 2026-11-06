@@ -725,6 +725,8 @@ pub(super) struct Giver<'s> {
     pub(super) gauss: &'s mut world::character::Gauss,
     /// The `item_attr` rows the magic rolls against.
     pub(super) attrs: &'s [gamedata::records::ItemAttrRecord],
+    /// The `item_attr_rare` rows the rare roll reads.
+    pub(super) rare: &'s [gamedata::records::ItemAttrRecord],
     /// The mask table.
     pub(super) masks: &'s [(u32, u32)],
     /// `GetPlayerID()` of the character, whose rows the gives write.
@@ -1050,6 +1052,115 @@ impl Session<'_> {
     /// every open frame is unswitched, when the script still runs for the reader.
     fn blocked_pc(&self) -> Option<&BlockedPc> {
         self.blocked.iter().rev().find_map(|frame| frame.as_ref())
+    }
+
+    /// The vnum the 6th/7th-bonus window holds for the character the script runs for:
+    /// the blocked PC's in a switched block, the reader's own otherwise. 0 with none.
+    fn attr67_held_vnum(&self) -> u32 {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        let at = ItemPos::new(EWindows::Attr67Add as u8, 0);
+        if let Some(blocked) = self.blocked_pc() {
+            return blocked.items.item_at(at).map_or(0, |item| item.vnum);
+        }
+        self.giver
+            .as_ref()
+            .and_then(|giver| giver.items.item_at(at))
+            .map_or(0, |item| item.vnum)
+    }
+
+    /// The rare attribute onto the window's item, for the character the script runs
+    /// for: its cell is updated and its row is saved. A step whose rows no descriptor
+    /// stores changes nothing.
+    fn attr67_roll_rare(&mut self) {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        let Some(giver) = self.giver.as_mut().filter(|giver| giver.stores) else {
+            warn!("a quest rolled a rare attribute where no descriptor stores it; none rolled");
+            return;
+        };
+        let at = ItemPos::new(EWindows::Attr67Add as u8, 0);
+        let Some(held) = giver.items.item_at(at).cloned() else {
+            return;
+        };
+        let Some(proto) = self.items.get(held.vnum) else {
+            return;
+        };
+        let mut attributes = held.attributes;
+        let Some((index, written)) =
+            world::character::add_rare_attribute(self.dice, proto, &mut attributes, giver.rare)
+        else {
+            return;
+        };
+        let done = world::character::force_worn_attribute(
+            giver.items,
+            held.id,
+            (index, written.b_type, written.s_value),
+        );
+        let moved = crate::item_move::MovedItems::new(
+            giver.owner_id,
+            self.reader.raw(),
+            done,
+            self.mover,
+            self.items,
+            self.locale,
+        );
+        self.records.extend(moved.records);
+        self.item_rows.extend(moved.changes);
+    }
+
+    /// The window's item into the first free base cell, for the character the script
+    /// runs for. Answers whether it moved. A step whose rows no descriptor stores
+    /// moves nothing.
+    fn attr67_take_home(&mut self) -> bool {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::{ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord};
+        let Some(giver) = self.giver.as_mut().filter(|giver| giver.stores) else {
+            warn!("a quest collected where no descriptor stores it; nothing collected");
+            return false;
+        };
+        let from = ItemPos::new(EWindows::Attr67Add as u8, 0);
+        let Some(held) = giver.items.item_at(from).cloned() else {
+            return false;
+        };
+        let Some(cell) = giver
+            .items
+            .find_free_inventory_cell(giver.rules.usable_cells, held.size)
+        else {
+            return false;
+        };
+        let to = ItemPos::new(EWindows::Inventory as u8, cell);
+        if giver.items.move_item(from, to, &held).is_err() {
+            return false;
+        }
+        let mut done = MoveDone {
+            kind: MoveKind::Retrieved,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        done.records.push(MoveRecord::Item(ItemRecord::Set(
+            world::item::gc_item_clear(from),
+        )));
+        if let Some(home) = giver.items.item(held.id) {
+            done.records
+                .push(MoveRecord::Item(ItemRecord::Set(home.gc_item_set(to, 0))));
+        }
+        done.changes.push(ItemChange::Moved {
+            id: held.id,
+            pos: to,
+        });
+        let moved = crate::item_move::MovedItems::new(
+            giver.owner_id,
+            self.reader.raw(),
+            done,
+            self.mover,
+            self.items,
+            self.locale,
+        );
+        self.records.extend(moved.records);
+        self.item_rows.extend(moved.changes);
+        true
     }
 
     /// The points of the character the script runs for: the blocked PC's in a
@@ -1951,6 +2062,18 @@ impl Game for Session<'_> {
                 value,
                 seconds,
             });
+    }
+
+    fn attr67_vnum(&self) -> u32 {
+        self.attr67_held_vnum()
+    }
+
+    fn attr67_add_rare(&mut self) {
+        self.attr67_roll_rare();
+    }
+
+    fn attr67_collect(&mut self) -> bool {
+        self.attr67_take_home()
     }
 
     fn horse_name(&self) -> Vec<u8> {
@@ -3172,6 +3295,7 @@ impl GameState {
             item_ids,
             item_count_limit,
             item_attrs,
+            item_rare_attrs,
             item_masks,
             gauss,
             horse_names,
@@ -3180,7 +3304,7 @@ impl GameState {
             ..
         } = self;
         let quests = quests.as_mut()?;
-        let mut context = reader_context(
+        let context = arm_context(
             characters,
             horse_names,
             bodies,
@@ -3191,12 +3315,9 @@ impl GameState {
             guilds,
             parties,
             reader,
+            hacked,
+            account,
         );
-        if hacked {
-            context.gates.set_hack(true);
-            context.gates.set_able(false);
-        }
-        (context.account_pids, context.empire_changes, context.login) = reader_account(account);
         let Quests {
             manager,
             protos,
@@ -3231,6 +3352,7 @@ impl GameState {
             item_ids,
             gauss,
             item_attrs,
+            item_rare_attrs,
             item_masks,
             quest_targets,
             giving != Giving::Nothing,
@@ -4089,11 +4211,49 @@ struct SessionInputs<'s> {
     ids: &'s mut Option<world::item::ItemIds>,
     gauss: &'s mut world::character::Gauss,
     attrs: &'s [gamedata::records::ItemAttrRecord],
+    rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
 }
+/// The [`ReaderContext`] a quest step runs with: the reader's snapshot, the hack gates,
+/// and the account triple.
+#[allow(clippy::too_many_arguments)]
+fn arm_context(
+    characters: &world::character::CharacterManager,
+    horse_names: &std::collections::HashMap<u32, Vec<u8>>,
+    bodies: &std::collections::HashMap<Vid, super::motion::Body>,
+    war_maps: &BTreeMap<i32, super::war_map::WarMap>,
+    dungeons: &super::dungeons::Dungeons,
+    maps: &BTreeMap<(u8, i32), super::view::MapIndex>,
+    pc_skills: &std::collections::HashMap<u32, super::pc_skill::PcSkillState>,
+    guilds: &super::guild::Guilds,
+    parties: &super::party::Parties,
+    reader: Vid,
+    hacked: bool,
+    account: &crate::game_loop_messages::QuestAccount,
+) -> ReaderContext {
+    let mut context = reader_context(
+        characters,
+        horse_names,
+        bodies,
+        war_maps,
+        dungeons,
+        maps,
+        pc_skills,
+        guilds,
+        parties,
+        reader,
+    );
+    if hacked {
+        context.gates.set_hack(true);
+        context.gates.set_able(false);
+    }
+    (context.account_pids, context.empire_changes, context.login) = reader_account(account);
+    context
+}
+
 /// The reader's job and skill group, level and player ID, and `GetMapIndex()` and `GetWarMap()`
 /// (`G/input_login.cpp:780`): the map the character stands on, and the war map it stands on,
 /// which is the map the world holds a war for.
@@ -4251,6 +4411,7 @@ fn arm_item_giver<'s>(
     item_ids: &'s mut Option<world::item::ItemIds>,
     gauss: &'s mut world::character::Gauss,
     item_attrs: &'s [gamedata::records::ItemAttrRecord],
+    item_rare: &'s [gamedata::records::ItemAttrRecord],
     item_masks: &'s gamedata::item_mask::ItemMasks,
     stores_items: bool,
     pid: u32,
@@ -4273,6 +4434,7 @@ fn arm_item_giver<'s>(
         ids: item_ids.as_mut(),
         gauss,
         attrs: item_attrs,
+        rare: item_rare,
         masks: item_masks.pairs(),
         owner_id: pid,
     });
@@ -4309,6 +4471,7 @@ fn session_inputs<'s>(
     ids: &'s mut Option<world::item::ItemIds>,
     gauss: &'s mut world::character::Gauss,
     attrs: &'s [gamedata::records::ItemAttrRecord],
+    rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
     targets: &'s mut QuestTargets,
     stores: bool,
@@ -4341,6 +4504,7 @@ fn session_inputs<'s>(
         ids,
         gauss,
         attrs,
+        rare,
         masks,
         targets,
         stores,
@@ -4378,6 +4542,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         ids,
         gauss,
         attrs,
+        rare,
         masks,
         targets,
         stores,
@@ -4410,6 +4575,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         ids,
         gauss,
         attrs,
+        rare,
         masks,
         targets,
         stores,
@@ -4447,6 +4613,7 @@ fn session_head<'s>(
     ids: &'s mut Option<world::item::ItemIds>,
     gauss: &'s mut world::character::Gauss,
     attrs: &'s [gamedata::records::ItemAttrRecord],
+    rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
     targets: &'s mut QuestTargets,
     stores: bool,
@@ -4461,6 +4628,7 @@ fn session_head<'s>(
         ids,
         gauss,
         attrs,
+        rare,
         masks,
         stores,
         pid,
@@ -4564,6 +4732,7 @@ struct SessionGiverInputs<'a, 's> {
     ids: &'a mut Option<world::item::ItemIds>,
     gauss: &'a mut world::character::Gauss,
     attrs: &'a [gamedata::records::ItemAttrRecord],
+    rare: &'a [gamedata::records::ItemAttrRecord],
     masks: &'a gamedata::item_mask::ItemMasks,
     stores: bool,
     pid: u32,
@@ -4579,6 +4748,7 @@ fn session_giver_inputs<'a, 's>(
     ids: &'a mut Option<world::item::ItemIds>,
     gauss: &'a mut world::character::Gauss,
     attrs: &'a [gamedata::records::ItemAttrRecord],
+    rare: &'a [gamedata::records::ItemAttrRecord],
     masks: &'a gamedata::item_mask::ItemMasks,
     stores: bool,
     pid: u32,
@@ -4590,6 +4760,7 @@ fn session_giver_inputs<'a, 's>(
         ids,
         gauss,
         attrs,
+        rare,
         masks,
         stores,
         pid,
@@ -4607,6 +4778,7 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
         ids,
         gauss,
         attrs,
+        rare,
         masks,
         stores,
         pid,
@@ -4619,6 +4791,7 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
         ids,
         gauss,
         attrs,
+        rare,
         masks,
         stores,
         pid,
@@ -5273,6 +5446,7 @@ mod tests {
             ids: Some(ids),
             gauss,
             attrs: &[],
+            rare: &[],
             masks: &[],
             owner_id: 42,
         }
@@ -5351,6 +5525,42 @@ mod tests {
             )),
         });
         f(&mut session)
+    }
+
+    /// The window's collect in a session that may give: the sword the window holds
+    /// moves to the first free base cell, the old cell clears, the new one fills, and the
+    /// row follows it. With no window item nothing moves.
+    #[test]
+    fn a_collect_moves_the_window_home() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::item::Item;
+        with_giving_session(
+            vec![gamedata::item_proto::ItemProto::for_category_rule(
+                SWORD, 1, 0,
+            )],
+            |session| {
+                assert_eq!(session.attr67_vnum(), 0);
+                assert!(!session.attr67_collect());
+                let giver = session.giver.as_mut().expect("a storing giver");
+                let from = ItemPos::new(EWindows::Attr67Add as u8, 0);
+                let mut sword = Item::new(11, SWORD);
+                sword.size = 1;
+                giver.items.set(from, &sword).expect("the window holds it");
+                assert_eq!(session.attr67_vnum(), SWORD);
+                assert!(session.attr67_collect());
+                assert_eq!(session.attr67_vnum(), 0);
+                let home = ItemPos::new(EWindows::Inventory as u8, 0);
+                let giver = session.giver.as_ref().expect("a storing giver");
+                assert_eq!(
+                    giver.items.item_at(home).map(|item| item.id),
+                    Some(11),
+                    "the sword is home"
+                );
+                assert_eq!(session.records.len(), 2, "the clear and the fill");
+                assert_eq!(session.item_rows.len(), 1, "the row follows");
+            },
+        );
     }
 
     /// `pc.give_item2`'s `AutoGiveItem` in a session that may give: a vnum with no proto

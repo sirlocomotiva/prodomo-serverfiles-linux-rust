@@ -63,6 +63,7 @@ use world::character::{add_from_client, sync_quickslots};
 
 mod affect;
 mod alignment;
+mod attr67;
 mod conqueror;
 mod costume;
 mod death;
@@ -137,6 +138,7 @@ mod war_map;
 mod warp_npc;
 mod whisper;
 
+pub use attr67::{Attr67Regist, ATTR67_ADD_WAIT_TIME, ATTR67_CLOSE, ATTR67_OPEN, ATTR67_REGIST};
 pub use gm_lines::GmRows;
 pub use guild::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -551,6 +553,9 @@ pub struct GameState {
     /// (`m_iRefineAdditionalCell`), which closing the window leaves. A character with no
     /// entry has none: a smith's window sets -1, and legacy never initialises the field.
     refine_scroll: HashMap<common::vid::Vid, u16>,
+    /// The characters whose 6th/7th-bonus window stands open
+    /// (`m_bIsOpenAttr67Add`), by VID.
+    attr67_open: std::collections::HashSet<common::vid::Vid>,
     /// The event calendar (`CEventManager::m_mapEvent`) in id order, installed once the store
     /// is up; `None` until then.
     events: Option<Vec<db::events::StoredEvent>>,
@@ -811,8 +816,7 @@ impl GameState {
             shop_price_3x_disabled: false,
             emotion_mask_disabled: false,
             emotion_consents: emotion::EmotionConsents::new(),
-            empire_privs: [[empire_priv::EmpirePriv { value: 0, ends: 0 };
-                empire_priv::EMPIRE_MAX_NUM]; empire_priv::MAX_PRIV_NUM],
+            empire_privs: empire_priv::EmpirePriv::table(),
             mob_rates: event_flag::MobRates::default(),
             test_server: true,
             shutdown_left: None,
@@ -829,6 +833,7 @@ impl GameState {
             sash_windows: HashMap::new(),
             changelook_windows: std::collections::HashSet::new(),
             quests: None,
+            attr67_open: std::collections::HashSet::new(),
             quest_targets: quest_target::QuestTargets::default(),
             warp_npcs: BTreeMap::new(),
             portal_times: HashMap::new(),
@@ -2239,6 +2244,7 @@ impl GameState {
             | GameCommand::DropGold { .. }
             | GameCommand::DestroyItem { .. }
             | GameCommand::Refine { .. }
+            | GameCommand::Attr67 { .. }
             | GameCommand::UseItemToItem { .. }
             | GameCommand::GiveItem { .. }
             | GameCommand::PickupItem { .. }
@@ -3198,6 +3204,7 @@ impl GameState {
         self.forget_portal_times(vid);
         self.refining.remove(&vid);
         self.refine_scroll.remove(&vid);
+        self.attr67_open.remove(&vid);
         self.forget_whisper_session(vid);
         let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
@@ -4162,6 +4169,15 @@ impl GameState {
                 reply,
             } => {
                 answer_item_step(vid, reply, self.refine(vid, pos, refine_type, mover));
+            }
+            GameCommand::Attr67 {
+                vid,
+                sub_header,
+                regist,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
             }
             GameCommand::UseItemToItem {
                 vid,

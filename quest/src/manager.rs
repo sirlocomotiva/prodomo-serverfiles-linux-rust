@@ -355,6 +355,19 @@ pub trait Game {
     /// the step ends.
     fn mount_bonus(&mut self, apply: u8, value: i32, seconds: i32);
 
+    /// `GetAttr67AddItem()` of the character the script runs for
+    /// (`G/char_item.cpp:10474-10477`): the vnum the window holds, 0 with none.
+    fn attr67_vnum(&self) -> u32;
+
+    /// The rare attribute onto the window's item (`CItem::AddRareAttribute`,
+    /// `G/item_attribute.cpp:422-464`): its cell is updated and its row is saved.
+    fn attr67_add_rare(&mut self);
+
+    /// The window's item into the first free base cell (`attr67add.collect`,
+    /// `G/questlua_attr67add.cpp:46-71`): the old cell clears, the new one fills, and
+    /// the row follows it. Answers whether it moved; with no room nothing moves.
+    fn attr67_collect(&mut self) -> bool;
+
     /// `pc.global_rank_add_point(type, count)` (`G/questlua_pc.cpp:3723-3736`): `count`
     /// onto counter `kind` of the character the script runs for, run when the step ends.
     fn global_rank_add_point(&mut self, kind: u8, count: i32);
@@ -4278,6 +4291,92 @@ fn mount_api(
     }
 }
 
+/// The regist's three flags, by the names legacy writes (`G/char_item.cpp:10601-10605`).
+const ATTR67_FLAG_SUCCESS: &[u8] = b"attr67add_item.success";
+/// The wait's end, which the quest reads but this family never writes.
+const ATTR67_FLAG_WAIT_TIME: &[u8] = b"attr67add_item.wait_time";
+/// The rare-add control.
+const ATTR67_FLAG_ADD: &[u8] = b"attr67add_item.add";
+/// The three flags `attr67add.collect` resets (`G/questlua_attr67add.cpp:61-63`): 0 deletes
+/// each, as `SetFlag` deletes a 0.
+const ATTR67_FLAGS: [&[u8]; 3] = [ATTR67_FLAG_SUCCESS, ATTR67_FLAG_WAIT_TIME, ATTR67_FLAG_ADD];
+/// `attr67add.collect` with no room (`G/questlua_attr67add.cpp:66`).
+const ATTR67_NO_ROOM: &[u8] = b"Not enough inventory space.";
+
+/// The `attr67add.*` calls (`__ATTR_6TH_7TH__`, `G/questlua_attr67add.cpp:28-137`): the
+/// window's readers and its collect. Returns `None` for a name this table does not hold.
+/// It cannot fail, but the [`Family`] table calls through `Result`, so it keeps the wrap.
+#[allow(clippy::unnecessary_wraps)]
+fn attr67_api(
+    _lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    _args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let one = |value: Value| MultiValue::from_iter([value]);
+    match name {
+        // `attr67add_holding` (`G/questlua_attr67add.cpp:28-42`): whether the window
+        // holds an item.
+        b"attr67add.holding" => Ok(Some(one(Value::Boolean(cx.game.attr67_vnum() != 0)))),
+        b"attr67add.success" => {
+            // `attr67add_success` (`G/questlua_attr67add.cpp:75-99`): false with no
+            // window item; else whether `attr67add_item.success` is above 0, adding
+            // the rare attribute first when `attr67add_item.add` is 0 or below.
+            if cx.game.attr67_vnum() == 0 {
+                return Ok(Some(one(Value::Boolean(false))));
+            }
+            let held = cx
+                .flag_map()
+                .and_then(|flags| flags.get(ATTR67_FLAG_SUCCESS))
+                .copied()
+                .unwrap_or(0);
+            if held <= 0 {
+                return Ok(Some(one(Value::Boolean(false))));
+            }
+            let added = cx
+                .flag_map()
+                .and_then(|flags| flags.get(ATTR67_FLAG_ADD))
+                .copied()
+                .unwrap_or(0);
+            if added <= 0 {
+                cx.game.attr67_add_rare();
+                if let Some(flags) = cx.flags() {
+                    flags.insert(ATTR67_FLAG_ADD.to_vec(), 1);
+                }
+            }
+            Ok(Some(one(Value::Boolean(true))))
+        }
+        b"attr67add.collect" => {
+            // `attr67add_collect` (`G/questlua_attr67add.cpp:46-71`): nothing with no
+            // window item; else the move home, and the three flags reset. `Not enough
+            // inventory space.` with no room. It pushes nothing.
+            if cx.game.attr67_vnum() == 0 {
+                return Ok(Some(MultiValue::new()));
+            }
+            if cx.game.attr67_collect() {
+                if let Some(flags) = cx.flags() {
+                    for flag in ATTR67_FLAGS {
+                        flags.remove(flag);
+                    }
+                }
+            } else {
+                cx.game.chat(ChatKind::Info, ATTR67_NO_ROOM);
+            }
+            Ok(Some(MultiValue::new()))
+        }
+        // `attr67add_item_vnum` (`G/questlua_attr67add.cpp:103-117`): the window's
+        // vnum, 0 with none.
+        b"attr67add.item_vnum" => Ok(Some(one(Value::Number(f64::from(cx.game.attr67_vnum()))))),
+        // `attr67add_window_type` (`:121-127`): `ATTR67_ADD`.
+        b"attr67add.window_type" => Ok(Some(one(Value::Number(f64::from(
+            common::item_slots::EWindows::Attr67Add as u8,
+        ))))),
+        // `attr67add_window_cell` (`:129-137`): 0, the window's one cell.
+        b"attr67add.window_cell" => Ok(Some(one(Value::Number(0.0)))),
+        _ => Ok(None),
+    }
+}
+
 /// The global rank's calls (`ENABLE_GLOBAL_RANK`) and the three `npc.is_*` reads its kill
 /// script makes. Returns `None` for a name this table does not hold.
 fn rank_api(
@@ -5099,7 +5198,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 13] = [
+    let families: [Family; 14] = [
         look_api,
         pc_api,
         item_api,
@@ -5110,6 +5209,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         quest_api,
         horse_api,
         mount_api,
+        attr67_api,
         rank_api,
         timer_api,
         game_api,
@@ -5452,6 +5552,14 @@ mod tests {
         horse_calls: Vec<(&'static str, bool, u32)>,
         /// `pc.mount`, `pc.unmount` and `pc.mount_bonus`, with their three numbers.
         mount_calls: Vec<(&'static str, u32, i32, i32)>,
+        /// What `attr67_vnum` answers: the window's vnum, 0 with none.
+        attr67_vnum: u32,
+        /// The `attr67_add_rare` calls.
+        attr67_rares: u32,
+        /// The `attr67_collect` calls.
+        attr67_collects: u32,
+        /// What `attr67_collect` answers: whether the item moved.
+        attr67_moved: bool,
         rank_points: Vec<(u8, i32)>,
         rank_reward: bool,
         npc_pc: u32,
@@ -5737,6 +5845,19 @@ mod tests {
         fn mount_bonus(&mut self, apply: u8, value: i32, seconds: i32) {
             self.mount_calls
                 .push(("mount_bonus", u32::from(apply), value, seconds));
+        }
+
+        fn attr67_vnum(&self) -> u32 {
+            self.attr67_vnum
+        }
+
+        fn attr67_add_rare(&mut self) {
+            self.attr67_rares += 1;
+        }
+
+        fn attr67_collect(&mut self) -> bool {
+            self.attr67_collects += 1;
+            self.attr67_moved
         }
 
         fn global_rank_add_point(&mut self, kind: u8, count: i32) {
@@ -7957,6 +8078,115 @@ mod tests {
                 ("mount_bonus", 8, 10, 0),
                 ("unmount", 0, 0, 0),
             ]
+        );
+    }
+
+    /// The attr67 names: the window's readers answer the Fake's vnum, `success`
+    /// rolls the rare only on a won flag with the control at 0 or below, and
+    /// `collect` moves the flags out on a move and chats with no room.
+    #[test]
+    fn the_attr67_names_read_the_window_and_the_flags() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake {
+                attr67_vnum: 10,
+                attr67_moved: true,
+                ..Fake::default()
+            },
+            output: Output::default(),
+            borrowed: BTreeMap::from([(
+                PID,
+                BTreeMap::from([
+                    (b"attr67add_item.success".to_vec(), 1),
+                    (b"attr67add_item.wait_time".to_vec(), 999),
+                    (b"attr67add_item.add".to_vec(), 0),
+                ]),
+            )]),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let one = |values: Vec<Value>| values;
+        assert_eq!(
+            one(probe.call("attr67add.holding", &[]).unwrap()),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(
+            one(probe.call("attr67add.item_vnum", &[]).unwrap()),
+            [Value::Number(10.0)]
+        );
+        assert_eq!(
+            one(probe.call("attr67add.window_type", &[]).unwrap()),
+            [Value::Number(6.0)]
+        );
+        assert_eq!(
+            one(probe.call("attr67add.window_cell", &[]).unwrap()),
+            [Value::Number(0.0)]
+        );
+        assert_eq!(
+            one(probe.call("attr67add.success", &[]).unwrap()),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(probe.game.attr67_rares, 1, "the first success rolls");
+        assert_eq!(
+            one(probe.call("attr67add.success", &[]).unwrap()),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(probe.game.attr67_rares, 1, "the control holds the second");
+        probe.call("attr67add.collect", &[]).unwrap();
+        assert_eq!(probe.game.attr67_collects, 1);
+        assert!(
+            probe.borrowed.get(&PID).is_some_and(BTreeMap::is_empty),
+            "the move resets the three flags"
+        );
+    }
+
+    /// The attr67 refusals: no window item answers false and pushes nothing, a lost
+    /// flag answers false without a roll, and a stuck collect chats the line.
+    #[test]
+    fn the_attr67_names_refuse_without_a_window_or_a_win() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake {
+                attr67_moved: false,
+                ..Fake::default()
+            },
+            output: Output::default(),
+            borrowed: BTreeMap::from([(
+                PID,
+                BTreeMap::from([(b"attr67add_item.success".to_vec(), 0)]),
+            )]),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let one = |values: Vec<Value>| values;
+        assert_eq!(
+            one(probe.call("attr67add.holding", &[]).unwrap()),
+            [Value::Boolean(false)]
+        );
+        assert_eq!(
+            one(probe.call("attr67add.success", &[]).unwrap()),
+            [Value::Boolean(false)]
+        );
+        assert_eq!(probe.game.attr67_rares, 0, "no window rolls nothing");
+        assert!(
+            probe.call("attr67add.collect", &[]).unwrap().is_empty(),
+            "no window pushes nothing"
+        );
+        probe.game.attr67_vnum = 10;
+        assert_eq!(
+            one(probe.call("attr67add.success", &[]).unwrap()),
+            [Value::Boolean(false)],
+            "a lost flag answers false"
+        );
+        assert_eq!(probe.game.attr67_rares, 0, "a lost flag rolls nothing");
+        probe.call("attr67add.collect", &[]).unwrap();
+        assert_eq!(
+            probe.game.chats,
+            [(ChatKind::Info, b"Not enough inventory space.".to_vec())]
         );
     }
 

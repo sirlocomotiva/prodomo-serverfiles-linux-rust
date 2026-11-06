@@ -66,6 +66,13 @@ pub(super) struct EmpirePriv {
 /// The empire grants, `[type][empire]` (`m_aakPrivEmpireData`).
 pub(super) type EmpirePrivs = [[EmpirePriv; EMPIRE_MAX_NUM]; MAX_PRIV_NUM];
 
+impl EmpirePriv {
+    /// A table with no grant in it.
+    pub(super) fn table() -> EmpirePrivs {
+        [[EmpirePriv::default(); EMPIRE_MAX_NUM]; MAX_PRIV_NUM]
+    }
+}
+
 /// `(int)strtol(word)` (`common/utils.h:44-50`), saturating past `i32`'s ends.
 fn parse_priv_number(word: &[u8]) -> i32 {
     let (negative, digits) = match word.split_first() {

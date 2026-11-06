@@ -121,19 +121,19 @@ use protocol::cg_fly_target::CgFlyTarget;
 use protocol::cg_guild_answer::CgAnswerMakeGuild;
 use protocol::cg_inventory::{
     HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
-    HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE,
-    HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT,
-    HEADER_CG_CHAT, HEADER_CG_CLIENT_VERSION, HEADER_CG_CLIENT_VERSION2, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FLY_TARGETING,
-    HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY,
-    HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE,
-    HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2,
-    HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN,
-    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK,
-    HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER,
-    HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
-    HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
-    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
+    HEADER_CG_ATTR67_ADD, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
+    HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
+    HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CLIENT_VERSION,
+    HEADER_CG_CLIENT_VERSION2, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE,
+    HEADER_CG_FISHING, HEADER_CG_FLY_TARGETING, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD,
+    HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
+    HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE,
+    HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST,
+    HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER,
+    HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
+    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
+    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING,
+    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
     HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SCRIPT_ANSWER,
     HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP,
     HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
@@ -163,7 +163,7 @@ use protocol::cg_quest_text::CgQuestInputString;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
 use protocol::cg_quickslot_del::CgQuickslotDel;
 use protocol::cg_quickslot_swap::CgQuickslotSwap;
-use protocol::cg_refine::CgRefine;
+use protocol::cg_refine::{CgAttr67Add, CgRefine};
 use protocol::cg_safebox::{CgSafeBoxItem, SafeBoxKind};
 use protocol::cg_safebox_move::CgSafeboxItemMove;
 use protocol::cg_shoot::CgShoot;
@@ -1226,6 +1226,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_ITEM_DESTROY.value()
         || header == HEADER_CG_ITEM_GIVE.value()
         || header == HEADER_CG_REFINE.value()
+        || header == HEADER_CG_ATTR67_ADD.value()
         || header == HEADER_CG_FISHING.value()
         || is_ground_step(header)
         || is_quickslot_step(header)
@@ -1268,6 +1269,8 @@ where
         give_an_item(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_REFINE.value() {
         refine_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_ATTR67_ADD.value() {
+        attr67_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISHING.value() {
         fish(session, addr, context, held, frame).await
     } else {
@@ -1559,6 +1562,47 @@ where
     let answer = context
         .game
         .refine(vid, (record.pos, record.ty), actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_ATTR67_ADD` (169) in the game phase: `CInputMain::Attr67Add`
+/// (`G/input_main.cpp:3489-3507`), with no observer gate. The world's rows are stored as a
+/// move's are; the quest flags the regist wrote travel with the character's own save.
+///
+/// A malformed record closes the connection; an unknown sub-header is absorbed.
+async fn attr67_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgAttr67Add::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed ATTR67_ADD; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "ATTR67_ADD without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let data = record.attr67_add_data;
+    let regist = prodomo::game_state::Attr67Regist {
+        regist: data.w_regist_item_pos,
+        materials: data.by_material_count,
+        support: data.w_support_item_pos,
+        supports: data.by_support_item_count,
+    };
+    let answer = context
+        .game
+        .attr67(vid, record.by_sub_header, regist, actor)
         .await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
@@ -14097,6 +14141,7 @@ mod tests {
             (HEADER_CG_REQUEST_EVENT_DATA, MainRecord::World),
             (HEADER_CG_QUICKSLOT_ADD, MainRecord::Belongings),
             (HEADER_CG_REFINE, MainRecord::Belongings),
+            (HEADER_CG_ATTR67_ADD, MainRecord::Belongings),
             (HEADER_CG_SHOP, MainRecord::Npc),
             (HEADER_CG_QUEST_CONFIRM, MainRecord::Npc),
             (HEADER_CG_SCRIPT_SELECT_ITEM, MainRecord::Npc),

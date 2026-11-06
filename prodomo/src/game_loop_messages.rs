@@ -506,6 +506,19 @@ pub enum GameCommand {
         /// Where the game thread reports what the refine did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_ATTR67_ADD` for the character online under `vid`, answered as a move is.
+    Attr67 {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The sub-header: open, close, or regist.
+        sub_header: u8,
+        /// The regist's named cells and counts.
+        regist: crate::game_state::Attr67Regist,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the regist did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_ITEM_GIVE` for the character online under `vid`, answered as a move is.
     GiveItem {
         /// The VID of the character whose client sent the gift.
@@ -3764,6 +3777,31 @@ impl GameLoopController {
             vid,
             pos,
             refine_type,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run an attr67 request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn attr67(
+        &self,
+        vid: common::vid::Vid,
+        sub_header: u8,
+        regist: crate::game_state::Attr67Regist,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Attr67 {
+            vid,
+            sub_header,
+            regist,
             mover,
             reply,
         })
