@@ -47142,3 +47142,27 @@ clean, the suite 4875 passed 1 failed in 42 targets — the failure is the known
 -- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `legacy/` clean, `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 429. The quest warp timers
+
+Three timed-event rows are unreachable. `event.questlua_forked.warp_all_to_map_event` is
+armed only by `forked.warp_all_in_map` (`G/questlua_forked.cpp:200-219`), and
+`event.questlua_global.warp_all_to_village_event` only by `warp_all_to_village`
+(`G/questlua_global.cpp:1042-1056`); both names are `unused` (ledger 401, question 37).
+`event.questlua_global.warp_all_to_map_my_empire_event` has no arming site at all: the
+tree-wide sweep finds only its own `EVENTFUNC` and info struct
+(`G/questlua_global.cpp:1159-1183`, `G/questlua.h:118-136`). The arming sweeps cover the
+whole `server/` tree; positive controls: the village-warp create at
+`G/questlua_global.cpp:1053` and the event-manager warp twin in `G/event_manager.cpp`.
+Trap avoided: the event-manager `warp_all_to_village_event` (`G/event_manager.cpp:168`) is
+a separate row and stays `missing` — the siege stones arm it (`:848-1145` via `OnDead`).
+All three rows are `unused` (owner question 43).
+
+Timed-events: 41 `missing` / 43 `ported` / 5 `partial` / 10 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4876 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

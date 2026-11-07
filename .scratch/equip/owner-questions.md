@@ -407,3 +407,9 @@ owner answers.
     names are `unused`: no Lua file calls them (ledger 401, question 37). The `mto`/`mtr`/
     `minfo`/`mtax` commands are a separate missing system; these timer rows are `unused`.
     Waits on it: nothing blocks.
+43. **The quest warp timers (ledger 429).** `warp_all_to_map_event` (forked) and
+    `warp_all_to_village_event` (global) are armed only by `forked.warp_all_in_map` and
+    `warp_all_to_village`, both `unused` (ledger 401, question 37); the empire warp
+    `warp_all_to_map_my_empire_event` has no arming site at all. The event-manager twin
+    `warp_all_to_village_event` is separate and stays: the siege stones arm it. The three
+    rows are `unused`. Waits on it: nothing blocks.
