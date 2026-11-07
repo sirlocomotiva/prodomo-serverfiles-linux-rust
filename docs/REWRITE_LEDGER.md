@@ -47186,3 +47186,28 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 431. The Gaya refresh tick
+
+The Gaya market opened with its stamp but never refreshed: `check_time_market_event`
+(`G/char_gaya.cpp:386-409`) had no port. The slice adds `run_gaya_ticks`
+(`prodomo/src/game_state/quest_quiet.rs`), wired into `process_pulse`: every 2 s (50
+Pulses) each standing shelf whose `system_gaya.gaya_time_world_4` stamp has lapsed
+refreshes — the stamp stamps 5 h out, the shelf re-rolls, and the client hears the
+markers again. The per-character arm at the market open needs no port (the tick runs
+only over open shelves), and neither does the declared-never-defined
+`StartCheckTimeMarketLogin` (`G/char.h:2267`, no definition anywhere in the tree). The
+wall-clock subtraction runs in `i64`, not through a wrapping `as` cast. The test
+`a_lapsed_market_refreshes_on_the_two_second_tick` pins the off-tick silence, the
+refresh (clear, nine items, slots, stamp, stamp moved), and the live-stamp hold. A
+binary scenario would wait 5 h, so the world test proves it (owner decision,
+2026-10-14). The row is `ported`.
+
+Timed-events: 39 `missing` / 44 `ported` / 5 `partial` / 11 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4877 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

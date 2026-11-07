@@ -5099,6 +5099,7 @@ impl PulseProcessor for GameState {
         self.run_ship_ticks(pulse);
         self.run_meley_ticks(pulse);
         self.run_temple_ochao(pulse);
+        self.run_gaya_ticks(pulse);
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);
         self.expire_empire_privs();

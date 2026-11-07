@@ -324,6 +324,45 @@ impl GameState {
         }
     }
 
+    /// `check_time_market_event` (`G/char_gaya.cpp:386-409`): every 2 s (50 Pulses)
+    /// each standing shelf whose stamp has lapsed refreshes — the stamp stamps 5 h
+    /// out, the shelf re-rolls, and the client hears the markers again. Quiet with
+    /// no shelves. The per-character event arms at the market open, so the tick runs
+    /// only over open shelves; a lapsed stamp with no shelf refreshes at the next
+    /// open instead (`open_gaya_market_window` keeps the first-stamp arm).
+    pub(super) fn run_gaya_ticks(&mut self, pulse: u64) {
+        if self.gaya_markets.is_empty() || pulse % 50 != 0 {
+            return;
+        }
+        let now = wall_time();
+        let lapsed: Vec<Vid> = self
+            .gaya_markets
+            .keys()
+            .filter(|reader| {
+                self.characters
+                    .find_by_vid(**reader)
+                    .ok()
+                    .map(world::character::Character::player_id)
+                    .and_then(|pid| {
+                        self.quests.as_ref().and_then(|quests| {
+                            quests
+                                .manager()
+                                .quest_flag(pid, b"system_gaya.gaya_time_world_4")
+                        })
+                    })
+                    .is_some_and(|stamp| i64::from(stamp) - i64::from(now) <= 0)
+            })
+            .copied()
+            .collect();
+        for reader in lapsed {
+            self.restock_gaya_market(reader);
+            self.set_gaya_stamp(reader);
+            if let Some(mover) = self.own_mover(reader) {
+                self.send_gaya_market(reader, mover);
+            }
+        }
+    }
+
     /// `InfoGayaMarker` (`G/char_gaya.cpp:94-110`): the reader's shelf reaches its
     /// client: the clear, each item, then the slots and the stamp when a row holds
     /// them. Quiet with no shelf.
@@ -880,6 +919,80 @@ mod tests {
         let stamp = text_of(&inbox.try_recv().expect("stamp"));
         assert!(stamp.starts_with(b"GayaMarketTime "), "{stamp:?}");
         assert!(inbox.try_recv().is_err());
+        let _ = mover;
+    }
+
+    /// A lapsed market stamp refreshes on the 2 s tick: the shelf re-rolls, the
+    /// stamp stamps 5 h out, and the client hears the markers again. A live stamp
+    /// holds, and an off-tick Pulse does nothing.
+    #[test]
+    fn a_lapsed_market_refreshes_on_the_two_second_tick() {
+        let clock = TestClock::default();
+        let mut world =
+            a_world(&clock).with_gaya_table(std::sync::Arc::new(gamedata::gaya::GayaTable {
+                items: (70036..70040)
+                    .map(|vnum| gamedata::gaya::GayaItem {
+                        vnum,
+                        price: 102,
+                        count: 1,
+                    })
+                    .collect(),
+            }));
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager =
+            quest::manager::Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        world.quests = Some(crate::game_state::quests::Quests::new(
+            manager,
+            std::sync::Arc::default(),
+            gamedata::mob_locale_names::MobNamesByLanguage::default(),
+        ));
+        let mut inbox = enter(&mut world, 0x6001, (3200, 3200), 0);
+        while inbox.try_recv().is_ok() {}
+        let mover = world.own_mover(Vid::new(0x6001)).expect("entered");
+        world.open_gaya_market_window(Vid::new(0x6001), mover);
+        while inbox.try_recv().is_ok() {}
+        let pid = world
+            .characters
+            .find_by_vid(Vid::new(0x6001))
+            .expect("entered")
+            .player_id();
+        // An off-tick Pulse does nothing, even lapsed.
+        world
+            .quests
+            .as_mut()
+            .expect("quests")
+            .manager_mut()
+            .set_quest_flag(pid, b"system_gaya.gaya_time_world_4", 1);
+        world.run_gaya_ticks(51);
+        assert!(inbox.try_recv().is_err(), "off-tick silence");
+        // The tick refreshes: clear, nine items, slots, stamp.
+        world.run_gaya_ticks(100);
+        assert_eq!(
+            text_of(&inbox.try_recv().expect("clear")),
+            b"GayaMarketClear"
+        );
+        for _ in 0..9 {
+            let line = text_of(&inbox.try_recv().expect("an item"));
+            assert!(line.starts_with(b"GayaMarketItems "), "{line:?}");
+        }
+        assert_eq!(
+            text_of(&inbox.try_recv().expect("slots")),
+            b"GayaMarketSlotsDesblock 0 0 0 0 0 0"
+        );
+        assert!(text_of(&inbox.try_recv().expect("stamp")).starts_with(b"GayaMarketTime "));
+        assert!(inbox.try_recv().is_err());
+        let stamp = world
+            .quests
+            .as_ref()
+            .expect("quests")
+            .manager()
+            .quest_flag(pid, b"system_gaya.gaya_time_world_4")
+            .expect("stamped");
+        assert!(stamp > 1, "the stamp moves 5 h out: {stamp}");
+        // A live stamp holds on the next tick.
+        world.run_gaya_ticks(150);
+        assert!(inbox.try_recv().is_err(), "a live stamp holds");
         let _ = mover;
     }
 
