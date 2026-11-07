@@ -428,3 +428,39 @@ owner answers.
     mount and pet costumes at equip and at load (`WornSystem::Mount`/`Pet`), the
     `TOGGLE_SHAMAN` toggle through an unported use arm. All three rows are `unused`.
     Waits on it: nothing blocks.
+47. **The dungeon regen timer (ledger 436).** `dungeon_regen_event` fires only for a
+    regen `regen_do` loads into a dungeon with `bOnce` false (`G/regen.cpp:487-495`),
+    and only `d.set_regen_file` passes both together — `d.regen_file` defaults
+    `bOnce` true (`G/dungeon.h:72`) — which no Lua file calls (`lua.d.set_regen_file`
+    is `unused`, ledger 401, question 37). The row is `unused`. Waits on it: nothing
+    blocks.
+48. **The three watchdog timers (ledger 436).** `check_speedhack_event` never
+    increments: both writers sit behind `enable_hack_check`, which the owner's
+    config leaves off (`G/battle.cpp:871`, `G/config.cpp:154`, `G/input_main.cpp:1562`),
+    and the port relays `FUNC_COMBO` with no combo count. `destroy_when_idle_event`
+    fires only for a disbanded NPC party (`G/party.cpp:326-335`), and the port hosts
+    PC parties only (`delete_party`, `prodomo/src/game_state/party.rs:1691`).
+    `load_affect_login_event` is the retired DB-peer's deferred load
+    (`G/char_affect.cpp:508-558`); the port loads affects synchronously at entry
+    (`GameState::load_affects`). All three rows are `unused`. Waits on it: nothing
+    blocks.
+49. **The three gated-system timers (ledger 436).** `private_shop_warp_event`
+    fires only from `WarpToPrivateShop` on the DB's warp answer
+    (`G/char.cpp:12434-12474`, `G/input_main.cpp:5038-5054`), while the whole
+    `HEADER_CG_PRIVATE_SHOP` record and `sys.trade.private_shop` are `missing`.
+    `premium_players_update_event` is armed only by the activate spend and the
+    premium login (`G/char.cpp:11553-11559`, `G/input_login.cpp:717-720`), while
+    `sys.custom.premium`, `cg.game.premium_players` and its sub-rows are `missing`.
+    `switchbot_event` fires only while `CSwitchbot::SwitchItems` runs
+    (`G/refactorized_switchbot.cpp:151-170,547,757`), while `sys.custom.switchbot`
+    and `cg.game.switchbot` are `missing`. All three rows are `unused`; each stands
+    ready for its system's port (the shop warp shares `TimedEvent`). Waits on it:
+    nothing blocks.
+50. **The two skill timers (ledger 436).** `ChainLightningEvent` is created only
+    from `FuncSplashDamage`'s chain arm (`G/char_skill.cpp:1970-1978`), and skill
+    108 is on the refused list (`gamedata/src/pc_skill_data.rs:16`), so no cast
+    reaches it. `skill_muyoung_event` starts only from `ComputeAffect`'s type-78
+    arm (`G/char_affect.cpp:805-810`) after `ComputeSkill`'s MUYEONG arm attaches
+    it (`G/char_skill.cpp:2740-2756`), and skill 78 is refused at the same load.
+    Both rows are `unused`; each walks home with its skill row when the loader
+    hosts it. Waits on it: nothing blocks.
