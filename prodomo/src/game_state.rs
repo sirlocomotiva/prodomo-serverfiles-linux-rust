@@ -78,6 +78,7 @@ mod empire_priv;
 mod event_calendar;
 mod event_flag;
 mod fight;
+mod fish_event;
 mod fish_simul;
 mod fishing;
 #[cfg(test)]
@@ -144,6 +145,7 @@ mod warp_npc;
 mod whisper;
 
 pub use attr67::{Attr67Regist, ATTR67_ADD_WAIT_TIME, ATTR67_CLOSE, ATTR67_OPEN, ATTR67_REGIST};
+pub use fish_event::{FishBoard, FishCell, FishEventStep, FISH_EVENT_SLOTS};
 pub use gm_lines::GmRows;
 pub use guild::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -585,6 +587,10 @@ pub struct GameState {
     fishing: Arc<gamedata::fishing::Fishing>,
     /// Each fishing character's `m_pkFishingEvent` (`G/fishing.cpp:464-537`).
     fishing_events: HashMap<common::vid::Vid, fishing::FishingEvent>,
+    /// Each character's jigsaw fish-event board (`m_fishSlots`, `m_dwFishUseCount` and
+    /// `m_bFishAttachedShape`, `G/char.h:1045,2063-2064`), installed at admission from
+    /// the stored board. The held shape is memory-only; the save never writes it.
+    fish_boards: HashMap<common::vid::Vid, fish_event::FishBoard>,
     /// Each digging character's `m_pkMiningEvent` (`G/mining.cpp:355-418`).
     mining_events: HashMap<common::vid::Vid, mining::MiningEvent>,
     /// The Pulse each character's horse stamina event fires on (`m_eventStaminaRegen`,
@@ -995,6 +1001,18 @@ impl GameState {
     #[must_use]
     pub fn npcs_on(&self, channel: u8, map: i32) -> Arc<MapNpcs> {
         self.npcs.get(&(channel, map)).cloned().unwrap_or_default()
+    }
+
+    /// Answers one `NpcsOn` ask with the NPCs standing on one map of one Channel.
+    fn answer_npcs_on(
+        &self,
+        channel: u8,
+        map: i32,
+        reply: tokio::sync::oneshot::Sender<Arc<MapNpcs>>,
+    ) {
+        if reply.send(self.npcs_on(channel, map)).is_err() {
+            debug!(channel, map, "nobody was left to hear the NPCs");
+        }
     }
 
     /// A handle to the counters, which stays readable after the state is moved into
@@ -2267,6 +2285,7 @@ impl GameState {
             | GameCommand::GiveItem { .. }
             | GameCommand::PickupItem { .. }
             | GameCommand::Fishing { .. }
+            | GameCommand::FishEvent { .. }
             | GameCommand::NpcsOn { .. }) => {
                 self.apply_ground(command);
                 None
@@ -2518,6 +2537,7 @@ impl GameState {
                 alignment: self.real_alignment_of(vid.raw()),
                 quest_flags: self.quest_flags_of(player_id),
                 affects,
+                fish_board: self.kept_fish_board(vid),
                 horse_name: character.points().map(|_| {
                     self.horse_names
                         .get(&player_id)
@@ -2977,6 +2997,11 @@ impl GameState {
             .quests
             .as_ref()
             .is_some_and(|quests| quests.manager().event_flag(b"letters_event") != 0);
+        // `FishEventGeneralInfo` (`G/char.cpp:10880-10913`) runs at the end of `Entergame`
+        // (`G/input_login.cpp:939`): the stored board is installed first, then the report's
+        // lines ride the burst last.
+        self.install_fish_board(vid, &loaded.fish_board.0, loaded.fish_board.1);
+        let fish_lines = self.fish_event_report(vid);
         Shown {
             records,
             update,
@@ -2984,6 +3009,7 @@ impl GameState {
             hide_lines,
             priv_lines,
             letters_event,
+            fish_lines,
             observer: self.is_observing(vid),
             landed: None,
         }
@@ -3168,6 +3194,10 @@ impl GameState {
         // `CHARACTER::Destroy` (`G/char.cpp:719`, `:733`): silent, unlike `mining_cancel`.
         let _fishing = self.fishing_events.remove(&vid);
         let _mining = self.mining_events.remove(&vid);
+        // `M2_DELETE_ARRAY(m_fishSlots)` in `CHARACTER::Destroy` (`G/char.cpp:779-782`):
+        // the board goes with the character, after the save takes its cells and count.
+        let fish_board = self.kept_fish_board(vid);
+        let _board = self.fish_boards.remove(&vid);
         // `CHorseRider::Destroy` cancels both stamina events (`G/horse_rider.cpp:81-85`).
         let _horse = self.horse_timers.remove(&vid);
         // `HorseSummon(false)` in `CHARACTER::Destroy` (`G/char.cpp:632`).
@@ -3244,6 +3274,7 @@ impl GameState {
             alignment,
             quest_flags,
             affects,
+            fish_board,
             horse_name: character.points().map(|_| {
                 self.horse_names
                     .get(&character.player_id())
@@ -4256,15 +4287,17 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.fish(vid, dir, mover)),
+            GameCommand::FishEvent {
+                vid,
+                step,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.fish_event(vid, step, mover)),
             GameCommand::NpcsOn {
                 channel,
                 map,
                 reply,
-            } => {
-                if reply.send(self.npcs_on(channel, map)).is_err() {
-                    debug!(channel, map, "nobody was left to hear the NPCs");
-                }
-            }
+            } => self.answer_npcs_on(channel, map, reply),
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
         }
     }
@@ -7516,6 +7549,7 @@ mod tests {
                 messenger_team: Vec::new(),
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
+                fish_board: (Vec::new(), 0),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
             }),
@@ -7524,8 +7558,12 @@ mod tests {
         });
         assert_eq!(
             answer.blocking_recv().unwrap(),
-            Ok(crate::game_loop_messages::Shown::default()),
-            "an entry with no body shows nothing"
+            Ok(crate::game_loop_messages::Shown {
+                // `ENABLE` with flag 0 and count 0: nothing used.
+                fish_lines: vec![vec![0xdf, 3, 0, 0, 0, 0, 0, 0, 0, 0]],
+                ..crate::game_loop_messages::Shown::default()
+            }),
+            "an entry with no body shows nothing but the fish report"
         );
         let character = state.characters().find_by_vid(Vid::new(7)).unwrap();
         assert_eq!(character.gold(), 1_200_000_000_000_000_000 - 1);
@@ -7568,6 +7606,7 @@ mod tests {
                 messenger_team: Vec::new(),
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
+                fish_board: (Vec::new(), 0),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
             }),

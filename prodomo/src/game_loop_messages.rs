@@ -569,6 +569,19 @@ pub enum GameCommand {
         /// Where the game thread reports the rows the step changed.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_FISH_EVENT_SEND` for the character online under `vid`: a box use or
+    /// a shape add. The records reach the client through the world; the answer carries
+    /// the rows to store.
+    FishEvent {
+        /// The VID of the character whose client sent the record.
+        vid: common::vid::Vid,
+        /// The decoded step.
+        step: crate::game_state::FishEventStep,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the rows the step changed.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_ITEM_PICKUP` for the character online under `vid`, answered as a move is.
     PickupItem {
         /// The VID of the character whose client sent the pick-up.
@@ -2893,6 +2906,10 @@ pub struct Shown {
     /// `G/input_login.cpp:69-82`): the `letters_event` flag is not 0. The burst's line
     /// reads 1 then, else 0.
     pub letters_event: bool,
+    /// The fish-event login report (`FishEventGeneralInfo`, `G/char.cpp:10880-10913`):
+    /// the enable record, then one `SHAPE_ADD` per main cell. The burst carries them
+    /// last, where legacy sends them at the end of `Entergame` (`G/input_login.cpp:939`).
+    pub fish_lines: Vec<Vec<u8>>,
     /// Whether the character observes: a war map's watch sets the flag at admission
     /// (`CWarMap::IncMember`, `G/war_map.cpp:384`). The descriptor gates the records by it.
     pub observer: bool,
@@ -3178,6 +3195,10 @@ pub struct Loaded {
     /// The horse name the load read (`player.horse_name`), which the world holds from the
     /// admission on (`HEADER_GD_REQ_HORSE_NAME`, `G/input_login.cpp:891-892`).
     pub horse_name: Vec<u8>,
+    /// The fish-event cells the load read (`fish_event_slot`) with the use count
+    /// (`fish_event_count`), which the world holds as the character's jigsaw board from
+    /// the admission on. The held shape is memory-only and never loads.
+    pub fish_board: (Vec<db::fish_event::StoredFishCell>, u32),
     /// The account's character PIDs and empire-change count, which the login event's
     /// scripts judge by. The descriptor reads them before it sends the admission, as
     /// the dialog steps do before theirs.
@@ -3205,6 +3226,10 @@ pub struct Kept {
     /// The saved affects the world holds, which a save writes: the silence rows
     /// (`AFFECT_BLOCK_CHAT`) the character still carries.
     pub affects: Vec<db::player_affects::StoredAffect>,
+    /// The fish-event board the world holds, as the set cells with the use count, which
+    /// a save writes (`G/char.cpp:1613-1614`). The held shape is memory-only and never
+    /// keeps.
+    pub fish_board: (Vec<db::fish_event::StoredFishCell>, u32),
     /// The horse name the world holds (`CHorseNameManager`), which a save writes with the
     /// character row. `None` for a character that entered without points.
     pub horse_name: Option<Vec<u8>>,
@@ -3898,6 +3923,29 @@ impl GameLoopController {
         self.send_command(GameCommand::Fishing {
             vid,
             dir,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `CG_FISH_EVENT_SEND`, and waits for the rows it changed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn fish_event(
+        &self,
+        vid: common::vid::Vid,
+        step: crate::game_state::FishEventStep,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::FishEvent {
+            vid,
+            step,
             mover,
             reply,
         })

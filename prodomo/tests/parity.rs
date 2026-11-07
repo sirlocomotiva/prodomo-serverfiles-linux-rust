@@ -1632,6 +1632,7 @@ fn game_len(header: u8) -> usize {
         GC_REFINE_INFORMATION => REFINE_INFORMATION_LEN,
         GC_QUEST_CONFIRM => QUEST_CONFIRM_LEN,
         GC_FISHING => FISHING_LEN,
+        GC_FISH_EVENT_INFO => FISH_EVENT_INFO_LEN,
         GC_DIG_MOTION => DIG_MOTION_LEN,
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
         other => panic!("unexpected game header {other}"),
@@ -2529,14 +2530,15 @@ fn read_marking_letters(
 }
 
 /// The rest of an enter-game burst whose view the scenario read by hand: the game phase,
-/// the time, the Channel 1 record, the `letters_event` command line, the war list, then
-/// the quest login event.
+/// the time, the Channel 1 record, the `letters_event` command line, the fish-event
+/// report, the war list, then the quest login event.
 fn read_enter_tail(keyed: &mut Keyed) {
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(keyed, [false; 5]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
+    let _report = read_fish_report(keyed);
     enter_war_list(keyed);
     read_login_event(keyed);
 }
@@ -2556,6 +2558,8 @@ struct Entered {
     shown: Shown,
     /// Its `GC_AFFECT_ADD` for the revive-invisible affect, the record after its look update.
     affect: Vec<u8>,
+    /// Its fish-event login report: the enable record, then one `SHAPE_ADD` per main cell.
+    report: Vec<Vec<u8>>,
 }
 
 /// [`enter_game_records`], answering what the burst showed.
@@ -2659,12 +2663,14 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
+    let report = read_fish_report(keyed);
     enter_war_list(keyed);
     Entered {
         add,
         info,
         shown,
         affect,
+        report,
     }
 }
 
@@ -4260,6 +4266,11 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(chat[8], 1, "bEmpire");
     assert_eq!(chat[9], 1, "bCanFormat");
     assert_eq!(&chat[10..], b"letters_event 0");
+    assert_eq!(
+        keyed.read_game(),
+        server_fish_event(3, 0, 0),
+        "the fish-event report: disabled, nothing used"
+    );
     enter_war_list(&mut keyed);
     read_login_event(&mut keyed);
     keyed.still("nothing follows");
@@ -5569,6 +5580,7 @@ fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
+    let _report = read_fish_report(keyed);
     enter_war_list(keyed);
     seen[0]
 }
@@ -5595,6 +5607,7 @@ fn enter_beside_shown(keyed: &mut Keyed, vnum: u16) -> (u32, u32) {
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
+    let _report = read_fish_report(keyed);
     enter_war_list(keyed);
     (own, seen[0])
 }
@@ -20197,6 +20210,7 @@ fn a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin() {
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
+    let _report = read_fish_report(&mut alice);
     enter_war_list(&mut alice);
     read_rank_login(&mut alice, 0, &[], &[]);
     read_login_lines_hiding(
@@ -22954,6 +22968,7 @@ fn a_gm_grants_an_empire_rate_and_every_client_hears_it() {
     assert_eq!(time[0], GC_TIME);
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
     read_priv_burst(&mut zulu);
+    let _report = read_fish_report(&mut zulu);
     enter_war_list(&mut zulu);
     assert_eq!(
         zulu.read_game(),
@@ -23040,6 +23055,7 @@ fn a_gm_sets_a_flag_and_a_late_login_reads_it() {
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
     let chat = zulu.read_game();
     assert_eq!(&chat[10..], b"letters_event 0", "no priv grants this run");
+    let _report = read_fish_report(&mut zulu);
     enter_war_list(&mut zulu);
     assert_eq!(
         zulu.read_game(),
@@ -23264,6 +23280,7 @@ fn a_player_trades_the_six_letters_for_the_box_draw() {
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
     let chat = zulu.read_game();
     assert_eq!(&chat[10..], b"letters_event 1", "the set flag shows");
+    let _report = read_fish_report(&mut zulu);
     enter_war_list(&mut zulu);
     assert_eq!(
         zulu.read_game(),
@@ -23460,6 +23477,7 @@ fn a_pkmode_line_lands_its_mode_with_an_update() {
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
     let chat = zulu.read_game();
     assert_eq!(&chat[10..], b"letters_event 0");
+    let _report = read_fish_report(&mut zulu);
     enter_war_list(&mut zulu);
     read_login_event(&mut zulu);
     zulu.still("nothing follows");
@@ -29263,6 +29281,7 @@ fn enter_with_hair_burst(server: &Server) -> Keyed {
     assert_eq!(alice.read_game(), [GC_CHANNEL, alice.channel_number]);
     let notice = alice.read_game();
     assert_eq!(notice[0], GC_CHAT);
+    let _report = read_fish_report(&mut alice);
     enter_war_list(&mut alice);
     read_god_login_event(&mut alice);
     alice
@@ -34177,6 +34196,59 @@ fn server_fishing(subheader: u8, info: u32, dir: u8) -> Vec<u8> {
     record
 }
 
+/// `HEADER_GC_FISH_EVENT_INFO` (0xdf).
+const GC_FISH_EVENT_INFO: u8 = 0xdf;
+/// `TPacketGCFishEventInfo` (`G/packet.h:2876-2881`): the header, the sub-header and two
+/// `DWORD`s.
+const FISH_EVENT_INFO_LEN: usize = 10;
+/// `HEADER_CG_FISH_EVENT_SEND` (0xdb).
+const CG_FISH_EVENT_SEND: u8 = 0xdb;
+/// The fish-event box and the special box.
+const FISH_BOX: u32 = 25106;
+const FISH_BOX_SPECIAL: u32 = 25107;
+
+/// A `GC_FISH_EVENT_INFO` of `subheader`, `first` and `second`.
+fn server_fish_event(subheader: u8, first: u32, second: u32) -> Vec<u8> {
+    let mut record = vec![GC_FISH_EVENT_INFO, subheader];
+    record.extend_from_slice(&first.to_le_bytes());
+    record.extend_from_slice(&second.to_le_bytes());
+    record
+}
+
+/// `CG_FISH_EVENT_SEND` for a box use at (`window`, `cell`).
+fn client_fish_event_box(window: u8, cell: u16) -> Vec<u8> {
+    let mut record = vec![CG_FISH_EVENT_SEND, 0, window];
+    record.extend_from_slice(&cell.to_le_bytes());
+    record
+}
+
+/// `CG_FISH_EVENT_SEND` for a shape add at `pos`.
+fn client_fish_event_shape(pos: u8) -> Vec<u8> {
+    vec![CG_FISH_EVENT_SEND, 1, pos]
+}
+
+/// The fish-event login report behind the burst's letters line: the enable record, then
+/// one `SHAPE_ADD` per main cell the board holds.
+fn read_fish_report(keyed: &mut Keyed) -> Vec<Vec<u8>> {
+    let mut lines = vec![keyed.read_game()];
+    assert_eq!(
+        (lines[0][0], lines[0][1]),
+        (GC_FISH_EVENT_INFO, 3),
+        "the enable record leads: {:02x?}",
+        lines[0]
+    );
+    loop {
+        let line = keyed.read_game();
+        if line[0] != GC_FISH_EVENT_INFO {
+            keyed.unread(vec![line]);
+            break;
+        }
+        assert_eq!(line[1], 1, "a main cell's add: {line:02x?}");
+        lines.push(line);
+    }
+    lines
+}
+
 /// Alpha at (470000, 950000) on map 1 with `baits` pastes in cell 0 (id 51) and, when `rod`
 /// holds the rod's bait socket, the rod in the weapon cell (id 50).
 fn fishing_stage(database: &ScratchDatabase, rod: Option<i32>, baits: u16) -> Server {
@@ -34441,6 +34513,247 @@ fn a_cast_on_a_block_or_without_a_rod_is_refused() {
         "a blocked cell"
     );
     alice.quiet("nothing is cast");
+}
+
+/// Alpha with five special boxes in cell 0 (id 51), a paste in cell 1 (id 52) and a
+/// normal box in cell 2 (id 53): the boxes the jigsaw board is played with, a wrong
+/// item for the refusal, and the random-shape box for after the board clears.
+fn fish_event_stage(database: &ScratchDatabase) -> Server {
+    let protos = owners_protos();
+    for vnum in [FISH_BOX, FISH_BOX_SPECIAL, 25113, BAIT] {
+        assert!(protos.get(vnum).is_some(), "the owner's data has {vnum}");
+    }
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(database);
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 51, id, 1, 0, \
+             5, {FISH_BOX_SPECIAL} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 52, id, 1, 1, \
+             1, {BAIT} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 53, id, 1, 2, \
+             1, {FISH_BOX} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    server
+}
+
+/// Attach shape 7 twice and land it at 0 and 3: the misfit on 0 resends the box use
+/// with the line before the second shape lands at 3.
+fn attach_two_fish_shapes(alice: &mut Keyed) {
+    alice.send_record(&client_fish_event_box(1, 1));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You can not use this item here"),
+        "a paste is no box"
+    );
+    alice.send_record(&client_fish_event_box(1, 0));
+    assert_eq!(
+        update_fields(&alice.read_game()),
+        (1, 0, 4),
+        "one box leaves"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_fish_event(0, 7, 1),
+        "shape 7 attaches"
+    );
+    alice.send_record(&client_fish_event_shape(0));
+    assert_eq!(
+        alice.read_game(),
+        server_fish_event(1, 0, 7),
+        "the shape lands at 0"
+    );
+    alice.send_record(&client_fish_event_box(1, 0));
+    assert_eq!(update_fields(&alice.read_game()), (1, 0, 3));
+    assert_eq!(alice.read_game(), server_fish_event(0, 7, 2));
+    alice.send_record(&client_fish_event_shape(0));
+    assert_eq!(
+        alice.read_game(),
+        server_fish_event(0, 7, 2),
+        "the misfit resends the box use"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"That shape can not fit in this position"),
+        "the misfit's line"
+    );
+    alice.send_record(&client_fish_event_shape(3));
+    assert_eq!(
+        alice.read_game(),
+        server_fish_event(1, 3, 7),
+        "the shape lands at 3"
+    );
+}
+
+/// Fill the half board with two more specials at 12 and 15: the fourth shape clears
+/// the board, and the reward, the exp and the reward record follow the pickup line.
+fn complete_the_jigsaw_board(alice: &mut Keyed, vid: u32, exp_before: i64) {
+    alice.send_record(&client_fish_event_box(1, 0));
+    assert_eq!(update_fields(&alice.read_game()), (1, 0, 2));
+    assert_eq!(alice.read_game(), server_fish_event(0, 7, 3));
+    alice.send_record(&client_fish_event_shape(12));
+    assert_eq!(alice.read_game(), server_fish_event(1, 12, 7));
+    alice.send_record(&client_fish_event_box(1, 0));
+    assert_eq!(update_fields(&alice.read_game()), (1, 0, 1));
+    assert_eq!(alice.read_game(), server_fish_event(0, 7, 4));
+    alice.send_record(&client_fish_event_shape(15));
+    assert_eq!(alice.read_game(), server_fish_event(1, 15, 7));
+    let notice = alice.read_game();
+    assert_eq!(
+        notice[0], GC_CHAT,
+        "the reward's pickup line leads: {notice:02x?}"
+    );
+    assert_eq!(
+        &notice[10..18],
+        b"[LS;444;",
+        "the received line: {notice:02x?}"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()).2,
+        25113,
+        "four boxes pay 25113"
+    );
+    assert_eq!(
+        alice.read_game(),
+        point_change(vid, POINT_EXP, 30_000, exp_before + 30_000),
+        "the completion exp"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_fish_event(2, 25113, 0),
+        "the reward record"
+    );
+}
+
+/// Use the normal box in cell 2 on the cleared board: the spend, the drawn shape
+/// 1-6, and the landing at 0, which every shape takes on an empty board. Returns
+/// the drawn shape.
+fn attach_a_normal_fish_shape(alice: &mut Keyed) -> u8 {
+    alice.send_record(&client_fish_event_box(1, 2));
+    let cleared = alice.read_game();
+    assert_eq!(set_fields(&cleared), (1, 2, 0, 0), "the normal box leaves");
+    let used = alice.read_game();
+    let shape = u32::from_le_bytes(used[2..6].try_into().expect("four bytes"));
+    assert_eq!(used[1], 0, "the box use: {used:02x?}");
+    assert!(
+        (1..=6).contains(&shape),
+        "the draw is shape 1-6: {used:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(used[6..10].try_into().expect("four bytes")),
+        1,
+        "the cleared count rises to 1: {used:02x?}"
+    );
+    alice.send_record(&client_fish_event_shape(0));
+    assert_eq!(
+        alice.read_game(),
+        server_fish_event(1, 0, shape),
+        "the draw lands at 0"
+    );
+    u8::try_from(shape).expect("a shape fits a byte")
+}
+
+/// `sys.event.fish`, `cg.game.fish_event_send`, `gc.fish_event_info` and the two
+/// `sub.FishEvent` arms: the jigsaw board.
+///
+/// A disabled event still reports (`ENABLE` with flag 0 and count 0). A box that is no
+/// box is named; a special box attaches shape 7 and spends one. The shape lands at 0
+/// and refuses 0 again with the resend and the line, then lands at 3. The half board
+/// survives a relogin behind the count-2 report; two more boxes fill it, and the board
+/// pays 25113 with 30000 exp and clears. A normal box then draws shape 1-6 on the
+/// cleared board and lands it at 0, and the relogin reports it behind count 1. An
+/// unknown subheader, a cell past 23 and a non-inventory window are silent.
+#[test]
+fn fish_boxes_fill_the_jigsaw_board_and_it_pays_and_clears() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = fish_event_stage(&database);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 3);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    assert_eq!(
+        entered.report,
+        vec![server_fish_event(3, 0, 0)],
+        "disabled, nothing used"
+    );
+    let exp_before = support::rows(
+        database.url(),
+        "SELECT exp FROM player WHERE name = 'Alpha'",
+        1,
+    )[0][0];
+
+    attach_two_fish_shapes(&mut alice);
+    alice.quiet("the board waits");
+    drop(alice);
+    wait_for(
+        &database,
+        "((SELECT COUNT(*) FROM fish_event_slot WHERE player_id = (SELECT id FROM player \
+         WHERE name = 'Alpha')) = 12 AND (SELECT use_count FROM fish_event_count WHERE \
+         player_id = (SELECT id FROM player WHERE name = 'Alpha')) = 2)",
+    );
+
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 3);
+    assert_eq!(
+        entered.report,
+        vec![
+            server_fish_event(3, 0, 2),
+            server_fish_event(1, 0, 7),
+            server_fish_event(1, 3, 7),
+        ],
+        "the half board behind the count-2 report"
+    );
+    complete_the_jigsaw_board(&mut alice, vid, exp_before);
+    alice.quiet("the board is clear");
+    wait_for(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE vnum = 25113 AND owner_id = (SELECT id FROM player \
+         WHERE name = 'Alpha'))",
+    );
+    let drawn = attach_a_normal_fish_shape(&mut alice);
+    let stamped = [3i64, 1, 3, 3, 4, 4][usize::from(drawn) - 1];
+    alice.quiet("the draw waits");
+    drop(alice);
+    wait_for(
+        &database,
+        &format!(
+            "((SELECT COUNT(*) FROM fish_event_slot WHERE player_id = (SELECT id FROM player \
+             WHERE name = 'Alpha')) = {stamped} AND (SELECT use_count FROM fish_event_count \
+             WHERE player_id = (SELECT id FROM player WHERE name = 'Alpha')) = 1)"
+        ),
+    );
+    check(
+        &database,
+        &format!(
+            "(SELECT exp FROM player WHERE name = 'Alpha') = {}",
+            exp_before + 30_000
+        ),
+    );
+
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 3);
+    assert_eq!(
+        entered.report,
+        vec![
+            server_fish_event(3, 0, 1),
+            server_fish_event(1, 0, u32::from(drawn)),
+        ],
+        "the draw behind the count-1 report"
+    );
+    alice.unanswered(&[CG_FISH_EVENT_SEND, 9]);
+    alice.unanswered(&client_fish_event_shape(24));
+    alice.unanswered(&client_fish_event_box(2, 0));
 }
 
 /// `HEADER_GC_DIG_MOTION` (134, `G/packet.h`): the header, the digger's VID, the vein's VID

@@ -6,7 +6,17 @@ use std::time::{Duration, Instant};
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, PULSE_PERIOD};
 use prodomo::game_loop_messages::{
     AsyncCompletionStatus, CompletionId, Departure, GameCommand, GameLoopFailure, GameLoopTerminal,
+    Shown,
 };
+
+/// The burst's fish-event line for a character with nothing used: `ENABLE` with flag 0
+/// and count 0 (`FishEventGeneralInfo`, `G/char.cpp:10880-10913`).
+fn empty_fish_report() -> Shown {
+    Shown {
+        fish_lines: vec![vec![0xdf, 3, 0, 0, 0, 0, 0, 0, 0, 0]],
+        ..Shown::default()
+    }
+}
 use prodomo::game_state::GameState;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -591,7 +601,7 @@ async fn a_client_admitted_from_tokio_lands_on_the_thread_that_owns_the_world() 
     // Then: the world holds the character, and a grant addressed to its Name finds
     // it. That second half is the point of the whole unit: before this, nothing a
     // client did could put a character where a grant could reach it.
-    assert_eq!(admitted, Ok(prodomo::game_loop_messages::Shown::default()));
+    assert_eq!(admitted, Ok(empty_fish_report()));
     let granted = tokio::time::timeout(
         Duration::from_secs(5),
         controller.request_grant(prodomo::item_grant::GrantRequest {
@@ -664,7 +674,7 @@ async fn a_client_that_enters_the_world_twice_is_refused_by_the_thread_that_owns
             )
             .await
             .expect("the answer crossed back"),
-        Ok(prodomo::game_loop_messages::Shown::default())
+        Ok(empty_fish_report())
     );
 
     // When: a second descriptor claims the same VID.
@@ -775,10 +785,7 @@ async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
         )
         .await
         .expect("the answer crossed back");
-    assert_eq!(
-        readmitted,
-        Ok(prodomo::game_loop_messages::Shown::default())
-    );
+    assert_eq!(readmitted, Ok(empty_fish_report()));
     // And the new session's inventory starts empty, so the first grant takes the
     // same cell the departed session held. A world that kept the old character's
     // items would hand the cell to somebody else and the player would see a hole.

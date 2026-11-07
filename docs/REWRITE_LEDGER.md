@@ -47485,3 +47485,66 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 440. The jigsaw fish event
+
+`sys.event.fish`, `cg.game.fish_event_send`, `gc.fish_event_info` and the two
+`sub.FishEvent` arms are `ported`, with the scenario
+`fish_boxes_fill_the_jigsaw_board_and_it_pays_and_clears`.
+
+The records. `protocol/src/cg_fish_event.rs` decodes `HEADER_CG_FISH_EVENT_SEND`
+(0xdb): a subheader byte, then the box's `ItemPos` or the board cell.
+`protocol/src/gc_vid.rs` carries `GcFishEventInfo` (0xdf) with the subheader and
+the two DWORDs, and the `gc_inventory` row is flipped, which moves the counts to
+119 implemented and 15 missing. Both directions stay opaque above the subheader:
+an unknown subheader, a cell past 23 and a non-inventory window end silently, as
+`CInputMain::FishEvent` falls through them (`G/input_main.cpp:1326-1358`).
+
+The board (`prodomo/src/game_state/fish_event.rs`). A normal box (25106) draws
+`number(1, 6)` and a special box (25107) attaches shape 7
+(`FishEventUseBox`, `G/char.cpp:10915-10959`), each spending one box and raising
+the use count; anything else at the cell is told `You can not use this item
+here`. `valid_position` and `place_shape` stenograph the head and offset tables
+of `FishEventIsValidPosition` and `FishEventPlaceShape` (`:10961-11037`),
+including the shape rows that repeat an offset and check a cell twice. A full
+board pays `reward_for` (25113 at 10 boxes or fewer, 25112 at 24 or fewer, else
+25111) through the item-step give, so the pickup line leads the item set exactly
+as `AutoGiveItem`'s `ChatPacket`-before-`AddToCharacter` does
+(`G/char_item.cpp:9181-9185`), then `PointChange(POINT_EXP, 30000)` and the
+`REWARD` record, then the board and the count clear
+(`FishEventCheckAndReward`, `:11039-11079`).
+
+The report and the store. The login report is `FishEventGeneralInfo`
+(`:10880-10913`): the `ENABLE` record with the `enable_fish_event` flag beside
+the count, then one `SHAPE_ADD` per main cell, carried last in the burst where
+`Entergame` sends it (`G/input_login.cpp:939`). A count of 0 clears the board
+first. Migration 0031 holds the cells (`fish_event_slot`) and the count
+(`fish_event_count`); the load installs them, the save writes them, and the
+attached shape stays memory-only, so a relogin drops what was held. The leave
+takes the cells before the board goes with the character, the way the affects
+are taken before the event.
+
+Defects not reproduced. `FishEventGeneralInfo`'s report guard compares the held
+shape to the special box's vnum (`lastAttachedShape > ITEM_FISH_EVENT_BOX_SPECIAL`,
+`:11086`), so every byte passes it; the Rewrite compares to shape 7, the highest
+the tables name. Recorded in `docs/STATUS.md`.
+
+The scenario plays five specials and a normal box with a paste: the refusal,
+the attach, the landing, the misfit's resend and line, the relogin behind the
+count-2 report, the completion with the pickup line, the set, the exp and the
+reward record, then the normal box's draw 1-6 on the cleared board and the
+relogin behind the count-1 report. The normal draw is ranged in the scenario
+and pinned by the rigged-dice unit test, the way `/dice` splits its coverage.
+Mutants: the shape-7 offsets, the reward vnum and bound, the exp, the shape max,
+the kept filter, the load's cell, the use count and the draw range, all killed.
+`apply_ground` lent its `NpcsOn` arm a helper to stay under the line limit.
+
+Systems: `sys.event.fish` `ported`. Client-packets: 79 `ported` / 17 `missing`.
+Server-records: 80 `ported` / 13 `missing`. Sub-headers: 41 `ported` / 72 `missing`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4906 passed 0 failed in 43 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

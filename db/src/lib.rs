@@ -8,6 +8,7 @@
 pub mod accounts;
 pub mod credentials;
 pub mod events;
+pub mod fish_event;
 pub mod guild_land;
 pub mod guilds;
 pub mod item_id_range;

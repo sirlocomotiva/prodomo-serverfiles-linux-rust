@@ -117,6 +117,7 @@ use protocol::cg_attack::CgAttack;
 use protocol::cg_chat::CgChat;
 use protocol::cg_client_version::CgClientVersion;
 use protocol::cg_exchange::CgExchange;
+use protocol::cg_fish_event::CgFishEvent;
 use protocol::cg_fly_target::CgFlyTarget;
 use protocol::cg_guild_answer::CgAnswerMakeGuild;
 use protocol::cg_inventory::{
@@ -125,20 +126,20 @@ use protocol::cg_inventory::{
     HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
     HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CLIENT_VERSION,
     HEADER_CG_CLIENT_VERSION2, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE,
-    HEADER_CG_FISHING, HEADER_CG_FLY_TARGETING, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD,
-    HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
-    HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE,
-    HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST,
-    HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER,
-    HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
-    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
-    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING,
-    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
-    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SCRIPT_ANSWER,
-    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP,
-    HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
-    HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
-    HEADER_CG_WHISPER_DETAILS,
+    HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING, HEADER_CG_GUILD,
+    HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
+    HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
+    HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
+    HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
+    HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
+    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
+    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_CONFIRM,
+    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
+    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REQUEST_EVENT_DATA,
+    HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON,
+    HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
+    HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD,
+    HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
 };
 use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
@@ -421,6 +422,10 @@ struct Held {
     /// The saved affects the load read (`player_affect`), which the world holds as the
     /// character's timed affects from the admission on, and which the save writes back.
     affects: Vec<db::player_affects::StoredAffect>,
+    /// The fish-event board the load read (`fish_event_slot` with `fish_event_count`),
+    /// which the world holds as the character's jigsaw board from the admission on, and
+    /// which the save writes back.
+    fish_board: (Vec<db::fish_event::StoredFishCell>, u32),
     /// The character's global rank row as the world last held it, with the generation to
     /// save it under, which the save writes; `None` before it ever scored.
     rank: Option<(i64, db::rank_global::StoredRank)>,
@@ -1074,6 +1079,7 @@ fn hold_kept(held: &mut Held, kept: Kept) {
     held.quickslots = kept.quickslots;
     held.quest_flags = kept.quest_flags;
     held.affects = kept.affects;
+    held.fish_board = kept.fish_board;
     held.rank = kept.rank;
     if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
         avatar.map = map;
@@ -1218,8 +1224,8 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// Whether `header` is `CG_ITEM_USE`, a destroy, a gift, a refine, a fishing record, a ground
-/// step or a quickslot request.
+/// Whether `header` is `CG_ITEM_USE`, a destroy, a gift, a refine, a fishing record, a
+/// fish-event record, a ground step or a quickslot request.
 fn is_belongings_step(header: u8) -> bool {
     header == HEADER_CG_ITEM_USE.value()
         || header == HEADER_CG_ITEM_USE_TO_ITEM.value()
@@ -1228,6 +1234,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_REFINE.value()
         || header == HEADER_CG_ATTR67_ADD.value()
         || header == HEADER_CG_FISHING.value()
+        || header == HEADER_CG_FISH_EVENT_SEND.value()
         || is_ground_step(header)
         || is_quickslot_step(header)
 }
@@ -1239,6 +1246,8 @@ fn is_belongings_step(header: u8) -> bool {
 /// - `CG_ITEM_GIVE` (83): `CInputMain::ItemGive` (`G/input_main.cpp:3723`).
 /// - `CG_REFINE` (96): `CInputMain::Refine` (`G/input_main.cpp:3851-3853`).
 /// - `CG_FISHING` (82): `CInputMain::Fishing` (`G/input_main.cpp:3166-3172`).
+/// - `CG_FISH_EVENT_SEND` (219): `CInputMain::FishEvent` (`G/input_main.cpp:1319-1366`),
+///   which no observer check guards (`:3760-3762`).
 /// - `CG_ITEM_DROP` (12), `CG_ITEM_DROP2` (20) and `CG_ITEM_PICKUP` (15), reached when the
 ///   character is not an observer (`G/input_main.cpp:3693-3717`).
 /// - `CG_ITEM_USE_TO_ITEM` (60): `CInputMain::ItemToItem` (`G/input_main.cpp:1006-1022`),
@@ -1273,6 +1282,8 @@ where
         attr67_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISHING.value() {
         fish(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_FISH_EVENT_SEND.value() {
+        fish_event(session, addr, context, held, frame).await
     } else {
         drop_an_item(session, addr, context, held, frame).await
     }
@@ -1304,6 +1315,43 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.fishing(vid, record.dir, actor).await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_FISH_EVENT_SEND` (219) in the game phase: `CInputMain::FishEvent`
+/// (`G/input_main.cpp:1319-1366`). An unknown subheader is consumed and ignored, as
+/// legacy's `default` arm does; the world sends the records, and the rows it changed
+/// (the spent box, the reward) are stored here.
+async fn fish_event<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgFishEvent::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed FISH_EVENT; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "FISH_EVENT without a character in the world; ignoring");
+        return true;
+    };
+    let step = match record {
+        CgFishEvent::BoxUse { window, cell } => {
+            prodomo::game_state::FishEventStep::BoxUse(ItemPos::new(window, cell))
+        }
+        CgFishEvent::ShapeAdd { pos } => prodomo::game_state::FishEventStep::ShapeAdd(pos),
+        CgFishEvent::Unknown { .. } => return true,
+    };
+    let actor = item_actor(held);
+    let answer = context.game.fish_event(vid, step, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -1689,6 +1737,7 @@ async fn entering_burst(
             hide_lines: shown.hide_lines,
             priv_lines: shown.priv_lines,
             letters_event: shown.letters_event,
+            fish_lines: shown.fish_lines,
         },
         channel,
         global_time(),
@@ -6136,7 +6185,7 @@ where
     let mut burst = loading_burst(&character, &points, vid, &view);
     // `PlayerLoad` sets each stored quickslot right after the map test and before the points
     // packet (`G/input_db.cpp:439-440`), and `TPlayerTable::skills` rides the player row.
-    let Some((quickslots, skills, quest_flags, affects)) =
+    let Some((quickslots, skills, quest_flags, affects, fish_board)) =
         load_select_rows(&context.store, addr, player, &mut burst).await
     else {
         return false;
@@ -6148,6 +6197,7 @@ where
     held.skills = skills;
     held.quest_flags = quest_flags;
     held.affects = affects;
+    held.fish_board = fish_board;
     held.character = Some(character.clone());
     held.channel = seat.number;
     // `SetPlayerProto`'s GM level (`G/input_db.cpp:1931-1955`): the character's own
@@ -6371,6 +6421,7 @@ async fn load_select_rows(
     Vec<db::player_skills::StoredSkill>,
     Vec<(Vec<u8>, i32)>,
     Vec<db::player_affects::StoredAffect>,
+    (Vec<db::fish_event::StoredFishCell>, u32),
 )> {
     let stored = match db::quickslots::load_quickslots(store, player).await {
         Ok(stored) => stored,
@@ -6414,7 +6465,16 @@ async fn load_select_rows(
             return None;
         }
     };
-    Some((quickslots, skills, quest_flags, affects))
+    // `m_fishSlots` and `m_dwFishUseCount` (`G/char.cpp:2280-2286`): the jigsaw board the
+    // character plays on from the admission on.
+    let fish_board = match db::fish_event::load_board(store, player).await {
+        Ok(fish_board) => fish_board,
+        Err(error) => {
+            warn!(%addr, player, %error, "Fish-event load failed; closing");
+            return None;
+        }
+    };
+    Some((quickslots, skills, quest_flags, affects, fish_board))
 }
 
 /// The item load at character select, the way `CInputDB::ItemLoad` places a character's
@@ -6893,6 +6953,7 @@ fn loaded_state(
         messenger_team: messenger.team,
         messenger_levels: messenger.levels,
         affects: held.affects.clone(),
+        fish_board: held.fish_board.clone(),
         horse_name: held
             .character
             .as_ref()
@@ -7136,6 +7197,19 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
                 db::player_affects::save_affects(&context.store, character.id, &held.affects).await
             {
                 warn!(player = character.id, %error, "Could not save the affects");
+                return false;
+            }
+            // `tab.fishSlots` and `tab.fishEventUseCount` (`G/char.cpp:1613-1614`): the
+            // jigsaw board the character holds, written after the player row.
+            if let Err(error) = db::fish_event::save_board(
+                &context.store,
+                character.id,
+                &held.fish_board.0,
+                held.fish_board.1,
+            )
+            .await
+            {
+                warn!(player = character.id, %error, "Could not save the fish-event board");
                 return false;
             }
             // Legacy's DB process wrote the counters every 20 minutes and at shutdown
@@ -14597,6 +14671,7 @@ mod tests {
                 alignment: -250,
                 quest_flags: Vec::new(),
                 affects: Vec::new(),
+                fish_board: (Vec::new(), 0),
                 horse_name: None,
                 rank: None,
             },

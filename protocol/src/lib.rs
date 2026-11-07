@@ -21,6 +21,7 @@ pub mod cg_client_version;
 pub mod cg_cube_renewal;
 pub mod cg_dragon_soul;
 pub mod cg_exchange;
+pub mod cg_fish_event;
 pub mod cg_fly_target;
 pub mod cg_gaya_system;
 pub mod cg_guild;

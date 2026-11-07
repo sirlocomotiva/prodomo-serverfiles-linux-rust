@@ -1283,7 +1283,8 @@ pub struct EnterGameBurst {
 
 /// The records the enter-game burst carries behind the character's own update: the
 /// restored affects' adds, then the enter-game hide restore's `SetXCostumeHidden`
-/// lines, then the live priv bonus notices, and whether the letters line reads 1.
+/// lines, then the live priv bonus notices, whether the letters line reads 1, and the
+/// fish-event report's records.
 pub struct BurstAfter {
     /// The restored affects' add records, in store order.
     pub silence: Vec<Vec<u8>>,
@@ -1294,6 +1295,9 @@ pub struct BurstAfter {
     /// Whether the character is in the letters event: the `letters_event` line reads
     /// 1 then, else 0.
     pub letters_event: bool,
+    /// The fish-event login report's records: the enable record, then one `SHAPE_ADD`
+    /// per main cell (`FishEventGeneralInfo`, `G/char.cpp:10880-10913`).
+    pub fish_lines: Vec<Vec<u8>>,
 }
 
 /// The records the enter-game burst sends, in legacy order.
@@ -1377,6 +1381,9 @@ pub fn enter_game_burst(
     let mut line = GcChat::notice(CHAT_TYPE_COMMAND, character.empire, chat)
         .expect("the letters_event line is shorter than the chat length limit");
     out.push(encoded(&mut line, "the letters_event line"));
+    // `FishEventGeneralInfo` closes `Entergame` (`G/input_login.cpp:939`): the enable
+    // record, then one `SHAPE_ADD` per main cell, ride the burst last.
+    out.extend(after.fish_lines);
     EnterGameBurst {
         before_phase: before,
         after_phase: out,
@@ -2220,6 +2227,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             1_600_000_000,
@@ -2250,6 +2258,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2334,6 +2343,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2376,6 +2386,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2404,6 +2415,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             4,
             1_600_000_000,
@@ -2434,6 +2446,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2473,6 +2486,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2497,6 +2511,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: true,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2518,6 +2533,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2663,6 +2679,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2689,6 +2706,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2711,6 +2729,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2787,6 +2806,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2818,6 +2838,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,
@@ -2845,6 +2866,7 @@ mod tests {
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
                 letters_event: false,
+                fish_lines: Vec::new(),
             },
             1,
             0,

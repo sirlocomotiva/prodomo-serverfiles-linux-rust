@@ -56,6 +56,9 @@ pub const GC_HEADER_AND_BYTE_AND_DWORD_WIRE_SIZE: usize = 1 + 1 + 4;
 /// `BYTE`.
 pub const GC_FISHING_WIRE_SIZE: usize = 1 + 1 + 4 + 1;
 
+/// Packed width of [`GcFishEventInfo`]: a header, a subheader, and two 32-bit values.
+pub const GC_FISH_EVENT_INFO_WIRE_SIZE: usize = 1 + 1 + 4 + 4;
+
 /// Packed width of a record that is a header, a 32-bit value, and a `WORD`.
 pub const GC_CHANGE_SPEED_WIRE_SIZE: usize = 1 + 4 + 2;
 
@@ -676,6 +679,166 @@ impl GcFishing {
     }
 }
 
+/// `HEADER_GC_FISH_EVENT_INFO` (byte 223).
+///
+/// Source: `{ BYTE header; BYTE subheader; DWORD first; DWORD second; }` at
+/// `server/server/game/packet.h:2876-2881`. Packed width 1 + 1 + 4 + 4 = 10,
+/// the same for every sub-header, so the frame length does not depend on the
+/// sub-header value.
+///
+/// The two `DWORD`s are **not** one thing. The server writes the enable flag and the
+/// use count for `Enable`, the attached shape and the use count for `BoxUse`, the cell
+/// and the shape for `ShapeAdd`, and the reward vnum and 0 for `Reward`
+/// (`server/server/game/char.cpp:10885-11110`). The client branches on the sub-header
+/// before interpreting them, so this codec keeps both raw and exposes the readings
+/// as named accessors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcFishEventInfo {
+    /// Legacy `bSubheader`, the typed sub-header discriminator.
+    pub subheader: GcFishEventInfoSubheader,
+    /// Legacy `dwFirstArg`. Kept raw because the meaning depends on the sub-header.
+    pub first: u32,
+    /// Legacy `dwSecondArg`. Kept raw because the meaning depends on the sub-header.
+    pub second: u32,
+}
+
+impl GcFishEventInfo {
+    /// Number of bytes this record occupies on the wire.
+    pub const WIRE_SIZE: usize = GC_FISH_EVENT_INFO_WIRE_SIZE;
+
+    /// Decodes the record from the start of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GcSmallError::Truncated`] unless `bytes` holds the full
+    /// [`GcFishEventInfo::WIRE_SIZE`], and [`GcSmallError::Header`] unless the first
+    /// byte is [`HEADER_GC_FISH_EVENT_INFO`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, GcSmallError> {
+        if bytes.len() < Self::WIRE_SIZE {
+            return Err(GcSmallError::Truncated {
+                context: "GcFishEventInfo",
+                needed: Self::WIRE_SIZE,
+                actual: bytes.len(),
+            });
+        }
+        if bytes[0] != HEADER_GC_FISH_EVENT_INFO {
+            return Err(GcSmallError::Header {
+                context: "GcFishEventInfo",
+                expected: HEADER_GC_FISH_EVENT_INFO,
+                actual: bytes[0],
+            });
+        }
+        Ok(Self {
+            subheader: GcFishEventInfoSubheader::from_value(bytes[1]),
+            first: u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+            second: u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]),
+        })
+    }
+
+    /// Appends the wire bytes to `out`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        out.push(HEADER_GC_FISH_EVENT_INFO);
+        out.push(self.subheader.value());
+        out.extend_from_slice(&self.first.to_le_bytes());
+        out.extend_from_slice(&self.second.to_le_bytes());
+    }
+
+    /// Reads the pair as the enable flag and the use count, for the `Enable` sub-header.
+    ///
+    /// Returns `None` for every other sub-header.
+    pub const fn enabled(&self) -> Option<(u32, u32)> {
+        match self.subheader {
+            GcFishEventInfoSubheader::Enable => Some((self.first, self.second)),
+            _ => None,
+        }
+    }
+
+    /// Reads the pair as the attached shape and the use count, for the `BoxUse` sub-header.
+    ///
+    /// Returns `None` for every other sub-header.
+    pub const fn box_used(&self) -> Option<(u32, u32)> {
+        match self.subheader {
+            GcFishEventInfoSubheader::BoxUse => Some((self.first, self.second)),
+            _ => None,
+        }
+    }
+
+    /// Reads the pair as the cell and the shape, for the `ShapeAdd` sub-header.
+    ///
+    /// Returns `None` for every other sub-header.
+    pub const fn shape_added(&self) -> Option<(u32, u32)> {
+        match self.subheader {
+            GcFishEventInfoSubheader::ShapeAdd => Some((self.first, self.second)),
+            _ => None,
+        }
+    }
+
+    /// Reads the pair as the reward vnum and 0, for the `Reward` sub-header.
+    ///
+    /// Returns `None` for every other sub-header.
+    pub const fn reward(&self) -> Option<u32> {
+        match self.subheader {
+            GcFishEventInfoSubheader::Reward => Some(self.first),
+            _ => None,
+        }
+    }
+}
+
+/// The `FISH_EVENT_SUBHEADER_GC_*` sub-header of [`GcFishEventInfo`].
+///
+/// The legacy enum auto-increments from zero at `packet.h:2862-2869`, so these values
+/// are the enumerator positions. The client and the server spell the same four names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcFishEventInfoSubheader {
+    /// `FISH_EVENT_SUBHEADER_BOX_USE` = 0.
+    BoxUse,
+    /// `FISH_EVENT_SUBHEADER_SHAPE_ADD` = 1.
+    ShapeAdd,
+    /// `FISH_EVENT_SUBHEADER_GC_REWARD` = 2.
+    Reward,
+    /// `FISH_EVENT_SUBHEADER_GC_ENABLE` = 3.
+    Enable,
+    /// A value the legacy enum does not define.
+    Unknown(u8),
+}
+
+impl Default for GcFishEventInfoSubheader {
+    /// The legacy enumerator starts at zero, so the zero value is
+    /// [`GcFishEventInfoSubheader::BoxUse`].
+    fn default() -> Self {
+        Self::BoxUse
+    }
+}
+
+impl GcFishEventInfoSubheader {
+    /// The raw wire byte for this sub-header.
+    pub const fn value(self) -> u8 {
+        match self {
+            Self::BoxUse => 0,
+            Self::ShapeAdd => 1,
+            Self::Reward => 2,
+            Self::Enable => 3,
+            Self::Unknown(raw) => raw,
+        }
+    }
+
+    /// Maps a wire byte to a sub-header, with an explicit unknown arm.
+    pub const fn from_value(raw: u8) -> Self {
+        match raw {
+            0 => Self::BoxUse,
+            1 => Self::ShapeAdd,
+            2 => Self::Reward,
+            3 => Self::Enable,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// Whether this is one of the four enumerated sub-headers.
+    pub const fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+}
+
 /// Failure decoding one of the 32-bit-value game-to-client records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcSmallError {
@@ -769,6 +932,8 @@ pub const HEADER_GC_MALL_DEL: u8 = 0x81;
 pub const HEADER_GC_EVENT_KW_SCORE: u8 = 0x9d;
 /// `HEADER_GC_DRAGON_SOUL_REFINE` (209).
 pub const HEADER_GC_DRAGON_SOUL_REFINE: u8 = 0xd1;
+/// `HEADER_GC_FISH_EVENT_INFO` (223).
+pub const HEADER_GC_FISH_EVENT_INFO: u8 = 0xdf;
 /// `HEADER_GC_REFINE_ELEMENT` (228).
 pub const HEADER_GC_REFINE_ELEMENT: u8 = 0xe4;
 
@@ -820,11 +985,11 @@ mod tests {
         assert_eq!(HEADER_GC_MALL_DEL, 129);
         assert_eq!(HEADER_GC_EVENT_KW_SCORE, 157);
         assert_eq!(HEADER_GC_DRAGON_SOUL_REFINE, 209);
-        assert_eq!(HEADER_GC_REFINE_ELEMENT, 228);
+        assert_eq!(HEADER_GC_FISH_EVENT_INFO, 223);
     }
 
     #[test]
-    fn the_shapes_capture_twenty_distinct_header_bytes() {
+    fn the_shapes_capture_twenty_one_distinct_header_bytes() {
         let all: BTreeSet<u8> = DWORD_RECORDS
             .iter()
             .chain(DWORD_BYTE_RECORDS.iter())
@@ -836,10 +1001,11 @@ mod tests {
                 HEADER_GC_EVENT_KW_SCORE,
                 HEADER_GC_DRAGON_SOUL_REFINE,
                 HEADER_GC_FISHING,
+                HEADER_GC_FISH_EVENT_INFO,
             ])
             .collect();
-        assert_eq!(all.len(), 11 + 3 + 6);
-        assert_eq!(all.len(), 20);
+        assert_eq!(all.len(), 11 + 3 + 7);
+        assert_eq!(all.len(), 21);
     }
 
     #[test]
@@ -852,7 +1018,7 @@ mod tests {
         assert_eq!(GC_CHANGE_SPEED_WIRE_SIZE, 7);
         assert_eq!(GC_EVENT_KW_SCORE_WIRE_SIZE, 7);
         assert_eq!(GC_FISHING_WIRE_SIZE, 7);
-        assert_eq!(ITEM_POS_WIRE_SIZE, 3);
+        assert_eq!(GC_FISH_EVENT_INFO_WIRE_SIZE, 10);
     }
 
     #[test]
@@ -1311,6 +1477,120 @@ mod tests {
                 context: "GcFishing",
                 needed: 7,
                 actual: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn the_fish_event_subheader_values_are_the_enumerator_positions() {
+        let expected = [
+            (GcFishEventInfoSubheader::BoxUse, 0u8),
+            (GcFishEventInfoSubheader::ShapeAdd, 1),
+            (GcFishEventInfoSubheader::Reward, 2),
+            (GcFishEventInfoSubheader::Enable, 3),
+        ];
+        for (variant, byte) in expected {
+            assert_eq!(variant.value(), byte);
+            assert_eq!(GcFishEventInfoSubheader::from_value(byte), variant);
+            assert!(variant.is_known());
+        }
+        for raw in [4u8, 100, 255] {
+            let variant = GcFishEventInfoSubheader::from_value(raw);
+            assert_eq!(variant, GcFishEventInfoSubheader::Unknown(raw));
+            assert_eq!(variant.value(), raw);
+            assert!(!variant.is_known());
+        }
+    }
+
+    #[test]
+    fn the_fish_event_record_is_ten_bytes_for_every_subheader() {
+        for variant in [
+            GcFishEventInfoSubheader::BoxUse,
+            GcFishEventInfoSubheader::ShapeAdd,
+            GcFishEventInfoSubheader::Reward,
+            GcFishEventInfoSubheader::Enable,
+            GcFishEventInfoSubheader::Unknown(200),
+        ] {
+            let record = GcFishEventInfo {
+                subheader: variant,
+                first: 0x0a0b_0c0d,
+                second: 0x1415_1617,
+            };
+            let mut wire = Vec::new();
+            record.encode_into(&mut wire);
+            assert_eq!(wire.len(), GC_FISH_EVENT_INFO_WIRE_SIZE, "{variant:?}");
+            assert_eq!(wire.len(), 10, "{variant:?}");
+            assert_eq!(wire[0], HEADER_GC_FISH_EVENT_INFO);
+            assert_eq!(wire[1], variant.value());
+            assert_eq!(&wire[2..6], &[0x0d, 0x0c, 0x0b, 0x0a]);
+            assert_eq!(&wire[6..10], &[0x17, 0x16, 0x15, 0x14]);
+            assert_eq!(GcFishEventInfo::decode(&wire), Ok(record), "{variant:?}");
+        }
+    }
+
+    #[test]
+    fn the_fish_event_pair_has_four_meanings_depending_on_the_subheader() {
+        let enabled = GcFishEventInfo {
+            subheader: GcFishEventInfoSubheader::Enable,
+            first: 1,
+            second: 9,
+        };
+        assert_eq!(enabled.enabled(), Some((1, 9)));
+        assert_eq!(enabled.box_used(), None);
+        assert_eq!(enabled.shape_added(), None);
+        assert_eq!(enabled.reward(), None);
+
+        let used = GcFishEventInfo {
+            subheader: GcFishEventInfoSubheader::BoxUse,
+            first: 4,
+            second: 9,
+        };
+        assert_eq!(used.box_used(), Some((4, 9)));
+        assert_eq!(used.reward(), None);
+
+        let added = GcFishEventInfo {
+            subheader: GcFishEventInfoSubheader::ShapeAdd,
+            first: 7,
+            second: 4,
+        };
+        assert_eq!(added.shape_added(), Some((7, 4)));
+        assert_eq!(added.enabled(), None);
+
+        let reward = GcFishEventInfo {
+            subheader: GcFishEventInfoSubheader::Reward,
+            first: 25112,
+            second: 0,
+        };
+        assert_eq!(reward.reward(), Some(25112));
+        assert_eq!(reward.shape_added(), None);
+
+        let unknown = GcFishEventInfo {
+            subheader: GcFishEventInfoSubheader::Unknown(9),
+            first: 1,
+            second: 2,
+        };
+        assert_eq!(unknown.enabled(), None);
+        assert_eq!(unknown.box_used(), None);
+        assert_eq!(unknown.shape_added(), None);
+        assert_eq!(unknown.reward(), None);
+    }
+
+    #[test]
+    fn the_fish_event_record_rejects_a_wrong_header_and_a_short_buffer() {
+        assert!(matches!(
+            GcFishEventInfo::decode(&[HEADER_GC_SEPCIAL_EFFECT, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Err(GcSmallError::Header {
+                expected: HEADER_GC_FISH_EVENT_INFO,
+                actual: HEADER_GC_SEPCIAL_EFFECT,
+                ..
+            })
+        ));
+        assert_eq!(
+            GcFishEventInfo::decode(&[HEADER_GC_FISH_EVENT_INFO; 9]),
+            Err(GcSmallError::Truncated {
+                context: "GcFishEventInfo",
+                needed: 10,
+                actual: 9,
             })
         );
     }
