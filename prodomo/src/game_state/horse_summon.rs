@@ -422,6 +422,9 @@ impl GameState {
             pid,
             changes: packed.changes,
             cleared_skills: Vec::new(),
+            gold: 0,
+            points: None,
+            quickslots: None,
         })
     }
 

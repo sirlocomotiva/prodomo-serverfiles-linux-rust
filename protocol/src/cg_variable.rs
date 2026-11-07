@@ -1225,6 +1225,49 @@ impl VariableClientFrameDecoder {
         self.try_decode()
     }
 
+    /// Try to consume one complete frame of an explicit `size` when the buffered bytes
+    /// start with `header`.
+    ///
+    /// The phase-aware caller uses this for header bytes whose framing the phase
+    /// decides: header `0xf1` in the game and dead phases is the 6-byte Gaya record,
+    /// while the inventory resolves it as the 67-byte client-version report. `None`
+    /// when another header is buffered or fewer than `size` bytes are buffered. The
+    /// drained frame is returned whole, header byte excluded from the payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientFrameError::FrameTooLarge`] when `size` exceeds the maximum,
+    /// [`ClientFrameError::InvalidInventorySize`] for a zero size, or
+    /// [`ClientFrameError::AllocationFailed`] when the payload cannot be reserved.
+    pub fn try_decode_fixed_override(
+        &mut self,
+        header: u8,
+        size: usize,
+    ) -> Result<Option<ClientFrame>, ClientFrameError> {
+        if self.buffer.first() != Some(&header) {
+            return Ok(None);
+        }
+        if size == 0 {
+            return Err(ClientFrameError::InvalidInventorySize { header, size });
+        }
+        if size > self.max_frame_size {
+            return Err(ClientFrameError::FrameTooLarge {
+                size,
+                maximum: self.max_frame_size,
+            });
+        }
+        if self.buffer.len() < size {
+            return Ok(None);
+        }
+        let mut payload = Vec::new();
+        payload
+            .try_reserve(size - CLIENT_FRAME_HEADER_SIZE)
+            .map_err(|_| ClientFrameError::AllocationFailed)?;
+        payload.extend_from_slice(&self.buffer[CLIENT_FRAME_HEADER_SIZE..size]);
+        self.buffer.drain(..size);
+        Ok(Some(ClientFrame { header, payload }))
+    }
+
     /// Validate EOF without consuming complete buffered frames.
     ///
     /// # Errors

@@ -556,6 +556,19 @@ pub enum GameCommand {
         /// Where the game thread reports what the changelook step did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_GAYA_SYSTEM` for the character online under `vid`, answered as a move is.
+    GayaSystem {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The sub-header: craft, market, or refresh.
+        sub_header: u8,
+        /// The `pos` the client named.
+        pos: i32,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the Gaya step did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_ITEM_GIVE` for the character online under `vid`, answered as a move is.
     GiveItem {
         /// The VID of the character whose client sent the gift.
@@ -2773,6 +2786,8 @@ pub enum GmLine {
     UserHorseFeed,
     /// `/show_quiz` (`do_oxevent_show_quiz`).
     ShowQuiz,
+    /// `/w_gaya` (`do_gaya_system`), a player's line.
+    GayaSystem,
 }
 
 /// Which restart a dead player asks for.
@@ -3965,6 +3980,31 @@ impl GameLoopController {
             sub_header,
             pos,
             at,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a Gaya request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn gaya_system(
+        &self,
+        vid: common::vid::Vid,
+        sub_header: u8,
+        pos: i32,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GayaSystem {
+            vid,
+            sub_header,
+            pos,
             mover,
             reply,
         })

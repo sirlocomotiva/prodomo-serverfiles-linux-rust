@@ -86,6 +86,7 @@ mod fishing;
 #[cfg(test)]
 mod fixtures;
 mod full_set;
+mod gaya_system;
 mod gm_lines;
 mod guild;
 mod guild_mark;
@@ -153,6 +154,7 @@ pub use daily_gift::{
     DAILY_GIFT_COLLECT_USE_TICKET, DAILY_GIFT_OPEN,
 };
 pub use fish_event::{FishBoard, FishCell, FishEventStep, FISH_EVENT_SLOTS};
+pub use gaya_system::{GAYA_CRAFT, GAYA_MARKET, GAYA_REFRESH};
 pub use gm_lines::GmRows;
 pub use guild::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -2342,6 +2344,7 @@ impl GameState {
             | GameCommand::Attr67 { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
+            | GameCommand::GayaSystem { .. }
             | GameCommand::UseItemToItem { .. }
             | GameCommand::GiveItem { .. }
             | GameCommand::PickupItem { .. }
@@ -4343,6 +4346,15 @@ impl GameState {
             }
             command @ (GameCommand::Sash { .. } | GameCommand::Changelook { .. }) => {
                 self.apply_window_step(command);
+            }
+            GameCommand::GayaSystem {
+                vid,
+                sub_header,
+                pos,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.gaya_system(vid, sub_header, pos, mover));
             }
             GameCommand::UseItemToItem {
                 vid,

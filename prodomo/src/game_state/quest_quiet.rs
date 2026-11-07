@@ -288,7 +288,7 @@ impl GameState {
     /// `UpdateItemsGayaMarker` (`G/char_gaya.cpp:242-273`): nine rolls of
     /// `number(1, size - 1)` onto the reader's shelf, the slots all locked. An empty
     /// or one-row table rolls nothing: legacy's `number` faults on the empty range.
-    fn restock_gaya_market(&mut self, reader: Vid) {
+    pub(super) fn restock_gaya_market(&mut self, reader: Vid) {
         let last = i32::try_from(self.gaya_table.items.len().saturating_sub(1)).unwrap_or(0);
         let mut items = Vec::new();
         if last >= 1 {
@@ -366,7 +366,7 @@ impl GameState {
     /// `InfoGayaMarker` (`G/char_gaya.cpp:94-110`): the reader's shelf reaches its
     /// client: the clear, each item, then the slots and the stamp when a row holds
     /// them. Quiet with no shelf.
-    fn send_gaya_market(&self, reader: Vid, mover: Mover) {
+    pub(super) fn send_gaya_market(&self, reader: Vid, mover: Mover) {
         let Some(market) = self.gaya_markets.get(&reader) else {
             return;
         };
@@ -868,6 +868,7 @@ mod tests {
                         count: 2,
                     },
                 ],
+                values: gamedata::gaya::GayaValues::default(),
             }));
         let mut world = world;
         let mut inbox = enter(&mut world, 0x6001, (3200, 3200), 0);
@@ -880,6 +881,7 @@ mod tests {
                 price: 1,
                 count: 1,
             }],
+            values: gamedata::gaya::GayaValues::default(),
         });
         world.restock_gaya_market(Vid::new(0x6001));
         assert!(world
@@ -894,6 +896,7 @@ mod tests {
                     count: 1,
                 })
                 .collect(),
+            values: gamedata::gaya::GayaValues::default(),
         });
         world.restock_gaya_market(Vid::new(0x6001));
         let market = world.gaya_markets.get(&Vid::new(0x6001)).expect("stocked");
@@ -937,6 +940,7 @@ mod tests {
                         count: 1,
                     })
                     .collect(),
+                values: gamedata::gaya::GayaValues::default(),
             }));
         let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../legacy/gamedata/locale/europe");

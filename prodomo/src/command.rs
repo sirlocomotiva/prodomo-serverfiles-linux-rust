@@ -223,7 +223,8 @@ impl CommandEntry {
             | "do_flush"
             | "do_observer"
             | "do_user_horse_feed"
-            | "do_oxevent_show_quiz" => self.gm_tail_name(),
+            | "do_oxevent_show_quiz"
+            | "do_gaya_system" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -318,6 +319,7 @@ impl CommandEntry {
             "do_observer" => Command::GmLine(GmLine::Observer),
             "do_user_horse_feed" => Command::GmLine(GmLine::UserHorseFeed),
             "do_oxevent_show_quiz" => Command::GmLine(GmLine::ShowQuiz),
+            "do_gaya_system" => Command::GmLine(GmLine::GayaSystem),
             _ => Command::NotPorted(self.handler),
         }
     }

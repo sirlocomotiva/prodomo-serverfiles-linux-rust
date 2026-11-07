@@ -47845,3 +47845,66 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 444. The Gaya craft and market
+
+`cg.game.gaya_system`, its three sub-headers, `cmd.w_gaya`, `data.gaya` and
+`sys.custom.gaya` are `ported`, all behind `a_gaya_craft_spends_and_a_market_opens`.
+
+The record's header byte 241 is the shadowed one: it frames as 67 bytes
+(`TPacketCGClientVersion2`, first-wins in `CPacketInfoCG`) while the client sends 6
+(`protocol::cg_gaya_system`, committed earlier). A phase-aware override frames the
+byte at 6 in the game and dead phases (`try_decode_fixed_override`, routed in
+`client_live.rs`); a 67-byte version-shaped frame on this byte never reaches the
+handler. The step has no observer gate (`G/input_main.cpp:3881-3883`), and an unknown
+sub-header is consumed and ignored, as legacy's `default`-less `switch` does.
+
+The craft (`CraftGayaItems`, `G/char_gaya.cpp:275-309`) minerals the stone at
+`{INVENTORY, pos}`: a missing cell sends nothing, a non-stone or one graded past
+`GRADE_STONE` chats the error line, short of the `GLIMMERSTONE_COUNT` glimmerstones
+the count line chats with the stone's locale name, and short of `COST_GAYA_YANG` the
+Yang line chats. Else the roll runs and a win grants `GIVE_GAYA` with the grant and
+success lines; either way the window refreshes (`GayaCheck`), the stones and the Yang
+leave, and the cell loses one stone. `CreateItem` of the stone cannot fail here: the
+proto is looked up, and a missing one sends nothing before the count line could name
+it. The module doc records the unit the legacy keys keep (`GayaValues`).
+
+The market (`MarketGayaItems`, `:311-344`) with no shelf chats the error line, as does
+a slot past 8 (a negative slot is the shelf check's business first). Slots 0-2 buy at
+once (`BuyItemsGayaMarket`, `:115-128`): short of the price the poor line chats, else
+the Gaya leaves and the shelf's item is given through `AutoGiveItem`. Slots 3-8
+unlock with `GAYA_EXPANSION_COUNT` expansion items when locked
+(`UpdateSlotGayaMarket`, `:153-173`, re-sends the markers), and buy once open; a
+locked slot short of the unlocks chats the count line with the unlock's locale name.
+The refresh (`RefreshGayaItems`, `:346-367`) with no shelf chats the error line; short
+of the `GAYA_REFRESH_COUNT` refreshers the count line chats, else they leave, the
+shelf re-rolls with the slots kept, and the markers are re-sent.
+
+The shelf and the slot unlocks live in memory per login: relogging reopens a fresh
+shelf, but the scenario proves the unlocks survive the relog (the loaded count stands
+behind the unlock, and the reopened line shows slot 3 open). Legacy keeps a
+`<Name>_gaya_system.txt` file per character; the path is the character name
+unsanitised, and a failed `fopen` NULL-derefs (`:175-273`). Recorded as a Divergence
+in `docs/STATUS.md`.
+
+`/w_gaya` (`do_gaya_system`, `G/cmd_general.cpp:4057-4091`) runs the same three lines:
+an empty line, a bare word outside craft/market/refresh, and a craft or market with
+no slot are all silent; the slot is `atoi`'s reading of the second word. It rides a
+new `GmLine::GayaSystem` whose rows carry the move's gold, points and quickslots
+(`GmRows` grows all three; `gm_line_step` stores the gold with the rows and holds the
+rest, as `finish_item_step` does).
+
+Two scenario findings, both asserted in the test. 55002 is missing from the owner
+protos, so a row that holds it sells nothing (the price leaves, no pickup follows);
+the four `ITEM_UNIQUE` rows likewise, since their make path is not ported
+(`unported_drop`); the buy reads the first row the maker takes. And the landed count
+is what `CreateItem` keeps: only a stackable row lands its count, a lone row lands
+one (`G/item_manager.cpp:251`).
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
+--locked --offline` clean; the suite 4930 passed, 0 failed in 44 targets; `cargo test
+--workspace --doc --locked --offline` clean; `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.

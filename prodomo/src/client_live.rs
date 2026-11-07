@@ -40,8 +40,9 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use protocol::cg_gaya_system::CG_GAYA_SYSTEM_WIRE_SIZE;
 use protocol::cg_handshake::CgHandshakeHeader;
-use protocol::cg_inventory::{CG_KEEP_ALIVE, HEADER_CG_PONG};
+use protocol::cg_inventory::{CG_KEEP_ALIVE, HEADER_CG_GAYA_SYSTEM, HEADER_CG_PONG};
 use protocol::cg_variable::VariableClientFrameDecoder;
 use protocol::cg_wire::{
     resolve_client_frame_size, ClientFrame, ClientFrameError, ClientFrameSize,
@@ -516,6 +517,19 @@ where
             return Err(LiveError::PhaseClosed);
         }
         self.drain_cipher_into_decoder()?;
+        if matches!(
+            self.lifecycle.phase(),
+            ClientPhase::Game | ClientPhase::Dead
+        ) && self.decoder.peek_header() == Some(HEADER_CG_GAYA_SYSTEM.value())
+        {
+            match self.decoder.try_decode_fixed_override(
+                HEADER_CG_GAYA_SYSTEM.value(),
+                CG_GAYA_SYSTEM_WIRE_SIZE,
+            )? {
+                Some(frame) => return Ok(Some(self.handle_frame(frame, now).await)),
+                None => return Ok(None),
+            }
+        }
         match self.decoder.try_decode()? {
             Some(frame) => Ok(Some(self.handle_frame(frame, now).await)),
             None => Ok(None),

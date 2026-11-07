@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 443 (the changelook window).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 444
+Last reviewed: 2026-11-07, after ledger section 444 (the Gaya craft and market).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 445
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -456,7 +456,8 @@ gift is `ported`: the line, the week, the cash and ticket collects, the renew an
 442 the sash's add, remove and refine are `ported`: the window, the guards, the combine and the
 absorption over the wire. Since
 443 the changelook's add, remove and refine are `ported`: the guarded pair, the stamp, the
-clean and the banked look. The
+clean and the banked look. Since 444 the Gaya craft and market are `ported`: the craft's
+guards and spend, the shelf's guards, buy and unlock, the refresh, and `/w_gaya`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -879,6 +880,7 @@ owner should know about (178.5):
 | The daily-gift cash is loaded at the admission and spent from memory (ledger 441): an Operator grant mid-session shows at the next login, and the spent delta saves with the row. | `GetCash` queries `account.account` on every open (`G/char_daily_gifts.cpp:321-345`). |
 | A sash material cannot be moved onto, and a sash material cannot be given (ledger 442): both refuse silently with `Locked`. | A move buries the held item (no destination check, `G/char_item.cpp:7636-7637`); `GiveItem` runs no `isLocked` check. |
 | The `USE_DETACHMENT` sash clean skips the `ITEM_FLAG_REFINEABLE` check (ledger 442): the flag bit is not ported. | `IS_SET(pkTarget->GetFlag(), ITEM_FLAG_REFINEABLE)` gates the arm (`G/char_item.cpp:1996`). |
+| The Gaya shelf and slot unlocks live in memory per login: the unlocks are kept (ledger 444). | `<Name>_gaya_system.txt` per character (`G/char_gaya.cpp:175-273`); the path is `GetName` unsanitised, and `fopen` failures NULL-deref. |
 
 ## Legacy defects not to reproduce
 

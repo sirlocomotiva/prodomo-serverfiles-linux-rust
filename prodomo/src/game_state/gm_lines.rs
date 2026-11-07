@@ -41,7 +41,7 @@ use world::item::{ItemId, ATTRIBUTES, SOCKETS};
 use super::view::EntityKey;
 use super::GameState;
 use crate::chat_line::Arg;
-use crate::command::one_argument;
+use crate::command::{one_argument, two_arguments};
 use crate::game_loop_messages::GmLine;
 use crate::item_move::{MovedItems, Mover};
 
@@ -61,6 +61,12 @@ pub struct GmRows {
     pub changes: Vec<db::items::RowChange>,
     /// The skill vnums a clear zeroed that held a level, whose rows are deleted.
     pub cleared_skills: Vec<u8>,
+    /// The gold the line's move spent or granted, stored with the rows.
+    pub gold: i64,
+    /// The mover's points after the line's move, which the descriptor holds.
+    pub points: Option<world::character::Points>,
+    /// The mover's quickslots after the line's syncs, which the descriptor holds.
+    pub quickslots: Option<world::character::Quickslots>,
 }
 
 /// What one attribute line rolled on the worn weapon, for
@@ -200,7 +206,55 @@ impl GameState {
             }
             GmLine::UserHorseFeed => self.user_horse_feed(vid, mover),
             GmLine::ShowQuiz => self.show_quiz(vid, mover),
+            GmLine::GayaSystem => self.run_gaya_command(vid, rest, mover),
         }
+    }
+
+    /// `/w_gaya <craft|market|refresh> [slot]` (`do_gaya_system`,
+    /// `G/cmd_general.cpp:4057-4091`): an empty line is silent, a craft or market with no
+    /// slot is silent, and the word runs the craft, the market or the refresh, with the
+    /// slot from `atoi`'s reading of the second word. Anything else is silent, as
+    /// legacy's `else`-less chain is. The world's moves are sent, and the rows for the
+    /// store are answered.
+    fn run_gaya_command(&mut self, vid: Vid, rest: &[u8], mover: Mover) -> Option<GmRows> {
+        let (first, second) = two_arguments(rest);
+        if first.is_empty() {
+            return None;
+        }
+        let (sub_header, pos) = if first == b"craft" {
+            if second.is_empty() {
+                return None;
+            }
+            (
+                super::gaya_system::GAYA_CRAFT,
+                int_word(&second).unwrap_or(0),
+            )
+        } else if first == b"market" {
+            if second.is_empty() {
+                return None;
+            }
+            (
+                super::gaya_system::GAYA_MARKET,
+                int_word(&second).unwrap_or(0),
+            )
+        } else if first == b"refresh" {
+            (super::gaya_system::GAYA_REFRESH, 0)
+        } else {
+            return None;
+        };
+        let pid = self.characters.find_by_vid(vid).ok()?.player_id();
+        let outcome = self.gaya_system(vid, sub_header, pos, mover).ok()?;
+        for record in &outcome.records {
+            let _sent = self.write_to_client(vid, record.clone());
+        }
+        Some(GmRows {
+            pid,
+            changes: outcome.changes,
+            cleared_skills: Vec::new(),
+            gold: outcome.gold.unwrap_or(0),
+            points: outcome.points,
+            quickslots: outcome.quickslots,
+        })
     }
 
     /// `/flush [pid]` (`do_flush`, `G/cmd_gm.cpp:4425-4446`, the `FLUSH_AT_SHUTDOWN` branch,
@@ -259,6 +313,9 @@ impl GameState {
             pid,
             changes: Vec::new(),
             cleared_skills,
+            gold: 0,
+            points: None,
+            quickslots: None,
         })
     }
 
@@ -447,6 +504,9 @@ impl GameState {
             pid,
             changes: moved.changes,
             cleared_skills: Vec::new(),
+            gold: 0,
+            points: None,
+            quickslots: None,
         })
     }
 
@@ -563,6 +623,9 @@ impl GameState {
             pid,
             changes: rolled.changes,
             cleared_skills: Vec::new(),
+            gold: 0,
+            points: None,
+            quickslots: None,
         })
     }
 }

@@ -40432,3 +40432,450 @@ fn a_transmutation_is_refused_stamped_and_banked() {
     alice.still("nothing follows");
     let _dead = cl_death_closes(&server, &database, alice);
 }
+
+/// `HEADER_CG_GAYA_SYSTEM` (241): the client-to-server Gaya request.
+const CG_GAYA_SYSTEM: u8 = 0xf1;
+
+/// One `CG_GAYA_SYSTEM` request: the sub-header and the `pos`.
+fn client_gaya(sub_header: u8, pos: i32) -> Vec<u8> {
+    let mut record = vec![CG_GAYA_SYSTEM, sub_header];
+    record.extend_from_slice(&pos.to_le_bytes());
+    record
+}
+
+/// A `GC_CHARACTER_POINT_CHANGE` record, parsed off the client's socket.
+struct PointMove {
+    kind: u8,
+    amount: i64,
+    value: i64,
+}
+
+/// Read one `GC_CHARACTER_POINT_CHANGE` record and parse its kind, amount and value.
+fn read_point_move(keyed: &mut Keyed) -> PointMove {
+    let record = keyed.read_game();
+    assert_eq!(
+        record.len(),
+        POINT_CHANGE_LEN,
+        "a points record is 25 bytes"
+    );
+    assert_eq!(record[0], GC_POINT_CHANGE, "the point header");
+    PointMove {
+        kind: record[8],
+        amount: i64::from_le_bytes(record[9..17].try_into().expect("eight")),
+        value: i64::from_le_bytes(record[17..25].try_into().expect("eight")),
+    }
+}
+
+/// `cg.game.gaya_system`, `sub.GayaSystemSend.*`: the craft guards of a stone stack at
+/// cell 0, a lone stone at 1, a sword at 2 and a grade-4 stone at 3.
+fn gaya_craft_guards(keyed: &mut Keyed) {
+    // An empty cell crafts nothing.
+    keyed.send_record(&client_gaya(0, 9));
+    keyed.still("an empty cell sends nothing");
+    // The sword is no stone; the grade-4 stone is past the grade.
+    keyed.send_record(&client_gaya(0, 2));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] Eroare.."),
+        "a sword is no stone"
+    );
+    keyed.send_record(&client_gaya(0, 3));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] Eroare.."),
+        "a grade-4 stone is past the grade"
+    );
+    keyed.still("the guards end");
+}
+
+/// The Gaya seed: Seon-Hae 20095 beside Alpha on map 1, a stone pair at cells 0 and
+/// 1, a sword at 2, a grade-4 stone at 3, and ten glimmerstones at 4; answers the
+/// open database and server. Gold is 100,000.
+fn gaya_seed_stones() -> Option<(ScratchDatabase, Server)> {
+    let database = ScratchDatabase::create()?;
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(b"m\t606\t540\t0\t0\t0\t1\t1000s\t100\t1\t20095\n");
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(npc, &npc_text)],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 100000 WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    for (vnum, (want, sub)) in [
+        (28_030, (gamedata::item_kind::ITEM_METIN, 0)),
+        (28_430, (gamedata::item_kind::ITEM_METIN, 0)),
+        (10, (gamedata::item_kind::ITEM_WEAPON, 0)),
+        (30_400, (gamedata::item_kind::ITEM_MATERIAL, 0)),
+    ] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(
+            proto.item_type, want,
+            "the seed vnum {vnum} is the kind the scenario proves"
+        );
+        assert_eq!(
+            proto.sub_type, sub,
+            "the seed vnum {vnum} is the subtype the scenario proves"
+        );
+    }
+    for (id, pos, vnum, count) in [
+        (40, 0, 28_030, 2),
+        (41, 1, 28_030, 1),
+        (42, 2, 10, 1),
+        (43, 3, 28_430, 1),
+        (44, 4, 30_400, 10),
+        (45, 5, 30_401, 9),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    Some((database, server))
+}
+
+// The craft's spend: win or lose, GayaCheck lands, the ten stones clear, the Yang
+// leaves the gold, and the cell loses one stone. Answers whether the roll won.
+fn gaya_craft_spend(keyed: &mut Keyed) -> bool {
+    use protocol::gc_item_window::{GcItemSet, GcItemUpdate};
+    keyed.send_record(&client_gaya(0, 0));
+    let first = keyed.read_game();
+    let won = first[0] == GC_POINT_CHANGE;
+    if won {
+        let grant = read_point_move_bytes(&first);
+        assert_eq!(
+            (grant.kind, grant.amount, grant.value),
+            (207, 0, 1),
+            "the grant point"
+        );
+        assert_eq!(
+            keyed.read_game(),
+            an_info_line(b"[Gaya] Ai reu\xbait s\xe3  : 1."),
+            "the grant line"
+        );
+        assert_eq!(
+            keyed.read_game(),
+            an_info_line(b"[Gaya] Ascu\xfeirea a reu\xbait."),
+            "the success line"
+        );
+    } else {
+        assert_eq!(
+            first,
+            an_info_line(b"[Gaya] Ascu\xfeirea a e\xbauat."),
+            "the loss line"
+        );
+    }
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaCheck"),
+        "the window refresh"
+    );
+    let cleared = keyed.read_game();
+    assert_eq!(cleared[0], ITEM_SET, "the spent stones clear");
+    let set = GcItemSet::decode(&cleared).expect("a set record");
+    assert_eq!((set.cell.cell, set.vnum), (4, 0), "cell 4 empties");
+    let fewer = keyed.read_game();
+    assert_eq!(fewer[0], ITEM_UPDATE, "the cell loses one stone");
+    let update = GcItemUpdate::decode(&fewer).expect("an update record");
+    assert_eq!((update.cell.cell, update.count), (0, 1), "one stone of two");
+    keyed.still("the craft ends");
+    won
+}
+
+/// The Gaya login: the letters and the update; answers Seon-Hae's VID.
+fn gaya_first_login(keyed: &mut Keyed) -> u32 {
+    let entered = enter_game_shown(keyed);
+    read_login_lines(keyed, 0, None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+    keyed.still("nothing follows");
+    vid_shown_at(entered.shown.inserts(), (470_200, 950_000))
+}
+
+/// Past the stone guards with the shelf unopened: the market and the refresh chat
+/// the error line; a slot past 8 chats it too.
+fn gaya_no_shelf(keyed: &mut Keyed) {
+    keyed.send_record(&client_gaya(1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] Eroare.."),
+        "no shelf buys nothing"
+    );
+    keyed.send_record(&client_gaya(2, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] Eroare.."),
+        "no shelf refreshes nothing"
+    );
+    keyed.still("the shelf guards end");
+}
+
+/// Seon-Hae's "Ce bonusuri" chat opens the market: the clear, nine items, the
+/// `slots` line, the stamp and the window. Answers the nine shelf rows as shown.
+fn gaya_open_market(keyed: &mut Keyed, seon: u32, slots: &[u8]) -> Vec<(u32, u32, u32)> {
+    keyed.send_record(&client_click(seon));
+    let menu = [
+        &b"[QUESTION 1;Pietre Str\xE3lucitoare|2;Ce bonusuri \xEE\x6Di aduce Gaya? |3;Inchide]"[..],
+    ]
+    .concat();
+    assert_eq!(keyed.read_game(), server_script(1, &menu));
+    keyed.send_record(&client_script_answer(1));
+    let page = [
+        b"[ENTER]Nu ai auzit \xEE\x6E\x63\xE3 de magazinul Gaya? [ENTER]Nu? Oh atunci trebuie s\xE3 \xEE\xFEi povestesc.. [ENTER]De la magazinul gaya po\xFEi achizi\xFEiona anumite obiecte folositoare! [ENTER]Dore\xBati s\xE3 vizualizezi magazinul ? [ENTER][ENTER]" as &[u8],
+        b"[QUESTION 1;Da |2;Nu ]" as &[u8],
+    ]
+    .concat();
+    assert_eq!(keyed.read_game(), server_script(1, &page));
+    keyed.send_record(&client_script_answer(0));
+    assert_eq!(keyed.read_game(), server_script(0, b"[DONE]"));
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaMarketClear"),
+        "the market clear"
+    );
+    let mut shelf = Vec::new();
+    for _ in 0..9 {
+        let line = keyed.read_game();
+        let text = &line[10..];
+        assert!(
+            text.starts_with(b"GayaMarketItems "),
+            "a market item: {line:?}"
+        );
+        let mut parts = text[b"GayaMarketItems ".len()..]
+            .split(|byte| *byte == b' ')
+            .map(|part| part.iter().fold(0u32, |n, d| n * 10 + u32::from(d - b'0')));
+        shelf.push((
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        ));
+    }
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, slots),
+        "the slot line"
+    );
+    let stamp = keyed.read_game();
+    assert!(
+        stamp[10..].starts_with(b"GayaMarketTime "),
+        "the stamp: {stamp:?}"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenGuiGayaMarket"),
+        "the market window"
+    );
+    keyed.still("the market opens");
+    shelf
+}
+
+// A locked slot short of the unlocks names them; a slot past 8 chats the error
+// line; and a poor slot 0 chats the poor line.
+fn gaya_market_guards(keyed: &mut Keyed) {
+    keyed.send_record(&client_gaya(1, 9));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] Eroare.."),
+        "a slot past 8 chats the error line"
+    );
+    keyed.send_record(&client_gaya(1, 3));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] 10 unit\xe3\xfei Extinde Magazinul Gaya cerute."),
+        "a locked slot names its unlocks"
+    );
+    keyed.send_record(&client_gaya(1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] Nu de\xfeii suficient\xe3 Gaya"),
+        "a poor slot chats the poor line"
+    );
+    keyed.still("the market guards end");
+}
+
+// Ten unlocks stand the slot-3 unlock behind: the unlock clears the stack and
+// re-sends the markers with slot 3 open; the refresh spends nothing short of its
+// refreshers, then re-rolls with the slots kept.
+fn gaya_unlock_and_refresh(server: &Server, database: &ScratchDatabase, keyed: Keyed) -> Keyed {
+    use protocol::gc_item_window::GcItemSet;
+    // The tenth unlock lands in the store; the relog loads it, and the market reopens
+    // fresh (the shelf is per-login).
+    sql(database, "UPDATE item SET count = 10 WHERE id = 45");
+    drop(keyed);
+    let (mut keyed, _alpha, _items) = load_character(server, b"alice", 0);
+    let entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    let seon = vid_shown_at(entered.shown.inserts(), (470_200, 950_000));
+    gaya_open_market(&mut keyed, seon, b"GayaMarketSlotsDesblock 0 0 0 0 0 0");
+    keyed.send_record(&client_gaya(1, 3));
+    let cleared = keyed.read_game();
+    assert_eq!(cleared[0], ITEM_SET, "the unlocks clear");
+    let set = GcItemSet::decode(&cleared).expect("a set record");
+    assert_eq!((set.cell.cell, set.vnum), (5, 0), "cell 5 empties");
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaMarketClear"),
+        "the markers re-send"
+    );
+    for _ in 0..9 {
+        let line = keyed.read_game();
+        assert!(
+            line[10..].starts_with(b"GayaMarketItems "),
+            "a market item: {line:?}"
+        );
+    }
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaMarketSlotsDesblock 1 0 0 0 0 0"),
+        "slot 3 stands open"
+    );
+    let stamp = keyed.read_game();
+    assert!(
+        stamp[10..].starts_with(b"GayaMarketTime "),
+        "the stamp: {stamp:?}"
+    );
+    keyed.still("the unlock ends");
+    keyed.send_record(&client_gaya(2, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] 10 unit\xe3\xfei Renew Gaya Store cerute."),
+        "a refresh short of refreshers names them"
+    );
+    keyed.still("the refresh guard ends");
+    // The buy lands once the purse holds 1,000: the grant lands in the store and
+    // the relog loads it, then the market reopens and shelf slot 0 sells — the point
+    // record, the pickup line and the set record. The price is parsed off the shelf's
+    // first item line. The relog's login burst carries the purse first: the points
+    // record's Gaya slot is asserted on the way in.
+    // The disconnect banks the shelf's unlock; the grant lands once the save is done
+    // (the save would overwrite it), and the relog loads 1,000.
+    drop(keyed);
+    wait_for(
+        database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 95000",
+    );
+    sql(
+        database,
+        "UPDATE player SET gaya = 1000 WHERE name = 'Alpha'",
+    );
+    let (mut keyed, _alpha, _items) = load_character(server, b"alice", 0);
+    let entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    let seon = vid_shown_at(entered.shown.inserts(), (470_200, 950_000));
+    let shelf = gaya_open_market(&mut keyed, seon, b"GayaMarketSlotsDesblock 1 0 0 0 0 0");
+    let protos = owners_protos();
+    // 55002 is missing from the owner protos, so a row that holds it sells
+    // nothing: the price leaves and no pickup follows. The four `ITEM_UNIQUE` rows
+    // likewise: their make path is not ported (`unported_drop`), so the buy spends
+    // and renders nothing. Rows neither the protos nor the maker take are skipped,
+    // and the landed count is what `CreateItem` keeps: only a stackable row lands
+    // its count, a lone row lands one (`G/item_manager.cpp:251`).
+    let (slot, (vnum, price, count)) = shelf
+        .iter()
+        .enumerate()
+        .filter(|(_, (vnum, _, _))| {
+            protos
+                .get(*vnum)
+                .is_some_and(|proto| world::character::unported_drop(*vnum, proto).is_none())
+        })
+        .map(|(slot, row)| (slot, *row))
+        .next()
+        .expect("the shelf holds a vnum the maker takes");
+    let stackable = protos
+        .get(vnum)
+        .is_some_and(|proto| proto.flags & world::item::ITEM_FLAG_STACKABLE != 0);
+    let count = u16::try_from(if stackable { count } else { 1 }).expect("a shelf count");
+    let slot = i32::try_from(slot).expect("a shelf slot");
+    keyed.send_record(&client_gaya(1, slot));
+    let point = read_point_move(&mut keyed);
+    assert_eq!(
+        (point.kind, point.amount, point.value),
+        (207, 0, 1000 - i64::from(price)),
+        "the price leaves the purse"
+    );
+    let pickup = keyed.read_game();
+    assert_eq!(pickup[0], GC_CHAT, "the pickup line lands");
+    let set = keyed.read_game();
+    assert_eq!(set[0], ITEM_SET, "the bought item lands");
+    let landed = protocol::gc_item_window::GcItemSet::decode(&set).expect("a set record");
+    assert_eq!(
+        (landed.vnum, landed.count),
+        (vnum, count),
+        "the shelf's row lands whole"
+    );
+    keyed.still("the buy ends");
+    keyed
+}
+
+/// `cg.game.gaya_system`, `sub.GayaSystemSend.*`: the stone guards refuse and one
+/// craft spends, the shelf guards refuse, the market opens over the owner's chat,
+/// its guards refuse, the slot-3 unlock lands, and the refresh names its refreshers.
+#[test]
+fn a_gaya_craft_spends_and_a_market_opens() {
+    let Some((database, server)) = gaya_seed_stones() else {
+        return;
+    };
+    let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
+    let seon = gaya_first_login(&mut keyed);
+    gaya_craft_guards(&mut keyed);
+    let _won = gaya_craft_spend(&mut keyed);
+    gaya_no_shelf(&mut keyed);
+    gaya_open_market(&mut keyed, seon, b"GayaMarketSlotsDesblock 0 0 0 0 0 0");
+    gaya_market_guards(&mut keyed);
+    let keyed = gaya_unlock_and_refresh(&server, &database, keyed);
+    gaya_command_line(keyed);
+}
+
+/// `/w_gaya` runs the same three lines the records do: an empty line and a bare
+/// word are silent, and `refresh` with the shelf open names the missing
+/// refreshers, as the sub-header's refresh does.
+fn gaya_command_line(mut keyed: Keyed) {
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/w_gaya"));
+    keyed.still("an empty line is silent");
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/w_gaya dance"));
+    keyed.still("a strange word is silent");
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/w_gaya craft"));
+    keyed.still("a craft with no slot is silent");
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/w_gaya refresh"));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Gaya] 10 unit\xe3\xfei Renew Gaya Store cerute."),
+        "the command's refresh names its refreshers"
+    );
+    keyed.still("the command ends");
+}
+
+/// Parse a `GC_CHARACTER_POINT_CHANGE` the test already read.
+fn read_point_move_bytes(record: &[u8]) -> PointMove {
+    assert_eq!(
+        record.len(),
+        POINT_CHANGE_LEN,
+        "a points record is 25 bytes"
+    );
+    PointMove {
+        kind: record[8],
+        amount: i64::from_le_bytes(record[9..17].try_into().expect("eight")),
+        value: i64::from_le_bytes(record[17..25].try_into().expect("eight")),
+    }
+}
