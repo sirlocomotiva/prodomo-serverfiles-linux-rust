@@ -500,6 +500,7 @@ impl GameState {
                 dead: self.is_dead(target),
                 alignment: self.alignment_of(target),
                 view_guild: self.view_guild_of_vid(target),
+                premium: self.premium_of(target),
             },
         })
     }
@@ -1073,6 +1074,8 @@ mod tests {
             skill_group: 0,
             alignment: 0,
             voice: 0,
+            premium: 0,
+            premium_time: 0,
         }
     }
 
@@ -1117,6 +1120,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         }
     }
 

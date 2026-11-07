@@ -271,6 +271,8 @@ pub fn player_save(
         biologist_completed: character.biologist_completed,
         secured: character.secured,
         secured_password: character.secured_password,
+        premium: character.premium,
+        premium_time: character.premium_time,
         horse: character.horse.clone(),
     }
 }
@@ -318,6 +320,8 @@ mod tests {
             biologist_completed: 0,
             secured: 1,
             secured_password: 123_456,
+            premium: 1,
+            premium_time: 1_700_000_000,
             voice: 47,
             part_base: 2,
             main_part: 1001,

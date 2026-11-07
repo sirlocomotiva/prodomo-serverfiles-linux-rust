@@ -546,6 +546,7 @@ impl super::GameState {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         };
         let name = name.to_vec();
         if let Some((_, _, _, _, take_sides, _)) = self.run_quests_giving(

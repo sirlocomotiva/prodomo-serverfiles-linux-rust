@@ -348,6 +348,16 @@ impl GameState {
         })
     }
 
+    /// What `UpdatePacket` sends of the premium of the character under `vid`
+    /// (`m_byPremium`, `m_iPremiumTime`, `G/char.cpp:1317-1318`), or 0 with no character.
+    pub(super) fn premium_of(&self, vid: u32) -> (u8, i32) {
+        self.characters
+            .find_by_vid(Vid::new(vid))
+            .ok()
+            .and_then(|character| character.points())
+            .map_or((0, 0), |points| (points.premium(), points.premium_time()))
+    }
+
     /// `GetRealAlignment()` (`G/char_battle.cpp:3452-3455`): the alignment the rules read and
     /// the store keeps, or 0 with no body. The value the client is shown is this one in
     /// tenths, which is what [`GameState::alignment_of`] returns.

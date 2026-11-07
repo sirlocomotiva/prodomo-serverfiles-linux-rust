@@ -230,6 +230,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         }
     }
 

@@ -48019,3 +48019,54 @@ test --workspace --doc` clean, `cargo clippy --workspace --all-targets --locked
 --workspace --no-deps --locked --offline` clean, `rustfmt` and `cargo-clippy` are
 the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%`
 database remained. No ADR changed.
+
+## 447. The premium players
+
+`sys.custom.premium`, `cg.game.premium_players`, `gc.premium_players` and the three
+`sub.RecvPremiumPlayersPacket.*` rows are `ported`, all behind
+`a_premium_opens_lists_activates_and_banks`.
+
+The flag and its timer ride the points (`m_byPremium`, `m_iPremiumTime`), kept beside
+the arrays as legacy's `BYTE` and `long` are (`G/char.h:2590-2591`). Migration 0035
+adds the `player` columns (`player.sql:870-871`); the load seeds them, the held row
+syncs them, and the disconnect banks them. The CG codec (`CgPremiumPlayers`) and the
+GC codec (`GcPremiumPlayers`) already existed; the descriptor dispatches the record,
+absorbing an unknown sub-header and closing on a malformed one.
+
+The open answers its window opener, the list names the flagged players highest level
+first (at most a hundred, `G/char.cpp:11460`), both from the descriptor, which owns
+the store read and the socket. The activation (`:11529-11561`) runs on the game
+thread: the already line, the voucher check (two MD vouchers, 80015) with the
+proto's locale name, the two spends, the Channel notice then the success line, the
+flag with its 30-day timer, one update carrying the flag (both setters send
+`UpdatePacket`, `:11589-11599`), and the four affects (549-552): 2000 max HP, 15
+monster, 10 boss, 10 metin bonus. The minute sweep ends a lapsed timer with the
+flag cleared, the affects gone and the time-up line (`:11478-11527`); legacy runs
+one event per character, the sweep is the same check over the outboxes. The login
+starts no check either way: the affects line stays commented out, as legacy's does
+(`G/input_login.cpp:718`).
+
+The updates and the ADD now carry the flag and the timer: the card holds them for
+the ADD, and the mover carries them from the points for the update. The GC_ACTIVATE
+sub-header is never sent, the premium hooks in the drop and exp terms stay hooks,
+and `pc.get_premium_remain_sec`/`pc.is_premium` (the other premium system) stay
+`unused` (owner question 37).
+
+One Defect not reproduced (STATUS): the activation creates the voucher item to read
+its name and leaks it (`:11542`); the Rewrite reads the proto's locale name.
+
+Unit tests: `the_activation_spends_sets_and_lays` and
+`the_flagged_hear_the_already_and_the_lapsed_end` (points, flags, affects, expiry);
+the db test `the_premium_list_names_the_flagged_highest_first`. Eight mutants
+killed: the already flag, the voucher count, the flag value, the mob bonus, the
+duration (first survived on a self-referential range, now a literal), the expiry
+guard (first survived for lack of a fresh-timer case, now covered), the list
+order, and the flag update. The scenario passed 8/8 flake runs.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace
+--locked --offline` clean, the suite 4952 passed 0 failed in 44 targets, `cargo
+test --workspace --doc` clean, `cargo clippy --workspace --all-targets --locked
+--offline -- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean, `rustfmt` and `cargo-clippy` are
+the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%`
+database remained. No ADR changed.

@@ -115,6 +115,7 @@ pub(crate) mod pc_skill;
 mod pickup;
 mod pk_mode;
 mod polymorph;
+mod premium;
 mod protected;
 mod pvp;
 mod quest_quiet;
@@ -172,6 +173,10 @@ pub use guild::{
 };
 pub use letters::LettersTrade;
 pub use level::{AdvanceLanded, LevelHeld, ResetHeld};
+pub use premium::{
+    PremiumStep, PREMIUM_ACTIVATE, PREMIUM_AFFECTS, PREMIUM_AFFECT_DURATION, PREMIUM_DURATION,
+    PREMIUM_GC_LIST, PREMIUM_GC_OPEN, PREMIUM_LIST, PREMIUM_OPEN, PREMIUM_VOUCHER,
+};
 pub use protected::{
     ProtectedStep, PROTECTED_ACTIVATE, PROTECTED_FRESH_PASSWORD, PROTECTED_PASSWORD_CHANGE,
     PROTECTED_PASSWORD_MAX_LEN,
@@ -2362,6 +2367,7 @@ impl GameState {
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
             | GameCommand::Biologist { .. }
+            | GameCommand::Premium { .. }
             | GameCommand::Protected { .. }
             | GameCommand::NpcsOn { .. }) => {
                 self.apply_ground(command);
@@ -3048,6 +3054,9 @@ impl GameState {
             }
         }
         let silence = self.load_affects(vid, &loaded.affects);
+        // `IsPremiumPlayer` (`G/input_login.cpp:717-720`): a flagged entrant's minute
+        // sweep picks it up from the outboxes; a lapsed timer ends at the next sweep.
+        // The affects check stays commented out, as legacy's does (`:718`).
         let meley_map = loaded
             .show
             .as_ref()
@@ -4416,6 +4425,7 @@ impl GameState {
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
             | GameCommand::Biologist { .. }
+            | GameCommand::Premium { .. }
             | GameCommand::Protected { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_event_step(command),
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
@@ -4483,6 +4493,12 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.biologist(vid, step, mover)),
+            GameCommand::Premium {
+                vid,
+                step,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.premium(vid, step, mover)),
             GameCommand::Protected {
                 vid,
                 step,
@@ -5219,6 +5235,7 @@ impl GameState {
             dead: self.is_dead(vid.raw()),
             alignment: self.alignment_of(vid.raw()),
             view_guild: self.view_guild_of_vid(vid.raw()),
+            premium: self.premium_of(vid.raw()),
             ..actor
         };
         let character = self
@@ -5391,6 +5408,7 @@ impl PulseProcessor for GameState {
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);
         self.expire_empire_privs();
+        self.run_premium_ticks(pulse);
         self.run_minds(pulse);
         self.broadcast_targets();
     }
@@ -6380,6 +6398,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         }
     }
 
@@ -7546,6 +7565,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         });
         let _ = points.compute_points();
         for kind in [common::point_slot::POINT_HP, common::point_slot::POINT_SP] {
@@ -7993,6 +8013,8 @@ mod tests {
             skill_group: 0,
             alignment: 0,
             voice: 0,
+            premium: 0,
+            premium_time: 0,
         };
         let place = crate::game_loop_messages::EnterPlace {
             channel: 1,

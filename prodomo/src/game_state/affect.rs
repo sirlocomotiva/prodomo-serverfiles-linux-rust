@@ -435,6 +435,7 @@ impl GameState {
             dead: self.is_dead(vid.raw()),
             alignment: i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX),
             view_guild: self.view_guild(character.player_id()),
+            premium: (points.premium(), points.premium_time()),
         };
         let mut frame = Vec::new();
         crate::item_move::character_update(vid.raw(), &look, mover).encode_into(&mut frame);
@@ -1009,6 +1010,7 @@ impl GameState {
             dead: npc.dead,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         };
         let mut frame = Vec::new();
         crate::item_move::character_update(vid, &look, mover).encode_into(&mut frame);

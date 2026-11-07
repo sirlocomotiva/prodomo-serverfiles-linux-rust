@@ -1396,6 +1396,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         })
     }
 

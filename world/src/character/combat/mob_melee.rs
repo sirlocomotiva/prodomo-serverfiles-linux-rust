@@ -1148,6 +1148,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         })
     }
 
@@ -1448,6 +1449,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         });
         points.set_point(point::POINT_NORMAL_HIT_DEFEND_BONUS, 60);
         points.set_point(point::POINT_RESIST_COMBAT, 60);
@@ -1641,6 +1643,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         });
         points.set_point(point::POINT_RESIST_COMBAT, 10);
         let mut dice = Script::new(&[0]);
@@ -1767,6 +1770,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         });
         points.set_point(point::POINT_RESIST_COMBAT, 60);
         let proto = wind_proto();

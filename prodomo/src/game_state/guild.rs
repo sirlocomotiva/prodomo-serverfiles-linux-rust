@@ -10669,6 +10669,8 @@ mod tests {
                 skill_group: 0,
                 alignment: 0,
                 voice: 0,
+                premium: 0,
+                premium_time: 0,
             },
         );
     }
@@ -10860,6 +10862,8 @@ mod tests {
                 skill_group: 0,
                 alignment: 0,
                 voice: 0,
+                premium: 0,
+                premium_time: 0,
             },
         );
         // The war ends: the map closes with it.
@@ -10962,6 +10966,8 @@ mod tests {
                 skill_group: 0,
                 alignment: 0,
                 voice: 0,
+                premium: 0,
+                premium_time: 0,
             },
         );
         let outcome =
@@ -11766,6 +11772,8 @@ mod tests {
                 skill_group: 0,
                 alignment: 0,
                 voice: 0,
+                premium: 0,
+                premium_time: 0,
             },
         );
         // The war is a minute old, so a score may end it.
@@ -12132,6 +12140,8 @@ mod tests {
                 skill_group: 0,
                 alignment: 0,
                 voice: 0,
+                premium: 0,
+                premium_time: 0,
             },
         );
     }

@@ -517,6 +517,10 @@ pub struct PlayerSave {
     pub secured: i16,
     /// `tab.secured_password`, the lock's password.
     pub secured_password: i32,
+    /// `tab.premium`, the premium-players flag, 1 while it runs.
+    pub premium: i16,
+    /// `tab.premium_time`, the `time(0)` the premium ends at.
+    pub premium_time: i32,
     /// The horse and its skill points.
     pub horse: PlayerHorse,
 }
@@ -554,7 +558,7 @@ pub async fn save_character(
          alignment = $33, sungma_str = $35, sungma_hp = $36, sungma_move = $37, \
          sungma_immune = $38, gaya = $39, conqueror_level_step = $40, conqueror_point = $41, \
          biologist_state = $49, biologist_items_taken = $50, biologist_completed = $51, \
-         secured = $52, secured_password = $53, \
+         secured = $52, secured_password = $53, premium = $54, premium_time = $55, \
          horse_level = $42, horse_riding = $43, horse_hp = $44, horse_hp_droptime = $45, \
          horse_stamina = $46, horse_skill_point = $47, horse_name = $48, last_play_at = now() \
          WHERE account_id = $1 AND id = $2",
@@ -612,6 +616,8 @@ pub async fn save_character(
     .bind(save.biologist_completed)
     .bind(save.secured)
     .bind(save.secured_password)
+    .bind(save.premium)
+    .bind(save.premium_time)
     .execute(store.pool())
     .await?;
     Ok(updated.rows_affected() == 1)
@@ -847,6 +853,10 @@ pub struct Character {
     pub secured: i16,
     /// The lock's password (`secured_password`).
     pub secured_password: i32,
+    /// The premium-players flag (`premium`), 1 while it runs.
+    pub premium: i16,
+    /// The `time(0)` the premium ends at (`premium_time`).
+    pub premium_time: i32,
     /// Conqueror experience banked towards the next conqueror level.
     pub conqueror_exp: i64,
     /// The quarters of the next conqueror level's cost banked (`conqueror_level_step`).
@@ -928,6 +938,28 @@ pub async fn id_by_name(store: &Store, name: &str) -> Result<Option<u32>, Accoun
         .fetch_optional(store.pool())
         .await?;
     Ok(row.and_then(|(id,)| u32::try_from(id).ok()))
+}
+
+/// The names of the premium players, highest level first, at most a hundred.
+///
+/// `PremiumPlayersListPacket` (`G/char.cpp:11458-11476`): `SELECT name FROM player
+/// WHERE premium = '1' ORDER BY level DESC LIMIT 100`. The names are ASCII letters
+/// and digits (`CONTEXT.md`), so they encode as their own bytes.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`] when the store cannot answer.
+pub async fn premium_names(store: &Store) -> Result<Vec<Vec<u8>>, AccountError> {
+    let rows =
+        sqlx::query("SELECT name FROM player WHERE premium = 1 ORDER BY level DESC LIMIT 100")
+            .fetch_all(store.pool())
+            .await?;
+    rows.iter()
+        .map(|row| {
+            let name: String = row.try_get("name")?;
+            Ok(name.into_bytes())
+        })
+        .collect()
 }
 
 /// The level columns of one character row, which is what `/advance` writes.
@@ -1090,7 +1122,7 @@ pub async fn load_character(
          p.random_hp, p.random_sp, p.stat_point, p.skill_point, p.sub_skill_point, p.level_step, \
          p.stat_reset_count, \
          p.hp, p.sp, p.stamina, p.gold, p.gaya, p.biologist_state, p.biologist_items_taken, \
-         p.biologist_completed, p.secured, p.secured_password, p.voice, p.part_base, p.part_main, p.alignment, \
+         p.biologist_completed, p.secured, p.secured_password, p.premium, p.premium_time, p.voice, p.part_base, p.part_main, p.alignment, \
          p.part_hair, p.part_sash, p.x, p.y, p.map_index, p.exit_x, p.exit_y, p.exit_map_index, \
          p.skill_group, p.playtime_minutes, \
          p.horse_level, p.horse_riding, p.horse_hp, p.horse_hp_droptime, p.horse_stamina, \
@@ -1143,6 +1175,8 @@ pub async fn load_character(
         biologist_completed: row.try_get("biologist_completed")?,
         secured: row.try_get("secured")?,
         secured_password: row.try_get("secured_password")?,
+        premium: row.try_get("premium")?,
+        premium_time: row.try_get("premium_time")?,
         voice: narrow(row.try_get::<i16, _>("voice")?, "voice")?,
         part_base: narrow(row.try_get::<i16, _>("part_base")?, "part_base")?,
         main_part: narrow(row.try_get::<i32, _>("part_main")?, "part_main")?,

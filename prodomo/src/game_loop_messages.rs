@@ -582,6 +582,19 @@ pub enum GameCommand {
         /// Where the game thread reports the rows the step changed.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_PREMIUM_PLAYERS` for the character online under `vid`: the open,
+    /// the list, or the activation. The records reach the client through the answer;
+    /// the reply carries the rows to store.
+    Premium {
+        /// The VID of the character whose client sent the record.
+        vid: common::vid::Vid,
+        /// The decoded step.
+        step: crate::game_state::PremiumStep,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the rows the step changed.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_INVENTORY_PROTECTED` for the character online under `vid`: the lock
     /// or the unlock, or the password change. The records reach the client through the
     /// answer; the reply carries the rows to store.
@@ -4067,6 +4080,29 @@ impl GameLoopController {
     /// # Errors
     ///
     /// As [`Self::move_item`].
+    /// Asks the world to run one premium-players step, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn premium(
+        &self,
+        vid: common::vid::Vid,
+        step: crate::game_state::PremiumStep,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Premium {
+            vid,
+            step,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
     /// Asks the world to run one protected-inventory step, and waits for what it did.
     ///
     /// # Errors

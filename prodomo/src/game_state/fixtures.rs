@@ -134,6 +134,7 @@ pub(super) fn points_at(level: u8, stamina: i32, exp: i64) -> Points {
         gaya: 0,
         biologist: [0; 3],
         secured: (0, 999_999),
+        premium: (0, 0),
     });
     let _ = points.compute_points();
     points
@@ -205,6 +206,8 @@ pub(super) fn enter_seeing_with(
         skill_group: 0,
         alignment: 0,
         voice: 0,
+        premium: 0,
+        premium_time: 0,
     };
     let shown = world.place_body(
         Vid::new(vid),

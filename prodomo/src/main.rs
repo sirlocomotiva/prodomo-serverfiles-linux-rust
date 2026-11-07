@@ -112,6 +112,7 @@ use protocol::cg_account::{
     CgEnterGame, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
 };
 use protocol::cg_arg_u8::CgChangeLanguage;
+use protocol::cg_arg_u8::CgPremiumPlayers;
 use protocol::cg_arg_u8::CgRequestEventData;
 use protocol::cg_attack::CgAttack;
 use protocol::cg_biologist::CgBiologist;
@@ -138,14 +139,14 @@ use protocol::cg_inventory::{
     HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
     HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
     HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
-    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_CONFIRM,
-    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
-    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REQUEST_EVENT_DATA,
-    HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH, HEADER_CG_SCRIPT_ANSWER,
-    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP,
-    HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
-    HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
-    HEADER_CG_WHISPER_DETAILS,
+    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS,
+    HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
+    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
+    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
+    HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
+    HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
+    HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
 };
 use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
@@ -1095,6 +1096,10 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
         // the password an `int`.
         held_character.secured = i16::from(points.secured());
         held_character.secured_password = points.secured_password();
+        // The premium rides the points' fields, not the slots: the flag is a `BYTE`,
+        // the timer an `int`.
+        held_character.premium = i16::from(points.premium());
+        held_character.premium_time = points.premium_time();
         held_character.level_step =
             i16::try_from(points.get_point(point_slot::POINT_LEVEL_STEP)).unwrap_or(i16::MAX);
         held_character.stat_reset_count =
@@ -1320,6 +1325,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_DAILY_GIFT.value()
         || header == HEADER_CG_GAYA_SYSTEM.value()
         || header == HEADER_CG_BIOLOGIST.value()
+        || header == HEADER_CG_PREMIUM_PLAYERS.value()
         || header == HEADER_CG_INVENTORY_PROTECTED.value()
         || is_ground_step(header)
         || is_quickslot_step(header)
@@ -1384,6 +1390,8 @@ where
         gaya_system(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_BIOLOGIST.value() {
         biologist(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PREMIUM_PLAYERS.value() {
+        premium_players(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_INVENTORY_PROTECTED.value() {
         protected(session, addr, context, held, frame).await
     } else {
@@ -1557,6 +1565,80 @@ where
 /// unknown sub-header is absorbed, as legacy's `default` arm does; a malformed
 /// record closes the connection. The world sends the records; the lock rides
 /// the held row, synced below.
+/// `CG_PREMIUM_PLAYERS` (176) in the game phase:
+/// `CInputMain::RecvPremiumPlayersPacket` (`G/input_main.cpp:5370-5386`). An unknown
+/// sub-header is consumed and ignored, as legacy's `default` arm does; a malformed
+/// record closes the connection. The open and the list are answered here: the window
+/// opener, and one record per flagged name, highest level first. The activation runs
+/// on the game thread and lands through [`finish_item_step`].
+async fn premium_players<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgPremiumPlayers::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed PREMIUM_PLAYERS; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "PREMIUM_PLAYERS without a character in the world; ignoring");
+        return true;
+    };
+    if record.by_sub_header == prodomo::game_state::PREMIUM_OPEN {
+        let mut out = Vec::new();
+        protocol::gc_nested::GcPremiumPlayers {
+            header: protocol::gc_nested::GcPremiumPlayers::header(),
+            sub_header: prodomo::game_state::PREMIUM_GC_OPEN,
+            pos: 0,
+            name: [0u8; 25],
+        }
+        .encode_into(&mut out);
+        return send_all(session, &[out]).await.is_ok();
+    }
+    if record.by_sub_header == prodomo::game_state::PREMIUM_LIST {
+        let names = match db::players::premium_names(&context.store).await {
+            Ok(names) => names,
+            Err(error) => {
+                warn!(%addr, %error, "The premium list could not be read; closing");
+                return false;
+            }
+        };
+        let mut out = Vec::with_capacity(names.len());
+        for (at, name) in names.iter().enumerate() {
+            let mut field = [0u8; 25];
+            let end = name.len().min(25);
+            field[..end].copy_from_slice(&name[..end]);
+            let mut record = Vec::new();
+            protocol::gc_nested::GcPremiumPlayers {
+                header: protocol::gc_nested::GcPremiumPlayers::header(),
+                sub_header: prodomo::game_state::PREMIUM_GC_LIST,
+                pos: u8::try_from(at + 1).unwrap_or(u8::MAX),
+                name: field,
+            }
+            .encode_into(&mut record);
+            out.push(record);
+        }
+        return send_all(session, &out).await.is_ok();
+    }
+    if record.by_sub_header != prodomo::game_state::PREMIUM_ACTIVATE {
+        return true;
+    }
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .premium(vid, prodomo::game_state::PremiumStep::Activate, actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
 async fn protected<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -2112,6 +2194,8 @@ fn item_actor(held: &Held) -> Mover {
         alignment: 0,
         // The world sets it from the character's guild, as the PK mode.
         view_guild: (0, 0),
+        // The world sets it from the character's points, as the PK mode.
+        premium: (0, 0),
     }
 }
 
@@ -15059,6 +15143,8 @@ mod tests {
             biologist_completed: 0,
             secured: 0,
             secured_password: 999_999,
+            premium: 0,
+            premium_time: 0,
             conqueror_exp: 0,
             conqueror_level_step: 0,
             conqueror_point: 0,

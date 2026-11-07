@@ -1634,6 +1634,7 @@ fn game_len(header: u8) -> usize {
         GC_FISHING => FISHING_LEN,
         GC_FISH_EVENT_INFO => FISH_EVENT_INFO_LEN,
         GC_BIOLOGIST => BIOLOGIST_LEN,
+        GC_PREMIUM_PLAYERS => PREMIUM_LEN,
         GC_DAILY_GIFT => DAILY_GIFT_LEN,
         GC_DIG_MOTION => DIG_MOTION_LEN,
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
@@ -41777,5 +41778,166 @@ fn a_lock_is_mistyped_set_used_changed_and_lifted() {
     wait_for(
         &database,
         "(SELECT secured = 0 AND secured_password = 123456 FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// `HEADER_CG_PREMIUM_PLAYERS` (176).
+const CG_PREMIUM_PLAYERS: u8 = 176;
+/// `HEADER_GC_PREMIUM_PLAYERS` (141).
+const GC_PREMIUM_PLAYERS: u8 = 141;
+/// `TPacketGCPremiumPlayers`: header, sub-header, pos and a 25-byte name.
+const PREMIUM_LEN: usize = 28;
+
+/// A `CG_PREMIUM_PLAYERS`: the header and the sub-header.
+fn client_premium(sub: u8) -> Vec<u8> {
+    vec![CG_PREMIUM_PLAYERS, sub]
+}
+
+/// One `GC_PREMIUM_PLAYERS` row: the sub-header, the pos and the name.
+fn premium_row(sub: u8, pos: u8, name: &[u8]) -> Vec<u8> {
+    let mut row = vec![GC_PREMIUM_PLAYERS, sub, pos];
+    row.extend_from_slice(name);
+    row.resize(PREMIUM_LEN, 0);
+    row
+}
+
+/// The window and the refused activation: the open answers its opener, the list names
+/// the flagged highest level first, a strange sub-header is silent, and one voucher
+/// is not two.
+fn premium_opens_lists_and_refuses(keyed: &mut Keyed) {
+    keyed.send_record(&client_premium(0));
+    assert_eq!(
+        keyed.read_game(),
+        premium_row(0, 0, b""),
+        "the open answers its opener"
+    );
+    keyed.still("the open ends");
+    keyed.send_record(&client_premium(1));
+    assert_eq!(
+        keyed.read_game(),
+        premium_row(1, 1, b"Yankee"),
+        "the list leads with level 50"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        premium_row(1, 2, b"Beta"),
+        "the list ends with level 1"
+    );
+    keyed.still("the list ends");
+    keyed.send_record(&client_premium(9));
+    keyed.still("a strange sub-header is silent");
+    keyed.send_record(&client_premium(2));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"Ai nevoie de MD Voucher (500) pentru a putea activa statusul de Premium"),
+        "one voucher is not two"
+    );
+    keyed.still("the refusal ends");
+}
+
+/// The activation: the notice, the line, the flag in the update and the four affects,
+/// then the already on a second try.
+fn premium_activates(keyed: &mut Keyed) {
+    keyed.send_record(&client_premium(2));
+    // The two spends pack their removes ahead of the notice.
+    for cell in [0, 1] {
+        let gone = keyed.read_game();
+        assert_eq!(gone[0], ITEM_SET, "cell {cell} clears: {gone:02x?}");
+        assert_eq!(gone[2], cell, "cell {cell} clears: {gone:02x?}");
+    }
+    assert_eq!(
+        keyed.read_game(),
+        a_notice_line(b"Jucatorul Alpha si-a activat statusul de Premium."),
+        "the notice follows the spends"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"Statusul tau de Premium a fost activat!"),
+        "the success line"
+    );
+    let update = keyed.read_game();
+    assert_eq!(
+        update[0], GC_CHARACTER_UPDATE,
+        "the flag updates: {update:02x?}"
+    );
+    assert_eq!(update[49], 1, "the flag sets: {update:02x?}");
+    let read = read_affect_moves(keyed, GC_AFFECT_ADD, 4);
+    let (added, _) = affect_moves(&read);
+    assert_eq!(
+        added,
+        vec![
+            (549, 6, 2000),
+            (550, 53, 15),
+            (551, 147, 10),
+            (552, 146, 10)
+        ],
+        "the four affects lay in order"
+    );
+    keyed.still("the activation ends");
+    keyed.send_record(&client_premium(2));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"PREMIUM_YOU_ALREADY_HAVE_PREMIUM_ON_THIS_CHARACTER"),
+        "a second try hears the already"
+    );
+    keyed.still("the already ends");
+}
+
+/// `sys.custom.premium`: Alpha opens the window, reads the list, is refused with one
+/// voucher, activates with two, hears the already, and banks the flag with its timer.
+#[test]
+fn a_premium_opens_lists_activates_and_banks() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', \
+         1, 50, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET premium = 1, premium_time = 1900000000 WHERE name IN ('Yankee', \
+         'Beta')",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 40, id, 1, 0, \
+         1, 80015 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    premium_opens_lists_and_refuses(&mut keyed);
+    drop(keyed);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 41, id, 1, 1, \
+         1, 80015 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    premium_activates(&mut keyed);
+    drop(keyed);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT premium = 1 AND premium_time > 1796000000 FROM player WHERE name = 'Alpha')",
     );
 }

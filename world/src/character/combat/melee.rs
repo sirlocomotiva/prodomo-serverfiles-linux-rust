@@ -1569,6 +1569,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         })
     }
 
@@ -1916,6 +1917,7 @@ mod tests {
                     gaya: 0,
                     biologist: [0; 3],
                     secured: (0, 999_999),
+                    premium: (0, 0),
                 });
                 let expected = if usize::from(race % 4) == job {
                     750
@@ -1960,6 +1962,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         });
         // Map 373 asks for 15 strength; 10 halves the 322.
         let mut dice = Script::new(&[0]);

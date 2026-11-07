@@ -197,6 +197,18 @@ pub const AFFECT_PREMIUM_START: u32 = 500;
 /// `AFFECT_PREMIUM_END` (`G/affect.h:71`): the last premium affect.
 pub const AFFECT_PREMIUM_END: u32 = 509;
 
+/// `AFFECT_PREMIUM_PLAYERS_01` (`G/affect.h:150`): the premium-players max-HP affect.
+pub const AFFECT_PREMIUM_PLAYERS_01: u32 = 549;
+
+/// `AFFECT_PREMIUM_PLAYERS_02` (`G/affect.h:151`): the premium-players monster-bonus affect.
+pub const AFFECT_PREMIUM_PLAYERS_02: u32 = 550;
+
+/// `AFFECT_PREMIUM_PLAYERS_03` (`G/affect.h:152`): the premium-players boss-bonus affect.
+pub const AFFECT_PREMIUM_PLAYERS_03: u32 = 551;
+
+/// `AFFECT_PREMIUM_PLAYERS_04` (`G/affect.h:153`): the premium-players metin-bonus affect.
+pub const AFFECT_PREMIUM_PLAYERS_04: u32 = 552;
+
 /// `AFFECT_HAIR` (`G/affect.h:78`): the hair affect `affect.add_hair` grants and
 /// `/hair` reads.
 pub const AFFECT_HAIR: u32 = 514;
@@ -721,6 +733,10 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
             u8::try_from(character.secured).unwrap_or(0),
             character.secured_password,
         ),
+        premium: (
+            u8::try_from(character.premium).unwrap_or(0),
+            character.premium_time,
+        ),
     });
     points.set_conqueror_progress(
         i32::from(character.conqueror_level_step),
@@ -908,6 +924,10 @@ pub struct PcCard {
     pub alignment: i32,
     /// `POINT_VOICE`, which a mid-game points record carries.
     pub voice: u8,
+    /// `m_byPremium` (`G/char.h:2590`), which the ADD and the UPDATE send.
+    pub premium: u8,
+    /// `m_iPremiumTime` (`G/char.h:2591`), which the ADD and the UPDATE send.
+    pub premium_time: i32,
 }
 
 impl PcCard {
@@ -926,6 +946,8 @@ impl PcCard {
             skill_group: character.skill_group,
             alignment: character.alignment,
             voice: character.voice,
+            premium: u8::try_from(character.premium).unwrap_or(0),
+            premium_time: character.premium_time,
         }
     }
 }
@@ -1065,8 +1087,8 @@ pub fn character_additional(
         state.mount_vnum(),
         0,
         guild.1,
-        0,
-        0,
+        card.premium,
+        card.premium_time,
         card.language,
     )
 }
@@ -1546,6 +1568,8 @@ mod tests {
             biologist_completed: 0,
             secured: 0,
             secured_password: 999_999,
+            premium: 0,
+            premium_time: 0,
             conqueror_exp: 0x00fe_dcba,
             conqueror_level_step: 0,
             conqueror_point: 0,
@@ -1997,9 +2021,7 @@ mod tests {
             999_999,
             "the lock's password is the row's own"
         );
-        for kind in [point::POINT_INVEN] {
-            assert_eq!(slots[kind], 0, "point slot {kind}");
-        }
+        assert_eq!(slots[point::POINT_INVEN], 0, "the inven slot stays zero");
     }
 
     /// The maxima are the engine's, from the assassin row: 650 + 13 x 40 hit points,
@@ -2688,6 +2710,8 @@ mod tests {
             skill_group: 0,
             alignment: 0,
             voice: 0,
+            premium: 0,
+            premium_time: 0,
         };
         let at = InsertAt {
             angle: 90.0,

@@ -80,6 +80,10 @@ pub struct Mover {
     /// a plain member, 0 with no guild. The descriptor does not hold them: the world sets
     /// them from the character's guild before an item step runs.
     pub view_guild: (u32, u8),
+    /// `m_byPremium` and `m_iPremiumTime`, which `UpdatePacket` sends
+    /// (`G/char.cpp:1317-1318`). The descriptor does not hold them: the world sets them
+    /// from the character's points before an item step runs.
+    pub premium: (u8, i32),
 }
 
 impl Mover {
@@ -319,9 +323,8 @@ impl MovedItems {
 /// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left, with the
 /// mover's PK mode (`:1315`), alignment (`:1320`), and the descriptor's language (`:1321`).
 ///
-/// The premium comes from a system this build does not have, and is 0. The mount rides
-/// in the look. The guild, the affect words and the dead bit of the state flags come
-/// from the mover.
+/// The mount rides in the look. The guild, the affect words, the dead bit of the state
+/// flags and the premium come from the mover.
 pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> GcCharacterUpdate {
     GcCharacterUpdate {
         dw_vid: vid,
@@ -338,8 +341,8 @@ pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> 
         dw_mount_vnum: look.mount_vnum,
         b_refine_element_type: look.refine_element_type,
         dw_new_is_guild_name: mover.view_guild.1,
-        by_premium: 0,
-        i_premium_time: 0,
+        by_premium: mover.premium.0,
+        i_premium_time: mover.premium.1,
         b_language: mover.language,
     }
 }
@@ -759,6 +762,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 7, done.clone(), actor, &owners(), &strings);
@@ -812,6 +816,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 0x0102_0304, done, actor, &owners(), &strings);
@@ -849,6 +854,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 7, done, actor, &owners(), &strings);
@@ -905,6 +911,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 0x0102_0304, done, actor, &owners(), &strings);

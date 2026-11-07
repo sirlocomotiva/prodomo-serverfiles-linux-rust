@@ -478,6 +478,7 @@ impl GameState {
             dead: self.is_dead(vid.raw()),
             alignment: i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX),
             view_guild: self.view_guild_of_vid(vid.raw()),
+            premium: self.premium_of(vid.raw()),
         })
     }
 
@@ -1544,6 +1545,8 @@ mod tests {
                 skill_group: 0,
                 alignment: 0,
                 voice: 0,
+                premium: 0,
+                premium_time: 0,
             };
             let place = EnterPlace {
                 channel: PLACE.0,
@@ -1716,6 +1719,7 @@ mod tests {
             dead: false,
             alignment: 0,
             view_guild: (0, 0),
+            premium: (0, 0),
         }
     }
 

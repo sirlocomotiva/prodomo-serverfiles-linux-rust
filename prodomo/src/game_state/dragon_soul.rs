@@ -164,6 +164,7 @@ impl GameState {
                 dead: false,
                 alignment: 0,
                 view_guild: (0, 0),
+                premium: (0, 0),
             };
             let mut step =
                 MovedItems::new(owner, vid.raw(), done, silent, &self.protos, &self.locale);

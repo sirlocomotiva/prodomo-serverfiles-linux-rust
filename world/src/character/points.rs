@@ -321,6 +321,9 @@ pub struct PointsRow {
     /// The locked state and its password (`G/char.cpp:2439-2440`): `BYTE` and `int`
     /// from the player row, `0` and `999999` on a fresh character.
     pub secured: (u8, i32),
+    /// The premium-players flag and its timer (`G/char.cpp:1548-1549`): `BYTE` and
+    /// `long` from the player row, both 0 on a fresh character.
+    pub premium: (u8, i32),
 }
 
 /// The four sungma slots, in the order of [`PointsRow::sungma`].
@@ -564,6 +567,10 @@ pub struct Points {
     secured: u8,
     /// The lock's password (`m_points.secured_password`).
     secured_password: i32,
+    /// The premium-players flag (`m_byPremium`, `G/char.h:2590`): 1 while it runs.
+    premium: u8,
+    /// The `time(0)` the premium ends at (`m_iPremiumTime`, `G/char.h:2591`).
+    premium_time: i32,
     immune_flag: u32,
     map_will: SungmaWill,
     armour: i32,
@@ -655,6 +662,8 @@ impl Points {
             bio_completed: row.biologist[2],
             secured: row.secured.0,
             secured_password: row.secured.1,
+            premium: row.premium.0,
+            premium_time: row.premium.1,
             immune_flag: 0,
             map_will: sungma_will(row.map_index),
             armour: 0,
@@ -1374,6 +1383,35 @@ impl Points {
     #[must_use]
     pub const fn is_secured(&self) -> bool {
         self.secured > 0
+    }
+
+    /// `GetPremiumPlayer`: the premium-players flag, 1 while it runs.
+    #[must_use]
+    pub const fn premium(&self) -> u8 {
+        self.premium
+    }
+
+    /// `GetPremiumPlayerTimer`: the `time(0)` the premium ends at.
+    #[must_use]
+    pub const fn premium_time(&self) -> i32 {
+        self.premium_time
+    }
+
+    /// `IsPremiumPlayer`: the flag is 1 while premium runs (`G/char.h:2579`).
+    #[must_use]
+    pub const fn is_premium_player(&self) -> bool {
+        self.premium == 1
+    }
+
+    /// `SetPremiumPlayer`, with the character-update send an activation does
+    /// (`G/char.cpp:11597`).
+    pub const fn set_premium(&mut self, value: u8) {
+        self.premium = value;
+    }
+
+    /// `SetPremiumPlayerTimer`: `time(0)` plus the seconds (`G/char.cpp:11591`).
+    pub const fn set_premium_timer(&mut self, ends_at: i32) {
+        self.premium_time = ends_at;
     }
     /// `SetSecuredState`, with the slot the points record sends.
     const fn set_secured(&mut self, value: u8) {
@@ -2369,6 +2407,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         }
     }
 

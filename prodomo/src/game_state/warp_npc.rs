@@ -390,6 +390,7 @@ impl GameState {
                         dead: false,
                         alignment: self.alignment_of(raw),
                         view_guild: self.view_guild_of_vid(raw),
+                        premium: self.premium_of(raw),
                     };
                     if let Some(line) = self.is_hack(vid, mover) {
                         let _sent = self.write_to_client(vid, line);

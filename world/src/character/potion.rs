@@ -330,6 +330,7 @@ mod tests {
             gaya: 0,
             biologist: [0; 3],
             secured: (0, 999_999),
+            premium: (0, 0),
         });
         let _ = points.compute_points();
         for kind in [point::POINT_HP, point::POINT_SP] {

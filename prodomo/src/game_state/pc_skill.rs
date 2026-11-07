@@ -4705,6 +4705,8 @@ mod tests {
             skill_group: 0,
             alignment: 0,
             voice: 0,
+            premium: 0,
+            premium_time: 0,
         };
         world.place_body(
             Vid::new(1),

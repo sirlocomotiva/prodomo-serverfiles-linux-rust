@@ -729,6 +729,8 @@ fn whole_save() -> PlayerSave {
         biologist_completed: 1,
         secured: 1,
         secured_password: 123_456,
+        premium: 1,
+        premium_time: 1_700_000_000,
         horse: db::players::PlayerHorse {
             level: 23,
             riding: true,
@@ -833,6 +835,14 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         read.secured_password, save.secured_password,
         "the lock's password rides with the save"
     );
+    assert_eq!(
+        read.premium, save.premium,
+        "the premium rides with the save"
+    );
+    assert_eq!(
+        read.premium_time, save.premium_time,
+        "the premium timer rides with the save"
+    );
     assert_eq!(read.horse, save.horse, "the horse rides with the save");
 }
 
@@ -895,6 +905,8 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         biologist_completed: 0,
         secured: 0,
         secured_password: 999_999,
+        premium: 0,
+        premium_time: 0,
         horse: db::players::PlayerHorse::default(),
     };
     // Bob's account naming Alice's character is a miss, not a write.
@@ -1010,4 +1022,31 @@ async fn the_identity_store_writes_race_and_group_by_row() {
     let read = load_character(store, alice, hero).await.unwrap();
     assert_eq!((read.job, read.skill_group), (6, 2));
     assert!(!store_identity(store, hero + 1000, 0, 0).await.unwrap());
+}
+
+/// The premium list names the flagged players, highest level first, at most a hundred
+/// (`PremiumPlayersListPacket`, `G/char.cpp:11458-11476`).
+#[tokio::test]
+async fn the_premium_list_names_the_flagged_highest_first() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    created(store, alice, 0, "Low").await;
+    created(store, alice, 1, "High").await;
+    created(store, bob, 0, "Plain").await;
+    sqlx::query("UPDATE player SET premium = 1, level = 10 WHERE name = 'Low'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE player SET premium = 1, level = 50 WHERE name = 'High'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        db::players::premium_names(store).await.unwrap(),
+        [b"High".to_vec(), b"Low".to_vec()]
+    );
 }

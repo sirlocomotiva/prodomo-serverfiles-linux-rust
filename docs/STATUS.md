@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 446 (the protected inventory).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 447
+Last reviewed: 2026-11-07, after ledger section 447 (the premium players).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 448
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -463,7 +463,8 @@ rewards, and the save round-trip; and every creation stamps the `SIGVnum`, a wor
 or ring appends its attr rows and answers its effect path, and a stamped quest item runs
 its group's `sig_use`. Since 446 the protected inventory is `ported`: the lock and the
 unlock, the password change, the twenty gates, the kick's auto-lock and the save
-round-trip. The
+round-trip. Since 447 the premium players are `ported`: the window, the list, the
+activation, the minute sweep and the save round-trip. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1442,6 +1443,9 @@ owner should know about (178.5):
 - The password change checks the digits of the two first bytes, not the two passwords
   (`has_only_digits(strFindFirstForNow)` at `G/char.cpp:11941`, where the activate passes
   the whole password at `:11878`). The Rewrite checks the wholes (ledger 446).
+- The premium activation creates the voucher item to read its name and leaks it
+  (`ITEM_MANAGER::instance().CreateItem(itemVnum)` at `G/char.cpp:11542` with no
+  destroy). The Rewrite reads the proto's locale name instead (ledger 447).
 
 ## Environment
 
