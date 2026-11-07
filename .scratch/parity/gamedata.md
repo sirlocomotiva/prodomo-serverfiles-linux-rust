@@ -27,7 +27,7 @@ byte-exact and a scenario exercises the system that uses it.
 | `data.item.stack_attribute` | `locale/europe/item_stack_attribute.txt` | `G/item_stack_attribute.cpp` | `sys.item.stack_attribute` | missing | | |
 | `data.item.blend` | `locale/europe/blend.json` | `G/blend_item.cpp` | `sys.item.blend` | missing | | |
 | `data.skill.power` | `locale/europe/skill_power.txt` | `G/skill_power.cpp` | `sys.skill.core` | missing | | |
-| `data.cube` | `locale/europe/cube.txt` | `G/cuberenewal.cpp` | `sys.custom.cube` | missing | | |
+| `data.cube` | `locale/europe/cube.txt` | `G/cuberenewal.cpp` | `sys.custom.cube` | ported | `a_cube_opens_crafts_and_closes` | Ledger 448: `gamedata::cube` reads `cube.txt`. |
 | `data.dragon_soul` | `locale/europe/dragon_soul_table.txt` | `G/dragon_soul_table.cpp` | `sys.custom.dragon_soul` | missing | | |
 | `data.fishing` | `locale/europe/fishing.txt` | `G/fishing.cpp` | `sys.life.fishing` | ported | `a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses` | Ledger 356: `gamedata::fishing` reads the table as `fishing::Initialize` does, for `/fish_simul`. Ledger 389: the bite draws its fish from the map's column (`DetermineFish`) and the take rolls `Compute` and `GetFishLength` on it. |
 | `data.gaya` | `locale/europe/gaya.txt` | `G/char_gaya.cpp` | `sys.custom.gaya` | ported | `a_gaya_craft_spends_and_a_market_opens` | Ledger 444: the roll list and all ten scalars. |

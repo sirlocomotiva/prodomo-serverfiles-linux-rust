@@ -1260,6 +1260,12 @@ impl Manager {
         self.pcs.get(&pid).is_some_and(|pc| pc.running.is_some())
     }
 
+    /// The quest NPC of character `pid` (`m_dwQuestNPCVID`, `G/char.cpp:7615-7618`): the
+    /// NPC the last click named, 0 with none.
+    pub fn npc_vid(&self, pid: u32) -> u32 {
+        self.pcs.get(&pid).map_or(0, |pc| pc.npc_vid)
+    }
+
     /// A quest flag of character `pid`, such as `QUEST.__status`, the state a quest last ran in.
     pub fn quest_flag(&self, pid: u32, name: &[u8]) -> Option<i32> {
         self.pcs.get(&pid)?.flags.get(name).copied()

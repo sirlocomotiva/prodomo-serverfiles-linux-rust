@@ -35,8 +35,11 @@
 //!   or the caller hears `Nu pot relua mob_drop_item.txt.` and the old tables stand (the
 //!   same read-first Divergence). On success the caller hears `mob_drop_item.txt reluat
 //!   cu succes...`.
-//! - `c` runs `Cube_init` over nothing: the cube is not ported (`sys.custom.cube` is
-//!   `missing`), so the arm is silent.
+//! - `c` runs `Cube_init` (`G/cmd_gm.cpp:2716-2719`): the reread `cube.txt` replaces the
+//!   recipes, silently. A file the descriptor could not read keeps the old recipes, as
+//!   legacy's failed `fopen` keeps the emptied proto (legacy destroys first, so a miss
+//!   leaves no recipes at all until the next good reload; the Rewrite reads first and
+//!   keeps the old tables, the same Divergence as the `t` and `m` arms).
 //!
 //! An empty line tells the three (`u`, `p`, `s`) in order. The payload rides the command:
 //! the descriptor reads the files before it sends, so the game thread swaps tables without
@@ -70,6 +73,8 @@ pub struct ReloadRead {
     pub mob: Option<Vec<u8>>,
     /// `drop_item_group.txt`'s bytes, which the `m` arm rereads beside the mob file.
     pub drop_groups: Option<Vec<u8>>,
+    /// `cube.txt`'s bytes, which the `c` arm rereads.
+    pub cube: Option<Vec<u8>>,
 }
 
 impl GameState {
@@ -106,6 +111,7 @@ impl GameState {
             b'f' => self.reload_fishing(read.fishing.as_deref()),
             b't' => self.reload_groups(vid, mover, read.groups.as_deref()),
             b'm' => self.reload_mob(vid, mover, read),
+            b'c' => self.reload_cube(read.cube.as_deref()),
             _ => {}
         }
     }
@@ -213,6 +219,14 @@ impl GameState {
             b"mob_drop_item.txt reluat cu succes...",
             &[],
         );
+    }
+
+    /// The `c` arm: the reread `cube.txt` replaces the recipes, silently. A file the
+    /// descriptor could not read keeps the old recipes.
+    fn reload_cube(&mut self, bytes: Option<&[u8]>) {
+        if let Some(bytes) = bytes {
+            self.cube_recipes = std::sync::Arc::new(gamedata::cube::CubeRecipes::read(bytes));
+        }
     }
 
     /// `SendLog` (`G/cmd_gm.cpp:1491-1514`): a `CHAT_TYPE_NOTICE` line to every character

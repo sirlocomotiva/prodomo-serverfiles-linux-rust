@@ -119,6 +119,7 @@ use protocol::cg_biologist::CgBiologist;
 use protocol::cg_change_look::CgChangeLook;
 use protocol::cg_chat::CgChat;
 use protocol::cg_client_version::CgClientVersion;
+use protocol::cg_cube_renewal::CgCubeRenewal;
 use protocol::cg_daily_gift::CgDailyGift;
 use protocol::cg_exchange::CgExchange;
 use protocol::cg_fish_event::CgFishEvent;
@@ -130,10 +131,10 @@ use protocol::cg_inventory::{
     HEADER_CG_ATTR67_ADD, HEADER_CG_BIOLOGIST, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
     HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
     HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CL, HEADER_CG_CLIENT_VERSION,
-    HEADER_CG_CLIENT_VERSION2, HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
-    HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING,
-    HEADER_CG_GAYA_SYSTEM, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK,
-    HEADER_CG_INVENTORY_PROTECTED, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
+    HEADER_CG_CLIENT_VERSION2, HEADER_CG_CUBE_RENEWAL, HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE,
+    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND,
+    HEADER_CG_FLY_TARGETING, HEADER_CG_GAYA_SYSTEM, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD,
+    HEADER_CG_HACK, HEADER_CG_INVENTORY_PROTECTED, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
     HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
     HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
     HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
@@ -1320,6 +1321,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_ATTR67_ADD.value()
         || header == HEADER_CG_SASH.value()
         || header == HEADER_CG_CL.value()
+        || header == HEADER_CG_CUBE_RENEWAL.value()
         || header == HEADER_CG_FISHING.value()
         || header == HEADER_CG_FISH_EVENT_SEND.value()
         || header == HEADER_CG_DAILY_GIFT.value()
@@ -1341,6 +1343,8 @@ fn is_belongings_step(header: u8) -> bool {
 ///   gate (`:3862`).
 /// - `CG_CL` (233): `CInputMain::ChangeLook` (`G/input_main.cpp:3431-3459`), with no observer
 ///   gate (`:3857-3861`).
+/// - `CG_CUBE_RENEWAL` (220): `CInputMain::CubeRenewalSend` (`G/input_main.cpp:3464-3488`),
+///   with no observer gate (`:3929-3932`).
 /// - `CG_FISHING` (82): `CInputMain::Fishing` (`G/input_main.cpp:3166-3172`).
 /// - `CG_FISH_EVENT_SEND` (219): `CInputMain::FishEvent` (`G/input_main.cpp:1319-1366`),
 ///   which no observer check guards (`:3760-3762`).
@@ -1380,6 +1384,8 @@ where
         sash_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_CL.value() {
         changelook_step(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_CUBE_RENEWAL.value() {
+        cube_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISHING.value() {
         fish(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISH_EVENT_SEND.value() {
@@ -2081,6 +2087,49 @@ where
     let answer = context
         .game
         .changelook(vid, record.subheader, (record.b_pos, at), actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_CUBE_RENEWAL` (220) in the game phase: `CInputMain::CubeRenewalSend`
+/// (`G/input_main.cpp:3464-3488`), with no observer gate (`:3929-3932`). The world's rows
+/// are stored as a move's are.
+///
+/// A malformed record closes the connection; an unknown sub-header is absorbed.
+async fn cube_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgCubeRenewal::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed CUBE_RENEWAL; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "CUBE_RENEWAL without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .cube_renewal(
+            vid,
+            record.subheader,
+            (
+                record.index_item,
+                record.count_item,
+                record.index_item_improve,
+            ),
+            actor,
+        )
         .await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
@@ -9143,6 +9192,8 @@ struct GameData {
     object_protos: Arc<gamedata::object_proto::ObjectProtos>,
     /// The daily-gift weeks, which the game thread holds.
     daily_weeks: Arc<gamedata::daily_gift::DailyGiftWeeks>,
+    /// The cube recipes, which the game thread holds.
+    cube_recipes: Arc<gamedata::cube::CubeRecipes>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -9185,6 +9236,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let lands = load_lands(config)?;
     let object_protos = load_object_protos(config)?;
     let daily_weeks = load_daily_weeks(config)?;
+    let cube_recipes = load_cube_recipes(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -9214,6 +9266,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         lands,
         object_protos,
         daily_weeks,
+        cube_recipes,
     };
     Ok((data, quests))
 }
@@ -9468,6 +9521,27 @@ fn load_daily_weeks(
     })?;
     info!(weeks = weeks.len(), "Daily-gift weeks loaded");
     Ok(Arc::new(weeks))
+}
+
+/// Load the cube recipes (`Cube_load` and `Cube_InformationInitialize`,
+/// `G/cuberenewal.cpp:123-315`).
+///
+/// A file that cannot be read stops the server, as for every other Game data file (a
+/// Divergence: legacy goes on without a file it cannot open). The Rewrite needs the
+/// recipes a `/cube open` lists.
+fn load_cube_recipes(config: &ServerConfig) -> Result<Arc<gamedata::cube::CubeRecipes>, String> {
+    let locale_dir = config.locale_dir();
+    let recipes = gamedata::cube::CubeRecipes::load(&locale_dir).map_err(|error| {
+        format!(
+            "Cube recipes are unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(
+        recipes = recipes.by_npc.values().map(Vec::len).sum::<usize>(),
+        "Cube recipes loaded"
+    );
+    Ok(Arc::new(recipes))
 }
 
 /// Load the quest translations (`LocaleService_LoadQuestTranslateFile`,
@@ -9913,6 +9987,7 @@ fn build_world(
         .with_lands(Arc::clone(&data.lands))
         .with_object_protos(Arc::clone(&data.object_protos))
         .with_daily_weeks(Arc::clone(&data.daily_weeks))
+        .with_cube_recipes(Arc::clone(&data.cube_recipes))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)
@@ -11420,6 +11495,7 @@ async fn reload_step(
         groups: std::fs::read(context.locale_dir.join("special_item_group.txt")).ok(),
         mob: std::fs::read(context.locale_dir.join("mob_drop_item.txt")).ok(),
         drop_groups: std::fs::read(context.locale_dir.join("drop_item_group.txt")).ok(),
+        cube: std::fs::read(context.locale_dir.join("cube.txt")).ok(),
     };
     if let Err(error) = context.game.run_reload(vid, rest, read).await {
         warn!(%addr, %error, "The world could not be asked for a reload; closing");

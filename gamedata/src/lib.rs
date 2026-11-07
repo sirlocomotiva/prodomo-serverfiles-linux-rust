@@ -11,6 +11,7 @@
 pub mod banword;
 pub mod belt_inventory;
 pub mod csv_table;
+pub mod cube;
 pub mod daily_gift;
 pub mod dragon_soul_table;
 pub mod drop;

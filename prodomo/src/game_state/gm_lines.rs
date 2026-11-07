@@ -207,6 +207,10 @@ impl GameState {
             GmLine::UserHorseFeed => self.user_horse_feed(vid, mover),
             GmLine::ShowQuiz => self.show_quiz(vid, mover),
             GmLine::GayaSystem => self.run_gaya_command(vid, rest, mover),
+            GmLine::Cube => {
+                self.cube_command(vid, rest);
+                None
+            }
         }
     }
 

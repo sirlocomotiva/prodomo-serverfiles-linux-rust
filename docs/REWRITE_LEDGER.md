@@ -48070,3 +48070,53 @@ test --workspace --doc` clean, `cargo clippy --workspace --all-targets --locked
 --workspace --no-deps --locked --offline` clean, `rustfmt` and `cargo-clippy` are
 the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%`
 database remained. No ADR changed.
+
+## 448. The cube
+
+`sys.custom.cube`, `data.cube`, `cg.game.cube_renewal`, `gc.cube_renewal`, `cmd.cube`
+and the two `sub.CubeRenewalSend.*` rows are `ported`, all behind
+`a_cube_opens_crafts_and_closes`.
+
+`gamedata::cube` reads the file (`Cube_load`, `G/cuberenewal.cpp:123-242`): `strtok`
+on whitespace, the case-insensitive token, the two `str_to_number` words, `#` and
+empty lines skipped. `section` opens, `end` validates (`FN_check_cube_data`: no zero
+NPC, material or reward vnum or count) and files; a recipe with no NPC or not exactly
+one reward is skipped, and the map keys the first NPC vnum
+(`Cube_InformationInitialize`, `:257-315`). A token outside a section is skipped,
+where legacy dereferences the stale pointer (Defect, STATUS). The boot stops without
+the file (Divergence: legacy goes on).
+
+`/cube open` (`do_cube`, `G/cmd_general.cpp:3256-3280`) stands the window on the quest
+NPC the last click named (a new `Manager::npc_vid` getter); anything but `open` is
+silent. `Cube_open` (`:317-359`) is silent without an NPC or on one no recipe names,
+chats `Cannot open crafting window` with a trade, a shop, a safebox, a cube or an aura
+window open (`OFFLINE_SHOP` is undefined, so the `GetPrivShopOwner` arm is compiled
+out), and is silent at distance 1000 or past. The answer is the four sends
+(`SendDateCubeRenewalPackets`, `:519-585`): the clear, one date per recipe in file
+order, the loading, then the open. The date carries the reward, the stackable byte,
+the first five materials, the gold, the percent and the category truncated to 100
+bytes (Divergence: legacy's `memcpy` overflows); `npc_vnum` and `index` ride 0, as
+legacy's unwritten words do (Defect kept).
+
+`Cube_Make` (`:368-516`) chats without the window, is silent past the list, and chats
+on short materials or gold with neither spent. The improve cell lends its whole stack
+of 40 or fewer when the sum stays at or under 100, else what 100 leaves below it; the
+lent count leaves before the rolls, even on a failure. Each craft draws
+`number(1, 100)` against the percent plus the lend. The spends land before the grant,
+as legacy's order does; no win chats `Failed`. A win grants
+`CreateItem(reward, count * wins)` as `AutoGiveItemNew` does, and no room chats
+`You don't have enough space in your inventory` with the spends kept. The close
+forgets the window silently, as does a warp or a disconnect.
+
+`/reload c` (`G/cmd_gm.cpp:2716-2719`) swaps the reread file in silently; a file the
+descriptor could not read keeps the old recipes (Divergence, as the `t` and `m` arms).
+`CommandEntry::mid_name`'s tail chain moved into `is_tail_line` for the line lint.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace
+--locked --offline` clean, `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast`: 4955 passed 0 failed in 44 targets, `cargo test --workspace --doc
+--locked --offline` clean, `cargo clippy --workspace --all-targets --locked --offline
+-- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+--locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR
+changed.

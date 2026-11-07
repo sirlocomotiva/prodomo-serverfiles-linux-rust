@@ -178,6 +178,9 @@ impl CommandEntry {
     /// The mid-table lines from the view to the end: split out so
     /// [`CommandEntry::command`] does not trip the line lint.
     fn mid_name(&self) -> Command {
+        if Self::is_tail_line(self.handler) {
+            return Self::tail_name(self.handler);
+        }
         match self.handler {
             "do_view_equip" => Command::ViewEquip,
             "do_warp" => Command::Warp,
@@ -224,7 +227,8 @@ impl CommandEntry {
             | "do_observer"
             | "do_user_horse_feed"
             | "do_oxevent_show_quiz"
-            | "do_gaya_system" => self.gm_tail_name(),
+            | "do_gaya_system"
+            | "do_cube" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -252,30 +256,6 @@ impl CommandEntry {
             "do_stat_reset" => Command::StatReset,
             "do_can_dead" | "do_pkmode" => self.pk_line(),
             "do_set_walk_mode" | "do_set_run_mode" => Self::mode_name(self.handler),
-            "do_all_skill_master"
-            | "do_full_set"
-            | "do_item_full_set"
-            | "do_attr_full_set"
-            | "do_refine_rod"
-            | "do_refine_pick"
-            | "do_max_pick"
-            | "do_use_item"
-            | "do_clear_affect"
-            | "do_dragon_soul"
-            | "do_ds_list"
-            | "do_ds_change_attr"
-            | "do_dice"
-            | "do_gift"
-            | "do_hair"
-            | "do_fishing_simul"
-            | "do_costume"
-            | "do_state"
-            | "do_inventory"
-            | "do_slow"
-            | "do_item_purge"
-            | "do_book"
-            | "do_console"
-            | "do_set" => Self::tail_name(self.handler),
             _ => Command::NotPorted(self.name),
         }
     }
@@ -320,8 +300,40 @@ impl CommandEntry {
             "do_user_horse_feed" => Command::GmLine(GmLine::UserHorseFeed),
             "do_oxevent_show_quiz" => Command::GmLine(GmLine::ShowQuiz),
             "do_gaya_system" => Command::GmLine(GmLine::GayaSystem),
+            "do_cube" => Command::GmLine(GmLine::Cube),
             _ => Command::NotPorted(self.handler),
         }
+    }
+
+    /// Whether `handler` is one of the tail lines after the walk-mode ones.
+    fn is_tail_line(handler: &str) -> bool {
+        matches!(
+            handler,
+            "do_all_skill_master"
+                | "do_full_set"
+                | "do_item_full_set"
+                | "do_attr_full_set"
+                | "do_refine_rod"
+                | "do_refine_pick"
+                | "do_max_pick"
+                | "do_use_item"
+                | "do_clear_affect"
+                | "do_dragon_soul"
+                | "do_ds_list"
+                | "do_ds_change_attr"
+                | "do_dice"
+                | "do_gift"
+                | "do_hair"
+                | "do_fishing_simul"
+                | "do_costume"
+                | "do_state"
+                | "do_inventory"
+                | "do_slow"
+                | "do_item_purge"
+                | "do_book"
+                | "do_console"
+                | "do_set"
+        )
     }
 
     /// The tail lines after the walk-mode ones: split out so [`CommandEntry::command`]

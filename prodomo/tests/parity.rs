@@ -1638,6 +1638,7 @@ fn game_len(header: u8) -> usize {
         GC_DAILY_GIFT => DAILY_GIFT_LEN,
         GC_DIG_MOTION => DIG_MOTION_LEN,
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
+        GC_CUBE_RENEWAL => CUBE_LEN,
         other => panic!("unexpected game header {other}"),
     }
 }
@@ -41940,4 +41941,201 @@ fn a_premium_opens_lists_activates_and_banks() {
         &database,
         "(SELECT premium = 1 AND premium_time > 1796000000 FROM player WHERE name = 'Alpha')",
     );
+}
+
+/// `HEADER_GC_CUBE_RENEWAL` (221): the cube window's answers, 171 bytes.
+const GC_CUBE_RENEWAL: u8 = 221;
+/// The whole cube record: the header, the sub-header, and the 169-byte date.
+const CUBE_LEN: usize = 171;
+/// `HEADER_CG_CUBE_RENEWAL` (220).
+const CG_CUBE_RENEWAL: u8 = 220;
+
+/// One `CG_CUBE_RENEWAL`: the header, the sub-header, and the three words.
+fn client_cube(sub: u8, index: u32, count: u32, improve: u32) -> Vec<u8> {
+    let mut record = vec![CG_CUBE_RENEWAL, sub];
+    record.extend_from_slice(&index.to_le_bytes());
+    record.extend_from_slice(&count.to_le_bytes());
+    record.extend_from_slice(&improve.to_le_bytes());
+    record
+}
+
+/// The cube file the scenario boots with: one 70% recipe on the Alchemist (20001),
+/// fifty 30055 for one 56002, costing 1000 gold.
+const CUBE_SCENARIO: &[u8] = b"section\nnpc\t20001\nitem\t30055\t50\nreward\t56002\t1\ngold\t1000\ncategory\tELEMENT\npercent\t70\nend\n";
+
+/// `sys.custom.cube`, `data.cube`, `cg.game.cube_renewal`, `gc.cube_renewal`,
+/// `cmd.cube` and the two `sub.CubeRenewalSend` arms: Alpha stands beside the Alchemist
+/// with exactly fifty 30055, thirty more to lend, and exactly 1000 gold. A `/cube` line
+/// without `open` is silent; the click names him; `/cube open` answers the four sends
+/// (the clear, the one date, the loading, the open); a second open chats `Cannot open
+/// crafting window`; the make lends the thirty (70 + 30 is exactly 100), spends the
+/// fifty and the gold, and grants one 56002; short materials and an index past the list
+/// answer as legacy does; the close is silent; and a make without the window chats
+/// `To create an item you have to have the crafting window open`.
+/// The cube's seed: the Alchemist's recipe file, Alpha beside him with exactly fifty
+/// 30055, thirty more to lend, and exactly 1000 gold.
+fn cube_seed() -> Option<(ScratchDatabase, Server)> {
+    let database = ScratchDatabase::create()?;
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[("locale/europe/cube.txt", CUBE_SCENARIO)],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 947100 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 1000 WHERE name = 'Alpha'",
+    );
+    for (id, pos, count) in [(40, 0, 40), (41, 1, 10), (42, 2, 30)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, 30055 FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    Some((database, server))
+}
+
+/// The first login: beside the Alchemist, answering the open connection and his VID.
+fn cube_first_login(server: &Server) -> (Keyed, u32) {
+    let (mut alice, _alpha, _items) = load_character(server, b"alice", 0);
+    let alchemist = enter_beside(&mut alice, 20001);
+    read_login_lines(&mut alice, 0, None);
+    let _marks = read_login_letters(&mut alice, true);
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+    (alice, alchemist)
+}
+
+#[test]
+fn a_cube_opens_crafts_and_closes() {
+    let Some((database, server)) = cube_seed() else {
+        return;
+    };
+    let (mut alice, alchemist) = cube_first_login(&server);
+    // Without a click no NPC is named, so the open is silent.
+    alice.send_record(&slash(b"/cube open"));
+    alice.quiet("no quest NPC names anyone yet");
+    alice.send_record(&slash(b"/cube"));
+    alice.quiet("a bare /cube is silent");
+    alice.send_record(&client_click(alchemist));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Schimbare Atributii Piatra Dragon|2;Rafinare Piatra Dragon|3;Inchide]"
+        ),
+        "the click shows his two dragon soul chats and the close"
+    );
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "Inchide ends the chat"
+    );
+    alice.still("nothing follows the menu");
+    alice.send_record(&slash(b"/cube close"));
+    alice.quiet("anything but open is silent");
+    alice.send_record(&slash(b"/cube open"));
+    let clear = alice.read_game();
+    assert_eq!(clear.len(), CUBE_LEN);
+    assert_eq!(&clear[0..2], &[GC_CUBE_RENEWAL, 1], "the clear");
+    let date = alice.read_game();
+    assert_eq!(date.len(), CUBE_LEN);
+    assert_eq!(&date[0..2], &[GC_CUBE_RENEWAL, 2], "the date");
+    assert_eq!(&date[2..6], &[0, 0, 0, 0], "the npc word is never written");
+    assert_eq!(
+        &date[6..10],
+        &[0, 0, 0, 0],
+        "the index word is never written"
+    );
+    assert_eq!(&date[10..14], &56002u32.to_le_bytes(), "the reward");
+    assert_eq!(&date[18], &1, "the reward stacks");
+    assert_eq!(&date[19..23], &30055u32.to_le_bytes(), "the material");
+    assert_eq!(&date[23..27], &50i32.to_le_bytes(), "its count");
+    assert_eq!(&date[27..59], &[0; 32], "no more materials");
+    assert_eq!(&date[59..67], &1000u64.to_le_bytes(), "the gold");
+    assert_eq!(&date[67..71], &70i32.to_le_bytes(), "the percent");
+    assert_eq!(&date[71..78], b"ELEMENT", "the category");
+    let loading = alice.read_game();
+    assert_eq!(&loading[0..2], &[GC_CUBE_RENEWAL, 3], "the loading");
+    let open = alice.read_game();
+    assert_eq!(&open[0..2], &[GC_CUBE_RENEWAL, 0], "the open");
+    alice.still("nothing follows the open");
+    alice.send_record(&slash(b"/cube open"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Cannot open crafting window"),
+        "a second open is refused"
+    );
+    // The lend names cell 2's thirty: 70 + 30 is exactly 100, so the recipe is sure.
+    alice.send_record(&client_cube(4, 0, 1, 2));
+    let mut craft = Vec::new();
+    for _ in 0..4 {
+        craft.push(alice.read_game());
+    }
+    assert_eq!(
+        craft[0][0], ITEM_SET,
+        "the lent cell clears first: {craft:02x?}"
+    );
+    assert_eq!(&craft[0][2..4], &2u16.to_le_bytes(), "its cell");
+    assert_eq!(&craft[0][4..8], &[0, 0, 0, 0], "its vnum is 0");
+    assert_eq!(
+        craft[1][0], ITEM_SET,
+        "the first spent cell clears: {craft:02x?}"
+    );
+    assert_eq!(&craft[1][4..8], &[0, 0, 0, 0], "its vnum is 0");
+    assert_eq!(
+        craft[2][0], ITEM_SET,
+        "the second spent cell clears: {craft:02x?}"
+    );
+    assert_eq!(&craft[2][4..8], &[0, 0, 0, 0], "its vnum is 0");
+    assert_eq!(craft[3][0], ITEM_SET, "the reward is set: {craft:02x?}");
+    assert_eq!(&craft[3][4..8], &56002u32.to_le_bytes(), "its vnum");
+    assert_eq!(&craft[3][2..4], &0u16.to_le_bytes(), "its cell");
+    alice.still("nothing follows the make");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE vnum = 56002 AND count = 1 AND owner_id = \
+         (SELECT id FROM player WHERE name = 'Alpha'))",
+    );
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id IN (40, 41, 42))",
+    );
+    check(
+        &database,
+        "(SELECT gold = 0 FROM player WHERE name = 'Alpha')",
+    );
+    // The make held exactly 50 for 50, so the boundary is pinned; now nothing is
+    // left, and one craft is short.
+    alice.send_record(&client_cube(4, 0, 1, u32::MAX));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You don't have the necessary materials"),
+        "short materials"
+    );
+    // A miss past the list is silent.
+    alice.send_record(&client_cube(4, 1, 1, u32::MAX));
+    alice.quiet("an index past the list is silent");
+    alice.send_record(&client_cube(5, 0, 0, 0));
+    alice.quiet("the close is silent");
+    alice.send_record(&client_cube(4, 0, 1, u32::MAX));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"To create an item you have to have the crafting window open"),
+        "a make without the window"
+    );
+    alice.send_record(&client_cube(9, 0, 0, 0));
+    alice.quiet("an unknown sub-header is absorbed");
+    drop(alice);
+    drop(server);
 }

@@ -69,6 +69,7 @@ mod cards;
 mod changelook;
 mod conqueror;
 mod costume;
+mod cube;
 mod daily_gift;
 mod death;
 mod detail_log;
@@ -723,6 +724,12 @@ pub struct GameState {
     /// `m_pSashMaterials` (`G/char.h:464`), as the held item ids (absent when the window
     /// stands empty or no window stands).
     sash_held: HashMap<common::vid::Vid, [Option<world::item::ItemId>; 2]>,
+    /// The cube window each character has open, keyed by its VID: the NPC VID
+    /// `Cube_open` stood it on (`m_pointsInstant.pCubeNpc`, `G/char.h:463`). Absent
+    /// when no window stands.
+    cubes: HashMap<common::vid::Vid, u32>,
+    /// The cube recipes by their first NPC vnum, which the window and the make read.
+    cube_recipes: std::sync::Arc<gamedata::cube::CubeRecipes>,
     /// The characters whose changelook (Transmutation) window stands:
     /// `m_bChangeLook` (`G/char.cpp:10504-10535`). Absent when no window stands.
     changelook_windows: std::collections::HashSet<common::vid::Vid>,
@@ -959,6 +966,13 @@ impl GameState {
     #[must_use]
     pub fn with_daily_weeks(mut self, weeks: Arc<gamedata::daily_gift::DailyGiftWeeks>) -> Self {
         self.daily_weeks = weeks;
+        self
+    }
+
+    /// Share the cube recipes, which the window and the make read.
+    #[must_use]
+    pub fn with_cube_recipes(mut self, recipes: Arc<gamedata::cube::CubeRecipes>) -> Self {
+        self.cube_recipes = recipes;
         self
     }
 
@@ -2359,6 +2373,7 @@ impl GameState {
             | GameCommand::Attr67 { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
+            | GameCommand::CubeRenewal { .. }
             | GameCommand::GayaSystem { .. }
             | GameCommand::UseItemToItem { .. }
             | GameCommand::GiveItem { .. }
@@ -3370,6 +3385,10 @@ impl GameState {
         // close), and the client rebuilds its windows on the new view.
         self.sash_windows.remove(&vid);
         self.sash_held.remove(&vid);
+        // A warp and a disconnect forget the cube window silently too: no warp or
+        // disconnect path calls `Cube_close`, and the client rebuilds its windows on
+        // the new view.
+        self.cubes.remove(&vid);
         // A warp and a disconnect forget the changelook window silently too: no warp or
         // disconnect path closes it (`Dead` and the CG close are the only calls), and the
         // client rebuilds its windows on the new view.
@@ -4369,9 +4388,9 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
             }
-            command @ (GameCommand::Sash { .. } | GameCommand::Changelook { .. }) => {
-                self.apply_window_step(command);
-            }
+            command @ (GameCommand::Sash { .. }
+            | GameCommand::Changelook { .. }
+            | GameCommand::CubeRenewal { .. }) => self.apply_window_step(command),
             GameCommand::GayaSystem {
                 vid,
                 sub_header,
@@ -4433,7 +4452,7 @@ impl GameState {
     }
 
     /// The window steps of [`GameState::apply_ground`], split out so neither trips the
-    /// line lint: the sash and the changelook.
+    /// line lint: the sash, the changelook and the cube.
     fn apply_window_step(&mut self, command: GameCommand) {
         match command {
             GameCommand::Sash {
@@ -4459,6 +4478,15 @@ impl GameState {
                     reply,
                     self.changelook(vid, sub_header, (pos, at), mover),
                 );
+            }
+            GameCommand::CubeRenewal {
+                vid,
+                sub_header,
+                words,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.cube_renewal(vid, sub_header, words, mover));
             }
             _ => debug_assert!(false, "only window commands reach apply_window_step"),
         }

@@ -556,6 +556,19 @@ pub enum GameCommand {
         /// Where the game thread reports what the changelook step did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_CUBE_RENEWAL` for the character online under `vid`, answered as a move is.
+    CubeRenewal {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The sub-header: make or close.
+        sub_header: u8,
+        /// The recipe index, the craft count, and the improve cell the client named.
+        words: (u32, u32, u32),
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the cube step did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_GAYA_SYSTEM` for the character online under `vid`, answered as a move is.
     GayaSystem {
         /// The VID of the character whose client sent the request.
@@ -2827,6 +2840,8 @@ pub enum GmLine {
     ShowQuiz,
     /// `/w_gaya` (`do_gaya_system`), a player's line.
     GayaSystem,
+    /// `/cube` (`do_cube`), a player's line.
+    Cube,
 }
 
 /// Which restart a dead player asks for.
@@ -4019,6 +4034,31 @@ impl GameLoopController {
             sub_header,
             pos,
             at,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a cube request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn cube_renewal(
+        &self,
+        vid: common::vid::Vid,
+        sub_header: u8,
+        words: (u32, u32, u32),
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CubeRenewal {
+            vid,
+            sub_header,
+            words,
             mover,
             reply,
         })

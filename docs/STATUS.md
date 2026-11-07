@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 447 (the premium players).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 448
+Last reviewed: 2026-11-07, after ledger section 448 (the cube).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 449
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -464,7 +464,8 @@ or ring appends its attr rows and answers its effect path, and a stamped quest i
 its group's `sig_use`. Since 446 the protected inventory is `ported`: the lock and the
 unlock, the password change, the twenty gates, the kick's auto-lock and the save
 round-trip. Since 447 the premium players are `ported`: the window, the list, the
-activation, the minute sweep and the save round-trip. The
+activation, the minute sweep and the save round-trip. Since 448 the cube is `ported`:
+the recipes, `/cube open`, the make and the close, and `/reload c`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -888,6 +889,7 @@ owner should know about (178.5):
 | A sash material cannot be moved onto, and a sash material cannot be given (ledger 442): both refuse silently with `Locked`. | A move buries the held item (no destination check, `G/char_item.cpp:7636-7637`); `GiveItem` runs no `isLocked` check. |
 | The `USE_DETACHMENT` sash clean skips the `ITEM_FLAG_REFINEABLE` check (ledger 442): the flag bit is not ported. | `IS_SET(pkTarget->GetFlag(), ITEM_FLAG_REFINEABLE)` gates the arm (`G/char_item.cpp:1996`). |
 | The Gaya shelf and slot unlocks live in memory per login: the unlocks are kept (ledger 444). | `<Name>_gaya_system.txt` per character (`G/char_gaya.cpp:175-273`); the path is `GetName` unsanitised, and `fopen` failures NULL-deref. |
+| A cube category past 100 bytes is truncated to the wire, and `/reload c` reads before it swaps (ledger 448): a bad or missing file keeps the live recipes, silently. | `memcpy` of the whole string into `char[100]` (`G/cuberenewal.cpp:559`); `Cube_init` destroys the proto first, so a miss leaves no recipes (`G/cmd_gm.cpp:2716-2719`). |
 
 ## Legacy defects not to reproduce
 
@@ -1431,6 +1433,13 @@ owner should know about (178.5):
 - The biologist's open `memcpy`s 64 bytes from a title shorter than 64
   (`G/Biologist.cpp:88`), reading past the literal. The Rewrite pads the title with
   zeroes (ledger 445).
+- `Cube_load` dereferences the open recipe for every token outside a `section`
+  (`G/cuberenewal.cpp:193-229`), so a token before the first `section` or after an
+  `end` writes through a stale or null pointer. The Rewrite skips such a token
+  (ledger 448).
+- `SendDateCubeRenewalPackets` never writes the `npc_vnum` or `index` words
+  (`G/cuberenewal.cpp:532-560`), so every date on the wire carries 0 for both. The
+  Rewrite sends the same zeroes (ledger 448).
 - The biologist's close record leaves `dwLevelLimit` uninitialized
   (`SendBiologistClosePacket`, `G/Biologist.cpp:334-352`, sets every field but it).
   The Rewrite sends 0 (ledger 445).
