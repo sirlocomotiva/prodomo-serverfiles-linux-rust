@@ -46623,3 +46623,48 @@ Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
 in parallel. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
 width was measured. Afterwards no `prodomo\_%` database remained. No ADR
 changed.
+
+## 414. The OX quiz list
+
+`_add_ox_quiz` (`G/questlua_global.cpp:1144-1156`) lands its level, question and answer in the OX
+list (`COXEventManager::AddQuiz`, `G/OXEvent.cpp:175-186`), and `return 1` pushes the level back (the
+function's `ALUA` returns 1 value: the first stack slot, which `lua_tonumber(L, 1)` left holding the
+level). `oxquiz.lua`'s 567 calls all pass level 1 with questions up to 98 bytes, and the only loads
+are `CEventManager::SetOXEvent` (`G/event_manager.cpp:1482-1516`, driven by the scheduled event table
+at `:755-775`, not by a quest) and `oxevent_open` (`G/questlua_oxevent.cpp:66-88`), whose whole
+`oxevent.*` family 401 marked `unused` with no caller.
+
+The bridge (`quiet_api`, `BRIDGED` 288): `(int)` of the first argument is the level (low byte), a
+string-like second is the question (a number formats), the third slot's truth is the answer. Quiet
+with no question: `AddQuiz` would fault on the NULL, and a crash the data can trigger is a Defect.
+`strlcpy(Quiz, question, 256)` keeps 255 bytes and the NUL; the Vec grows one past the level, so a
+level-3 quiz opens the gap at 0 and 2. `/show_quiz` (`G/cmd_oxevent.cpp:11-16`,
+`G/OXEvent.cpp:189-204`) reads the list back through `GmLine::ShowQuiz`: the header, each level,
+question and key (`[LS;858]`/`[LS;869]` passed through for the client to translate, as the Rewrite
+holds no `LC_TEXT` table), the `[LS;880;%d]` count, and the footer.
+
+`npc.get_guild` (`G/questlua_npc.cpp:60-70`) pushes the current NPC's guild ID, 0 with no NPC or no
+guild. Only `CObject::RegenNPC` (`G/building.cpp:269-295`) sets one, from the land's owner, and no
+building stands (`sys.world.objects` missing), so the answer is 0; the bridge (already in
+`game_npc_api` and `BRIDGED`) is now scenario-proven, with a comment at the session's `npc_guild`.
+
+`timer`, `party.show_cinematic` and `party.run_cinematic` are `unused`. The sweep over the 164 files
+under `locale/europe/quest` (but `quest_functions`) and `locale/europe/*.lua`: `pc.setqf` counts 27
+(positive control), a fabricated name counts 0 (negative control), `timer` has no call form (`(`,
+string, `[[`, `{`) and its one bare token is the comment "Refrain from using these inside a timer."
+(`dungeonFunctions.lua:50`), and the cinematics appear only in two commented lines
+(`questlib.lua:35-36`). `timer` bridges `_timer`/`_set_named_timer`, already proven absent from the
+manager in 403's sweep. Owner to confirm.
+
+Scenario `a_quiz_lands_from_a_click_and_show_quiz_lists_it` (8/8 stable): a click lands a level-1
+quiz and says `quiz:1 guild:0`; `/show_quiz` lists it. Units: the bridge's argument rules, the land
+(truncation, gaps). Mutants killed: the answer forced true, the truncation at 200, the key forced
+`[LS;869]`. The `mid_name` split moved the GmLine arms into `gm_tail_name` and the reward pair into
+`reward_name` for the line lint. No width was measured.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline`
+clean; the suite `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 4835 passed
+0 failed in 42 targets; `cargo test --workspace --doc --locked --offline` 1 passed; `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo
+doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin`
+pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

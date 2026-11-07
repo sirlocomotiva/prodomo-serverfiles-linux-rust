@@ -442,6 +442,9 @@ struct WorldMoves {
     temple_prepares: usize,
     /// Every `command` call's line, in order, for the commands after the step.
     quest_commands: Vec<Vec<u8>>,
+    /// Every `add_ox_quiz` call's level, question and answer, in order, for the
+    /// OX list after the step.
+    ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
 }
 
 impl WorldMoves {
@@ -488,6 +491,7 @@ impl WorldMoves {
             temple_prepares: usize::try_from(std::mem::take(&mut session.queues.temple_prepares))
                 .unwrap_or(usize::MAX),
             quest_commands: std::mem::take(&mut session.queues.quest_commands),
+            ox_quizzes: std::mem::take(&mut session.queues.ox_quizzes),
         }
     }
 }
@@ -541,6 +545,9 @@ pub(super) struct SessionQueues {
     /// Every `command` call's line, in order, for the commands after the step
     /// (legacy interprets in the call).
     pub(super) quest_commands: Vec<Vec<u8>>,
+    /// Every `add_ox_quiz` call's level, question and answer, in order, for the
+    /// OX list after the step (legacy lands in the call).
+    pub(super) ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
 }
 
 pub(super) struct Session<'s> {
@@ -2501,7 +2508,11 @@ impl Game for Session<'_> {
             .find(|npc| npc.vid == vid)
             .map(|npc| npc.empire)
     }
-    fn npc_guild(&self, _vid: u32) -> u32 {
+    fn npc_guild(&self, vid: u32) -> u32 {
+        // `npc_get_guild` (`G/questlua_npc.cpp:60-70`): the NPC's guild ID, 0 with no
+        // NPC or no guild. Only a building's NPC holds one (`CObject::RegenNPC`,
+        // `G/building.cpp:269-295`); none stands, so no lookup answers.
+        let _ = vid;
         0
     }
     fn player_id(&self) -> u32 {
@@ -2630,6 +2641,10 @@ impl Game for Session<'_> {
 
     fn quest_command(&mut self, line: Vec<u8>) {
         self.queues.quest_commands.push(line);
+    }
+
+    fn add_ox_quiz(&mut self, level: u8, question: Vec<u8>, answer: bool) {
+        self.queues.ox_quizzes.push((level, question, answer));
     }
 
     fn find_pc_vid(&self, name: &[u8]) -> u32 {
@@ -4053,6 +4068,7 @@ struct ReaderGains {
     notices_all: Vec<super::quest_quiet::NoticeParts>,
     temple_prepares: usize,
     quest_commands: Vec<Vec<u8>>,
+    ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
     exp2: Vec<i64>,
     skill_groups: Vec<u8>,
 }
@@ -4097,6 +4113,7 @@ impl GameState {
             notices_all,
             temple_prepares,
             quest_commands,
+            ox_quizzes,
             exp2,
             skill_groups,
         } = gains;
@@ -4107,6 +4124,7 @@ impl GameState {
             &notices_all,
             temple_prepares,
             &quest_commands,
+            &ox_quizzes,
         );
         for grant in exp2 {
             self.gain_pc_exp(reader, grant);
@@ -4165,6 +4183,7 @@ impl GameState {
             notices_all,
             temple_prepares,
             quest_commands,
+            ox_quizzes,
         } = queued;
         self.apply_reader_gains(
             reader,
@@ -4177,6 +4196,7 @@ impl GameState {
                 notices_all,
                 temple_prepares,
                 quest_commands,
+                ox_quizzes,
                 exp2,
                 skill_groups,
             },

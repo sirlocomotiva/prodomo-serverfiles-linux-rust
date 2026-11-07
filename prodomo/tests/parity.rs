@@ -37358,3 +37358,61 @@ fn a_quiet_probe_broadcasts_runs_a_line_and_moves_its_state() {
     );
     alice.quiet("the second click ends the dialog");
 }
+
+/// Ledger 414's OX probe: the skill teacher (vnum 20300, bound but questless) answers a
+/// click by landing a quiz and saying the pushed level and the NPC's guild.
+const OX_PROBE: &[u8] = b"quest ox_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('quiz:' .. add_ox_quiz(1, 'Steel cuts?', true) .. ' guild:' .. npc.get_guild())\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `lua.add_ox_quiz`, `lua.npc.get_guild`, `cmd.show_quiz`: the click lands the quiz at
+/// level 1 and says `quiz:1 guild:0` (no building stands, so no NPC holds a guild);
+/// `/show_quiz` then lists the header, the quiz's level, question and `[LS;858]` key,
+/// the `[LS;880;1]` count, and the footer.
+#[test]
+fn a_quiz_lands_from_a_click_and_show_quiz_lists_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/ox_probe.lua", OX_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"quiz:1 guild:0[ENTER][DONE]"),
+        "the quiz lands and the NPC holds no guild"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/show_quiz"));
+    for line in [
+        b"===== OX QUIZ LIST =====".as_slice(),
+        b"1 Steel cuts? [LS;858]",
+        b"[LS;880;1]",
+        b"===== OX QUIZ LIST END =====",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(line));
+    }
+    alice.quiet("the list is the line's whole answer");
+}

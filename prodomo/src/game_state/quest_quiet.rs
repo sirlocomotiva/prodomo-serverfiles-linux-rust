@@ -1,5 +1,6 @@
 //! The quest calls whose effects land after the step: `notice_all`, the Ochao
-//! `initialize`, and `command` (`G/questlua_global.cpp:730-741,944-984,1521-1544`).
+//! `initialize`, `command` and `add_ox_quiz`
+//! (`G/questlua_global.cpp:730-741,944-984,1521-1544`).
 //!
 //! `SendLocaleNotice` (`G/cmd_gm.cpp:1252-1313`) speaks to every in-game character: a
 //! non-empty all-digit first part is looked up in the character's own language, `%d`
@@ -16,6 +17,18 @@ use crate::item_move::Mover;
 
 /// The six notice slots legacy snapshots (`MAX_QUEST_NOTICE_ARGS + 1`, `C/length.h:1197`).
 pub(super) type NoticeParts = [Vec<u8>; 6];
+
+/// One `tag_Quiz` (`G/OXEvent.h:4-9`): the level, the question as `strlcpy` keeps it
+/// (255 bytes and the NUL), and the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OxQuiz {
+    /// Its level.
+    pub(super) level: u8,
+    /// Its question, NUL-padded to 256.
+    pub(super) question: [u8; 256],
+    /// Its answer.
+    pub(super) answer: bool,
+}
 
 /// What a snapshot of a missing Lua slot holds: `snprintf("%s", NULL)` on glibc.
 const NULL_SLOT: &[u8] = b"(null)";
@@ -165,8 +178,25 @@ impl GameState {
         }
     }
 
+    /// An `add_ox_quiz` call after the step: the quiz lands in the OX list, as
+    /// `COXEventManager::AddQuiz` lands it (`G/OXEvent.cpp:175-186`).
+    fn land_ox_quiz(&mut self, level: u8, question: &[u8], answer: bool) {
+        let slot = usize::from(level);
+        if self.ox_quiz.len() < slot + 1 {
+            self.ox_quiz.resize_with(slot + 1, Vec::new);
+        }
+        let mut kept = [0u8; 256];
+        let take = question.len().min(255);
+        kept[..take].copy_from_slice(&question[..take]);
+        self.ox_quiz[slot].push(OxQuiz {
+            level,
+            question: kept,
+            answer,
+        });
+    }
+
     /// Run the quiet calls after the step, in call order: the notices, the temple
-    /// re-arms, then the commands.
+    /// re-arms, then the commands, then the OX quizzes.
     pub(super) fn apply_quiet_calls(
         &mut self,
         reader: Vid,
@@ -174,6 +204,7 @@ impl GameState {
         notices: &[NoticeParts],
         prepares: usize,
         commands: &[Vec<u8>],
+        quizzes: &[(u8, Vec<u8>, bool)],
     ) {
         for parts in notices {
             self.broadcast_notice(parts);
@@ -183,6 +214,9 @@ impl GameState {
         }
         for line in commands {
             self.run_quest_command(reader, mover, line);
+        }
+        for (level, question, answer) in quizzes {
+            self.land_ox_quiz(*level, question, *answer);
         }
     }
 }
@@ -294,5 +328,27 @@ mod tests {
     fn text_of(line: &[u8]) -> Vec<u8> {
         assert_eq!(line[0], 4, "HEADER_GC_CHAT");
         line[10..].to_vec()
+    }
+
+    /// A quiz lands at its level with the answer, a 300-byte question keeps 255,
+    /// and a higher level opens the gap between.
+    #[test]
+    fn the_quiz_lands_truncated_at_its_level() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world.land_ox_quiz(1, b"Steel cuts?", true);
+        world.land_ox_quiz(3, &[b'q'; 300], false);
+        assert_eq!(world.ox_quiz.len(), 4);
+        assert!(world.ox_quiz[0].is_empty());
+        assert!(world.ox_quiz[2].is_empty());
+        let quiz = &world.ox_quiz[1][0];
+        assert_eq!(quiz.level, 1);
+        assert!(quiz.answer);
+        assert_eq!(&quiz.question[..11], b"Steel cuts?");
+        assert!(quiz.question[11..].iter().all(|byte| *byte == 0));
+        let long = &world.ox_quiz[3][0];
+        assert!(!long.answer);
+        assert!(long.question[..255].iter().all(|byte| *byte == b'q'));
+        assert_eq!(long.question[255], 0);
     }
 }

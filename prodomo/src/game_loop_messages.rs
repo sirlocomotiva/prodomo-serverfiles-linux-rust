@@ -2698,6 +2698,8 @@ pub enum GmLine {
     Observer,
     /// `/user_horse_feed` (`do_user_horse_feed`), a player's line.
     UserHorseFeed,
+    /// `/show_quiz` (`do_oxevent_show_quiz`).
+    ShowQuiz,
 }
 
 /// Which restart a dead player asks for.

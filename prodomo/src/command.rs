@@ -204,25 +204,26 @@ impl CommandEntry {
             "do_polymorph_item" => Command::Polyitem,
             "do_socket_item" => Command::SocketItem,
             "do_save_attribute_to_image" => Command::SaveAti,
-            "do_get_item_id_list" => Command::GmLine(GmLine::ItemIdList),
-            "do_get_mob_count" => Command::GmLine(GmLine::MobCount),
-            "do_effect" => Command::GmLine(GmLine::Effect),
-            "do_add_socket" => Command::GmLine(GmLine::AddSocket),
-            "do_set_socket" => Command::GmLine(GmLine::SetSocket),
-            "do_change_attr" => Command::GmLine(GmLine::ChangeAttr),
-            "do_add_attr" => Command::GmLine(GmLine::AddAttr),
-            "do_change_rare_attr" => Command::GmLine(GmLine::ChangeRareAttr),
-            "do_add_rare_attr" => Command::GmLine(GmLine::AddRareAttr),
-            "do_force_logout" => Command::GmLine(GmLine::ForceLogout),
-            "do_reset_subskill" => Command::GmLine(GmLine::ResetSubSkill),
-            "do_conqueror_level" => Command::GmLine(GmLine::ConquerorLevel),
-            "do_conqueror_point" => Command::GmLine(GmLine::ConquerorPoint),
-            "do_sort_inventory" => Command::GmLine(GmLine::SortInventory),
-            "do_pickup_affect" => Command::GmLine(GmLine::PickupAffect),
-            "do_move_channel" => Command::GmLine(GmLine::MoveChannel),
-            "do_flush" => Command::GmLine(GmLine::Flush),
-            "do_observer" => Command::GmLine(GmLine::Observer),
-            "do_user_horse_feed" => Command::GmLine(GmLine::UserHorseFeed),
+            "do_get_item_id_list"
+            | "do_get_mob_count"
+            | "do_effect"
+            | "do_add_socket"
+            | "do_set_socket"
+            | "do_change_attr"
+            | "do_add_attr"
+            | "do_change_rare_attr"
+            | "do_add_rare_attr"
+            | "do_force_logout"
+            | "do_reset_subskill"
+            | "do_conqueror_level"
+            | "do_conqueror_point"
+            | "do_sort_inventory"
+            | "do_pickup_affect"
+            | "do_move_channel"
+            | "do_flush"
+            | "do_observer"
+            | "do_user_horse_feed"
+            | "do_oxevent_show_quiz" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -243,8 +244,7 @@ impl CommandEntry {
             "do_event_flag" => Command::EventFlag,
             "do_get_event_flag" => Command::GetEventFlag,
             "do_xmas" | "do_eclipse" | "do_event_helper" => self.event_name(),
-            "give_reward" => Command::GiveReward,
-            "letters_open" => Command::LettersOpen,
+            "give_reward" | "letters_open" => self.reward_name(),
             "do_stat" => Command::Stat,
             "do_stat_minus" => Command::StatMinus,
             "do_stat_val" => Command::StatVal,
@@ -279,6 +279,41 @@ impl CommandEntry {
             _ => Command::NotPorted(self.name),
         }
     }
+    /// The reward and letter openers: split out so `mid_name` stays under the line lint.
+    fn reward_name(&self) -> Command {
+        match self.handler {
+            "give_reward" => Command::GiveReward,
+            _ => Command::LettersOpen,
+        }
+    }
+
+    /// The tail GM lines: split out so `mid_name` stays under the line lint.
+    fn gm_tail_name(&self) -> Command {
+        match self.handler {
+            "do_get_item_id_list" => Command::GmLine(GmLine::ItemIdList),
+            "do_get_mob_count" => Command::GmLine(GmLine::MobCount),
+            "do_effect" => Command::GmLine(GmLine::Effect),
+            "do_add_socket" => Command::GmLine(GmLine::AddSocket),
+            "do_set_socket" => Command::GmLine(GmLine::SetSocket),
+            "do_change_attr" => Command::GmLine(GmLine::ChangeAttr),
+            "do_add_attr" => Command::GmLine(GmLine::AddAttr),
+            "do_change_rare_attr" => Command::GmLine(GmLine::ChangeRareAttr),
+            "do_add_rare_attr" => Command::GmLine(GmLine::AddRareAttr),
+            "do_force_logout" => Command::GmLine(GmLine::ForceLogout),
+            "do_reset_subskill" => Command::GmLine(GmLine::ResetSubSkill),
+            "do_conqueror_level" => Command::GmLine(GmLine::ConquerorLevel),
+            "do_conqueror_point" => Command::GmLine(GmLine::ConquerorPoint),
+            "do_sort_inventory" => Command::GmLine(GmLine::SortInventory),
+            "do_pickup_affect" => Command::GmLine(GmLine::PickupAffect),
+            "do_move_channel" => Command::GmLine(GmLine::MoveChannel),
+            "do_flush" => Command::GmLine(GmLine::Flush),
+            "do_observer" => Command::GmLine(GmLine::Observer),
+            "do_user_horse_feed" => Command::GmLine(GmLine::UserHorseFeed),
+            "do_oxevent_show_quiz" => Command::GmLine(GmLine::ShowQuiz),
+            _ => Command::NotPorted(self.handler),
+        }
+    }
+
     /// The tail lines after the walk-mode ones: split out so [`CommandEntry::command`]
     /// does not trip the line lint.
     fn tail_name(handler: &'static str) -> Command {

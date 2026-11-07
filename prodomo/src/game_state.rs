@@ -507,6 +507,9 @@ pub struct GameState {
     /// The offline mail (`whisper::OfflineMail`): the lines waiting for an absent
     /// target and when each sender last left one.
     offline_mail: whisper::OfflineMail,
+    /// The OX quiz list (`COXEventManager::m_vec_quiz`, `G/OXEvent.h:28`), by level:
+    /// every `add_ox_quiz` call lands here after its step, and `/show_quiz` reads it.
+    ox_quiz: Vec<Vec<quest_quiet::OxQuiz>>,
     /// The block mode of each character (`m_pointsInstant.bBlockMode`, `G/char.h:471`):
     /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist. A
     /// session's own: the leave forgets it.

@@ -525,6 +525,11 @@ pub trait Game {
     /// as the character. The world judges after the step.
     fn quest_command(&mut self, line: Vec<u8>);
 
+    /// `_add_ox_quiz` (`G/questlua_global.cpp:1144-1156`): the quiz `question` at
+    /// `level` with `answer` lands in the OX list (`COXEventManager::AddQuiz`,
+    /// `G/OXEvent.cpp:175-186`). The world judges after the step.
+    fn add_ox_quiz(&mut self, level: u8, question: Vec<u8>, answer: bool);
+
     /// `_find_pc` (`G/questlua_global.cpp:743-757`): the VID of the online PC named `name`,
     /// case-insensitively, and 0 when no PC holds it.
     fn find_pc_vid(&self, name: &[u8]) -> u32;
@@ -5465,12 +5470,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         return Ok(MultiValue::new());
     }
     let result = match name {
-        b"getnpcid" => {
-            let id = host::c_string(lua, last)?
-                .and_then(|name| cx.npc_ids.get(&name).copied())
-                .unwrap_or(0);
-            number(id)
-        }
+        b"getnpcid" => number(npc_id_of(lua, cx, last)?),
         b"number" => Some(Value::Number(f64::from(drawn_number(
             lua, cx, args, first,
         )?))),
@@ -5526,7 +5526,12 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             None
         }
         // The quiet globals (see `quiet_api`).
-        b"LC" | b"notice_all" | b"set_quest_state" | b"command" | b"temple_ochao.initialize" => {
+        b"LC"
+        | b"notice_all"
+        | b"set_quest_state"
+        | b"command"
+        | b"add_ox_quiz"
+        | b"temple_ochao.initialize" => {
             return quiet_api(lua, cx, name, args, first);
         }
         // The quest-log pair (see `quest_log`).
@@ -5542,6 +5547,14 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         }
     };
     Ok(result.into_iter().collect())
+}
+
+/// `getnpcid` (`G/questlua_global.cpp:289-296`): the ID of the NPC the last argument
+/// names, 0 for a non-string or an unknown name.
+fn npc_id_of(lua: &Lua, cx: &Cx<'_>, last: Value) -> mlua::Result<u32> {
+    Ok(host::c_string(lua, last)?
+        .and_then(|name| cx.npc_ids.get(&name).copied())
+        .unwrap_or(0))
 }
 
 /// `get_locale` (`G/locale.cpp:30-56`): the two letters of the language byte.
@@ -5564,9 +5577,9 @@ fn locale_code(language: u8) -> &'static [u8] {
 }
 
 /// The quiet globals: `LC` (`G/questlua_global.cpp:44-54`), `_notice_all`
-/// (`:944-991`), `_set_quest_state` (`:828-862`), `_do_command` (`:730-741`) and
-/// `temple_ochao_initialize` (`G/questlua_TempleOchao.cpp:15-20`). Split out so `api`
-/// stays under the line lint.
+/// (`:944-991`), `_set_quest_state` (`:828-862`), `_do_command` (`:730-741`),
+/// `_add_ox_quiz` (`:1144-1156`) and `temple_ochao_initialize`
+/// (`G/questlua_TempleOchao.cpp:15-20`). Split out so `api` stays under the line lint.
 fn quiet_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
@@ -5620,6 +5633,23 @@ fn quiet_api(
                 cx.game.quest_command(line);
             }
             None
+        }
+        // `_add_ox_quiz` (`G/questlua_global.cpp:1144-1156`): `(int)` of the first
+        // argument is the level (`unsigned char`, so its low byte), a string-like
+        // second is the question (a number formats), and the third's truth is the
+        // answer. The (n+1)th push of `return 1` is the level itself. Quiet with no
+        // question, as `AddQuiz` would fault on the NULL.
+        b"add_ox_quiz" => {
+            let level = u32::from_le_bytes(host::c_int(lua, first)?.to_le_bytes()).to_le_bytes()[0];
+            let question = host::c_string(lua, args.get(1).cloned().unwrap_or(Value::Nil))?;
+            if let Some(question) = question {
+                let answer = !matches!(
+                    args.get(2).cloned().unwrap_or(Value::Nil),
+                    Value::Nil | Value::Boolean(false)
+                );
+                cx.game.add_ox_quiz(level, question, answer);
+            }
+            Some(Value::Number(f64::from(level)))
         }
         // `temple_ochao_initialize`: the temple prepares. Pushes nothing.
         b"temple_ochao.initialize" => {
@@ -5852,6 +5882,8 @@ mod tests {
         temple_prepares: usize,
         /// Every `quest_command` call's line, in order.
         quest_commands: Vec<Vec<u8>>,
+        /// Every `add_ox_quiz` call, in order.
+        ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
         /// The VID `find_pc_vid` answers for each PC name.
         pcs: BTreeMap<Vec<u8>, u32>,
         /// The PID `pid_of` answers for each VID.
@@ -6373,6 +6405,10 @@ mod tests {
 
         fn quest_command(&mut self, line: Vec<u8>) {
             self.quest_commands.push(line);
+        }
+
+        fn add_ox_quiz(&mut self, level: u8, question: Vec<u8>, answer: bool) {
+            self.ox_quizzes.push((level, question, answer));
         }
 
         fn find_pc_vid(&self, name: &[u8]) -> u32 {
@@ -7897,6 +7933,56 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(probe.game.temple_prepares, 1);
+    }
+
+    /// `add_ox_quiz` lands the level, question and answer and pushes the level back;
+    /// a number question formats, a missing one stays quiet, and the third slot's
+    /// truth is the answer.
+    #[test]
+    fn the_ox_quiz_lands_and_pushes_its_level() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let quiz = probe.call(
+            "add_ox_quiz",
+            &[
+                Value::Number(1.0),
+                string(b"Steel cuts?"),
+                Value::Boolean(true),
+            ],
+        );
+        assert!(
+            matches!(quiz.unwrap()[..], [Value::Number(level)] if level.to_bits() == 1.0_f64.to_bits())
+        );
+        assert_eq!(
+            probe.game.ox_quizzes.pop(),
+            Some((1, b"Steel cuts?".to_vec(), true))
+        );
+        let quiz = probe.call(
+            "add_ox_quiz",
+            &[Value::Number(7.0), Value::Number(42.0), Value::Nil],
+        );
+        assert!(
+            matches!(quiz.unwrap()[..], [Value::Number(level)] if level.to_bits() == 7.0_f64.to_bits())
+        );
+        assert_eq!(
+            probe.game.ox_quizzes.pop(),
+            Some((7, b"42".to_vec(), false))
+        );
+        let quiz = probe.call("add_ox_quiz", &[Value::Number(3.0)]);
+        assert!(
+            matches!(quiz.unwrap()[..], [Value::Number(level)] if level.to_bits() == 3.0_f64.to_bits())
+        );
+        assert!(probe.game.ox_quizzes.is_empty());
     }
 
     /// `pc.warp` answers false without two numbers; past them it warps and answers the

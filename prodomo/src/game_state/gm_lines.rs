@@ -199,6 +199,7 @@ impl GameState {
                 None
             }
             GmLine::UserHorseFeed => self.user_horse_feed(vid, mover),
+            GmLine::ShowQuiz => self.show_quiz(vid, mover),
         }
     }
 
@@ -263,6 +264,56 @@ impl GameState {
 
     /// `do_get_item_id_list`: `cell : %d, name : %s, id : %d` for each item in the
     /// inventory and equipment cells, in cell order.
+    /// `/show_quiz` (`do_oxevent_show_quiz`, `G/cmd_oxevent.cpp:11-16`, and
+    /// `COXEventManager::ShowQuizList`, `G/OXEvent.cpp:189-204`): the caller hears the
+    /// header, each quiz's level, question and answer key (`[LS;858]` for true,
+    /// `[LS;869]` for false), and the count (`[LS;880;%d]`), then the footer.
+    fn show_quiz(&self, vid: Vid, mover: Mover) -> Option<GmRows> {
+        self.tell(vid, mover, CHAT_TYPE_INFO, b"===== OX QUIZ LIST =====", &[]);
+        let mut count = 0;
+        for level in &self.ox_quiz {
+            for quiz in level {
+                let end = quiz
+                    .question
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(quiz.question.len());
+                let key = if quiz.answer {
+                    b"[LS;858]".as_slice()
+                } else {
+                    b"[LS;869]".as_slice()
+                };
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    b"%d %s %s",
+                    &[
+                        Arg::Int(i64::from(quiz.level)),
+                        Arg::Text(&quiz.question[..end]),
+                        Arg::Text(key),
+                    ],
+                );
+                count += 1;
+            }
+        }
+        self.tell(
+            vid,
+            mover,
+            CHAT_TYPE_INFO,
+            b"[LS;880;%d]",
+            &[Arg::Int(count)],
+        );
+        self.tell(
+            vid,
+            mover,
+            CHAT_TYPE_INFO,
+            b"===== OX QUIZ LIST END =====",
+            &[],
+        );
+        None
+    }
+
     fn item_id_list(&self, vid: Vid, mover: Mover) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return;
