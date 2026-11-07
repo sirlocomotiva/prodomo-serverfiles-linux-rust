@@ -47010,3 +47010,28 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 424. The skill-hit ticks
+
+`event.char_skill.mob_skill_hit_event` stood `missing` though its tick ran: a destroyed
+owner drops it, else the cast runs at the captured point and the map key is erased
+(`mob_skill_event`). Both halves are pinned (`splash_timing_schedules_and_a_second_cast_cancels_first`
+for the scheduling, `a_destroyed_owner_drops_its_hit_event` for the drop). The row is `ported`.
+
+`event.char_skill.skill_gwihwan_event` is dead. Nothing arms it: the tree-wide sweep for
+`gwihwan`/`GWIHWAN` finds only its own `EVENTINFO`/`EVENTFUNC` and null checks
+(`G/char_skill.cpp:2060-2078`) — no `event_create`, no skill number, no caster. Positive
+control: the same sweep finds the `skill_muyoung_event` and `mob_skill_hit_event` arming
+sites; negative control: a fabricated name finds 0. The row is `unused` (owner question
+40). (`skill_muyoung_event` waits on the self-buff path: skill 78 must land `AFF_MUYEONG`
+first.)
+
+Timed-events: 56 `missing` / 35 `ported` / 5 `partial` / 3 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4875 passed 1 failed in 42 targets — the failure is the known unrelated load flake
+`a_gm_flags_a_stray_dog_aggressive_and_coward`, which passes alone (12.38 s) — `cargo test
+--workspace --doc --locked --offline` clean, `cargo clippy --workspace --all-targets --locked --offline
+-- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `legacy/` clean, `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -392,3 +392,7 @@ owner answers.
     Both names are `unused`: no Lua file calls them (ledger 401, question 37). The rows
     are `unused`; if a future quest needs them, the monster count and the two timers
     are ported then. Waits on it: nothing blocks.
+40. **The gwihwan recall timer (ledger 424).** `skill_gwihwan_event` recalls the
+    caster to its empire's spawn on a level-scaled roll (`G/char_skill.cpp:2072-2113`),
+    but nothing arms it: no skill row casts it, no code creates the event, and the name
+    appears nowhere else in the tree. The row is `unused`. Waits on it: nothing blocks.
