@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 429 (the quest warp timers).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 430
+Last reviewed: 2026-11-07, after ledger section 430 (the spam reload timer).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 431
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -447,7 +447,7 @@ legacy does, not the 120 s ledger 413 had written. Since 422 the poison and fire
 `ported`, each proved by its binary scenario. Since 426 the server quest timer is `ported` and the per-player timer is
 `unused` (owner question 41). Since 427 the war map's begin, timeout, end and flag-reset ticks are
 `ported`. Since 428 the three monarch timers are `unused` (owner question 42). Since 429 the three quest warp timers are
-`unused` (owner question 43). The
+`unused` (owner question 43). Since 430 the spam reload timer is `unused` (owner question 44). The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

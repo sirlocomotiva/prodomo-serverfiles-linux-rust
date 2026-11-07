@@ -47166,3 +47166,23 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 430. The spam reload timer
+
+`event.db.reload_spam_event` is dead: its only `event_create` sits behind `#ifdef
+ENABLE_SPAMDB_REFRESH` (`G/db.cpp:770-775`), and that switch is commented out
+(`G/db.cpp:766`) and defined nowhere in the tree. The initial `LoadSpamDB` query still
+runs once at boot, but the reload event is never created. Positive control: the sweep
+finds the `#ifdef` and its commented `//#define`; negative control: no other file in
+`server/` names the switch. The row is `unused` (owner question 44). The spam block
+itself (`block_chat_by_ip_event`) stays `missing`: it needs the per-IP score store
+(`prodomo/src/chat.rs:421-423` documents the gap).
+
+Timed-events: 40 `missing` / 43 `ported` / 5 `partial` / 11 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4876 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

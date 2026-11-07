@@ -413,3 +413,8 @@ owner answers.
     `warp_all_to_map_my_empire_event` has no arming site at all. The event-manager twin
     `warp_all_to_village_event` is separate and stays: the siege stones arm it. The three
     rows are `unused`. Waits on it: nothing blocks.
+44. **The spam-table reload timer (ledger 430).** `reload_spam_event` re-reads `spam_db`
+    every `spam_block_reload_cycle`, but its only `event_create` sits behind `#ifdef
+    ENABLE_SPAMDB_REFRESH` (`G/db.cpp:770-775`), and that switch is commented out and
+    defined nowhere. The row is `unused`. The spam block itself (`block_chat_by_ip_event`)
+    stays `missing`: it needs the per-IP score store. Waits on it: nothing blocks.
