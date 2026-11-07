@@ -47092,3 +47092,30 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 427. The war-map ticks
+
+Four timed-event rows stood `missing` though each runs with a scenario. No code changed;
+the slice marks all four `ported`.
+
+`event.war_map.war_begin_event` (`G/war_map.cpp:28-41`): the map asks whether the war is
+over (`CheckWarEnd`, `run_war_map_ticks`'s check arm). `a_war_without_a_side_ends_when_the_map_times_out`
+stands a war with no side on the map: a minute after the map was made the map says so.
+`event.war_map.war_timeout_event` (`G/war_map.cpp:70-84`): a minute after the ask, the war
+ends (`run_war_map_ticks`'s timeout arm) — the same scenario's second minute.
+`event.war_map.war_end_event` (`G/war_map.cpp:44-68`): the players go out, and five seconds
+later the map is destroyed — the same scenario runs the exit, and
+`the_wars_end_sends_its_players_back_and_then_the_map_goes` pins the destroy.
+`event.war_map.war_reset_flag_event` (`G/war_map.cpp:913-930`): the flags come back on
+their bases 10 s after the reset (`the_flags_come_back_ten_seconds_after_the_reset`; a
+binary flag-war scenario would stand two full wars, so the world test proves it — owner
+decision, 2026-10-14).
+
+Timed-events: 47 `missing` / 43 `ported` / 5 `partial` / 4 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4876 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

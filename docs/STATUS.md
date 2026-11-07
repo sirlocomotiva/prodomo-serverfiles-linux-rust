@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 426 (the quest timers).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 427
+Last reviewed: 2026-11-07, after ledger section 427 (the war-map ticks).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 428
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -445,7 +445,8 @@ legacy does, not the 120 s ledger 413 had written. Since 422 the poison and fire
 `unused` (owner question 39). Since 424 the mob hit tick is `ported` and the gwihwan timer is
 `unused` (owner question 40). Since 425 the save, ping and disconnect ticks are
 `ported`, each proved by its binary scenario. Since 426 the server quest timer is `ported` and the per-player timer is
-`unused` (owner question 41). The
+`unused` (owner question 41). Since 427 the war map's begin, timeout, end and flag-reset ticks are
+`ported`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
