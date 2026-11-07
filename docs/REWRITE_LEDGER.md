@@ -47266,3 +47266,29 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 434. The campfire
+
+`event.char_item.kill_campfire_event` had no port: the `ITEM_CAMPFIRE` use arm itself was
+unported (`Use(15)`). The slice ports both. `world::character::campfire::use_campfire`
+runs the use checks, then the map-113 bar, the 60 s `kamp.ates` cool
+(`__FIX_CAMPFIRE__`, `C/prodomodefines.h:104-105`), and the `[LS;1217]`/`[LS;1228]`
+grounds; a lit fire spends one. `GameState::use_campfire_item` wires it into `use_item`
+(the bait pattern): the line goes first, the flag stamps, and the campfire (12000)
+stands at the point 100 ahead facing `number(0, 359)`, gone 40 s on (`Due::Campfire`,
+fired beside the vein). The scenario `a_used_campfire_stands_ahead_burns_and_goes_out`
+pins the insert (100 north of [`ALPHA_ENTERS_AT`], a drawn whole heading), the spend,
+the 60 s refusal, and the removal 40 s on; the world test
+`each_campfire_ground_answers_its_own_outcome` pins the six grounds (the lapse at
+exactly 60 included). The suite's one failure was the known unrelated load flake
+`a_gm_flags_a_stray_dog_aggressive_and_coward`, green on rerun. The row is `ported`.
+
+Timed-events: 35 `missing` / 46 `ported` / 5 `partial` / 13 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4881 passed 1 failed in 42 targets (the known flake, green on rerun),
+`cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

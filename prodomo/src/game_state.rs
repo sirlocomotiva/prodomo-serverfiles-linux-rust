@@ -3547,6 +3547,9 @@ impl GameState {
         if self.bait_at(vid, at) {
             return self.use_bait(vid, at, actor);
         }
+        if self.campfire_at(vid, at) {
+            return self.use_campfire_item(vid, at, actor);
+        }
         // The book the read passed, and the slot it climbed, for the store: `None` while
         // the step is no read.
         let mut climbed: Option<(u8, u8, i32)> = None;

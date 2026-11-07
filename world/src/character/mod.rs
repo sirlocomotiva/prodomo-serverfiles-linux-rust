@@ -3,6 +3,7 @@
 mod apply;
 mod auto_give_new;
 mod bait;
+mod campfire;
 mod combat;
 mod death_penalty;
 mod dice;
@@ -45,6 +46,9 @@ pub use apply::{
 };
 pub use auto_give_new::{auto_give_item_new, GivenNew};
 pub use bait::{is_bait, use_bait, Baited, ROD_BAIT_SOCKET, WEAPON_CELL};
+pub use campfire::{
+    is_campfire, use_campfire, CampfireGround, Fired, CAMPFIRE_BARRED_MAP, CAMPFIRE_COOLDOWN_SECS,
+};
 pub use combat::{
     attack_rating, battle_damage_floor, calc_arrow_damage, calc_arrow_skill_atk, calc_melee_damage,
     calc_melee_damage_on_player, calc_melee_skill_atk, damage_magic, damage_melee,

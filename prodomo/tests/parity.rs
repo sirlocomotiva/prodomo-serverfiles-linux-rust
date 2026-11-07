@@ -34161,6 +34161,8 @@ const CG_FISHING: u8 = 0x52;
 const ROD: u32 = 27_400;
 /// The owner's paste bait.
 const BAIT: u32 = 27_800;
+/// The owner's campfire.
+const CAMPFIRE: u32 = 27_600;
 
 /// `CG_FISHING` with the direction `dir`.
 fn client_fishing(dir: u8) -> Vec<u8> {
@@ -38187,4 +38189,85 @@ fn meley_fight_clicks_the_gate(server: &Server) {
         "no take before the win"
     );
     alice.quiet("the reward step ends");
+}
+
+/// Alpha with two campfires in cell 0 (id 51).
+fn campfire_stage(database: &ScratchDatabase) -> Server {
+    let protos = owners_protos();
+    let fire = protos.get(CAMPFIRE).expect("the owner's data has the fire");
+    assert_eq!(
+        fire.item_type,
+        gamedata::item_kind::ITEM_CAMPFIRE,
+        "a campfire"
+    );
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(database);
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 51, id, 1, 0, \
+             2, {CAMPFIRE} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    server
+}
+
+/// `sys.life.fishing`, `event.char_item.kill_campfire_event`: a used campfire stands at the
+/// point 100 ahead (Alpha enters at [`ALPHA_ENTERS_AT`] facing north, so 100 north of it),
+/// facing a drawn whole heading, and one fire is used; a second use within 60 s is refused
+/// with the wait line and changes nothing; 40 s on the fire goes out and its removal
+/// reaches the view.
+#[test]
+fn a_used_campfire_stands_ahead_burns_and_goes_out() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = campfire_stage(&database);
+    let (mut alice, _alpha, _entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let at = (ALPHA_ENTERS_AT.0, ALPHA_ENTERS_AT.1 + 100);
+
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        update_fields(&alice.read_game()),
+        (1, 0, 1),
+        "one fire left"
+    );
+    let insert = alice.read_game();
+    assert_eq!(insert[0], GC_CHARACTER_ADD, "the campfire's insert");
+    assert_eq!(inserted_at(&insert), at, "100 ahead");
+    assert_eq!(
+        u16::from_le_bytes([insert[22], insert[23]]),
+        12_000,
+        "the campfire"
+    );
+    let angle = f32::from_le_bytes(insert[5..9].try_into().expect("four"));
+    assert!(
+        angle.fract() == 0.0 && (0.0..=359.0).contains(&angle),
+        "a drawn whole heading: {angle}"
+    );
+    let vid = u32::from_le_bytes(insert[1..5].try_into().expect("four bytes"));
+    assert_eq!(
+        u32::from_le_bytes(alice.read_game()[1..5].try_into().expect("four bytes")),
+        vid,
+        "the campfire's summary"
+    );
+    wait_for(&database, "(SELECT count FROM item WHERE id = 51) = 1");
+
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Once at 60 seconds you can use the fire"),
+        "the 60 s cool"
+    );
+    alice.quiet("the refused fire changes nothing");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut removal = vec![GC_CHARACTER_DEL];
+    removal.extend_from_slice(&vid.to_le_bytes());
+    assert_eq!(
+        alice.read_game_until(deadline),
+        Some(removal),
+        "40 s on the fire goes out"
+    );
 }

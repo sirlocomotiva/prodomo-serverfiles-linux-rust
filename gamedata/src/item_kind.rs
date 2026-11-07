@@ -37,6 +37,8 @@ pub const ITEM_ROD: i32 = 13;
 pub const FISH_ALIVE: i32 = 0;
 /// `FISH_DEAD`.
 pub const FISH_DEAD: i32 = 1;
+/// `ITEM_CAMPFIRE`, which `CG_ITEM_USE` stands on the ground.
+pub const ITEM_CAMPFIRE: i32 = 15;
 /// `ITEM_UNIQUE`.
 pub const ITEM_UNIQUE: i32 = 16;
 /// `ITEM_SKILLBOOK` (17): a master-training book, read by `LearnSkillByBook`.
@@ -242,6 +244,7 @@ mod tests {
             (ITEM_METIN, "ITEM_METIN"),
             (ITEM_FISH, "ITEM_FISH"),
             (ITEM_ROD, "ITEM_ROD"),
+            (ITEM_CAMPFIRE, "ITEM_CAMPFIRE"),
             (ITEM_UNIQUE, "ITEM_UNIQUE"),
             (ITEM_SKILLBOOK, "ITEM_SKILLBOOK"),
             (ITEM_SKILLFORGET, "ITEM_SKILLFORGET"),

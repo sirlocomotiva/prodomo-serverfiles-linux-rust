@@ -1,6 +1,7 @@
 //! Fishing: `CG_FISHING` (`CInputMain::Fishing`, `G/input_main.cpp:3166-3172`), the fishing
-//! event (`G/fishing.cpp:464-537`), the take (`Take`, `:596-745`) and the bait
-//! (`case USE_BAIT`, `G/char_item.cpp:6800-6825`).
+//! event (`G/fishing.cpp:464-537`), the take (`Take`, `:596-745`), the bait
+//! (`case USE_BAIT`, `G/char_item.cpp:6800-6825`) and the campfire (`case ITEM_CAMPFIRE`,
+//! `:2891-2947`, `kill_campfire_event`, `:2047-2066`).
 //!
 //! A `CG_FISHING` turns the character to `dir * 5` degrees, then runs `CHARACTER::fishing`
 //! (`G/char.cpp:5248-5298`). While the character's fishing event runs the record is the
@@ -46,18 +47,25 @@
 //!   and `fish_info[MAX_FISH]` is then read past the table (`:389-396`, `:502`); the
 //!   Rewrite answers fish `MAX_FISH`, which `Compute` refuses as legacy's does, and a
 //!   `FISH` record of vnum 0.
+//!
+//! A campfire used on map 113 answers `Forbidden` and one within 60 s of the last fire
+//! answers `Once at 60 seconds you can use the fire`; past a missing sectree or a water
+//! cell the lines are `[LS;1217]` and `[LS;1228]`. Else one fire is used up, `kamp.ates`
+//! takes the time, and the campfire (12000) stands at the point 100 units ahead facing a
+//! drawn heading, for 40 s.
 
 use common::vid::Vid;
 use db::items::RowChange;
 use gamedata::fishing::{Fish, FISHING_TIME, MAX_FISH, MAX_PROB};
 use gamedata::item_kind::ITEM_ROD;
-use gamedata::server_attr::ATTR_BLOCK;
+use gamedata::server_attr::{ATTR_BLOCK, ATTR_WATER};
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_vid::{GcFishing, GcFishingSubheader};
 use protocol::item_pos::ItemPos;
 use world::character::{
-    number, set_item_socket, use_bait, AutoGiven, Baited, Dice, MoveDone, MoveKind, MoveRecord,
-    ROD_BAIT_SOCKET, WEAPON_CELL,
+    is_campfire, number, set_item_socket, use_bait, use_campfire, AutoGiven, Baited,
+    CampfireGround, Dice, Fired, MoveDone, MoveKind, MoveRecord, CAMPFIRE_MOB, ROD_BAIT_SOCKET,
+    WEAPON_CELL,
 };
 use world::item::Item;
 
@@ -67,6 +75,8 @@ use crate::chat_line::{chat_packet, Arg};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover, StoreOrder};
 use crate::save::PASSES_PER_SEC;
 
+/// `kill_campfire_event`'s delay (`G/char_item.cpp:2933`): 40 s.
+const CAMPFIRE_LIFETIME: u32 = 40;
 /// `AFFECT_FISH_MIND_PILL` (`G/affect.h:31`): 208, the eighth after `AFFECT_MOV_SPEED` (200).
 const AFFECT_FISH_MIND_PILL: u32 = 208;
 /// `UNIQUE_GROUP_FISH_MIND` (`G/unique_item.h:10`).
@@ -578,6 +588,106 @@ impl GameState {
             .and_then(|character| character.items().item_at(at))
             .and_then(|item| self.protos.get(item.vnum))
             .is_some_and(world::character::is_bait)
+    }
+
+    /// Whether the item at `at` of the character under `vid` is a campfire.
+    pub(super) fn campfire_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .is_some_and(is_campfire)
+    }
+
+    /// `CG_ITEM_USE` of a campfire (`case ITEM_CAMPFIRE`, `G/char_item.cpp:2891-2947`):
+    /// the use checks, then the map, the 60 s cool, the tree and the water, each with
+    /// its line first. A lit fire spends one, stamps `kamp.ates`, and stands the
+    /// campfire at the point 100 ahead facing `number(0, 359)`, for 40 s
+    /// (`kill_campfire_event`, `:2047-2066`).
+    pub(super) fn use_campfire_item(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let Some(place) = self.place_of(vid.raw()) else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let last = self
+            .quests
+            .as_ref()
+            .and_then(|quests| quests.manager().quest_flag(pid, b"kamp.ates"))
+            .map_or(0, |flag| u32::try_from(flag).unwrap_or(0));
+        let now = Self::global_time();
+        let rotation = self.bodies.get(&vid).map_or(0.0, |body| body.rotation);
+        let (fx, fy) = super::mob_ai::delta_by_degree(rotation, 100.0);
+        let point = (
+            spot.x.saturating_add(common::cfloat::f32_to_i32(fx)),
+            spot.y.saturating_add(common::cfloat::f32_to_i32(fy)),
+        );
+        let ground = self
+            .maps
+            .get(&place)
+            .and_then(|index| index.tree_at(point.0, point.1))
+            .map(|_| (point, self.is_attr(place.1, point, ATTR_WATER)));
+        let mut outcome = Fired::NoTree;
+        let mut lit_at: Option<(i32, i32)> = None;
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            let around = CampfireGround {
+                map: place.1,
+                last,
+                now,
+                ground,
+            };
+            use_campfire(items, at, rules, gear, around).map(|(done, fired)| {
+                outcome = fired;
+                if fired == Fired::Lit {
+                    lit_at = ground.map(|(at, _)| at);
+                }
+                done
+            })
+        })?;
+        let line = match outcome {
+            Fired::Barred => Some(b"Forbidden".as_slice()),
+            Fired::Cooling => Some(b"Once at 60 seconds you can use the fire".as_slice()),
+            Fired::NoTree => Some(b"[LS;1217]".as_slice()),
+            Fired::Water => Some(b"[LS;1228]".as_slice()),
+            Fired::Lit => None,
+        };
+        if let Some(text) = line {
+            let to = actor.recipient(&self.locale);
+            moved
+                .records
+                .insert(0, chat_packet(to, CHAT_TYPE_INFO, text, &[]));
+            return Ok(moved);
+        }
+        if let Some(quests) = self.quests.as_mut() {
+            quests.manager_mut().set_quest_flag(
+                pid,
+                b"kamp.ates",
+                i32::try_from(now).unwrap_or(i32::MAX),
+            );
+        }
+        if let Some(at) = lit_at {
+            let dir = number(&mut self.dice, 0, 359);
+            if let Some(stood) = self.spawn_event_mob(place, CAMPFIRE_MOB, at, dir, false) {
+                let when = self
+                    .last_pulse
+                    .saturating_add(super::regen::pulses(CAMPFIRE_LIFETIME));
+                self.regens
+                    .due
+                    .insert((when, super::regen::Due::Campfire(stood)));
+            }
+        }
+        Ok(moved)
     }
 
     /// `CG_ITEM_USE` of a bait (`case USE_BAIT`, `G/char_item.cpp:6800-6825`): the line

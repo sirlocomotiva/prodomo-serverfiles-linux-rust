@@ -71,6 +71,11 @@ use crate::save::PASSES_PER_SEC;
 pub(super) enum Due {
     /// `kill_ore_load_event` of the ore vein under this VID.
     Vein(u32),
+    /// `kill_campfire_event` of the campfire under this VID (`G/char_item.cpp:2047-2066`).
+    /// It sorts after [`Due::Vein`]: at an equal Pulse a vein's end runs first (a
+    /// Divergence — legacy's heap order at equal priority is heap-shape dependent, as
+    /// the other arms note).
+    Campfire(u32),
     /// `regen_event` of the regen at this place in its map's list.
     Regen {
         /// The Channel.
@@ -304,7 +309,7 @@ impl GameState {
                 // The VID of a non-player already destroyed names nothing, as no such VID is
                 // reused. A player's VID is its PID, which comes back at its next login, so a
                 // player's event runs only while its own slot still holds it.
-                Due::Vein(vid) => self.destroy_npc(vid),
+                Due::Vein(vid) | Due::Campfire(vid) => self.destroy_npc(vid),
                 Due::SantaSpawn { map } => self.fire_santa_spawn(map, pulse),
                 Due::Regen { channel, map, at } => self.fire_regen((channel, map), at, pulse),
                 Due::Stun(vid) => self.stun_event(vid),
