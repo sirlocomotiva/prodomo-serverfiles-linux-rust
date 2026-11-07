@@ -396,3 +396,8 @@ owner answers.
     caster to its empire's spawn on a level-scaled roll (`G/char_skill.cpp:2072-2113`),
     but nothing arms it: no skill row casts it, no code creates the event, and the name
     appears nowhere else in the tree. The row is `unused`. Waits on it: nothing blocks.
+41. **The per-player quest timer (ledger 426).** `quest_timer_event` fires a PC's named
+    timer script (`G/questevent.cpp:49-105`), but only `timer` and `loop_timer` arm it
+    (`G/questlua_global.cpp:206-262`), and both are `unused`: no Lua file calls them
+    (ledgers 401, 414, question 37). The row is `unused`; the server timer twin is
+    `ported` (ledger 403's scenario). Waits on it: nothing blocks.

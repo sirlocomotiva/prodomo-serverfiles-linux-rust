@@ -47067,3 +47067,28 @@ clean, the suite 4875 passed 1 failed in 42 targets — the failure is an unrela
 -- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `legacy/` clean, `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 426. The quest timers
+
+`event.questevent.quest_server_timer_event` stood `missing` though its tick ran with a
+binary scenario: the named timer fires `ServerTimer` with its arg, and the one-shot
+forgets itself (`run_dungeon_ticks` + `fire_server_timer`).
+`a_party_enters_the_forest_and_its_timer_sends_it_home` arms `server_timer`, reads the arg
+in the script, and the dungeon sends the party home. The row is `ported`.
+
+Its per-player twin is unreachable. `quest_timer_event` is armed only through `timer`
+(`_set_timer`/`_set_named_timer`, `G/questlua_global.cpp:232-262`) and `loop_timer`
+(`_set_named_loop_timer`, `:206-222`), and all three quest rows are `unused` — no Lua file
+names them (ledgers 401, 414, question 37). `cleartimer` only removes. The arming sweep
+covers the whole `server/` tree: `quest_create_timer_event` is called only at
+`G/questlua_global.cpp:219,240,261`. Positive control: the same sweep finds the
+server-timer twin at `:168,192`. The row is `unused` (owner question 41).
+
+Timed-events: 51 `missing` / 39 `ported` / 5 `partial` / 4 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4876 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
