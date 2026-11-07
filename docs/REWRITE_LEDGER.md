@@ -47119,3 +47119,26 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 428. The monarch timers
+
+Three timed-event rows are unreachable: each is armed only by one quest name, and all
+three names are `unused` (ledger 401, question 37) — no Lua file calls them.
+
+`event.questlua_monarch.monarch_powerup_event` is created only by `oh.monarchpowerup`
+(`G/questlua_monarch.cpp:207-216`). `event.questlua_monarch.monarch_defenseup_event` only
+by `oh.monarchdefenseup` (`:264-273`). `event.questlua_monarch.monarch_transfer2_event`
+only by `oh.transfer2` (`:828-946`). The arming sweeps cover the whole `server/` tree;
+positive controls: each sweep finds the sibling twins at `:216,273,946`. All three rows
+are `unused` (owner question 42). The `mto`/`mtr`/`minfo`/`mtax` commands are a separate
+missing system.
+
+Timed-events: 44 `missing` / 43 `ported` / 5 `partial` / 7 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4875 passed 1 failed in 42 targets — the failure is the known unrelated load flake
+`a_gm_flags_a_stray_dog_aggressive_and_coward`, which passes alone (13.10 s) — `cargo test
+--workspace --doc --locked --offline` clean, `cargo clippy --workspace --all-targets --locked --offline
+-- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `legacy/` clean, `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

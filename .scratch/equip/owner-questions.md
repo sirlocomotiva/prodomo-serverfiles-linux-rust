@@ -401,3 +401,9 @@ owner answers.
     (`G/questlua_global.cpp:206-262`), and both are `unused`: no Lua file calls them
     (ledgers 401, 414, question 37). The row is `unused`; the server timer twin is
     `ported` (ledger 403's scenario). Waits on it: nothing blocks.
+42. **The monarch timers (ledger 428).** `monarch_powerup_event`, `monarch_defenseup_event`
+    and `monarch_transfer2_event` are armed only by `oh.monarchpowerup`, `oh.monarchdefenseup`
+    and `oh.transfer2` (`G/questlua_monarch.cpp:207-216, 264-273, 828-946`), and all three
+    names are `unused`: no Lua file calls them (ledger 401, question 37). The `mto`/`mtr`/
+    `minfo`/`mtax` commands are a separate missing system; these timer rows are `unused`.
+    Waits on it: nothing blocks.
