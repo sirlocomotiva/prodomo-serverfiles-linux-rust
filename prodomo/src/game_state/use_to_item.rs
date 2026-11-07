@@ -12,8 +12,9 @@
 //! hair).
 //!
 //! A sash cleaning scroll (`USE_DETACHMENT` with `VALUE0` 7) cleans the sash's absorbed
-//! socket and attributes (`CleanSashAttr`, `G/char.cpp:10481-10500`); a changelook's (`VALUE0`
-//! 8) is refused as not ported. The owner's protos have neither scroll.
+//! socket and attributes (`CleanSashAttr`, `G/char.cpp:10481-10500`); a changelook's
+//! (`VALUE0` 8) cleans the transmutation (`CleanTransmutation`, `G/char.cpp:10746-10768`).
+//! The owner's protos have neither scroll.
 //!
 //!
 //! Divergence: a scroll or a target outside the inventory window opens no window, where
@@ -115,6 +116,8 @@ enum Arm {
     Scroll(i32),
     /// `USE_DETACHMENT` with `VALUE0` 7: a sash cleaning scroll.
     CleanSash,
+    /// `USE_DETACHMENT` with `VALUE0` 8: a transmutation cleaning scroll.
+    CleanLook,
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -154,6 +157,9 @@ impl GameState {
         }
         let scroll = match arm {
             Arm::Scroll(value) => value,
+            Arm::CleanLook => {
+                return self.clean_look_step(vid, at, dest, actor);
+            }
             Arm::Stone | Arm::CleanSash | Arm::Plain => {
                 return self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
                     let stone = world::character::use_source(items, at)?;
@@ -192,6 +198,69 @@ impl GameState {
         Ok(moved)
     }
 
+    /// The `USE_DETACHMENT` arm with `VALUE0` 8 (`CleanTransmutation`,
+    /// `G/char.cpp:10746-10768`): the scroll at `at` cleans the transmutation of the item at
+    /// `dest`. A held target chats the locked line; the world reports it through
+    /// [`MoveRefused::Locked`], which no other arm of the use-on-an-item path raises.
+    fn clean_look_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let sash = self
+            .sash_held
+            .values()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let looks = self
+            .changelook_held
+            .values()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        match self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let stone = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(stone.vnum)
+                .ok_or(MoveRefused::UnknownVnum(stone.vnum))?;
+            world::character::use_checks(&stone, proto, rules, gear.points)?;
+            world::character::clean_transmutation(items, (&stone, proto), dest, protos, |id| {
+                sash.contains(&Some(id)) || looks.contains(&Some(id))
+            })
+        }) {
+            Err(MoveItemRefused::Refused(MoveRefused::Locked)) => {
+                let character = self
+                    .characters
+                    .find_by_vid(vid)
+                    .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+                let pid = character.player_id();
+                let mut moved = MovedItems::new(
+                    pid,
+                    vid.raw(),
+                    MoveDone {
+                        kind: MoveKind::Used,
+                        records: Vec::new(),
+                        changes: Vec::new(),
+                    },
+                    actor,
+                    &self.protos,
+                    &self.locale,
+                );
+                moved.records.push(self.refine_line(
+                    actor,
+                    CHAT_TYPE_INFO,
+                    world::character::CLEAN_LOCKED_NOTICE.as_bytes(),
+                ));
+                Ok(moved)
+            }
+            answered => answered,
+        }
+    }
+
     /// The arm the item at `at` runs; an item with no proto runs the plain use, which
     /// refuses it.
     fn use_arm(&self, vid: Vid, at: ItemPos) -> Arm {
@@ -216,6 +285,13 @@ impl GameState {
                     && proto.values[0] == SASH_CLEAN_ATTR_VALUE0 =>
             {
                 Arm::CleanSash
+            }
+            Some(proto)
+                if proto.item_type == ITEM_USE
+                    && proto.sub_type == USE_DETACHMENT
+                    && proto.values[0] == CL_CLEAN_ATTR_VALUE0 =>
+            {
+                Arm::CleanLook
             }
             _ => Arm::Plain,
         }

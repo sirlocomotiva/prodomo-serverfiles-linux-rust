@@ -470,6 +470,18 @@ impl CharacterItems {
         body.refine_element = element;
         Ok(())
     }
+    /// Write a stored item's transmutation (`CItem::SetTransmutation`,
+    /// `G/item.cpp:352-356`). The update record and the save are the caller's.
+    ///
+    /// # Errors
+    ///
+    /// [`SocketRefused::NotHeld`] when this storage does not hold the id. Nothing changes
+    /// then.
+    pub fn set_transmutation(&mut self, id: ItemId, look: u32) -> Result<(), SocketRefused> {
+        let body = self.bodies.get_mut(&id).ok_or(SocketRefused::NotHeld(id))?;
+        body.transmutation = look;
+        Ok(())
+    }
 
     /// Write one socket of a stored item and answer its sockets after the write.
     ///

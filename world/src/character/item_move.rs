@@ -296,6 +296,15 @@ pub enum ItemChange {
         /// Its attributes now.
         attributes: [ItemAttribute; crate::item::ATTRIBUTES],
     },
+    /// The item's transmutation changed: a changelook stamped a look onto it
+    /// (`CItem::SetTransmutation`, `G/item.cpp:352-356`) or a detachment scroll
+    /// cleaned it back to none (`CHARACTER::CleanTransmutation`, `G/char.cpp:10746-10768`).
+    Transmuted {
+        /// The item.
+        id: ItemId,
+        /// Its transmutation now: the look's vnum, or 0 for none.
+        look: u32,
+    },
     /// A trade gave the item to another character, which stores it here.
     Given {
         /// The item.

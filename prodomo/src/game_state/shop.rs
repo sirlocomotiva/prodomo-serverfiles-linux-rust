@@ -551,9 +551,11 @@ impl GameState {
         if let Err(declined) = self.trading(vid, place, mover) {
             return Ok(*declined);
         }
-        if self.sash_item_at(vid, protocol::item_pos::ItemPos::new(1, cell)) {
-            // `CItem::isLocked` (`G/shop_manager.cpp:519-522`): a sash material cannot be
-            // sold. Silent, as legacy is.
+        if self.sash_item_at(vid, protocol::item_pos::ItemPos::new(1, cell))
+            || self.changelook_item_at(vid, protocol::item_pos::ItemPos::new(1, cell))
+        {
+            // `CItem::isLocked` (`G/shop_manager.cpp:519-522`): a sash or changelook material
+            // cannot be sold. Silent, as legacy is.
             return Ok(ShopAnswer::silent(ShopDeclined::Locked));
         }
         let character = self

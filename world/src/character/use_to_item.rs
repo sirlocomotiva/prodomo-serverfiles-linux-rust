@@ -14,7 +14,10 @@ use super::equip::Trail;
 use super::item_move::{done, MoveDone, MoveKind, MoveRecord};
 use super::items::CharacterItems;
 use super::{ItemChange, ItemRecord, MoveRefused};
-use crate::item::{Item, SOCKETS};
+use crate::item::{Item, ItemId, SOCKETS};
+
+/// The locked target of a transmutation clean (`CleanTransmutation`, `G/char.cpp:10756-10760`).
+pub const CLEAN_LOCKED_NOTICE: &str = "You can't remove the transmute because item is locked";
 
 /// A stone of the same kind already sits in the target (`G/char_item.cpp:6996`).
 pub const SAME_STONE_NOTICE: &str = "[LS;426]";
@@ -215,10 +218,72 @@ pub fn clean_sash_attr(
     Ok(done(MoveKind::Used, trail))
 }
 
+/// `CleanTransmutation` (`G/char.cpp:10746-10768`): the detachment scroll cleans the
+/// transmutation of the weapon, armour or costume at `dest` back to none, and one scroll
+/// is spent. The `CanHandleItem` gate is the caller's; a target [`use_target`] refuses,
+/// one that is no weapon, armour or costume, and one with no transmutation are refused
+/// without a line. A held target chats [`CLEAN_LOCKED_NOTICE`].
+///
+/// The caller answers the lock: this reports it through [`MoveRefused::Locked`], which no
+/// other arm of the use-on-an-item path raises.
+///
+/// The `ITEM_FLAG_REFINEABLE` check of the `USE_DETACHMENT` arm (`G/char_item.cpp:1996`)
+/// is not here: the flag bit is not ported, and every owner proto the arm could clean
+/// would pass it. Recorded in `docs/STATUS.md`.
+///
+/// # Errors
+///
+/// [`MoveRefused::Locked`] for a held target, and a storage refusal, which changes
+/// nothing.
+pub fn clean_transmutation(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    dest: ItemPos,
+    protos: &ItemProtos,
+    locked: impl Fn(ItemId) -> bool,
+) -> Result<MoveDone, MoveRefused> {
+    let silent = || Ok(done(MoveKind::Used, Trail::default()));
+    let Some(target) = use_target(items, dest) else {
+        return silent();
+    };
+    let Some(target_proto) = protos.get(target.vnum) else {
+        return silent();
+    };
+    if target_proto.item_type != ITEM_WEAPON
+        && target_proto.item_type != ITEM_ARMOR
+        && target_proto.item_type != ITEM_COSTUME
+    {
+        return silent();
+    }
+    if locked(target.id) {
+        return Err(MoveRefused::Locked);
+    }
+    if target.transmutation == 0 {
+        return silent();
+    }
+    let mut trail = Trail::default();
+    let _ = items.set_transmutation(target.id, 0);
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Transmuted {
+        id: target.id,
+        look: 0,
+    });
+    super::potion::use_one(
+        items,
+        scroll,
+        super::quickslot::chains_when_used_up(scroll_proto),
+        &mut trail,
+    )?;
+    Ok(done(MoveKind::Used, trail))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gamedata::item_kind::{COSTUME_BODY, ITEM_USE, USE_DETACHMENT};
+    use gamedata::item_kind::{COSTUME_BODY, ITEM_ROD, ITEM_USE, ITEM_WEAPON, USE_DETACHMENT};
     use gamedata::item_proto::ItemProtos;
     use protocol::gc_item_window::ItemAttribute;
 
@@ -230,7 +295,8 @@ mod tests {
         let mut scroll = ItemProto::for_category_rule(SCROLL, ITEM_USE, USE_DETACHMENT);
         scroll.values[0] = 7;
         let body = ItemProto::for_category_rule(11, ITEM_COSTUME, COSTUME_BODY);
-        ItemProtos::from_rows(vec![sash, scroll, body])
+        let sword = ItemProto::for_category_rule(3000, ITEM_WEAPON, 0);
+        ItemProtos::from_rows(vec![sash, scroll, body, sword])
     }
 
     fn inv(cell: u16) -> ItemPos {
@@ -281,6 +347,63 @@ mod tests {
                 .any(|change| matches!(change, ItemChange::Attributes { id: 9, .. })),
             "the attributes store"
         );
+    }
+
+    /// A transmuted weapon cleans back to none: the update record, the `Transmuted`
+    /// change, and one scroll spent. A locked target refuses through `Locked`; an
+    /// untransmuted weapon and a non-weapon/armour/costume refuse silently.
+    #[test]
+    fn a_clean_takes_the_transmutation_off() {
+        let protos = protos();
+        let mut sword = Item::new(20, 3000);
+        sword.transmutation = 3010;
+        let mut items = holding(&[(0, sword), (1, Item::new(10, SCROLL))]);
+        let scroll = items.item_at(inv(1)).expect("the scroll").clone();
+        let proto = protos.get(SCROLL).expect("the scroll proto").clone();
+        let done = clean_transmutation(&mut items, (&scroll, &proto), inv(0), &protos, |_| false)
+            .expect("the clean lands");
+        assert!(!done.records.is_empty(), "the clean sends its update");
+        assert_eq!(items.item(20).expect("the sword stays").transmutation, 0);
+        assert!(
+            done.changes
+                .iter()
+                .any(|change| matches!(change, ItemChange::Transmuted { id: 20, look: 0 })),
+            "the look stores"
+        );
+        let done = clean_transmutation(&mut items, (&scroll, &proto), inv(0), &protos, |_| false)
+            .expect("a silent refusal");
+        assert!(done.records.is_empty(), "no record for a clean sword");
+        assert!(done.changes.is_empty(), "no change for a clean sword");
+    }
+
+    /// A held target refuses through `Locked`, and a rod (no weapon, armour or costume)
+    /// refuses silently.
+    #[test]
+    fn a_clean_refuses_a_locked_target_and_a_rod() {
+        let mut rod_proto = ItemProto::for_category_rule(31, ITEM_ROD, 0);
+        rod_proto.values[0] = 0;
+        let protos = ItemProtos::from_rows(vec![
+            ItemProto::for_category_rule(3000, ITEM_WEAPON, 0),
+            ItemProto::for_category_rule(SCROLL, ITEM_USE, USE_DETACHMENT),
+            rod_proto,
+        ]);
+        let mut sword = Item::new(20, 3000);
+        sword.transmutation = 3010;
+        let mut rod = Item::new(21, 31);
+        rod.transmutation = 3010;
+        let mut items = holding(&[(0, sword), (1, Item::new(10, SCROLL)), (2, rod)]);
+        let scroll = items.item_at(inv(1)).expect("the scroll").clone();
+        let proto = protos.get(SCROLL).expect("the scroll proto").clone();
+        assert_eq!(
+            clean_transmutation(&mut items, (&scroll, &proto), inv(0), &protos, |id| id
+                == 20),
+            Err(MoveRefused::Locked),
+            "the held sword locks"
+        );
+        let done = clean_transmutation(&mut items, (&scroll, &proto), inv(2), &protos, |_| false)
+            .expect("a silent refusal");
+        assert!(done.records.is_empty(), "no record for a rod");
+        assert!(done.changes.is_empty(), "no change for a rod");
     }
 
     /// A sash with no absorbed socket and a non-costume refuse, each silently: no

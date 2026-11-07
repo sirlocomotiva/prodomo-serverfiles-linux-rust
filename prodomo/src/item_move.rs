@@ -424,6 +424,10 @@ pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
                     s_value: attributes[index].s_value,
                 }),
             },
+            ItemChange::Transmuted { id, look } => RowChange::Transmuted {
+                id: *id,
+                look: *look,
+            },
             ItemChange::Stored { id, account, pos } => RowChange::Stored {
                 id: *id,
                 account: *account,

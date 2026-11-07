@@ -291,9 +291,9 @@ impl GameState {
         mover: Mover,
     ) -> SafeboxAnswer {
         let questing = self.quest_running(vid);
-        if mall.is_none() && self.sash_item_at(vid, cell) {
-            // `CItem::isLocked` (`G/input_main.cpp:2328-2332`): a sash material cannot be
-            // checked in, and legacy chats the same `[LS;667]` as for an unstorable item.
+        if mall.is_none() && (self.sash_item_at(vid, cell) || self.changelook_item_at(vid, cell)) {
+            // `CItem::isLocked` (`G/input_main.cpp:2328-2332`): a sash or changelook material
+            // cannot be checked in, and legacy chats the same `[LS;667]` as for an unstorable item.
             return refusal(
                 &world::character::SafeboxRefused::NotStorable,
                 mover,

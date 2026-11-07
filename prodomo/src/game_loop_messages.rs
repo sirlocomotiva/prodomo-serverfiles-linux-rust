@@ -541,6 +541,21 @@ pub enum GameCommand {
         /// Where the game thread reports what the sash step did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_CL` for the character online under `vid`, answered as a move is.
+    Changelook {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The sub-header: close, add, remove, or refine.
+        sub_header: u8,
+        /// The material slot the client named.
+        pos: u8,
+        /// The material position the client named.
+        at: protocol::item_pos::ItemPos,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the changelook step did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_ITEM_GIVE` for the character online under `vid`, answered as a move is.
     GiveItem {
         /// The VID of the character whose client sent the gift.
@@ -3920,6 +3935,32 @@ impl GameLoopController {
     ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Sash {
+            vid,
+            sub_header,
+            pos,
+            at,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a changelook request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn changelook(
+        &self,
+        vid: common::vid::Vid,
+        sub_header: u8,
+        (pos, at): (u8, protocol::item_pos::ItemPos),
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Changelook {
             vid,
             sub_header,
             pos,

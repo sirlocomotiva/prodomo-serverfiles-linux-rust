@@ -47739,3 +47739,109 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 443. The changelook window
+
+`CG_CL` (`CInputMain::ChangeLook`, `G/input_main.cpp:3431-3459`) with no observer gate
+(`:3857-3861`): close, add, remove and refine over the `pc.open_changelook` window
+(`G/char.cpp:10504-10776`), answered as a move is. A waiting quest and an unknown
+sub-header are absorbed, as legacy's guard and `default` do. The window is
+`changelook_windows`; its materials are item ids in `changelook_held`, so a held item
+stays held when it moves cells, as legacy's `LPITEM` pointers survive the same moves.
+`ChangeLookWindow` ends in `ClearClWindowMaterials` (`:10535`), so the fresh window holds
+nothing.
+
+The add (`:10563-10672`) resolves a `pos` at or past 2 to the first free slot only when it
+is exactly 255, then guards in legacy's `else if` order: the item must exist (`GetItem`
+refuses a worn cell and anything at or past `INVENTORY_AND_EQUIP_SLOT_MAX`; a belt cell
+refuses), a worn item chats the equipped line, anything but a weapon, armour or costume
+chats the cannot line, an arrow or mount spear chats it, a non-body armour chats it, a
+costume that is no body, hair, weapon or sash chats it (`ENABLE_WEAPON_COSTUME_SYSTEM` is
+on), a held material chats the locked line, and an already-transmuted item chats the
+transmuted line. `LC_TEXT` of an unknown key is the key itself, so the chat keys go out
+raw. Slot 1 with slot 0 empty refuses silently, as does a filled slot; slot 1 of
+mismatched type, subtype, original vnum (`GetOriginalVnum` is the vnum, `G/item.h:107`) or
+antiflags (the sex pair either way, each job flag only when slot 1 names one slot 0 does
+not; `GetAntiFlag` is the proto's, `G/item.h:78`) chats the cannot-submit line. The landed
+add answers `ADD` with cost 0, the slot, and the named position.
+
+The remove (`:10674-10708`) unlocks slot 1 alone while slot 0 clears both; both answer
+`REMOVE` with a zeroed `{INVENTORY, 0}` position and cost 0, and a remove of an empty slot
+sends nothing. The close answers with cost 0 only when the window stands; without one the
+not-open line chats (the client close passes `bRequest = false`). The refine
+(`:10710-10744`) sends nothing with slot 0 empty, chats the submit line with slot 1 empty,
+and chats the gold line short of 50,000,000. Else it spends the gold (`ChangeGold`,
+`ENABLE_REMOVE_LIMIT_GOLD`), destroys slot 1, stamps slot 1's vnum into slot 0's
+transmutation (`SetTransmutation`, `G/item.cpp:352-356`: the `GC_ITEM_UPDATE` and the
+save), clears the window, and answers `REFINE` with a zeroed position. The money and item
+logs are `sys.log`'s, which owns no sink.
+
+Death closes the window with its record (`Dead`, `G/char_battle.cpp:1642-1644`); the
+penalty's `ChangeLookWindow(false, true)` runs at `dead_event`, after `Dead` already closed
+it, so it sends nothing (`:334-339`). A warp and a disconnect forget the window silently:
+no warp or disconnect path closes it, and the client rebuilds its windows on the new view.
+The real-time expiry's locked-item clear (`G/item.cpp:2057-2062`) waits on the expiry
+system, whose timers are `unused` (ledger 437). Improving an item drops its look because
+the result is a fresh item (`CopyAllAttrTo` carries no transmutation), which
+`world::character::refined_item` already builds that way.
+
+A held material locks destroy, drop, move, give, sale and checkin (`CItem::isLocked`),
+sharing the sash lock bit; the move-destination arm and the gift arm stay the Divergences
+ledger 442 recorded. The attr67 regist, the trade and the personal shop run lock checks
+the Rewrite never ported for the sash either, so the changelook adds none there.
+
+The detachment scroll (`USE_DETACHMENT` with `VALUE0` 8 on a transmuted weapon, armour or
+costume, `CleanTransmutation`, `:10746-10768`) rides use-on-item
+(`world::character::clean_transmutation`): the transmutation to 0, the update record, the
+`Transmuted` change, one scroll spent, silent on a refused target, and the locked line for
+a held one. The `ITEM_FLAG_REFINEABLE` check is skipped — the flag bit is not ported — and
+is the same Divergence the sash clean recorded. The owner's one detachment scroll (25100)
+has `VALUE0` 3, so no wire scenario can carry the clean: it is unit-proved in `world`.
+
+Scenario `a_transmutation_is_refused_stamped_and_banked` (eight helpers under the line
+lint): past the reward pages to the eight chats, "Transmutation" opens the window with
+the 50,000,000 cost. The head armour, the mount spear and the stone chat the cannot line;
+the +0 sword lands in slot 0 echoing its position, the male-only armour chats the submit
+line in slot 1, the fan chats it for its subtype (its job flags also disagree, so the
+polearm proves the subtype arm alone: broad flags in slot 0, narrow ones in slot 1), the
+held sword chats the locked line, the +1 sword lands in slot 1, and a held destroy is
+silent. The male-only armour lands in slot 0 and the female-only one chats the submit
+line (the sex flags disagree either way); slot 1 lifts alone with a zeroed position,
+slot 0 clears both, an empty remove sends nothing, slot 2 removes nothing, the close
+answers all four fields, and a second close chats the not-open line. A one-material
+refine chats the submit line; the poor refine chats the gold line with no record. With
+exactly the 50,000,000 stored the reopened window refines: the +0's row updates with the
++1's look, the +1 is destroyed, the gold empties, the refine answers, an add lands
+nowhere and the close chats not-open (the refine cleared the window), and the disconnect
+banks the stamp. Then, as an IMPLEMENTOR (the mission's non-GM login gate keeps the relog
+quiet), death closes the reopened window behind the dead and the three re-added affects
+(540, 215, 540) — after the stamped sword chats the already line and the polearm lands in
+its place. Flake check 8/8.
+
+Refactors for the line lint: `apply_ground` lent its window arms `apply_window_step`,
+`use_item_to_item` lent its clean arm `clean_look_step`, and `write_change` lent its
+holder trio `write_holder_change`.
+
+Mutants, all killed: the close pos, the close guard, the ADD echo, the vnum arm, the job
+arm, the sex arm, the type/subtype `||` (by the polearm — first `SURVIVED` twice, then
+hardened), the weapon gate, the gold off-by-one, the poor gate (by the exact 50,000,000 —
+first `SURVIVED`, then hardened), the remove bound (first `SURVIVED`, then hardened), the
+empty remove, the slot-1 arm, the missing chat, the slot-1-empty guard, the filled-slot
+guard, the add window guard, the belt guard, the already guard, the equipped guard, the
+refine's window clear (first `SURVIVED`, then hardened), the `Transmuted` id, the death
+close (by the death proof — first `SURVIVED`, then hardened), the locked guard, and the
+clean stamp and guard (by hand, in `world`: the shared helper misreads multi-test runs).
+One equivalent no-op mutant was replaced by the missing-chat drop. Two mutant binaries
+were rebuilt pristine before the flake check.
+
+Client-packets: `cg.game.cl` `ported` (82 `ported` / 14 `missing`), and the use-on-item
+row notes the cleaner. Sub-headers: the four `sub.ChangeLook.*` `ported` (49 `ported` /
+64 `missing`). Quests: `quest.changelook` notes the window
+(`a_transmutation_is_refused_stamped_and_banked`).
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4928 passed 0 failed in 44 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

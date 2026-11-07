@@ -65,6 +65,7 @@ mod affect;
 mod alignment;
 mod attr67;
 mod cards;
+mod changelook;
 mod conqueror;
 mod costume;
 mod daily_gift;
@@ -708,6 +709,10 @@ pub struct GameState {
     /// The characters whose changelook (Transmutation) window stands:
     /// `m_bChangeLook` (`G/char.cpp:10504-10535`). Absent when no window stands.
     changelook_windows: std::collections::HashSet<common::vid::Vid>,
+    /// The materials the changelook window of each character holds, slot by slot, keyed by
+    /// its VID: `m_pointsInstant.pClMaterials` (`G/char.h:2404`), as the held item ids
+    /// (absent when the window stands empty or no window stands).
+    changelook_held: HashMap<common::vid::Vid, [Option<world::item::ItemId>; 2]>,
     /// The aura refine window each character has open, keyed by its VID:
     /// `m_bAuraRefineWindowType` and `m_pAuraRefineWindowOpener`
     /// (`G/char_aura.cpp:14-71`). Absent when no window stands.
@@ -2336,6 +2341,7 @@ impl GameState {
             | GameCommand::Refine { .. }
             | GameCommand::Attr67 { .. }
             | GameCommand::Sash { .. }
+            | GameCommand::Changelook { .. }
             | GameCommand::UseItemToItem { .. }
             | GameCommand::GiveItem { .. }
             | GameCommand::PickupItem { .. }
@@ -3340,6 +3346,11 @@ impl GameState {
         // close), and the client rebuilds its windows on the new view.
         self.sash_windows.remove(&vid);
         self.sash_held.remove(&vid);
+        // A warp and a disconnect forget the changelook window silently too: no warp or
+        // disconnect path closes it (`Dead` and the CG close are the only calls), and the
+        // client rebuilds its windows on the new view.
+        self.changelook_windows.remove(&vid);
+        self.changelook_held.remove(&vid);
         self.forget_whisper_session(vid);
         let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
@@ -3414,9 +3425,13 @@ impl GameState {
         request: MoveRequest,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
-        if self.sash_item_at(vid, request.from) || self.sash_item_at(vid, request.to) {
-            // `CItem::isLocked` (`G/char_item.cpp:7636-7637`): a sash material cannot be
-            // moved, and nothing lands on one. Silent, as legacy's source check is; the
+        if self.sash_item_at(vid, request.from)
+            || self.sash_item_at(vid, request.to)
+            || self.changelook_item_at(vid, request.from)
+            || self.changelook_item_at(vid, request.to)
+        {
+            // `CItem::isLocked` (`G/char_item.cpp:7636-7637`): a sash or changelook material
+            // cannot be moved, and nothing lands on one. Silent, as legacy's source check is; the
             // destination arm has no legacy twin — legacy lets a move bury the held item —
             // and is a Divergence, recorded in `docs/STATUS.md`.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
@@ -4326,15 +4341,8 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
             }
-            GameCommand::Sash {
-                vid,
-                sub_header,
-                pos,
-                at,
-                mover,
-                reply,
-            } => {
-                answer_item_step(vid, reply, self.sash(vid, sub_header, (pos, at), mover));
+            command @ (GameCommand::Sash { .. } | GameCommand::Changelook { .. }) => {
+                self.apply_window_step(command);
             }
             GameCommand::UseItemToItem {
                 vid,
@@ -4381,6 +4389,38 @@ impl GameState {
             | GameCommand::DailyGift { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_event_step(command),
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
+        }
+    }
+
+    /// The window steps of [`GameState::apply_ground`], split out so neither trips the
+    /// line lint: the sash and the changelook.
+    fn apply_window_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Sash {
+                vid,
+                sub_header,
+                pos,
+                at,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.sash(vid, sub_header, (pos, at), mover));
+            }
+            GameCommand::Changelook {
+                vid,
+                sub_header,
+                pos,
+                at,
+                mover,
+                reply,
+            } => {
+                answer_item_step(
+                    vid,
+                    reply,
+                    self.changelook(vid, sub_header, (pos, at), mover),
+                );
+            }
+            _ => debug_assert!(false, "only window commands reach apply_window_step"),
         }
     }
 
@@ -4435,9 +4475,9 @@ impl GameState {
         if self.is_dead(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::DroppedWhileDead));
         }
-        if self.sash_item_at(vid, at) {
-            // `CItem::isLocked` (`G/char_item.cpp:7476-7477`): a sash material cannot be
-            // dropped. Silent, as legacy is.
+        if self.sash_item_at(vid, at) || self.changelook_item_at(vid, at) {
+            // `CItem::isLocked` (`G/char_item.cpp:7476-7477`): a sash or changelook
+            // material cannot be dropped. Silent, as legacy is.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
         let owner_id = self
@@ -4610,9 +4650,9 @@ impl GameState {
         {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
         }
-        if self.sash_item_at(vid, at) {
-            // `CItem::isLocked` (`G/char_item.cpp:7422-7423`): a sash material cannot be
-            // destroyed. Silent, as legacy is.
+        if self.sash_item_at(vid, at) || self.changelook_item_at(vid, at) {
+            // `CItem::isLocked` (`G/char_item.cpp:7422-7423`): a sash or changelook
+            // material cannot be destroyed. Silent, as legacy is.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
         if self.is_dead(vid.raw()) {
@@ -4687,8 +4727,8 @@ impl GameState {
         if self.give_blocked(vid) {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
         }
-        if self.sash_item_at(vid, at) {
-            // A sash material cannot be given: the window holds it. Legacy's `GiveItem`
+        if self.sash_item_at(vid, at) || self.changelook_item_at(vid, at) {
+            // A sash or changelook material cannot be given: the window holds it. Legacy's `GiveItem`
             // runs no `isLocked` check (a Defect, fixed by the window the gift would have
             // to cross); the Rewrite refuses rather than lose the material, and records
             // the Divergence in `docs/STATUS.md`.

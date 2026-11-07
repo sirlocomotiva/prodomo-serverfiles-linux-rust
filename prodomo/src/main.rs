@@ -114,6 +114,7 @@ use protocol::cg_account::{
 use protocol::cg_arg_u8::CgChangeLanguage;
 use protocol::cg_arg_u8::CgRequestEventData;
 use protocol::cg_attack::CgAttack;
+use protocol::cg_change_look::CgChangeLook;
 use protocol::cg_chat::CgChat;
 use protocol::cg_client_version::CgClientVersion;
 use protocol::cg_daily_gift::CgDailyGift;
@@ -125,7 +126,7 @@ use protocol::cg_inventory::{
     HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
     HEADER_CG_ATTR67_ADD, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
     HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
-    HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CLIENT_VERSION,
+    HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CL, HEADER_CG_CLIENT_VERSION,
     HEADER_CG_CLIENT_VERSION2, HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
     HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING,
     HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY,
@@ -1244,6 +1245,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_REFINE.value()
         || header == HEADER_CG_ATTR67_ADD.value()
         || header == HEADER_CG_SASH.value()
+        || header == HEADER_CG_CL.value()
         || header == HEADER_CG_FISHING.value()
         || header == HEADER_CG_FISH_EVENT_SEND.value()
         || header == HEADER_CG_DAILY_GIFT.value()
@@ -1259,6 +1261,8 @@ fn is_belongings_step(header: u8) -> bool {
 /// - `CG_REFINE` (96): `CInputMain::Refine` (`G/input_main.cpp:3851-3853`).
 /// - `CG_SASH` (230): `CInputMain::Sash` (`G/input_main.cpp:3395-3425`), with no observer
 ///   gate (`:3862`).
+/// - `CG_CL` (233): `CInputMain::ChangeLook` (`G/input_main.cpp:3431-3459`), with no observer
+///   gate (`:3857-3861`).
 /// - `CG_FISHING` (82): `CInputMain::Fishing` (`G/input_main.cpp:3166-3172`).
 /// - `CG_FISH_EVENT_SEND` (219): `CInputMain::FishEvent` (`G/input_main.cpp:1319-1366`),
 ///   which no observer check guards (`:3760-3762`).
@@ -1296,6 +1300,8 @@ where
         attr67_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_SASH.value() {
         sash_step(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_CL.value() {
+        changelook_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISHING.value() {
         fish(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISH_EVENT_SEND.value() {
@@ -1749,6 +1755,41 @@ where
     let answer = context
         .game
         .sash(vid, record.subheader, (record.pos, at), actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_CL` (233) in the game phase: `CInputMain::ChangeLook`
+/// (`G/input_main.cpp:3431-3459`), with no observer gate (`:3857-3861`). The world's rows are
+/// stored as a move's are.
+///
+/// A malformed record closes the connection; an unknown sub-header is absorbed.
+async fn changelook_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgChangeLook::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed CL; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "CL without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let at = protocol::item_pos::ItemPos::new(record.t_pos.window_type, record.t_pos.cell);
+    let answer = context
+        .game
+        .changelook(vid, record.subheader, (record.b_pos, at), actor)
         .await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
@@ -14661,6 +14702,7 @@ mod tests {
             (HEADER_CG_REFINE, MainRecord::Belongings),
             (HEADER_CG_ATTR67_ADD, MainRecord::Belongings),
             (HEADER_CG_SASH, MainRecord::Belongings),
+            (HEADER_CG_CL, MainRecord::Belongings),
             (HEADER_CG_SHOP, MainRecord::Npc),
             (HEADER_CG_QUEST_CONFIRM, MainRecord::Npc),
             (HEADER_CG_SCRIPT_SELECT_ITEM, MainRecord::Npc),

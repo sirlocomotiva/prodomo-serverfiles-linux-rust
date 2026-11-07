@@ -956,6 +956,14 @@ pub enum RowChange {
         /// All of its attributes, as they are now.
         attributes: [Attribute; ATTRS],
     },
+    /// The item's transmutation changed: a changelook stamped a look onto it or a detachment
+    /// scroll cleaned it back to none.
+    Transmuted {
+        /// The item.
+        id: u32,
+        /// Its transmutation now: the look's vnum, or 0 for none.
+        look: u32,
+    },
     /// A trade gave the item to another character, into this window and cell, in stored
     /// terms (`CExchange::Done`, `G/exchange.cpp`). Only [`apply_exchange`] writes one, and
     /// only to another side of the same Transfer.
@@ -1546,6 +1554,33 @@ async fn write_change(
             }
             (*id, query.execute(&mut *connection).await?.rows_affected())
         }
+        RowChange::Transmuted { id, look } => {
+            let touched =
+                sqlx::query("UPDATE item SET transmutation = $3 WHERE id = $1 AND owner_id = $2")
+                    .bind(i64::from(*id))
+                    .bind(i64::from(owner_id))
+                    .bind(i64::from(*look))
+                    .execute(&mut *connection)
+                    .await?
+                    .rows_affected();
+            (*id, touched)
+        }
+        change @ (RowChange::Given { .. }
+        | RowChange::Stored { .. }
+        | RowChange::Retrieved { .. }) => {
+            write_holder_change(&mut *connection, owner_id, change).await?
+        }
+    })
+}
+
+/// Run a holder change's statement inside the move's transaction: the id it names, and how
+/// many rows it touched. Split out of [`write_change`] so neither trips the line lint.
+async fn write_holder_change(
+    connection: &mut sqlx::PgConnection,
+    owner_id: u32,
+    change: &RowChange,
+) -> Result<(u32, u64), ItemError> {
+    Ok(match change {
         RowChange::Given {
             id,
             to,
@@ -1601,6 +1636,10 @@ async fn write_change(
             .await?
             .rows_affected();
             (*id, touched)
+        }
+        _ => {
+            debug_assert!(false, "only holder changes reach write_holder_change");
+            (0, 0)
         }
     })
 }
@@ -1676,6 +1715,7 @@ fn taken_cell(owner_id: u32, sides: &[TransferSide<'_>], shared: &[(i16, i64)]) 
                 | RowChange::Destroyed { .. }
                 | RowChange::Sockets { .. }
                 | RowChange::Attributes { .. }
+                | RowChange::Transmuted { .. }
                 | RowChange::Stored { .. } => return None,
             };
             (holder == owner_id).then_some((id, window_type, pos))
@@ -1734,6 +1774,7 @@ fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(),
         RowChange::Destroyed { .. }
         | RowChange::Sockets { .. }
         | RowChange::Attributes { .. }
+        | RowChange::Transmuted { .. }
         | RowChange::Stored { .. } => {}
     }
     Ok(())

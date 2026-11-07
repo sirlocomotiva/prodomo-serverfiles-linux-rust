@@ -792,9 +792,10 @@ impl GameState {
         self.regens.cancel(&mut combat.dead_due, Due::PcDead(raw));
         self.regens
             .schedule(&mut combat.dead_due, when, Due::PcDead(raw));
-        // The closes (`:1614-1648`). The cube, change-look, aura and premium-shop windows
-        // and the private shop are not ported; the mall stays open, as legacy closes only the
-        // safebox. The sash close answers its record, as `CloseSash` sends it.
+        // The closes (`:1614-1648`). The cube, aura and premium-shop windows and the
+        // private shop are not ported; the mall stays open, as legacy closes only the
+        // safebox. The sash and changelook closes answer their records, as `CloseSash` and
+        // `ChangeLookWindow(false, true)` send them.
         self.cancel_trade(vid);
         self.end_browsing(vid);
         if let Some(combination) = self.sash_windows.remove(&vid) {
@@ -808,6 +809,16 @@ impl GameState {
                 0,
                 0,
                 0,
+            );
+            let _sent = self.write_to_client(vid, close.encode());
+        }
+        if self.changelook_windows.remove(&vid) {
+            self.changelook_held.remove(&vid);
+            let close = protocol::gc_changelook::GcChangeLook::new(
+                protocol::gc_changelook::CL_SUBHEADER_CLOSE,
+                0,
+                0,
+                protocol::item_pos::ItemPos::new(1, 0),
             );
             let _sent = self.write_to_client(vid, close.encode());
         }
@@ -1049,9 +1060,10 @@ impl GameState {
     }
 
     /// `DeathPenalty(bTown)` (`G/char_battle.cpp:330-392`), with the flag tested first (D2) and
-    /// no roll in town (B11). The cube and change-look windows are not ported, and no
-    /// affect 511 (`AFFECT_NO_DEATH_PENALTY`) is ever added. The penalty's `CloseSash` runs
-    /// at `dead_event`, after `Dead` already closed the window, so it sends nothing.
+    /// no roll in town (B11). The cube window is not ported, and no
+    /// affect 511 (`AFFECT_NO_DEATH_PENALTY`) is ever added. The penalty's `CloseSash` and
+    /// `ChangeLookWindow(false, true)` run at `dead_event`, after `Dead` already closed the
+    /// windows, so they send nothing.
     fn death_penalty(&mut self, vid: Vid, town: bool, mover: Mover) {
         let raw = vid.raw();
         if self

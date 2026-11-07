@@ -157,6 +157,7 @@ pub use trade::{
     YANG_LIMIT_NOTICE,
 };
 pub use use_to_item::{
-    clean_sash_attr, put_stone, spend_one, use_target, NOT_BODY_STONE_NOTICE,
-    NOT_WEAPON_STONE_NOTICE, NO_SOCKET_NOTICE, SAME_STONE_NOTICE, STONE_SET_NOTICE,
+    clean_sash_attr, clean_transmutation, put_stone, spend_one, use_target, CLEAN_LOCKED_NOTICE,
+    NOT_BODY_STONE_NOTICE, NOT_WEAPON_STONE_NOTICE, NO_SOCKET_NOTICE, SAME_STONE_NOTICE,
+    STONE_SET_NOTICE,
 };

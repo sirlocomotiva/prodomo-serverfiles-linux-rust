@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 442 (the sash window).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 443
+Last reviewed: 2026-11-07, after ledger section 443 (the changelook window).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 444
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -454,9 +454,11 @@ legacy does, not the 120 s ledger 413 had written. Since 422 the poison and fire
 `ported`: the report, the two arms, the reward and the save round-trip. Since 441 the daily
 gift is `ported`: the line, the week, the cash and ticket collects, the renew and the save. Since
 442 the sash's add, remove and refine are `ported`: the window, the guards, the combine and the
-absorption over the wire. The
+absorption over the wire. Since
+443 the changelook's add, remove and refine are `ported`: the guarded pair, the stamp, the
+clean and the banked look. The
 next slice is the owner's call: the forest's leader branch is ported,
-the changelook's add, remove and refine wait on its window's records, the sash
+the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
 

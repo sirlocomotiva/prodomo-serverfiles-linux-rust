@@ -4650,6 +4650,9 @@ impl GameState {
         self.changelook_windows.insert(reader);
         let open = protocol::gc_changelook::GcChangeLook::open().encode();
         let _sent = self.write_to_client(reader, open);
+        // `ChangeLookWindow` ends in `ClearClWindowMaterials` (`G/char.cpp:10535`): the
+        // fresh window holds nothing.
+        self.changelook_held.remove(&reader);
     }
 }
 

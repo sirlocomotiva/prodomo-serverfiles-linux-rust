@@ -39050,6 +39050,48 @@ fn renew_the_week(server: &Server, database: &ScratchDatabase, alice: Keyed) {
     alice.quiet("every answer was read");
 }
 
+/// `HEADER_CG_CL` (233): the client-to-server changelook request.
+const CG_CL: u8 = 0xe9;
+
+/// One `CG_CL` request: the sub-header, the material slot, and the named position.
+fn client_cl(sub_header: u8, pos: u8, window: u8, cell: u16) -> Vec<u8> {
+    let mut record = vec![CG_CL, sub_header, 0, 0, 0, 0, pos, window];
+    record.extend_from_slice(&cell.to_le_bytes());
+    record
+}
+
+/// One `GC_CL` record, parsed off the client's socket.
+struct ClRecord {
+    subheader: u8,
+    cost: u32,
+    pos: u8,
+    item_pos: (u8, u16),
+}
+
+/// Read one `GC_CL` record and parse its four fields.
+fn read_cl(keyed: &mut Keyed) -> ClRecord {
+    let record = keyed.read_game();
+    assert_eq!(record.len(), CL_LEN, "a changelook record is 10 bytes");
+    assert_eq!(record[0], GC_CL, "the changelook header");
+    ClRecord {
+        subheader: record[1],
+        cost: u32::from_le_bytes(record[2..6].try_into().expect("four")),
+        pos: record[6],
+        item_pos: (
+            record[7],
+            u16::from_le_bytes(record[8..10].try_into().expect("two")),
+        ),
+    }
+}
+
+/// The transmutation of a `GC_ITEM_UPDATE` (the header, the 3-byte cell, the count and
+/// the refine element come first).
+fn update_transmutation(update: &[u8]) -> u32 {
+    assert_eq!(update.len(), ITEM_UPDATE_LEN);
+    assert_eq!(update[0], ITEM_UPDATE);
+    u32::from_le_bytes(update[10..14].try_into().expect("four bytes"))
+}
+
 /// `HEADER_CG_SASH` (230): the client-to-server sash request.
 const CG_SASH: u8 = 0xe6;
 
@@ -39748,4 +39790,645 @@ fn sash_combines_and_absorbs() {
     sash_death_closes(&server, &database, alice);
     let alice = sash_absorb_login(&server);
     sash_absorb_and_bank(alice, &database);
+}
+
+/// Seed the changelook scenario and boot the server: Alpha beside Theowahdan with the
+/// sword pair at cells 0 and 1 (a +0 and a +1 sword, 10 and 11), the male-only armour at
+/// cell 2 (11901), the female-only armour at cell 3 (11903), the head armour at cell 4
+/// (12200), the mount spear at cell 12 (7200), and the stone at cell 13 (28030). The
+/// two-cell swords and armours cover their anchor plus the cell five below, so the spear
+/// and the stone sit clear of every footprint.
+fn cl_seed_looks() -> Option<(ScratchDatabase, Server)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'sash_mission.__status'::bytea, 557528158 FROM player WHERE player.name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let k = gamedata::item_kind::ITEM_WEAPON;
+    for (vnum, (want, sub)) in [
+        (10, (k, gamedata::item_kind::WEAPON_SWORD)),
+        (11, (k, gamedata::item_kind::WEAPON_SWORD)),
+        (
+            11_901,
+            (
+                gamedata::item_kind::ITEM_ARMOR,
+                gamedata::item_kind::ARMOR_BODY,
+            ),
+        ),
+        (
+            11_903,
+            (
+                gamedata::item_kind::ITEM_ARMOR,
+                gamedata::item_kind::ARMOR_BODY,
+            ),
+        ),
+        (
+            12_200,
+            (
+                gamedata::item_kind::ITEM_ARMOR,
+                gamedata::item_kind::ARMOR_HEAD,
+            ),
+        ),
+        (
+            7200,
+            (
+                gamedata::item_kind::ITEM_WEAPON,
+                gamedata::item_kind::WEAPON_MOUNT_SPEAR,
+            ),
+        ),
+        (
+            7000,
+            (
+                gamedata::item_kind::ITEM_WEAPON,
+                gamedata::item_kind::WEAPON_FAN,
+            ),
+        ),
+        (
+            3000,
+            (
+                gamedata::item_kind::ITEM_WEAPON,
+                gamedata::item_kind::WEAPON_TWO_HANDED,
+            ),
+        ),
+    ] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(
+            (proto.item_type, proto.sub_type),
+            (want, sub),
+            "the seed vnum {vnum} is the kind the scenario proves"
+        );
+    }
+    assert_eq!(
+        (
+            protos.get(11_901).expect("male-only").anti_flags & 1,
+            protos.get(11_903).expect("female-only").anti_flags & 2
+        ),
+        (1, 2),
+        "the armour pair splits on the sex flags"
+    );
+    for (id, pos, vnum) in [
+        (40, 0, 10),
+        (41, 1, 11),
+        (42, 2, 11_901),
+        (43, 3, 11_903),
+        (44, 4, 12_200),
+        (45, 12, 7200),
+        (46, 13, 28_030),
+        (47, 9, 7000),
+        (48, 14, 3000),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    Some((database, server))
+}
+
+/// The first login: the reward mark, the sash letter, the marks and the update;
+/// answers the open connection and Theowahdans VID.
+fn cl_first_login(server: &Server) -> (Keyed, u32) {
+    let (mut keyed, _alpha, _items) = load_character(server, b"alice", 0);
+    let beside = enter_beside(&mut keyed, THEOWAHDAN_VNUM);
+    read_login_lines(&mut keyed, 0, None);
+    read_letter(
+        &mut keyed,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_letter(
+        &mut keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    let _reward = read_quest_target_create(&mut keyed, 1, b"Theowahdan");
+    read_letter(
+        &mut keyed,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_letter(
+        &mut keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    (keyed, beside)
+}
+
+/// Past the rewards pages to his eight chats, then the "Transmutation" chat opens
+/// the window.
+fn cl_open_transmutation(keyed: &mut Keyed, theowahdan: u32) {
+    keyed.send_record(&client_click(theowahdan));
+    assert_eq!(
+        keyed.read_game_marked(),
+        server_quest_target_delete(1),
+        "the target click deletes the reward mark"
+    );
+    let first = titled_page(b"teowahdan", &SASH_REWARD_FIRST, b"[NEXT]");
+    assert_eq!(keyed.read_game_marked(), server_script(1, &first));
+    keyed.send_record(&client_script_answer(254));
+    let second = titled_page(b"teowahdan", &SASH_REWARD_SHORT, b"[DONE]");
+    assert_eq!(keyed.read_game_marked(), server_script(1, &second));
+    assert_ne!(
+        read_quest_target_create(&mut *keyed, 2, b"Captain"),
+        theowahdan
+    );
+    read_letter(
+        &mut *keyed,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    keyed.send_record(&client_click(theowahdan));
+    assert_eq!(
+        keyed.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: \
+              Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of \
+              bonuses|9;Inchide]"
+        ),
+        "his eight chats, and the close"
+    );
+    keyed.send_record(&client_script_answer(4));
+    let ask = titled_page(
+        b"teowahdan",
+        &[
+            b"",
+            b"Transmutation enables you to permanently change",
+            b"the appearance of your equipment. The effect is",
+            b"restricted to the level of your equipment,",
+            b"however, and the transmutation will be reversed",
+            b"if you improve the item. Do you want to continue?",
+            b"",
+        ],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(keyed.read_game(), server_script(1, &ask));
+    keyed.send_record(&client_script_answer(0));
+    assert_eq!(keyed.read_game(), server_script(0, b"[DONE]"));
+    let open = read_cl(&mut *keyed);
+    assert_eq!(
+        (open.subheader, open.cost, open.pos, open.item_pos),
+        (0, 50_000_000, 0, (1, 0)),
+        "the changelook window opens"
+    );
+}
+
+/// The kind refusals chat, the +0 sword lands in slot 0, slot 1's mismatches chat, and
+/// a held destroy is silent.
+fn cl_adds_and_guards(keyed: &mut Keyed) {
+    // The head armour, the mount spear and the stone are no transmutable kind.
+    for (cell, what) in [(4, "a head armour"), (12, "a mount spear"), (13, "a stone")] {
+        keyed.send_record(&client_cl(2, 0, 1, cell));
+        assert_eq!(
+            keyed.read_game(),
+            an_info_line(b"[Transmutation] This item cannot be transmuted"),
+            "{what} chats the cannot line"
+        );
+    }
+    keyed.still("nothing follows");
+    // The +0 sword lands in slot 0; the record echoes the named position.
+    keyed.send_record(&client_cl(2, 0, 1, 0));
+    let added = read_cl(&mut *keyed);
+    assert_eq!(
+        (added.subheader, added.cost, added.pos, added.item_pos),
+        (2, 0, 0, (1, 0)),
+        "the sword lands"
+    );
+    // Slot 1 takes no armour of another type; the sex-split pair proves the flag
+    // arm below, after the swords leave the window.
+    keyed.send_record(&client_cl(2, 1, 1, 2));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] You cannot submit this item"),
+        "an armour of another type chats the submit line"
+    );
+    // Same type, another subtype: the fan chats the submit line too (its job flags
+    // also disagree, so the polearm proves the subtype arm alone: broad flags in slot
+    // 0, narrow ones in slot 1, same type, another subtype).
+    keyed.send_record(&client_cl(2, 1, 1, 9));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] You cannot submit this item"),
+        "a fan of another subtype chats the submit line"
+    );
+    keyed.send_record(&client_cl(3, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(2, 0, 1, 14));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(2, 1, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] You cannot submit this item"),
+        "a sword of another subtype chats the submit line"
+    );
+    keyed.send_record(&client_cl(3, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(2, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(2, 1, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] You can't add locked items"),
+        "the held sword chats the locked line"
+    );
+    // The +1 sword lands in slot 1: same kind, same flags, another vnum.
+    keyed.send_record(&client_cl(2, 1, 1, 1));
+    let added = read_cl(&mut *keyed);
+    assert_eq!(
+        (added.subheader, added.pos, added.item_pos),
+        (2, 1, (1, 1)),
+        "the +1 sword lands in slot 1"
+    );
+    // A destroy of a held material is silent: the lock holds.
+    keyed.send_record(&client_destroy(1));
+    keyed.still("a held material cannot be destroyed");
+    // The window clears for the flag proof: the male-only armour lands in slot 0,
+    // and the female-only one chats the submit line in slot 1 — the sex flags
+    // disagree either way.
+    keyed.send_record(&client_cl(3, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(2, 0, 1, 2));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(2, 1, 1, 3));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] You cannot submit this item"),
+        "the opposed sex flag chats the submit line"
+    );
+    keyed.send_record(&client_cl(3, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    // The same-vnum arm: the +0 sword lands again, and its own twin in slot 1 is
+    // the held sword, so the lock chats first — the vnum arm is proved by the
+    // +1's landing below, which a same vnum would refuse.
+    keyed.send_record(&client_cl(2, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+}
+
+/// Slot 1 lifts alone, slot 0 clears both, the close answers and a second close chats
+/// the not-open line.
+fn cl_remove_and_close(keyed: &mut Keyed) {
+    // Slot 0 holds the +0 sword from the flag proof; the +1 lands in slot 1 so a
+    // refine with one material chats the submit line after slot 1 lifts.
+    keyed.send_record(&client_cl(2, 1, 1, 1));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(3, 1, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(4, 0, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] Please submit the item you want to transmute"),
+        "one material chats the submit line"
+    );
+    keyed.send_record(&client_cl(2, 1, 1, 1));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(4, 0, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] You don't have enough Gold"),
+        "no gold, no record"
+    );
+    keyed.still("nothing follows");
+    // Slot 1 lifts alone; slot 0 clears the rest.
+    keyed.send_record(&client_cl(3, 1, 1, 0));
+    let removed = read_cl(&mut *keyed);
+    assert_eq!(
+        (
+            removed.subheader,
+            removed.cost,
+            removed.pos,
+            removed.item_pos
+        ),
+        (3, 0, 1, (1, 0)),
+        "slot 1 lifts with a zeroed position"
+    );
+    keyed.send_record(&client_cl(2, 1, 1, 1));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(3, 0, 1, 0));
+    let removed = read_cl(&mut *keyed);
+    assert_eq!(
+        (removed.subheader, removed.pos),
+        (3, 0),
+        "slot 0 clears both"
+    );
+    // A remove of the empty slot sends nothing, and a remove of slot 2 is past
+    // the window; the close answers, and a second close chats the not-open line.
+    keyed.send_record(&client_cl(3, 0, 1, 0));
+    keyed.still("an empty slot removes nothing");
+    keyed.send_record(&client_cl(2, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(3, 2, 1, 0));
+    keyed.still("slot 2 removes nothing");
+    keyed.send_record(&client_cl(3, 0, 1, 0));
+    let _ = read_cl(&mut *keyed);
+    keyed.send_record(&client_cl(1, 0, 1, 0));
+    let closed = read_cl(&mut *keyed);
+    assert_eq!(
+        (closed.subheader, closed.cost, closed.pos, closed.item_pos),
+        (1, 0, 0, (1, 0)),
+        "the window closes"
+    );
+    keyed.send_record(&client_cl(1, 0, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] The window is not opened"),
+        "a closed window chats the not-open line"
+    );
+}
+
+/// Stores the gold, relogs, and reopens the window; answers the open connection.
+fn cl_gold_relog(server: &Server, database: &ScratchDatabase, keyed: Keyed) -> Keyed {
+    sql(
+        database,
+        "UPDATE player SET gold = 50000000 WHERE name = 'Alpha'",
+    );
+    drop(keyed);
+    let (mut relogged, _alpha, _items) = load_character(server, b"alice", 0);
+    let theowahdan = enter_beside(&mut relogged, THEOWAHDAN_VNUM);
+    read_login_lines(&mut relogged, 0, None);
+    read_letter(
+        &mut relogged,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let _captain = read_quest_target_create(&mut relogged, 3, b"Captain");
+    read_letter(
+        &mut relogged,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    read_letter(
+        &mut relogged,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    read_login_update(&mut relogged);
+    relogged.still("nothing follows");
+    relogged.send_record(&client_click(theowahdan));
+    assert_eq!(
+        relogged.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: \
+              Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of \
+              bonuses|9;Inchide]"
+        ),
+        "the chats again"
+    );
+    relogged.send_record(&client_script_answer(4));
+    let ask = titled_page(
+        b"teowahdan",
+        &[
+            b"",
+            b"Transmutation enables you to permanently change",
+            b"the appearance of your equipment. The effect is",
+            b"restricted to the level of your equipment,",
+            b"however, and the transmutation will be reversed",
+            b"if you improve the item. Do you want to continue?",
+            b"",
+        ],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(relogged.read_game(), server_script(1, &ask));
+    relogged.send_record(&client_script_answer(0));
+    assert_eq!(relogged.read_game(), server_script(0, b"[DONE]"));
+    let open = read_cl(&mut relogged);
+    assert_eq!(open.subheader, 0, "the window stands again");
+    relogged
+}
+
+/// The pair lands, the refine stamps the +0 sword with the +1's look, destroys the
+/// +1, spends 50,000,000 gold, answers `REFINE`, and the disconnect banks the stamp.
+fn cl_refine_and_bank(keyed: Keyed, database: &ScratchDatabase) {
+    let mut keyed = keyed;
+    keyed.send_record(&client_cl(2, 0, 1, 0));
+    let _ = read_cl(&mut keyed);
+    keyed.send_record(&client_cl(2, 1, 1, 1));
+    let _ = read_cl(&mut keyed);
+    keyed.send_record(&client_cl(4, 0, 1, 0));
+    let update = keyed.read_game();
+    assert_eq!(update[0], ITEM_UPDATE, "the sword's row updates");
+    assert_eq!(
+        update_transmutation(&update),
+        11,
+        "the +1's vnum stamps the look"
+    );
+    let cleared = keyed.read_game();
+    assert_eq!(cleared[0], ITEM_SET, "the +1's cell clears");
+    assert_eq!(set_fields(&cleared).2, 0, "the +1 is destroyed");
+    let gold = keyed.read_game();
+    assert_eq!(gold[0], GC_GOLD_CHANGE, "the gold moves");
+    assert_eq!(
+        u64::from_le_bytes(gold[16..24].try_into().expect("eight")),
+        0,
+        "50,000,000 leaves the 50,000,000 empty"
+    );
+    let refined = read_cl(&mut keyed);
+    assert_eq!(
+        (
+            refined.subheader,
+            refined.cost,
+            refined.pos,
+            refined.item_pos
+        ),
+        (4, 0, 0, (1, 0)),
+        "the refine answers"
+    );
+    // The refine cleared the window: an add lands nowhere, and the close chats the
+    // not-open line.
+    keyed.send_record(&client_cl(2, 0, 1, 0));
+    keyed.still("no window takes the add");
+    keyed.send_record(&client_cl(1, 0, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[Transmutation] The window is not opened"),
+        "the refine closed the window"
+    );
+    keyed.still("nothing follows");
+    drop(keyed);
+    // The disconnect banks the stamp: the +0 carries the +1's look, the +1 is gone,
+    // and the gold is 0.
+    wait_for(
+        database,
+        "SELECT count(*) = 1 FROM item WHERE id = 40 AND transmutation = 11",
+    );
+    wait_for(database, "SELECT count(*) = 0 FROM item WHERE id = 41");
+    wait_for(database, "SELECT gold = 0 FROM player WHERE name = 'Alpha'");
+}
+
+/// Death closes the reopened window: the IMPLEMENTOR grant (the mission's non-GM login
+/// gate keeps the relog quiet), the relog, the reopen, a material landed, the kill, and
+/// the close behind the dead and the three re-added affects. Answers the open
+/// connection.
+fn cl_death_closes(server: &Server, database: &ScratchDatabase, keyed: Keyed) -> Keyed {
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR'          FROM account WHERE login = 'alice'",
+    );
+    drop(keyed);
+    let (mut relogged, _alpha, _items) = load_character(server, b"alice", 0);
+    let (alpha_vid, theowahdan) = enter_beside_shown(&mut relogged, THEOWAHDAN_VNUM);
+    read_rank_login(&mut relogged, 0, &[], &[]);
+    assert_eq!(
+        relogged.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the GM login event"
+    );
+    read_letter(&mut relogged, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(&mut relogged, 1, 0, None, [false; 5], None);
+    let _marks = read_login_letters(&mut relogged, true);
+    let _captain = read_quest_target_create(&mut relogged, 5, b"Captain");
+    read_letter(
+        &mut relogged,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    read_letter(
+        &mut relogged,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    read_login_update(&mut relogged);
+    relogged.still("nothing follows");
+    relogged.send_record(&client_click(theowahdan));
+    assert_eq!(
+        relogged.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]"
+        ),
+        "the chats again"
+    );
+    relogged.send_record(&client_script_answer(4));
+    let ask = titled_page(
+        b"teowahdan",
+        &[
+            b"",
+            b"Transmutation enables you to permanently change",
+            b"the appearance of your equipment. The effect is",
+            b"restricted to the level of your equipment,",
+            b"however, and the transmutation will be reversed",
+            b"if you improve the item. Do you want to continue?",
+            b"",
+        ],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(relogged.read_game(), server_script(1, &ask));
+    relogged.send_record(&client_script_answer(0));
+    assert_eq!(relogged.read_game(), server_script(0, b"[DONE]"));
+    let open = read_cl(&mut relogged);
+    assert_eq!(open.subheader, 0, "the window stands again");
+    // The +0 sword carries the refine's stamp, so it chats the already line; the
+    // polearm lands instead.
+    relogged.send_record(&client_cl(2, 0, 1, 0));
+    assert_eq!(
+        relogged.read_game(),
+        an_info_line(b"[Transmutation] You can't add items which are transmuted yet"),
+        "the stamped sword chats the already line"
+    );
+    relogged.send_record(&client_cl(2, 0, 1, 14));
+    let _ = read_cl(&mut relogged);
+    relogged.send_record(&client_chat(CHAT_TALKING, b"/kill Alpha"));
+    assert_eq!(
+        relogged.read_game(),
+        ownership_of(0, alpha_vid),
+        "death releases the view"
+    );
+    assert_eq!(relogged.read_game(), [GC_PHASE, 6], "the dead phase");
+    assert_eq!(relogged.read_game(), dead_of(alpha_vid), "the dead");
+    let mut kinds = Vec::new();
+    for what in [
+        "the first re-added",
+        "the second re-added",
+        "the third re-added",
+    ] {
+        let add = relogged.read_game();
+        assert_eq!(add[0], GC_AFFECT_ADD, "{what}: {add:02x?}");
+        kinds.push(u32::from_le_bytes(add[1..5].try_into().expect("four")));
+    }
+    assert_eq!(kinds, [540, 215, 540], "the running three, in order");
+    let closed = read_cl(&mut relogged);
+    assert_eq!(
+        (closed.subheader, closed.cost, closed.pos, closed.item_pos),
+        (1, 0, 0, (1, 0)),
+        "death closes the window"
+    );
+    relogged.still("nothing follows");
+    relogged
+}
+
+/// `cg.game.cl`, `sub.ChangeLook.*`, `quest.changelook`: Alpha with the sword pair at
+/// cells 0 and 1, the sex-split armour pair, a head armour, a mount spear and a stone,
+/// enters beside Theowahdan. "Transmutation" opens the window with the 50,000,000 cost.
+/// The head armour, the mount spear and the stone chat the cannot line; the +0 sword
+/// lands in slot 0, the male-only armour chats the submit line in slot 1, the held
+/// sword chats the locked line, the +1 sword lands in slot 1, and a destroy of a held
+/// material is silent. Slot 1 lifts alone with a zeroed position, slot 0 clears both,
+/// an empty remove sends nothing, the close answers and a second close chats the
+/// not-open line. A one-material refine chats the submit line; the poor refine chats
+/// the gold line with no record. With the gold stored the reopened window refines: the
+/// +0's row updates with the +1's look, the +1 is destroyed, 50,000,000 gold leaves,
+/// the refine answers, and the disconnect banks the stamp.
+#[test]
+fn a_transmutation_is_refused_stamped_and_banked() {
+    let Some((database, server)) = cl_seed_looks() else {
+        return;
+    };
+    let (mut alice, theowahdan) = cl_first_login(&server);
+    cl_open_transmutation(&mut alice, theowahdan);
+    cl_adds_and_guards(&mut alice);
+    cl_remove_and_close(&mut alice);
+    let alice = cl_gold_relog(&server, &database, alice);
+    cl_refine_and_bank(alice, &database);
+    // Death closes a reopened window; the grant lands after the refine so the
+    // earlier logins stay non-GM.
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let _ = enter_beside(&mut alice, THEOWAHDAN_VNUM);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let _captain = read_quest_target_create(&mut alice, 4, b"Captain");
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+    let _dead = cl_death_closes(&server, &database, alice);
 }
