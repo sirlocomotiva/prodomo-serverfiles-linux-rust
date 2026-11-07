@@ -46933,3 +46933,24 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 421. The temple ticks
+
+Ledger 413 had written the Ochao portal's show as 120 s. The source says 60
+(`TEMPLE_OCHAO_PORTAL_SHOW`, `G/TempleOchao.h:7`), and the doc comment named a
+`TEMPLE_OCHAO_SHOW_PORTAL` that does not exist anywhere in the tree. The slice fixes the
+constant (`prodomo/src/game_state/temple_ochao.rs:30`), pins the due in
+`the_kill_raises_the_portal_where_the_killer_stands`, and marks the two temple rows
+`ported`: `guardian_activity_event` (every 30 s, past the idle line — 180 s, 600 s once
+attacked — the guardian moves rooms) and `guardian_event` (the portal spawns where the
+killer stands, the prepare clears 60 s later). The rest of the port — the attack arm, the
+room change with a victim on 209, the kill coordinates — already matched its source.
+
+Timed-events: 67 `missing` / 27 `ported` / 5 `partial`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4875 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

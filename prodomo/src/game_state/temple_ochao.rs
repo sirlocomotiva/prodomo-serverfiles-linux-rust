@@ -26,8 +26,8 @@ const NO_ACTIVITY_SECS: u64 = 180;
 const ATTACKED_SECS: u64 = 600;
 /// `TEMPLE_OCHAO_CHECK_ACTIVITY`, in seconds.
 const CHECK_ACTIVITY_SECS: u64 = 30;
-/// `TEMPLE_OCHAO_SHOW_PORTAL`, in seconds.
-const PORTAL_SHOW_SECS: u64 = 120;
+/// `TEMPLE_OCHAO_PORTAL_SHOW`, in seconds.
+const PORTAL_SHOW_SECS: u64 = 60;
 /// The room offsets in map units (`Prepare`'s `pos`, each `* 100`).
 const ROOM_OFFSETS: [(i32, i32); 11] = [
     (193, 145),
@@ -152,7 +152,7 @@ impl GameState {
     }
 
     /// `CMgr::OnGuardianKilled`: the portal spawns where the killer stands and the
-    /// prepare clears 120 s later.
+    /// prepare clears 60 s later.
     pub(super) fn temple_guardian_killed(&mut self, place: (u8, i32), at: (i32, i32)) {
         let stood = self.spawn_event_mob(place, PORTAL_VNUM, at, -1, true);
         self.temple_ochao.portal = stood.unwrap_or(0);
@@ -373,7 +373,7 @@ mod tests {
     }
 
     /// The guardian's death at a killer standing on 209 raises the portal where the
-    /// killer stands for 120 s; a killer elsewhere raises nothing.
+    /// killer stands for 60 s; a killer elsewhere raises nothing.
     #[test]
     fn the_kill_raises_the_portal_where_the_killer_stands() {
         let clock = TestClock::default();
@@ -394,6 +394,7 @@ mod tests {
             [(BASE.0 + 19_400, BASE.1 + 14_600)]
         );
         let due = world.temple_ochao.portal_due.expect("shown");
+        assert_eq!(due, 60 * u64::from(crate::save::PASSES_PER_SEC));
         world.run_temple_ochao(due);
         assert!(standing(&world, PORTAL_VNUM).is_empty());
         while inbox.try_recv().is_ok() {}
