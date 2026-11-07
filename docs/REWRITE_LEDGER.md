@@ -47234,3 +47234,35 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 433. Santa's hop
+
+`event.xmas_event.spawn_santa_event` had no port: Santa stood where the flag put him and
+never moved. The slice ports the respawn (`G/xmas_event.cpp:115-141`), Santa's map hop
+(`G/char_state.cpp:539-578`), and his 30 s arm and grade bonuses
+(`G/char.cpp:2517-2527`). The idle's hop draws one of the seven maps ([61, 62, 63, 64,
+3, 23, 43]), Santa leaves, and the respawn stands armed 50 min on — 50 s on the test
+server (`test_server` divides the gap by 60, and it is on). The fire checks the flag,
+the standing Santa and the map, re-arming 5 s on when none hosts it. The unhosted-map
+arm and the GG relay's observable half (`G/input_p2p.cpp:410-428`, the reply that
+destroys the local Santa) arm the same timer: the relay itself is retired (ADR-0001),
+and each legacy core kept its own Santa map, so per-world vs process-wide is
+unobservable here. The gate lives on `NpcCombat::play_start_ms` (`m_dwPlayStartTime`,
+`G/char.h:943`, read nowhere else), stamped 30 s out at creation; the bonuses ride
+`MobFight::of` (+10 attack, +6 defence). A 50 min binary scenario is unwitnessable, so
+the world tests prove it (owner decision, 2026-10-14):
+`the_santa_respawn_checks_the_flag_the_standing_and_the_map` (flag 0, landing, standing,
+unhosted re-arm) and `a_lapsed_santa_hops_and_a_live_one_stands` (hop, gate, dice,
+50 s arming), plus `a_santa_keeps_the_grade_bonuses` in `world`. The suite's one
+failure was the scenario cell naming two tests; the rule needs one `file::test`, so the
+hop test moved into the note. The row is `ported`.
+
+Timed-events: 36 `missing` / 45 `ported` / 5 `partial` / 13 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4879 passed 1 failed in 42 targets (the scenario cell), the rerun parity target
+322 passed 0 failed, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

@@ -223,6 +223,10 @@ pub(super) struct NpcCombat {
     /// it per victim and increments it, and only the CHAIN skill resets it (unhosted, so
     /// no reset is ported).
     pub(super) chain: u8,
+    /// `m_dwPlayStartTime` (`G/char.h:943`): for a Santa, the next 2 s hop's gate. `created`
+    /// stamps it 30 s out (`SetProto`, `G/char.cpp:2525-2527`); a lazy `or_default()` leaves
+    /// it 0, so a Santa stood by hand hops at once. Unread on any other race.
+    pub(super) play_start_ms: u32,
 }
 
 /// A player's no-damage flags: `m_dwNDRFlag` and `m_setNDAFlag`
@@ -280,9 +284,13 @@ impl NpcCombat {
             skill_cool_ms: [0; 5],
             skill_events: std::collections::BTreeMap::new(),
             chain: 0,
+            play_start_ms: now.wrapping_add(SANTA_HOP_ARM_MS),
         }
     }
 }
+
+/// `SetProto`'s Santa arm delay (`G/char.cpp:2525-2527`): the first hop waits 30 s.
+const SANTA_HOP_ARM_MS: u32 = 30_000;
 
 impl Default for NpcCombat {
     /// `created` at time 0 at the origin: -100 aggro, an unstamped victim-set time.

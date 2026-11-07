@@ -9,8 +9,7 @@
 //! `aiMobEnchantApplyIdx` and `aiMobResistsApplyIdx` (`G/constants.cpp:643-666`).
 //!
 //! Nothing a non-player does changes these points in the Rewrite yet: an affect on a non-player
-//! waits for the affect system, and the Santa's grade bonuses (`G/char.cpp:2517-2528`) for the
-//! Christmas event.
+//! waits for the affect system. The Santa's grade bonuses (`G/char.cpp:2517-2528`) are in.
 
 use std::collections::BTreeMap;
 
@@ -28,6 +27,13 @@ const ENCHANT_APPLIES: [u8; MOB_ENCHANTS_MAX_NUM] = [
     15, // APPLY_CRITICAL_PCT
     16, // APPLY_PENETRATE_PCT
 ];
+
+/// `xmas::MOB_SANTA_VNUM` (`G/xmas_event.h`).
+const SANTA_VNUM: u32 = 20_031;
+/// `SetPoint(POINT_ATT_GRADE_BONUS, 10)` (`G/char.cpp:2519`).
+const SANTA_ATT_BONUS: i32 = 10;
+/// `SetPoint(POINT_DEF_GRADE_BONUS, 6)` (`G/char.cpp:2520`).
+const SANTA_DEF_BONUS: i32 = 6;
 
 /// `aiMobResistsApplyIdx`: the apply type each of a proto's `cResists` adds to.
 const RESIST_APPLIES: [u8; MOB_RESISTS_MAX_NUM] = [
@@ -141,6 +147,11 @@ impl MobFight {
                 fight.add(slot, i32::from(value));
             }
         }
+        if proto.vnum == SANTA_VNUM {
+            // `SetProto`'s Santa hardcoding (`G/char.cpp:2517-2520`): +10 attack, +6 defence.
+            fight.add(point::POINT_ATT_GRADE_BONUS, SANTA_ATT_BONUS);
+            fight.add(point::POINT_DEF_GRADE_BONUS, SANTA_DEF_BONUS);
+        }
         fight
     }
 
@@ -201,6 +212,20 @@ mod tests {
             resists: [-7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0],
             ..MobTableRecord::default()
         }
+    }
+
+    /// A Santa keeps +10 attack and +6 defence (`G/char.cpp:2517-2520`); any other vnum
+    /// keeps none.
+    #[test]
+    fn a_santa_keeps_the_grade_bonuses() {
+        let mut santa = proto();
+        santa.vnum = SANTA_VNUM;
+        let fight = MobFight::of(&santa);
+        assert_eq!(fight.point(point::POINT_ATT_GRADE_BONUS), 10);
+        assert_eq!(fight.point(point::POINT_DEF_GRADE_BONUS), 6);
+        let plain = MobFight::of(&proto());
+        assert_eq!(plain.point(point::POINT_ATT_GRADE_BONUS), 0);
+        assert_eq!(plain.point(point::POINT_DEF_GRADE_BONUS), 0);
     }
 
     /// `MobFight` keeps the sight, multiplier, berserk, death-blow and revive points (U17).

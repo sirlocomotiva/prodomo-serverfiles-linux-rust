@@ -61,7 +61,8 @@
 //!   waits for a hit on a stone, which is refused until its spawns are ported.
 //! - **A stone's spawns** at each tenth of its hit points wait for a hit on a stone, which is
 //!   refused until they are ported.
-//! - **Santa and the war flags** wait for their systems. A horse runs `StateHorse`
+//! - **The war flags** wait for their system. Santa's hop is ported
+//!   (`crate::game_state::GameState::santa_hop`), and a horse runs `StateHorse`
 //!   ([`super::horse_summon`]).
 //! - **The monster clips.** Every NPC moves at the fall-back motion speed of 300 (V2), as no
 //!   monster `.msa` is loaded.
@@ -141,6 +142,13 @@ const STONE_SPAWNS: [(i32, i32, &[i32]); 10] = [
     (90, 2, &[500]),
     (99, 1, &[1000]),
 ];
+
+/// Santa's hop maps (`G/char_state.cpp:554-555`).
+const SANTA_HOP_MAPS: [i32; 7] = [61, 62, 63, 64, 3, 23, 43];
+/// The hop gate's re-arm (`G/char_state.cpp:543-545`): 2 s.
+const SANTA_HOP_REARM_MS: u32 = 2_000;
+/// The hop's respawn gap (`G/char_state.cpp:563`, `G/input_p2p.cpp:416`): 50 min.
+const SANTA_RESPAWN_GAP: i32 = 50 * 60;
 
 /// `PASSES_PER_SEC(seconds)`.
 pub(super) fn pulses(seconds: i32) -> u64 {
@@ -426,13 +434,16 @@ impl GameState {
         }
     }
 
-    /// `__StateIdle_NPC` (`G/char_state.cpp:507-624`). No pet, mount or shaman is ported, and
-    /// Santa waits for his system. A guard searches for a monster victim past the `noguard`
-    /// event flag (`:522-538`); a follower past 500 of its group's leader walks back to
-    /// within `number(100, 300)` of it (`:586-598`; [`super::mob_party`]).
+    /// `__StateIdle_NPC` (`G/char_state.cpp:507-624`). No pet, mount or shaman is ported. A
+    /// guard searches for a monster victim past the `noguard` event flag (`:522-538`); a
+    /// follower past 500 of its group's leader walks back to within `number(100, 300)` of
+    /// it (`:586-598`; [`super::mob_party`]); a lapsed Santa hops maps (`:539-578`).
     fn idle_npc(&mut self, vid: u32, who: Who) {
         self.monster_chat_wait(vid, who);
         self.set_duration(vid, pulses(5));
+        if u32::from(who.race) == super::event_flag::SANTA && self.santa_hop(vid) {
+            return;
+        }
         if self.is_guard(vid) {
             // The guard arm (`:522-538`): past `noguard`, the nearest monster within
             // 50000 starts the fight at once, 12 Pulses out (`passes_per_sec / 2`).
@@ -453,6 +464,12 @@ impl GameState {
         if who.ai_flags & AIFLAG_NOMOVE != 0 {
             return;
         }
+        // A live-stamp Santa hops and returns above; a wander draw below would double-spend
+        // the Santa-only dice order (`number(0, 6)` then `number(200, 400)`), so a Santa
+        // never reaches the wander.
+        if u32::from(who.race) == super::event_flag::SANTA {
+            return;
+        }
         // The protege follow (`:586-598`): a `Follow` that walks returns before the wander
         // draw, and one that refuses — within 100 to 300, or a refused walk — falls
         // through to it.
@@ -471,6 +488,33 @@ impl GameState {
         if self.npc_goto(vid, x, y) {
             self.send_move_wait(vid);
         }
+    }
+
+    /// Santa's map hop (`G/char_state.cpp:539-578`): when `get_dword_time()` has passed his
+    /// `m_dwPlayStartTime`, the gate re-stamps 2 s out, one map of the seven is drawn, and
+    /// Santa leaves for it — destroyed here and respawned there 50 min on when some Channel
+    /// world hosts it, else kept standing and the respawn armed on the map anyway (the GG
+    /// relay's observable half, `G/input_p2p.cpp:410-428`, with no GG left: the core that
+    /// would have hosted the map never existed, so the timer carries it). Returns whether
+    /// Santa hopped; a live gate keeps him walking nowhere, as his `AIFLAG_NOMOVE` proto
+    /// holds him (`mob_proto.txt:1196`).
+    pub(super) fn santa_hop(&mut self, vid: u32) -> bool {
+        let now = self.clock.now();
+        let Some(combat) = self.npc_combat.get(&vid) else {
+            return false;
+        };
+        if now <= combat.play_start_ms {
+            return false;
+        }
+        if let Some(combat) = self.npc_combat.get_mut(&vid) {
+            combat.play_start_ms = now.wrapping_add(SANTA_HOP_REARM_MS);
+        }
+        let next = SANTA_HOP_MAPS[usize::try_from(number(&mut self.dice, 1, 7))
+            .unwrap_or(1)
+            .saturating_sub(1)];
+        self.destroy_npc(vid);
+        self.spawn_santa(next, SANTA_RESPAWN_GAP, self.last_pulse);
+        true
     }
 
     /// `__StateIdle_Monster` (`G/char_state.cpp:626-757`).
@@ -1409,6 +1453,51 @@ mod tests {
                 assert_eq!(world.dice, dice);
             }
         }
+    }
+
+    /// A lapsed Santa hops at his first idle: the gate re-stamps 2 s out, one of the seven
+    /// maps is drawn, Santa leaves, and the respawn stands armed for that map (50 s on the
+    /// test server). A live gate lapses nothing: Santa stands and draws his chat's odds
+    /// alone, and no respawn is armed.
+    #[test]
+    fn a_lapsed_santa_hops_and_a_live_one_stands() {
+        const SANTA: u16 = 20_031;
+        // The gate stands 30 s out of the standing Pulse (`created`); the first idle hops
+        // only when the clock has passed it.
+        let mut npc = an_npc(ME, CHAR_TYPE_NPC, SANTA, AIFLAG_NOMOVE);
+        let (mut world, mut inbox, mut dice) = first_idle(npc.clone(), 0);
+        assert!(world.npc_by_vid(ME).is_some(), "the first hop waits 30 s");
+        let _chat = number(&mut dice, 0, 30);
+        assert_eq!(world.dice, dice, "a live Santa draws his chat's odds alone");
+        assert_eq!(drained(&mut inbox), Vec::<Vec<u8>>::new());
+        let gate = world.npc_combat.get(&ME).expect("a fight").play_start_ms;
+        assert_eq!(gate, T0.wrapping_add(30_000));
+        assert!(world.regens.due.is_empty(), "no respawn is armed");
+        // Lapse the gate and run the next idle.
+        world
+            .npc_combat
+            .get_mut(&ME)
+            .expect("a fight")
+            .play_start_ms = 0;
+        let clock = TestClock::default();
+        clock.set(T0 + 126 * 40);
+        world.clock = super::super::motion::WorldClock::new(Box::new(clock));
+        world.process_pulse(126);
+        let armed: Vec<(u64, i32)> = world
+            .regens
+            .due
+            .iter()
+            .filter_map(|&(when, ref what)| match what {
+                super::super::regen::Due::SantaSpawn { map } => Some((when, *map)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(armed.len(), 1, "one respawn stands armed");
+        let (when, map) = armed[0];
+        assert!(SANTA_HOP_MAPS.contains(&map));
+        assert_eq!(when, 126 + pulses(50), "50 s on the test server");
+        assert!(world.npc_by_vid(ME).is_none(), "Santa leaves");
+        let _ = &mut npc;
     }
 
     /// A monster's idle walk: one time in 7 it turns to a drawn heading, walks a drawn 300 to

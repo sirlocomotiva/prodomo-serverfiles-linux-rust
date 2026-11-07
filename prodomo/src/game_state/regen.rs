@@ -80,6 +80,14 @@ pub(super) enum Due {
         /// Its place in the map's [`world::npc::MapNpcs::regens`].
         at: usize,
     },
+    /// `spawn_santa_event` (`G/xmas_event.cpp:115-141`): Santa's 50 min respawn on this map.
+    /// It sorts first here: at an equal Pulse it fires before any other event (a Divergence
+    /// — legacy's heap order at equal priority is heap-shape dependent, as the other arms
+    /// note).
+    SantaSpawn {
+        /// The map index Santa returns to.
+        map: i32,
+    },
     /// `StunEvent` of the non-player under this VID. See [`super::fight`].
     Stun(u32),
     /// `dead_event` of the non-player under this VID.
@@ -297,6 +305,7 @@ impl GameState {
                 // reused. A player's VID is its PID, which comes back at its next login, so a
                 // player's event runs only while its own slot still holds it.
                 Due::Vein(vid) => self.destroy_npc(vid),
+                Due::SantaSpawn { map } => self.fire_santa_spawn(map, pulse),
                 Due::Regen { channel, map, at } => self.fire_regen((channel, map), at, pulse),
                 Due::Stun(vid) => self.stun_event(vid),
                 Due::Dead(vid) => self.dead_event(vid),
@@ -310,6 +319,37 @@ impl GameState {
                 Due::PcPoison { vid, count, killer } => self.pc_poison_event(vid, count, killer),
             }
         }
+    }
+
+    /// `xmas::SpawnSanta` (`G/xmas_event.cpp:143-156`): Santa returns to `map` after
+    /// `gap` seconds (50 min from the hop or the GG relay), 50 s on the test server
+    /// (`test_server` divides the gap by 60, and the world is one).
+    pub(super) fn spawn_santa(&mut self, map: i32, gap: i32, pulse: u64) {
+        let gap = gap / if self.test_server { 60 } else { 1 };
+        let gap = u32::try_from(gap).unwrap_or(0);
+        let when = pulse.saturating_add(pulses(gap));
+        self.regens.due.insert((when, Due::SantaSpawn { map }));
+    }
+
+    /// `spawn_santa_event` (`G/xmas_event.cpp:115-141`): silent when `xmas_santa` is 0 or a
+    /// Santa stands anywhere (any Channel world — each legacy core kept its own map and
+    /// the check was process-wide); else Santa returns to the map on some Channel world
+    /// hosting it, first one in map order. A map none hosts re-arms 5 s on, as legacy's
+    /// failed spawn does.
+    fn fire_santa_spawn(&mut self, map: i32, pulse: u64) {
+        let flag = self
+            .quests
+            .as_ref()
+            .map_or(0, |quests| quests.manager().event_flag(b"xmas_santa"));
+        if flag == 0 || !self.vids_of_race(None, super::event_flag::SANTA).is_empty() {
+            return;
+        }
+        let Some(&place) = self.places_hosting(map).iter().min().copied().as_ref() else {
+            let when = pulse.saturating_add(pulses(5));
+            self.regens.due.insert((when, Due::SantaSpawn { map }));
+            return;
+        };
+        self.spawn_event_mob_randomly(place, super::event_flag::SANTA);
     }
 
     /// `regen_event`: `regen_spawn(regen, false)`, then the next run `time` seconds on.

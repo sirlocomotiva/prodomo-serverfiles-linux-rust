@@ -40,8 +40,8 @@ use crate::game_loop_messages::EventLine;
 use crate::game_state::GameState;
 use crate::item_move::Mover;
 
-/// `xmas::MOB_SANTA_VNUM` (`G/xmas_event.h`).
-const SANTA: u32 = 20_031;
+/// `xmas::MOB_SANTA_VNUM` (`G/xmas_event.h`). `pub(super)` for the NPC idle's hop.
+pub(super) const SANTA: u32 = 20_031;
 /// `xmas::MOB_XMAS_TREE_VNUM`.
 const XMAS_TREE: u32 = 20_032;
 /// `xmas::MOB_XMAS_FIRWORK_SELLER_VNUM`.
@@ -351,7 +351,7 @@ impl GameState {
     /// `GetCharactersByRaceNum(race)` on one Channel world, or on all with `None`: each
     /// character's VID and map. Every race the arms ask for is registered (an NPC proto or
     /// a Christmas race).
-    fn vids_of_race(&self, channel: Option<u8>, race: u32) -> Vec<(u32, i32)> {
+    pub(super) fn vids_of_race(&self, channel: Option<u8>, race: u32) -> Vec<(u32, i32)> {
         self.npcs
             .iter()
             .filter(|(&(on, _), _)| channel.is_none_or(|wanted| wanted == on))
@@ -799,6 +799,73 @@ mod tests {
         assert!(
             standing(&world, FIREWORK_SELLER).is_empty(),
             "day's sellers stood and went, map 41's point lies in the region"
+        );
+    }
+
+    /// The respawn's gates (`G/xmas_event.cpp:115-141`): at the flag 0 nothing comes and at
+    /// a standing Santa no second comes, each leaving nothing armed; with the flag on and
+    /// no Santa standing, Santa comes to the map and nothing re-arms; on a map none hosts
+    /// the spawn re-arms 5 s on.
+    #[test]
+    fn the_santa_respawn_checks_the_flag_the_standing_and_the_map() {
+        use crate::game_loop::PulseProcessor;
+        use crate::game_state::regen::Due;
+        let clock = TestClock::default();
+        let (mut world, _clients) = event_world_on(&clock, 61, (358_400, 153_600));
+        let seohan = (PLACE.0, 61);
+        // At the flag 0 nothing comes.
+        world.spawn_santa(61, 50 * 60, 0);
+        assert_eq!(world.regens.due.len(), 1);
+        let (when, _) = world.regens.due.iter().next().copied().expect("armed");
+        world.process_pulse(when);
+        assert!(world.regens.due.is_empty(), "a lapsed flag-0 run ends it");
+        assert!(standing_on(&world, seohan, SANTA).is_empty());
+        // With the flag on Santa comes.
+        world.set_event_flag(b"xmas_santa", 2);
+        world.spawn_santa(61, 50 * 60, when);
+        let (due, _) = world
+            .regens
+            .due
+            .iter()
+            .next()
+            .copied()
+            .expect("armed again");
+        assert_eq!(
+            due,
+            when + crate::game_state::regen::pulses(50),
+            "50 s, the test server"
+        );
+        world.process_pulse(due);
+        assert_eq!(standing_on(&world, seohan, SANTA).len(), 1);
+        assert!(
+            world.regens.due.is_empty(),
+            "a landed Santa re-arms nothing"
+        );
+        // At a standing Santa no second comes.
+        world.spawn_santa(61, 50 * 60, due);
+        let (next, _) = world.regens.due.iter().next().copied().expect("armed");
+        world.process_pulse(next);
+        assert_eq!(standing_on(&world, seohan, SANTA).len(), 1);
+        assert!(world.regens.due.is_empty(), "a standing Santa ends it");
+        // On a map none hosts the spawn re-arms 5 s on.
+        world.set_event_flag(b"xmas_santa", 0);
+        assert!(standing_on(&world, seohan, SANTA).is_empty());
+        world.set_event_flag(b"xmas_santa", 2);
+        world.spawn_santa(62, 50 * 60, next);
+        let (third, _) = world.regens.due.iter().next().copied().expect("armed");
+        world.process_pulse(third);
+        assert_eq!(
+            world
+                .regens
+                .due
+                .iter()
+                .filter_map(|&(when, ref what)| match what {
+                    Due::SantaSpawn { map } => Some((when, *map)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [(third + crate::game_state::regen::pulses(5), 62)],
+            "a map none hosts re-arms 5 s on"
         );
     }
 
