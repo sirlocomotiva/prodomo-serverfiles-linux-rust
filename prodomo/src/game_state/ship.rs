@@ -1982,6 +1982,18 @@ mod tests {
             BARRIER_VNUM,
             FAKE_HYDRAS[0],
             FAKE_HYDRAS[1],
+            HYDRAS[0],
+            HYDRAS[1],
+            HYDRAS[2],
+            MINI_HYDRAS[0],
+            MINI_HYDRAS[1],
+            MINI_HYDRAS[2],
+            EGG_VNUM,
+            REWARD_VNUM,
+            PORTAL_VNUM,
+            WOOD_VNUM,
+            3954,
+            3955,
         ]
         .into_iter()
         .map(|vnum| gamedata::mob_proto::MobProto {
@@ -2188,6 +2200,244 @@ mod tests {
         let _leave = member_orders.try_recv().expect("the leave warps");
         world.judge_ship_land(Vid::new(MEMBER_VID));
         let _land = member_orders.try_recv().expect("the land warps");
+    }
+
+    /// The wave tick: at 60 it chats nothing and counts down; at 10 and under
+    /// the sea-battle countdown chats; at 0 wave 1 sets — the minis stand (none
+    /// for wave 1), the spawn timer starts, and the 120-second wave timer arms.
+    #[test]
+    fn the_wave_tick_counts_chats_and_sets_wave_1() {
+        let ShipWorld {
+            mut world,
+            mut leader_inbox,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        if let Some(body) = world.bodies.get_mut(&Vid::new(LEADER_VID)) {
+            body.map = 3_580_000;
+        }
+        let _ = heard(&mut leader_inbox);
+        let due = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.wave_due)
+            .expect("armed")
+            .3;
+        // At 60 the tick counts down silent.
+        world.run_ship_wave(LEADER_VID, due);
+        let (_, _, wait, _) = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.wave_due)
+            .expect("armed");
+        assert_eq!(wait, 59);
+        assert!(heard(&mut leader_inbox).is_empty(), "silent past 10");
+        // At 10 the countdown chats.
+        if let Some(run) = world.ship.of_mut(LEADER_VID) {
+            run.wave_due = Some((false, 1, 10, due));
+        }
+        world.run_ship_wave(LEADER_VID, due);
+        let lines = heard(&mut leader_inbox);
+        assert!(
+            lines.iter().any(|line| line
+                .windows(b"sea battle starts in 10".len())
+                .any(|window| window == b"sea battle starts in 10")),
+            "the countdown chats: {lines:02x?}"
+        );
+        // At 0 wave 1 sets: the spawn timer starts and the next-wave timer arms.
+        if let Some(run) = world.ship.of_mut(LEADER_VID) {
+            run.wave_due = Some((false, 1, 0, due));
+        }
+        world.run_ship_wave(LEADER_VID, due);
+        let run = world.ship.of(LEADER_VID).expect("the run stands");
+        assert_eq!(run.wave, 1);
+        assert!(run.spawn_due.is_some(), "the spawn timer starts");
+        assert!(
+            matches!(run.wave_due, Some((true, 1, 120, _))),
+            "the 120-second timer arms: {:?}",
+            run.wave_due
+        );
+    }
+
+    /// The ship tick: it counts 6 down silent, then prepares wave 3 — the fake
+    /// hydra and the wave-1 pair stand, and the 10-second wave timer arms.
+    #[test]
+    fn the_ship_tick_counts_down_then_prepares_the_wave() {
+        let ShipWorld {
+            mut world,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        let due = world.last_pulse().saturating_add(25);
+        world.ship_set_ship_event(LEADER_VID, 3, due);
+        assert!(world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.ship_due)
+            .is_some());
+        world.run_ship_ship(LEADER_VID, due);
+        let (_, wait, _) = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.ship_due)
+            .expect("counting");
+        assert_eq!(wait, 5);
+        if let Some(run) = world.ship.of_mut(LEADER_VID) {
+            run.ship_due = Some((3, 0, due));
+        }
+        world.run_ship_ship(LEADER_VID, due);
+        let run = world.ship.of(LEADER_VID).expect("the run stands");
+        assert!(run.ship_due.is_none(), "the timer ends");
+        // Waves 2-4 spawn their fakes untracked, as legacy `Spawn`s them; the
+        // wave-3 hydra stands tracked.
+        let fakes = world
+            .npcs_on(1, 3_580_000)
+            .npcs
+            .iter()
+            .filter(|npc| npc.vnum == FAKE_HYDRAS[1])
+            .count();
+        // `judge_ship_start` stands the wave-1 fakes (3), and the wave-3 prepare
+        // stands its own (1).
+        assert_eq!(fakes, 4, "the wave-3 fake stands");
+        assert!(run.boss.is_some(), "the hydra stands");
+        assert!(
+            matches!(run.wave_due, Some((false, 3, 10, _))),
+            "the 10-second timer arms: {:?}",
+            run.wave_due
+        );
+    }
+
+    /// The spawn tick: wave 1 past 40 seconds stands a mob, and the laser tick
+    /// re-arms every second.
+    #[test]
+    fn the_spawn_tick_stands_wave_1_and_the_laser_tick_rearms() {
+        let ShipWorld {
+            mut world,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        let due = world.last_pulse().saturating_add(25);
+        world.ship_set_wave(LEADER_VID, 1, due);
+        let before = world.npcs_on(1, 3_580_000).npcs.len();
+        // Wave 1 at 41 seconds: the roll may or may not stand, but the seconds tick on.
+        if let Some(run) = world.ship.of_mut(LEADER_VID) {
+            run.spawn_due = Some((1, 0, 41, due));
+        }
+        world.run_ship_spawn(LEADER_VID, due);
+        let (_, _, secs, _) = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.spawn_due)
+            .expect("ticking");
+        assert_eq!(secs, 42);
+        let _ = before;
+        // Wave 2 arms the laser timer; the laser tick re-arms it a second on.
+        world.ship_set_wave(LEADER_VID, 2, due);
+        assert!(world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.laser_due)
+            .is_some());
+        world.run_ship_laser(LEADER_VID, due);
+        assert_eq!(
+            world.ship.of(LEADER_VID).and_then(|run| run.laser_due),
+            Some(due.saturating_add(25)),
+            "the laser re-arms"
+        );
+    }
+
+    /// The clear tick: the wave-1 fake hydra goes 3 seconds after the prepare,
+    /// and the egg's clear takes the egg.
+    #[test]
+    fn the_clear_tick_destroys_the_fake_and_the_egg() {
+        let ShipWorld {
+            mut world,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        let due = world.last_pulse().saturating_add(25);
+        world.ship_prepare_wave(LEADER_VID, 1, due);
+        let fake = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.fake)
+            .expect("the fake stands");
+        let (_, clear_due) = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.clear_due)
+            .expect("armed");
+        assert_eq!(clear_due, due.saturating_add(3 * 25), "3 seconds on");
+        world.run_ship_clear(LEADER_VID, clear_due);
+        assert!(world.ship.of(LEADER_VID).and_then(|run| run.fake).is_none());
+        assert!(world.npc_by_vid(fake).is_none(), "the fake is destroyed");
+        // The egg's clear takes the egg.
+        world.ship_spawn_egg(LEADER_VID, due);
+        let egg = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.egg)
+            .expect("the egg stands");
+        let (_, egg_due) = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.clear_due)
+            .expect("armed");
+        assert_eq!(egg_due, due.saturating_add(8 * 25), "8 seconds on");
+        world.run_ship_clear(LEADER_VID, egg_due);
+        assert!(world.npc_by_vid(egg).is_none(), "the egg is destroyed");
+    }
+
+    /// The exit tick: at 60 the minute line chats and the count ticks down; at 0
+    /// the run ends.
+    #[test]
+    fn the_exit_tick_chats_the_minute_then_ends_the_run() {
+        let ShipWorld {
+            mut world,
+            mut leader_inbox,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        if let Some(body) = world.bodies.get_mut(&Vid::new(LEADER_VID)) {
+            body.map = 3_580_000;
+        }
+        let due = world.last_pulse().saturating_add(25);
+        world.ship_set_ship_event(LEADER_VID, 5, due);
+        let (_, secs, exit_due) = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.exit_due)
+            .expect("armed");
+        assert_eq!(secs, 300);
+        let _ = heard(&mut leader_inbox);
+        world.run_ship_exit(LEADER_VID, exit_due);
+        let lines = heard(&mut leader_inbox);
+        assert!(
+            lines.iter().any(|line| line
+                .windows(b"5 minutes".len())
+                .any(|window| window == b"5 minutes")),
+            "the minute line chats: {lines:02x?}"
+        );
+        if let Some(run) = world.ship.of_mut(LEADER_VID) {
+            run.exit_due = Some((false, 0, exit_due));
+        }
+        world.run_ship_exit(LEADER_VID, exit_due);
+        assert!(world.ship.of(LEADER_VID).is_none(), "the run ends");
     }
 
     /// The heal pastes 1% past the maximum, chats the HP, stuns the reader and

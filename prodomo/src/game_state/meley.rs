@@ -2113,21 +2113,148 @@ mod tests {
         (world, orders, inbox, lease)
     }
 
+    /// The spawn tick: step 1 refills the common row to 12 and re-arms 5 s on.
+    #[test]
+    fn the_spawn_tick_refills_the_common_row() {
+        let (mut world, _orders, _inbox, _lease) = a_fighting_world();
+        let (_, _, due) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.spawn_due)
+            .expect("step 1 arms");
+        world.run_meley_spawn(GUILD_ID, due, NOW);
+        let index = world
+            .meley
+            .of(GUILD_ID)
+            .map(|run| run.index)
+            .expect("the run stands");
+        assert_eq!(
+            world.meley_count(index, COMMON_VNUMS[0], true),
+            COMMON_COUNT,
+            "the row refills"
+        );
+        let (_, _, rearm) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.spawn_due)
+            .expect("re-armed");
+        assert_eq!(rearm, due.saturating_add(super::super::mob_ai::pulses(5)));
+    }
+
+    /// The effect tick: the first pass re-arms the second 5 s on, the second
+    /// moves the step on to 2.
+    #[test]
+    fn the_effect_tick_arms_then_moves_the_step_on() {
+        let (mut world, _orders, _inbox, _lease) = a_fighting_world();
+        world.meley_set_step(GUILD_ID, 2, NOW);
+        let (_, _, due) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.effect_due)
+            .expect("step 2 arms");
+        world.run_meley_effect(GUILD_ID, due);
+        let (_, pass, rearm) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.effect_due)
+            .expect("the second pass arms");
+        assert_eq!(pass, 2);
+        assert_eq!(rearm, due.saturating_add(super::super::mob_ai::pulses(5)));
+        world.run_meley_effect(GUILD_ID, rearm);
+        assert!(world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.effect_due)
+            .is_none());
+        // `meley_start_step` refuses a no-op step: the effect's second pass is
+        // what moves 2 on, so the spawn tick for it stands armed.
+        assert!(world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.spawn_due)
+            .is_some());
+    }
+
+    /// The statue tick: the first run re-arms 10 s on, the second judges — with
+    /// no `AFF_STATUE4` statues the dungeon times out and the warp arms.
+    #[test]
+    fn the_statue_tick_rearms_then_judges_the_timeout() {
+        let (mut world, _orders, _inbox, _lease) = a_fighting_world();
+        world.meley_set_step(GUILD_ID, 4, NOW);
+        let (_, due) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.statues_due)
+            .expect("step 4 arms");
+        world.run_meley_statues(GUILD_ID, due, NOW);
+        let (first, rearm) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.statues_due)
+            .expect("the kill window arms");
+        assert!(first);
+        assert_eq!(
+            rearm,
+            due.saturating_add(super::super::mob_ai::pulses(10)),
+            "the 10-second kill window"
+        );
+        world.run_meley_statues(GUILD_ID, rearm, NOW);
+        let (warp, _) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.end_due)
+            .expect("the timeout warps");
+        assert!(warp, "the warp arm, not the hour");
+    }
+
+    /// The end tick: the hour ends the dungeon timed out, and the warp drops
+    /// the run.
+    #[test]
+    fn the_hour_ends_the_dungeon_and_the_warp_drops_the_run() {
+        let (mut world, _orders, _inbox, _lease) = a_fighting_world();
+        let (_, due) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.end_due)
+            .expect("the hour arms");
+        world.run_meley_end(GUILD_ID, due, NOW);
+        let (warp, warp_due) = world
+            .meley
+            .of(GUILD_ID)
+            .and_then(|run| run.end_due)
+            .expect("the timeout warps");
+        assert!(warp);
+        world.run_meley_end(GUILD_ID, warp_due, NOW);
+        assert!(world.meley.of(GUILD_ID).is_none(), "the run drops");
+    }
+
     /// Install the fight's spawner and stand the empty base region, so the
     /// register's start pieces stand. Split out so `a_meley_world` stays under
     /// the line lint.
     fn install_meley_spawns(world: &mut GameState) {
-        let rows = [NPC_VNUM, GATE_VNUM, BOSS_VNUM, STATUE_VNUM, CHEST_VNUM]
-            .into_iter()
-            .map(|vnum| gamedata::mob_proto::MobProto {
-                line: 2,
-                table: gamedata::records::MobTableRecord {
-                    vnum,
-                    mob_type: CHAR_TYPE_MONSTER,
-                    max_hp: 10_000,
-                    ..gamedata::records::MobTableRecord::default()
-                },
-            });
+        let rows = [
+            NPC_VNUM,
+            GATE_VNUM,
+            BOSS_VNUM,
+            STATUE_VNUM,
+            CHEST_VNUM,
+            STONE_VNUM,
+            BOSS3_VNUM,
+            SUBBOSS3_VNUM,
+            COMMON_VNUMS[0],
+            COMMON_VNUMS[1],
+            COMMON_VNUMS[2],
+        ]
+        .into_iter()
+        .map(|vnum| gamedata::mob_proto::MobProto {
+            line: 2,
+            table: gamedata::records::MobTableRecord {
+                vnum,
+                mob_type: CHAR_TYPE_MONSTER,
+                max_hp: 10_000,
+                ..gamedata::records::MobTableRecord::default()
+            },
+        });
         let respawner = Respawner::new(
             Arc::new(gamedata::mob_proto::MobProtos::from_rows(rows.collect())),
             Arc::new(gamedata::mob_group::MobGroups::default()),

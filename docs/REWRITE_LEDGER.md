@@ -46903,3 +46903,33 @@ Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
 -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1).
 No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 420. The ship and Meley ticks
+
+Ten timed-event rows stood `missing` though their ticks ran on every Pulse through
+`run_ship_ticks` and `run_meley_ticks` (`prodomo/src/game_state.rs:5101-5102`). The slice pins
+each tick with pulse unit tests and marks the rows `ported` — no behaviour changes.
+
+Ship (`prodomo/src/game_state/ship.rs`): `the_wave_tick_counts_chats_and_sets_wave_1` (silent
+past 10, the sea-battle countdown at 10, wave 1 sets with its spawn timer and 120-second wave
+timer), `the_ship_tick_counts_down_then_prepares_the_wave` (counts 6 down silent, then prepares
+wave 3), `the_spawn_tick_stands_wave_1_and_the_laser_tick_rearms`, the clear tick (the fake goes
+at 3 s, the egg at 8 s), and the exit tick (the minute line chats at 300, the run ends at 0).
+The `CLEAR_ALL`/`CLEAR_ALL_EXCEPT_BOSS` arms are never armed by a timer (only `CLEAR_EGG` and
+`CLEAR_FAKE_BOSS`, `G/ShipDefense.cpp:1038,1173`); waves 2-4 spawn their fakes untracked, as
+legacy `Spawn`s them. The fixture now protos the hydras, minis, egg, reward, portal, wood and
+the wave-1 mobs.
+
+Meley (`prodomo/src/game_state/meley.rs`): `the_spawn_tick_refills_the_common_row` (12, re-armed
+5 s on), `the_effect_tick_arms_then_moves_the_step_on`, `the_statue_tick_rearms_then_judges_the_timeout`
+(the 10-second kill window, then the timeout arms the warp), and
+`the_hour_ends_the_dungeon_and_the_warp_drops_the_run`.
+
+Timed-events: 69 `missing` / 25 `ported` / 5 `partial`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4875 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
