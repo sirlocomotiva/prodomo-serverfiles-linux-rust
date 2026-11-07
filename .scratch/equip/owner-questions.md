@@ -418,3 +418,8 @@ owner answers.
     ENABLE_SPAMDB_REFRESH` (`G/db.cpp:770-775`), and that switch is commented out and
     defined nowhere. The row is `unused`. The spam block itself (`block_chat_by_ip_event`)
     stays `missing`: it needs the per-IP score store. Waits on it: nothing blocks.
+45. **The marriage and wedding timers (ledger 432).** `near_check_event` and
+    `wedding_end_event` run only for a standing marriage, and a marriage forms only
+    through `marriage.engage_to` (`G/questlua_marriage.cpp:18-28`), which no Lua file
+    calls — all 15 `marriage.*` names are `unused` (ledger 401, question 37). Both rows
+    are `unused`. Waits on it: nothing blocks.

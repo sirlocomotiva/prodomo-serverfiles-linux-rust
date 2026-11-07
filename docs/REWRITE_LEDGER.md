@@ -47211,3 +47211,26 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 432. The marriage timers
+
+Two timed-event rows are unreachable. `event.marriage.near_check_event` fires only
+while two married characters stand online (`G/marriage.cpp:200-218`), and
+`event.wedding.wedding_end_event` only when a wedding map stands (`G/wedding.cpp:79`).
+Both need a standing marriage, and a marriage forms only through `marriage.engage_to`
+(`RequestAdd`, `G/questlua_marriage.cpp:18-28`), which no Lua file names — all 15
+`marriage.*` names are `unused` (ledger 401, question 37). The form sweep covers the
+whole `server/` tree: `RequestAdd` is called only there. Positive control: the sweep
+finds the love-point and `IsMarried` gates in `G/char_item.cpp:10157` and
+`G/cmd_emotion.cpp:247`. The port refuses the marriage branch for everyone
+(`prodomo/src/game_state/emotion.rs:161-162`). Both rows are `unused` (owner question
+45).
+
+Timed-events: 37 `missing` / 44 `ported` / 5 `partial` / 13 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4877 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
