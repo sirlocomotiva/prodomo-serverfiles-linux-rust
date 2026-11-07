@@ -46801,3 +46801,50 @@ Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 418. The ship defence
+
+The thirteen `ship_defense_mgr` names are bridged (`quest/src/host.rs` `BRIDGED`, now
+`[&str; 322]`; the `ship_api` family in `quest/src/manager.rs`) and judged
+(`prodomo/src/game_state/ship.rs`, new): the create's private map, cooldown fan, ready fan and
+warp; the start's deck and wave-1 prepare; the join's party-gated warp; the leave's entry
+recall; the land's port spot with the entry fallback; the shadow created/running pair; the
+four `EInstance` constant flags; the heal's 1% paste, HP chat, 5-second stun and broadcast;
+and `can_join`'s shadow read. The queens drain through `judge_ship_calls` from the dialog and
+target steps. The run ticks on the pulse (`run_ship_ticks`): the wave regens from the owner's
+`wave*.txt` tables (emitted as literals), the hydra and laser halves, the kill arm
+(`ship_on_kill`, hooked from `fight.rs`'s non-player death before the reward halves), and the
+jump-out land.
+
+Three legacy readings pin the port. `SetAllianceHPPct`
+(`G/ShipDefense.cpp:1701-1736`) ignores its argument: the mast heals
+`WOOD_REPAIR_PCT` (1%) of its maximum past it, whatever the quest passed, so the judge reads
+the queued `pct` and drops it. `Join` (`:1738-1772`) needs a party: a lone reader's join is
+quiet. `GetLeaderPID` (`:1652-1673`) with no party answers the reader's own PID, so a lone
+captain creates and starts.
+
+`a_captain_boards_starts_and_lands_the_ship_defence`: Alpha stands beside 9009 on the cape
+(135); its board chats the four true flags and the shadow pair around the create, and enters
+warped to the recall spot (166700, 522300) on the run's index. Coming back, the deck's wheel
+(20436) stands on the run; its start chats the running read, and the start's broadcast, the
+wave's pair, the heal's notice, the stun's flag update and affect add, and the heal's
+broadcast land in order. Its land ships out to the port spot (168500, 611200). The menus
+carry the live quest's own chats beside the probes, since the loaded `ship_defense.lua`
+arms on the same NPCs. `join` needs a party, which one client cannot form, so the wire pins
+only its quiet; the unit join (`the_join_leave_and_land_order_their_warps`) pins its warp.
+The unit create (`the_create_gates_the_member_and_warps_the_leader_in`) gates a member's
+create, the start (`the_start_runs_the_deck`) flips the state and counts wave 1 from 60, and
+the heal (`the_heal_pastes_chats_stuns_and_broadcasts`) pastes 1% past the maximum, chats the
+HP, stuns and broadcasts. The shadow pair and the member-create queue are pinned in
+`the_ship_shadow_stands_reads_and_starts`.
+
+Quest-api is now 244 ported, 2 missing (`MeleyLair.CanGetReward`, `MeleyLair.Reward`), 370
+unused and 83 partial; `quest.ship_defense` stays `partial` (its rankings arm is commented
+out in the source). 8 parallel runs of the scenario pass.
+
+Gates (2026-11-07):
+`cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo
+test --workspace --all-targets --locked --offline --no-fail-fast` 4862 passed 0 failed in 42 targets; `cargo test --workspace --doc --locked --offline` 1 ok; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
