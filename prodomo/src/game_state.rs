@@ -121,6 +121,7 @@ mod regen;
 mod reload;
 mod reward;
 mod safebox;
+mod sash;
 mod set_attr;
 mod ship;
 mod shop;
@@ -168,6 +169,12 @@ pub use reload::ReloadRead;
 pub use safebox::{
     SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
     OTHER_WINDOW_NOTICE, SAFEBOX_WAIT_NOTICE, TRADE_WAIT_NOTICE, TRADE_WAIT_SECONDS,
+};
+pub use sash::{
+    sash_combine_price, SashMaterials, SASH_ABSORBED_SOCKET, SASH_ABSORPTION_SOCKET, SASH_ADD,
+    SASH_ANY_SLOT, SASH_CLOSE, SASH_GRADE_2_ABS, SASH_GRADE_3_ABS, SASH_GRADE_4_ABS_MAX,
+    SASH_GRADE_4_ABS_MAX_COMB, SASH_GRADE_4_ABS_MIN, SASH_GRADE_4_ABS_RANGE, SASH_MATERIALS,
+    SASH_REFINE, SASH_REMOVE,
 };
 pub use set_attr::SetAttrStored;
 pub use shop::{ShopAnswer, ShopDeclined, ShopStep, SAFEBOX_OPEN_NOTICE};
@@ -694,6 +701,10 @@ pub struct GameState {
     /// `m_bSashCombination`/`m_bSashAbsorption` (`G/char.h:2377`), as combination
     /// (`true`) or absorption. Absent when no window stands.
     sash_windows: HashMap<common::vid::Vid, bool>,
+    /// The materials the sash window of each character holds, slot by slot, keyed by its VID:
+    /// `m_pSashMaterials` (`G/char.h:464`), as the held item ids (absent when the window
+    /// stands empty or no window stands).
+    sash_held: HashMap<common::vid::Vid, [Option<world::item::ItemId>; 2]>,
     /// The characters whose changelook (Transmutation) window stands:
     /// `m_bChangeLook` (`G/char.cpp:10504-10535`). Absent when no window stands.
     changelook_windows: std::collections::HashSet<common::vid::Vid>,
@@ -2324,6 +2335,7 @@ impl GameState {
             | GameCommand::DestroyItem { .. }
             | GameCommand::Refine { .. }
             | GameCommand::Attr67 { .. }
+            | GameCommand::Sash { .. }
             | GameCommand::UseItemToItem { .. }
             | GameCommand::GiveItem { .. }
             | GameCommand::PickupItem { .. }
@@ -3323,6 +3335,11 @@ impl GameState {
         self.refining.remove(&vid);
         self.refine_scroll.remove(&vid);
         self.attr67_open.remove(&vid);
+        // A warp and a disconnect forget the sash window silently with the rest: no warp or
+        // disconnect path calls `CloseSash` (the only calls are the death pair and the CG
+        // close), and the client rebuilds its windows on the new view.
+        self.sash_windows.remove(&vid);
+        self.sash_held.remove(&vid);
         self.forget_whisper_session(vid);
         let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
@@ -3397,6 +3414,13 @@ impl GameState {
         request: MoveRequest,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
+        if self.sash_item_at(vid, request.from) || self.sash_item_at(vid, request.to) {
+            // `CItem::isLocked` (`G/char_item.cpp:7636-7637`): a sash material cannot be
+            // moved, and nothing lands on one. Silent, as legacy's source check is; the
+            // destination arm has no legacy twin — legacy lets a move bury the held item —
+            // and is a Divergence, recorded in `docs/STATUS.md`.
+            return Err(MoveItemRefused::Refused(MoveRefused::Locked));
+        }
         self.run_item_step(vid, actor, |items, ids, rules, gear, protos| {
             move_item(items, ids, request, rules, gear, |vnum| {
                 move_facts(protos, vnum)
@@ -4302,6 +4326,16 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
             }
+            GameCommand::Sash {
+                vid,
+                sub_header,
+                pos,
+                at,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.sash(vid, sub_header, (pos, at), mover));
+            }
             GameCommand::UseItemToItem {
                 vid,
                 at,
@@ -4400,6 +4434,11 @@ impl GameState {
     ) -> Result<MovedItems, MoveItemRefused> {
         if self.is_dead(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::DroppedWhileDead));
+        }
+        if self.sash_item_at(vid, at) {
+            // `CItem::isLocked` (`G/char_item.cpp:7476-7477`): a sash material cannot be
+            // dropped. Silent, as legacy is.
+            return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
         let owner_id = self
             .characters
@@ -4552,8 +4591,9 @@ impl GameState {
     ///
     /// `CanHandleItem` is the windows this build has: a sash, changelook or smith's window
     /// refuses silently, as does a dead character; the observer gate is the descriptor's.
-    /// The personal shop, the cube, the dragon soul refine, the warp, the aura and the locks
-    /// and the secured state are not ported, so none refuses, and each port re-gates here.
+    /// A sash material refuses silently too (`isLocked`); the personal shop, the cube, the
+    /// dragon soul refine, the warp, the aura, the other locks and the secured state are not
+    /// ported, so none refuses, and each port re-gates here.
     ///
     /// # Errors
     ///
@@ -4569,6 +4609,11 @@ impl GameState {
             || self.under_refine(vid)
         {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
+        }
+        if self.sash_item_at(vid, at) {
+            // `CItem::isLocked` (`G/char_item.cpp:7422-7423`): a sash material cannot be
+            // destroyed. Silent, as legacy is.
+            return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
         if self.is_dead(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::DestroyedWhileDead));
@@ -4642,6 +4687,13 @@ impl GameState {
         if self.give_blocked(vid) {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
         }
+        if self.sash_item_at(vid, at) {
+            // A sash material cannot be given: the window holds it. Legacy's `GiveItem`
+            // runs no `isLocked` check (a Defect, fixed by the window the gift would have
+            // to cross); the Rewrite refuses rather than lose the material, and records
+            // the Divergence in `docs/STATUS.md`.
+            return Err(MoveItemRefused::Refused(MoveRefused::Locked));
+        }
         let pid = self
             .characters
             .find_by_vid(vid)
@@ -4697,7 +4749,34 @@ impl GameState {
         if distance_approx(place.x - npc_x, place.y - npc_y) > world::character::GIVE_DISTANCE {
             return Ok(moved);
         }
-        match can_receive(race, npc_dead, vnum, &proto) {
+        self.give_answer(
+            vid,
+            (target, race, npc_dead),
+            (id, vnum),
+            at,
+            &proto,
+            place,
+            actor,
+            moved,
+        )
+    }
+
+    /// The `CanReceiveItem` answer of [`Self::give_item`]: the take, the lines, the horse
+    /// and refine gifts, the statue, and the unported systems. Split out so `give_item`
+    /// stays under the line lint.
+    #[allow(clippy::too_many_arguments)]
+    fn give_answer(
+        &mut self,
+        vid: common::vid::Vid,
+        (target, race, npc_dead): (u32, u32, bool),
+        (id, vnum): (u32, u32),
+        at: protocol::item_pos::ItemPos,
+        proto: &gamedata::item_proto::ItemProto,
+        place: GroundPlace,
+        actor: Mover,
+        mut moved: MovedItems,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        match can_receive(race, npc_dead, vnum, proto) {
             GiveAnswer::Take => {
                 tracing::info!(
                     "TakeItem {} {} {}",

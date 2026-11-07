@@ -792,11 +792,25 @@ impl GameState {
         self.regens.cancel(&mut combat.dead_due, Due::PcDead(raw));
         self.regens
             .schedule(&mut combat.dead_due, when, Due::PcDead(raw));
-        // The closes (`:1614-1648`). The cube, sash, change-look, aura and premium-shop windows
+        // The closes (`:1614-1648`). The cube, change-look, aura and premium-shop windows
         // and the private shop are not ported; the mall stays open, as legacy closes only the
-        // safebox.
+        // safebox. The sash close answers its record, as `CloseSash` sends it.
         self.cancel_trade(vid);
         self.end_browsing(vid);
+        if let Some(combination) = self.sash_windows.remove(&vid) {
+            self.sash_held.remove(&vid);
+            let close = protocol::gc_sash::GcSash::new(
+                protocol::gc_sash::SASH_SUBHEADER_GC_CLOSE,
+                combination,
+                0,
+                0,
+                protocol::cg_sash::ItemPos::new(1, 0),
+                0,
+                0,
+                0,
+            );
+            let _sent = self.write_to_client(vid, close.encode());
+        }
         if let Some(mover) = self.own_mover(vid) {
             self.close_safebox_on_death(vid, mover);
         }
@@ -1035,8 +1049,9 @@ impl GameState {
     }
 
     /// `DeathPenalty(bTown)` (`G/char_battle.cpp:330-392`), with the flag tested first (D2) and
-    /// no roll in town (B11). The cube, sash and change-look windows are not ported, and no
-    /// affect 511 (`AFFECT_NO_DEATH_PENALTY`) is ever added.
+    /// no roll in town (B11). The cube and change-look windows are not ported, and no
+    /// affect 511 (`AFFECT_NO_DEATH_PENALTY`) is ever added. The penalty's `CloseSash` runs
+    /// at `dead_event`, after `Dead` already closed the window, so it sends nothing.
     fn death_penalty(&mut self, vid: Vid, town: bool, mover: Mover) {
         let raw = vid.raw();
         if self

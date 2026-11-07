@@ -4,7 +4,8 @@
 //! `G/` = `server/server/game/`.
 
 use gamedata::item_kind::{
-    ITEM_ARMOR, ITEM_PICK, ITEM_ROD, ITEM_WEAPON, WEARABLE_BODY, WEARABLE_WEAPON,
+    COSTUME_SASH, ITEM_ARMOR, ITEM_COSTUME, ITEM_PICK, ITEM_ROD, ITEM_WEAPON, WEARABLE_BODY,
+    WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use protocol::item_pos::ItemPos;
@@ -25,6 +26,8 @@ pub const NOT_WEAPON_STONE_NOTICE: &str = "[LS;428]";
 pub const NO_SOCKET_NOTICE: &str = "[LS;431]";
 /// The stone sits in its socket (`ENABLE_ADDSTONE_FAILURE` is off, so it always does).
 pub const STONE_SET_NOTICE: &str = "[LS;1613]";
+/// `SASH_ABSORBED_SOCKET` (`C/item_length.h:505`): socket 1.
+const ABSORBED_SOCKET: usize = 1;
 
 /// `item->SetCount(item->GetCount() - 1)` for a used item: the last one leaves its cell,
 /// with its slots following the next of its vnum when the proto chains them.
@@ -148,4 +151,164 @@ pub fn put_stone(
         &mut trail,
     )?;
     Ok(done(MoveKind::Used, trail))
+}
+
+/// `CleanSashAttr` (`G/char.cpp:10481-10500`): the detachment scroll cleans the absorbed
+/// socket and every attribute of the sash at `dest`, and one scroll is spent. The
+/// `CanHandleItem` gate is the caller's; a target [`use_target`] refuses, one that is no
+/// costume sash (legacy reads the target's type `&&` subtype, a Defect: every costume
+/// that is no sash passes), and one with no absorbed socket are refused without a line.
+///
+/// The `ITEM_FLAG_REFINEABLE` check of the `USE_DETACHMENT` arm (`G/char_item.cpp:1996`)
+/// is not here: the flag bit is not ported, and every owner proto the arm could clean
+/// would pass it. Recorded in `docs/STATUS.md`.
+///
+/// # Errors
+///
+/// A storage refusal, which changes nothing.
+pub fn clean_sash_attr(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    dest: ItemPos,
+    protos: &ItemProtos,
+) -> Result<MoveDone, MoveRefused> {
+    let silent = || Ok(done(MoveKind::Used, Trail::default()));
+    let Some(target) = use_target(items, dest) else {
+        return silent();
+    };
+    let Some(target_proto) = protos.get(target.vnum) else {
+        return silent();
+    };
+    if target_proto.item_type != ITEM_COSTUME && target_proto.sub_type != COSTUME_SASH {
+        return silent();
+    }
+    if target.sockets[ABSORBED_SOCKET] <= 0 {
+        return silent();
+    }
+    let mut trail = Trail::default();
+    let sockets = items
+        .set_socket(target.id, ABSORBED_SOCKET, 0)
+        .map_err(|_| MoveRefused::Empty)?;
+    let mut attributes = target.attributes;
+    for (index, attribute) in attributes.iter_mut().enumerate() {
+        *attribute = protocol::gc_item_window::ItemAttribute::new(0, 0);
+        let _ = items.set_attribute(target.id, index, *attribute);
+    }
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets,
+    });
+    trail.changes.push(ItemChange::Attributes {
+        id: target.id,
+        attributes,
+    });
+    super::potion::use_one(
+        items,
+        scroll,
+        super::quickslot::chains_when_used_up(scroll_proto),
+        &mut trail,
+    )?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gamedata::item_kind::{COSTUME_BODY, ITEM_USE, USE_DETACHMENT};
+    use gamedata::item_proto::ItemProtos;
+    use protocol::gc_item_window::ItemAttribute;
+
+    const SASH: u32 = 85_001;
+    const SCROLL: u32 = 71_999;
+
+    fn protos() -> ItemProtos {
+        let sash = ItemProto::for_category_rule(SASH, ITEM_COSTUME, COSTUME_SASH);
+        let mut scroll = ItemProto::for_category_rule(SCROLL, ITEM_USE, USE_DETACHMENT);
+        scroll.values[0] = 7;
+        let body = ItemProto::for_category_rule(11, ITEM_COSTUME, COSTUME_BODY);
+        ItemProtos::from_rows(vec![sash, scroll, body])
+    }
+
+    fn inv(cell: u16) -> ItemPos {
+        ItemPos::new(1, cell)
+    }
+
+    fn holding(placed: &[(u16, Item)]) -> CharacterItems {
+        let mut items = CharacterItems::new();
+        for (cell, item) in placed {
+            items.set(inv(*cell), item).expect("the fixture places");
+        }
+        items
+    }
+
+    fn sash(id: u32, absorbed: i32) -> Item {
+        let mut item = Item::new(id, SASH);
+        item.sockets[1] = absorbed;
+        item.attributes[0] = ItemAttribute::new(7, 26);
+        item
+    }
+
+    /// The scroll on an absorbed sash zeroes socket 1 and every attribute, and one
+    /// scroll is spent.
+    #[test]
+    fn a_detachment_scroll_cleans_an_absorbed_sash() {
+        let protos = protos();
+        let mut items = holding(&[(0, sash(9, 5000)), (1, Item::new(10, SCROLL))]);
+        let scroll = items.item_at(inv(1)).expect("the scroll").clone();
+        let proto = protos.get(SCROLL).expect("the scroll proto").clone();
+        let done = clean_sash_attr(&mut items, (&scroll, &proto), inv(0), &protos)
+            .expect("the clean lands");
+        let kept = items.item(9).expect("the sash stays");
+        assert_eq!(kept.sockets[1], 0);
+        assert!(kept
+            .attributes
+            .iter()
+            .all(|attr| *attr == ItemAttribute::new(0, 0)));
+        assert!(items.item(10).is_none(), "the last scroll leaves");
+        assert!(
+            done.changes
+                .iter()
+                .any(|change| matches!(change, ItemChange::Sockets { id: 9, .. })),
+            "the sockets store"
+        );
+        assert!(
+            done.changes
+                .iter()
+                .any(|change| matches!(change, ItemChange::Attributes { id: 9, .. })),
+            "the attributes store"
+        );
+    }
+
+    /// A sash with no absorbed socket and a non-costume refuse, each silently: no
+    /// record, no change. A costume that is no sash passes the gate (legacy's `&&`),
+    /// then refuses on its empty absorbed socket — the class the `&&`-to-`||` mutant
+    /// hides is the absorbed non-sash costume, which the clean must take.
+    #[test]
+    fn a_clean_refuses_a_non_costume_and_an_unabsorbed_sash() {
+        let protos = protos();
+        let mut body = Item::new(11, 11);
+        body.sockets[1] = 5000;
+        let mut items = holding(&[(0, sash(9, 0)), (1, Item::new(10, SCROLL)), (2, body)]);
+        let scroll = items.item_at(inv(1)).expect("the scroll").clone();
+        let proto = protos.get(SCROLL).expect("the scroll proto").clone();
+        for dest in [inv(0), inv(2)] {
+            if dest == inv(2) {
+                // The absorbed body passes the `&&` gate and is cleaned, as legacy
+                // cleans it.
+                let done = clean_sash_attr(&mut items, (&scroll, &proto), dest, &protos)
+                    .expect("the non-sash costume cleans");
+                assert!(!done.records.is_empty(), "the clean sends its update");
+                assert_eq!(items.item(11).expect("the body stays").sockets[1], 0);
+                continue;
+            }
+            let done = clean_sash_attr(&mut items, (&scroll, &proto), dest, &protos)
+                .expect("a silent refusal");
+            assert!(done.records.is_empty(), "no record for {dest:?}");
+            assert!(done.changes.is_empty(), "no change for {dest:?}");
+        }
+    }
 }

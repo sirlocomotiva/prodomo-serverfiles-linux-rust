@@ -137,11 +137,11 @@ use protocol::cg_inventory::{
     HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
     HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
     HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
-    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SCRIPT_ANSWER,
-    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP,
-    HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
-    HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
-    HEADER_CG_WHISPER_DETAILS,
+    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
+    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
+    HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
+    HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
+    HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
 };
 use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
@@ -169,6 +169,7 @@ use protocol::cg_quickslot_swap::CgQuickslotSwap;
 use protocol::cg_refine::{CgAttr67Add, CgRefine};
 use protocol::cg_safebox::{CgSafeBoxItem, SafeBoxKind};
 use protocol::cg_safebox_move::CgSafeboxItemMove;
+use protocol::cg_sash::CgSash;
 use protocol::cg_shoot::CgShoot;
 use protocol::cg_shop::CgShop;
 use protocol::cg_use_skill::CgUseSkill;
@@ -1242,6 +1243,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_ITEM_GIVE.value()
         || header == HEADER_CG_REFINE.value()
         || header == HEADER_CG_ATTR67_ADD.value()
+        || header == HEADER_CG_SASH.value()
         || header == HEADER_CG_FISHING.value()
         || header == HEADER_CG_FISH_EVENT_SEND.value()
         || header == HEADER_CG_DAILY_GIFT.value()
@@ -1255,6 +1257,8 @@ fn is_belongings_step(header: u8) -> bool {
 /// - `CG_ITEM_DESTROY` (21): `CInputMain::ItemDestroy` (`G/input_main.cpp:3703`).
 /// - `CG_ITEM_GIVE` (83): `CInputMain::ItemGive` (`G/input_main.cpp:3723`).
 /// - `CG_REFINE` (96): `CInputMain::Refine` (`G/input_main.cpp:3851-3853`).
+/// - `CG_SASH` (230): `CInputMain::Sash` (`G/input_main.cpp:3395-3425`), with no observer
+///   gate (`:3862`).
 /// - `CG_FISHING` (82): `CInputMain::Fishing` (`G/input_main.cpp:3166-3172`).
 /// - `CG_FISH_EVENT_SEND` (219): `CInputMain::FishEvent` (`G/input_main.cpp:1319-1366`),
 ///   which no observer check guards (`:3760-3762`).
@@ -1290,6 +1294,8 @@ where
         refine_an_item(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ATTR67_ADD.value() {
         attr67_step(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_SASH.value() {
+        sash_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISHING.value() {
         fish(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISH_EVENT_SEND.value() {
@@ -1708,6 +1714,41 @@ where
     let answer = context
         .game
         .attr67(vid, record.by_sub_header, regist, actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_SASH` (230) in the game phase: `CInputMain::Sash`
+/// (`G/input_main.cpp:3395-3425`), with no observer gate (`:3862`). The world's rows are
+/// stored as a move's are.
+///
+/// A malformed record closes the connection; an unknown sub-header is absorbed.
+async fn sash_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgSash::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed SASH; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "SASH without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let at = protocol::item_pos::ItemPos::new(record.item_pos.window_type, record.item_pos.cell);
+    let answer = context
+        .game
+        .sash(vid, record.subheader, (record.pos, at), actor)
         .await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
@@ -14619,6 +14660,7 @@ mod tests {
             (HEADER_CG_QUICKSLOT_ADD, MainRecord::Belongings),
             (HEADER_CG_REFINE, MainRecord::Belongings),
             (HEADER_CG_ATTR67_ADD, MainRecord::Belongings),
+            (HEADER_CG_SASH, MainRecord::Belongings),
             (HEADER_CG_SHOP, MainRecord::Npc),
             (HEADER_CG_QUEST_CONFIRM, MainRecord::Npc),
             (HEADER_CG_SCRIPT_SELECT_ITEM, MainRecord::Npc),

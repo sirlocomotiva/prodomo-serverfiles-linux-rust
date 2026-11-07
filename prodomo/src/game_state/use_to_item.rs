@@ -11,8 +11,10 @@
 //! (`USE_DETACHMENT`, the bonus and socket scrolls, the costume and talisman scrolls, the
 //! hair).
 //!
-//! A sash's or a changelook's cleaning scroll (`VALUE0` 7 or 8) is refused as not ported;
-//! the owner's protos have none.
+//! A sash cleaning scroll (`USE_DETACHMENT` with `VALUE0` 7) cleans the sash's absorbed
+//! socket and attributes (`CleanSashAttr`, `G/char.cpp:10481-10500`); a changelook's (`VALUE0`
+//! 8) is refused as not ported. The owner's protos have neither scroll.
+//!
 //!
 //! Divergence: a scroll or a target outside the inventory window opens no window, where
 //! legacy passes the cell number to `RefineInformation`, which reads the inventory cell of
@@ -24,7 +26,7 @@ use std::ops::RangeInclusive;
 
 use common::item_slots::EWindows;
 use common::vid::Vid;
-use gamedata::item_kind::{ITEM_METIN, ITEM_USE, USE_TUNING};
+use gamedata::item_kind::{ITEM_METIN, ITEM_USE, USE_DETACHMENT, USE_TUNING};
 use gamedata::item_proto::ItemProto;
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::item_pos::ItemPos;
@@ -111,6 +113,8 @@ enum Arm {
     Stone,
     /// `USE_TUNING` with its `VALUE0`.
     Scroll(i32),
+    /// `USE_DETACHMENT` with `VALUE0` 7: a sash cleaning scroll.
+    CleanSash,
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -150,7 +154,7 @@ impl GameState {
         }
         let scroll = match arm {
             Arm::Scroll(value) => value,
-            Arm::Stone | Arm::Plain => {
+            Arm::Stone | Arm::CleanSash | Arm::Plain => {
                 return self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
                     let stone = world::character::use_source(items, at)?;
                     let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
@@ -158,6 +162,14 @@ impl GameState {
                         .get(stone.vnum)
                         .ok_or(MoveRefused::UnknownVnum(stone.vnum))?;
                     world::character::use_checks(&stone, proto, rules, gear.points)?;
+                    if matches!(arm, Arm::CleanSash) {
+                        return world::character::clean_sash_attr(
+                            items,
+                            (&stone, proto),
+                            dest,
+                            protos,
+                        );
+                    }
                     world::character::put_stone(items, (&stone, proto), dest, protos)
                 });
             }
@@ -194,12 +206,16 @@ impl GameState {
             Some(proto)
                 if proto.item_type == ITEM_USE
                     && proto.sub_type == USE_TUNING
-                    && !matches!(
-                        proto.values[0],
-                        SASH_CLEAN_ATTR_VALUE0 | CL_CLEAN_ATTR_VALUE0
-                    ) =>
+                    && proto.values[0] != CL_CLEAN_ATTR_VALUE0 =>
             {
                 Arm::Scroll(proto.values[0])
+            }
+            Some(proto)
+                if proto.item_type == ITEM_USE
+                    && proto.sub_type == USE_DETACHMENT
+                    && proto.values[0] == SASH_CLEAN_ATTR_VALUE0 =>
+            {
+                Arm::CleanSash
             }
             _ => Arm::Plain,
         }

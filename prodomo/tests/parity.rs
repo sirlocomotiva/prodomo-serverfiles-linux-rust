@@ -39049,3 +39049,703 @@ fn renew_the_week(server: &Server, database: &ScratchDatabase, alice: Keyed) {
     );
     alice.quiet("every answer was read");
 }
+
+/// `HEADER_CG_SASH` (230): the client-to-server sash request.
+const CG_SASH: u8 = 0xe6;
+
+/// One `CG_SASH` request: the sub-header, the material slot, and the named position.
+fn client_sash(sub_header: u8, pos: u8, window: u8, cell: u16) -> Vec<u8> {
+    let mut record = vec![CG_SASH, sub_header, 0, 0, 0, 0, 0, pos, window];
+    record.extend_from_slice(&cell.to_le_bytes());
+    record.extend_from_slice(&[0; 12]);
+    record
+}
+
+/// One `GC_SASH` record, parsed off the client's socket.
+struct SashRecord {
+    subheader: u8,
+    window: bool,
+    price: u32,
+    pos: u8,
+    item_pos: (u8, u16),
+    vnum: u32,
+    min_absorb: u32,
+    max_absorb: u32,
+}
+
+/// Read one `GC_SASH` record and parse its nine fields.
+fn read_sash(keyed: &mut Keyed) -> SashRecord {
+    let record = keyed.read_game();
+    assert_eq!(record.len(), SASH_LEN, "a sash record is 23 bytes");
+    assert_eq!(record[0], GC_SASH, "the sash header");
+    SashRecord {
+        subheader: record[1],
+        window: record[2] != 0,
+        price: u32::from_le_bytes(record[3..7].try_into().expect("four")),
+        pos: record[7],
+        item_pos: (
+            record[8],
+            u16::from_le_bytes(record[9..11].try_into().expect("two")),
+        ),
+        vnum: u32::from_le_bytes(record[11..15].try_into().expect("four")),
+        min_absorb: u32::from_le_bytes(record[15..19].try_into().expect("four")),
+        max_absorb: u32::from_le_bytes(record[19..23].try_into().expect("four")),
+    }
+}
+
+/// Seed the sash scenario and boot the server: Alpha beside Theowahdan with the
+/// combine pair at cells 0 and 1, the bell at cell 2, and forty spare grade-1 sashes
+/// at cells 3 up (each failed refine destroys one; the retry loop allows 40 draws).
+fn sash_seed_sashes() -> Option<(ScratchDatabase, Server)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'sash_mission.__status'::bytea, 557528158 FROM player WHERE player.name = 'Alpha'",
+    );
+    // Two grade-1 sashes to combine, the bell to absorb, and forty spare grade-1
+    // sashes: each failed refine destroys one, and the retry loop allows 40 draws.
+    for (id, pos, vnum) in [(40, 0, 85001), (41, 1, 85001), (42, 2, 5000)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    for spare in 0..40 {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {}, 1, 85001 FROM player WHERE name = 'Alpha'",
+                100 + spare,
+                3 + spare,
+            ),
+        );
+    }
+    sql(
+        &database,
+        "UPDATE item SET attrtype0 = 7, attrvalue0 = 26 WHERE id = 42",
+    );
+    Some((database, server))
+}
+
+/// The first login: the reward mark, the sash letter, the marks and the update;
+/// answers the open connection and Theowahdans VID.
+fn sash_first_login(server: &Server) -> (Keyed, u32) {
+    let (mut keyed, _alpha, _items) = load_character(server, b"alice", 0);
+    let beside = enter_beside(&mut keyed, THEOWAHDAN_VNUM);
+    read_login_lines(&mut keyed, 0, None);
+    read_letter(
+        &mut keyed,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_letter(
+        &mut keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    let _reward = read_quest_target_create(&mut keyed, 1, b"Theowahdan");
+    read_letter(
+        &mut keyed,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_letter(
+        &mut keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+
+    (keyed, beside)
+}
+
+/// Past the rewards pages to his eight chats, then the "Combination" chat opens
+/// the window.
+fn sash_open_combination(keyed: &mut Keyed, theowahdan: u32) {
+    // Past the reward's pages to his eight chats.
+    keyed.send_record(&client_click(theowahdan));
+    assert_eq!(
+        keyed.read_game_marked(),
+        server_quest_target_delete(1),
+        "the target click deletes the reward mark"
+    );
+    let first = titled_page(b"teowahdan", &SASH_REWARD_FIRST, b"[NEXT]");
+    assert_eq!(keyed.read_game_marked(), server_script(1, &first));
+    keyed.send_record(&client_script_answer(254));
+    let second = titled_page(b"teowahdan", &SASH_REWARD_SHORT, b"[DONE]");
+    assert_eq!(keyed.read_game_marked(), server_script(1, &second));
+    assert_ne!(
+        read_quest_target_create(&mut *keyed, 2, b"Captain"),
+        theowahdan
+    );
+    read_letter(
+        &mut *keyed,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    keyed.send_record(&client_click(theowahdan));
+    assert_eq!(
+        keyed.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: \
+              Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of \
+              bonuses|9;Inchide]"
+        ),
+        "his eight chats, and the close"
+    );
+    keyed.send_record(&client_script_answer(6));
+    let ask = titled_page(
+        b"teowahdan",
+        &[b"", b"Would you like to combine two sashes?", b""],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(keyed.read_game(), server_script(1, &ask));
+    keyed.send_record(&client_script_answer(0));
+    assert_eq!(keyed.read_game(), server_script(0, b"[DONE]"));
+    let open = read_sash(&mut *keyed);
+    assert_eq!(
+        (open.subheader, open.window, open.price),
+        (0, true, 0),
+        "the combination window opens"
+    );
+}
+
+/// Slot 0 lands at the 1370 quirk, the bell lands nowhere, slot 1 shows the result,
+/// a held destroy is silent, the poor refine chats.
+fn sash_adds_and_poor_refine(keyed: &mut Keyed) {
+    // The grade-2 sash lands in slot 0; a grade-1 in slot 1 is another grade.
+    keyed.send_record(&client_sash(1, 0, 1, 0));
+    let added = read_sash(&mut *keyed);
+    assert_eq!(
+        (added.subheader, added.window, added.price, added.pos),
+        (2, true, 100_000, 90),
+        "the add answers, priced by the grade, at the 1370 quirk"
+    );
+    assert_eq!(
+        (
+            added.item_pos,
+            added.vnum,
+            added.min_absorb,
+            added.max_absorb
+        ),
+        ((1, 0), 0, 0, 0),
+        "one material shows no result"
+    );
+    // The bell is no costume: slot 1 of the combination takes nothing silently.
+    keyed.send_record(&client_sash(1, 1, 1, 2));
+    keyed.still("a non-costume lands silently nowhere");
+    // The grade-1 sash lands in slot 1: the 85002 result at 5..=5.
+    keyed.send_record(&client_sash(1, 1, 1, 1));
+    let added = read_sash(&mut *keyed);
+    assert_eq!(
+        (
+            added.subheader,
+            added.vnum,
+            added.min_absorb,
+            added.max_absorb
+        ),
+        (2, 85002, 5, 5),
+        "two grade-1 sashes show the stepped result"
+    );
+    // A destroy of a held material is silent: the lock holds.
+    keyed.send_record(&client_destroy(0));
+    keyed.still("a held material cannot be destroyed");
+}
+
+/// Slot 1 lifts priced by slot 0, slot 0 clears both, the close answers and a second
+/// close sends nothing.
+fn sash_remove_and_close(keyed: &mut Keyed) {
+    // A refine with one material is silent: `CanRefineSashMaterials` answers 0.
+    keyed.send_record(&client_sash(2, 1, 1, 0));
+    let _ = read_sash(&mut *keyed);
+    keyed.send_record(&client_sash(3, 0, 1, 0));
+    keyed.still("one material refines nothing");
+    keyed.send_record(&client_sash(1, 1, 1, 1));
+    let _ = read_sash(&mut *keyed);
+    // The poor refine chats and sends no record.
+    keyed.send_record(&client_sash(3, 0, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"NOT_ENOUGH_YANG"),
+        "no gold, no record"
+    );
+    keyed.still("nothing follows");
+    // Slot 1 lifts alone, priced by what slot 0 holds; slot 0 clears the rest.
+    keyed.send_record(&client_sash(2, 1, 1, 0));
+    let removed = read_sash(&mut *keyed);
+    assert_eq!(
+        (
+            removed.subheader,
+            removed.window,
+            removed.price,
+            removed.pos
+        ),
+        (3, true, 100_000, 1),
+        "slot 1 lifts, priced by slot 0"
+    );
+    assert_eq!(
+        (removed.item_pos, removed.vnum),
+        ((1, 0), 0),
+        "the remove zeroes its position and vnum"
+    );
+    keyed.send_record(&client_sash(2, 0, 1, 0));
+    let removed = read_sash(&mut *keyed);
+    assert_eq!(
+        (removed.subheader, removed.price, removed.pos),
+        (3, 0, 0),
+        "slot 0 clears both"
+    );
+    // The close answers; a second close sends nothing.
+    keyed.send_record(&client_sash(0, 0, 1, 0));
+    let closed = read_sash(&mut *keyed);
+    assert_eq!(
+        (closed.subheader, closed.window),
+        (1, true),
+        "the window closes"
+    );
+    keyed.send_record(&client_sash(0, 0, 1, 0));
+    keyed.still("a closed window sends no close");
+}
+
+/// Stores the gold, relogs, reopens the window and lands the pair; answers the open
+/// connection.
+fn sash_gold_relog(server: &Server, database: &ScratchDatabase, keyed: Keyed) -> Keyed {
+    // With the gold stored the reopened window combines: both cells clear, 85002
+    // lands in cell 0 at absorption 5, and the refine answers 100.
+    sql(
+        database,
+        "UPDATE player SET gold = 500000 WHERE name = 'Alpha'",
+    );
+    drop(keyed);
+    let (mut relogged, _alpha, _items) = load_character(server, b"alice", 0);
+    let theowahdan = enter_beside(&mut relogged, THEOWAHDAN_VNUM);
+    read_login_lines(&mut relogged, 0, None);
+    read_letter(
+        &mut relogged,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let _captain = read_quest_target_create(&mut relogged, 3, b"Captain");
+    read_letter(
+        &mut relogged,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    read_letter(
+        &mut relogged,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    read_login_update(&mut relogged);
+    relogged.still("nothing follows");
+    relogged.send_record(&client_click(theowahdan));
+    assert_eq!(
+        relogged.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]"
+        ),
+        "the chats, straight to them"
+    );
+    relogged.send_record(&client_script_answer(6));
+    let ask = titled_page(
+        b"teowahdan",
+        &[b"", b"Would you like to combine two sashes?", b""],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(relogged.read_game(), server_script(1, &ask));
+    relogged.send_record(&client_script_answer(0));
+    assert_eq!(relogged.read_game(), server_script(0, b"[DONE]"));
+    let open = read_sash(&mut relogged);
+    assert_eq!(
+        (open.subheader, open.window),
+        (0, true),
+        "the window reopens"
+    );
+    relogged.send_record(&client_sash(1, 255, 1, 0));
+    let added = read_sash(&mut relogged);
+    assert_eq!(
+        (added.subheader, added.price, added.pos, added.item_pos),
+        (2, 100_000, 90, (1, 0)),
+        "255 lands in the first free slot"
+    );
+    relogged.send_record(&client_sash(1, 255, 1, 1));
+    let added = read_sash(&mut relogged);
+    assert_eq!(
+        (
+            added.subheader,
+            added.vnum,
+            added.min_absorb,
+            added.max_absorb
+        ),
+        (2, 85002, 5, 5),
+        "the pair shows the result"
+    );
+    relogged
+}
+
+/// Refines at 80-in-100 until it succeeds, rotating the spares: a failure clears
+/// slot 1s cell, spends the gold and answers `max_absorb` 0; the success clears both
+/// cells, lands 85002 at absorption 5, spends 100,000 gold, chats `SUCCESS`, answers
+/// `pos` 0 and `max_absorb` 100, and the effect 25 reaches the mover behind it.
+fn sash_refine_until_success(keyed: &mut Keyed) {
+    // The refine at 80-in-100: rerun the window until it succeeds. The world rolls
+    // other draws between the scenario's (spawns, regen), so the loop allows enough
+    // draws for the driest seed: failing 38 in a row at 0.2 each is 1 in 3.6e27.
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        assert!(tries < 40, "the combine succeeds within 40 draws");
+        keyed.send_record(&client_sash(3, 0, 1, 0));
+        // A success clears both cells and lands 85002 in cell 0; a failure clears
+        // slot 1's cell only. The first record tells them apart.
+        let first = keyed.read_game();
+        assert_eq!(first[0], ITEM_SET, "the slot-1 clear comes first, always");
+        let second = keyed.read_game();
+        if second[0] == ITEM_SET {
+            // Both cells cleared: the success. The new sash lands, the gold moves,
+            // SUCCESS chats, the effect goes around, and REFINED answers 100.
+            let landed = keyed.read_game();
+            assert_eq!(landed[0], ITEM_SET, "the result lands");
+            assert_eq!(set_fields(&landed).2, 85002, "the stepped vnum");
+            let gold = keyed.read_game();
+            assert_eq!(gold[0], GC_GOLD_CHANGE, "the spend shows");
+            assert_eq!(
+                keyed.read_game(),
+                an_info_line(b"SUCCESS"),
+                "the success chats"
+            );
+            let refined = read_sash(&mut *keyed);
+            assert_eq!(
+                (
+                    refined.subheader,
+                    refined.price,
+                    refined.pos,
+                    refined.max_absorb
+                ),
+                (4, 100_000, 0, 100),
+                "the refine answers its success"
+            );
+            // The effect around reaches the mover too, behind the answer.
+            let effect = keyed.read_game();
+            assert_eq!(effect[0], GC_SPECIAL_EFFECT, "the success shows around");
+            assert_eq!(effect[1], 25, "SE_EFFECT_SASH_SUCCEDED");
+            break;
+        }
+        // A failure: the FAILED chat and the REFINED record at 0. The gold moves
+        // with no record of its own... no: ChangeGold sends it. Read the spend.
+        let next = keyed.read_game();
+        if next[0] == GC_GOLD_CHANGE {
+            assert_eq!(
+                keyed.read_game(),
+                an_info_line(b"FAILED"),
+                "the failure chats"
+            );
+        } else {
+            assert_eq!(next, an_info_line(b"FAILED"), "the failure chats");
+        }
+        let refined = read_sash(&mut *keyed);
+        assert_eq!(
+            (refined.subheader, refined.max_absorb),
+            (4, 0),
+            "the refine answers its failure"
+        );
+        // The retry proves the failure unlocked slot 1 and kept slot 0: slot 1 lifts
+        // alone (priced by what slot 0 still holds), and the next spare (cells 3 up)
+        // fills it. Each failure ate one sash.
+        keyed.send_record(&client_sash(2, 1, 1, 0));
+        let removed = read_sash(&mut *keyed);
+        assert_eq!(
+            (removed.subheader, removed.price, removed.pos),
+            (3, 100_000, 1),
+            "slot 1 lifts, priced by the survivor in slot 0"
+        );
+        let spare = u16::try_from(2 + tries).expect("a spare cell");
+        keyed.send_record(&client_sash(1, 255, 1, spare));
+        let added = read_sash(&mut *keyed);
+        assert_eq!(
+            (added.subheader, added.vnum),
+            (2, 85002),
+            "the spare fills slot 1 and shows the result again"
+        );
+    }
+}
+
+/// Grants IMPLEMENTOR, relogs quiet (the missions non-GM login gate keeps it so),
+/// reopens, kills: the close answers behind the dead and the three re-added affects.
+fn sash_death_closes(server: &Server, database: &ScratchDatabase, keyed: Keyed) {
+    // Death closes the window: the grant, the relog, the reopen, the kill, and the
+    // close behind the dead. The mission's login gate (`not pc.is_gm()`) keeps the
+    // GM relog quiet: no letter, no mark.
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR'          FROM account WHERE login = 'alice'",
+    );
+    drop(keyed);
+    let (mut relogged, _alpha, _items) = load_character(server, b"alice", 0);
+    let (alpha_vid, theowahdan) = enter_beside_shown(&mut relogged, THEOWAHDAN_VNUM);
+    // The GM relog: the rank lines lead, `dungeon_info`'s line follows, `event_panel`'s
+    // letter rides between it and `costume_option`'s hides (the implementor entry order).
+    read_rank_login(&mut relogged, 0, &[], &[]);
+    assert_eq!(
+        relogged.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the GM login event"
+    );
+    read_letter(&mut relogged, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(&mut relogged, 1, 0, None, [false; 5], None);
+    let _marks = read_login_letters(&mut relogged, true);
+    let _captain = read_quest_target_create(&mut relogged, 4, b"Captain");
+    read_letter(
+        &mut relogged,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    read_letter(
+        &mut relogged,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    read_login_update(&mut relogged);
+    relogged.still("nothing follows");
+    relogged.send_record(&client_click(theowahdan));
+    assert_eq!(
+        relogged.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]"
+        ),
+        "the chats again"
+    );
+    relogged.send_record(&client_script_answer(6));
+    let ask = titled_page(
+        b"teowahdan",
+        &[b"", b"Would you like to combine two sashes?", b""],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(relogged.read_game(), server_script(1, &ask));
+    relogged.send_record(&client_script_answer(0));
+    assert_eq!(relogged.read_game(), server_script(0, b"[DONE]"));
+    let open = read_sash(&mut relogged);
+    assert_eq!(
+        (open.subheader, open.window),
+        (0, true),
+        "the window stands again"
+    );
+    relogged.send_record(&client_sash(1, 0, 1, 0));
+    let _ = read_sash(&mut relogged);
+    relogged.send_record(&client_chat(CHAT_TALKING, b"/kill Alpha"));
+    assert_eq!(
+        relogged.read_game(),
+        ownership_of(0, alpha_vid),
+        "death releases the view"
+    );
+    assert_eq!(relogged.read_game(), [GC_PHASE, 6], "the dead phase");
+    assert_eq!(relogged.read_game(), dead_of(alpha_vid), "the dead");
+    // The client is sent its affects again behind the dead (`Dead`, `:1561-1569`):
+    // the two the login laid plus the penalty's own, in the order they run.
+    let mut kinds = Vec::new();
+    for what in [
+        "the first re-added",
+        "the second re-added",
+        "the third re-added",
+    ] {
+        let add = relogged.read_game();
+        assert_eq!(add[0], GC_AFFECT_ADD, "{what}: {add:02x?}");
+        kinds.push(u32::from_le_bytes(add[1..5].try_into().expect("four")));
+    }
+    assert_eq!(kinds, [540, 215, 540], "the running three, in order");
+    let closed = read_sash(&mut relogged);
+    assert_eq!(
+        (closed.subheader, closed.window),
+        (1, true),
+        "death closes the window"
+    );
+    relogged.still("nothing follows");
+}
+
+/// Fourth login (a GMs too) and the absorption chat opens the absorb window;
+/// answers the open connection.
+fn sash_absorb_login(server: &Server) -> Keyed {
+    let (mut relogged, _alpha, _items) = load_character(server, b"alice", 0);
+    let theowahdan = enter_beside(&mut relogged, THEOWAHDAN_VNUM);
+    // The grant stays: the fourth login is a GM's too, in the implementor order.
+    read_rank_login(&mut relogged, 0, &[], &[]);
+    assert_eq!(
+        relogged.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the absorb login"
+    );
+    read_letter(&mut relogged, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(&mut relogged, 1, 0, None, [false; 5], None);
+    let _marks = read_login_letters(&mut relogged, true);
+    let _captain = read_quest_target_create(&mut relogged, 5, b"Captain");
+    read_letter(
+        &mut relogged,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    read_letter(
+        &mut relogged,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    read_login_update(&mut relogged);
+    relogged.still("nothing follows");
+    relogged.send_record(&client_click(theowahdan));
+    assert_eq!(
+        relogged.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]"
+        ),
+        "the chats once more"
+    );
+    relogged.send_record(&client_script_answer(7));
+    let ask = titled_page(
+        b"teowahdan",
+        &[
+            b"",
+            b"Do you want to absorb bonuses from your weapon",
+            b"or amour?",
+            b"",
+        ],
+        b"[QUESTION 1;Yes|2;No]",
+    );
+    assert_eq!(relogged.read_game(), server_script(1, &ask));
+    relogged.send_record(&client_script_answer(0));
+    assert_eq!(relogged.read_game(), server_script(0, b"[DONE]"));
+    let open = read_sash(&mut relogged);
+    assert_eq!(
+        (open.subheader, open.window),
+        (0, false),
+        "the absorb window opens"
+    );
+    relogged
+}
+
+/// The bell refuses slot 0, the sash lands, the bell lands as the weapon, the refine
+/// absorbs, the disconnect banks every row: the sash carries the bells attribute and
+/// the stamp, the bell is gone.
+fn sash_absorb_and_bank(keyed: Keyed, database: &ScratchDatabase) {
+    let mut keyed = keyed;
+    keyed.send_record(&client_sash(1, 0, 1, 2));
+    keyed.still("the bell is no costume: slot 0 takes nothing silently");
+    keyed.send_record(&client_sash(1, 0, 1, 0));
+    let added = read_sash(&mut keyed);
+    assert_eq!(
+        (added.subheader, added.window, added.price, added.pos),
+        (2, false, 200_000, 90),
+        "the grade-2 sash lands in slot 0, priced 200,000"
+    );
+    keyed.send_record(&client_sash(1, 1, 1, 2));
+    let added = read_sash(&mut keyed);
+    assert_eq!(
+        (
+            added.subheader,
+            added.vnum,
+            added.min_absorb,
+            added.max_absorb
+        ),
+        (2, 85002, 5, 5),
+        "the weapon lands in slot 1; the pair shows the sash at its 5"
+    );
+    keyed.send_record(&client_sash(3, 0, 1, 0));
+    let update = keyed.read_game();
+    assert_eq!(update[0], ITEM_UPDATE, "the sash's row updates");
+    let sockets = update_sockets(&update);
+    assert_eq!(sockets[1], 5000, "the bell's vnum stamps socket 1");
+    let cleared = keyed.read_game();
+    assert_eq!(cleared[0], ITEM_SET, "the bell's cell clears");
+    assert_eq!(set_fields(&cleared).2, 0, "the bell is destroyed");
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"SUCCESS"),
+        "the absorb chats"
+    );
+    let refined = read_sash(&mut keyed);
+    assert_eq!(
+        (
+            refined.subheader,
+            refined.window,
+            refined.price,
+            refined.pos,
+            refined.max_absorb
+        ),
+        (4, false, 200_000, 255, 1),
+        "the refine answers 255 and 1"
+    );
+    keyed.still("nothing follows");
+    // The disconnect banks every row: the sash carries the bell's attribute and the
+    // stamp, the bell is gone.
+    drop(keyed);
+    wait_for(
+        database,
+        "SELECT count(*) = 1 FROM item WHERE vnum = 85002 AND attrtype0 = 7 AND attrvalue0 = 26 \
+         AND socket1 = 5000",
+    );
+    wait_for(database, "SELECT count(*) = 0 FROM item WHERE id = 42");
+}
+
+/// `cg.game.sash`, `sub.Sash.*`, `quest.sash`: Alpha, level 154 with the sash mission past
+/// its reward and two grade-1 sashes (85001) at cells 0 and 1 plus a bell (5000) at cell 2,
+/// enters beside Theowahdan. "Combination" opens the window; the grade-1 sash lands in
+/// slot 0 at the 1370 quirk (the client hears 90), the bell lands silently nowhere (no
+/// costume), the second grade-1 shows the 85002 result at 5..=5, a destroy of a held
+/// material is silent, and the poor refine chats `NOT_ENOUGH_YANG` with no record. Slot 1
+/// lifts alone priced by slot 0, slot 0 clears both, the close answers and a second close
+/// sends nothing. With the gold stored the reopened window refines at 80-in-100 odds until
+/// it succeeds: a failure clears slot 1's cell, spends the gold and answers `max_absorb`
+/// 0; the success clears both cells, lands 85002 in cell 0 at absorption 5, spends 100,000
+/// gold, chats `SUCCESS`, answers `pos` 0 and `max_absorb` 100, and the effect 25 goes
+/// around and reaches the mover behind the answer.
+///
+/// Then, as an IMPLEMENTOR (so the mission's non-GM login gate keeps the relog quiet),
+/// death closes the reopened window with its record behind the dead and the three
+/// re-added affects. The absorption chat reopens it uncombined; the bell refuses slot 0
+/// silently (no costume), the grade-2 sash lands there priced 200,000, the bell lands in
+/// slot 1 as the weapon showing 85002 at 5..=5, and the refine updates the sash (socket 1
+/// stamped 5000), destroys the bell, chats `SUCCESS`, and answers `pos` 255 and
+/// `max_absorb` 1. The disconnect banks every row: the sash carries the bell's attribute
+/// and the stamp, the bell is gone.
+#[test]
+fn sash_combines_and_absorbs() {
+    let Some((database, server)) = sash_seed_sashes() else {
+        return;
+    };
+    let (mut alice, theowahdan) = sash_first_login(&server);
+    sash_open_combination(&mut alice, theowahdan);
+    sash_adds_and_poor_refine(&mut alice);
+    sash_remove_and_close(&mut alice);
+    let mut alice = sash_gold_relog(&server, &database, alice);
+    sash_refine_until_success(&mut alice);
+    sash_death_closes(&server, &database, alice);
+    let alice = sash_absorb_login(&server);
+    sash_absorb_and_bank(alice, &database);
+}

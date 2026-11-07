@@ -4630,6 +4630,9 @@ impl GameState {
         self.sash_windows.insert(reader, combination);
         let open = protocol::gc_sash::GcSash::open(combination).encode();
         let _sent = self.write_to_client(reader, open);
+        // `OpenSash` ends in `ClearSashMaterials` (`G/char.cpp:9933`): the fresh window
+        // holds nothing.
+        self.sash_held.remove(&reader);
     }
 
     /// One `pc.open_changelook` call: `ChangeLookWindow(true, false)`

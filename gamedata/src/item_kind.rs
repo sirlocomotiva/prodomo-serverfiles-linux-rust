@@ -106,6 +106,8 @@ pub const WEAPON_MOUNT_SPEAR: i32 = 7;
 pub const USE_POTION: i32 = 0;
 /// `USE_TUNING`: a refine scroll, which the smith refuses to refine.
 pub const USE_TUNING: i32 = 2;
+/// `USE_DETACHMENT` (`C/item_length.h:268`): a stone or sash detachment scroll.
+pub const USE_DETACHMENT: i32 = 14;
 /// `USE_BAIT`: a bait, which `UseItemEx` puts on the worn rod (`G/char_item.cpp:6800-6825`).
 pub const USE_BAIT: i32 = 6;
 /// `USE_ABILITY_UP`: a potion that raises a point for a while.
@@ -299,6 +301,7 @@ mod tests {
         for (value, name) in [
             (USE_POTION, "USE_POTION"),
             (USE_TUNING, "USE_TUNING"),
+            (USE_DETACHMENT, "USE_DETACHMENT"),
             (USE_ABILITY_UP, "USE_ABILITY_UP"),
             (USE_POTION_NODELAY, "USE_POTION_NODELAY"),
             (USE_BAIT, "USE_BAIT"),

@@ -501,6 +501,9 @@ pub enum MoveRefused {
     DestroyedWhileDead,
     /// `DestroyItem`: `CanHandleItem` refuses — a window this build has stands open.
     WindowOpen,
+    /// A sash material (`CItem::isLocked`): it cannot be destroyed, dropped, moved, sold,
+    /// stored, or refined with a scroll. Silent, as each of legacy's checks is.
+    Locked,
     /// `PickupItem`: `IsOwnership` refused (`G/item.cpp:1696-1702`) — another character's
     /// ownership event still runs. Legacy sends nothing and returns false (`:8160`).
     OwnedByOther,
@@ -683,6 +686,7 @@ impl core::fmt::Display for MoveRefused {
             Self::PickedUpWhileDead => f.write_str("an item is picked up while dead"),
             Self::DestroyedWhileDead => f.write_str("an item is destroyed while dead"),
             Self::WindowOpen => f.write_str("a window holds the character's items"),
+            Self::Locked => f.write_str("a sash window holds the item"),
             Self::OwnedByOther => f.write_str("another character owns the ground item"),
             Self::GoldOverflow => f.write_str("the gold pile would reach the gold cap"),
         }

@@ -191,6 +191,8 @@ pub enum ShopDeclined {
     },
     /// The slot is past the window.
     InvalidPos(u8),
+    /// The item is a sash material (`CItem::isLocked`, `G/shop_manager.cpp:519-522`).
+    Locked,
     /// The world refused the buy or the sale.
     Refused(ShopRefused),
 }
@@ -548,6 +550,11 @@ impl GameState {
     ) -> Result<ShopAnswer, MoveItemRefused> {
         if let Err(declined) = self.trading(vid, place, mover) {
             return Ok(*declined);
+        }
+        if self.sash_item_at(vid, protocol::item_pos::ItemPos::new(1, cell)) {
+            // `CItem::isLocked` (`G/shop_manager.cpp:519-522`): a sash material cannot be
+            // sold. Silent, as legacy is.
+            return Ok(ShopAnswer::silent(ShopDeclined::Locked));
         }
         let character = self
             .characters

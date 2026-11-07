@@ -458,6 +458,18 @@ impl CharacterItems {
         let body = self.bodies.get_mut(&id).ok_or(CountRefused::NotHeld(id))?;
         body.set_count(count).map_err(CountRefused::Count)
     }
+    /// Write a stored item's refine element (`CItem::SetRefineElement`,
+    /// `G/item.cpp:288-293`).
+    ///
+    /// # Errors
+    ///
+    /// [`SocketRefused::NotHeld`] when this storage does not hold the id. Nothing changes
+    /// then.
+    pub fn set_refine_element(&mut self, id: ItemId, element: u32) -> Result<(), SocketRefused> {
+        let body = self.bodies.get_mut(&id).ok_or(SocketRefused::NotHeld(id))?;
+        body.refine_element = element;
+        Ok(())
+    }
 
     /// Write one socket of a stored item and answer its sockets after the write.
     ///

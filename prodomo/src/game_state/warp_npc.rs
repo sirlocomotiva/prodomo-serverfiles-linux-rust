@@ -57,12 +57,10 @@
 //!   the `test_server` audit the owner decides on, with the rest of `test_server`'s effects.
 //! - The refine timer (`[LS;437;%d]`), the personal shop, the cube and the aura window: the
 //!   Rewrite has no refine, no personal shop, no cube and no aura window, so none refuses.
-//! - `CanHandleItem(false, true)` (`G/char_item.cpp:213-247`): every window and state it reads
-//!   (the personal shop, the refine, the cube, the dragon soul refine, `IsWarping`, and under the
-//!   owner's `__SASH_SYSTEM__`, `__AURA_SYSTEM__` and `__CHANGELOOK_SYSTEM__` the sash
-//!   combination and absorption, the aura refine window and its opener, and the change look) is
-//!   one the Rewrite does not have, so it passes every player. Each port of one gates the warp
-//!   NPC here.
+//! - `CanHandleItem(false, true)` (`G/char_item.cpp:213-247`): the sash (442) and the
+//!   changelook windows refuse; the personal shop, the refine, the cube, the dragon soul refine,
+//!   `IsWarping`, the aura refine window and its opener are not ported, so none refuses. Each
+//!   port of one gates the warp NPC here.
 
 use std::collections::HashSet;
 
@@ -397,6 +395,9 @@ impl GameState {
                         let _sent = self.write_to_client(vid, line);
                         continue;
                     }
+                    if !self.warp_can_handle(vid) {
+                        continue;
+                    }
                     match npc.order {
                         NpcOrder::Warp { x, y } => {
                             let _first = warped.insert(raw);
@@ -433,6 +434,13 @@ impl GameState {
                 );
             }
         }
+    }
+
+    /// `CanHandleItem(false, true)` for a warp NPC's judgement (`G/char_item.cpp:213-247`,
+    /// `:7964`): the observer is skipped, the shop/refine/cube/dragon-soul/warp/aura arms are
+    /// not ported, so the sash and the changelook decide. Silent, as legacy is.
+    fn warp_can_handle(&self, vid: Vid) -> bool {
+        !self.sash_windows.contains_key(&vid) && !self.changelook_windows.contains(&vid)
     }
 
     /// The warp and goto NPCs standing on one map of one Channel, with their orders.
@@ -645,6 +653,20 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn an_open_sash_or_changelook_window_holds_the_warp() {
+        use crate::game_state::fixtures::{a_world, TestClock};
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let vid = Vid::new(7);
+        assert!(world.warp_can_handle(vid));
+        world.sash_windows.insert(vid, true);
+        assert!(!world.warp_can_handle(vid));
+        world.sash_windows.remove(&vid);
+        world.changelook_windows.insert(vid);
+        assert!(!world.warp_can_handle(vid));
     }
 
     #[test]
