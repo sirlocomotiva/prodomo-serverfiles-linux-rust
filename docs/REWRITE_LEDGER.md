@@ -47634,3 +47634,108 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 442. The sash window
+
+`CG_SASH` (`CInputMain::Sash`, `G/input_main.cpp:3395-3425`) with no observer gate (`:3862`):
+close, add, remove and refine over the `OpenSash` windows (`G/char.cpp:9888-10560`), answered
+as a move is. A waiting quest and an unknown sub-header are absorbed, as legacy's guard and
+`default` do. The window is `sash_windows` (combination or absorption); its materials are item
+ids in `sash_held`, so a held item stays held when it moves cells, as legacy's `LPITEM`
+pointers survive the same moves. `OpenSash` ends in `ClearSashMaterials` (`:9933`), so the
+fresh window holds nothing.
+
+The add (`:10105-10213`) resolves `pos` 255 to the first free slot only when it is exactly
+255 — legacy's report is `CUSTOM_INVENTORY_SLOT_END` (1370), which never fits a `BYTE`, so the
+client always sends 255; the Rewrite matches the wire, not the report. Then the guards in
+legacy's `else if` order: the item must exist (a worn cell, anything at or past 1370, belt
+cells and dragon souls refuse), a combination takes costume and an absorption takes costume
+in slot 0, a material held by another window chats `LOCKED_ITEMS`, slot 1 of a combination
+takes the grade slot 0 holds (`SAME_GRADE`), a combination takes nothing at the grade-4
+absorption cap (`MAX_AB`), slot 1 of an absorption takes a weapon or a body armour
+(`ABSORB_WEAPON_ARMOR`), and slot 0 of an absorption refuses nothing already absorbed. The
+last two arms are silent; `LC_TEXT` of an unknown key is the key itself, so the chat keys go
+out raw. The landed add answers `ADDED` with the window flag, the grade price, the slot
+(1370's low byte: `CheckEmptyMaterialSlot`'s `CUSTOM_INVENTORY_SLOT_END` truncates to 90 —
+pinned as a Quirk), the named position, and `GetSashCombineResult` (`:10039-10103`): a
+grade-4 pair keeps the vnum and widens by 5 up to 25; a lower pair steps the vnum up by one
+when the proto table holds it and sets 5, 10, or 11..=19; an absorption shows slot 0's vnum
+and absorption. Fewer than two materials zeroes every number.
+
+The remove (`:10215-10255`) unlocks slot 1 alone, pricing what slot 0 still holds, while
+slot 0 clears both; both answer `REMOVED` with a zeroed `{INVENTORY, 0}` position and vnum
+0. The refine (`:10313-10511`) answers `REFINED` (value 4, despite the `CG_` name): a
+combination sends `pos` 0 and `max_absorb` 100 on success, 0 on failure; an absorption sends
+`pos` 255 and `max_absorb` 1. A combination at no gold chats `NOT_ENOUGH_YANG` and sends
+nothing; a refine short of two materials is silent (`CanRefineSashMaterials` 0). A success
+builds the result (`CopyAllAttrTo` through `refined_item`), rolls the absorption (`min` when
+flat, else `number(min + 1, max)`), carries slot 0's absorbed socket, spends the gold,
+destroys both materials, lands the new sash in slot 0's old cell, chats the rate (grade 4)
+or `SUCCESS`, sends effect 25 around (which reaches the mover too, behind the answer), and
+clears the window. A failure spends the gold, destroys slot 1 alone, keeps the window
+standing, and unlocks slot 1. An absorption copies slot 1's attributes onto slot 0 (the
+negative forced to 0, the refine element carried), stamps slot 1's vnum into socket 1,
+destroys slot 1, chats `SUCCESS`, and clears the window. The money, item and sash logs are
+`sys.log`'s, which owns no sink.
+
+Death closes the window with its record (`Dead`, `:1620-1627`); the penalty's `CloseSash`
+runs at `dead_event`, after `Dead` already closed it, so it sends nothing (`:330-336`). A
+warp and a disconnect forget the window silently: no warp or disconnect path calls
+`CloseSash`, and the client rebuilds its windows on the new view. The warp NPC judges
+`CanHandleItem(false, true)` (`:7964`): the sash and the changelook refuse, the shop,
+refine, cube, dragon soul, warp and aura arms are not ported.
+
+A held material locks destroy, drop, move, give, sale, checkin and scroll-refine
+(`CItem::isLocked`): the destroy, drop, move and sale refuse silently; the checkin chats
+`[LS;667]` as for an unstorable item; the gift refuses silently. The move-destination arm
+(legacy lets a move bury the held item) and the gift arm (`GiveItem` runs no `isLocked`
+check) are Divergences, recorded in `docs/STATUS.md`.
+
+The detachment scroll (`USE_DETACHMENT` with `VALUE0` 7, `CleanSashAttr`, `:10481-10500`)
+rides use-on-item (`world::character::clean_sash_attr`): the absorbed socket to 0, every
+attribute to 0, one scroll spent, silent on a refused target. Legacy's gate reads the
+target's type `&&` subtype, so every costume that is no sash passes; the Rewrite keeps the
+`&&` (a recorded Defect). The `ITEM_FLAG_REFINEABLE` check is skipped — the flag bit is not
+ported — and is a Divergence. The owner's one detachment scroll (25100) has `VALUE0` 3, so
+no wire scenario can carry the clean: it is unit-proved in `world`.
+
+Scenario `sash_combines_and_absorbs` (ten helpers under the line lint): the reward pages to
+the eight chats, "Combination" opens, slot 0 lands at the quirk, the bell lands silently
+nowhere, slot 1 shows 85002 at 5..=5, a held destroy is silent, a one-material refine is
+silent, the poor refine chats, slot 1 lifts priced by slot 0, slot 0 clears both, the close
+answers and a second close sends nothing. With the gold stored the window refines at
+80-in-100 until it succeeds (40 spare sashes, 40 draws: failing 38 in a row at 0.2 each is
+1 in 3.6e27): each failure clears slot 1's cell, spends the gold, chats `FAILED` and
+answers 0, and the retry proves slot 1 unlocked and slot 0 kept; the success clears both,
+lands 85002 at absorption 5, spends 100,000 gold, chats `SUCCESS`, answers 0 and 100, and
+the effect 25 follows. Then, as an IMPLEMENTOR (the mission's non-GM login gate keeps the
+relog quiet), death closes the reopened window behind the dead and the three re-added
+affects (540, 215, 540: the login's pair plus the penalty's own). The absorption chat
+reopens it uncombined; the bell refuses slot 0 silently, the grade-2 sash lands priced
+200,000, the bell lands as the weapon showing 85002 at 5..=5, and the refine updates the
+sash (socket 1 stamped 5000), destroys the bell, chats `SUCCESS`, and answers 255 and 1.
+The disconnect banks every row. Flake check 8/8.
+
+Refactors for the line lint: `give_item` lent its answer `give_answer`, `sash_combine_success`
+lent its build `sash_made_item`, its id `sash_result_id` and its close `sash_success_close`,
+and `run_warp_npcs` lent its gate `warp_can_handle`.
+
+Mutants, all killed: the close window flag, the grade-1 chance (the loop times out at 40),
+the result absorption, the absorb stamp, the failure's `held[1]` (by the retry's priced
+remove — first `SURVIVED`, then hardened), the REFINED 100, the ADDED price, the ADDED pos
+quirk, the death close subheader, the absorb REFINED flag, the costume gate, the absorbed
+gate, the `can_refine` guard (`== 1`, loud on the combine; the `== 99` form is equivalent
+where the arms re-check the materials), the warp gate (by the new unit test), and the clean
+gate's `&&` (by the absorbed non-sash costume — first `SURVIVED`, then hardened). Two
+mutant binaries were rebuilt pristine before the flake check.
+
+Client-packets: `cg.game.sash` `ported` (81 `ported` / 15 `missing`). Sub-headers: the four
+`sub.Sash.*` `ported` (45 `ported` / 68 `missing`). Quests: `quest.sash` notes the window
+(`sash_combines_and_absorbs`).
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4925 passed 0 failed in 44 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
