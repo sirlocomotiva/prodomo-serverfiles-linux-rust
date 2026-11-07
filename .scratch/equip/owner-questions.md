@@ -476,3 +476,19 @@ owner answers.
     accessory; aura-boost expiry from `EquipTo` while `WornSystem::Aura` refuses
     every aura costume. All six rows are `unused`; each fires home with its
     `WornSystem` when the equip gate opens. Waits on it: nothing blocks.
+52. **The four arena timers (ledger 438).** `ready_to_start_event` and
+    `duel_time_out` run only from `StartDuel`, which runs only from
+    `arena.start_duel` and the GM `do_duel` (`G/questlua_arena.cpp:41`,
+    `G/cmd_gm.cpp:4052`); the bridge is `unused` and `cmd.duel` is `missing`.
+    `battle_arena_event` starts only from `ba.start` and the GM `do_weeklyevent`
+    (`G/questlua_ba.cpp:12`, `G/cmd_gm.cpp:4488-4492`); the bridge is `unused`
+    and `cmd.weeklyevent` is `missing`. `DragonLair_Collapse_Event` is armed only
+    by the dragon's death in a rented lair (`G/DragonLair.cpp:243-250`), and the
+    lair rents only from `DragonLair.startRaid`, which no Lua file names. All
+    four rows are `unused`. Waits on it: nothing blocks.
+53. **The two castle siege timers (ledger 438).** Both are created only by
+    `castle_start_siege` (`G/castle.cpp:591-618`), which runs only from
+    `castle_siege`, which runs only from the GM `do_siege` (`G/cmd_gm.cpp:4354`)
+    and the retired game-to-game siege packet (`G/input_p2p.cpp:677`, ADR-0001);
+    `cmd.siege` is `missing`. Both rows are `unused`. Waits on it: nothing
+    blocks.

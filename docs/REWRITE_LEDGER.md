@@ -47408,3 +47408,38 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 438. The arena, lair and siege timers
+
+Six timed-event rows are unreachable, in three groups.
+
+Two arena duel timers. `event.arena.ready_to_start_event` and
+`event.arena.duel_time_out` run only from `StartDuel`, which runs only from
+`arena.start_duel` (`G/questlua_arena.cpp:41`) and the GM `do_duel`
+(`G/cmd_gm.cpp:4052`); the bridge is `unused` (ledger 401) and `cmd.duel` is
+`missing`, and this build has no arena (`/observer_exit` takes the plain branch).
+`event.BattleArena.battle_arena_event` starts only from `ba.start`
+(`G/questlua_ba.cpp:12`) and the GM `do_weeklyevent` (`G/cmd_gm.cpp:4488-4492`); the
+bridge is `unused` and `cmd.weeklyevent` is `missing` (owner question 52).
+
+`event.DragonLair.DragonLair_Collapse_Event` is armed only by the dragon's death in
+a rented lair (`G/DragonLair.cpp:243-250`), and the lair rents only from
+`DragonLair.startRaid` (`G/questlua_dragonlair.cpp:16`), which no Lua file names
+(`lua.DragonLair.startRaid` is `unused`, ledger 401), so no lair ever stands
+(owner question 52).
+
+Two castle siege timers. Both are created only by `castle_start_siege`
+(`G/castle.cpp:591-618`), which runs only from `castle_siege`, which runs only from
+the GM `do_siege` (`G/cmd_gm.cpp:4354`) and the retired game-to-game siege packet
+(`G/input_p2p.cpp:677`, ADR-0001); `cmd.siege` is `missing` (owner question 53).
+
+Timed-events: 11 `missing` / 46 `ported` / 5 `partial` / 37 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4881 passed 1 failed in 42 targets (the known unrelated load flake
+`a_gm_flags_a_stray_dog_aggressive_and_coward`, 7/8 green on re-run),
+`cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
