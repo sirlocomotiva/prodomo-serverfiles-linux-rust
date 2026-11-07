@@ -47292,3 +47292,28 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 435. The summon timers
+
+Three timed-event rows are unreachable. `event.MountSystem.mountsystem_update_event` is
+armed only when a mount costume is worn (`EquipTo`'s `MountSummon` arm,
+`G/item.cpp:1479-1482`, `G/char.cpp:11117`), `event.PetSystem.petsystem_update_event`
+only when a pet costume is worn (`PetSummon`, `G/item.cpp:1484-1487`,
+`G/char.cpp:11281`), and `event.ShamanSystem.shamansystem_update_event` only when a
+`TOGGLE_SHAMAN` toggle activates (`ActivateToggleItem`, `G/ItemUtils.cpp:88-97`; the
+one proto is 69700). The port refuses every mount and pet costume at equip and at load
+(`WornSystem::Mount`/`Pet`, `world/src/character/equip.rs:197-198`,
+`prodomo/src/item_load.rs:407`), and `ITEM_TOGGLE` has no ported use arm, so no system
+ever starts. The `unique_expire_event` survey (same slice) stays `missing`: the
+countdown arms at wear and the absolute arms at creation, the hide-alignment hardcodes,
+and the 35/70 value-2 split are mapped for its slice. All three rows are `unused`
+(owner question 46).
+
+Timed-events: 32 `missing` / 46 `ported` / 5 `partial` / 16 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4882 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

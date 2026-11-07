@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 434 (the campfire).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 435
+Last reviewed: 2026-11-07, after ledger section 435 (the summon timers).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 436
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -450,7 +450,7 @@ legacy does, not the 120 s ledger 413 had written. Since 422 the poison and fire
 `unused` (owner question 43). Since 430 the spam reload timer is `unused` (owner question 44). Since 431 a lapsed Gaya market refreshes on the 2 s tick, and the row is
 `ported`. Since 432 the marriage and wedding timers are `unused` (owner question 45). Since 433 Santa hops maps and returns on the timer, and the row is
 `ported`. Since 434 a used campfire stands ahead, burns 40 s and goes out, and the row is
-`ported`. The
+`ported`. Since 435 the mount, pet and shaman timers are `unused` (owner question 46). The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

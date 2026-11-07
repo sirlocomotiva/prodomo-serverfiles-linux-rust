@@ -423,3 +423,8 @@ owner answers.
     through `marriage.engage_to` (`G/questlua_marriage.cpp:18-28`), which no Lua file
     calls — all 15 `marriage.*` names are `unused` (ledger 401, question 37). Both rows
     are `unused`. Waits on it: nothing blocks.
+46. **The mount, pet and shaman timers (ledger 435).** Each fires only while its
+    system runs, and each system starts only through an equip arm the port refuses:
+    mount and pet costumes at equip and at load (`WornSystem::Mount`/`Pet`), the
+    `TOGGLE_SHAMAN` toggle through an unported use arm. All three rows are `unused`.
+    Waits on it: nothing blocks.
