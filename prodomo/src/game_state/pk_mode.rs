@@ -24,9 +24,6 @@ use crate::loading_phase::{
     PK_MODE_FREE, PK_MODE_GUILD, PK_MODE_MAX_NUM, PK_MODE_PEACE, PK_MODE_PROTECT,
 };
 
-/// Meley's map (`MeleyLair.h:15`): `/pkmode` on it always lands `GUILD`.
-const MELEY_MAP: i32 = 212;
-
 /// `(unsigned char)strtoul(word)` (`common/utils.h:20-26`): the unsigned walk's low
 /// byte. A `-` negates into the wrap, so `-1` reads 255. The walk is a `u8`
 /// throughout, so the C cast's low byte falls out of the wrapping arithmetic.
@@ -48,12 +45,6 @@ pub(super) fn parse_mode(word: &[u8]) -> u8 {
         value = value.wrapping_neg();
     }
     value
-}
-
-/// Whether `map` is Meley's (`CMgr::IsMeleyMap`, `MeleyLair.cpp:1215-1222`): 212
-/// itself, or its 2120000..2130000 private copies.
-fn is_meley_map(map: i32) -> bool {
-    map == MELEY_MAP || (MELEY_MAP * 10_000..=MELEY_MAP * 10_000 + 10_000).contains(&map)
 }
 
 impl GameState {
@@ -85,7 +76,7 @@ impl GameState {
         let mut mode = mode;
         // `SetPKMode`'s folds (`G/char_battle.cpp:3604-3610`): Meley's map forces
         // `GUILD`, and `GUILD` without a guild falls back to `FREE`.
-        if is_meley_map(map) && mode != PK_MODE_GUILD {
+        if super::meley::is_meley_map(map) && mode != PK_MODE_GUILD {
             mode = PK_MODE_GUILD;
         }
         if mode == PK_MODE_GUILD {
@@ -110,8 +101,9 @@ impl GameState {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_meley_map, parse_mode};
+    use super::parse_mode;
     use crate::game_state::fixtures::{a_world, enter, TestClock};
+    use crate::game_state::meley::is_meley_map;
     use crate::loading_phase::{PK_MODE_FREE, PK_MODE_PEACE};
     use common::vid::Vid;
     use protocol::gc_actors::GcCharacterUpdate;

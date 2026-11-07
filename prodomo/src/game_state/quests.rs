@@ -223,6 +223,7 @@ type QuestRun = (
     Vec<(u8, bool)>,
     Vec<(u32, u32)>,
     Vec<(u32, u32)>,
+    (u32, u32, u32, u32),
 );
 
 /// The bit of a `CG_SCRIPT_BUTTON` word that asks for the quest's information
@@ -880,6 +881,18 @@ pub(super) struct SessionTail<'s> {
     /// Every `building.reconstruct` call's NPC VID and vnum, in order, for the world
     /// after the step.
     pub(super) reconstructs: Vec<(u32, u32)>,
+    /// The Meley registrations at the step's start, by guild id, which the lobby
+    /// calls read. Writers queue for the world; the register moves the shadow at
+    /// once, so a later call in the step reads it.
+    pub(super) meley: super::meley::MeleyRuns,
+    /// The `MeleyLair.Register` calls, for the world's registers after the step.
+    pub(super) meley_registers: u32,
+    /// The `MeleyLair.Enter` calls, for the world's enters after the step.
+    pub(super) meley_enters: u32,
+    /// The `MeleyLair.Check` calls, for the world's checks after the step.
+    pub(super) meley_checks: u32,
+    /// The `MeleyLair.Leave` calls, for the world's leaves after the step.
+    pub(super) meley_leaves: u32,
 }
 
 impl<'s> SessionTail<'s> {
@@ -900,6 +913,11 @@ impl<'s> SessionTail<'s> {
             land_owners: std::collections::BTreeMap::new(),
             land_sets: Vec::new(),
             reconstructs: Vec::new(),
+            meley: super::meley::MeleyRuns::default(),
+            meley_registers: 0,
+            meley_enters: 0,
+            meley_checks: 0,
+            meley_leaves: 0,
         }
     }
 
@@ -911,11 +929,13 @@ impl<'s> SessionTail<'s> {
         lands: &'s gamedata::land::Lands,
         object_protos: &'s gamedata::object_proto::ObjectProtos,
         guilds: &super::guild::Guilds,
+        meley: super::meley::MeleyRuns,
     ) -> Self {
         let mut tail = Self::new(pre, atlas);
         tail.lands = Some(lands);
         tail.object_protos = Some(object_protos);
         tail.land_owners = guilds.land_owners();
+        tail.meley = meley;
         tail
     }
 }
@@ -1283,6 +1303,113 @@ fn skill_can_up(vnum: u32, level: impl Fn(u32) -> u8) -> bool {
 }
 
 impl Session<'_> {
+    /// The shadow of `CMgr::Register` (`G/MeleyLair.cpp:992-1073`): the (`iRes1`,
+    /// `iRes2`) pair the reader's guild reads now, so the script's selects see it.
+    /// A passing register moves the shadow triple and ladder at once, as the call
+    /// does, and stands a shadow run; the world judges the queued call again after
+    /// the step, which hosts the map and debits the row.
+    fn shadow_meley_register(&mut self) -> (i32, i32) {
+        use super::meley::{LADDER_COST, LADDER_RETURN, MAP, MIN_LEVEL};
+        let now = quest_now();
+        let Some(pid) = self.caller else {
+            return (0, 0);
+        };
+        let Some(id) = self.guilds.shadow_guild_of(pid) else {
+            return (0, 0);
+        };
+        let Some((master, level, ladder, dungeon)) = self.guilds.shadow_meley_guild(id) else {
+            return (0, 0);
+        };
+        if master != pid {
+            return (0, 0);
+        }
+        if self.shadow_meley_registered().0 {
+            return (1, i32::from(dungeon.0));
+        }
+        if dungeon.0 != 0 {
+            return (2, 0);
+        }
+        if level < MIN_LEVEL {
+            return (3, i32::from(MIN_LEVEL));
+        }
+        if ladder < LADDER_COST {
+            return (4, LADDER_COST);
+        }
+        let cooldown = dungeon.2;
+        if cooldown > now {
+            return (7, i32::try_from(cooldown - now).unwrap_or(i32::MAX));
+        }
+        if !super::meley::base_hosted(self.tail.atlas, self.channel, MAP) {
+            return (5, 0);
+        }
+        let channel = self.channel;
+        self.guilds.shadow_meley_take(id, channel, LADDER_COST);
+        self.tail.meley.insert(id, 0);
+        (6, LADDER_RETURN)
+    }
+
+    /// The shadow of `CMgr::isRegistered` (`G/MeleyLair.cpp:976-990`): the triple's
+    /// range arm on the shadow. The channel is the shadow triple's own.
+    fn shadow_meley_registered(&self) -> (bool, u8) {
+        let Some(pid) = self.caller else {
+            return (false, 0);
+        };
+        let Some(id) = self.guilds.shadow_guild_of(pid) else {
+            return (false, 0);
+        };
+        let Some((_, _, _, dungeon)) = self.guilds.shadow_meley_guild(id) else {
+            return (false, 0);
+        };
+        let (channel, map, _) = dungeon;
+        let lo = super::meley::MAP * 10_000;
+        if (lo..=lo + 10_000).contains(&map) {
+            (true, channel)
+        } else {
+            (false, 0)
+        }
+    }
+
+    /// The shadow of `CMgr::Enter` (`G/MeleyLair.cpp:1075-1154`): whether the reader
+    /// enters and the pushed limit. The world's re-judge warps the reader in.
+    fn shadow_meley_enter(&self) -> (bool, i32) {
+        use super::meley::{MAP, PARTECIPANTS_LIMIT};
+        let Some(pid) = self.caller else {
+            return (false, 1);
+        };
+        let Some(id) = self.guilds.shadow_guild_of(pid) else {
+            return (false, 1);
+        };
+        let Some(run) = self.tail.meley.of(id) else {
+            // No seeded run: legacy's late create would stand one and enter, as
+            // the world's re-judge does, except from the wrong Channel or with no
+            // map to create.
+            let channel = self.guilds.shadow_meley_guild(id).map_or(0, |row| row.3 .0);
+            if channel != 0 && channel != self.channel {
+                return (false, i32::from(channel));
+            }
+            if !super::meley::base_hosted(self.tail.atlas, self.channel, MAP) {
+                return (false, 0);
+            }
+            if self.mover.pk_mode != crate::loading_phase::PK_MODE_GUILD {
+                return (true, 4);
+            }
+            if super::meley::recall_spot(self.tail.atlas, MAP).is_none() {
+                return (true, 2);
+            }
+            return (true, 0);
+        };
+        if run.participants.len() >= PARTECIPANTS_LIMIT {
+            return (true, 1);
+        }
+        if self.mover.pk_mode != crate::loading_phase::PK_MODE_GUILD {
+            return (true, 4);
+        }
+        if super::meley::recall_spot(self.tail.atlas, MAP).is_none() {
+            return (true, 2);
+        }
+        (true, 0)
+    }
+
     /// The innermost switched block's PC, if any: `None` outside a block or when
     /// every open frame is unswitched, when the script still runs for the reader.
     fn blocked_pc(&self) -> Option<&BlockedPc> {
@@ -2675,6 +2802,40 @@ impl Game for Session<'_> {
         // world, which judges the chain after the step.
         self.tail.reconstructs.push((npc_vid, vnum));
     }
+    fn meley_register(&mut self) -> (i32, i32) {
+        // `MeleyLair_Register` (`G/questlua_MeleyLair.cpp:37-49`): the shadow judges
+        // now, so the script's select sees the pair; the world judges the queued
+        // call again after the step, which registers the guild and debits the ladder.
+        self.tail.meley_registers += 1;
+        self.shadow_meley_register()
+    }
+    fn meley_is_registered(&self) -> (bool, u8) {
+        // `MeleyLair_IsRegistered` (`G/questlua_MeleyLair.cpp:51-68`): the triple's
+        // range arm on the shadow, with the caller's channel.
+        self.shadow_meley_registered()
+    }
+    fn meley_enter(&mut self) -> (bool, i32) {
+        // `MeleyLair_Enter` (`G/questlua_MeleyLair.cpp:70-87`): the shadow judges
+        // now, so the script's selects see the pair; the world judges the queued
+        // call again after the step, which warps the reader in.
+        self.tail.meley_enters += 1;
+        self.shadow_meley_enter()
+    }
+    fn is_meley_map(&self) -> bool {
+        // `MeleyLair_IsMeleyMap` (`G/questlua_MeleyLair.cpp:89-97`): the reader's map
+        // in 212 or its 2120000..2130000 private copies (`G/MeleyLair.cpp:1215-1222`).
+        super::meley::is_meley_map(self.map_index)
+    }
+    fn meley_check(&mut self) {
+        // `MeleyLair_Check` (`G/questlua_MeleyLair.cpp:99-107`): queued for the world
+        // after the step, which warps a stranger out.
+        self.tail.meley_checks += 1;
+    }
+    fn meley_leave(&mut self) {
+        // `MeleyLair_Leave` (`G/questlua_MeleyLair.cpp:109-117`): queued for the world
+        // after the step, which drops the reader and warps it out.
+        self.tail.meley_leaves += 1;
+    }
     fn player_id(&self) -> u32 {
         self.blocked_pc().map_or(self.pid, |blocked| blocked.pid)
     }
@@ -3146,6 +3307,16 @@ impl GameState {
             .points()
             .map_or(1, world::character::Points::level);
         let login = account.login.clone();
+        // The descriptor's actor carries PEACE: the step's scripts read the world's
+        // own PK mode, alignment, guild, flags and dead bit, as a click's do.
+        let mover = Mover {
+            pk_mode: self.pk_mode_of(vid.raw()),
+            affect_flags: self.affect_flags_of(vid),
+            dead: self.is_dead(vid.raw()),
+            alignment: self.alignment_of(vid.raw()),
+            view_guild: self.view_guild_of_vid(vid.raw()),
+            ..mover
+        };
         let answered = self.run_quests_giving(
             place,
             (mover, level, pid),
@@ -3170,7 +3341,18 @@ impl GameState {
         );
         let Some((
             (),
-            (mut records, climbs, ops, block_mode, _, gold_moves, _, land_sets, reconstructs),
+            (
+                mut records,
+                climbs,
+                ops,
+                block_mode,
+                _,
+                gold_moves,
+                _,
+                land_sets,
+                reconstructs,
+                meley,
+            ),
             items,
             claimed,
             take_sides,
@@ -3199,6 +3381,7 @@ impl GameState {
         }
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
+        stores.extend(self.judge_meley_calls(vid, meley, now));
         Ok((
             records, climbs, stores, items, gold, claimed, take_sides, landed,
         ))
@@ -3229,7 +3412,7 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = self.run_quests(
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = self.run_quests(
             place,
             mover,
             level,
@@ -3293,7 +3476,18 @@ impl GameState {
         let login = account.login.clone();
         let Some((
             taken,
-            (mut records, climbs, ops, block_mode, _, gold_moves, _, land_sets, reconstructs),
+            (
+                mut records,
+                climbs,
+                ops,
+                block_mode,
+                _,
+                gold_moves,
+                _,
+                land_sets,
+                reconstructs,
+                meley,
+            ),
             items,
             claimed,
             take_sides,
@@ -3325,6 +3519,7 @@ impl GameState {
         }
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
+        stores.extend(self.judge_meley_calls(vid, meley, now));
         (
             taken,
             (
@@ -3383,7 +3578,7 @@ impl GameState {
         let login = account.login.clone();
         let Some((
             (),
-            (records, climbs, ops, block_mode, _, _, _, land_sets, reconstructs),
+            (records, climbs, ops, block_mode, _, _, _, land_sets, reconstructs, meley),
             items,
             _,
             take_sides,
@@ -3422,6 +3617,7 @@ impl GameState {
         }
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
+        stores.extend(self.judge_meley_calls(vid, meley, now));
         step.quest = (climbs, stores, landed);
         if let Ok(character) = self.characters.find_by_vid(vid) {
             step.quickslots = Some(character.quickslots().clone());
@@ -3565,7 +3761,7 @@ impl GameState {
                 manager.levelup(pid, game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -3611,7 +3807,7 @@ impl GameState {
                 manager.kill(pid, race, leader, game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -3717,6 +3913,12 @@ impl GameState {
                 hides,
                 tail.land_sets,
                 tail.reconstructs,
+                (
+                    tail.meley_registers,
+                    tail.meley_enters,
+                    tail.meley_checks,
+                    tail.meley_leaves,
+                ),
             );
             (
                 answer,
@@ -3792,6 +3994,7 @@ impl GameState {
             recall,
             guild_lands,
             object_protos,
+            meley,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -3847,6 +4050,7 @@ impl GameState {
                 object_protos,
                 giving,
                 rank,
+                meley: meley.clone(),
             },
         ))
     }
@@ -4070,7 +4274,14 @@ impl GameState {
     /// runs `WarpSet` (the private index, the sort gate, the save, `GC_WARP`); a target
     /// no Channel hosts orders nowhere, as legacy's failed `CMapLocation::Get` warps
     /// nowhere while the call still answers true.
-    fn order_quest_warp(&mut self, reader: Vid, x: i32, y: i32, private: i32, _mover: Mover) {
+    pub(super) fn order_quest_warp(
+        &mut self,
+        reader: Vid,
+        x: i32,
+        y: i32,
+        private: i32,
+        _mover: Mover,
+    ) {
         let target = self.recall.atlas().and_then(|atlas| atlas.index_at(x, y));
         let channel = target.and_then(|index| {
             self.maps
@@ -4120,7 +4331,7 @@ impl GameState {
     /// One `warp_to_village` call: `WarpSet` to the reader's empire start
     /// (`g_start_position`, `G/questlua_global.cpp:1066-1067`), through the quest
     /// warp's order.
-    fn order_village_warp(&mut self, reader: Vid, mover: Mover) {
+    pub(super) fn order_village_warp(&mut self, reader: Vid, mover: Mover) {
         let empire = self.bodies.get(&reader).map_or(0, |body| body.card.empire);
         let at = crate::channel_login::EMPIRE_START
             .get(usize::from(empire))
@@ -4908,6 +5119,7 @@ struct FinishInputs<'s> {
     object_protos: &'s gamedata::object_proto::ObjectProtos,
     giving: Giving,
     rank: &'s super::rank_global::RankBoard,
+    meley: super::meley::MeleyRuns,
 }
 
 /// Build the [`Session`] and open its rank prizes: the tail half of
@@ -4956,6 +5168,7 @@ fn finish_armed_session<'s>(quests: &'s mut Quests, rest: FinishInputs<'s>) -> A
         rest.atlas,
         rest.guild_lands,
         rest.object_protos,
+        rest.meley,
     ));
     open_rank_prizes(&mut session, rest.giving, rest.rank, rest.pid);
     ArmedSession {
@@ -5006,6 +5219,8 @@ struct SessionInputs<'s> {
     lands: &'s gamedata::land::Lands,
     /// The building object prototypes, which `building.reconstruct` reads.
     object_protos: &'s gamedata::object_proto::ObjectProtos,
+    /// The Meley registrations at the step's start, which the lobby calls read.
+    meley: super::meley::MeleyRuns,
 }
 
 /// What a session knows of the world's step-start state: the reader's open windows,
@@ -5350,6 +5565,7 @@ fn session_inputs<'s>(
     atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
     lands: &'s gamedata::land::Lands,
     object_protos: &'s gamedata::object_proto::ObjectProtos,
+    meley: super::meley::MeleyRuns,
 ) -> SessionInputs<'s> {
     SessionInputs {
         dungeon_flags,
@@ -5387,6 +5603,7 @@ fn session_inputs<'s>(
         atlas,
         lands,
         object_protos,
+        meley,
     }
 }
 
@@ -5429,6 +5646,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         atlas,
         lands,
         object_protos,
+        meley,
     } = inputs;
     session_head(
         dungeon_flags,
@@ -5466,6 +5684,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         atlas,
         lands,
         object_protos,
+        meley,
     )
 }
 
@@ -5508,6 +5727,7 @@ fn session_head<'s>(
     atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
     lands: &'s gamedata::land::Lands,
     object_protos: &'s gamedata::object_proto::ObjectProtos,
+    meley: super::meley::MeleyRuns,
 ) -> Session<'s> {
     let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
     let roster = quest_step_roster(characters);
@@ -5607,7 +5827,7 @@ fn session_head<'s>(
         okay_ranks: context.okay_ranks,
         empire_moves: Vec::new(),
         windows: pre.windows,
-        tail: SessionTail::with_buildings(pre, atlas, lands, object_protos, guilds),
+        tail: SessionTail::with_buildings(pre, atlas, lands, object_protos, guilds, meley),
     }
 }
 
@@ -5848,6 +6068,43 @@ mod tests {
             windows: WindowFlags::default(),
             tail: SessionTail::new(QuestStepState::default(), None),
         }
+    }
+
+    /// The Meley shadow's pairs: the caller's guild reads, the register's (6, 300)
+    /// pass which stands a shadow run with the world's shape, the registered pair,
+    /// and the enter's no-run `(true, 0)` when the map stands.
+    #[test]
+    fn the_meley_shadow_pairs_cover_the_lobby_reads() {
+        use crate::game_state::meley::{LADDER_COST, LADDER_RETURN, MAP, MIN_LEVEL};
+        let protos = MobProtos::default();
+        let names = MobNamesByLanguage::default();
+        let items = ItemProtos::default();
+        let item_names = ItemNamesByLanguage::default();
+        let atlas: &'static gamedata::map_atlas::MapAtlas =
+            Box::leak(Box::new(gamedata::map_atlas::MapAtlas::from_regions(vec![
+                gamedata::map_atlas::MapRegion {
+                    index: MAP,
+                    name: b"meley".to_vec(),
+                    sx: 100_000,
+                    sy: 200_000,
+                    ex: 200_000,
+                    ey: 300_000,
+                    spawn: (113_000, 213_000),
+                    empire_spawns: None,
+                },
+            ])));
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            session.caller = Some(100);
+            session
+                .guilds
+                .install_meley_test_guild(7, 100, MIN_LEVEL, LADDER_COST);
+            session.tail.atlas = Some(atlas);
+            session.mover.pk_mode = crate::loading_phase::PK_MODE_GUILD;
+            assert_eq!(session.meley_register(), (6, LADDER_RETURN));
+            assert!(session.tail.meley.of(7).is_some());
+            assert_eq!(session.meley_is_registered(), (false, 0));
+            assert_eq!(session.meley_enter(), (true, 0));
+        });
     }
 
     /// Runs `f` with a session of character 1, in the mover's language, that names the

@@ -46747,3 +46747,57 @@ unrelated load flake `a_gm_flags_a_stray_dog_aggressive_and_coward`, green in is
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 417. Meley's lobby
+
+Nine quest names, all called by the owner's Meley quests: `meleylair.lua` chats the
+registered pair, the requirements and the register's pair at 20419, then the enter's
+pair; `meleylair_zone.lua` runs `Check()` at login and `Leave()` at the shelter
+(`BRIDGED` 309).
+
+`MeleyLair.GetRequirments` pushes (3, 600), `GetPartecipantsLimit` 16 and
+`GetSubMapIndex` 62. The register judges mid-script from the shadow guilds: the (0, 0)
+quiet for a guest or a non-master, (1, ch) when registered, (2, 0) on another
+dungeon, (3, 3) and (4, 600) for the level and ladder gates, (7, seconds) on a live
+cooldown, (5, 0) with no map to create, and (6, 300) on the pass, which moves the
+shadow ladder and triple at once. The world re-judges the queued call after the step:
+`CreatePrivateMap(212)` through the dungeon manager, the double ladder write (delta
+and set, as `ChangeLadderPoint` + `SetLadderPoint`), the dungeon triple, the run, and
+the `[LS;1001]` line to every online member that `SetLadderPoint` chats — dropped only
+when the ladder is unchanged, as its `!=` guard is. The enter late-creates on a
+registered-but-unhosted triple, refuses the wrong Channel and the full, finished and
+non-guild arms, then rows the participant, saves the exit and orders the warp to the
+recall spot on the run's index. `Check` outs a stranger, `Leave` drops the reader and
+outs it; the login flow outs a shown stranger (`input_login.cpp:784-785`), the
+disconnect drops a leaver from its run (`char.cpp:1757-1758`), a removed member is
+warped out (`MemberRemoved`), and a disband ends its run (`GuildRemoved` ->
+`EndDungeonWarp`). The enter's `GetRecallPositionByEmpire(212, 0)` is the town spawn,
+already absolute: no owner quest registers a restart-city row, so the empire-0
+`Town.txt` arm is the only one that fires. The fight engine (steps, spawns, rewards,
+`CanGetReward`/`Reward`) waits; `sys.guild.dungeon` is `partial`.
+
+Two fixes the lobby needed: the quest session now seeds the world's live runs, so an
+enter after a register reads the registration, and click and dialog steps refresh the
+mover's PK mode, alignment, guild, flags and dead bit from the world, as item steps
+do — the descriptor's actor carries PEACE, which read every enter as non-guild.
+
+Scenario `a_guild_registers_enters_and_leaves_meleys_lair` (8/8 stable): Alpha leads a
+level-3 `MyGuild` with a 600 ladder beside 20419 on map 62; the register chats
+`(6, 300)` and the `[LS;1001;0]` line, the row holds 0; in guild PK mode the enter
+chats `(true, 0)` and warps to (320000, 1529000) on 2120000; coming back, the probe
+login reads the map and the check keeps it. (`MeleyLair.Leave` runs the same
+`order_meley_out` the unit leave pins; no NPC on the run's map can chat it over the
+wire.) Units: the bridges' pairs, the shadow pairs, the register's gates, the
+enter/check/leave warps. Mutants killed: the ladder cost -1, the submap name typo,
+the shadow level +1. One incident: a mutation helper truncated the new untracked
+`meley.rs` to 0 bytes; it was rewritten from the session transcript and verified
+build-clean with every Meley test and the scenario green before the mutants reran.
+No width was measured.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4855 passed 0 failed in 42 targets; `cargo test --workspace --doc --locked
+--offline` 1 ok; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

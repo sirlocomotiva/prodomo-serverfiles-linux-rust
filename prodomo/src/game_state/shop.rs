@@ -356,6 +356,16 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
+        // The descriptor's actor carries PEACE: the click's scripts read the world's
+        // own PK mode, alignment, guild, flags and dead bit, as an item step's do.
+        let mover = Mover {
+            pk_mode: self.pk_mode_of(vid.raw()),
+            affect_flags: self.affect_flags_of(vid),
+            dead: self.is_dead(vid.raw()),
+            alignment: self.alignment_of(vid.raw()),
+            view_guild: self.view_guild_of_vid(vid.raw()),
+            ..mover
+        };
         let (taken, (mut records, climbs, guild_ops, items, gold, claimed, take_sides, landed)) =
             self.quest_click(vid, (target, race), place, mover, account);
         // A give's rows are stored even when no script took the click.

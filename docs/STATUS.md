@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 416 (the guild lands and buildings).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 417
+Last reviewed: 2026-11-07, after ledger section 417 (Meley's lobby).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 418
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -436,7 +436,9 @@ accepts and restores the Okey hand, the ended games log to the Okey table, and t
 quest's chats read both ranks (`pc.get_okay_global_rank`, `pc.get_okay_rund_rank`). Since 412 a script reads the tail names (`pc.get_player_id`, `pc.get_account_id`, `pc.get_empty_inventory_count`, `pc.is_trade0`, `pc.is_busy0`, `pc.give_exp2`, `pc.set_skill_group`, `pc.select`, `pc.get_killee_drop_pct`, `pc.warp_local`, `game.drop_item`). Since 413 a script reads the tongue (`LC`), broadcasts a notice (`notice_all`) through the quest translations, runs a line (`command`, battle-pass only), re-arms the Ochao temple (`temple_ochao.initialize`), and moves its quest (`set_quest_state`). Since 414 a click can land an OX quiz and `/show_quiz` lists what landed, `npc.get_guild` answers 0 with no building standing, and `timer` and the party cinematics are `unused` (no owner Lua calls them). The
 Since 415 a click can open the Gaya window and market, the aura windows and the exp event (with its priv grant), and `gc.aura` carries the open. The
 Since 416 a guild master claims its land at the claim stone and rebuilds its refinery, through the five `building.*` calls over the dumped lands and prototypes. The
-The
+Since 417 a guild registers for Meley's Lair, enters it, and leaves it: the
+lobby's nine quest names run their `CMgr` gates, the ladder debit and the `[LS;1001]` line land, and the
+enter warps to the recall spot on the run's private index. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

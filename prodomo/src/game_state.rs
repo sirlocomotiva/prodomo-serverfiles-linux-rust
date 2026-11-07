@@ -93,6 +93,7 @@ mod item_penalty;
 mod item_purge;
 mod letters;
 mod level;
+mod meley;
 mod messenger;
 mod mining;
 mod mob_ai;
@@ -738,6 +739,9 @@ pub struct GameState {
     protect_level: u8,
     /// The guilds and their member index. See [`guild`].
     guilds: guild::Guilds,
+    /// The guilds whose Meley run lives, by guild id (`MeleyLair::CMgr::m_RegGuilds`,
+    /// `G/MeleyLair.cpp:953-1453`). See [`meley`].
+    meley: meley::MeleyRuns,
     /// The messenger's relations. See [`messenger`].
     messenger: messenger::Relations,
     /// The war maps the live wars are fought on, keyed by the private map index
@@ -2931,6 +2935,10 @@ impl GameState {
             }
         }
         let silence = self.load_affects(vid, &loaded.affects);
+        let meley_map = loaded
+            .show
+            .as_ref()
+            .is_some_and(|show| meley::is_meley_map(show.place.map));
         let (records, update) = match loaded.show {
             Some(show) => {
                 let records = self.place_body(vid, show.place, show.card);
@@ -2939,6 +2947,13 @@ impl GameState {
             }
             None => (Vec::new(), None),
         };
+        // `CInputLogin::Entergame` (`G/input_login.cpp:784-785`): a character shown
+        // on Meley's map with no participant row is sent out at once, as
+        // `Leave(guild, ch, true)` sends it. The show stands first, so the burst
+        // carries the map's own records; the warp order follows them.
+        if meley_map {
+            self.send_out_meley_stranger(vid);
+        }
         // `CInputLogin::Entergame`'s hide restore (`G/input_login.cpp:612-638`) runs after
         // the show and the revive-invisible add, whose pair and update read the mask
         // still clear, and its lines ride the burst after the phase change. The setters
@@ -3175,6 +3190,11 @@ impl GameState {
         let war_map = self.bodies.get(&vid).map_or(0, |body| body.map);
         self.leave_war_map(vid, war_map);
         self.leave_dungeon(vid, war_map);
+        // `CHARACTER::Disconnect` (`G/char.cpp:1757-1759`): a player that leaves
+        // Meley's map while online leaves its run's participants, as `Leave` with
+        // `bSendOut = false` does. The map's own leave is the body's; the run keeps
+        // its registration, which only the dungeon's end drops.
+        self.leave_meley(vid, war_map);
         // A disconnect runs the `logout` scripts before the flags are taken, and drops
         // the record after: `CHARACTER::Disconnect` runs `CQuestManager::LogoutPC`
         // (`G/char.cpp:1773`), writes the character with its quest flags
@@ -4621,7 +4641,7 @@ impl GameState {
                 manager.take(pid, (id, race), game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {

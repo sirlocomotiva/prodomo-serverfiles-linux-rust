@@ -298,12 +298,23 @@ struct Guild {
     /// (`std::map`). Memory-only: a reboot clears every declare, as the DB process's
     /// `m_DeclareMap` dying does.
     enemies: BTreeMap<u32, GuildWar>,
+    /// `TGuildData::dungeon_ch`, `dungeon_map`, `dungeon_cooldown`
+    /// (`G/guild.h:433-438`): Meley's register writes them through `RequestDungeon`
+    /// and `SetDungeonCooldown` (`G/guild.cpp:2302-2319`), and the login flow reads
+    /// them back. Memory-only: legacy receives them from the DB peer, which the
+    /// Rewrite retired (ADR-0001), so a fresh guild starts at zero, as it does there
+    /// before the first row answers.
+    dungeon: (u8, i32, u32),
 }
 
 /// The `guild.*` quest calls' shadow (230s): the guilds as the world holds them at a quest
 /// step's start, cloned into the [`Session`](super::quests::Session) so a call answers the
 /// same rows the world would judge. Writers judged after the step re-read the live guilds.
 pub(super) type GuildShadow = Guilds;
+
+/// What the Meley lobby reads of a guild: its master, level, ladder and dungeon
+/// triple.
+pub(super) type MeleyGuildRow = (u32, u8, i32, (u8, i32, u32));
 
 /// The `change_master_with_limit` arguments past the name (230s): the min level, resign,
 /// other-leader, other-member and ignore flag, each present when the script passed it.
@@ -1268,6 +1279,7 @@ impl GameState {
                     usable: [true; GUILD_SKILL_COUNT],
                     usable_due: [None; GUILD_SKILL_COUNT],
                     enemies: BTreeMap::new(),
+                    dungeon: (0, 0, 0),
                 },
             );
         }
@@ -2275,6 +2287,19 @@ impl GameState {
             .unwrap_or_default();
         for member in members {
             let _sent = self.write_to_client(member, fan.clone());
+        }
+        // `Guild::RemoveMember` (`G/guild.cpp:238`): a removed member on Meley's
+        // map leaves its run's participants and is warped out, as `MemberRemoved`
+        // sends it (`G/MeleyLair.cpp:1417-1437`).
+        if let Ok(character) = self.characters.find_by_pid(pid) {
+            let vid = character.vid();
+            let map = self.place_of(vid.raw()).map_or(0, |place| place.1);
+            if super::meley::is_meley_map(map) {
+                if let Some(run) = self.meley.of_mut(id) {
+                    run.participants.remove(&pid);
+                }
+                self.order_meley_out(vid);
+            }
         }
         let post = if online {
             None
@@ -6049,6 +6074,7 @@ impl GameState {
                 usable: [true; GUILD_SKILL_COUNT],
                 usable_due: [None; GUILD_SKILL_COUNT],
                 enemies: BTreeMap::new(),
+                dungeon: (0, 0, 0),
             },
         );
         self.guilds.of.insert(pid, commit.id);
@@ -6583,6 +6609,11 @@ impl GameState {
         for pid in &members {
             self.guilds.of.remove(pid);
         }
+        // `CGuildManager::RemoveGuild` (`G/guild_manager.cpp:267`): the disbanded
+        // guild's run warps every member on its map out, as `GuildRemoved` sends
+        // them (`G/MeleyLair.cpp:1439-1452`). The map and the registration go with
+        // the guild, as `EndDungeonWarp` drops them.
+        self.end_meley_run(id);
         self.guilds.by_id.remove(&id);
         self.marks.delete_mark(id);
         self.symbols.remove(&id);
@@ -7640,6 +7671,98 @@ impl Guilds {
     /// guild arm reads of the account's characters.
     pub(super) fn shadow_guild_of(&self, pid: u32) -> Option<u32> {
         self.of.get(&pid).copied()
+    }
+
+    /// The shadow guild `id`'s master, level, ladder and dungeon triple, if any:
+    /// what the Meley lobby reads.
+    pub(super) fn shadow_meley_guild(&self, id: u32) -> Option<MeleyGuildRow> {
+        self.by_id.get(&id).map(|guild| {
+            (
+                guild.master_pid,
+                guild.level,
+                guild.ladder_point,
+                guild.dungeon,
+            )
+        })
+    }
+
+    /// The shadow register's take (`Register`, `G/MeleyLair.cpp:1049-1072`): the
+    /// ladder falls by `cost`, floored at 0, the triple names `channel`, and the
+    /// cooldown clears, as the call leaves them. The private index is the world's
+    /// to judge; the shadow stands no map.
+    pub(super) fn shadow_meley_take(&mut self, id: u32, channel: u8, cost: i32) {
+        if let Some(guild) = self.by_id.get_mut(&id) {
+            guild.ladder_point = guild.ladder_point.saturating_sub(cost).max(0);
+            guild.dungeon = (channel, 0, 0);
+        }
+    }
+
+    /// Install a one-master guild for the Meley shadow test: master `master` of
+    /// guild `id` at `level` with `ladder` and a zero dungeon triple.
+    #[cfg(test)]
+    pub(super) fn install_meley_test_guild(
+        &mut self,
+        id: u32,
+        master: u32,
+        level: u8,
+        ladder: i32,
+    ) {
+        self.by_id.insert(
+            id,
+            Guild {
+                id,
+                master_pid: master,
+                exp: 0,
+                level,
+                name: Vec::new(),
+                grades: std::array::from_fn(|_| (Vec::new(), 0)),
+                skill_point: 0,
+                skills: [0; GUILD_SKILL_COUNT],
+                power: 0,
+                max_power: 0,
+                gold: 0,
+                member_count_bonus: 0,
+                members: BTreeMap::new(),
+                ladder_point: ladder,
+                war_wins: 0,
+                war_draws: 0,
+                war_losses: 0,
+                post_comment_due: 0,
+                usable: [true; GUILD_SKILL_COUNT],
+                usable_due: [None; GUILD_SKILL_COUNT],
+                enemies: BTreeMap::new(),
+                dungeon: (0, 0, 0),
+            },
+        );
+        self.of.insert(master, id);
+    }
+
+    /// Write the level of guild `id`: the Meley test's gate setup.
+    #[cfg(test)]
+    pub(super) fn set_meley_level(&mut self, id: u32, level: u8) {
+        if let Some(guild) = self.by_id.get_mut(&id) {
+            guild.level = level;
+        }
+    }
+
+    /// Write the ladder and the dungeon triple of guild `id`: the world's register
+    /// and late-enter takes.
+    pub(super) fn set_meley_row(&mut self, id: u32, ladder: i32, dungeon: (u8, i32, u32)) {
+        if let Some(guild) = self.by_id.get_mut(&id) {
+            guild.ladder_point = ladder;
+            guild.dungeon = dungeon;
+        }
+    }
+
+    /// The online members' VIDs, in member order: who `SetLadderPoint` chats.
+    pub(super) fn online_vids(&self, id: u32) -> Vec<Vid> {
+        self.by_id.get(&id).map_or(Vec::new(), |guild| {
+            guild
+                .members
+                .values()
+                .filter_map(|member| member.vid)
+                .collect()
+        })
     }
 
     /// The enemy of `id` whose war has begun (`CGuild::UnderAnyWar`,
@@ -12429,6 +12552,7 @@ mod tests {
                 usable: [true; GUILD_SKILL_COUNT],
                 usable_due: [None; GUILD_SKILL_COUNT],
                 enemies: BTreeMap::new(),
+                dungeon: (0, 0, 0),
             },
         );
         let place = (1u8, 1i32);

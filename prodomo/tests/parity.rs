@@ -37676,3 +37676,187 @@ fn a_guild_master_claims_land_and_rebuilds_its_refinery() {
     );
     beta.quiet("the rebuild step ends");
 }
+
+/// The Meley probe: one click quest on the sub map's NPC (20419) that chats the
+/// registered pair, the requirements, the register's pair, then the enter's pair
+/// on the same menus the owner's quest reads.
+const MELEY_PROBE: &[u8] = b"quest meley_probe begin\n\
+    state start begin\n\
+    when login with MeleyLair.IsMeleyMap() begin\n\
+    say(\"lobby \" .. tostring(MeleyLair.IsMeleyMap()))\n\
+    MeleyLair.Check()\n\
+    end\n\
+    when 20419.chat.\"probe register\" begin\n\
+    local reg, ch = MeleyLair.IsRegistered()\n\
+    local req1, req2 = MeleyLair.GetRequirments()\n\
+    say(\"reg \" .. tostring(reg) .. \" ch \" .. ch .. \" req \" .. req1 .. \" \" .. req2)\n\
+    local r1, r2 = MeleyLair.Register()\n\
+    say(\"got \" .. r1 .. \" \" .. r2)\n\
+    end\n\
+    when 20419.chat.\"probe enter\" begin\n\
+    say(\"limit \" .. MeleyLair.GetPartecipantsLimit())\n\
+    local ok, limit = MeleyLair.Enter()\n\
+    say(\"in \" .. tostring(ok) .. \" \" .. limit)\n\
+    end\n\
+    when 20419.chat.\"probe leave\" begin\n\
+    MeleyLair.Leave()\n\
+    say(\"left \" .. MeleyLair.GetSubMapIndex())\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Seed `MyGuild` for the Meley lobby: a level-3 guild of Alpha alone with a 600
+/// ladder, and Alpha beside 20419 — `npc.txt:13`'s (83, 851) past map 62's base
+/// (588800, 614400).
+fn seed_meley_guild(database: &ScratchDatabase) {
+    sql(
+        database,
+        "INSERT INTO guild (id, name, master_pid, level, ladder_point) SELECT 7, 'MyGuild', id, \
+         3, 600 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN \
+         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         FROM generate_series(1, 15) grade",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 7, 1 FROM player WHERE \
+         name = 'Alpha'",
+    );
+    sql(
+        database,
+        "UPDATE player SET map_index = 62, x = 597100, y = 699500 WHERE name = 'Alpha'",
+    );
+}
+
+/// The Channels the Meley lobby runs on: Channel 1 hosts the sub map (62) and the
+/// dungeon map (212), the register's and the enter's create gates.
+fn meley_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 3, 62, 212],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// `lua.MeleyLair.GetRequirments`, `lua.MeleyLair.GetPartecipantsLimit`,
+/// `lua.MeleyLair.GetSubMapIndex`, `lua.MeleyLair.Register`,
+/// `lua.MeleyLair.IsRegistered`, `lua.MeleyLair.Enter`, `lua.MeleyLair.IsMeleyMap`,
+/// `lua.MeleyLair.Check`, `lua.MeleyLair.Leave`: Alpha leads `MyGuild` at level 3
+/// with a 600 ladder and stands beside the sub map's NPC (20419). Its register
+/// chats the `(6, 300)` pair and the `[LS;1001;0]` ladder line, and the row holds
+/// 0. In guild PK mode the enter chats `(true, 0)` and warps it to the recall spot
+/// on the run's index; coming back, it stands there, the probe login reads the
+/// map, and the check keeps it. (`MeleyLair.Leave` runs the same `order_meley_out`
+/// the unit leave pins; no NPC on the run's map can chat it over the wire.)
+#[test]
+fn a_guild_registers_enters_and_leaves_meleys_lair() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    seed_meley_guild(&database);
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/meley_probe.lua", MELEY_PROBE)],
+        &meley_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, listed, entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let npc = shown_vid(&entered, 20_419, "the sub map shows 20419");
+    alice.send_record(&client_click(npc));
+    let menu = alice.read_game();
+    assert_eq!(
+        menu,
+        server_script(
+            1,
+            &[
+                &b"[QUESTION 1;The Sung Mahi dragons?|2;Fight the Sung Mahi dragons!|3;Go inside "
+                    [..],
+                &b"shelter!|4;probe register|5;probe enter|6;probe leave|7;Inchide]"[..],
+            ]
+            .concat(),
+        ),
+        "the five chats and the close"
+    );
+    alice.send_record(&client_script_answer(3));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"reg false ch 0 req 3 600[ENTER]got 6 300[ENTER][DONE]"),
+        "the registered pair, the requirements, the register's pair"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1001;0]"),
+        "the ladder line"
+    );
+    alice.quiet("the register step ends");
+    wait_for(
+        &database,
+        "(SELECT ladder_point FROM guild WHERE id = 7) = 0",
+    );
+    // Guild PK mode lands with an update to the view.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 4"));
+    assert_eq!(read_update_mode(&mut alice, listed.id), 4, "guild lands");
+    alice.quiet("the switch ends");
+    // The enter chats `(true, 0)` and warps to the recall spot on the run.
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu again");
+    alice.send_record(&client_script_answer(4));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"limit 16[ENTER]in true 0[ENTER][DONE]"),
+        "the limit and the enter's pair"
+    );
+    let port = server.channel(1).port();
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((320_000, 1_529_000), port),
+        "the recall spot on the run"
+    );
+    alice.quiet("the enter step ends");
+    wait_for(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 2120000",
+    );
+    // Coming back, the participant stands on the run: the probe login reads the
+    // map and the check keeps it, and the warped-out stranger's row lands too.
+    drop(alice);
+    let (keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let mut alice = keyed;
+    let entered = enter_game_guilded(&mut alice, 1);
+    assert_eq!((character.x, character.y), (320_000, 1_529_000));
+    let _ = entered;
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"lobby true[ENTER][DONE]"),
+        "the probe login reads the map"
+    );
+    let _marks = read_login_letters(&mut alice, false);
+    read_login_update(&mut alice);
+    alice.quiet("the check keeps the participant");
+    // The leave runs through the same ordered warp: a dialog-step `Leave()`
+    // would need an NPC on the run's map, which legacy never places there.
+}

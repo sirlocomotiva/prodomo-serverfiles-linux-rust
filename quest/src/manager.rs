@@ -448,6 +448,26 @@ pub trait Game {
     /// first land in id order holding `(x, y)` on `map` after the map-base shift, and
     /// 0 with none.
     fn land_id_at(&self, map: i32, x: i32, y: i32) -> u32;
+    /// `MeleyLair_Register` (`G/questlua_MeleyLair.cpp:37-49`): the register's
+    /// (`iRes1`, `iRes2`) pair. The shadow judges from the step's reads; the world
+    /// judges the queued call again after the step.
+    fn meley_register(&mut self) -> (i32, i32);
+    /// `MeleyLair_IsRegistered` (`G/questlua_MeleyLair.cpp:51-68`): whether the
+    /// reader's guild is registered, and the channel that registered it.
+    fn meley_is_registered(&self) -> (bool, u8);
+    /// `MeleyLair_Enter` (`G/questlua_MeleyLair.cpp:70-87`): whether the reader
+    /// enters, and the pushed limit when it does not. The world judges the queued
+    /// call again after the step, which warps the reader in.
+    fn meley_enter(&mut self) -> (bool, i32);
+    /// `MeleyLair_IsMeleyMap` (`G/questlua_MeleyLair.cpp:89-97`): whether the reader
+    /// stands on Meley's map (212 or its 2120000..2130000 private copies).
+    fn is_meley_map(&self) -> bool;
+    /// `MeleyLair_Check` (`G/questlua_MeleyLair.cpp:99-107`): the login check is
+    /// queued for the world after the step.
+    fn meley_check(&mut self);
+    /// `MeleyLair_Leave` (`G/questlua_MeleyLair.cpp:109-117`): the leave is queued
+    /// for the world after the step.
+    fn meley_leave(&mut self);
     /// `building_get_land_info`'s triple (`G/questlua_building.cpp:31-58`): the
     /// `(price, owner, level limit)` of `land`, and `None` with no such land.
     fn land_info(&self, land: u32) -> Option<(u32, u32, u8)>;
@@ -5501,7 +5521,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 15] = [
+    let families: [Family; 16] = [
         look_api,
         pc_api,
         item_api,
@@ -5517,6 +5537,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         timer_api,
         game_api,
         building_api,
+        meley_api,
     ];
     for family in families {
         if let Some(answered) = family(lua, cx, name, args)? {
@@ -5779,6 +5800,83 @@ fn time_find_api(
 /// The `building.*` calls (`G/questlua_building.cpp`): the land id read, the info
 /// triple, the owner write, the owned read, and the object rebuild. Split out so `api`
 /// stays under the line lint.
+///
+///
+///
+///
+///
+/// The `MeleyLair.*` lobby calls (`G/questlua_MeleyLair.cpp`): the two constant
+/// pairs, the register and enter pairs, the map read, and the two queued warps.
+/// Split out so `api` stays under the line lint.
+/// It cannot fail, but the [`Family`] table calls through `Result`, so it keeps the wrap.
+#[allow(clippy::unnecessary_wraps)]
+fn meley_api(
+    _lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let _ = args;
+    let pair = |first: f64, second: f64| {
+        MultiValue::from_vec(vec![Value::Number(first), Value::Number(second)])
+    };
+    // `MeleyLair_GetRequirments` (`:18-23`): the minimum guild level and the ladder
+    // cost (`MeleyLair.h:18-20`).
+    if name == b"MeleyLair.GetRequirments" {
+        return Ok(Some(pair(3.0, 600.0)));
+    }
+    // `MeleyLair_GetPartecipantsLimit` (`:25-29`): 16 (`MeleyLair.h:19`).
+    if name == b"MeleyLair.GetPartecipantsLimit" {
+        return Ok(Some(MultiValue::from_vec(vec![Value::Number(16.0)])));
+    }
+    // `MeleyLair_GetSubMapIndex` (`:31-35`): 62 (`MeleyLair.h:17`).
+    if name == b"MeleyLair.GetSubMapIndex" {
+        return Ok(Some(MultiValue::from_vec(vec![Value::Number(62.0)])));
+    }
+    // `MeleyLair_Register` (`:37-49`): the judged (`iRes1`, `iRes2`) pair. The
+    // register runs mid-script, beside its script's world, as `guild_call` does.
+    if name == b"MeleyLair.Register" {
+        let (first, second) = cx.game.meley_register();
+        return Ok(Some(pair(f64::from(first), f64::from(second))));
+    }
+    // `MeleyLair_IsRegistered` (`:51-68`): the boolean and the channel (0 with no
+    // character, as the `NULL` arm pushes).
+    if name == b"MeleyLair.IsRegistered" {
+        let (registered, channel) = cx.game.meley_is_registered();
+        return Ok(Some(MultiValue::from_vec(vec![
+            Value::Boolean(registered),
+            Value::Number(f64::from(channel)),
+        ])));
+    }
+    // `MeleyLair_Enter` (`:70-87`): the boolean and the limit (1 with no
+    // character, as the `NULL` arm pushes).
+    if name == b"MeleyLair.Enter" {
+        let (entered, limit) = cx.game.meley_enter();
+        return Ok(Some(MultiValue::from_vec(vec![
+            Value::Boolean(entered),
+            Value::Number(f64::from(limit)),
+        ])));
+    }
+    // `MeleyLair_IsMeleyMap` (`:89-97`): false with no character, as the `NULL`
+    // arm pushes.
+    if name == b"MeleyLair.IsMeleyMap" {
+        return Ok(Some(MultiValue::from_vec(vec![Value::Boolean(
+            cx.game.is_meley_map(),
+        )])));
+    }
+    // `MeleyLair_Check` (`:99-107`) and `MeleyLair_Leave` (`:109-117`): queued,
+    // pushing nothing.
+    if name == b"MeleyLair.Check" {
+        cx.game.meley_check();
+        return Ok(Some(MultiValue::new()));
+    }
+    if name == b"MeleyLair.Leave" {
+        cx.game.meley_leave();
+        return Ok(Some(MultiValue::new()));
+    }
+    Ok(None)
+}
+
 fn building_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
@@ -6067,6 +6165,14 @@ mod tests {
         land_guilds: BTreeSet<u32>,
         set_owners: Vec<(u32, u32)>,
         reconstructs: Vec<(u32, u32)>,
+        meley_registers: usize,
+        meley_registered: (i32, i32),
+        meley_registered_flag: (bool, u8),
+        meley_enters: usize,
+        meley_entered: (bool, i32),
+        meley_map: bool,
+        meley_checks: usize,
+        meley_leaves: usize,
         player_id: u32,
         account_table_id: u32,
         empty_cells: u32,
@@ -6587,6 +6693,26 @@ mod tests {
         }
         fn reconstruct_object(&mut self, npc_vid: u32, vnum: u32) {
             self.reconstructs.push((npc_vid, vnum));
+        }
+        fn meley_register(&mut self) -> (i32, i32) {
+            self.meley_registers += 1;
+            self.meley_registered
+        }
+        fn meley_is_registered(&self) -> (bool, u8) {
+            self.meley_registered_flag
+        }
+        fn meley_enter(&mut self) -> (bool, i32) {
+            self.meley_enters += 1;
+            self.meley_entered
+        }
+        fn is_meley_map(&self) -> bool {
+            self.meley_map
+        }
+        fn meley_check(&mut self) {
+            self.meley_checks += 1;
+        }
+        fn meley_leave(&mut self) {
+            self.meley_leaves += 1;
         }
         fn player_id(&self) -> u32 {
             self.player_id
@@ -8267,6 +8393,61 @@ mod tests {
     /// non-number, the info triple answers 10^9 for a non-number or an unknown land,
     /// the owner write and the rebuild push nothing, and the owned read pushes true
     /// for a non-number.
+    /// The Meley lobby pushes its constants and its judged pairs: the requirements,
+    /// the limit, the sub map, the register's pair, the registered boolean with its
+    /// channel, the enter's boolean with its limit, the map read, and the quiet
+    /// check and leave.
+    #[test]
+    fn the_meley_lobby_pushes_its_pairs() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let bits = |values: Vec<Value>| {
+            values
+                .iter()
+                .map(|value| match value {
+                    Value::Number(number) => number.to_bits(),
+                    Value::Boolean(flag) => u64::from(*flag),
+                    _ => 0,
+                })
+                .collect::<Vec<_>>()
+        };
+        let pair = probe.call("MeleyLair.GetRequirments", &[]).unwrap();
+        assert_eq!(bits(pair), [3.0_f64.to_bits(), 600.0_f64.to_bits()]);
+        let limit = probe.call("MeleyLair.GetPartecipantsLimit", &[]).unwrap();
+        assert_eq!(bits(limit), [16.0_f64.to_bits()]);
+        let sub = probe.call("MeleyLair.GetSubMapIndex", &[]).unwrap();
+        assert_eq!(bits(sub), [62.0_f64.to_bits()]);
+        probe.game.meley_registered = (6, 300);
+        let pair = probe.call("MeleyLair.Register", &[]).unwrap();
+        assert_eq!(bits(pair), [6.0_f64.to_bits(), 300.0_f64.to_bits()]);
+        assert_eq!(probe.game.meley_registers, 1);
+        probe.game.meley_registered_flag = (true, 2);
+        let pair = probe.call("MeleyLair.IsRegistered", &[]).unwrap();
+        assert_eq!(pair.len(), 2);
+        assert!(matches!(pair[0], Value::Boolean(true)));
+        assert_eq!(bits(pair), [1, 2.0_f64.to_bits()]);
+        probe.game.meley_entered = (true, 0);
+        let pair = probe.call("MeleyLair.Enter", &[]).unwrap();
+        assert!(matches!(pair[0], Value::Boolean(true)));
+        assert_eq!(bits(pair), [1, 0.0_f64.to_bits()]);
+        assert_eq!(probe.game.meley_enters, 1);
+        probe.game.meley_map = true;
+        let map = probe.call("MeleyLair.IsMeleyMap", &[]).unwrap();
+        assert!(matches!(map[..], [Value::Boolean(true)]));
+        assert!(probe.call("MeleyLair.Check", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.meley_checks, 1);
+        assert!(probe.call("MeleyLair.Leave", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.meley_leaves, 1);
+    }
+
     #[test]
     fn the_building_calls_follow_their_argument_rules() {
         let manager = manager().lock().unwrap();
