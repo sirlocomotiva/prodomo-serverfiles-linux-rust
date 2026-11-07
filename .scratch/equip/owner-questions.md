@@ -492,3 +492,30 @@ owner answers.
     and the retired game-to-game siege packet (`G/input_p2p.cpp:677`, ADR-0001);
     `cmd.siege` is `missing`. Both rows are `unused`. Waits on it: nothing
     blocks.
+54. **The three OX timers and the spam timer (ledger 439).** `oxevent_timer`
+    is created only by `Quiz` (`G/OXEvent.cpp:296`), which runs only from the
+    process's quiz phase and `oxevent.quiz`; `end_oxevent` only from
+    `oxevent.end_event`; `ox_event_process` only from `SetOXEvent(true)` — and
+    the whole `oxevent.*` bridge family is `unused` while `start_game_event`
+    stops at the flag for index 11. `block_chat_by_ip_event` is created only by
+    `SpamBlockCheck`, whose per-IP score the chat judge documents as unported
+    (`prodomo/src/chat.rs:421-423`). All four rows are `unused`. Waits on it:
+    nothing blocks.
+55. **The three-way war timer and the three world boss timers (ledger 439).**
+    `regen_mob_event` is created only by `CThreeWayWar::onDead`'s elimination arm
+    (`G/threeway_war.cpp:410-418`) from `Dead` on a forked map, and the port reads
+    only the SungZi half of `forkedmapindex.txt`. The three world boss timers are
+    created only by `SetCooldown`/`SetRunTime`, which `Enable(true)` runs from the
+    `world_boss_event` flag arm (`G/questmanager.cpp:1344-1348`); the port's
+    `set_event_flag` leaves that name on the table with no arm, and
+    `cmd.worldboss` is `missing`. All four rows are `unused`. Waits on it:
+    nothing blocks.
+56. **The three event-manager spawn timers (ledger 439).** Every arm of
+    `warp_all_to_village_event` is a `Set*Event` end-arm or the siege-stone
+    kill; `dynamic_spawn_cycle_event` is created only by the boss and metin
+    start-arms; `static_spawn_cycle_event` only by the frog and Tanaka
+    start-arms — and `start_game_event` ports only the exp and loot arms (1-2)
+    past the flag (`prodomo/src/game_state/quest_quiet.rs:467`). All three rows
+    are `unused`; each fires home with its first event start or end. With them
+    the timed-events inventory has no `missing` row left. Waits on it: nothing
+    blocks.

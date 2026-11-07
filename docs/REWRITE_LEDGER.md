@@ -47443,3 +47443,45 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 439. The OX, spam, war and event timers
+
+Eleven timed-event rows are unreachable, in three groups, and no `missing`
+timed-event row is left.
+
+Three OX timers and the spam timer. `event.OXEvent.oxevent_timer` is created only
+by `COXEventManager::Quiz` (`G/OXEvent.cpp:296`), which runs only from
+`ox_event_process`'s quiz phase (`G/event_manager.cpp:1428`) and `oxevent.quiz`
+(`G/questlua_oxevent.cpp:103`); the whole `oxevent.*` bridge family is `unused`
+(ledger 401) and `SetOXEvent` is unreachable (`start_game_event` stops at the flag
+for 11). `event.questlua_oxevent.end_oxevent` is created only by `oxevent.end_event`
+(`G/questlua_oxevent.cpp:145`). `event.event_manager.ox_event_process` is created
+only by `SetOXEvent(true)` (`G/event_manager.cpp:1506-1512`).
+`event.input_main.block_chat_by_ip_event` is created only by `SpamBlockCheck`
+(`G/input_main.cpp:223`) when an under-level-10 IP's score crosses the bar, and the
+chat judge documents the skip: the per-IP score has no store in the Rewrite
+(`prodomo/src/chat.rs:421-423`) (owner question 54).
+
+The three-way war timer and the three world boss timers. `event.threeway_war.regen_mob_event`
+is created only by `CThreeWayWar::onDead`'s elimination arm
+(`G/threeway_war.cpp:410-418`) from `Dead` on a forked map, and the port reads only
+the SungZi half of `forkedmapindex.txt`. The boss timers are created only by
+`SetCooldown`/`SetRunTime`, which `Enable(true)` runs from the `world_boss_event`
+flag arm (`G/questmanager.cpp:1344-1348`); the port's `set_event_flag` leaves that
+name on the table with no arm, and `cmd.worldboss` is `missing` (owner question 55).
+
+Three event-manager spawn timers. Every arm of
+`event.event_manager.warp_all_to_village_event` is a `Set*Event` end-arm or the
+siege-stone kill; `event.event_manager.dynamic_spawn_cycle_event` is created only by
+the boss and metin start-arms (for map 230); `event.event_manager.static_spawn_cycle_event`
+only by the frog and Tanaka start-arms — and `start_game_event` ports only the exp
+and loot arms (1-2) past the flag (owner question 56).
+
+Timed-events: 0 `missing` / 46 `ported` / 5 `partial` / 48 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4882 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
