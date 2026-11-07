@@ -45,6 +45,14 @@ pub struct Pcg32 {
 /// The LCG multiplier of the reference implementation.
 const PCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 
+impl Default for Pcg32 {
+    /// The reference's zero seed: `new(0, 0)`. The game thread never starts here;
+    /// [`crate::character`]'s worlds seed fresh dice.
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
+}
+
 impl Pcg32 {
     /// `pcg32_srandom_r(seed, stream)`: the generator the reference seeds with this state and
     /// stream.

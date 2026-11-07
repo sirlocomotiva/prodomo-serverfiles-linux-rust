@@ -186,7 +186,7 @@ pub struct PointRecord {
     pub broadcast: bool,
 }
 /// The two server limits the experience arm reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExpLimits {
     /// `gPlayerMaxLevel` (`config.cpp:417`).
     pub max_level: i32,
