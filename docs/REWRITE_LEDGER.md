@@ -46984,3 +46984,29 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 423. The dungeon ticks
+
+`event.dungeon.dungeon_dead_event` stood `missing` though its tick ran: 300 s after the
+last member leaves, the dungeon is destroyed (`run_dungeon_ticks`,
+`the_dead_event_fires_300_seconds_after_the_last_leave`). A binary scenario would wait 5
+minutes, so the world test proves it (owner decision, 2026-10-14); the row is `ported`.
+
+Its two siblings are unreachable. `dungeon_jump_to_event` and `dungeon_exit_all_event`
+fire only when `CheckEliminated` finds `m_bWarpAtEliminate` / `m_bExitAllAtEliminate` set
+(`G/dungeon.cpp:1319-1357`), and only `d.set_warp_at_eliminate` /
+`d.set_exit_all_at_eliminate` set those flags (`G/questlua_dungeon.cpp:265,306`), which no
+Lua file names (both `unused`, ledger 401, question 37). The setter sweep covers the whole
+`server/` tree with no other caller; positive control: the same sweep finds the three
+`EVENTFUNC`s in `G/dungeon.cpp` and the two setter call sites. The port keeps no monster
+count, so the check cannot run here either. Both rows are `unused` (owner question 39);
+if a future quest needs them, the count and the two timers are ported then.
+
+Timed-events: 58 `missing` / 34 `ported` / 5 `partial` / 2 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4876 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

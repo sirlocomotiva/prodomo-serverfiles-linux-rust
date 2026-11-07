@@ -385,3 +385,10 @@ owner answers.
     Rewrite will carry the fixed line as a Divergence. Waits on it: nothing blocks; the
     bridges (`guild.get_reserve_war_table`, `guild.is_bet`, `guild.war_bet`) are ported and
     proved by probe.
+39. **The dungeon eliminate timers (ledger 423).** `dungeon_jump_to_event` and
+    `dungeon_exit_all_event` fire only when `CheckEliminated` finds their flag set
+    (`G/dungeon.cpp:1319-1357`), and only `d.set_warp_at_eliminate` /
+    `d.set_exit_all_at_eliminate` set those flags (`G/questlua_dungeon.cpp:265,306`).
+    Both names are `unused`: no Lua file calls them (ledger 401, question 37). The rows
+    are `unused`; if a future quest needs them, the monster count and the two timers
+    are ported then. Waits on it: nothing blocks.
