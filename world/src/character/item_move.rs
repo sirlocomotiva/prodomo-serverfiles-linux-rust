@@ -26,8 +26,9 @@
 //! and the look too, so a [`MoveDone`] carries [`MoveRecord`]s, not only item records. A path
 //! that changes something and then fails ends [`MoveKind::Declined`], with what it did.
 //!
-//! Four legacy checks have nothing to test yet and are left out: `isLocked`,
-//! `CanHandleItem`, `IsSecured`, and the observer mode. The quickslot sync and the
+//! Three legacy checks have nothing to test yet and are left out: `isLocked`,
+//! `CanHandleItem`, and the observer mode. The lock (`IsSecured`) gates the move at
+//! legacy's place, and the game state chats its popup. The quickslot sync and the
 //! `ITEM_SPLIT` log are the caller's. An item offered in a trade is refused silently
 //! (`IsExchanging`, `:7618`), after the lookup and before the count, as legacy does.
 //!
@@ -106,6 +107,8 @@ pub struct MoveRules {
     pub belt_grade: Option<i32>,
     /// Whether a script of the character waits for its client (`quest::PC::IsRunning`).
     pub questing: bool,
+    /// Whether the inventory is locked (`IsSecured`).
+    pub secured: bool,
 }
 
 /// The facts about an item's prototype a move reads.
@@ -524,6 +527,9 @@ pub enum MoveRefused {
     /// gold moves and no gold change is sent, while the pile is still consumed
     /// (`G/char.cpp:4407-4423`).
     GoldOverflow,
+    /// `IsSecured`: the lock stands. Each site chats its own popup line; the world
+    /// carries the refusal, and the game state sends the line.
+    Secured,
 }
 
 impl MoveRefused {
@@ -702,6 +708,7 @@ impl core::fmt::Display for MoveRefused {
             Self::Locked => f.write_str("a sash window holds the item"),
             Self::OwnedByOther => f.write_str("another character owns the ground item"),
             Self::GoldOverflow => f.write_str("the gold pile would reach the gold cap"),
+            Self::Secured => f.write_str("the inventory is locked"),
         }
     }
 }
@@ -748,6 +755,10 @@ pub fn move_item(
     let item = items.item_at(from).cloned().ok_or(MoveRefused::Empty)?;
     if items.is_exchanging(item.id) {
         return Err(MoveRefused::Exchanging);
+    }
+    // `G/char_item.cpp:7717-7722`, after the exchange; the game state chats the popup.
+    if rules.secured {
+        return Err(MoveRefused::Secured);
     }
     if item.count < count {
         return Err(MoveRefused::CountAboveStack {
@@ -1231,6 +1242,7 @@ mod tests {
         usable_cells: 90,
         belt_grade: None,
         questing: false,
+        secured: false,
     };
 
     const fn at(window_type: u8, cell: u16) -> ItemPos {

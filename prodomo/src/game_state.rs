@@ -115,6 +115,7 @@ pub(crate) mod pc_skill;
 mod pickup;
 mod pk_mode;
 mod polymorph;
+mod protected;
 mod pvp;
 mod quest_quiet;
 mod quest_target;
@@ -171,6 +172,10 @@ pub use guild::{
 };
 pub use letters::LettersTrade;
 pub use level::{AdvanceLanded, LevelHeld, ResetHeld};
+pub use protected::{
+    ProtectedStep, PROTECTED_ACTIVATE, PROTECTED_FRESH_PASSWORD, PROTECTED_PASSWORD_CHANGE,
+    PROTECTED_PASSWORD_MAX_LEN,
+};
 pub use quests::{QuestStep, QuestStepOutcome, Quests};
 pub use rank_global::SeasonEnd;
 pub use reload::ReloadRead;
@@ -2357,6 +2362,7 @@ impl GameState {
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
             | GameCommand::Biologist { .. }
+            | GameCommand::Protected { .. }
             | GameCommand::NpcsOn { .. }) => {
                 self.apply_ground(command);
                 None
@@ -3730,6 +3736,10 @@ impl GameState {
             }
         }
         let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            // `G/char_item.cpp:7236-7241`, before the summon arms; the refusal chats the popup.
+            if rules.secured {
+                return Err(world::character::MoveRefused::Secured);
+            }
             use_item(items, at, rules, gear)
         })?;
         if moved.kind == world::character::MoveKind::QuestUsed {
@@ -4406,6 +4416,7 @@ impl GameState {
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
             | GameCommand::Biologist { .. }
+            | GameCommand::Protected { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_event_step(command),
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
         }
@@ -4472,6 +4483,12 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.biologist(vid, step, mover)),
+            GameCommand::Protected {
+                vid,
+                step,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.protected(vid, step, mover)),
             GameCommand::NpcsOn {
                 channel,
                 map,
@@ -4528,7 +4545,11 @@ impl GameState {
                 .is_some(),
         };
         let mut dropped = None;
-        let mut moved = self.run_item_step(vid, actor, |items, ids, _rules, _gear, _protos| {
+        let mut moved = self.run_item_step(vid, actor, |items, ids, rules, _gear, _protos| {
+            // `G/char_item.cpp:7489-7495`, after the anti-flags; the refusal chats the popup.
+            if rules.secured {
+                return Err(world::character::MoveRefused::Secured);
+            }
             drop_item(items, ids, at, count, to).map(|(done, ground)| {
                 dropped = Some(ground);
                 done
@@ -4656,9 +4677,10 @@ impl GameState {
     ///
     /// `CanHandleItem` is the windows this build has: a sash, changelook or smith's window
     /// refuses silently, as does a dead character; the observer gate is the descriptor's.
-    /// A sash material refuses silently too (`isLocked`); the personal shop, the cube, the
-    /// dragon soul refine, the warp, the aura, the other locks and the secured state are not
-    /// ported, so none refuses, and each port re-gates here.
+    /// A sash material refuses silently too (`isLocked`); the lock gates at legacy's
+    /// place, with the popup it chats. The personal shop, the cube, the dragon soul
+    /// refine, the warp, the aura and the other locks are not ported, so none refuses,
+    /// and each port re-gates here.
     ///
     /// # Errors
     ///
@@ -4685,7 +4707,7 @@ impl GameState {
         }
         let mut vnum = 0;
         let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, _gear, _protos| {
-            destroy_item(items, at, rules.questing).map(|(done, named)| {
+            destroy_item(items, at, rules.questing, rules.secured).map(|(done, named)| {
                 vnum = named;
                 done
             })
@@ -5022,6 +5044,7 @@ impl GameState {
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: belt_grade(character.items(), &self.protos),
             questing,
+            secured: false,
         };
         let mut picker = Picker {
             owner_id,
@@ -5203,11 +5226,15 @@ impl GameState {
             .find_by_vid_mut(vid)
             .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
         let owner_id = character.player_id();
+        let secured = character
+            .points()
+            .is_some_and(world::character::Points::is_secured);
         let rules = MoveRules {
             count_limit: self.item_count_limit,
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: belt_grade(character.items(), &self.protos),
             questing,
+            secured,
         };
         let protos = &self.protos;
         let (items, points) = character.items_and_points_mut();
@@ -7518,6 +7545,7 @@ mod tests {
             conqueror_exp: 0,
             gaya: 0,
             biologist: [0; 3],
+            secured: (0, 999_999),
         });
         let _ = points.compute_points();
         for kind in [common::point_slot::POINT_HP, common::point_slot::POINT_SP] {

@@ -390,6 +390,7 @@ mod tests {
         usable_cells: 90,
         belt_grade: None,
         questing: false,
+        secured: false,
     };
 
     fn inv(cell: u16) -> ItemPos {

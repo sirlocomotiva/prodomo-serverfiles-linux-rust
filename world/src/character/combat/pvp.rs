@@ -439,6 +439,7 @@ mod tests {
             conqueror_exp: 0,
             gaya: 0,
             biologist: [0; 3],
+            secured: (0, 999_999),
         })
     }
 

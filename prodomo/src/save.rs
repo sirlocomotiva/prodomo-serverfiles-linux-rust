@@ -269,6 +269,8 @@ pub fn player_save(
         biologist_state: character.biologist_state,
         biologist_items_taken: character.biologist_items_taken,
         biologist_completed: character.biologist_completed,
+        secured: character.secured,
+        secured_password: character.secured_password,
         horse: character.horse.clone(),
     }
 }
@@ -314,6 +316,8 @@ mod tests {
             biologist_state: 3,
             biologist_items_taken: 4,
             biologist_completed: 0,
+            secured: 1,
+            secured_password: 123_456,
             voice: 47,
             part_base: 2,
             main_part: 1001,

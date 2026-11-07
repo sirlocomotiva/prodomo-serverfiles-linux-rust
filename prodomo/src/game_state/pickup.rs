@@ -119,6 +119,7 @@ impl GameState {
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: None,
             questing: false,
+            secured: false,
         };
         let (given, done) =
             auto_give_item_new(character.items_mut(), &rules, &protos, item, qualified);

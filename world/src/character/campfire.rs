@@ -124,6 +124,7 @@ mod tests {
         usable_cells: 90,
         belt_grade: None,
         questing: false,
+        secured: false,
     };
 
     fn holding(count: u16) -> (CharacterItems, gamedata::item_proto::ItemProtos) {
@@ -166,6 +167,7 @@ mod tests {
             conqueror_exp: 0,
             gaya: 0,
             biologist: [0; 3],
+            secured: (0, 999_999),
         })
     }
 

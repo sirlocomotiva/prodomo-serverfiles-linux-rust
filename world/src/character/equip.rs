@@ -27,9 +27,10 @@
 //! the points' polymorph race. Unreachable here, and so not written: the ride item's wedding
 //! check (a unique, which is not ported, refuses later), the unique unstack, the
 //! wedding checks `__FIX_COSTUM_NUNTA_PESTE_COSTUM_NORMAL__` repeats (the `ENABLE_WEDDING_FIX`
-//! ones return first), `REAL_TIME_FIRST_USE`, the mount quest, the aura window, `IsSecured`,
-//! the quickslot sync, and `EquipItem`'s `IsExchanging` (`:8315`): the move and the use refuse
-//! an offered item before they get here.
+//! ones return first), `REAL_TIME_FIRST_USE`, the mount quest and the aura window; the lock
+//! (`IsSecured`) gates the equip and the unequip at legacy's places, with the popup the
+//! game state chats. The quickslot sync and `EquipItem`'s `IsExchanging` (`:8315`) stay out:
+//! the move and the use refuse an offered item before they get here.
 
 use common::enums::EWearPositions;
 use common::item_slots::{
@@ -649,6 +650,10 @@ impl<'s, 'g> Equipper<'s, 'g> {
                 return Err(MoveRefused::RingTwice);
             }
         }
+        // `G/char_item.cpp:10184-10190`, last; the game state chats the popup.
+        if self.gear.points.is_secured() {
+            return Err(MoveRefused::Secured);
+        }
         Ok(())
     }
 
@@ -673,6 +678,10 @@ impl<'s, 'g> Equipper<'s, 'g> {
         }
         if self.empty_inventory_cell(item, proto).is_none() {
             return Err(MoveRefused::NoRoomToUnequip);
+        }
+        // `G/char_item.cpp:10213-10219`, last; the game state chats the popup.
+        if self.gear.points.is_secured() {
+            return Err(MoveRefused::Secured);
         }
         Ok(())
     }
@@ -1249,6 +1258,7 @@ mod tests {
         usable_cells: 90,
         belt_grade: None,
         questing: false,
+        secured: false,
     };
 
     /// Always draws the same number.
@@ -1385,6 +1395,7 @@ mod tests {
             conqueror_exp: 0,
             gaya: 0,
             biologist: [0; 3],
+            secured: (0, 999_999),
         })
     }
 
@@ -1999,6 +2010,7 @@ mod tests {
         assert_eq!(case.items, items);
         let questing = MoveRules {
             questing: true,
+            secured: false,
             ..RULES
         };
         let refused = case.use_with(inv(3), &questing);
@@ -2012,12 +2024,29 @@ mod tests {
         assert_eq!(used.kind, MoveKind::QuestUsed);
     }
 
+    /// The lock gates the equip and the unequip last (`G/char_item.cpp:10184-10190`,
+    /// `:10213-10219`).
+    #[test]
+    fn a_locked_character_wears_and_unwears_nothing() {
+        let mut case = Case::new(&[(inv(3), Item::new(7, ARMOUR))]);
+        case.points
+            .point_change(point::POINT_SECURED_STATE, 1, false, false)
+            .expect("the lock sets");
+        assert_eq!(case.refused(inv(3), wear_pos(BODY)), MoveRefused::Secured);
+        let mut case = Case::new(&[(wear_pos(BODY), Item::new(9, ARMOUR))]);
+        case.points
+            .point_change(point::POINT_SECURED_STATE, 1, false, false)
+            .expect("the lock sets");
+        assert_eq!(case.refused(wear_pos(BODY), inv(3)), MoveRefused::Secured);
+    }
+
     /// `UseItem` (`@fixme150`, `G/char_item.cpp:7349-7354`): while a script waits nothing is
     /// used, after the job and sex checks and before `UseItemEx`'s limits.
     #[test]
     fn a_character_whose_script_waits_uses_nothing() {
         let questing = MoveRules {
             questing: true,
+            secured: false,
             ..RULES
         };
         let mut case = Case::new(&[(inv(3), Item::new(7, SWORD))]);

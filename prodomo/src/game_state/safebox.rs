@@ -171,6 +171,15 @@ impl GameState {
         step: SafeboxStep,
         mover: Mover,
     ) -> Result<SafeboxAnswer, MoveItemRefused> {
+        // `ReqSafeboxLoad` and `LoadMall` (`G/char.cpp:7055,7211`), first; the popup chats.
+        // Only the loads gate: a loaded store stays open while the lock stands.
+        if matches!(
+            step,
+            SafeboxStep::BeginOpen | SafeboxStep::BeginMall | SafeboxStep::OpenMall { .. }
+        ) && self.is_secured(vid)
+        {
+            return Ok(SafeboxAnswer::Sent(vec![self.protected_popup(mover)]));
+        }
         let owner_id = match self.characters.find_by_vid(vid) {
             Ok(character) => character.player_id(),
             Err(_) => return Err(MoveItemRefused::NoSuchCharacter { vid }),
@@ -316,6 +325,7 @@ impl GameState {
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: belt_grade(character.items(), &self.protos),
             questing,
+            secured: false,
         };
         let done = if mall.is_none() {
             checkin(

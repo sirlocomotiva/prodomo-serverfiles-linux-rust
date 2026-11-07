@@ -33,7 +33,7 @@ use gamedata::item_proto::ItemProtos;
 use gamedata::item_proto_value::type_value;
 use gamedata::locale_string::LocaleStrings;
 use protocol::gc_actors::{GcCharacterGoldChange, GcCharacterUpdate};
-use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
 use protocol::gc_fields::GcSpecificEffect;
 use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect};
 use protocol::item_pos::ItemPos;
@@ -496,13 +496,25 @@ fn item_row(owner_id: u32, item: &Item) -> ItemRow {
     }
 }
 
-/// The `CHAT_TYPE_INFO` line a refusal sends, encoded, or `None` when legacy sends nothing.
+/// The line a refusal sends, encoded, or `None` when legacy sends nothing.
 ///
-/// `CHARACTER::ChatPacket` (`G/char.cpp:5140-5187`), which [`chat_packet`] ports: the text is
-/// looked up in the descriptor's language, and none of [`MoveRefused::notice`]'s texts holds a
-/// `%`.
+/// `CHARACTER::ChatPacket` (`G/char.cpp:5140-5187`), which [`chat_packet`] ports: an
+/// INFO text is looked up in the descriptor's language, and none of
+/// [`MoveRefused::notice`]'s texts holds a `%`. The lock is the one COMMAND line:
+/// each site chats its own popup text, and the move family shares the
+/// `char_item.cpp` one.
 #[must_use]
 pub fn refusal_notice(refused: &MoveRefused, to: Recipient<'_>) -> Option<Vec<u8>> {
+    if matches!(refused, MoveRefused::Secured) {
+        return Some(chat_packet(
+            to,
+            CHAT_TYPE_COMMAND,
+            b"BINARY_PopupMessage %s",
+            &[Arg::Text(
+                b"@@(char_item.cpp)tradus:Acest_cont_este_securizat!",
+            )],
+        ));
+    }
     refused.notice().map(|text| notice(text, to))
 }
 

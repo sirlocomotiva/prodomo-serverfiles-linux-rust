@@ -7,8 +7,7 @@
 //! and a real point above the job's start. The cap is `g_iStatusPointSetMaxValue`
 //! (`game.status_point_set_max_value`, `G/config.cpp:1101-1110`), 90 on the owner's
 //! data. The polymorph gate is dead: no ported path polymorphs, so it never refuses.
-//! The secured gate is dead too: no ported path secures the inventory, so its
-//! `POINT_SECURED_STATE` reads 0.
+//! The lock gates the raise and the lower at legacy's places, with the popup it chats.
 //!
 //! The raises land exactly as legacy writes them: both arrays move, `ComputePoints`
 //! runs, the attribute's `PointChange` runs (which recomputes the battle points),
@@ -75,6 +74,13 @@ impl GameState {
     pub(super) fn run_stat(&mut self, vid: Vid, rest: &[u8], lower: bool) -> Option<StatHeld> {
         let (word, _) = one_argument(rest);
         if word.is_empty() {
+            return None;
+        }
+        // `do_stat` and `do_stat_minus` (`G/cmd_general.cpp:730,805`), after the empty
+        // line; the popup chats. `do_stat_val` has no gate.
+        if self.is_secured(vid) {
+            let mover = self.own_mover(vid)?;
+            let _sent = self.write_to_client(vid, self.protected_popup(mover));
             return None;
         }
         let kind = match word.as_slice() {

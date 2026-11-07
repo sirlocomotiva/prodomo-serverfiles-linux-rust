@@ -61,10 +61,12 @@
 //!   level-up chains run through [`Points::gain_exp`] and [`Points::gain_conqueror_exp`],
 //!   whose callers own the quest trigger, guild and party updates, and save.
 //! - `POINT_GOLD`, `POINT_GAYA` and `POINT_INVEN`: the currencies and the inventory unlocks.
-//! - `POINT_POLYMORPH`, `POINT_ENERGY`, `POINT_COSTUME_ATTR_BONUS` and the two
-//!   protected-inventory arms: each drives its own system. The three biologist arms are
-//!   ported: the mission, the taken and the completed, kept beside the arrays as legacy's
-//!   `DWORD`s are, the state clamped to mission 9.
+//! - `POINT_POLYMORPH`, `POINT_ENERGY` and `POINT_COSTUME_ATTR_BONUS`: each drives its
+//!   own system. The three biologist arms are ported: the mission, the taken and the
+//!   completed, kept beside the arrays as legacy's `DWORD`s are, the state clamped to
+//!   mission 9. The two protected-inventory arms are ported the same way: the locked
+//!   state (`BYTE`) and its password, kept beside the arrays and set by the amount,
+//!   not raised by it.
 //!
 //! The random hit and spell points a level-up adds (`iRandomHP` and `iRandomSP`) are 0: they
 //! grow only at a level-up, and the store gains their columns when the level-up is ported.
@@ -316,6 +318,9 @@ pub struct PointsRow {
     pub conqueror_exp: i64,
     /// The biologist mission, taken and completed (`G/char.cpp:2426-2428`).
     pub biologist: [u32; 3],
+    /// The locked state and its password (`G/char.cpp:2439-2440`): `BYTE` and `int`
+    /// from the player row, `0` and `999999` on a fresh character.
+    pub secured: (u8, i32),
 }
 
 /// The four sungma slots, in the order of [`PointsRow::sungma`].
@@ -483,7 +488,7 @@ const COUNTERS: [usize; 5] = [
 ];
 
 /// The arms whose side effects are not ported. See the module note.
-const NOT_PORTED: [usize; 13] = [
+const NOT_PORTED: [usize; 11] = [
     point::POINT_CONQUEROR_LEVEL,
     point::POINT_CONQUEROR_EXP,
     point::POINT_CONQUEROR_LEVEL_STEP,
@@ -495,8 +500,6 @@ const NOT_PORTED: [usize; 13] = [
     point::POINT_POLYMORPH,
     point::POINT_ENERGY,
     point::POINT_COSTUME_ATTR_BONUS,
-    point::POINT_SECURED_STATE,
-    point::POINT_SECURED_PASSWORD,
 ];
 
 /// The slots whose change recomputes the battle points (`char.cpp:4778-4797`).
@@ -557,6 +560,10 @@ pub struct Points {
     bio_taken: u32,
     /// Whether the missions are done (`m_points.biologist_completed`).
     bio_completed: u32,
+    /// The locked state (`m_points.secured`): 0 open, nonzero locked.
+    secured: u8,
+    /// The lock's password (`m_points.secured_password`).
+    secured_password: i32,
     immune_flag: u32,
     map_will: SungmaWill,
     armour: i32,
@@ -646,6 +653,8 @@ impl Points {
             bio_state: row.biologist[0],
             bio_taken: row.biologist[1],
             bio_completed: row.biologist[2],
+            secured: row.secured.0,
+            secured_password: row.secured.1,
             immune_flag: 0,
             map_will: sungma_will(row.map_index),
             armour: 0,
@@ -1349,6 +1358,34 @@ impl Points {
         self.instant[point::POINT_BIOLOGIST_COMPLETED] = i32::from_ne_bytes(value.to_ne_bytes());
     }
 
+    /// `GetSecuredState`: the locked state, 0 open.
+    #[must_use]
+    pub const fn secured(&self) -> u8 {
+        self.secured
+    }
+
+    /// `GetSecuredPassword`: the lock's password.
+    #[must_use]
+    pub const fn secured_password(&self) -> i32 {
+        self.secured_password
+    }
+
+    /// `IsSecured`: a nonzero state locks the inventory (`G/char.h:2601`).
+    #[must_use]
+    pub const fn is_secured(&self) -> bool {
+        self.secured > 0
+    }
+    /// `SetSecuredState`, with the slot the points record sends.
+    const fn set_secured(&mut self, value: u8) {
+        self.secured = value;
+        self.instant[point::POINT_SECURED_STATE] = value as i32;
+    }
+    /// `SetSecuredPassword`, with the slot the points record sends.
+    const fn set_secured_password(&mut self, value: i32) {
+        self.secured_password = value;
+        self.instant[point::POINT_SECURED_PASSWORD] = value;
+    }
+
     /// `BiologistConfig::MAX_MISSION_STATE` (`G/Biologist.h:8`): the last mission index.
     const BIO_STATE_MAX: u32 = 9;
 
@@ -1879,6 +1916,20 @@ impl Points {
                 self.set_bio_completed(value);
                 i64::from(value)
             }
+            // `POINT_SECURED_STATE` (`char.cpp:4755-4761`): the amount becomes the
+            // state. The `BYTE` keeps the low byte, as legacy's `SetSecuredState`
+            // does.
+            point::POINT_SECURED_STATE => {
+                let value = u8::from_ne_bytes([amount.to_ne_bytes()[0]]);
+                self.set_secured(value);
+                i64::from(value)
+            }
+            // `POINT_SECURED_PASSWORD` (`char.cpp:4762-4768`): the amount becomes
+            // the password.
+            point::POINT_SECURED_PASSWORD => {
+                self.set_secured_password(amount);
+                i64::from(amount)
+            }
             point::POINT_RAMADAN_CANDY_BONUS_EXP => {
                 self.instant[kind] = amount;
                 i64::from(amount)
@@ -1920,8 +1971,8 @@ impl Points {
     }
 
     /// The slots the recompute keeps from the fields legacy holds outside the array: the
-    /// inventory unlocks, the gaya, and the three biologist counters (`char.cpp:2917-2926`
-    /// reads the parts the same way).
+    /// inventory unlocks, the gaya, the three biologist counters and the two lock
+    /// fields (`char.cpp:2917-2926` reads the parts the same way).
     fn seed_kept_slots(&mut self) {
         self.instant[point::POINT_INVEN] = self.inven_point;
         self.instant[point::POINT_GAYA] = self.gaya;
@@ -1931,6 +1982,8 @@ impl Points {
             i32::from_ne_bytes(self.bio_taken.to_ne_bytes());
         self.instant[point::POINT_BIOLOGIST_COMPLETED] =
             i32::from_ne_bytes(self.bio_completed.to_ne_bytes());
+        self.instant[point::POINT_SECURED_STATE] = i32::from(self.secured);
+        self.instant[point::POINT_SECURED_PASSWORD] = self.secured_password;
     }
 
     /// An immunity slot: add, then set its `IMMUNE_*` bit while the slot is non-zero.
@@ -2315,6 +2368,7 @@ mod tests {
             conqueror_exp: 0,
             gaya: 0,
             biologist: [0; 3],
+            secured: (0, 999_999),
         }
     }
 
@@ -3345,6 +3399,44 @@ mod tests {
         let _ = points.compute_points();
         assert_eq!(points.get_point(point::POINT_BIOLOGIST_STATE), 9);
         assert_eq!(points.get_point(point::POINT_BIOLOGIST_ITEMS_TAKEN), 3);
+    }
+
+    #[test]
+    fn the_lock_arms_set_by_the_amount_not_by_the_rise() {
+        let mut points = warrior();
+        assert!(!points.is_secured());
+        // The state keeps the low byte: 257 locks with 1.
+        let records = points
+            .point_change(point::POINT_SECURED_STATE, 257, true, false)
+            .unwrap();
+        assert!(points.is_secured());
+        assert_eq!(points.secured(), 1);
+        assert_eq!(
+            (records[0].kind, records[0].amount, records[0].value),
+            (208, 257, 1)
+        );
+        // The password sets whole.
+        let records = points
+            .point_change(point::POINT_SECURED_PASSWORD, 123_456, true, false)
+            .unwrap();
+        assert_eq!(points.secured_password(), 123_456);
+        assert_eq!(
+            (records[0].kind, records[0].amount, records[0].value),
+            (209, 123_456, 123_456)
+        );
+        // The recompute keeps the fields: the lock survives it.
+        let _ = points.compute_points();
+        assert_eq!(points.get_point(point::POINT_SECURED_STATE), 1);
+        assert_eq!(points.get_point(point::POINT_SECURED_PASSWORD), 123_456);
+        // Zero unlocks.
+        let records = points
+            .point_change(point::POINT_SECURED_STATE, 0, true, false)
+            .unwrap();
+        assert!(!points.is_secured());
+        assert_eq!(
+            (records[0].kind, records[0].amount, records[0].value),
+            (208, 0, 0)
+        );
     }
 
     #[test]

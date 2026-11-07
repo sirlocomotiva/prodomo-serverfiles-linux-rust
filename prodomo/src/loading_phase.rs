@@ -717,6 +717,10 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
             u32::try_from(character.biologist_items_taken).unwrap_or(0),
             u32::try_from(character.biologist_completed).unwrap_or(0),
         ],
+        secured: (
+            u8::try_from(character.secured).unwrap_or(0),
+            character.secured_password,
+        ),
     });
     points.set_conqueror_progress(
         i32::from(character.conqueror_level_step),
@@ -1540,6 +1544,8 @@ mod tests {
             biologist_state: 3,
             biologist_items_taken: 4,
             biologist_completed: 0,
+            secured: 0,
+            secured_password: 999_999,
             conqueror_exp: 0x00fe_dcba,
             conqueror_level_step: 0,
             conqueror_point: 0,
@@ -1981,11 +1987,17 @@ mod tests {
             0,
             "the completed is the row's own"
         );
-        for kind in [
-            point::POINT_INVEN,
-            point::POINT_SECURED_STATE,
-            point::POINT_SECURED_PASSWORD,
-        ] {
+        assert_eq!(
+            slots[point::POINT_SECURED_STATE],
+            0,
+            "the lock is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_SECURED_PASSWORD],
+            999_999,
+            "the lock's password is the row's own"
+        );
+        for kind in [point::POINT_INVEN] {
             assert_eq!(slots[kind], 0, "point slot {kind}");
         }
     }

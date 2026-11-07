@@ -727,6 +727,8 @@ fn whole_save() -> PlayerSave {
         biologist_state: 3,
         biologist_items_taken: 0x0405,
         biologist_completed: 1,
+        secured: 1,
+        secured_password: 123_456,
         horse: db::players::PlayerHorse {
             level: 23,
             riding: true,
@@ -826,6 +828,11 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         read.biologist_completed, save.biologist_completed,
         "the biologist completed rides with the save"
     );
+    assert_eq!(read.secured, save.secured, "the lock rides with the save");
+    assert_eq!(
+        read.secured_password, save.secured_password,
+        "the lock's password rides with the save"
+    );
     assert_eq!(read.horse, save.horse, "the horse rides with the save");
 }
 
@@ -886,6 +893,8 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         biologist_state: 0,
         biologist_items_taken: 0,
         biologist_completed: 0,
+        secured: 0,
+        secured_password: 999_999,
         horse: db::players::PlayerHorse::default(),
     };
     // Bob's account naming Alice's character is a miss, not a write.

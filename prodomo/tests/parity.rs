@@ -41517,3 +41517,265 @@ fn a_biologist_last_pick_closes_the_finished_book() {
          FROM player WHERE name = 'Alpha')",
     );
 }
+
+/// `HEADER_CG_INVENTORY_PROTECTED` (144).
+const CG_PROTECTED: u8 = 144;
+/// `POINT_SECURED_STATE`, `POINT_SECURED_PASSWORD`.
+const POINT_SECURED: u8 = 208;
+const POINT_SECURED_PASSWORD: u8 = 209;
+
+/// A `CG_INVENTORY_PROTECTED`: the sub-header, the two 7-byte passwords, the flag.
+fn client_protected(sub: u8, now: [u8; 7], changed: [u8; 7], activated: u8) -> Vec<u8> {
+    let mut record = vec![CG_PROTECTED, sub];
+    record.extend_from_slice(&now);
+    record.extend_from_slice(&changed);
+    record.push(activated);
+    record
+}
+
+/// The 7-byte field for `digits`.
+fn protected_field(digits: &[u8]) -> [u8; 7] {
+    let mut field = [0u8; 7];
+    let end = digits.len().min(7);
+    field[..end].copy_from_slice(&digits[..end]);
+    field
+}
+
+/// The popup line the lock chats for `text`.
+fn protected_popup(text: &[u8]) -> Vec<u8> {
+    let mut line = b"BINARY_PopupMessage ".to_vec();
+    line.extend_from_slice(text);
+    a_command_line(&line)
+}
+
+/// The mistypes and the lock: the strange sub-header is silent, a leading zero,
+/// letters and a wrong password each chat, the fresh password locks with the state
+/// set, and a second lock is refused.
+fn lock_mistypes_and_locks(keyed: &mut Keyed, fresh: [u8; 7], empty: [u8; 7]) {
+    keyed.send_record(&client_protected(9, fresh, empty, 1));
+    keyed.still("a strange sub-header is silent");
+    keyed.send_record(&client_protected(0, protected_field(b"012345"), empty, 1));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Parola_nu_poate_incepe_cu_'0'."),
+        "a leading zero is refused"
+    );
+    keyed.send_record(&client_protected(0, protected_field(b"12a45"), empty, 1));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Parola_trebuie_sa_contina_doar_cifre."),
+        "letters are refused"
+    );
+    keyed.send_record(&client_protected(0, protected_field(b"111111"), empty, 1));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Parola_gresita._Securitatea_nu_poate_fi_activata!"),
+        "a wrong password is refused"
+    );
+    keyed.send_record(&client_protected(0, fresh, empty, 1));
+    let locked = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (locked.kind, locked.amount, locked.value),
+        (POINT_SECURED, 1, 1),
+        "the state sets"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cff3cd95e[Info]:|h|r_Securitatea_a_fost_activata!"),
+        "the lock chats"
+    );
+    keyed.still("the lock ends");
+    keyed.send_record(&client_protected(0, fresh, empty, 1));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Securitatea_este_deja_activa!"),
+        "a locked lock is refused"
+    );
+}
+
+/// The move family while locked: a drop, a destroy, a move, a use and a wear are
+/// refused, each with the `char_item.cpp` popup.
+fn lock_refuses_the_moves(keyed: &mut Keyed) {
+    keyed.send_record(&client_item_drop(0, None));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"@@(char_item.cpp)tradus:Acest_cont_este_securizat!"),
+        "a locked drop is refused"
+    );
+    keyed.send_record(&client_destroy(1));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"@@(char_item.cpp)tradus:Acest_cont_este_securizat!"),
+        "a locked destroy is refused"
+    );
+    keyed.send_record(&client_item_move(2, 5, 0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"@@(char_item.cpp)tradus:Acest_cont_este_securizat!"),
+        "a locked move is refused"
+    );
+    keyed.send_record(&client_item_use(0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"@@(char_item.cpp)tradus:Acest_cont_este_securizat!"),
+        "a locked use is refused"
+    );
+    keyed.send_record(&client_item_move(1, 10, 0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"@@(char_item.cpp)tradus:Acest_cont_este_securizat!"),
+        "a locked wear is refused"
+    );
+}
+
+/// The lines while locked: a stat, a skill-up and a safebox load are refused.
+fn lock_refuses_the_lines(keyed: &mut Keyed) {
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/stat st"));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Acest_cont_este_securizat!"),
+        "a locked stat is refused"
+    );
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/skillup 1"));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Acest_cont_este_securizat!"),
+        "a locked skill-up is refused"
+    );
+    keyed.send_record(&client_chat(CHAT_TALKING, b"/safebox_password secret"));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Acest_cont_este_securizat!"),
+        "a locked safebox is refused"
+    );
+}
+
+/// The change and the lift: a wrong old password, an unchanged one and letters in
+/// the new one are refused, the change sets the password, the old one no longer
+/// unlocks, the new one does, and an open unlock is refused.
+fn lock_changes_and_lifts(keyed: &mut Keyed, fresh: [u8; 7], empty: [u8; 7]) {
+    keyed.send_record(&client_protected(
+        1,
+        protected_field(b"111111"),
+        protected_field(b"123456"),
+        0,
+    ));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Parola_actuala_este_gresita!"),
+        "a wrong old password is refused"
+    );
+    keyed.send_record(&client_protected(1, fresh, fresh, 0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Parola_noua_trebuie_sa_fie_diferita_de_cea_veche!"),
+        "an unchanged password is refused"
+    );
+    keyed.send_record(&client_protected(1, fresh, protected_field(b"12a45"), 0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Parola_trebuie_sa_contina_doar_cifre."),
+        "letters in the new password are refused"
+    );
+    keyed.send_record(&client_protected(1, fresh, protected_field(b"123456"), 0));
+    let changed = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (changed.kind, changed.amount, changed.value),
+        (POINT_SECURED_PASSWORD, 123_456, 123_456),
+        "the password sets"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cff3cd95e[Info]:|h|r_Parola_a_fost_schimbata_cu_succes!"),
+        "the change chats"
+    );
+    keyed.send_record(&client_protected(0, fresh, empty, 0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(
+            b"|cffd93c3c[Err]:|h|r_Parola_gresita._Securitatea_nu_poate_fi_dezactivata!"
+        ),
+        "the old password no longer unlocks"
+    );
+    keyed.send_record(&client_protected(0, protected_field(b"123456"), empty, 0));
+    let open = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (open.kind, open.amount, open.value),
+        (POINT_SECURED, 0, 0),
+        "the state clears"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cff3cd95e[Info]:|h|r_Securitatea_a_fost_dezactivata!"),
+        "the unlock chats"
+    );
+    keyed.still("the unlock ends");
+}
+
+/// `sys.item.protected`: Alpha mistypes, locks with the fresh password, is refused
+/// a drop, a destroy, a move, a use, a wear, a trade, a stat, a skill-up and a
+/// safebox load while locked, changes the password, unlocks with the new one, and
+/// banks the open lock with its password.
+#[test]
+fn a_lock_is_mistyped_set_used_changed_and_lifted() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    for (id, pos, vnum) in [(40, 0, 30_006), (41, 1, 19), (42, 2, 30_006)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    let fresh = protected_field(b"999999");
+    let empty = protected_field(b"");
+    lock_mistypes_and_locks(&mut keyed, fresh, empty);
+    lock_refuses_the_moves(&mut keyed);
+    let (bob, yankee, _bob_view) = enter_world_seeing(&server, b"bob", 0);
+    keyed.sees_enter(yankee.id, true, None);
+    keyed.send_record(&client_exchange(0, u64::from(yankee.id), 0, 0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Acest_cont_este_securizat!"),
+        "a locked trade start is refused"
+    );
+    lock_refuses_the_lines(&mut keyed);
+    lock_changes_and_lifts(&mut keyed, fresh, empty);
+    drop(bob);
+    keyed.sees_disconnect(yankee.id);
+    keyed.send_record(&client_protected(0, protected_field(b"123456"), empty, 0));
+    assert_eq!(
+        keyed.read_game(),
+        protected_popup(b"|cffd93c3c[Err]:|h|r_Securitatea_este_deja_dezactivata!"),
+        "an open unlock is refused"
+    );
+    drop(keyed);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT secured = 0 AND secured_password = 123456 FROM player WHERE name = 'Alpha')",
+    );
+}

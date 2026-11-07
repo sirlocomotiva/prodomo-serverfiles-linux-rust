@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 445 (the biologist and the special-group tails).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 446
+Last reviewed: 2026-11-07, after ledger section 446 (the protected inventory).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 447
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -461,7 +461,9 @@ guards and spend, the shelf's guards, buy and unlock, the refresh, and `/w_gaya`
 445 the biologist is `ported`: the ten missions, the takes, the waits, the picks, the
 rewards, and the save round-trip; and every creation stamps the `SIGVnum`, a worn unique
 or ring appends its attr rows and answers its effect path, and a stamped quest item runs
-its group's `sig_use`. The
+its group's `sig_use`. Since 446 the protected inventory is `ported`: the lock and the
+unlock, the password change, the twenty gates, the kick's auto-lock and the save
+round-trip. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1437,6 +1439,9 @@ owner should know about (178.5):
   (ledger 445).
 - The biologist's `DropObjects` has no caller and its state guard can never fire
   (`state < 0 && state > 9` on a `DWORD`). The Rewrite ports no drop (ledger 445).
+- The password change checks the digits of the two first bytes, not the two passwords
+  (`has_only_digits(strFindFirstForNow)` at `G/char.cpp:11941`, where the activate passes
+  the whole password at `:11878`). The Rewrite checks the wholes (ledger 446).
 
 ## Environment
 

@@ -67,6 +67,7 @@ impl GameState {
             usable_cells: 0,
             belt_grade: None,
             questing: false,
+            secured: false,
         };
         let protos = std::sync::Arc::clone(&self.protos);
         let character = self.characters.find_by_vid_mut(vid).ok()?;

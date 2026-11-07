@@ -352,6 +352,11 @@ impl GameState {
         actor: Mover,
         moved: &mut MovedItems,
     ) {
+        // `G/char_item.cpp:1600-1606`, first; the popup chats.
+        if self.is_secured(vid) {
+            moved.records.push(self.protected_popup(actor));
+            return;
+        }
         match self.scroll_plan(vid, at, moved.owner_id) {
             Ok(plan) => self.apply_refine(vid, at, &plan, actor, moved),
             Err(Some(notice)) => {

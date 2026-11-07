@@ -329,6 +329,7 @@ mod tests {
             conqueror_exp: 0,
             gaya: 0,
             biologist: [0; 3],
+            secured: (0, 999_999),
         });
         let _ = points.compute_points();
         for kind in [point::POINT_HP, point::POINT_SP] {

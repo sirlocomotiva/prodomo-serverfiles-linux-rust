@@ -43,9 +43,10 @@
 //!   charges the price it showed.
 //! - **Unported gates.** Of the other-window check (`[LS;876]`) only the safebox refuses: a trade
 //!   never reaches it because `OnClick` has already ignored the click, and the personal shop, the
-//!   cube and the aura window are not in the Rewrite. `IsSecured`, `CanHandleItem`, a locked item
-//!   and the buy-and-sell throttle belong to systems the Rewrite does not have: none of them is
-//!   open, secured, locked or set, so none refuses.
+//!   cube and the aura window are not in the Rewrite. The lock gates the buy and the sale
+//!   at legacy's places, with the popup it chats. `CanHandleItem`, a locked item and the
+//!   buy-and-sell throttle belong to systems the Rewrite does not have: none of them is
+//!   open, locked or set, so none refuses.
 
 use std::sync::Arc;
 
@@ -193,6 +194,8 @@ pub enum ShopDeclined {
     InvalidPos(u8),
     /// The item is a sash material (`CItem::isLocked`, `G/shop_manager.cpp:519-522`).
     Locked,
+    /// The character locks its inventory.
+    Secured,
     /// The world refused the buy or the sale.
     Refused(ShopRefused),
 }
@@ -517,6 +520,7 @@ impl GameState {
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: None,
             questing,
+            secured: false,
         };
         let gold = character.gold();
         match buy_item(
@@ -595,6 +599,13 @@ impl GameState {
             return Err(Box::new(ShopAnswer::Declined {
                 reason: ShopDeclined::TooFar { distance },
                 records: vec![notice(TOO_FAR_NOTICE, mover, &self.locale)],
+            }));
+        }
+        // `CShopManager::Buy` and `Sell` (`G/shop_manager.cpp:412,489`), after the distance.
+        if self.is_secured(vid) {
+            return Err(Box::new(ShopAnswer::Declined {
+                reason: ShopDeclined::Secured,
+                records: vec![self.protected_popup(mover)],
             }));
         }
         Ok(browsing)

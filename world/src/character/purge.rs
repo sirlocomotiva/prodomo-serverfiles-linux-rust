@@ -374,6 +374,7 @@ mod tests {
             conqueror_exp: 0,
             gaya: 0,
             biologist: [0; 3],
+            secured: (0, 999_999),
         });
         points.set_part(EParts::Weapon, 12019);
         let groups = gamedata::special_item_group::SpecialItemGroups::default();

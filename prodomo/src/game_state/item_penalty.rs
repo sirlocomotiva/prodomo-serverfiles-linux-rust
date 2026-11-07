@@ -424,6 +424,10 @@ impl GameState {
     /// `ITEM_ANTIFLAG_GIVE` and `ITEM_ANTIFLAG_PKDROP` forbid it (`G/char_battle.cpp:1098`
     /// and `:1142`).
     fn may_drop(&self, vid: Vid, at: ItemPos) -> bool {
+        // `G/char_battle.cpp:1102,1146`, after the anti-flags; silent, as legacy is.
+        if self.is_secured(vid) {
+            return false;
+        }
         let Some(character) = self.characters.find_by_vid(vid).ok() else {
             return false;
         };

@@ -56,8 +56,9 @@
 //!
 //! # Not ported
 //!
-//! The spectator check, `IsSecured`, the personal shop, the cube and the aura window are
-//! not in the Rewrite, so none refuses a trade. An open safebox refuses as an open shop
+//! The lock gates the start on both sides, with the popup each chats; the spectator check,
+//! the personal shop, the cube and the aura window are not in the Rewrite, so none refuses
+//! a trade. An open safebox refuses as an open shop
 //! does (`exchange.cpp:92-98`). The mall does not: `IsOpenSafebox` is the safebox only.
 //! The quest check on `START` (`CQuestManager::GiveItemToPC`, `G/questmanager.cpp:892-916`) runs
 //! a quest's `target` click on the player asked, and no quest can set a target (`target.*` is not
@@ -226,6 +227,10 @@ pub enum TradeDeclined {
     PartnerTrading,
     /// The player asked blocks exchanges.
     PartnerRejects,
+    /// The character locks its inventory.
+    Secured,
+    /// The player asked locks its inventory.
+    PartnerSecured,
     /// The character does not trade.
     NotTrading,
     /// The other side accepts, so the offers are fixed.
@@ -383,6 +388,13 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return TradeAnswer::silent(TradeDeclined::Trading);
         }
+        // `CExchange` (`G/exchange.cpp:106-119`), on the busy checks; each side chats.
+        if self.is_secured(vid) {
+            return TradeAnswer::Declined {
+                reason: TradeDeclined::Secured,
+                records: vec![self.protected_popup(mover)],
+            };
+        }
         let Some(found) = self.find_target(target, place) else {
             return TradeAnswer::silent(TradeDeclined::NoSuchTarget { target });
         };
@@ -406,6 +418,19 @@ impl GameState {
         let partner = Vid::new(target);
         if self.browsing.contains_key(&partner) || self.safebox_open(partner) {
             return self.told(TradeDeclined::PartnerBusy, PARTNER_BUSY_NOTICE, mover);
+        }
+        if self.is_secured(partner) {
+            let text = b"|cffd93c3c[Err]:|h|r_Acest_jucator_are_contul_securizat!";
+            let line = crate::chat_line::chat_packet(
+                mover.recipient(&self.locale),
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                b"BINARY_PopupMessage %s",
+                &[crate::chat_line::Arg::Text(text)],
+            );
+            return TradeAnswer::Declined {
+                reason: TradeDeclined::PartnerSecured,
+                records: vec![line],
+            };
         }
         let distance = distance_approx(place.x.saturating_sub(x), place.y.saturating_sub(y));
         if distance >= EXCHANGE_MAX_DISTANCE {

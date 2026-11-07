@@ -211,6 +211,7 @@ impl GameState {
             usable_cells: usable,
             belt_grade: None,
             questing,
+            secured: false,
         };
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)

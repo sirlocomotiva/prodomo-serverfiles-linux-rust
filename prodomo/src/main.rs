@@ -132,19 +132,20 @@ use protocol::cg_inventory::{
     HEADER_CG_CLIENT_VERSION2, HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
     HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING,
     HEADER_CG_GAYA_SYSTEM, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK,
-    HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE,
-    HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM,
-    HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST,
-    HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE,
-    HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
-    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
-    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING,
-    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
-    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
-    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
-    HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
-    HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
-    HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
+    HEADER_CG_INVENTORY_PROTECTED, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
+    HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
+    HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
+    HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
+    HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
+    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
+    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_CONFIRM,
+    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
+    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REQUEST_EVENT_DATA,
+    HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH, HEADER_CG_SCRIPT_ANSWER,
+    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP,
+    HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
+    HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
+    HEADER_CG_WHISPER_DETAILS,
 };
 use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
@@ -159,6 +160,7 @@ use protocol::cg_login3::CgLogin3;
 use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload, CgSymbolCrc};
 use protocol::cg_micro::{CgFishing, CgScriptAnswer, CgWarp};
 use protocol::cg_move::CgMove;
+use protocol::cg_name::CgInventoryProtected;
 use protocol::cg_name::{CgChangeName, CgWhisperDetails, CG_CHARACTER_NAME_FIELD_SIZE};
 use protocol::cg_party::{CgPartyInvite, CgPartyInviteAnswer, CgPartyRemove};
 use protocol::cg_party::{CgPartyParameter, CgPartySetState};
@@ -567,6 +569,54 @@ async fn logon_kicked(logon: Option<&LogonClaim>) {
     }
 }
 
+/// The kick's half of `DESC::DisconnectOfSameLogin` (`G/desc.cpp:842-860`): with a
+/// character in the world, the lock snaps on with the held password (so only the
+/// fresh one takes), the held row takes the state for the close's save, and
+/// `SECURITY_GOT_ACTIVATED` chats (no locale table names it, so the key itself is
+/// sent). Without a character, nothing happens.
+async fn lock_on_kick<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        return;
+    };
+    let password = held
+        .character
+        .as_ref()
+        .map_or(prodomo::game_state::PROTECTED_FRESH_PASSWORD, |character| {
+            character.secured_password
+        });
+    let mut field = [0u8; 7];
+    let digits = password.to_string();
+    let digits = digits.as_bytes();
+    let end = digits.len().min(7);
+    field[..end].copy_from_slice(&digits[..end]);
+    let actor = item_actor(held);
+    let step = prodomo::game_state::ProtectedStep::Activate {
+        password: field,
+        activated: true,
+    };
+    let _answer = context.game.protected(vid, step, actor).await;
+    if let Some(character) = held.character.as_mut() {
+        character.secured = 1;
+    }
+    let to = item_actor(held).recipient(&context.locale);
+    let line = prodomo::chat_line::chat_packet(
+        to,
+        protocol::gc_chat::CHAT_TYPE_INFO,
+        b"SECURITY_GOT_ACTIVATED",
+        &[],
+    );
+    if send_all(session, &[line]).await.is_err() {
+        warn!(%addr, "Client session stopped");
+    }
+}
+
 /// Serve one client connection as the legacy descriptor does.
 ///
 /// On accept the descriptor sends `GC_PHASE(PHASE_HANDSHAKE)` and `GC_HANDSHAKE`
@@ -812,7 +862,10 @@ async fn pump_descriptor<S>(
                 break;
             }
             () = logon_kicked(held.logon.as_ref()) => {
-                // `DESC::DisconnectOfSameLogin` without a character: `SetPhase(PHASE_CLOSE)`.
+                // `DESC::DisconnectOfSameLogin` (`G/desc.cpp:842-860`): with a
+                // character, the lock snaps on before the close, with its line; without
+                // one, `SetPhase(PHASE_CLOSE)`.
+                lock_on_kick(session, addr, context, held).await;
                 info!(%addr, "Another client logged in with this login; closing");
                 break;
             }
@@ -1038,6 +1091,10 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
             i16::try_from(points.bio_taken()).unwrap_or(i16::MAX);
         held_character.biologist_completed =
             i16::try_from(points.bio_completed()).unwrap_or(i16::MAX);
+        // The lock rides the points' fields, not the slots: the state is a `BYTE`,
+        // the password an `int`.
+        held_character.secured = i16::from(points.secured());
+        held_character.secured_password = points.secured_password();
         held_character.level_step =
             i16::try_from(points.get_point(point_slot::POINT_LEVEL_STEP)).unwrap_or(i16::MAX);
         held_character.stat_reset_count =
@@ -1263,6 +1320,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_DAILY_GIFT.value()
         || header == HEADER_CG_GAYA_SYSTEM.value()
         || header == HEADER_CG_BIOLOGIST.value()
+        || header == HEADER_CG_INVENTORY_PROTECTED.value()
         || is_ground_step(header)
         || is_quickslot_step(header)
 }
@@ -1326,6 +1384,8 @@ where
         gaya_system(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_BIOLOGIST.value() {
         biologist(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_INVENTORY_PROTECTED.value() {
+        protected(session, addr, context, held, frame).await
     } else {
         drop_an_item(session, addr, context, held, frame).await
     }
@@ -1489,6 +1549,50 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.biologist(vid, step, actor).await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_INVENTORY_PROTECTED` (144) in the game phase:
+/// `CInputMain::RecvActivateProtectedSystem` (`G/input_main.cpp:5392-5407`). An
+/// unknown sub-header is absorbed, as legacy's `default` arm does; a malformed
+/// record closes the connection. The world sends the records; the lock rides
+/// the held row, synced below.
+async fn protected<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgInventoryProtected::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed INVENTORY_PROTECTED; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "INVENTORY_PROTECTED without a character in the world; ignoring");
+        return true;
+    };
+    let step = match record.by_sub_header {
+        prodomo::game_state::PROTECTED_ACTIVATE => prodomo::game_state::ProtectedStep::Activate {
+            password: record.current_password,
+            activated: record.activated,
+        },
+        prodomo::game_state::PROTECTED_PASSWORD_CHANGE => {
+            prodomo::game_state::ProtectedStep::PasswordChange {
+                password: record.current_password,
+                replacement: record.replacement_password,
+            }
+        }
+        _ => return true,
+    };
+    let actor = item_actor(held);
+    let answer = context.game.protected(vid, step, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -14953,6 +15057,8 @@ mod tests {
             biologist_state: 0,
             biologist_items_taken: 0,
             biologist_completed: 0,
+            secured: 0,
+            secured_password: 999_999,
             conqueror_exp: 0,
             conqueror_level_step: 0,
             conqueror_point: 0,

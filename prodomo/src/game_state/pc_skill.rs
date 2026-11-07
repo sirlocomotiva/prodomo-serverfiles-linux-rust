@@ -503,6 +503,12 @@ impl GameState {
     /// `store_skill`.
     pub(super) fn skill_up(&mut self, vid: Vid, rest: &[u8]) -> Option<(u8, u8)> {
         let vnum = skill_up_vnum(rest)?;
+        // `do_skillup` (`G/cmd_general.cpp:917-922`), after the empty line; the popup chats.
+        if self.is_secured(vid) {
+            let mover = self.own_mover(vid)?;
+            let _sent = self.write_to_client(vid, self.protected_popup(mover));
+            return None;
+        }
         let (job, group) = match self.bodies.get(&vid) {
             Some(body) => (body.card.job, body.card.skill_group),
             None => return None,
@@ -1372,6 +1378,13 @@ impl GameState {
             .points_of(vid.raw())
             .is_some_and(world::character::Points::is_polymorphed);
         if polymorphed {
+            return false;
+        }
+        // `UseSkill` (`G/char_skill.cpp:2924-2930`), after the polymorph; the popup chats.
+        if self.is_secured(vid) {
+            if let Some(mover) = self.own_mover(vid) {
+                let _sent = self.write_to_client(vid, self.protected_popup(mover));
+            }
             return false;
         }
         // The horse-summon arm (`:2933-2944`): with the skill learnt, the caster hears

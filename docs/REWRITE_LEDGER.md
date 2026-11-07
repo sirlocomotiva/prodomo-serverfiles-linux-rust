@@ -47969,3 +47969,53 @@ Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
 --workspace --no-deps --locked --offline` clean. `legacy/` clean, `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 446. The protected inventory
+
+`sys.item.protected`, `cg.game.inventory_protected` and the two
+`sub.RecvActivateProtectedSystem.*` rows are `ported`, all behind
+`a_lock_is_mistyped_set_used_changed_and_lifted`.
+
+The lock is the points' two fields, `POINT_SECURED_STATE` (208) and
+`POINT_SECURED_PASSWORD` (209), kept beside the arrays as legacy's `BYTE` and `int`
+are (`G/char.h:441-442`): the arms set by the amount, not by the rise
+(`G/char.cpp:4755-4768`), the state keeping the low byte. Migration 0034 adds the
+`player` columns (`secured`, `secured_password`, `player.sql:872-873`); the load
+seeds them, the held row syncs them, and the disconnect banks them. The codec
+(`CgInventoryProtected`) already existed; the descriptor dispatches it, absorbing
+an unknown sub-header and closing on a malformed record.
+
+The activate and the change (`G/char.cpp:11867-11974`) chat their Romanian lines as
+`BINARY_PopupMessage` commands: the leading zero, the digits, the six-digit cap,
+the wrong password, the already-locked and already-open, the wrong old, the
+unchanged, and the two successes. Each lands through the point arms, so the change
+records ride the outbox before the popup.
+
+Twenty gates read `is_secured` at legacy's places: the world's move
+(`:7717-7722`), equip and unequip (`:10184-10190`, `:10213-10219`) and destroy
+(`:7430-7436`) carry `MoveRefused::Secured`, which the refusal path chats as the
+`char_item.cpp` popup; the game state gates the drop (`:7489-7495`) and the use
+(`:7236-7241`) the same way. The refine and the scroll refine, both trade sides
+(the partner's own line), the buy and the sale, the stat lines (`do_stat_val` has
+no gate), the skill-up, the skill cast, the safebox and mall loads, and the death
+penalty's two skips each gate with the popup or the silence legacy gives. The
+duplicate login snaps the lock on with the held password before the close, with
+`SECURITY_GOT_ACTIVATED` (`G/desc.cpp:842-860`). `GiveItem` and `DropGold` have no
+gate, so none was added; `lua.pc.is_secured` stays `unused` (owner question 37).
+
+One Defect not reproduced (STATUS): the change checks the digits of the two first
+bytes, not the two passwords (`:11941` vs `:11878`); the Rewrite checks the wholes.
+
+Unit tests: `the_lock_arms_set_by_the_amount_not_by_the_rise` (points) and
+`a_locked_character_wears_and_unwears_nothing` (equip). Eight mutants killed: the
+leading zero, the digits, the lock value, the low byte, the new-password digits,
+the same password, the trade self-gate, the world move gate. The scenario passed
+8/8 flake runs.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace
+--locked --offline` clean, the suite 4948 passed 0 failed in 44 targets, `cargo
+test --workspace --doc` clean, `cargo clippy --workspace --all-targets --locked
+--offline -- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean, `rustfmt` and `cargo-clippy` are
+the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%`
+database remained. No ADR changed.

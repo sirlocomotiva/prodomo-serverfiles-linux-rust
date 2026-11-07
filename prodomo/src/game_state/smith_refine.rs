@@ -14,8 +14,9 @@
 //! - A smith of a guild (`GetRefineGuild`, `G/char.cpp:8169-8212`) stands only on guild land,
 //!   which the Rewrite does not build, so the fee is the recipe's cost, the draw is not
 //!   lowered for a guild, and no fee is deposited.
-//! - `IsSecured`, the personal shop, the cube, the aura and the dragon soul refine window are
-//!   not in the Rewrite, so none of them refuses.
+//! - The lock gates the normal and the scroll refines at legacy's places, with the
+//!   popup it chats. The personal shop, the cube, the aura and the dragon soul refine
+//!   window are not in the Rewrite, so none of them refuses.
 //! - The money, item and refine logs are `sys.log`'s, which owns no sink.
 //!
 //! Two Divergences: a gift from a custom bank (cell 290 and up) opens no window, where legacy
@@ -344,6 +345,11 @@ impl GameState {
         actor: Mover,
         moved: &mut MovedItems,
     ) {
+        // `G/char_item.cpp:1425-1431`, first; the popup chats.
+        if self.is_secured(vid) {
+            moved.records.push(self.protected_popup(actor));
+            return;
+        }
         match self.refine_plan(vid, at, money_only, moved.owner_id) {
             Ok(plan) => self.apply_refine(vid, at, &plan, actor, moved),
             Err(Some(notice)) => {

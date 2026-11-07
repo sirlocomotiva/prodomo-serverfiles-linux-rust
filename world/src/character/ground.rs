@@ -280,8 +280,9 @@ pub fn drop_item(
 /// names the item's default-locale name, which the caller renders: the name table is not a
 /// character's.
 ///
-/// `CanHandleItem`, the dead gate, the lock and the secured gate are the caller's: the
-/// windows and states are not a character's. A worn cell is refused like a drop's
+/// `CanHandleItem`, the dead gate and the lock are the caller's: the windows and states
+/// are not a character's. The secured gate stands here, at legacy's place, and the game
+/// state chats its popup. A worn cell is refused like a drop's
 /// (`Unported::Equipment`): legacy destroys it, but no step unports worn items yet.
 /// A zero-count stack cannot be built here, so the `GetCount() <= 0` arm never fires.
 ///
@@ -290,11 +291,13 @@ pub fn drop_item(
 /// [`MoveRefused::InvalidSource`] for a position that holds no item, [`MoveRefused::Empty`]
 /// for an empty cell, [`MoveRefused::Exchanging`] for an item offered in a trade, and
 /// [`MoveRefused::DestroyedWhileQuesting`] while a script waits for the character's client,
-/// each silent as legacy's is. Nothing changes on any of them.
+/// and [`MoveRefused::Secured`] while the lock stands, each silent as legacy's is. Nothing
+/// changes on any of them.
 pub fn destroy_item(
     items: &mut CharacterItems,
     at: ItemPos,
     questing: bool,
+    secured: bool,
 ) -> Result<(MoveDone, u32), MoveRefused> {
     if !is_valid_item_position(at) {
         return Err(MoveRefused::InvalidSource);
@@ -311,6 +314,10 @@ pub fn destroy_item(
     // `G/char_item.cpp:7426-7427`, silently.
     if questing {
         return Err(MoveRefused::DestroyedWhileQuesting);
+    }
+    // `G/char_item.cpp:7430-7436`, on the count; the game state chats the popup.
+    if secured {
+        return Err(MoveRefused::Secured);
     }
     if is_equip_position(at) {
         return Err(MoveRefused::NotPorted(Unported::Equipment));
@@ -750,6 +757,7 @@ mod tests {
         usable_cells: 90,
         belt_grade: None,
         questing: false,
+        secured: false,
     };
 
     struct Fixed(u32);
@@ -977,7 +985,7 @@ mod tests {
     #[test]
     fn a_destroyed_stack_leaves_nothing_and_names_its_vnum() {
         let mut items = holding(&[(4, arrows(8, 20)), (5, Item::new(9, SWORD))]);
-        let (done, vnum) = destroy_item(&mut items, inv(4), false).expect("stack destroys");
+        let (done, vnum) = destroy_item(&mut items, inv(4), false, false).expect("stack destroys");
         assert_eq!(vnum, ARROW);
         assert_eq!(done.kind, MoveKind::Removed);
         assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 8 }]);
@@ -991,10 +999,10 @@ mod tests {
             MoveRecord::Item(ItemRecord::Set(_))
         ));
         assert_eq!(
-            destroy_item(&mut items, inv(4), false),
+            destroy_item(&mut items, inv(4), false, false),
             Err(MoveRefused::Empty)
         );
-        assert!(destroy_item(&mut items, inv(5), false).is_ok());
+        assert!(destroy_item(&mut items, inv(5), false, false).is_ok());
     }
 
     /// `DestroyItem` (`G/char_item.cpp:7418-7427`): an offered item and a waiting script
@@ -1005,11 +1013,11 @@ mod tests {
         assert!(items.set_exchanging(9, true));
         let before = items.clone();
         assert_eq!(
-            destroy_item(&mut items, inv(5), true),
+            destroy_item(&mut items, inv(5), true, false),
             Err(MoveRefused::Exchanging)
         );
         assert_eq!(
-            destroy_item(&mut items, inv(4), true),
+            destroy_item(&mut items, inv(4), true, false),
             Err(MoveRefused::DestroyedWhileQuesting)
         );
         assert_eq!(MoveRefused::DestroyedWhileQuesting.notice(), None);
@@ -1046,6 +1054,7 @@ mod tests {
         let protos = protos();
         let rules = MoveRules {
             questing: true,
+            secured: false,
             ..RULES
         };
         let mut dice = Fixed(0);
