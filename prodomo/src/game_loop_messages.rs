@@ -1513,6 +1513,31 @@ pub enum GameCommand {
         /// Where the game thread reports the line ran.
         reply: oneshot::Sender<()>,
     },
+    /// Run one `CG_DAILY_GIFT` for the character online under `vid`: a close, an open
+    /// or a collect. The records reach the client through the world; the answer carries
+    /// the rows to store.
+    DailyGift {
+        /// The VID of the character whose client sent the record.
+        vid: common::vid::Vid,
+        /// The decoded step.
+        step: crate::game_state::DailyGiftStep,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the rows the step changed.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Run one `/daily_gift_event` line: the usage, or the event starts or stops. See
+    /// `game_state::daily_gift`.
+    DailyGiftEvent {
+        /// The VID of the commanding GM.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
     /// Run one `/geteventflag` line: every flag is listed on the caller, one
     /// `name value` line each. See `game_state::event_flag`.
     GetEventFlag {
@@ -2572,6 +2597,7 @@ impl GameCommand {
                 | GameCommand::GroupRandom { .. }
                 | GameCommand::EventFlag { .. }
                 | GameCommand::GetEventFlag { .. }
+                | GameCommand::DailyGiftEvent { .. }
                 | GameCommand::EventLine { .. }
                 | GameCommand::RankLine { .. }
                 | GameCommand::GiveReward { .. }
@@ -3199,6 +3225,10 @@ pub struct Loaded {
     /// (`fish_event_count`), which the world holds as the character's jigsaw board from
     /// the admission on. The held shape is memory-only and never loads.
     pub fish_board: (Vec<db::fish_event::StoredFishCell>, u32),
+    /// The daily-gift row the load read (`daily_gift`), if the week was ever opened,
+    /// with the account's cash, which the world holds as the character's gift week from
+    /// the admission on. The open and loaded flags are memory-only and never load.
+    pub daily_gift: (Option<db::daily_gift::StoredDailyGift>, u32),
     /// The account's character PIDs and empire-change count, which the login event's
     /// scripts judge by. The descriptor reads them before it sends the admission, as
     /// the dialog steps do before theirs.
@@ -3230,6 +3260,10 @@ pub struct Kept {
     /// a save writes (`G/char.cpp:1613-1614`). The held shape is memory-only and never
     /// keeps.
     pub fish_board: (Vec<db::fish_event::StoredFishCell>, u32),
+    /// The daily-gift row the world holds, if the week was ever opened, with the
+    /// account's cash, which a save writes (`G/char_daily_gifts.cpp:258`, `:368-370`).
+    /// The open and loaded flags are memory-only and never keep.
+    pub daily_gift: (Option<db::daily_gift::StoredDailyGift>, u32),
     /// The horse name the world holds (`CHorseNameManager`), which a save writes with the
     /// character row. `None` for a character that entered without points.
     pub horse_name: Option<Vec<u8>>,
@@ -5577,6 +5611,51 @@ impl GameLoopController {
     ) -> Result<(), MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::EventFlag {
+            vid,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `CG_DAILY_GIFT`, and waits for the rows it changed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn daily_gift(
+        &self,
+        vid: common::vid::Vid,
+        step: crate::game_state::DailyGiftStep,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DailyGift {
+            vid,
+            step,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/daily_gift_event` line of a GM. What the line shows
+    /// rides the outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn daily_gift_event(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: crate::item_move::Mover,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DailyGiftEvent {
             vid,
             rest,
             mover,

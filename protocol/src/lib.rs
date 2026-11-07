@@ -19,6 +19,7 @@ pub mod cg_change_look;
 pub mod cg_chat;
 pub mod cg_client_version;
 pub mod cg_cube_renewal;
+pub mod cg_daily_gift;
 pub mod cg_dragon_soul;
 pub mod cg_exchange;
 pub mod cg_fish_event;

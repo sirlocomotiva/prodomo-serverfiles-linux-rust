@@ -234,6 +234,7 @@ impl GameState {
             }
             b"pre_event_hc" => self.pre_event_arm(prev, value),
             b"new_xmas_event" => self.new_xmas_arm(value),
+            b"daily_gift_event" => self.daily_gift_event_arm(value),
             _ => {}
         }
     }

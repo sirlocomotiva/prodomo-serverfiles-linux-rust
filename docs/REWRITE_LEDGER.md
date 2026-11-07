@@ -47548,3 +47548,89 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 441. The daily gift
+
+`sys.custom.daily_gift`, `data.daily_gift`, `cg.game.daily_gift`,
+`gc.daily_gift` and `cmd.daily_gift_event` are `ported`, with the scenario
+`daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews`.
+
+The records. `protocol/src/cg_daily_gift.rs` decodes `HEADER_CG_DAILY_GIFT`
+(0xb4): an action byte and a slot. `GcDailyGift` (0xb4, 111 bytes) already had
+its codec in `protocol/src/gc_nested.rs`; the `gc_inventory` row is flipped.
+The flag gate, the silent slot past 6 and the silent unknown action are
+`CInputMain::DailyGift` (`G/input_main.cpp:3512-3545`), which checks nothing
+else: a collect slot at or above 7 indexes the week's gift vector unchecked
+(`CDailyGiftItemGroup::GetVnum`, `G/item_manager.h:46-58`), a Defect the Rewrite
+does not reproduce (recorded in `docs/STATUS.md`).
+
+The week (`prodomo/src/game_state/daily_gift.rs`, `gamedata/src/daily_gift.rs`).
+The owner runs four weeks (`locale/europe/daily_gift.txt`); the third is fully
+covered by the item protos and the scenario plays it. The open is
+`LoadDailyGiftWeek` (`G/char_daily_gifts.cpp:21-70`): renew first, the missing
+group line, then the record, then the mission line for a character below 50.
+The status is `GetDailyGiftStatus` (`:262-316`) with its early locks, its fresh
+row with day 1 waiting, and its wait promotion that stores when the row
+counted. The `[TEST]` print sits inside the status, so a collect's guard call
+prints the day at the epoch before anything else, and a mission-less look
+prints none; the scenario pins both. `ctime` is UTC (the Rewrite has no time
+zone), with the trailing newline riding the line as legacy's `%s` carries it.
+
+The collects are `CollectDailyGift` (`:132-260`): the locked day unlocks for
+cash, or for the ticket whenever the ticket arm ran, even when the cash would
+cover it (`!bUseTicket` gates the cash branch, `:166`); the waiting day collects
+free and silent; the collected day is told it already was. Every gift runs
+through the shared give with the pickup notice stripped, because legacy passes
+`bMsg` false (`:170-174`). The line work the scenario pins: the usage with its
+repeated `<renew>` block, the already-active refusal, the unlock line, the poor
+day, the missing ticket, and the epoch guard line of each.
+
+The line and the arm. `/daily_gift_event` (`G/cmd_gm.cpp:5061-5152`) starts the
+event for a week or stops it; `isnhdigit` is a leading ASCII digit
+(`libthecore/hangul.h:17`), and `str_to_byte` parses the words. The
+`DailyGiftEvent` arm (`G/questmanager.cpp:1440-1451`) fires on the flag set, so
+in the Rewrite it lands before the enable's notice; legacy's arm rides the
+DB-peer's answer and lands later, an inherent timing of the retired roundtrip.
+The command needed two claims the first scenario run found missing: the
+`is_chat_line` row and the chat-flag gate, without which the game loop hit its
+catch-all and the descriptor closed.
+
+The store and the save. Migration 0032 holds the week (`daily_gift`) beside the
+account's cash; the load installs the row, the cash and the renew time the
+admission read from the flag. The cash loads once and spends from memory, where
+legacy queries it on every open: an Operator grant mid-session shows at the
+next login (a Divergence, recorded in `docs/STATUS.md`). The save writes the
+row and the spent delta after the player row and advances the loaded baseline,
+so a second save in the session finds no delta; the scenario shortens the save
+cycle to a second and watches both saves land. The renew is
+`CheckDailyGiftRenewTime` (`:89-129`): past its time the week steps to the next
+with `order`, or to a random one, or the event stops.
+
+Refactors for the line lint: `daily_collect` lent its locked arm
+`daily_collect_locked`, the line lent its usage `daily_gift_event_usage`,
+`apply_chat_flag` lent its stat arms `apply_stat_command`, `apply_delegated`
+lends its pick list `is_pick_command`, `apply_ground` lends its event steps
+`apply_event_step`, `mid_name` lends its flag rows `flag_name`, `select_character`
+lends its burst `deliver_loading_burst` over a bundled `BurstDelivery`, and
+`save_held` lends its stored rows `save_stored_rows` and its week
+`save_daily_gift`.
+
+Mutants, all killed: the unlock line, the mission level (by the unit test; the
+scenario's 154 and 1 straddle no boundary), the quiet give, the cash spend, the
+collect-time day base, the renew week step, the ticket branch, the fresh day-1
+wait, the ctime weekday, the arm hook, the baseline advance (by the mid-save
+watch), and the record's week. A flake-check run against a mutant binary is
+worth a warning: the mutants build their binary and restore only the source, so
+the next `ls -t` can pick a mutant binary; the 8/8 green check ran on a rebuilt
+pristine binary.
+
+Systems: `sys.custom.daily_gift` `ported`. Client-packets: 80 `ported` / 16 `missing`.
+Server-records: 81 `ported` / 13 `missing`. Commands: 224 `ported` / 41 `missing`.
+Gamedata: `data.daily_gift` `ported`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4921 passed 0 failed in 44 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

@@ -116,6 +116,7 @@ use protocol::cg_arg_u8::CgRequestEventData;
 use protocol::cg_attack::CgAttack;
 use protocol::cg_chat::CgChat;
 use protocol::cg_client_version::CgClientVersion;
+use protocol::cg_daily_gift::CgDailyGift;
 use protocol::cg_exchange::CgExchange;
 use protocol::cg_fish_event::CgFishEvent;
 use protocol::cg_fly_target::CgFlyTarget;
@@ -125,21 +126,22 @@ use protocol::cg_inventory::{
     HEADER_CG_ATTR67_ADD, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
     HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
     HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CLIENT_VERSION,
-    HEADER_CG_CLIENT_VERSION2, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE,
-    HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING, HEADER_CG_GUILD,
-    HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
-    HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
-    HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
-    HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
-    HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
-    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
-    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_CONFIRM,
-    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
-    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REQUEST_EVENT_DATA,
-    HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON,
-    HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
-    HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD,
-    HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
+    HEADER_CG_CLIENT_VERSION2, HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
+    HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING,
+    HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_ITEM_DESTROY,
+    HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE,
+    HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2,
+    HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN,
+    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK,
+    HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER,
+    HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
+    HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
+    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SCRIPT_ANSWER,
+    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM, HEADER_CG_SHOOT, HEADER_CG_SHOP,
+    HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
+    HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
+    HEADER_CG_WHISPER_DETAILS,
 };
 use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
@@ -426,6 +428,12 @@ struct Held {
     /// which the world holds as the character's jigsaw board from the admission on, and
     /// which the save writes back.
     fish_board: (Vec<db::fish_event::StoredFishCell>, u32),
+    /// The daily-gift row the load read (`daily_gift`) with the account's cash, which
+    /// the world holds as the character's gift week from the admission on, and which
+    /// the save writes back: the row by replace, the cash as the delta from the load.
+    daily_gift: (Option<db::daily_gift::StoredDailyGift>, u32),
+    /// The account's cash as the load read it, which the save's delta starts from.
+    daily_cash_loaded: u32,
     /// The character's global rank row as the world last held it, with the generation to
     /// save it under, which the save writes; `None` before it ever scored.
     rank: Option<(i64, db::rank_global::StoredRank)>,
@@ -633,7 +641,7 @@ async fn handle_connection(
     // `SaveReal`'s two guards (`G/char.cpp:1660-1664`).
     if held.save.is_some() {
         let queued = held.save.as_ref().is_some_and(|event| event.queued);
-        let written = save_held(&context, &held, std::time::Instant::now()).await;
+        let written = save_held(&context, &mut held, std::time::Instant::now()).await;
         info!(
             %addr,
             ?queued,
@@ -845,7 +853,7 @@ async fn save_on_tick(context: &ConnectionContext, addr: SocketAddr, held: &mut 
     // same minutes.
     let at = std::time::Instant::now();
     hold_world_points(context, addr, held, at).await;
-    if save_held(context, &*held, at).await {
+    if save_held(context, held, at).await {
         info!(%addr, "Save event wrote the character row");
     }
 }
@@ -1080,6 +1088,7 @@ fn hold_kept(held: &mut Held, kept: Kept) {
     held.quest_flags = kept.quest_flags;
     held.affects = kept.affects;
     held.fish_board = kept.fish_board;
+    held.daily_gift = kept.daily_gift;
     held.rank = kept.rank;
     if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
         avatar.map = map;
@@ -1235,6 +1244,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_ATTR67_ADD.value()
         || header == HEADER_CG_FISHING.value()
         || header == HEADER_CG_FISH_EVENT_SEND.value()
+        || header == HEADER_CG_DAILY_GIFT.value()
         || is_ground_step(header)
         || is_quickslot_step(header)
 }
@@ -1284,6 +1294,8 @@ where
         fish(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_FISH_EVENT_SEND.value() {
         fish_event(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_DAILY_GIFT.value() {
+        daily_gift(session, addr, context, held, frame).await
     } else {
         drop_an_item(session, addr, context, held, frame).await
     }
@@ -1315,6 +1327,51 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.fishing(vid, record.dir, actor).await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_DAILY_GIFT` (180) in the game phase: `CInputMain::DailyGift`
+/// (`G/input_main.cpp:3512-3545`). An unknown action is consumed and ignored, as
+/// legacy's missing `default` arm does; the world sends the records, and the rows it
+/// changed (the spent ticket, the gift) are stored here.
+async fn daily_gift<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgDailyGift::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed DAILY_GIFT; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "DAILY_GIFT without a character in the world; ignoring");
+        return true;
+    };
+    let step = match record.action {
+        prodomo::game_state::DAILY_GIFT_CLOSE => prodomo::game_state::DailyGiftStep::Close,
+        prodomo::game_state::DAILY_GIFT_OPEN => prodomo::game_state::DailyGiftStep::Open,
+        prodomo::game_state::DAILY_GIFT_COLLECT => prodomo::game_state::DailyGiftStep::Collect {
+            slot: record.slot,
+            ticket: false,
+        },
+        prodomo::game_state::DAILY_GIFT_COLLECT_USE_TICKET => {
+            prodomo::game_state::DailyGiftStep::Collect {
+                slot: record.slot,
+                ticket: true,
+            }
+        }
+        _ => return true,
+    };
+    let actor = item_actor(held);
+    let answer = context.game.daily_gift(vid, step, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -1978,7 +2035,7 @@ where
             if !held.departed && held.world.is_some() {
                 let at = std::time::Instant::now();
                 hold_world_points(context, addr, held, at).await;
-                if save_held(context, &*held, at).await {
+                if save_held(context, held, at).await {
                     info!(%addr, "A flush wrote the character row");
                 }
             }
@@ -6185,8 +6242,15 @@ where
     let mut burst = loading_burst(&character, &points, vid, &view);
     // `PlayerLoad` sets each stored quickslot right after the map test and before the points
     // packet (`G/input_db.cpp:439-440`), and `TPlayerTable::skills` rides the player row.
-    let Some((quickslots, skills, quest_flags, affects, fish_board)) =
-        load_select_rows(&context.store, addr, player, &mut burst).await
+    let Some((quickslots, skills, quest_flags, affects, fish_board, daily_gift)) =
+        load_select_rows(
+            &context.store,
+            addr,
+            player,
+            account.login.as_str(),
+            &mut burst,
+        )
+        .await
     else {
         return false;
     };
@@ -6198,6 +6262,8 @@ where
     held.quest_flags = quest_flags;
     held.affects = affects;
     held.fish_board = fish_board;
+    held.daily_gift = daily_gift;
+    held.daily_cash_loaded = daily_gift.1;
     held.character = Some(character.clone());
     held.channel = seat.number;
     // `SetPlayerProto`'s GM level (`G/input_db.cpp:1931-1955`): the character's own
@@ -6225,28 +6291,18 @@ where
         name = %character.name.as_str(),
         "Character selected; sending the loading burst",
     );
-    let delivery = async {
-        // `SetPhase(PHASE_LOADING)` writes `GC_PHASE` and then installs the loading phase's
-        // input boundary, before any other loading record.
-        session.set_phase(PostHandshakePhase::Loading).await?;
-        send_all(session, &burst.before_map_test).await?;
-        // The map test. `PlayerLoad` folds an instance map onto its base map first.
-        let allowed = map_index.is_some_and(|index| {
-            map_is_allowed(
-                public_map_index(index),
-                context
-                    .routes
-                    .channel_maps
-                    .get(&seat.number)
-                    .map_or(&[][..], Vec::as_slice),
-            )
-        });
-        if !allowed {
-            return refuse_map(session, addr, context, seat, &character, account, map_index).await;
-        }
-        send_all(session, &burst.after_map_test).await
-    };
-    if let Err(error) = delivery.await {
+    if let Err(error) = deliver_loading_burst(BurstDelivery {
+        session,
+        addr,
+        context,
+        seat,
+        account,
+        character: &character,
+        burst: &burst,
+        map_index,
+    })
+    .await
+    {
         warn!(%addr, %error, "Client session stopped");
         return false;
     }
@@ -6266,6 +6322,55 @@ where
     // first thing the game phase does with it is join the client set.
     held.map = map_index;
     true
+}
+
+/// What the select sends around the map test: the session, the burst, and the rows
+/// the test and the refusal read. Bundled so the delivery takes one argument.
+struct BurstDelivery<'a, 'b, S> {
+    session: &'a mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &'a ConnectionContext,
+    seat: &'a ChannelSeat<'b>,
+    account: &'a SelectAccount,
+    character: &'a db::players::Character,
+    burst: &'a prodomo::loading_phase::LoadingBurst,
+    map_index: Option<i32>,
+}
+
+/// Send the loading burst around the map test: `SetPhase(PHASE_LOADING)` writes
+/// `GC_PHASE` first, then the records before the test, then the test refuses or the
+/// records after it. Split out so `select_character` stays under the line lint.
+async fn deliver_loading_burst<S>(delivery: BurstDelivery<'_, '_, S>) -> Result<(), LiveError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let BurstDelivery {
+        session,
+        addr,
+        context,
+        seat,
+        account,
+        character,
+        burst,
+        map_index,
+    } = delivery;
+    session.set_phase(PostHandshakePhase::Loading).await?;
+    send_all(session, &burst.before_map_test).await?;
+    // The map test. `PlayerLoad` folds an instance map onto its base map first.
+    let allowed = map_index.is_some_and(|index| {
+        map_is_allowed(
+            public_map_index(index),
+            context
+                .routes
+                .channel_maps
+                .get(&seat.number)
+                .map_or(&[][..], Vec::as_slice),
+        )
+    });
+    if !allowed {
+        return refuse_map(session, addr, context, seat, character, account, map_index).await;
+    }
+    send_all(session, &burst.after_map_test).await
 }
 
 /// The character the client selected, with the player's id.
@@ -6415,6 +6520,7 @@ async fn load_select_rows(
     store: &Store,
     addr: SocketAddr,
     player: u32,
+    login: &str,
     burst: &mut LoadingBurst,
 ) -> Option<(
     world::character::Quickslots,
@@ -6422,6 +6528,7 @@ async fn load_select_rows(
     Vec<(Vec<u8>, i32)>,
     Vec<db::player_affects::StoredAffect>,
     (Vec<db::fish_event::StoredFishCell>, u32),
+    (Option<db::daily_gift::StoredDailyGift>, u32),
 )> {
     let stored = match db::quickslots::load_quickslots(store, player).await {
         Ok(stored) => stored,
@@ -6474,7 +6581,30 @@ async fn load_select_rows(
             return None;
         }
     };
-    Some((quickslots, skills, quest_flags, affects, fish_board))
+    // The `daily_gift` row and the account's cash (`GetCash`, `:314-342`): the gift
+    // week the character plays from the admission on.
+    let daily_week = match db::daily_gift::load_week(store, player).await {
+        Ok(daily_week) => daily_week,
+        Err(error) => {
+            warn!(%addr, player, %error, "Daily-gift load failed; closing");
+            return None;
+        }
+    };
+    let daily_cash = match db::daily_gift::load_cash(store, login).await {
+        Ok(daily_cash) => daily_cash,
+        Err(error) => {
+            warn!(%addr, player, %error, "Daily-gift cash load failed; closing");
+            return None;
+        }
+    };
+    Some((
+        quickslots,
+        skills,
+        quest_flags,
+        affects,
+        fish_board,
+        (daily_week, daily_cash),
+    ))
 }
 
 /// The item load at character select, the way `CInputDB::ItemLoad` places a character's
@@ -6954,6 +7084,7 @@ fn loaded_state(
         messenger_levels: messenger.levels,
         affects: held.affects.clone(),
         fish_board: held.fish_board.clone(),
+        daily_gift: held.daily_gift,
         horse_name: held
             .character
             .as_ref()
@@ -7126,7 +7257,7 @@ fn played(held: &Held, at: std::time::Instant) -> Option<prodomo::save::Playtime
 /// The playtime is accumulated from [`SaveEvent::play_start`], not from the session length, so a
 /// save at ninety seconds banks the minute a save at thirty seconds did not. Legacy's remainder
 /// carry is what makes that work, and [`prodomo::save::playtime`] is the rule.
-async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Instant) -> bool {
+async fn save_held(context: &ConnectionContext, held: &mut Held, at: std::time::Instant) -> bool {
     let (Some(character), Some(account), Some(avatar)) = (
         held.character.as_ref(),
         held.account.as_ref(),
@@ -7168,48 +7299,21 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
         // Legacy writes the quickslots in the player row (`G/char.cpp:1603-1604`); here they
         // are their own table, written after the row.
         Ok(true) => {
-            let slots = prodomo::quickslot::stored(&held.quickslots);
-            if let Err(error) =
-                db::quickslots::save_quickslots(&context.store, character.id, &slots).await
-            {
-                warn!(player = character.id, %error, "Could not save the quickslots");
+            if !save_stored_rows(&context.store, character.id, held).await {
                 return false;
             }
-            // `CHARACTER::Save` writes the quest flags after the player row
-            // (`G/char.cpp:1673-1679`, `quest::PC::Save`, `G/questpc.cpp:520-588`).
-            let flags: Vec<db::quest_flags::StoredQuestFlag> = held
-                .quest_flags
-                .iter()
-                .map(|(name, value)| db::quest_flags::StoredQuestFlag {
-                    name: name.clone(),
-                    value: *value,
-                })
-                .collect();
-            if let Err(error) =
-                db::quest_flags::save_flags(&context.store, character.id, &flags).await
-            {
-                warn!(player = character.id, %error, "Could not save the quest flags");
-                return false;
-            }
-            // `QUERY_ADD_AFFECT` (`db/ClientManagerPlayer.cpp:1563-1585`): the saved
-            // affects the character still carries, written after the player row.
-            if let Err(error) =
-                db::player_affects::save_affects(&context.store, character.id, &held.affects).await
-            {
-                warn!(player = character.id, %error, "Could not save the affects");
-                return false;
-            }
-            // `tab.fishSlots` and `tab.fishEventUseCount` (`G/char.cpp:1613-1614`): the
-            // jigsaw board the character holds, written after the player row.
-            if let Err(error) = db::fish_event::save_board(
+            // The `daily_gift` row (`:258`) and the cash spent since the load
+            // (`SetCash`, `:368-370`), written after the player row. A week never
+            // opened is no row, and unspent cash is no change.
+            if !save_daily_gift(
                 &context.store,
                 character.id,
-                &held.fish_board.0,
-                held.fish_board.1,
+                &account.login,
+                &mut held.daily_gift,
+                &mut held.daily_cash_loaded,
             )
             .await
             {
-                warn!(player = character.id, %error, "Could not save the fish-event board");
                 return false;
             }
             // Legacy's DB process wrote the counters every 20 minutes and at shutdown
@@ -7238,6 +7342,78 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
             false
         }
     }
+}
+
+/// Save the held quickslots, quest flags, affects and fish-event board after the
+/// player row. Split out so `save_held` stays under the line lint.
+async fn save_stored_rows(store: &db::store::Store, player: u32, held: &Held) -> bool {
+    // Legacy writes the quickslots in the player row (`G/char.cpp:1603-1604`); here
+    // they are their own table, written after the row.
+    let slots = prodomo::quickslot::stored(&held.quickslots);
+    if let Err(error) = db::quickslots::save_quickslots(store, player, &slots).await {
+        warn!(player, %error, "Could not save the quickslots");
+        return false;
+    }
+    // `CHARACTER::Save` writes the quest flags after the player row
+    // (`G/char.cpp:1673-1679`, `quest::PC::Save`, `G/questpc.cpp:520-588`).
+    let flags: Vec<db::quest_flags::StoredQuestFlag> = held
+        .quest_flags
+        .iter()
+        .map(|(name, value)| db::quest_flags::StoredQuestFlag {
+            name: name.clone(),
+            value: *value,
+        })
+        .collect();
+    if let Err(error) = db::quest_flags::save_flags(store, player, &flags).await {
+        warn!(player, %error, "Could not save the quest flags");
+        return false;
+    }
+    // `QUERY_ADD_AFFECT` (`db/ClientManagerPlayer.cpp:1563-1585`): the saved
+    // affects the character still carries, written after the player row.
+    if let Err(error) = db::player_affects::save_affects(store, player, &held.affects).await {
+        warn!(player, %error, "Could not save the affects");
+        return false;
+    }
+    // `tab.fishSlots` and `tab.fishEventUseCount` (`G/char.cpp:1613-1614`): the
+    // jigsaw board the character holds, written after the player row.
+    if let Err(error) =
+        db::fish_event::save_board(store, player, &held.fish_board.0, held.fish_board.1).await
+    {
+        warn!(player, %error, "Could not save the fish-event board");
+        return false;
+    }
+    true
+}
+
+/// Save the held `daily_gift` row and the cash spent since the load, and advance
+/// the loaded baseline past the spent delta. Split out so `save_held` stays under
+/// the line lint. The week and the baseline travel apart from the rows that name
+/// them, so the caller keeps its own borrows.
+async fn save_daily_gift(
+    store: &db::store::Store,
+    player: u32,
+    login: &db::credentials::Login,
+    daily: &mut (Option<db::daily_gift::StoredDailyGift>, u32),
+    loaded: &mut u32,
+) -> bool {
+    if let Some(week) = &daily.0 {
+        if let Err(error) = db::daily_gift::save_week(store, player, week).await {
+            warn!(player, %error, "Could not save the daily gifts");
+            return false;
+        }
+    }
+    let delta = i64::from(daily.1) - i64::from(*loaded);
+    if delta != 0 {
+        if let Err(error) =
+            db::accounts::adjust_balance(store, login, db::accounts::Currency::Cash, delta).await
+        {
+            warn!(player, %error, "Could not save the cash");
+            return false;
+        }
+        // The delta is spent; the next save starts from what the world holds.
+        *loaded = daily.1;
+    }
+    true
 }
 
 /// The next fire of the save event, or nothing at all when the character is not in the game.
@@ -8588,6 +8764,8 @@ struct GameData {
     lands: Arc<gamedata::land::Lands>,
     /// The building object prototypes, which the game thread holds.
     object_protos: Arc<gamedata::object_proto::ObjectProtos>,
+    /// The daily-gift weeks, which the game thread holds.
+    daily_weeks: Arc<gamedata::daily_gift::DailyGiftWeeks>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -8629,6 +8807,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let sungzi_maps = load_sungzi_maps(config)?;
     let lands = load_lands(config)?;
     let object_protos = load_object_protos(config)?;
+    let daily_weeks = load_daily_weeks(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -8657,6 +8836,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         sungzi_maps,
         lands,
         object_protos,
+        daily_weeks,
     };
     Ok((data, quests))
 }
@@ -8891,6 +9071,26 @@ fn load_object_protos(
         .map_err(|error| format!("Building object prototypes are unusable: {error}"))?;
     info!(protos = protos.len(), "Building object prototypes loaded");
     Ok(Arc::new(protos))
+}
+
+/// Load the daily-gift weeks (`ReadDailyGiftItemGroup`,
+/// `G/item_manager_read_tables.cpp:957-1026`).
+///
+/// A file that cannot be parsed stops the server, as every Game data read the world needs
+/// does, so a client is never accepted into a world whose gifts cannot open. A missing
+/// file is no weeks, as legacy's `sys_err` is.
+fn load_daily_weeks(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::daily_gift::DailyGiftWeeks>, String> {
+    let locale_dir = config.locale_dir();
+    let weeks = gamedata::daily_gift::DailyGiftWeeks::load(&locale_dir).map_err(|error| {
+        format!(
+            "Daily-gift weeks are unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(weeks = weeks.len(), "Daily-gift weeks loaded");
+    Ok(Arc::new(weeks))
 }
 
 /// Load the quest translations (`LocaleService_LoadQuestTranslateFile`,
@@ -9334,6 +9534,7 @@ fn build_world(
         .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
         .with_lands(Arc::clone(&data.lands))
         .with_object_protos(Arc::clone(&data.object_protos))
+        .with_daily_weeks(Arc::clone(&data.daily_weeks))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)
@@ -9627,6 +9828,7 @@ where
         LineCommand::Weaken => purge_step(addr, context, held, rest, true).await,
         LineCommand::PrivEmpire => priv_empire_step(addr, context, held, rest).await,
         LineCommand::EventFlag => event_flag_step(addr, context, held, rest).await,
+        LineCommand::DailyGiftEvent => daily_gift_event_step(addr, context, held, rest).await,
         LineCommand::GetEventFlag => get_event_flag_step(addr, context, held).await,
         LineCommand::EventLine(line) => event_line_step(addr, context, held, line, rest).await,
         LineCommand::LettersOpen => letters_open_step(addr, context, held).await,
@@ -9985,6 +10187,30 @@ async fn event_flag_step(
         return false;
     }
     info!(%addr, "Event flag");
+    true
+}
+
+/// `do_daily_gift_event` (`G/cmd_gm.cpp:5061-5152`): the world runs the line, and what
+/// the line shows rode the outbox already.
+async fn daily_gift_event_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Daily gift without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context
+        .game
+        .daily_gift_event(vid, rest, item_actor(held))
+        .await
+    {
+        warn!(%addr, %error, "The world could not be asked for a gift; closing");
+        return false;
+    }
+    info!(%addr, "Daily gift event");
     true
 }
 
@@ -14672,6 +14898,7 @@ mod tests {
                 quest_flags: Vec::new(),
                 affects: Vec::new(),
                 fish_board: (Vec::new(), 0),
+                daily_gift: (None, 0),
                 horse_name: None,
                 rank: None,
             },

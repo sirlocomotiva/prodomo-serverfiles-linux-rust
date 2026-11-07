@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 440 (the jigsaw fish event).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 441
+Last reviewed: 2026-11-07, after ledger section 441 (the daily gift).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 442
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -451,7 +451,8 @@ legacy does, not the 120 s ledger 413 had written. Since 422 the poison and fire
 `ported`. Since 432 the marriage and wedding timers are `unused` (owner question 45). Since 433 Santa hops maps and returns on the timer, and the row is
 `ported`. Since 434 a used campfire stands ahead, burns 40 s and goes out, and the row is
 `ported`. Since 435 the mount, pet and shaman timers are `unused` (owner question 46). Since 436 the dungeon-regen, watchdog, gated-system and skill timers are `unused` (owner questions 47-50). Since 437 the six item expiry timers are `unused` (owner question 51). Since 438 the arena, lair and siege timers are `unused` (owner questions 52-53). Since 439 the OX, spam, war, boss and event-manager timers are `unused` (owner questions 54-56), and no `missing` timed-event row is left. Since 440 the jigsaw fish event is
-`ported`: the report, the two arms, the reward and the save round-trip. The
+`ported`: the report, the two arms, the reward and the save round-trip. Since 441 the daily
+gift is `ported`: the line, the week, the cash and ticket collects, the renew and the save. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -871,6 +872,7 @@ owner should know about (178.5):
 | V27. A `/shutdown` after the bar restarts nothing, and a `/shutdown` mid-countdown restarts it at 10 (ledger 360). The game thread must not kill the process, so the operator stops it with SIGTERM, which the graceful path already serves; the bar never clears. | `Shutdown()` past the bar calls `thecore_shutdown()` (`G/cmd_general.cpp:246-249`), exiting the process at once; mid-countdown it starts a second concurrent event, whose notices double the first's (`:250-261`). |
 | A login's loaded affects lay their points at the next computation, not while they load, and a saved mount sends no `MountVnum` re-show (ledger 399). The adds, and the mount's and its bonus's removes, ride the burst as legacy's do. | `LoadAffect` runs `ComputeAffect` on each row it loads (`G/char_affect.cpp:633`), so a saved mount re-shows the character mounted and `RemoveAffect(AFFECT_MOUNT)` re-shows it unmounted (`:644-645`); the Rewrite's restore runs before the burst, where point records and a re-show would reach the client ahead of the character it describes. |
 | A quest's `command` line never trips the anti-flood, and a click's dialog records beat the world's notices to the socket (ledger 413). The flood is fresh on every quest line, and the step's records go straight to the socket while the broadcasts travel through the outbox. | `interpret_command` counts quest lines against the character's flood and disconnects past 10 a second (`G/cmd.cpp`), and the notices go out while the script runs with the dialog at its end; the world has no delayed-disconnect path, and the step's records bypass the outbox. |
+| The daily-gift cash is loaded at the admission and spent from memory (ledger 441): an Operator grant mid-session shows at the next login, and the spent delta saves with the row. | `GetCash` queries `account.account` on every open (`G/char_daily_gifts.cpp:321-345`). |
 
 ## Legacy defects not to reproduce
 
@@ -1397,6 +1399,10 @@ owner should know about (178.5):
 - `FishEventGeneralInfo`'s shape guard compares the held shape to the special box's vnum
   (`lastAttachedShape > ITEM_FISH_EVENT_BOX_SPECIAL`, `G/char.cpp:11086`), so every byte
   passes it. The Rewrite compares to shape 7, the highest the tables name (ledger 440).
+- `CollectDailyGift` indexes the week's gift vector with the client's slot byte
+  unchecked (`CDailyGiftItemGroup::GetVnum(bSlotIndex)`, `G/item_manager.h:46-58`), so a slot
+  at or above 7 reads past the week's seven gifts. The Rewrite is silent on such a slot
+  (ledger 441).
 
 ## Environment
 

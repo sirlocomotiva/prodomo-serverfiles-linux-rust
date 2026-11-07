@@ -1633,6 +1633,7 @@ fn game_len(header: u8) -> usize {
         GC_QUEST_CONFIRM => QUEST_CONFIRM_LEN,
         GC_FISHING => FISHING_LEN,
         GC_FISH_EVENT_INFO => FISH_EVENT_INFO_LEN,
+        GC_DAILY_GIFT => DAILY_GIFT_LEN,
         GC_DIG_MOTION => DIG_MOTION_LEN,
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
         other => panic!("unexpected game header {other}"),
@@ -38583,4 +38584,468 @@ fn a_used_campfire_stands_ahead_burns_and_goes_out() {
         Some(removal),
         "40 s on the fire goes out"
     );
+}
+
+/// `HEADER_CG_DAILY_GIFT` and `HEADER_GC_DAILY_GIFT` (both 0xb4).
+const CG_DAILY_GIFT: u8 = 180;
+const GC_DAILY_GIFT: u8 = 180;
+/// `sizeof(TPacketGCDailyGift)`: the header, cash, week, seven vnums, counts,
+/// collect times, costs and statuses.
+const DAILY_GIFT_LEN: usize = 111;
+/// `DAILY_GIFT_TICKET_ITEM` (`G/length.h`).
+const DAILY_TICKET: u32 = 72319;
+
+/// A `CG_DAILY_GIFT` of `action` for `slot`.
+fn client_daily_gift(action: u8, slot: u8) -> Vec<u8> {
+    vec![CG_DAILY_GIFT, action, slot]
+}
+
+/// A `GC_DAILY_GIFT` week, parsed off the client's socket.
+struct GiftWeek {
+    cash: u32,
+    week: u8,
+    vnums: [u32; 7],
+    counts: [u32; 7],
+    collects: [u32; 7],
+    costs: [u16; 7],
+    statuses: [u8; 7],
+}
+
+/// Read a `GC_DAILY_GIFT` record and parse its seven days.
+fn read_gift_week(keyed: &mut Keyed) -> GiftWeek {
+    let record = keyed.read_game();
+    assert_eq!(record.len(), DAILY_GIFT_LEN);
+    assert_eq!(record[0], GC_DAILY_GIFT);
+    let u32_at = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
+    let mut week = GiftWeek {
+        cash: u32_at(1),
+        week: record[5],
+        vnums: [0; 7],
+        counts: [0; 7],
+        collects: [0; 7],
+        costs: [0; 7],
+        statuses: [0; 7],
+    };
+    for day in 0..7 {
+        week.vnums[day] = u32_at(6 + day * 4);
+        week.counts[day] = u32_at(34 + day * 4);
+        week.collects[day] = u32_at(62 + day * 4);
+        week.costs[day] = u16::from_le_bytes([record[90 + day * 2], record[91 + day * 2]]);
+        week.statuses[day] = record[104 + day];
+    }
+    week
+}
+
+/// Read the seven `[TEST]` lines an open prints, one per day in day order.
+fn read_test_days(keyed: &mut Keyed) {
+    for day in 1..=7u8 {
+        let line = keyed.read_game();
+        let head = format!("[TEST] You can collect day {day} at ");
+        assert_eq!(line[0], GC_CHAT, "day {day} rides a chat line");
+        assert_eq!(
+            line.len(),
+            10 + head.len() + 25,
+            "day {day} carries a ctime and its newline"
+        );
+        assert_eq!(
+            &line[10..10 + head.len()],
+            head.as_bytes(),
+            "day {day} names itself"
+        );
+        assert_eq!(
+            line[line.len() - 1],
+            b'\n',
+            "day {day} keeps ctime's newline"
+        );
+    }
+}
+
+/// The guard's `[TEST]` line a collect of day `day` prints before anything else:
+/// the status call carries collect time 0, so the date is the epoch.
+fn guard_test_day(alice: &mut Keyed, day: u8) {
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(
+            format!("[TEST] You can collect day {day} at Thu Jan  1 00:00:00 1970\n").as_bytes()
+        ),
+        "the guard names day {day} at the epoch"
+    );
+}
+
+/// Stage the daily-gift scenario: Alpha an `IMPLEMENTOR` with 1000 cash and a ticket
+/// in cell 4, and Yankee at level 1, both in empire 1 where Alpha stands.
+fn stage_daily_gifts(database: &ScratchDatabase) {
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "UPDATE account SET cash = 1000 WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', \
+         1, 1, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 4, \
+             1, {DAILY_TICKET} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+}
+
+/// Run `/daily_gift_event {args}` and read the arm and the notice an enable fans, or
+/// the arm and the line a disable answers.
+fn run_daily_event(alice: &mut Keyed, args: &[u8], value: u8) {
+    let mut line = b"/daily_gift_event ".to_vec();
+    line.extend_from_slice(args);
+    alice.send_record(&client_chat(CHAT_TALKING, &line));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(format!("DailyGiftEvent {value}").as_bytes()),
+        "the flag's arm lands first"
+    );
+}
+
+/// `cg.game.daily_gift`: the week's gifts collect free, for cash and for the ticket,
+/// a short week renews into the next, and the row and the cash save.
+#[test]
+fn daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    stage_daily_gifts(&database);
+    // The save cycle is a second, so the cash delta saves twice: once behind the
+    // collects, once at the drop. The second save must find no delta left.
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "save_event_second_cycle = 1",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let before = unix_secs();
+    run_daily_event(&mut alice, b"1 3 1", 1);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Daily gifts are now available."),
+        "the start is noticed"
+    );
+    let after = unix_secs();
+    collect_the_week(&mut alice, before, after);
+    wait_for(
+        &database,
+        "(SELECT cash = 400 FROM account WHERE login = 'alice')",
+    );
+    read_daily_usage(&mut alice);
+    refuse_yankee_mission(&server, &mut alice);
+    run_daily_event(&mut alice, b"0", 0);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You disabled the daily gift event."),
+        "the stop answers"
+    );
+    alice.send_record(&client_daily_gift(1, 0));
+    alice.quiet("a stopped event opens nothing");
+    renew_the_week(&server, &database, alice);
+}
+
+/// The usage, while the event runs: the seventeen lines, a blank, the dates, and
+/// the already-active refusal of a second start.
+fn read_daily_usage(alice: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/daily_gift_event"));
+    for line in [
+        "Usage: daily_gift_event <command> <specific_week> <renew>",
+        "<command>",
+        "    0 = Disable",
+        "    1 = Enable",
+        "<specific_week>",
+        "    ID = ( 0 = Random | # Week table )",
+        "    STRING = ( auto = Start week from order )",
+        "<renew>",
+        "    0 = The event will stop after a week",
+        "    1 = The event will continue after a week",
+        "        with the same arguments.",
+        "<renew>",
+        "    0 = The event will stop after a week",
+        "    1 = The event will continue after a week",
+        "        with the same arguments.",
+        "Example:",
+        "Command: /daily_gift_event 1 auto 1",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(line.as_bytes()), "{line}");
+    }
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b""),
+        "the dates stand apart"
+    );
+    for head in [
+        b"     Start Date: ".as_slice(),
+        b"     Renew Date: ".as_slice(),
+    ] {
+        let line = alice.read_game();
+        assert_eq!(&line[10..10 + head.len()], head, "the date names itself");
+        assert_eq!(
+            line[line.len() - 1],
+            b'\n',
+            "the date keeps ctime's newline"
+        );
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/daily_gift_event 1 3 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"This event is already active."),
+        "a second start refuses"
+    );
+}
+
+/// Below level 50 Yankee may look but never collect: every day locks, and the
+/// mission line follows the record and answers the collect. The status returns
+/// before the `[TEST]` print, so no test line lands.
+fn refuse_yankee_mission(server: &Server, alice: &mut Keyed) {
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.send_record(&client_daily_gift(1, 0));
+    assert_eq!(
+        read_gift_week(&mut yankee).statuses,
+        [0, 0, 0, 0, 0, 0, 0],
+        "no mission locks every day"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(
+            b"You cannot collect any reward until you complete the required quest. (Reach level 50)"
+        ),
+        "the look ends on the mission"
+    );
+    yankee.send_record(&client_daily_gift(2, 0));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(
+            b"You cannot collect any reward until you complete the required quest. (Reach level 50)"
+        ),
+        "the collect answers the mission"
+    );
+    yankee.quiet("a refused collect changes nothing");
+    let yankee_id = yankee_listed.id;
+    drop(yankee);
+    alice.sees_disconnect(yankee_id);
+}
+
+/// Seconds since the epoch, as the collect-time ranges compare them.
+fn unix_secs() -> u32 {
+    u32::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+/// The week's collects: day 1 free and silent, day 3 for the ticket while cash would
+/// cover it, day 2 for cash, then the refuses — the double collect, the poor day, the
+/// spent ticket — and the silent close and unknown action.
+fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
+    alice.send_record(&client_daily_gift(1, 0));
+    read_test_days(alice);
+    let week = read_gift_week(alice);
+    assert_eq!(
+        (week.cash, week.week),
+        (1000, 3),
+        "the loaded cash and week"
+    );
+    assert_eq!(
+        week.vnums,
+        [53006, 53015, 53219, 53221, 53237, 53245, 53256],
+        "the owner's third week"
+    );
+    assert_eq!(week.counts, [1; 7], "one of each");
+    assert_eq!(
+        week.costs,
+        [300, 600, 900, 1200, 1500, 1800, 2100],
+        "the week's costs"
+    );
+    assert_eq!(
+        week.statuses,
+        [1, 0, 0, 0, 0, 0, 0],
+        "day 1 waits, the rest lock"
+    );
+    for (day, collect) in week.collects.iter().enumerate() {
+        let start = collect - 86_400 * u32::try_from(day + 1).unwrap();
+        assert!(
+            (before..=after).contains(&start),
+            "day {} opens a day after the start: {start}",
+            day + 1
+        );
+    }
+    // Day 1 collects free, with no line: the gift is set, then the week resends.
+    alice.send_record(&client_daily_gift(2, 0));
+    guard_test_day(alice, 1);
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 0, 53006, 1),
+        "the free gift lands in the first cell"
+    );
+    read_test_days(alice);
+    assert_eq!(
+        read_gift_week(alice).statuses,
+        [2, 0, 0, 0, 0, 0, 0],
+        "day 1 collected, day 2 still locked"
+    );
+    // Day 3 for the ticket, although the 1000 cash would cover its 900: the ticket
+    // arm spends the ticket, and the gift lands silent.
+    alice.send_record(&client_daily_gift(3, 2));
+    guard_test_day(alice, 3);
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 4, 0, 0),
+        "the ticket leaves its cell"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 1, 53219, 1),
+        "the ticket's gift lands next"
+    );
+    read_test_days(alice);
+    let week = read_gift_week(alice);
+    assert_eq!(week.cash, 1000, "the ticket spends no cash");
+    assert_eq!(
+        week.statuses,
+        [2, 0, 2, 0, 0, 0, 0],
+        "day 3 collected, the cash untouched"
+    );
+    // Day 2 for cash: the line, the gift, and the week with 400 left.
+    alice.send_record(&client_daily_gift(2, 1));
+    guard_test_day(alice, 2);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You have unlocked the item successfully."),
+        "the unlock says so"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 2, 53015, 1),
+        "the bought gift lands next"
+    );
+    read_test_days(alice);
+    let week = read_gift_week(alice);
+    assert_eq!(week.cash, 400, "600 spent");
+    assert_eq!(week.statuses, [2, 2, 2, 0, 0, 0, 0], "three days collected");
+    refuse_the_week(alice);
+}
+
+/// The week's refuses: the double collect, the poor day, the spent ticket — and
+/// the silent close and unknown action, then the reopen that resends the week.
+fn refuse_the_week(alice: &mut Keyed) {
+    alice.send_record(&client_daily_gift(2, 1));
+    guard_test_day(alice, 2);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You have already recieved this reward."),
+        "the double collect refuses"
+    );
+    alice.send_record(&client_daily_gift(2, 3));
+    guard_test_day(alice, 4);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Unfortunately you don't have enough cash."),
+        "1200 costs more than the 400 left"
+    );
+    alice.send_record(&client_daily_gift(3, 4));
+    guard_test_day(alice, 5);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You don't have the ticket."),
+        "the ticket is spent"
+    );
+    alice.send_record(&client_daily_gift(9, 0));
+    alice.quiet("an unknown action is consumed");
+    alice.send_record(&client_daily_gift(0, 0));
+    alice.quiet("the close answers nothing");
+    alice.send_record(&client_daily_gift(1, 0));
+    read_test_days(alice);
+    assert_eq!(
+        read_gift_week(alice).statuses,
+        [2, 2, 2, 0, 0, 0, 0],
+        "the reopen resends the week"
+    );
+    alice.quiet("every answer was read");
+}
+
+/// Stop the week, save it, and start it again with a past renew time: the next open
+/// renews into week 4, with the saved cash and the collects left behind.
+fn renew_the_week(server: &Server, database: &ScratchDatabase, alice: Keyed) {
+    drop(alice);
+    wait_for(
+        database,
+        "(SELECT week = 3 AND day1 = 2 AND day2 = 2 AND day3 = 2 AND day4 = 0 AND day5 = 0 \
+         AND day6 = 0 AND day7 = 0 FROM daily_gift WHERE player_id = (SELECT id FROM player \
+         WHERE name = 'Alpha'))",
+    );
+    check(
+        database,
+        "(SELECT cash = 400 FROM account WHERE login = 'alice')",
+    );
+    check(
+        database,
+        "(SELECT count(*) = 3 FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum IN (53006, 53015, 53219))",
+    );
+    let (mut alice, _) = enter_world_as_implementor(server);
+    run_daily_event(&mut alice, b"1 3 1", 1);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Daily gifts are now available."),
+        "the event starts again"
+    );
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        b"/eventflag daily_gift_renew_time 1000",
+    ));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag daily_gift_renew_time 1000"),
+        "the renew moves to the past"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag daily_gift_order 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag daily_gift_order 1"),
+        "the order takes the next week"
+    );
+    drop(alice);
+    let (mut alice, _) = enter_world_as_implementor(server);
+    let before = unix_secs();
+    alice.send_record(&client_daily_gift(1, 0));
+    read_test_days(&mut alice);
+    let week = read_gift_week(&mut alice);
+    let after = unix_secs();
+    assert_eq!(
+        (week.cash, week.week),
+        (400, 4),
+        "the saved cash, the next week"
+    );
+    assert_eq!(week.vnums[0], 76002, "week 4 leads with its own gift");
+    assert_eq!(
+        week.statuses,
+        [1, 0, 0, 0, 0, 0, 0],
+        "the new week waits on day 1"
+    );
+    let start = week.collects[0] - 86_400;
+    assert!(
+        (before..=after).contains(&start),
+        "the new week starts at the renew: {start}"
+    );
+    alice.quiet("every answer was read");
 }

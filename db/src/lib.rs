@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod credentials;
+pub mod daily_gift;
 pub mod events;
 pub mod fish_event;
 pub mod guild_land;

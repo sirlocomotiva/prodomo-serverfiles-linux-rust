@@ -117,7 +117,7 @@ in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that tur
 | `sys.custom.attr67` | `G/questlua_attr67add.cpp` | 6th and 7th bonus add | `sys.item.attr` | ported | `an_attr67_regist_waits_and_collects` | Ledger 409: the window, the regist, and the quest's wait, success and collect. |
 | `sys.custom.battle_pass` | `G/BattlePassManager.cpp`, `ENABLE_BATTLE_PASS` | Battle pass (`battlepass.json`) | `sys.quest.runtime` | missing | | |
 | `sys.custom.switchbot` | `G/refactorized_switchbot.cpp`, `ENABLE_SWITCHBOT` | Switchbot | `sys.item.attr` | missing | | |
-| `sys.custom.daily_gift` | `G/char_daily_gifts.cpp`, `__DAILY_GIFT_SYSTEM__` | Daily gift | `sys.item.core` | missing | | |
+| `sys.custom.daily_gift` | `G/char_daily_gifts.cpp`, `__DAILY_GIFT_SYSTEM__` | Daily gift | `sys.item.core` | ported | `daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews` | Open, collect, renew, cash and save. |
 | `sys.custom.biologist` | `G/Biologist.cpp`, `__ENABLE_BIOLOGIST_RENEWAL_SYSTEM__` | Biologist | `sys.item.core` | missing | | |
 | `sys.custom.premium` | `__ENABLE_PREMIUM_PLAYERS__` | Premium players | `sys.login.enter` | missing | | |
 | `sys.custom.reward` | `ENABLE_REWARD_SYSTEM` | Reward info | `sys.login.enter` | missing | | |

@@ -67,6 +67,7 @@ mod attr67;
 mod cards;
 mod conqueror;
 mod costume;
+mod daily_gift;
 mod death;
 mod detail_log;
 mod dice;
@@ -145,6 +146,10 @@ mod warp_npc;
 mod whisper;
 
 pub use attr67::{Attr67Regist, ATTR67_ADD_WAIT_TIME, ATTR67_CLOSE, ATTR67_OPEN, ATTR67_REGIST};
+pub use daily_gift::{
+    DailyGiftState, DailyGiftStep, DAILY_GIFT_CLOSE, DAILY_GIFT_COLLECT,
+    DAILY_GIFT_COLLECT_USE_TICKET, DAILY_GIFT_OPEN,
+};
 pub use fish_event::{FishBoard, FishCell, FishEventStep, FISH_EVENT_SLOTS};
 pub use gm_lines::GmRows;
 pub use guild::{
@@ -591,6 +596,12 @@ pub struct GameState {
     /// `m_bFishAttachedShape`, `G/char.h:1045,2063-2064`), installed at admission from
     /// the stored board. The held shape is memory-only; the save never writes it.
     fish_boards: HashMap<common::vid::Vid, fish_event::FishBoard>,
+    /// The daily-gift weeks, which the gift opens read the running week's gifts from.
+    daily_weeks: Arc<gamedata::daily_gift::DailyGiftWeeks>,
+    /// Each character's daily-gift week (`m_bDailyGiftOpen`, `m_bDailyGiftLoad`,
+    /// `m_dwDailyGiftRenewTime` and the `daily_gift` row, `G/char.h:2546-2549`),
+    /// installed at admission from the stored row and the account's cash.
+    daily_gifts: HashMap<common::vid::Vid, daily_gift::DailyGiftState>,
     /// Each digging character's `m_pkMiningEvent` (`G/mining.cpp:355-418`).
     mining_events: HashMap<common::vid::Vid, mining::MiningEvent>,
     /// The Pulse each character's horse stamina event fires on (`m_eventStaminaRegen`,
@@ -908,6 +919,13 @@ impl GameState {
     #[must_use]
     pub fn with_lands(mut self, lands: Arc<gamedata::land::Lands>) -> Self {
         self.guild_lands = lands;
+        self
+    }
+
+    /// Share the daily-gift weeks, which the gift opens read the running week's gifts from.
+    #[must_use]
+    pub fn with_daily_weeks(mut self, weeks: Arc<gamedata::daily_gift::DailyGiftWeeks>) -> Self {
+        self.daily_weeks = weeks;
         self
     }
 
@@ -1249,6 +1267,7 @@ impl GameState {
             GameCommand::Reset { .. }
                 | GameCommand::EventFlag { .. }
                 | GameCommand::GetEventFlag { .. }
+                | GameCommand::DailyGiftEvent { .. }
                 | GameCommand::EventLine { .. }
                 | GameCommand::GiveReward { .. }
                 | GameCommand::LettersOpen { .. }
@@ -2026,6 +2045,17 @@ impl GameState {
                     debug!(?vid, "nobody was left to hear a flag's answer");
                 }
             }
+            GameCommand::DailyGiftEvent {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => {
+                self.run_daily_gift_event(vid, &rest, mover);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a daily gift's answer");
+                }
+            }
             GameCommand::GetEventFlag { vid, mover, reply } => {
                 self.run_get_event_flag(vid, mover);
                 if reply.send(()).is_err() {
@@ -2056,6 +2086,19 @@ impl GameState {
                     debug!(?vid, "nobody was left to hear a letters window");
                 }
             }
+            command @ (GameCommand::Stat { .. }
+            | GameCommand::StatVal { .. }
+            | GameCommand::StatPlus { .. }
+            | GameCommand::SetStat { .. }
+            | GameCommand::StatReset { .. }) => self.apply_stat_command(command),
+            _ => debug_assert!(false, "the dispatch routes only flag lines here"),
+        }
+    }
+
+    /// The stat lines of [`GameState::apply_chat_flag`], split out so neither
+    /// trips the line lint.
+    fn apply_stat_command(&mut self, command: GameCommand) {
+        match command {
             GameCommand::Stat {
                 vid,
                 rest,
@@ -2101,7 +2144,7 @@ impl GameState {
                     debug!(?vid, "nobody was left to hear a stat reset's answer");
                 }
             }
-            _ => debug_assert!(false, "the dispatch routes only flag lines here"),
+            _ => debug_assert!(false, "the dispatch routes only stat lines here"),
         }
     }
 
@@ -2286,6 +2329,7 @@ impl GameState {
             | GameCommand::PickupItem { .. }
             | GameCommand::Fishing { .. }
             | GameCommand::FishEvent { .. }
+            | GameCommand::DailyGift { .. }
             | GameCommand::NpcsOn { .. }) => {
                 self.apply_ground(command);
                 None
@@ -2296,31 +2340,7 @@ impl GameState {
                 self.apply_motion(command);
                 None
             }
-            command @ (GameCommand::Target { .. }
-            | GameCommand::TargetInfo { .. }
-            | GameCommand::EventInfo { .. }
-            | GameCommand::UseSkill { .. }
-            | GameCommand::Attack { .. }
-            | GameCommand::FlyTarget { .. }
-            | GameCommand::Shoot { .. }
-            | GameCommand::PartyInvite { .. }
-            | GameCommand::PartyInviteAnswer { .. }
-            | GameCommand::PartyRequest { .. }
-            | GameCommand::PartyRequestAccept { .. }
-            | GameCommand::PartyRequestDeny { .. }
-            | GameCommand::Ungroup { .. }
-            | GameCommand::PartyRemove { .. }
-            | GameCommand::PartySetState { .. }
-            | GameCommand::PartyParameter { .. }
-            | GameCommand::PartyUseSkill { .. }
-            | GameCommand::PartyOf { .. }
-            | GameCommand::GuildOf { .. }
-            | GameCommand::QuestConfirm { .. }
-            | GameCommand::MarkUpload { .. }
-            | GameCommand::MarkIdxList { .. }
-            | GameCommand::MarkCrcList { .. }
-            | GameCommand::SymbolUpload { .. }
-            | GameCommand::SymbolCrc { .. }) => {
+            command if Self::is_pick_command(&command) => {
                 self.apply_pick(command);
                 None
             }
@@ -2330,6 +2350,38 @@ impl GameState {
             }
             command => Some(command),
         }
+    }
+
+    /// Whether `command` is a pick step: a target, skill, party or mark command.
+    fn is_pick_command(command: &GameCommand) -> bool {
+        matches!(
+            command,
+            GameCommand::Target { .. }
+                | GameCommand::TargetInfo { .. }
+                | GameCommand::EventInfo { .. }
+                | GameCommand::UseSkill { .. }
+                | GameCommand::Attack { .. }
+                | GameCommand::FlyTarget { .. }
+                | GameCommand::Shoot { .. }
+                | GameCommand::PartyInvite { .. }
+                | GameCommand::PartyInviteAnswer { .. }
+                | GameCommand::PartyRequest { .. }
+                | GameCommand::PartyRequestAccept { .. }
+                | GameCommand::PartyRequestDeny { .. }
+                | GameCommand::Ungroup { .. }
+                | GameCommand::PartyRemove { .. }
+                | GameCommand::PartySetState { .. }
+                | GameCommand::PartyParameter { .. }
+                | GameCommand::PartyUseSkill { .. }
+                | GameCommand::PartyOf { .. }
+                | GameCommand::GuildOf { .. }
+                | GameCommand::QuestConfirm { .. }
+                | GameCommand::MarkUpload { .. }
+                | GameCommand::MarkIdxList { .. }
+                | GameCommand::MarkCrcList { .. }
+                | GameCommand::SymbolUpload { .. }
+                | GameCommand::SymbolCrc { .. }
+        )
     }
 
     /// Drop one async completion. There is nothing to apply it to yet: a completion
@@ -2538,6 +2590,7 @@ impl GameState {
                 quest_flags: self.quest_flags_of(player_id),
                 affects,
                 fish_board: self.kept_fish_board(vid),
+                daily_gift: self.kept_daily_gift(vid),
                 horse_name: character.points().map(|_| {
                     self.horse_names
                         .get(&player_id)
@@ -3001,6 +3054,10 @@ impl GameState {
         // (`G/input_login.cpp:939`): the stored board is installed first, then the report's
         // lines ride the burst last.
         self.install_fish_board(vid, &loaded.fish_board.0, loaded.fish_board.1);
+        // The gift week installs with the character (`CHARACTER::CHARACTER`,
+        // `G/char.cpp:511`): the stored row and the cash, with the renew time from
+        // the flag.
+        self.install_daily_gift(vid, loaded.daily_gift.0, loaded.daily_gift.1);
         let fish_lines = self.fish_event_report(vid);
         Shown {
             records,
@@ -3198,6 +3255,9 @@ impl GameState {
         // the board goes with the character, after the save takes its cells and count.
         let fish_board = self.kept_fish_board(vid);
         let _board = self.fish_boards.remove(&vid);
+        // The gift week goes with the character, after the save takes its row and cash.
+        let daily_gift = self.kept_daily_gift(vid);
+        let _gifts = self.daily_gifts.remove(&vid);
         // `CHorseRider::Destroy` cancels both stamina events (`G/horse_rider.cpp:81-85`).
         let _horse = self.horse_timers.remove(&vid);
         // `HorseSummon(false)` in `CHARACTER::Destroy` (`G/char.cpp:632`).
@@ -3275,6 +3335,7 @@ impl GameState {
             quest_flags,
             affects,
             fish_board,
+            daily_gift,
             horse_name: character.points().map(|_| {
                 self.horse_names
                     .get(&character.player_id())
@@ -4281,6 +4342,19 @@ impl GameState {
                 let place = self.live_place(vid, place);
                 answer_item_step(vid, reply, self.pickup_item(vid, ground, place, mover));
             }
+            command @ (GameCommand::Fishing { .. }
+            | GameCommand::FishEvent { .. }
+            | GameCommand::DailyGift { .. }
+            | GameCommand::NpcsOn { .. }) => self.apply_event_step(command),
+            _ => debug_assert!(false, "only ground commands reach apply_ground"),
+        }
+    }
+
+    /// The event steps of [`GameState::apply_ground`], split out so neither trips
+    /// the line lint: fishing, the fish event, the daily gift, and the NPCs
+    /// standing on a map.
+    fn apply_event_step(&mut self, command: GameCommand) {
+        match command {
             GameCommand::Fishing {
                 vid,
                 dir,
@@ -4293,12 +4367,18 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.fish_event(vid, step, mover)),
+            GameCommand::DailyGift {
+                vid,
+                step,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.daily_gift(vid, step, mover)),
             GameCommand::NpcsOn {
                 channel,
                 map,
                 reply,
             } => self.answer_npcs_on(channel, map, reply),
-            _ => debug_assert!(false, "only ground commands reach apply_ground"),
+            _ => debug_assert!(false, "only event steps reach apply_event_step"),
         }
     }
 
@@ -7550,6 +7630,7 @@ mod tests {
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
                 fish_board: (Vec::new(), 0),
+                daily_gift: (None, 0),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
             }),
@@ -7607,6 +7688,7 @@ mod tests {
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
                 fish_board: (Vec::new(), 0),
+                daily_gift: (None, 0),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
             }),

@@ -31,7 +31,7 @@ byte-exact and a scenario exercises the system that uses it.
 | `data.dragon_soul` | `locale/europe/dragon_soul_table.txt` | `G/dragon_soul_table.cpp` | `sys.custom.dragon_soul` | missing | | |
 | `data.fishing` | `locale/europe/fishing.txt` | `G/fishing.cpp` | `sys.life.fishing` | ported | `a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses` | Ledger 356: `gamedata::fishing` reads the table as `fishing::Initialize` does, for `/fish_simul`. Ledger 389: the bite draws its fish from the map's column (`DetermineFish`) and the take rolls `Compute` and `GetFishLength` on it. |
 | `data.gaya` | `locale/europe/gaya.txt` | `G/char_gaya.cpp` | `sys.custom.gaya` | missing | | |
-| `data.daily_gift` | `locale/europe/daily_gift.txt` | `G/char_daily_gifts.cpp` | `sys.custom.daily_gift` | missing | | |
+| `data.daily_gift` | `locale/europe/daily_gift.txt` | `G/char_daily_gifts.cpp` | `sys.custom.daily_gift` | ported | `daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews` | The four owner weeks. |
 | `data.battle_pass` | `locale/europe/battlepass.json` | `G/BattlePassManager.cpp` | `sys.custom.battle_pass` | missing | | |
 | `data.world_boss` | `locale/europe/world_boss.txt` | `G/input_db.cpp` | `sys.event.world_boss` | missing | | |
 | `data.dungeon_info` | `locale/europe/dungeon_info.txt` | `G/dungeon_info.cpp` | `sys.dungeon.info` | missing | | |

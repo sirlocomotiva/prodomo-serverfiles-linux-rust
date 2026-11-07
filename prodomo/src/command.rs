@@ -241,8 +241,7 @@ impl CommandEntry {
             "do_hide_costume" => Command::HideCostume,
             "do_emotion_allow" | "do_emotion" => self.emotion_name(),
             "do_priv_empire" => Command::PrivEmpire,
-            "do_event_flag" => Command::EventFlag,
-            "do_get_event_flag" => Command::GetEventFlag,
+            "do_event_flag" | "do_get_event_flag" | "do_daily_gift_event" => self.flag_name(),
             "do_xmas" | "do_eclipse" | "do_event_helper" => self.event_name(),
             "give_reward" | "letters_open" => self.reward_name(),
             "do_stat" => Command::Stat,
@@ -284,6 +283,15 @@ impl CommandEntry {
         match self.handler {
             "give_reward" => Command::GiveReward,
             _ => Command::LettersOpen,
+        }
+    }
+
+    /// The event-flag lines: split out so `mid_name` stays under the line lint.
+    fn flag_name(&self) -> Command {
+        match self.handler {
+            "do_event_flag" => Command::EventFlag,
+            "do_get_event_flag" => Command::GetEventFlag,
+            _ => Command::DailyGiftEvent,
         }
     }
 
@@ -776,6 +784,8 @@ pub enum Command {
     EventFlag,
     /// `do_get_event_flag`: every flag is listed on the caller.
     GetEventFlag,
+    /// `do_daily_gift_event`: the usage, or the event starts or stops.
+    DailyGiftEvent,
     /// `do_xmas`, `do_eclipse` and `do_event_helper`: one named flag is set, or the
     /// firework sellers stand or go.
     EventLine(EventLine),
