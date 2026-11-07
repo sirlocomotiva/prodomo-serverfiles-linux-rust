@@ -2635,7 +2635,7 @@ impl GameState {
     /// `AttackedByFire` on the non-player under `victim` (`G/char_resist.cpp:161-176`):
     /// nothing while a fire event runs, else the `AFFECT_FIRE` affect lands
     /// (`count*3+1` ticks) and the fire event with 5 ticks is due 1 Pulse on.
-    fn fire_npc(&mut self, attacker: Vid, victim: u32, amount: i32) {
+    pub(super) fn fire_npc(&mut self, attacker: Vid, victim: u32, amount: i32) {
         if self
             .npc_combat
             .get(&victim)

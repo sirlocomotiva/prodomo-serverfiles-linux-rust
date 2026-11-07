@@ -4818,6 +4818,36 @@ mod tests {
         );
     }
 
+    /// The fire event ticks five times with the stored amount and the `DAMAGE_NORMAL`
+    /// packet, then ends; a second fire while it runs is gated by it.
+    #[test]
+    fn the_npc_fire_event_ticks_five_times_then_ends() {
+        use protocol::gc_nested::GcDamageInfo;
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        world.fire_npc(Vid::new(1), ME, 40);
+        let mut pulse = P0 + 1;
+        for left in (1..=5).rev() {
+            world.process_pulse(pulse);
+            let heard = drained(&mut alpha);
+            let infos: Vec<(u8, i32)> = heard
+                .iter()
+                .filter_map(|record| GcDamageInfo::decode(record).ok())
+                .map(|info| (info.flag, info.damage))
+                .collect();
+            assert_eq!(infos, [(DAMAGE_NORMAL, 40)], "tick with {left} left");
+            // No HP pin: the monster's recovery heals between ticks, as in the
+            // poison tests.
+            pulse += 75;
+        }
+        assert!(world.npc_combat[&ME].fire_due.is_none());
+        assert_eq!(
+            world.npc_combat[&ME].damage.get(&1).map(|row| row.total),
+            Some(200)
+        );
+    }
+
     /// A poisoned monster's recovery heals nothing and reschedules; death clears the
     /// affects before `GC_DEAD` with no update packet.
     #[test]

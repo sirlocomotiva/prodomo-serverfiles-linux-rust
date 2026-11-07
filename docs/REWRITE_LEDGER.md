@@ -46954,3 +46954,33 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 422. The resist and party ticks
+
+Six more timed-event rows stood `missing` though their ticks ran. The slice adds the one
+test that was missing and marks all six `ported` — no behaviour changes besides a
+visibility widening (`fire_npc` to `pub(super)`, matching `poison_npc`).
+
+`event.char_resist.fire_event`: `the_npc_fire_event_ticks_five_times_then_ends`
+(`prodomo/src/game_state/fight.rs`) — five ticks of the stored amount with the
+`DAMAGE_NORMAL` packet, 75 Pulses apart, then the event ends; the damage-map row fills.
+(The monster's recovery heals between ticks, so no HP pin, as in the poison tests.)
+Fire on a player waits on skill damage against players, which is not ported, so no
+reachable PC arm exists.
+
+The five rows whose tests already stood: `event.char_resist.poison_event` (the NPC arm
+`the_npc_poison_event_ticks_ten_times_with_the_rank_rate`, the PC arm
+`the_poison_event_ticks_ten_times_and_never_kills`), `event.guild.GuildInviteEvent`
+(`an_invite_lands_and_lapses_quiet`), `event.char.party_request_event`
+(`a_request_expires_after_250_pulses`), `event.char.party_invite_event`
+(`invite_expires_after_250_pulses`), and `event.party.party_update_event`
+(`update_nears_wipes_and_resends`).
+
+Timed-events: 61 `missing` / 33 `ported` / 5 `partial`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4876 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

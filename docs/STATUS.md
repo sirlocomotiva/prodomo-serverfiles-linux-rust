@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 421 (the temple ticks).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 422
+Last reviewed: 2026-11-07, after ledger section 422 (the resist and party ticks).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 423
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -440,7 +440,8 @@ Since 417 a guild registers for Meley's Lair, enters it, and leaves it: the
 lobby's nine quest names run their `CMgr` gates, the ladder debit and the `[LS;1001]` line land, and the
 enter warps to the recall spot on the run's private index. Since 418 a captain boards the ship defence, starts it and lands it: the thirteen `ship_defense_mgr` names are bridged and judged, the deck stands, the waves run, and the heal ignores its argument as legacy does. Since 419 the guild gate click starts Meley's fight (`meley_gate_click`, the two guild lines, the gate's death, step 1 and the hour), the statues flag at their HP line and strip on the kill limits, seals break step-4 statues, and `MeleyLair.CanGetReward`/`MeleyLair.Reward` bridge the chest's take. Since 420 the ship's six ticks and Meley's four carry pulse unit tests, and their ten timed-event rows are
 `ported`. Since 421 the temple's two ticks are `ported` too: its portal clears at 60 s, as
-legacy does, not the 120 s ledger 413 had written. The
+legacy does, not the 120 s ledger 413 had written. Since 422 the poison and fire ticks, the guild invite lapse, and the party's request, invite and update ticks are
+`ported`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
