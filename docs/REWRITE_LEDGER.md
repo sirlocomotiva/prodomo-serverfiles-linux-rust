@@ -47370,3 +47370,41 @@ clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 437. The item expiry timers
+
+Six timed-event rows are unreachable: each starts only from a path the port's
+equip/load gates refuse.
+
+`event.item.unique_expire_event` starts only from `EquipTo` (`G/item.cpp:1465`), the
+`CreateItem` value-2 arm (`G/item_manager.cpp:278-279`) and the buff NPC's exp item
+(`G/buff_npc_system.cpp:210`); the port refuses every `ITEM_UNIQUE` at equip and at
+load (`WornSystem::Unique`), `use_item` answers `Unported::Use` for the type, and the
+buff NPC is unported. `event.item.timer_based_on_wear_expire_event` starts only from
+`EquipTo`'s timer-index arm (`G/item.cpp:1466-1467`), the create wear arm
+(`G/item_manager.cpp:301-304`), the toggle arm (`G/ItemUtils.cpp:84`) and the dragon
+soul's (`G/DragonSoul.cpp:1241`); `WornSystem::Timer` refuses every timed item,
+`ITEM_TOGGLE` has no ported use arm, and the dragon soul deck is refused.
+`event.item.real_time_expire_event` starts only from the create real-time arm (which
+stamps `time(0) + value`), the first-use arm, the load arm and
+`item.start_realtime_expire` (`G/item_manager.cpp:280-294`, `G/char_item.cpp:8544-8552`,
+`G/item.cpp:2775-2780`, `G/questlua_item.cpp:366`); the `Timer` gate refuses and the
+quest bridge is `unused`. `event.item.blend_use_expire_event` starts only from the
+extended-blend use arm and the load arm (`G/char_item.cpp:7073-7079`,
+`G/item.cpp:2762-2766`); `use_item` answers `Unported::Use` for `ITEM_BLEND`.
+`event.item.accessory_socket_expire_event` starts only from `EquipTo` and the post-degrade
+re-arm, both needing a graded accessory (`G/item.cpp:1470,:2503`);
+`WornSystem::AccessoryTimer` refuses every graded accessory.
+`event.item.aura_boost_socket_expire_event` starts only from `EquipTo`'s aura arm
+(`G/item.cpp:1472`); `WornSystem::Aura` refuses every aura costume. All six rows are
+`unused` (owner question 51); each fires home with its `WornSystem` when its equip
+gate opens.
+
+Timed-events: 17 `missing` / 46 `ported` / 5 `partial` / 31 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4882 passed 0 failed in 42 targets, `cargo test --workspace --doc --locked --offline`
+clean, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `legacy/` clean,
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

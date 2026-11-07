@@ -464,3 +464,15 @@ owner answers.
     it (`G/char_skill.cpp:2740-2756`), and skill 78 is refused at the same load.
     Both rows are `unused`; each walks home with its skill row when the loader
     hosts it. Waits on it: nothing blocks.
+51. **The six item expiry timers (ledger 437).** Each starts only from a path
+    the port refuses: unique expiry from `EquipTo`/create/buff-NPC while
+    `WornSystem::Unique` refuses every `ITEM_UNIQUE` at equip and at load;
+    timer-based-on-wear from `EquipTo`/create/toggle/dragon-soul while
+    `WornSystem::Timer` refuses every timed item; real-time expiry from
+    create/first-use/load/quest while the same `Timer` gate refuses and the quest
+    bridge is `unused`; blend-use expiry from the extended-blend arm while
+    `use_item` answers `Unported::Use` for `ITEM_BLEND`; accessory-socket expiry
+    from `EquipTo`/re-arm while `WornSystem::AccessoryTimer` refuses every graded
+    accessory; aura-boost expiry from `EquipTo` while `WornSystem::Aura` refuses
+    every aura costume. All six rows are `unused`; each fires home with its
+    `WornSystem` when the equip gate opens. Waits on it: nothing blocks.
