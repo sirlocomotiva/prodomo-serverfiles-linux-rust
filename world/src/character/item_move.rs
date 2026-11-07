@@ -210,6 +210,10 @@ pub enum MoveRecord {
     Look(CharacterLook),
     /// A `GC_SPECIAL_EFFECT` on the character, which the viewers are sent too.
     Effect(u8),
+    /// A `GC_SPECIFIC_EFFECT` on the character (`SpecificEffectPacket`,
+    /// `G/char.cpp:7544-7553`), which the viewers are sent too. The 128 raw path bytes,
+    /// zero-padded as legacy's `memcpy` leaves the packet.
+    SpecificEffect([u8; 128]),
     /// A `CHAT_TYPE_INFO` line.
     Notice(&'static str),
     /// A ground item appeared or went, which the viewers are sent too.

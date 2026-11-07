@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 444 (the Gaya craft and market).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 445
+Last reviewed: 2026-11-07, after ledger section 445 (the biologist and the special-group tails).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 446
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -457,7 +457,11 @@ gift is `ported`: the line, the week, the cash and ticket collects, the renew an
 absorption over the wire. Since
 443 the changelook's add, remove and refine are `ported`: the guarded pair, the stamp, the
 clean and the banked look. Since 444 the Gaya craft and market are `ported`: the craft's
-guards and spend, the shelf's guards, buy and unlock, the refresh, and `/w_gaya`. The
+guards and spend, the shelf's guards, buy and unlock, the refresh, and `/w_gaya`. Since
+445 the biologist is `ported`: the ten missions, the takes, the waits, the picks, the
+rewards, and the save round-trip; and every creation stamps the `SIGVnum`, a worn unique
+or ring appends its attr rows and answers its effect path, and a stamped quest item runs
+its group's `sig_use`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1415,6 +1419,24 @@ owner should know about (178.5):
   subtype is not `COSTUME_SASH` (`G/char.cpp:10486`), so every costume that is no sash passes
   the gate. The Rewrite keeps the `&&` (ledger 442); only the missing absorbed socket refuses
   such a target.
+- The biologist's selective arm reads `byIndex` uninitialized for a choice past 2
+  (`G/Biologist.cpp:237-245`), and hands whatever byte to `arr_bonus[state][byIndex]`.
+  The Rewrite ends a choice past 2 silently (ledger 445).
+- The biologist's time arm indexes the two flowers unchecked (`G/Biologist.cpp:299-331`),
+  so an index past 1 reads past the table. The Rewrite ends an index past 1 silently
+  (ledger 445).
+- The biologist's open `memcpy`s 64 bytes from a title shorter than 64
+  (`G/Biologist.cpp:88`), reading past the literal. The Rewrite pads the title with
+  zeroes (ledger 445).
+- The biologist's close record leaves `dwLevelLimit` uninitialized
+  (`SendBiologistClosePacket`, `G/Biologist.cpp:334-352`, sets every field but it).
+  The Rewrite sends 0 (ledger 445).
+- Mission 6 names `POINT_RESIST_*` (59-62) where `aApplyInfo` wants apply types, so its
+  affect lands on `POINT_ATTBONUS_*` (54-57) instead (`constants.cpp:784-787`). The
+  Rewrite keeps the landed points: the honest client shows what the server did
+  (ledger 445).
+- The biologist's `DropObjects` has no caller and its state guard can never fire
+  (`state < 0 && state > 9` on a `DWORD`). The Rewrite ports no drop (ledger 445).
 
 ## Environment
 

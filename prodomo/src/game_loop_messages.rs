@@ -569,6 +569,19 @@ pub enum GameCommand {
         /// Where the game thread reports what the Gaya step did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Run one `CG_BIOLOGIST` for the character online under `vid`: an open, a take,
+    /// a pick, or a wait-shortening. The records reach the client through the answer;
+    /// the reply carries the rows to store.
+    Biologist {
+        /// The VID of the character whose client sent the record.
+        vid: common::vid::Vid,
+        /// The decoded step.
+        step: crate::game_state::BiologistStep,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the rows the step changed.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_ITEM_GIVE` for the character online under `vid`, answered as a move is.
     GiveItem {
         /// The VID of the character whose client sent the gift.
@@ -4005,6 +4018,29 @@ impl GameLoopController {
             vid,
             sub_header,
             pos,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a biologist request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn biologist(
+        &self,
+        vid: common::vid::Vid,
+        step: crate::game_state::BiologistStep,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Biologist {
+            vid,
+            step,
             mover,
             reply,
         })

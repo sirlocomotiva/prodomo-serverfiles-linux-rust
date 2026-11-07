@@ -96,6 +96,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         })
     }
 

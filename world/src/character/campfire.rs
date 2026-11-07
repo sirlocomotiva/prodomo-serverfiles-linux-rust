@@ -165,6 +165,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         })
     }
 
@@ -194,9 +195,11 @@ mod tests {
             let (mut items, protos) = holding(2);
             let mut points = warrior();
             let mut dice = FixedDraw::new(0);
+            let groups = gamedata::special_item_group::SpecialItemGroups::default();
             let mut gear = Gear {
                 points: &mut points,
                 protos: &protos,
+                groups: &groups,
                 dice: &mut dice,
                 recently_fought: false,
             };

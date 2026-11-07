@@ -1633,6 +1633,7 @@ fn game_len(header: u8) -> usize {
         GC_QUEST_CONFIRM => QUEST_CONFIRM_LEN,
         GC_FISHING => FISHING_LEN,
         GC_FISH_EVENT_INFO => FISH_EVENT_INFO_LEN,
+        GC_BIOLOGIST => BIOLOGIST_LEN,
         GC_DAILY_GIFT => DAILY_GIFT_LEN,
         GC_DIG_MOTION => DIG_MOTION_LEN,
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
@@ -40878,4 +40879,641 @@ fn read_point_move_bytes(record: &[u8]) -> PointMove {
         amount: i64::from_le_bytes(record[9..17].try_into().expect("eight")),
         value: i64::from_le_bytes(record[17..25].try_into().expect("eight")),
     }
+}
+
+/// `HEADER_CG_BIOLOGIST` (175) and `HEADER_GC_BIOLOGIST` (140).
+const CG_BIOLOGIST: u8 = 175;
+const GC_BIOLOGIST: u8 = 140;
+/// `sizeof(TPacketGCBiologist)`: the header, sub-header, selective byte, 64-byte
+/// title, five words, two three-word bonus arrays, and the seconds left.
+const BIOLOGIST_LEN: usize = 115;
+/// `POINT_BIOLOGIST_STATE`, `POINT_BIOLOGIST_ITEMS_TAKEN`, `POINT_BIOLOGIST_COMPLETED`.
+const POINT_BIO_STATE: u8 = 166;
+const POINT_BIO_TAKEN: u8 = 167;
+const POINT_BIO_DONE: u8 = 168;
+
+/// A `CG_BIOLOGIST`: the sub-header and the four bytes (`byChosenAffect`,
+/// `byDecreaseTimeIndex`, `byIsElixirUse`, `byIsBookTimeUse`).
+fn client_biologist(sub: u8, chosen: u8, flower: u8, elixir: u8, book: u8) -> Vec<u8> {
+    vec![CG_BIOLOGIST, sub, chosen, flower, elixir, book]
+}
+
+/// The parsed `GC_BIOLOGIST` window.
+struct BioWindow {
+    sub: u8,
+    selective: u8,
+    title: Vec<u8>,
+    level: u32,
+    req: u32,
+    takes: u32,
+    elixir: u32,
+    book: u32,
+    bonus_vnum: [u32; 3],
+    bonus_value: [u32; 3],
+    time: i32,
+}
+
+/// Parse a `GC_BIOLOGIST` the test already read.
+fn read_bio_window(record: &[u8]) -> BioWindow {
+    assert_eq!(
+        record.len(),
+        BIOLOGIST_LEN,
+        "a biologist window is 115 bytes"
+    );
+    assert_eq!(record[0], GC_BIOLOGIST);
+    let word = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("four"));
+    let end = record[3..67]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(64);
+    BioWindow {
+        sub: record[1],
+        selective: record[2],
+        title: record[3..3 + end].to_vec(),
+        level: word(67),
+        req: word(71),
+        takes: word(75),
+        elixir: word(79),
+        book: word(83),
+        bonus_vnum: [word(87), word(91), word(95)],
+        bonus_value: [word(99), word(103), word(107)],
+        time: i32::from_le_bytes(record[111..115].try_into().expect("four")),
+    }
+}
+
+/// The biologist seed: Alpha holds ten orc teeth (30006) at cell 0, ten elixirs
+/// (71035) at 1, one big flower (30170) at 2 and nine forget books (72350) at 3;
+/// answers the open database and server.
+fn bio_seed_materials() -> Option<(ScratchDatabase, Server)> {
+    let database = ScratchDatabase::create()?;
+    let (server, _console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, vnum, count) in [
+        (40, 0, 30_006, 10),
+        (41, 1, 71_035, 10),
+        (42, 2, 30_170, 1),
+        (43, 3, 72_350, 9),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    Some((database, server))
+}
+
+/// Alice's Alpha enters the game and reads the login burst, ready for a biologist
+/// request.
+fn bio_enter(server: &Server) -> Keyed {
+    let (mut keyed, _alpha, _items) = load_character(server, b"alice", 0);
+    let _entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    keyed
+}
+
+/// The client leaves and the disconnect banks the row: `condition` is the `SELECT`
+/// the banked row must satisfy.
+fn bio_banked(database: &ScratchDatabase, server: &mut Server, keyed: Keyed, condition: &str) {
+    drop(keyed);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(database, &format!("({condition})"));
+}
+
+/// `sys.custom.biologist`: Alpha opens the window on mission 0, hands over a tooth
+/// with the elixir, is told to wait, shortens the wait with the big flower, hands
+/// over the rest with the forget book clearing each wait, and finishes mission 0:
+/// the reward lands, affect 553 lands on `POINT_MOV_SPEED`, the state rises and
+/// the taken clears. Then the selective arm (which legacy guards with nothing but
+/// the shared guards) grants mission 1's picked bonus and rises again, and the
+/// disconnect banks state 2 with the taken cleared.
+#[test]
+fn a_biologist_hands_over_materials_and_finishes_a_mission() {
+    let Some((database, mut server)) = bio_seed_materials() else {
+        return;
+    };
+    let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    // An unknown sub-header and the close byte name no arm: both are silent.
+    keyed.send_record(&client_biologist(9, 0, 0, 0, 0));
+    keyed.still("a strange sub-header is silent");
+    keyed.send_record(&client_biologist(1, 0, 0, 0, 0));
+    keyed.still("the close byte is silent");
+    // The open shows mission 0: the title, level 30, the tooth and its ten takes.
+    keyed.send_record(&client_biologist(0, 0, 0, 0, 0));
+    let window = read_bio_window(&keyed.read_game());
+    assert_eq!(window.sub, 0, "the open sub-header");
+    assert_eq!(window.selective, 0, "mission 0 never selects");
+    assert_eq!(window.title, b"Din\xfeii de Orc", "the mission-0 title");
+    assert_eq!(window.level, 30, "the mission-0 level");
+    assert_eq!(window.req, 30_006, "the tooth");
+    assert_eq!(window.takes, 10, "the ten takes");
+    assert_eq!(window.elixir, 71_035, "the elixir vnum");
+    assert_eq!(window.book, 72_350, "the forget-book vnum");
+    assert_eq!(
+        (window.bonus_vnum, window.bonus_value),
+        ([8, 0, 0], [10, 0, 0]),
+        "mission 0 pays move speed 10"
+    );
+    assert!(window.time <= 0, "no wait runs: {}", window.time);
+    keyed.still("the open ends");
+    bio_first_take(&mut keyed);
+    bio_wait_and_flower(&mut keyed);
+    bio_middle_takes(&mut keyed);
+    bio_last_take(&mut keyed);
+    bio_selective_grant(&mut keyed);
+    drop(keyed);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT biologist_state = 2 AND biologist_items_taken = 0 AND biologist_completed = 0 \
+         FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// The first take with the elixir: the elixir line, the success command, the tooth
+/// and elixir counts fall, the taken rises to 1, and the window re-sends with the
+/// 1800 s wait running.
+fn bio_first_take(keyed: &mut Keyed) {
+    keyed.send_record(&client_biologist(2, 0, 0, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Elixirul Exploat\xe3rii a fost folosit\xe3 pentru a v\xe3 \
+              oferi o \xbaans\xe3 perfect\xe3 de oferire a obiectului!"
+        ),
+        "the elixir line"
+    );
+    assert_eq!(
+        update_fields(&keyed.read_game()),
+        (1, 1, 9),
+        "one elixir leaves"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        a_command_line(b"BINARY_BiologistProvidesMaterialSuccesfully"),
+        "the take lands"
+    );
+    assert_eq!(
+        update_fields(&keyed.read_game()),
+        (1, 0, 9),
+        "one tooth leaves"
+    );
+    let took = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (took.kind, took.amount, took.value),
+        (POINT_BIO_TAKEN, 1, 1),
+        "the taken rises"
+    );
+    let window = read_bio_window(&keyed.read_game());
+    assert_eq!(window.sub, 2, "the provide sub-header");
+    assert!(
+        (1790..=1800).contains(&window.time),
+        "the 1800 s wait runs: {}",
+        window.time
+    );
+    keyed.still("the take ends");
+}
+
+/// The next take meets the wait; the unheld small flower is refused; the big flower
+/// clears the 1800 s wait (1800 - 2700 reads free) and the window re-sends.
+fn bio_wait_and_flower(keyed: &mut Keyed) {
+    keyed.send_record(&client_biologist(2, 0, 0, 1, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r \xcenc\xe3 prelucrez ultimul obiect oferit! Te rog s\xe3 \
+              mai a\xbatep\xfei o vreme!"
+        ),
+        "the wait line"
+    );
+    keyed.still("the refused take ends");
+    keyed.send_record(&client_biologist(4, 0, 0, 0, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Ai nevoie de o floare pentru a putea reduce timpul de \
+              a\xbateptare!"
+        ),
+        "no small flower is held"
+    );
+    keyed.still("the refused flower ends");
+    keyed.send_record(&client_biologist(4, 0, 1, 0, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Timpul de a\xbateptare a fost redus cu 45 de minute!"
+        ),
+        "the 45 minutes line"
+    );
+    assert_eq!(
+        set_fields(&keyed.read_game()),
+        (1, 2, 0, 0),
+        "the big flower leaves"
+    );
+    let window = read_bio_window(&keyed.read_game());
+    assert_eq!(window.sub, 4, "the time sub-header");
+    assert!(window.time <= 0, "the wait cleared: {}", window.time);
+    keyed.still("the flower ends");
+}
+
+/// Takes 2 to 9, each with the elixir and the forget book: the elixir line, the
+/// success command, the three counts fall, the taken rises, the forgot line chats,
+/// and the window re-sends with the wait cleared.
+fn bio_middle_takes(keyed: &mut Keyed) {
+    for take in 2..=9u32 {
+        let teeth = 10 - take;
+        let elixirs = 10 - take;
+        let books = 10 - take;
+        keyed.send_record(&client_biologist(2, 0, 0, 1, 1));
+        assert_eq!(
+            keyed.read_game(),
+            an_info_line(
+                b"|cff808000[Biologist]|h|r Elixirul Exploat\xe3rii a fost folosit\xe3 pentru a \
+                  v\xe3 oferi o \xbaans\xe3 perfect\xe3 de oferire a obiectului!"
+            ),
+            "take {take}: the elixir line"
+        );
+        assert_eq!(
+            update_fields(&keyed.read_game()),
+            (1, 1, u16::try_from(elixirs).expect("elixirs fit")),
+            "take {take}: one elixir leaves"
+        );
+        assert_eq!(
+            keyed.read_game(),
+            a_command_line(b"BINARY_BiologistProvidesMaterialSuccesfully"),
+            "take {take}: the take lands"
+        );
+        assert_eq!(
+            update_fields(&keyed.read_game()),
+            (1, 0, u16::try_from(teeth).expect("teeth fit")),
+            "take {take}: one tooth leaves"
+        );
+        let took = read_point_move_bytes(&keyed.read_game());
+        assert_eq!(
+            (took.kind, took.amount, took.value),
+            (POINT_BIO_TAKEN, 1, i64::from(take)),
+            "take {take}: the taken rises"
+        );
+        assert_eq!(
+            keyed.read_game(),
+            an_info_line(
+                b"|cff808000[Biologist]|h|r Cartea Uit\xe3rii a fost folosit\xe3 pentru e elimina \
+                  urm\xe3toarea limit\xe3 de timp!"
+            ),
+            "take {take}: the forgot line"
+        );
+        if books == 0 {
+            assert_eq!(
+                set_fields(&keyed.read_game()),
+                (1, 3, 0, 0),
+                "take {take}: the last book leaves"
+            );
+        } else {
+            assert_eq!(
+                update_fields(&keyed.read_game()),
+                (1, 3, u16::try_from(books).expect("books fit")),
+                "take {take}: one book leaves"
+            );
+        }
+        let window = read_bio_window(&keyed.read_game());
+        assert_eq!(window.sub, 2, "take {take}: the provide sub-header");
+        assert!(window.time <= 0, "take {take}: the book cleared the wait");
+        keyed.still("the take ends");
+    }
+}
+/// The tenth take finishes mission 0: the elixir's and take's lines, the counts
+/// fall, the taken reaches 10, the reward 50109 lands in the freed cell 2, affect
+/// 553 lands move speed 10, the state rises to 1, the taken clears, and the window
+/// re-sends on mission 1.
+fn bio_last_take(keyed: &mut Keyed) {
+    keyed.send_record(&client_biologist(2, 0, 0, 1, 1));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Elixirul Exploat\xe3rii a fost folosit\xe3 pentru a v\xe3 \
+              oferi o \xbaans\xe3 perfect\xe3 de oferire a obiectului!"
+        ),
+        "the elixir line"
+    );
+    assert_eq!(
+        set_fields(&keyed.read_game()),
+        (1, 1, 0, 0),
+        "the last elixir leaves"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        a_command_line(b"BINARY_BiologistProvidesMaterialSuccesfully"),
+        "the take lands"
+    );
+    assert_eq!(
+        set_fields(&keyed.read_game()),
+        (1, 0, 0, 0),
+        "the last tooth leaves"
+    );
+    let took = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (took.kind, took.amount, took.value),
+        (POINT_BIO_TAKEN, 1, 10),
+        "the taken reaches 10"
+    );
+    assert_eq!(
+        set_fields(&keyed.read_game()),
+        (1, 830, 50_109, 1),
+        "the giftbox reward lands in its custom bank"
+    );
+    let rose = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (rose.kind, rose.amount, rose.value),
+        (POINT_BIO_STATE, 1, 1),
+        "the state rises to 1"
+    );
+    let cleared = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (cleared.kind, cleared.amount, cleared.value),
+        (POINT_BIO_TAKEN, -10, 0),
+        "the taken clears"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Cartea Uit\xe3rii a fost folosit\xe3 pentru e elimina \
+              urm\xe3toarea limit\xe3 de timp!"
+        ),
+        "the last book clears the finish's wait"
+    );
+    assert_eq!(
+        set_fields(&keyed.read_game()),
+        (1, 3, 0, 0),
+        "the last book leaves"
+    );
+    let window = read_bio_window(&keyed.read_game());
+    assert_eq!(window.sub, 2, "the provide sub-header");
+    assert_eq!(window.title, b"C\xe3r\xfeile Blestemate", "now mission 1");
+    assert_eq!(window.level, 40, "mission 1 wants 40");
+    assert_eq!(window.req, 30_047, "mission 1 wants the cursed book");
+    assert_eq!(
+        (window.bonus_vnum, window.bonus_value),
+        ([7, 0, 0], [8, 0, 0]),
+        "mission 1 pays attack speed 8"
+    );
+    assert!(window.time <= 0, "the finish cleared the wait");
+    // The affect's own records ride the outbox, behind the answer's: the speed
+    // rises, the look re-sends, and affect 553 lands move speed 10.
+    let faster = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (faster.kind, faster.amount, faster.value),
+        (19, 0, 110),
+        "move speed takes the mission's 10"
+    );
+    let update = keyed.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "the look re-sends");
+    let (added, _) = affect_moves(&[keyed.read_game()]);
+    assert_eq!(added, vec![(553, 19, 10)], "affect 553 lands");
+    keyed.still("the finish ends");
+}
+
+/// The selective arm on mission 1: legacy guards it with nothing but the shared
+/// guards, so choice 0 grants at once — the reward 50110 lands, affect 554 lands
+/// attack speed 8, the state rises to 2, and the window re-sends on mission 2.
+/// A choice past 2 is silent (legacy reads `byIndex` uninitialized there).
+fn bio_selective_grant(keyed: &mut Keyed) {
+    for chosen in [3, 4, 5, 255] {
+        keyed.send_record(&client_biologist(3, chosen, 0, 0, 0));
+        keyed.still("a choice past 2 is silent");
+    }
+    keyed.send_record(&client_biologist(3, 0, 0, 0, 0));
+    let cleared = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (cleared.kind, cleared.amount, cleared.value),
+        (POINT_BIO_TAKEN, 0, 0),
+        "below the last mission the taken clears first"
+    );
+    assert_eq!(
+        set_fields(&keyed.read_game()),
+        (1, 831, 50_110, 1),
+        "mission 1's giftbox lands beside the first"
+    );
+    let rose = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (rose.kind, rose.amount, rose.value),
+        (POINT_BIO_STATE, 1, 2),
+        "the state rises to 2"
+    );
+    let window = read_bio_window(&keyed.read_game());
+    assert_eq!(window.sub, 2, "the provide sub-header");
+    assert_eq!(window.title, b"Suvenirul Demonului", "now mission 2");
+    assert_eq!(window.req, 30_015, "mission 2 wants the demon souvenir");
+    // The picked affect's own records ride the outbox, behind the answer's: the
+    // speed total, then the add. No look re-sends for attack speed.
+    let quicker = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(quicker.kind, 17, "attack speed moves");
+    assert_eq!(quicker.amount, 0, "the affect compute sends the total");
+    let update = keyed.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "the look re-sends");
+    let (added, _) = affect_moves(&[keyed.read_game()]);
+    assert_eq!(added, vec![(554, 17, 8)], "affect 554 lands");
+    keyed.still("the pick ends");
+}
+
+/// `sys.custom.biologist`'s guards: a level exactly at the mission's passes; mission
+/// 9 opens (the bound is `>`, not `>=`); a selective mission with the taken at its
+/// takes answers the pick line (the bound is `>=`); a finished count on a plain
+/// mission overflows; and a completed book is done.
+#[test]
+fn a_biologist_refuses_the_wrong_state_level_and_done_missions() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Level 30 opens mission 0: the level bound is `<`, not `<=`.
+    sql(
+        &database,
+        "UPDATE player SET level = 30 WHERE name = 'Alpha'",
+    );
+    let mut keyed = bio_enter(&server);
+    keyed.send_record(&client_biologist(0, 0, 0, 0, 0));
+    let window = read_bio_window(&keyed.read_game());
+    assert_eq!(
+        window.title, b"Din\xfeii de Orc",
+        "level 30 opens mission 0"
+    );
+    keyed.still("the open ends");
+    bio_banked(
+        &database,
+        &mut server,
+        keyed,
+        "SELECT level = 30 AND biologist_state = 0 FROM player WHERE name = 'Alpha'",
+    );
+    // State 9 opens mission 9: the state bound is `>`, not `>=`.
+    sql(
+        &database,
+        "UPDATE player SET level = 154, biologist_state = 9 WHERE name = 'Alpha'",
+    );
+    let mut keyed = bio_enter(&server);
+    keyed.send_record(&client_biologist(0, 0, 0, 0, 0));
+    let window = read_bio_window(&keyed.read_game());
+    assert_eq!(
+        window.title, b"Bijuterie \xcen\xfeelepciune",
+        "state 9 opens mission 9"
+    );
+    assert_eq!(window.level, 94, "mission 9 wants 94");
+    assert_eq!(window.req, 30_252, "mission 9 wants the wisdom jewel");
+    assert_eq!(window.takes, 20, "mission 9 wants twenty");
+    assert_eq!(
+        (window.bonus_vnum, window.bonus_value),
+        ([1, 53, 54], [1100, 60, 140]),
+        "mission 9 offers its three bonuses"
+    );
+    assert_eq!(window.selective, 0, "nothing taken, nothing to pick");
+    keyed.still("the open ends");
+    bio_banked(&database, &mut server, keyed, "SELECT biologist_state = 9 AND biologist_items_taken = 0 FROM player WHERE name =          'Alpha'");
+    // Ten taken on mission 8 answers the pick line: the selective bound is `>=`.
+    sql(
+        &database,
+        "UPDATE player SET biologist_state = 8, biologist_items_taken = 10 WHERE name = 'Alpha'",
+    );
+    let mut keyed = bio_enter(&server);
+    keyed.send_record(&client_biologist(2, 0, 0, 0, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Alege unul dintre bonusurile din lista de recompens\xe3!"
+        ),
+        "the pick line"
+    );
+    keyed.still("the refused take ends");
+    bio_banked(&database, &mut server, keyed, "SELECT biologist_state = 8 AND biologist_items_taken = 10 FROM player WHERE name =          'Alpha'");
+    // Ten taken on mission 0 overflows: the mission is no selective one.
+    sql(
+        &database,
+        "UPDATE player SET biologist_state = 0, biologist_items_taken = 10 WHERE name = 'Alpha'",
+    );
+    let mut keyed = bio_enter(&server);
+    keyed.send_record(&client_biologist(2, 0, 0, 0, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r OverFlow objects. Contacta\xfei un membru din echipa \
+              noastr\xe3!"
+        ),
+        "the overflow line"
+    );
+    keyed.still("the refused take ends");
+    bio_banked(&database, &mut server, keyed, "SELECT biologist_state = 0 AND biologist_items_taken = 10 FROM player WHERE name =          'Alpha'");
+    // A completed book is done, on every arm.
+    sql(
+        &database,
+        "UPDATE player SET biologist_state = 0, biologist_items_taken = 0, biologist_completed = 1 \
+         WHERE name = 'Alpha'",
+    );
+    let mut keyed = bio_enter(&server);
+    keyed.send_record(&client_biologist(0, 0, 0, 0, 0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Misiunile Biologului Chaegirab au fost finalizate \xeen \
+              totalitate!"
+        ),
+        "the done line"
+    );
+    keyed.still("the refused open ends");
+}
+
+/// The last pick finishes the book: with twenty taken on mission 9, choice 0 pays
+/// the reward and the picked affect, the state clamps at 9 (the arm's room is 0),
+/// the all-done line chats, the completed sets, and the close goes out. The taken
+/// is *not* cleared first — only below the last mission does the arm clear it.
+#[test]
+fn a_biologist_last_pick_closes_the_finished_book() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET biologist_state = 9, biologist_items_taken = 20 WHERE name = 'Alpha'",
+    );
+    let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut keyed);
+    read_login_lines(&mut keyed, 0, None);
+    let _marks = read_login_letters(&mut keyed, true);
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    keyed.send_record(&client_biologist(3, 0, 0, 0, 0));
+    assert_eq!(
+        set_fields(&keyed.read_game()),
+        (1, 0, 71_105, 1),
+        "mission 9's reward lands in the first cell"
+    );
+    let rose = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (rose.kind, rose.amount, rose.value),
+        (POINT_BIO_STATE, 0, 9),
+        "the state clamps at 9"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(
+            b"|cff808000[Biologist]|h|r Toate misiune au fost completate cu succes! Felicit\xe3ri!"
+        ),
+        "the all-done line"
+    );
+    let done = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(
+        (done.kind, done.amount, done.value),
+        (POINT_BIO_DONE, 1, 1),
+        "the completed sets"
+    );
+    let close = keyed.read_game();
+    assert_eq!(close.len(), BIOLOGIST_LEN, "the close is a full window");
+    assert_eq!(close[0], GC_BIOLOGIST);
+    assert_eq!(close[1], 1, "the close sub-header");
+    assert!(
+        close[2..].iter().all(|byte| *byte == 0),
+        "the close zeroes every field: {close:02x?}"
+    );
+    // The picked affect's own records ride the outbox, behind the answer's.
+    let healthier = read_point_move_bytes(&keyed.read_game());
+    assert_eq!(healthier.kind, 6, "max HP moves");
+    assert_eq!(healthier.amount, 0, "the affect compute sends the total");
+    let (added, _) = affect_moves(&[keyed.read_game()]);
+    assert_eq!(added, vec![(562, 6, 1100)], "affect 562 lands max HP 1100");
+    keyed.still("the pick ends");
+    drop(keyed);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT biologist_state = 9 AND biologist_items_taken = 20 AND biologist_completed = 1 \
+         FROM player WHERE name = 'Alpha')",
+    );
 }

@@ -93,7 +93,7 @@
 use std::fmt;
 
 use crate::gc::{
-    HEADER_GC_ADD_FLY_TARGETING, HEADER_GC_AFFECT_ADD, HEADER_GC_CUBE_RENEWAL,
+    HEADER_GC_ADD_FLY_TARGETING, HEADER_GC_AFFECT_ADD, HEADER_GC_BIOLOGIST, HEADER_GC_CUBE_RENEWAL,
     HEADER_GC_DAILY_GIFT, HEADER_GC_DAMAGE_INFO, HEADER_GC_DIG_MOTION, HEADER_GC_FLY_TARGETING,
     HEADER_GC_PARTY_UPDATE, HEADER_GC_PLAYER_POINT_CHANGE, HEADER_GC_PREMIUM_PLAYERS,
     HEADER_GC_SKILL_LEVEL_NEW, HEADER_GC_WARP,
@@ -163,6 +163,16 @@ pub const GC_DAILY_GIFT_WIRE_SIZE: usize =
 /// Packed width of [`GcPartyUpdate`]: header, `DWORD`, two `BYTE`s, seven
 /// `short`s.
 pub const GC_PARTY_UPDATE_WIRE_SIZE: usize = 1 + 4 + 1 + 1 + 2 * GC_PARTY_AFFECT_SLOT_COUNT;
+/// The `szTitle` width of [`GcBiologist`].
+pub const GC_BIOLOGIST_TITLE_SIZE: usize = 64;
+
+/// The bonus array width of [`GcBiologist`] (`REWARD_BONUS_MAX_COUNT`).
+pub const GC_BIOLOGIST_BONUS_COUNT: usize = 3;
+
+/// Packed width of [`GcBiologist`]: header, sub-header, the selective byte, the title,
+/// five words, two three-word bonus arrays, and the seconds left.
+pub const GC_BIOLOGIST_WIRE_SIZE: usize =
+    1 + 1 + 1 + GC_BIOLOGIST_TITLE_SIZE + 5 * 4 + 2 * GC_BIOLOGIST_BONUS_COUNT * 4 + 4;
 
 /// Packed width of the 100-byte `category` field of [`GcCubeRenewalDate`].
 pub const GC_CUBE_CATEGORY_SIZE: usize = 100;
@@ -932,6 +942,103 @@ impl GcPartyUpdate {
             state: raw[5],
             percent_hp: raw[6],
             affects,
+        })
+    }
+}
+/// `HEADER_GC_BIOLOGIST` (140), 115 packed bytes.
+///
+/// Legacy `SPacketGCBiologist` (`G/packet.h:3181-3199`): the header, the GC sub-header,
+/// the selective byte, the 64-byte title, five words, two three-word bonus arrays, and
+/// the seconds left. `1 + 1 + 1 + 64 + 4 + 4 + 4 + 4 + 4 + 3 * 4 + 3 * 4 + 4 = 115`.
+/// The selective field is a C++ `bool`, which is one byte, so it is a raw `u8` here
+/// and the module has no `bool`; the title is a raw `char[64]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcBiologist {
+    /// The one-byte record header.
+    pub header: u8,
+    /// The legacy `bySubHeader` byte.
+    pub sub_header: u8,
+    /// The legacy `bIsSelective` byte.
+    pub selective: u8,
+    /// The raw `char[64]` title field. No text decoding, no NUL validation.
+    pub title: [u8; GC_BIOLOGIST_TITLE_SIZE],
+    /// The legacy `dwLevelLimit` word.
+    pub level_limit: u32,
+    /// The legacy `dwItemReq` word.
+    pub item_req: u32,
+    /// The legacy `dwItemReqCount` word.
+    pub item_req_count: u32,
+    /// The legacy `dwItemIncreaseRate` word.
+    pub item_increase_rate: u32,
+    /// The legacy `dwItemForgetTime` word.
+    pub item_forget_time: u32,
+    /// The legacy `dwRewardBonusVnum[3]` array.
+    pub bonus_vnum: [u32; GC_BIOLOGIST_BONUS_COUNT],
+    /// The legacy `dwRewardBonusValue[3]` array.
+    pub bonus_value: [u32; GC_BIOLOGIST_BONUS_COUNT],
+    /// The legacy `iTime` field: the seconds left.
+    pub time: i32,
+}
+
+impl GcBiologist {
+    /// The fixed header this record always carries.
+    pub const fn header() -> u8 {
+        HEADER_GC_BIOLOGIST
+    }
+
+    /// Append the 115 packed bytes to `out`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        out.push(Self::header());
+        out.push(self.sub_header);
+        out.push(self.selective);
+        out.extend_from_slice(&self.title);
+        out.extend_from_slice(&self.level_limit.to_le_bytes());
+        out.extend_from_slice(&self.item_req.to_le_bytes());
+        out.extend_from_slice(&self.item_req_count.to_le_bytes());
+        out.extend_from_slice(&self.item_increase_rate.to_le_bytes());
+        out.extend_from_slice(&self.item_forget_time.to_le_bytes());
+        for value in &self.bonus_vnum {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in &self.bonus_value {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&self.time.to_le_bytes());
+    }
+
+    /// Read the 115 packed bytes, rejecting any other header.
+    ///
+    /// # Errors
+    ///
+    /// [`GcNestedError::Truncated`] when the buffer is shorter than
+    /// [`GC_BIOLOGIST_WIRE_SIZE`], and [`GcNestedError::Header`] when a
+    /// complete-length buffer starts with any other byte.
+    pub fn decode(bytes: &[u8]) -> Result<Self, GcNestedError> {
+        let raw = take(bytes, GC_BIOLOGIST_WIRE_SIZE, "GcBiologist")?;
+        check_header(bytes, "GcBiologist", Self::header())?;
+        let mut title = [0u8; GC_BIOLOGIST_TITLE_SIZE];
+        title.copy_from_slice(&raw[3..3 + GC_BIOLOGIST_TITLE_SIZE]);
+        let mut bonus_vnum = [0u32; GC_BIOLOGIST_BONUS_COUNT];
+        let mut bonus_value = [0u32; GC_BIOLOGIST_BONUS_COUNT];
+        for (index, slot) in bonus_vnum.iter_mut().enumerate() {
+            *slot = u32_at(raw, 87 + index * 4);
+        }
+        for (index, slot) in bonus_value.iter_mut().enumerate() {
+            *slot = u32_at(raw, 99 + index * 4);
+        }
+        Ok(Self {
+            header: raw[0],
+            sub_header: raw[1],
+            selective: raw[2],
+            title,
+            level_limit: u32_at(raw, 67),
+            item_req: u32_at(raw, 71),
+            item_req_count: u32_at(raw, 75),
+            item_increase_rate: u32_at(raw, 79),
+            item_forget_time: u32_at(raw, 83),
+            bonus_vnum,
+            bonus_value,
+            time: i32_at(raw, 111),
         })
     }
 }
@@ -2138,5 +2245,55 @@ mod tests {
                 assert_eq!(got.next_read, value, "skills[{index}].next_read");
             }
         }
+    }
+
+    /// The biologist record pins every field to its byte: the header, the sub-header
+    /// and the selective byte, the 64-byte title, the five words in field order, the
+    /// two three-word bonus arrays, and the signed seconds left.
+    #[test]
+    fn the_biologist_record_pins_every_field_to_its_byte() {
+        let mut title = [0u8; GC_BIOLOGIST_TITLE_SIZE];
+        title[..4].copy_from_slice(b"Din\xfe");
+        let record = GcBiologist {
+            header: GcBiologist::header(),
+            sub_header: 2,
+            selective: 1,
+            title,
+            level_limit: 0x0102_0304,
+            item_req: 0x0a0b_0c0d,
+            item_req_count: 0x1122_3344,
+            item_increase_rate: 0x5566_7788,
+            item_forget_time: 0x99aa_bbcc,
+            bonus_vnum: [8, 0, 0],
+            bonus_value: [10, 0, 0],
+            time: -0x0a0b_0c0d,
+        };
+        let mut wire = Vec::new();
+        record.encode_into(&mut wire);
+        assert_eq!(wire.len(), 115, "1 + 1 + 1 + 64 + 20 + 24 + 4");
+        assert_eq!(wire[0], 140, "the header");
+        assert_eq!(wire[1], 2, "the sub-header");
+        assert_eq!(wire[2], 1, "the selective byte");
+        assert_eq!(&wire[3..7], b"Din\xfe", "the title's head");
+        assert_eq!(&wire[7..67], &[0u8; 60], "the title's tail");
+        assert_eq!(&wire[67..71], &0x0102_0304u32.to_le_bytes(), "level limit");
+        assert_eq!(&wire[71..75], &0x0a0b_0c0du32.to_le_bytes(), "item req");
+        assert_eq!(&wire[75..79], &0x1122_3344u32.to_le_bytes(), "item count");
+        assert_eq!(
+            &wire[79..83],
+            &0x5566_7788u32.to_le_bytes(),
+            "increase rate"
+        );
+        assert_eq!(&wire[83..87], &0x99aa_bbccu32.to_le_bytes(), "forget time");
+        assert_eq!(&wire[87..91], &8u32.to_le_bytes(), "bonus vnum 0");
+        assert_eq!(&wire[91..99], &[0u8; 8], "bonus vnums 1 and 2");
+        assert_eq!(&wire[99..103], &10u32.to_le_bytes(), "bonus value 0");
+        assert_eq!(&wire[103..111], &[0u8; 8], "bonus values 1 and 2");
+        assert_eq!(
+            &wire[111..115],
+            &(-0x0a0b_0c0di32).to_le_bytes(),
+            "the time"
+        );
+        assert_eq!(GcBiologist::decode(&wire).unwrap(), record, "round trip");
     }
 }

@@ -233,6 +233,7 @@ impl ItemLoad {
 pub fn plan_item_load(
     rows: &[ItemRow],
     protos: &ItemProtos,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
     inven_point: u16,
     level: u8,
 ) -> ItemLoad {
@@ -246,7 +247,7 @@ pub fn plan_item_load(
             pos: row.pos,
             why,
         };
-        let item = match item_from_row(row, protos) {
+        let item = match item_from_row(row, protos, groups) {
             Ok(item) => item,
             Err(why) => {
                 load.refused.push(refuse(why));
@@ -254,7 +255,7 @@ pub fn plan_item_load(
             }
         };
         let placement = if row.window_type == EWindows::Equipment as u8 {
-            wear_position(row, &item, protos, level, &storage)
+            wear_position(row, &item, protos, groups, level, &storage)
         } else {
             load_position(row).map(Some)
         };
@@ -315,11 +316,15 @@ pub fn plan_item_load(
 /// are not items (ADR-0005). Which of them fit is [`world::character::Safebox::open`]'s
 /// question; a cell past `u16` is outside every safebox, and it skips one.
 #[must_use]
-pub fn stored_items(rows: &[ItemRow], protos: &ItemProtos) -> (Vec<Item>, Vec<LoadRefusal>) {
+pub fn stored_items(
+    rows: &[ItemRow],
+    protos: &ItemProtos,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
+) -> (Vec<Item>, Vec<LoadRefusal>) {
     let mut items = Vec::with_capacity(rows.len());
     let mut refused = Vec::new();
     for row in rows {
-        match item_from_row(row, protos) {
+        match item_from_row(row, protos, groups) {
             Ok(mut item) => {
                 item.pos =
                     ItemPos::new(row.window_type, u16::try_from(row.pos).unwrap_or(u16::MAX));
@@ -336,8 +341,13 @@ pub fn stored_items(rows: &[ItemRow], protos: &ItemProtos) -> (Vec<Item>, Vec<Lo
     (items, refused)
 }
 
-/// The item a row describes, with its prototype's size and flags.
-fn item_from_row(row: &ItemRow, protos: &ItemProtos) -> Result<Item, Refused> {
+/// The item a row describes, with its prototype's size and flags. The load's `CreateItem`
+/// (`G/input_db.cpp:1472`) recomputes the `SIGVnum` from the groups, as every make does.
+fn item_from_row(
+    row: &ItemRow,
+    protos: &ItemProtos,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
+) -> Result<Item, Refused> {
     let proto = protos.get(row.vnum).ok_or(Refused::UnknownVnum)?;
     let mut item = Item::new(row.id, row.vnum);
     let size = u8::try_from(proto.size).map_err(|_| Refused::NoFootprint)?;
@@ -352,6 +362,7 @@ fn item_from_row(row: &ItemRow, protos: &ItemProtos) -> Result<Item, Refused> {
     item.attributes = std::array::from_fn(|index| {
         ItemAttribute::new(row.attributes[index].b_type, row.attributes[index].s_value)
     });
+    item.sig_vnum = world::character::sig_vnum_of(groups, proto, row.vnum);
     Ok(item)
 }
 
@@ -366,6 +377,7 @@ fn wear_position(
     row: &ItemRow,
     item: &Item,
     protos: &ItemProtos,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
     level: u8,
     storage: &CharacterItems,
 ) -> Result<Option<ItemPos>, Refused> {
@@ -387,7 +399,7 @@ fn wear_position(
         if storage.item_at(pos).is_some() || !meets_level_limit(proto, level) {
             return Ok(None);
         }
-        if let Some(system) = worn_system_not_ported(item, proto, protos)
+        if let Some(system) = worn_system_not_ported(item, proto, protos, groups)
             .filter(|system| *system != WornSystem::DragonSoul && *system != WornSystem::Timer)
         {
             return Err(Refused::WornNotPorted(system));
@@ -404,7 +416,7 @@ fn wear_position(
     if storage.item_at(pos).is_some() || !meets_level_limit(proto, level) {
         return Ok(None);
     }
-    if let Some(system) = worn_system_not_ported(item, proto, protos) {
+    if let Some(system) = worn_system_not_ported(item, proto, protos, groups) {
         return Err(Refused::WornNotPorted(system));
     }
     Ok(Some(pos))
@@ -498,6 +510,10 @@ mod tests {
     use gamedata::item_proto::ItemValue;
     use world::character::APPLY_ENERGY;
 
+    /// No groups: every loaded item stamps `SIGVnum` 0.
+    static GROUPS: std::sync::LazyLock<gamedata::special_item_group::SpecialItemGroups> =
+        std::sync::LazyLock::new(gamedata::special_item_group::SpecialItemGroups::default);
+
     fn owners() -> ItemProtos {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
         ItemProtos::load(&dir).expect("the owner's item protos load")
@@ -569,7 +585,7 @@ mod tests {
             b_type: 0x21,
             s_value: -0x0102,
         };
-        let load = plan_item_load(&[stored], &protos, 0, 1);
+        let load = plan_item_load(&[stored], &protos, &GROUPS, 0, 1);
         assert!(load.refused.is_empty(), "{:?}", load.refused);
         let [placed] = load.placed.as_slice() else {
             panic!("one item: {:?}", load.placed);
@@ -600,6 +616,7 @@ mod tests {
                 row(2, EWindows::BeltInventory as u8, 16, vnum),
             ],
             &protos,
+            &GROUPS,
             0,
             1,
         );
@@ -626,6 +643,7 @@ mod tests {
                 row(2, dragon_soul, 9, vnum),
             ],
             &protos,
+            &GROUPS,
             0,
             1,
         );
@@ -656,7 +674,7 @@ mod tests {
             row(5, INVENTORY, 20, small),
         ];
         rows[2].sockets = [0x0102, 0, 0, 0, 0, -3];
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         let rewritten = load.moved_rows(&rows);
         assert_eq!(
             rewritten[0],
@@ -702,7 +720,7 @@ mod tests {
             row(1, INVENTORY, 277, small),
             row(2, EWindows::BeltInventory as u8, 3, small),
         ];
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert!(load.refused.is_empty(), "{:?}", load.refused);
         assert_eq!(
             load.placed[1].moved_from,
@@ -727,7 +745,7 @@ mod tests {
             .map(|cell| row(cell + 1, INVENTORY, cell, small))
             .collect();
         rows.push(row(1000, INVENTORY, 0, small));
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert_eq!(load.placed.len(), 90);
         assert_eq!(
             load.refused,
@@ -762,7 +780,7 @@ mod tests {
             row(14, INVENTORY, 244, small),
             row(15, INVENTORY, 255, small),
         ];
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         let placed: Vec<u32> = load.placed.iter().map(|placed| placed.item.id).collect();
         assert_eq!(
             placed,
@@ -860,7 +878,7 @@ mod tests {
             row(2, EQUIPMENT, 5, 101),
             row(3, EQUIPMENT, u32::from(WEAR_MAX_NUM) - 1, 101),
         ];
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert!(load.refused.is_empty(), "{:?}", load.refused);
         let placed: Vec<PlacedAt> = load
             .placed
@@ -899,7 +917,7 @@ mod tests {
             twice,
         ]);
         let rows = [row(1, EQUIPMENT, 4, 100), row(2, EQUIPMENT, 5, 101)];
-        let at_level = plan_item_load(&rows, &protos, 0, 30);
+        let at_level = plan_item_load(&rows, &protos, &GROUPS, 0, 30);
         assert!(at_level.refused.is_empty(), "{:?}", at_level.refused);
         let cells: Vec<u16> = at_level
             .placed
@@ -907,7 +925,7 @@ mod tests {
             .map(|placed| placed.pos.cell)
             .collect();
         assert_eq!(cells, [184, 185]);
-        let under = plan_item_load(&rows, &protos, 0, 29);
+        let under = plan_item_load(&rows, &protos, &GROUPS, 0, 29);
         assert!(under.refused.is_empty(), "{:?}", under.refused);
         let placed: Vec<PlacedAt> = under
             .placed
@@ -952,7 +970,7 @@ mod tests {
             row(4, EQUIPMENT, 260, 100),
             row(5, EQUIPMENT, 70_000, 100),
         ];
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert!(load.refused.is_empty(), "{:?}", load.refused);
         let placed: Vec<PlacedAt> = load
             .placed
@@ -1004,7 +1022,7 @@ mod tests {
             .map(|index| row(index + 1, EQUIPMENT, index + 1, 101 + index))
             .chain([accessory])
             .collect();
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert!(load.placed.is_empty(), "{:?}", load.placed);
         let refused: Vec<(u32, Refused)> = load
             .refused
@@ -1052,7 +1070,7 @@ mod tests {
             row(3, EQUIPMENT, 3, 102),
             accessory,
         ];
-        let load = plan_item_load(&rows, &protos, 0, 1);
+        let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert!(load.refused.is_empty(), "{:?}", load.refused);
         let cells: Vec<u16> = load.placed.iter().map(|placed| placed.pos.cell).collect();
         assert_eq!(cells, [181, 182, 183, 184]);
@@ -1063,14 +1081,14 @@ mod tests {
         let protos = ItemProtos::from_rows(vec![shaped(100, ITEM_DS, 0)]);
         // Deck cells 64..76 ride the inventory window at 180 plus the cell.
         for (pos, cell) in [(64, 244), (69, 249), (75, 255)] {
-            let load = plan_item_load(&[row(1, EQUIPMENT, pos, 100)], &protos, 0, 1);
+            let load = plan_item_load(&[row(1, EQUIPMENT, pos, 100)], &protos, &GROUPS, 0, 1);
             assert!(load.refused.is_empty(), "pos {pos}: {:?}", load.refused);
             assert_eq!(load.placed.len(), 1, "pos {pos}");
             assert_eq!(load.placed[0].pos.cell, cell, "pos {pos}");
         }
         // Any other cell sets the stone aside, into the first free base cell.
         for pos in [0, 63, 76, 70_000] {
-            let load = plan_item_load(&[row(1, EQUIPMENT, pos, 100)], &protos, 0, 1);
+            let load = plan_item_load(&[row(1, EQUIPMENT, pos, 100)], &protos, &GROUPS, 0, 1);
             assert!(load.refused.is_empty(), "pos {pos}: {:?}", load.refused);
             assert_eq!(load.placed.len(), 1, "pos {pos}");
             assert_eq!(load.placed[0].pos.cell, 0, "pos {pos} lands in cell 0");

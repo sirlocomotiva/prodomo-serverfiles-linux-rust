@@ -724,6 +724,7 @@ impl GameState {
                 pos: protocol::item_pos::ItemPos::new(0, 0),
                 refine_element: 0,
                 transmutation: 0,
+                sig_vnum: 0,
             },
             x: at.0,
             y: at.1,
@@ -1011,6 +1012,7 @@ impl GameState {
         let attrs = Arc::clone(&self.item_attrs);
         let masks = Arc::clone(&self.item_masks);
         let protos = Arc::clone(&self.protos);
+        let groups = Arc::clone(&self.item_groups);
         let Some(ids) = self.item_ids.as_mut() else {
             tracing::warn!(
                 vnum,
@@ -1022,6 +1024,7 @@ impl GameState {
         let made = DropMade {
             attrs: &attrs,
             masks: masks.pairs(),
+            groups: &groups,
             now_secs,
             count_limit,
         };

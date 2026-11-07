@@ -507,6 +507,12 @@ pub struct PlayerSave {
     pub sungma_immune: u8,
     /// `tab.gaya`, the gaya currency.
     pub gaya: i32,
+    /// `tab.biologist_state`, the biologist mission index.
+    pub biologist_state: i16,
+    /// `tab.biologist_items_taken`.
+    pub biologist_items_taken: i16,
+    /// `tab.biologist_completed`.
+    pub biologist_completed: i16,
     /// The horse and its skill points.
     pub horse: PlayerHorse,
 }
@@ -543,6 +549,7 @@ pub async fn save_character(
          skill_group = $31, playtime_minutes = $32, \
          alignment = $33, sungma_str = $35, sungma_hp = $36, sungma_move = $37, \
          sungma_immune = $38, gaya = $39, conqueror_level_step = $40, conqueror_point = $41, \
+         biologist_state = $49, biologist_items_taken = $50, biologist_completed = $51, \
          horse_level = $42, horse_riding = $43, horse_hp = $44, horse_hp_droptime = $45, \
          horse_stamina = $46, horse_skill_point = $47, horse_name = $48, last_play_at = now() \
          WHERE account_id = $1 AND id = $2",
@@ -595,6 +602,9 @@ pub async fn save_character(
     .bind(save.horse.stamina)
     .bind(save.horse.skill_point)
     .bind(save.horse.name.as_slice())
+    .bind(save.biologist_state)
+    .bind(save.biologist_items_taken)
+    .bind(save.biologist_completed)
     .execute(store.pool())
     .await?;
     Ok(updated.rows_affected() == 1)
@@ -820,6 +830,12 @@ pub struct Character {
     /// The gaya currency. Legacy is an unsigned int (`TPlayerTable.gaya`); the column
     /// holds the 0 to `GAYA_MAX` range the point arm keeps.
     pub gaya: i32,
+    /// The biologist mission index (`biologist_state`), 0 to 9.
+    pub biologist_state: i16,
+    /// The materials taken for the mission (`biologist_items_taken`).
+    pub biologist_items_taken: i16,
+    /// Whether the missions are done (`biologist_completed`).
+    pub biologist_completed: i16,
     /// Conqueror experience banked towards the next conqueror level.
     pub conqueror_exp: i64,
     /// The quarters of the next conqueror level's cost banked (`conqueror_level_step`).
@@ -1062,7 +1078,8 @@ pub async fn load_character(
          p.dx, p.iq, p.sungma_str, p.sungma_hp, p.sungma_move, p.sungma_immune, \
          p.random_hp, p.random_sp, p.stat_point, p.skill_point, p.sub_skill_point, p.level_step, \
          p.stat_reset_count, \
-         p.hp, p.sp, p.stamina, p.gold, p.gaya, p.voice, p.part_base, p.part_main, p.alignment, \
+         p.hp, p.sp, p.stamina, p.gold, p.gaya, p.biologist_state, p.biologist_items_taken, \
+         p.biologist_completed, p.voice, p.part_base, p.part_main, p.alignment, \
          p.part_hair, p.part_sash, p.x, p.y, p.map_index, p.exit_x, p.exit_y, p.exit_map_index, \
          p.skill_group, p.playtime_minutes, \
          p.horse_level, p.horse_riding, p.horse_hp, p.horse_hp_droptime, p.horse_stamina, \
@@ -1110,6 +1127,9 @@ pub async fn load_character(
         stamina: row.try_get("stamina")?,
         gold: row.try_get("gold")?,
         gaya: row.try_get("gaya")?,
+        biologist_state: row.try_get("biologist_state")?,
+        biologist_items_taken: row.try_get("biologist_items_taken")?,
+        biologist_completed: row.try_get("biologist_completed")?,
         voice: narrow(row.try_get::<i16, _>("voice")?, "voice")?,
         part_base: narrow(row.try_get::<i16, _>("part_base")?, "part_base")?,
         main_part: narrow(row.try_get::<i32, _>("part_main")?, "part_main")?,

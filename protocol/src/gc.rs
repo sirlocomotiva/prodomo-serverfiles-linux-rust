@@ -109,6 +109,8 @@ pub const HEADER_GC_AFFECT_ADD: u8 = 126;
 pub const HEADER_GC_DIG_MOTION: u8 = 134;
 /// `HEADER_GC_DAMAGE_INFO` (135). `TPacketGCDamageInfo`, 10 packed bytes.
 pub const HEADER_GC_DAMAGE_INFO: u8 = 135;
+/// `HEADER_GC_BIOLOGIST` (140). `TPacketGCBiologist`, 115 packed bytes.
+pub const HEADER_GC_BIOLOGIST: u8 = 140;
 /// `HEADER_GC_PREMIUM_PLAYERS` (141). `TPacketGCPremiumPlayers`, 28 packed bytes.
 pub const HEADER_GC_PREMIUM_PLAYERS: u8 = 141;
 /// `HEADER_GC_DAILY_GIFT` (180). `TPacketGCDailyGift`, 111 packed bytes.

@@ -244,7 +244,7 @@ fn release_flat(
     };
     let worn = wear_of(pos);
     if worn.is_some() {
-        let applies = removal_applies(&item_applies(held, proto, gear.protos));
+        let applies = removal_applies(&item_applies(held, proto, gear.protos, gear.groups));
         for (apply, value) in applies {
             let records = gear.points.apply_point(apply, value);
             done.records
@@ -373,12 +373,15 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         });
         points.set_part(EParts::Weapon, 12019);
+        let groups = gamedata::special_item_group::SpecialItemGroups::default();
         let mut dice = Fixed(5);
         let mut gear = Gear {
             points: &mut points,
             protos: &protos,
+            groups: &groups,
             dice: &mut dice,
             recently_fought: false,
         };

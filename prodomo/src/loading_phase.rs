@@ -712,6 +712,11 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
         playtime: character.playtime_minutes,
         conqueror_exp: character.conqueror_exp,
         gaya: character.gaya,
+        biologist: [
+            u32::try_from(character.biologist_state).unwrap_or(0),
+            u32::try_from(character.biologist_items_taken).unwrap_or(0),
+            u32::try_from(character.biologist_completed).unwrap_or(0),
+        ],
     });
     points.set_conqueror_progress(
         i32::from(character.conqueror_level_step),
@@ -1532,6 +1537,9 @@ mod tests {
             stamina: 0x0011_2233,
             gold: 0x0012_3456_789a_bcde,
             gaya: 0x0012_3456,
+            biologist_state: 3,
+            biologist_items_taken: 4,
+            biologist_completed: 0,
             conqueror_exp: 0x00fe_dcba,
             conqueror_level_step: 0,
             conqueror_point: 0,
@@ -1948,8 +1956,8 @@ mod tests {
     }
 
     /// The slots whose state the Rewrite does not store are what `GetPoint` answers for them,
-    /// which is 0: the inventory unlocks, the biologist and the protected inventory. Gaya is
-    /// stored since ledger 352, so it reads the hero's own.
+    /// which is 0: the inventory unlocks and the protected inventory. Gaya is stored since
+    /// ledger 352 and the biologist since 445, so they read the hero's own.
     #[test]
     fn the_slots_of_unstored_state_are_zero() {
         let slots = points(&hero(), &hero_points());
@@ -1958,11 +1966,23 @@ mod tests {
             0x0012_3456,
             "the gaya is the row's own"
         );
+        assert_eq!(
+            slots[point::POINT_BIOLOGIST_STATE],
+            3,
+            "the mission is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_BIOLOGIST_ITEMS_TAKEN],
+            4,
+            "the taken is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_BIOLOGIST_COMPLETED],
+            0,
+            "the completed is the row's own"
+        );
         for kind in [
             point::POINT_INVEN,
-            point::POINT_BIOLOGIST_STATE,
-            point::POINT_BIOLOGIST_ITEMS_TAKEN,
-            point::POINT_BIOLOGIST_COMPLETED,
             point::POINT_SECURED_STATE,
             point::POINT_SECURED_PASSWORD,
         ] {

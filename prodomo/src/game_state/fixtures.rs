@@ -132,6 +132,7 @@ pub(super) fn points_at(level: u8, stamina: i32, exp: i64) -> Points {
         playtime: 0,
         conqueror_exp: 0,
         gaya: 0,
+        biologist: [0; 3],
     });
     let _ = points.compute_points();
     points

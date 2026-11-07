@@ -266,6 +266,9 @@ pub fn player_save(
         sungma_move: character.sungma_move,
         sungma_immune: character.sungma_immune,
         gaya: character.gaya,
+        biologist_state: character.biologist_state,
+        biologist_items_taken: character.biologist_items_taken,
+        biologist_completed: character.biologist_completed,
         horse: character.horse.clone(),
     }
 }
@@ -308,6 +311,9 @@ mod tests {
             stamina: 41,
             gold: 43,
             gaya: 45,
+            biologist_state: 3,
+            biologist_items_taken: 4,
+            biologist_completed: 0,
             voice: 47,
             part_base: 2,
             main_part: 1001,

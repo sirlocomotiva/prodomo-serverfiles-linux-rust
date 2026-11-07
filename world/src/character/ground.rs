@@ -144,6 +144,7 @@ pub fn drop_gold(
             pos: protocol::item_pos::ItemPos::new(0, 0),
             refine_element: 0,
             transmutation: 0,
+            sig_vnum: 0,
         },
         x: to.x,
         y: to.y,

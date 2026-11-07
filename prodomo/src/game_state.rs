@@ -64,6 +64,7 @@ use world::character::{add_from_client, sync_quickslots};
 mod affect;
 mod alignment;
 mod attr67;
+mod biologist;
 mod cards;
 mod changelook;
 mod conqueror;
@@ -149,6 +150,10 @@ mod warp_npc;
 mod whisper;
 
 pub use attr67::{Attr67Regist, ATTR67_ADD_WAIT_TIME, ATTR67_CLOSE, ATTR67_OPEN, ATTR67_REGIST};
+pub use biologist::{
+    BiologistStep, BIOLOGIST_CLOSE, BIOLOGIST_OPEN, BIOLOGIST_PROVIDES, BIOLOGIST_SELECTIVE,
+    BIOLOGIST_TIME,
+};
 pub use daily_gift::{
     DailyGiftState, DailyGiftStep, DAILY_GIFT_CLOSE, DAILY_GIFT_COLLECT,
     DAILY_GIFT_COLLECT_USE_TICKET, DAILY_GIFT_OPEN,
@@ -2351,6 +2356,7 @@ impl GameState {
             | GameCommand::Fishing { .. }
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
+            | GameCommand::Biologist { .. }
             | GameCommand::NpcsOn { .. }) => {
                 self.apply_ground(command);
                 None
@@ -4399,6 +4405,7 @@ impl GameState {
             command @ (GameCommand::Fishing { .. }
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
+            | GameCommand::Biologist { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_event_step(command),
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
         }
@@ -4459,6 +4466,12 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.daily_gift(vid, step, mover)),
+            GameCommand::Biologist {
+                vid,
+                step,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.biologist(vid, step, mover)),
             GameCommand::NpcsOn {
                 channel,
                 map,
@@ -5201,6 +5214,7 @@ impl GameState {
         let mut gear = points.map(|points| Gear {
             points,
             protos,
+            groups: &self.item_groups,
             dice: &mut self.dice,
             recently_fought: actor.recently_fought,
         });
@@ -7503,6 +7517,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         });
         let _ = points.compute_points();
         for kind in [common::point_slot::POINT_HP, common::point_slot::POINT_SP] {

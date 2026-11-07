@@ -61,8 +61,10 @@
 //!   level-up chains run through [`Points::gain_exp`] and [`Points::gain_conqueror_exp`],
 //!   whose callers own the quest trigger, guild and party updates, and save.
 //! - `POINT_GOLD`, `POINT_GAYA` and `POINT_INVEN`: the currencies and the inventory unlocks.
-//! - `POINT_POLYMORPH`, `POINT_ENERGY`, `POINT_COSTUME_ATTR_BONUS`, the three biologist arms
-//!   and the two protected-inventory arms: each drives its own system.
+//! - `POINT_POLYMORPH`, `POINT_ENERGY`, `POINT_COSTUME_ATTR_BONUS` and the two
+//!   protected-inventory arms: each drives its own system. The three biologist arms are
+//!   ported: the mission, the taken and the completed, kept beside the arrays as legacy's
+//!   `DWORD`s are, the state clamped to mission 9.
 //!
 //! The random hit and spell points a level-up adds (`iRandomHP` and `iRandomSP`) are 0: they
 //! grow only at a level-up, and the store gains their columns when the level-up is ported.
@@ -312,6 +314,8 @@ pub struct PointsRow {
     pub playtime: i32,
     /// Conqueror experience banked towards the next conqueror level.
     pub conqueror_exp: i64,
+    /// The biologist mission, taken and completed (`G/char.cpp:2426-2428`).
+    pub biologist: [u32; 3],
 }
 
 /// The four sungma slots, in the order of [`PointsRow::sungma`].
@@ -479,7 +483,7 @@ const COUNTERS: [usize; 5] = [
 ];
 
 /// The arms whose side effects are not ported. See the module note.
-const NOT_PORTED: [usize; 16] = [
+const NOT_PORTED: [usize; 13] = [
     point::POINT_CONQUEROR_LEVEL,
     point::POINT_CONQUEROR_EXP,
     point::POINT_CONQUEROR_LEVEL_STEP,
@@ -491,9 +495,6 @@ const NOT_PORTED: [usize; 16] = [
     point::POINT_POLYMORPH,
     point::POINT_ENERGY,
     point::POINT_COSTUME_ATTR_BONUS,
-    point::POINT_BIOLOGIST_STATE,
-    point::POINT_BIOLOGIST_ITEMS_TAKEN,
-    point::POINT_BIOLOGIST_COMPLETED,
     point::POINT_SECURED_STATE,
     point::POINT_SECURED_PASSWORD,
 ];
@@ -549,6 +550,13 @@ pub struct Points {
     /// The gaya currency (`m_points.gaya`): the `POINT_GAYA` arm keeps it, refused at
     /// `GAYA_MAX`.
     gaya: i32,
+    /// The biologist mission (`m_points.biologist_state`): the mission index, which the
+    /// store keeps and the load seeds (`G/char.cpp:2426`).
+    bio_state: u32,
+    /// The materials taken for the mission (`m_points.biologist_items_taken`).
+    bio_taken: u32,
+    /// Whether the missions are done (`m_points.biologist_completed`).
+    bio_completed: u32,
     immune_flag: u32,
     map_will: SungmaWill,
     armour: i32,
@@ -635,6 +643,9 @@ impl Points {
             random_sp: row.random_sp,
             inven_point: i32::from(row.inven_point),
             gaya: row.gaya,
+            bio_state: row.biologist[0],
+            bio_taken: row.biologist[1],
+            bio_completed: row.biologist[2],
             immune_flag: 0,
             map_will: sungma_will(row.map_index),
             armour: 0,
@@ -1302,6 +1313,44 @@ impl Points {
     pub fn gaya(&self) -> i32 {
         self.gaya
     }
+    /// `GetBiologistState`: the biologist mission index.
+    #[must_use]
+    pub const fn bio_state(&self) -> u32 {
+        self.bio_state
+    }
+
+    /// `GetBiologistItemsTaken`: the materials taken for the mission.
+    #[must_use]
+    pub const fn bio_taken(&self) -> u32 {
+        self.bio_taken
+    }
+
+    /// `GetBiologistCompleted`: whether the missions are done.
+    #[must_use]
+    pub const fn bio_completed(&self) -> u32 {
+        self.bio_completed
+    }
+
+    /// `SetBiologistState`, with the slot the points record sends.
+    fn set_bio_state(&mut self, value: u32) {
+        self.bio_state = value;
+        self.instant[point::POINT_BIOLOGIST_STATE] = i32::from_ne_bytes(value.to_ne_bytes());
+    }
+
+    /// `SetBiologistItemsTaken`, with the slot the points record sends.
+    fn set_bio_taken(&mut self, value: u32) {
+        self.bio_taken = value;
+        self.instant[point::POINT_BIOLOGIST_ITEMS_TAKEN] = i32::from_ne_bytes(value.to_ne_bytes());
+    }
+
+    /// `SetBiologistCompleted`, with the slot the points record sends.
+    fn set_bio_completed(&mut self, value: u32) {
+        self.bio_completed = value;
+        self.instant[point::POINT_BIOLOGIST_COMPLETED] = i32::from_ne_bytes(value.to_ne_bytes());
+    }
+
+    /// `BiologistConfig::MAX_MISSION_STATE` (`G/Biologist.h:8`): the last mission index.
+    const BIO_STATE_MAX: u32 = 9;
 
     /// `SetRace` (`G/char.cpp:2188-2196`): the race becomes `race`. A race past the
     /// eight main ones logs and leaves the race alone.
@@ -1804,6 +1853,32 @@ impl Points {
                 self.instant[kind] = self.gaya;
                 i64::from(self.gaya)
             }
+            // `POINT_BIOLOGIST_STATE` (`char.cpp:4731-4740`): the rise clamps to
+            // `MAX_MISSION_STATE` (9); a fall below 0 wraps, as the legacy `DWORD` does.
+            point::POINT_BIOLOGIST_STATE => {
+                let room = Self::BIO_STATE_MAX.saturating_sub(self.bio_state());
+                let room = i32::try_from(room).unwrap_or(i32::MAX);
+                amount = amount.min(room);
+                let value = self
+                    .bio_state()
+                    .wrapping_add(u32::from_ne_bytes(amount.to_ne_bytes()));
+                self.set_bio_state(value);
+                i64::from(value)
+            }
+            point::POINT_BIOLOGIST_ITEMS_TAKEN => {
+                let value = self
+                    .bio_taken()
+                    .wrapping_add(u32::from_ne_bytes(amount.to_ne_bytes()));
+                self.set_bio_taken(value);
+                i64::from(value)
+            }
+            point::POINT_BIOLOGIST_COMPLETED => {
+                let value = self
+                    .bio_completed()
+                    .wrapping_add(u32::from_ne_bytes(amount.to_ne_bytes()));
+                self.set_bio_completed(value);
+                i64::from(value)
+            }
             point::POINT_RAMADAN_CANDY_BONUS_EXP => {
                 self.instant[kind] = amount;
                 i64::from(amount)
@@ -1845,10 +1920,17 @@ impl Points {
     }
 
     /// The slots the recompute keeps from the fields legacy holds outside the array: the
-    /// inventory unlocks and the gaya (`char.cpp:2917-2926` reads the parts the same way).
+    /// inventory unlocks, the gaya, and the three biologist counters (`char.cpp:2917-2926`
+    /// reads the parts the same way).
     fn seed_kept_slots(&mut self) {
         self.instant[point::POINT_INVEN] = self.inven_point;
         self.instant[point::POINT_GAYA] = self.gaya;
+        self.instant[point::POINT_BIOLOGIST_STATE] =
+            i32::from_ne_bytes(self.bio_state.to_ne_bytes());
+        self.instant[point::POINT_BIOLOGIST_ITEMS_TAKEN] =
+            i32::from_ne_bytes(self.bio_taken.to_ne_bytes());
+        self.instant[point::POINT_BIOLOGIST_COMPLETED] =
+            i32::from_ne_bytes(self.bio_completed.to_ne_bytes());
     }
 
     /// An immunity slot: add, then set its `IMMUNE_*` bit while the slot is non-zero.
@@ -2232,6 +2314,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         }
     }
 
@@ -3228,6 +3311,40 @@ mod tests {
             .unwrap();
         assert!(records.is_empty());
         assert_eq!(points.gaya(), crate::character::GAYA_MAX - 1);
+    }
+    #[test]
+    fn the_biologist_arms_keep_their_counters_and_the_state_clamps_to_nine() {
+        let mut points = warrior();
+        let records = points
+            .point_change(point::POINT_BIOLOGIST_STATE, 1, true, false)
+            .unwrap();
+        assert_eq!(points.bio_state(), 1);
+        assert_eq!(points.get_point(point::POINT_BIOLOGIST_STATE), 1);
+        assert_eq!(
+            (records[0].kind, records[0].amount, records[0].value),
+            (166, 1, 1)
+        );
+        let records = points
+            .point_change(point::POINT_BIOLOGIST_ITEMS_TAKEN, 3, true, false)
+            .unwrap();
+        assert_eq!(points.bio_taken(), 3);
+        assert_eq!(
+            (records[0].kind, records[0].amount, records[0].value),
+            (167, 3, 3)
+        );
+        let records = points
+            .point_change(point::POINT_BIOLOGIST_STATE, 100, true, false)
+            .unwrap();
+        // The rise clamps: only the room to 9 moves, and the record carries it.
+        assert_eq!(points.bio_state(), 9);
+        assert_eq!(
+            (records[0].kind, records[0].amount, records[0].value),
+            (166, 8, 9)
+        );
+        // The recompute keeps the fields: the mission survives it.
+        let _ = points.compute_points();
+        assert_eq!(points.get_point(point::POINT_BIOLOGIST_STATE), 9);
+        assert_eq!(points.get_point(point::POINT_BIOLOGIST_ITEMS_TAKEN), 3);
     }
 
     #[test]

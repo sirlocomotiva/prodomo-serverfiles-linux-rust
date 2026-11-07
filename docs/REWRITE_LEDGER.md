@@ -47908,3 +47908,64 @@ Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
 --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+
+## 445. The biologist and the special-group tails
+
+`cg.game.biologist`, `gc.biologist`, the four `sub.RecvBiologistPacket.*`, and
+`sys.custom.biologist` are `ported`, all behind
+`a_biologist_hands_over_materials_and_finishes_a_mission`, with
+`a_biologist_refuses_the_wrong_state_level_and_done_missions` and
+`a_biologist_last_pick_closes_the_finished_book` pinning the bounds. The special
+item groups reach the world beside it: every creation stamps the `SIGVnum`, the
+load recomputes it, a worn unique or ring appends its attr rows and answers its
+effect path, and a stamped quest item runs its group's `sig_use`.
+
+The biologist (`G/Biologist.cpp`, `__ENABLE_BIOLOGIST_RENEWAL_SYSTEM__`) runs its
+ten missions through `GameCommand::Biologist`: the open guards (done, no mission,
+level) and sends the 115-byte window; the take guards (wait, pick-wait, overflow,
+no material), draws `number(1, 100)` against 60 or 100 with the elixir (71035),
+spends the material either way, waits, and on the last take pays the reward item
+and the lasting affect, rises the state and clears the taken — or lifts the wait
+for the client's pick on missions 8 and 9; the pick pays below the last mission
+and closes with the all-done line on it; the flower (30169, 30170) shortens the
+wait. The three counters are `POINT_BIOLOGIST_*` fields banked by migration 0033
+and loaded beside the row; the wait's end is the `biologist.timeout` quest flag
+against `quest_now()`. Six Defects stay out (STATUS): the uninitialized `byIndex`,
+the unchecked flower index, the 64-byte `memcpy`, the uninitialized close level,
+mission 6's `POINT_RESIST_*` landing on `POINT_ATTBONUS_*`, and the callerless
+`DropObjects` with its never-firing guard.
+
+The `SIGVnum` scans (`G/item_manager.cpp:412-441`) stamp the last group key in
+map order whose `quest` bag holds the vnum (`ITEM_QUEST`), or whose `special`
+bag holds it (unique, mount costume, ring). The stamp lands in `make_drop_item`
+and in the load's `item_from_row`; `Gear`, `Equipment`, `item_applies` and the
+quest giver thread the groups through. A worn unique or ring appends its attr
+rows (`sig_applies`, `G/item.cpp:1338-1374`) and answers its effect path as a new
+`MoveRecord::SpecificEffect` (`G/char_item.cpp:8592-8604`), rendered as
+`HEADER_GC_SPECIFIC_EFFECT` to the mover and the view. A used quest item with a
+stamp runs `Manager::sig_use` instead of `use_item`. All three are dead on the
+owner's data — its one group is type-less and no quest has a `sig_use` script —
+so unit tests prove them: the stamping scan, the ring's appended rows and effect
+path, the render, and the miss that runs nothing.
+
+Mutants killed by their own tests: the stamping zeroed, the applies tail dropped,
+the effect arm silenced, and `sig_use` answering the `use` event and true on a
+miss. The protocol count tests now pin 120 implemented game-to-client rows and 14
+missing. The save round-trip pins the three biologist columns with distinct
+patterns. Clippy's line lint split `bio_provide`'s finish into `bio_finish`, folded
+`session_head`'s alignment read into its literal, and gave the refuses scenario
+`bio_enter` and `bio_banked`.
+
+Client-packets: `cg.game.biologist` `ported` (84 `ported` / 12 `missing`).
+Sub-headers: the four `sub.RecvBiologistPacket.*` `ported` (56 `ported` / 57
+`missing`). Server-records: `gc.biologist` `ported` (82 `ported` / 12 `missing`).
+Systems: `sys.custom.biologist` `ported`. Gamedata and `sys.item.proto` note the
+tails; both stay `partial`: the bag is never drawn.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
+--locked --offline` clean; the suite 4945 passed, 0 failed in 44 targets; `cargo test
+--workspace --doc --locked --offline` clean; `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean. `legacy/` clean, `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

@@ -220,9 +220,11 @@ impl GameState {
         let attrs = std::sync::Arc::clone(&self.item_attrs);
         let masks = std::sync::Arc::clone(&self.item_masks);
         let protos = std::sync::Arc::clone(&self.protos);
+        let groups = std::sync::Arc::clone(&self.item_groups);
         let made = DropMade {
             attrs: &attrs,
             masks: masks.pairs(),
+            groups: &groups,
             now_secs,
             count_limit: self.item_count_limit,
         };

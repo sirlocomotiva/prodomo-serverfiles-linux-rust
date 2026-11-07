@@ -32,17 +32,15 @@
 //!
 //! The aura costume's drain (`item.cpp:983-1019` and `1045-1073`) and its armour
 //! (`char.cpp:2796-2819`), and the dragon soul alchemy bonus (`item.cpp:1092-1113`): the item
-//! load refuses aura costumes and dragon soul stones, so none of them is ever worn. The
-//! `ITEM_UNIQUE` and `ITEM_RING` arms apply the bonuses of a special attribute group, and the
-//! owner's `special_item_group.txt` has none (`gamedata::special_item_group`'s test
-//! `the_owners_file_is_one_group_of_twenty_nine_rows`), so both apply nothing.
+//! load refuses aura costumes and dragon soul stones, so none of them is ever worn.
 
 use common::enums::{EParts, EWearPositions};
 use common::item_slots::{EWindows, INVENTORY_MAX_NUM, WEAR_MAX_NUM};
 use gamedata::item_kind::{
     ARMOR_BODY, ARMOR_EAR, ARMOR_FOOTS, ARMOR_HEAD, ARMOR_NECK, ARMOR_SHIELD, ARMOR_WRIST,
     COSTUME_AURA, COSTUME_BODY, COSTUME_HAIR, COSTUME_MOUNT, COSTUME_SASH, COSTUME_WEAPON,
-    ITEM_ARMOR, ITEM_BELT, ITEM_COSTUME, ITEM_METIN, ITEM_PICK, ITEM_ROD, ITEM_WEAPON,
+    ITEM_ARMOR, ITEM_BELT, ITEM_COSTUME, ITEM_METIN, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_UNIQUE,
+    ITEM_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use protocol::item_pos::ItemPos;
@@ -157,6 +155,7 @@ pub struct Worn<'a> {
 pub struct Equipment<'a> {
     cells: [Option<Worn<'a>>; WEARS],
     protos: Option<&'a ItemProtos>,
+    groups: Option<&'a gamedata::special_item_group::SpecialItemGroups>,
 }
 
 impl Default for Equipment<'_> {
@@ -165,6 +164,7 @@ impl Default for Equipment<'_> {
         Self {
             cells: [None; WEARS],
             protos: None,
+            groups: None,
         }
     }
 }
@@ -184,7 +184,18 @@ impl<'a> Equipment<'a> {
         Self {
             cells,
             protos: Some(protos),
+            groups: None,
         }
+    }
+
+    /// [`of`](Self::of), with the groups a worn unique or ring's applies read.
+    #[must_use]
+    pub fn with_groups(
+        mut self,
+        groups: &'a gamedata::special_item_group::SpecialItemGroups,
+    ) -> Self {
+        self.groups = Some(groups);
+        self
     }
 
     /// `GetWear(wear)`: the item in a wear cell.
@@ -201,14 +212,18 @@ impl<'a> Equipment<'a> {
     }
 
     /// The worn loop of `ComputePoints`: each worn item in wear-cell order, with the applies
-    /// its `ModifyPoints(true)` makes.
+    /// its `ModifyPoints(true)` makes. Without groups ([`with_groups`](Self::with_groups)),
+    /// the sig tail reads an empty table, so it appends nothing.
     #[must_use]
     pub fn modify_points(&self) -> Vec<(Worn<'a>, Vec<(u8, i32)>)> {
+        static NONE: std::sync::LazyLock<gamedata::special_item_group::SpecialItemGroups> =
+            std::sync::LazyLock::new(gamedata::special_item_group::SpecialItemGroups::default);
         let Some(protos) = self.protos else {
             return Vec::new();
         };
+        let groups = self.groups.unwrap_or(&NONE);
         self.worn()
-            .map(|(_, worn)| (worn, item_applies(worn.item, worn.proto, protos)))
+            .map(|(_, worn)| (worn, item_applies(worn.item, worn.proto, protos, groups)))
             .collect()
     }
 
@@ -514,8 +529,15 @@ pub fn is_set_item(vnum: u32) -> bool {
 ///
 /// `protos` resolves the stones in the item's sockets and the item a sash has absorbed. An
 /// entry may carry `APPLY_NONE`, which changes nothing, as legacy calls `ApplyPoint` with it.
+/// A worn unique or ring with a `SIGVnum` appends its attr group's rows
+/// (`G/item.cpp:1338-1374`), which a group that went missing cuts short.
 #[must_use]
-pub fn item_applies(item: &Item, proto: &ItemProto, protos: &ItemProtos) -> Vec<(u8, i32)> {
+pub fn item_applies(
+    item: &Item,
+    proto: &ItemProto,
+    protos: &ItemProtos,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
+) -> Vec<(u8, i32)> {
     let mut applies = Vec::new();
     let accessory_grade = accessory_socket_grade(item, proto);
     if !is_accessory_for_socket(proto) {
@@ -568,7 +590,35 @@ pub fn item_applies(item: &Item, proto: &ItemProto, protos: &ItemProtos) -> Vec<
         let pct = rarity_pct(item.sockets[RARITY_SOCKET]);
         applies.push((APPLY_DEF_GRADE_BONUS, narrow(defence * pct / 100)));
     }
+    applies.extend(sig_applies(item, proto, groups));
     applies
+}
+
+/// The `ITEM_UNIQUE` and `ITEM_RING` tail of `ModifyPoints` (`G/item.cpp:1338-1374`): a
+/// worn item with a `SIGVnum` answers its special group's attr rows for its own vnum
+/// (`GetAttrVnum(item->GetVnum())`, the masked one). A group the reload dropped cuts
+/// the switch short (`break`), as does a row or attr group that went missing; the
+/// apply type narrows to a `BYTE`, so a row past 255 wraps the way the call does.
+fn sig_applies(
+    item: &Item,
+    proto: &ItemProto,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
+) -> Vec<(u8, i32)> {
+    if item.sig_vnum == 0 || (proto.item_type != ITEM_UNIQUE && proto.item_type != ITEM_RING) {
+        return Vec::new();
+    }
+    let key = i32::from_ne_bytes(item.sig_vnum.to_ne_bytes());
+    let Some(bag) = groups.special.get(&key) else {
+        return Vec::new();
+    };
+    let attr = i32::from_ne_bytes(bag.attr_vnum(item.vnum).to_ne_bytes());
+    let Some(attr) = groups.attr.get(&attr) else {
+        return Vec::new();
+    };
+    attr.attrs
+        .iter()
+        .map(|&(apply, value)| (apply.to_le_bytes()[0], value))
+        .collect()
 }
 
 /// `GetAccessorySocketGrade` (`item.cpp:2684-2692`): how many of an accessory's sockets hold a
@@ -786,6 +836,11 @@ mod tests {
     use super::*;
     use crate::character::apply::APPLY_MAX_SP;
     use crate::character::legacy_source::{auto_numbered, legacy, span, strip_comments, switches};
+
+    /// No groups: the sig tail appends nothing.
+    fn groups() -> gamedata::special_item_group::SpecialItemGroups {
+        gamedata::special_item_group::SpecialItemGroups::default()
+    }
 
     const INV: u8 = EWindows::Inventory as u8;
     const BODY: u16 = EWearPositions::Body as u16;
@@ -1084,7 +1139,8 @@ mod tests {
         );
         let sword = proto(10, ITEM_WEAPON, 0);
         let protos = ItemProtos::from_rows(vec![stone, not_a_stone, sword.clone()]);
-        let stones = |sockets| item_applies(&socketed(item(1, 10), sockets), &sword, &protos);
+        let stones =
+            |sockets| item_applies(&socketed(item(1, 10), sockets), &sword, &protos, &groups());
         // 0, 1 and 2 are the empty and blocked socket marks, a vnum with no proto adds nothing,
         // and -1 reads as the vnum 4294967295, which has none.
         let sockets = [1, STONE.try_into().expect("a vnum"), 2, -1, 12_010, 0];
@@ -1108,7 +1164,14 @@ mod tests {
         );
         let stone = applying(proto(STONE, ITEM_METIN, 0), [(APPLY_MAX_HP, 1_000); 3]);
         let protos = ItemProtos::from_rows(vec![neck.clone(), stone]);
-        let with = |sockets| item_applies(&socketed(item(1, 16_010), sockets), &neck, &protos);
+        let with = |sockets| {
+            item_applies(
+                &socketed(item(1, 16_010), sockets),
+                &neck,
+                &protos,
+                &groups(),
+            )
+        };
         // Grade 2 of at most 3: 515 + max(2, 515 * 20 / 100) and 7 + max(2, 7 * 20 / 100). The
         // third apply keeps its value, and socket 2 is the accessory's timer, not a stone.
         let stone = STONE.try_into().expect("a vnum");
@@ -1130,7 +1193,7 @@ mod tests {
         let protos = ItemProtos::from_rows(vec![belt.clone()]);
         let belted = socketed(item(2, 18_000), [1, 1, 0, 0, 0, 0]);
         assert_eq!(
-            item_applies(&belted, &belt, &protos),
+            item_applies(&belted, &belt, &protos, &groups()),
             [
                 (APPLY_MAX_HP, 110),
                 (APPLY_MAX_HP, 110),
@@ -1144,7 +1207,7 @@ mod tests {
         let protos = ItemProtos::from_rows(vec![ear.clone(), wrist.clone()]);
         let graded = socketed(item(3, 17_020), [3, 3, 0, 0, 0, 0]);
         assert_eq!(
-            item_applies(&graded, &ear, &protos),
+            item_applies(&graded, &ear, &protos, &groups()),
             [(APPLY_SKILL, 0x0080_0301)]
         );
         // A bracelet's sub-type number is `COSTUME_SASH`'s, so legacy's test keeps its NONE
@@ -1152,7 +1215,7 @@ mod tests {
         let graded = socketed(item(4, 14_020), [3, 3, 0, 0, 0, 0]);
         assert_eq!(ARMOR_WRIST, COSTUME_SASH);
         assert_eq!(
-            item_applies(&graded, &wrist, &protos),
+            item_applies(&graded, &wrist, &protos, &groups()),
             [(APPLY_SKILL, 0x0080_0301), (APPLY_NONE, 3), (APPLY_NONE, 0)]
         );
     }
@@ -1182,7 +1245,7 @@ mod tests {
         worn.attributes[3] = ItemAttribute::new(APPLY_ATTBONUS_HUMAN, -300);
         worn.attributes[4] = ItemAttribute::new(0, 99);
         assert_eq!(
-            item_applies(&worn, &sash, &protos),
+            item_applies(&worn, &sash, &protos, &groups()),
             [
                 // (515 + 2 * 17) * 25% is 137.25, rounded to 137, plus 1.
                 (APPLY_DEF_GRADE_BONUS, 138),
@@ -1202,10 +1265,10 @@ mod tests {
         // With nothing absorbed, a sash applies only its attributes.
         let mut empty = worn.clone();
         empty.sockets[SASH_ABSORBED_SOCKET] = 0;
-        assert_eq!(item_applies(&empty, &sash, &protos).len(), 3);
+        assert_eq!(item_applies(&empty, &sash, &protos, &groups()).len(), 3);
         let mut lost = worn;
         lost.sockets[SASH_ABSORBED_SOCKET] = 99_999;
-        assert_eq!(item_applies(&lost, &sash, &protos).len(), 3);
+        assert_eq!(item_applies(&lost, &sash, &protos, &groups()).len(), 3);
     }
 
     #[test]
@@ -1221,7 +1284,7 @@ mod tests {
         // Element 2 with a bonus of 15 and an attack of 40.
         worn.refine_element = 201_540_000;
         assert_eq!(
-            item_applies(&worn, &sash, &protos),
+            item_applies(&worn, &sash, &protos, &groups()),
             [
                 // v3 is not above v4, so 544 + 48, plus the element's 40: 632 * 25% is 158.
                 (APPLY_ATT_GRADE_BONUS, 159),
@@ -1233,7 +1296,7 @@ mod tests {
         );
         worn.refine_element = 0;
         assert_eq!(
-            item_applies(&worn, &sash, &protos),
+            item_applies(&worn, &sash, &protos, &groups()),
             [(APPLY_ATT_GRADE_BONUS, 149), (APPLY_MAGIC_ATT_GRADE, 85)]
         );
         // With v3 above v4, the attack is v3 + v5 and the magic attack v2 + v5.
@@ -1245,7 +1308,7 @@ mod tests {
         let absorbed = (ABSORBED_WEAPON + 1).try_into().expect("a vnum");
         let worn = socketed(item(2, 85_004), [25, absorbed, 0, 0, 0, 0]);
         assert_eq!(
-            item_applies(&worn, &sash, &protos),
+            item_applies(&worn, &sash, &protos, &groups()),
             // 560 + 48 is 608, and 288 + 48 is 336: a quarter of each, plus one.
             [(APPLY_ATT_GRADE_BONUS, 153), (APPLY_MAGIC_ATT_GRADE, 85)]
         );
@@ -1267,7 +1330,7 @@ mod tests {
         let protos = ItemProtos::from_rows(vec![armour.clone()]);
         let rare = |rarity| {
             let worn = socketed(item(1, 11_210), [0, 0, 0, 0, rarity, 0]);
-            item_applies(&worn, &armour, &protos)
+            item_applies(&worn, &armour, &protos, &groups())
         };
         // Rarity 2 adds half: 513 + 256 and 261 + 130, then (291 + 2 * 17) * 50%.
         assert_eq!(
@@ -1304,7 +1367,10 @@ mod tests {
         );
         let protos = ItemProtos::from_rows(vec![sword.clone()]);
         let worn = socketed(item(2, 10), [0, 0, 0, 0, 2, 0]);
-        assert_eq!(item_applies(&worn, &sword, &protos), [(APPLY_MAX_HP, 513)]);
+        assert_eq!(
+            item_applies(&worn, &sword, &protos, &groups()),
+            [(APPLY_MAX_HP, 513)]
+        );
     }
 
     #[test]
@@ -1323,12 +1389,15 @@ mod tests {
         );
         let protos = ItemProtos::from_rows(vec![costume.clone(), mount.clone(), sword.clone()]);
         assert_eq!(
-            item_applies(&item(1, 41_001), &costume, &protos),
+            item_applies(&item(1, 41_001), &costume, &protos, &groups()),
             [(APPLY_NONE, 5), (APPLY_MAX_HP, 0x0102), (APPLY_NONE, 0)]
         );
-        assert_eq!(item_applies(&item(2, 71_224), &mount, &protos), []);
         assert_eq!(
-            item_applies(&item(3, 10), &sword, &protos),
+            item_applies(&item(2, 71_224), &mount, &protos, &groups()),
+            []
+        );
+        assert_eq!(
+            item_applies(&item(3, 10), &sword, &protos, &groups()),
             [(APPLY_MAX_HP, 0x0102)]
         );
     }
@@ -1345,12 +1414,15 @@ mod tests {
             worn
         };
         assert_eq!(
-            item_applies(&with_attributes(71_134), &other, &protos),
+            item_applies(&with_attributes(71_134), &other, &protos, &groups()),
             [(APPLY_MAX_HP, 0x0203), (APPLY_SKILL, -0x0102)]
         );
         for vnum in ATTRIBUTES_SKIPPED {
             let skipped = proto(vnum, ITEM_ARMOR, ARMOR_BODY);
-            assert_eq!(item_applies(&with_attributes(vnum), &skipped, &protos), []);
+            assert_eq!(
+                item_applies(&with_attributes(vnum), &skipped, &protos, &groups()),
+                []
+            );
         }
     }
 
@@ -1362,7 +1434,7 @@ mod tests {
         let refined = |element, proto: &ItemProto| {
             let mut worn = item(1, proto.vnum);
             worn.refine_element = element;
-            item_applies(&worn, proto, &protos)
+            item_applies(&worn, proto, &protos, &groups())
         };
         assert_eq!(
             refined(301_234_000, &sword),
@@ -1880,5 +1952,45 @@ mod tests {
         assert_eq!(word(0x0001_0203), 0x0203);
         assert_eq!(word(0xfffe_0405), 0x0405);
         assert_eq!(word(0x0506), 0x0506);
+    }
+
+    /// The unique and ring tail of `ModifyPoints` (`G/item.cpp:1338-1374`): a worn
+    /// ring with a `SIGVnum` appends its attr group's rows for its own vnum; a
+    /// missing group, row or attr group appends nothing.
+    #[test]
+    fn a_worn_ring_appends_its_attr_groups_rows() {
+        use gamedata::special_item_group::{
+            GroupType, SpecialAttrGroup, SpecialItemGroup, SpecialItemGroups, SpecialItemInfo,
+        };
+        let bag = SpecialItemGroup {
+            vnum: 900,
+            group_type: GroupType::Special,
+            items: vec![SpecialItemInfo {
+                vnum: 50011,
+                count: 42,
+                rare: 0,
+            }],
+            totals: vec![1],
+        };
+        let attr = SpecialAttrGroup {
+            vnum: 42,
+            effect_file: b"50011.effect".to_vec(),
+            attrs: vec![(u32::from(APPLY_MAX_HP), 100)],
+        };
+        let mut groups = SpecialItemGroups::default();
+        groups.special.insert(900, bag);
+        groups.attr.insert(42, attr);
+        let ring = proto(50011, ITEM_RING, 0);
+        let protos = ItemProtos::from_rows(vec![ring.clone()]);
+        let mut worn = item(1, 50011);
+        worn.sig_vnum = 900;
+        assert_eq!(
+            item_applies(&worn, &ring, &protos, &groups),
+            [(APPLY_MAX_HP, 100)]
+        );
+        worn.sig_vnum = 0;
+        assert_eq!(item_applies(&worn, &ring, &protos, &groups), []);
+        worn.sig_vnum = 901;
+        assert_eq!(item_applies(&worn, &ring, &protos, &groups), []);
     }
 }

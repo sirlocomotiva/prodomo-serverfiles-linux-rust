@@ -224,6 +224,12 @@ pub struct Item {
     /// grid walk runs no iterations. This field is `u8` and is set explicitly,
     /// so a caller that has not read the prototype must say what it means.
     pub size: u8,
+    /// `m_dwSIGVnum` (`item.h:415`): the special group the creation scans matched,
+    /// as a `DWORD`.
+    ///
+    /// It is memory-only: the row stores no column for it, and every construction
+    /// (`CreateItem`) recomputes it from the groups (`G/item_manager.cpp:412-441`).
+    pub sig_vnum: u32,
     /// Where the item currently is. [`NPOS`] until it is stored.
     ///
     /// Legacy keeps the window and cell in `CItem::m_window_type` and
@@ -253,6 +259,8 @@ impl Item {
             sockets: [0; SOCKETS],
             attributes: [ItemAttribute::new(0, 0); ATTRIBUTES],
             size: 1,
+            // `CItem(dwVnum)` zeroes it (`G/item.cpp:41`).
+            sig_vnum: 0,
             pos: NPOS,
         }
     }

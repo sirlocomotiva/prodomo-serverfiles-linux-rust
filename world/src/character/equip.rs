@@ -27,10 +27,9 @@
 //! the points' polymorph race. Unreachable here, and so not written: the ride item's wedding
 //! check (a unique, which is not ported, refuses later), the unique unstack, the
 //! wedding checks `__FIX_COSTUM_NUNTA_PESTE_COSTUM_NORMAL__` repeats (the `ENABLE_WEDDING_FIX`
-//! ones return first), the special item group effect (a dangling `else` binds it to the sash
-//! arm), `REAL_TIME_FIRST_USE`, the mount quest, the aura window, `IsSecured`, the quickslot
-//! sync, and `EquipItem`'s `IsExchanging` (`:8315`): the move and the use refuse an offered
-//! item before they get here.
+//! ones return first), `REAL_TIME_FIRST_USE`, the mount quest, the aura window, `IsSecured`,
+//! the quickslot sync, and `EquipItem`'s `IsExchanging` (`:8315`): the move and the use refuse
+//! an offered item before they get here.
 
 use common::enums::EWearPositions;
 use common::item_slots::{
@@ -83,6 +82,8 @@ pub struct Gear<'a> {
     pub points: &'a mut Points,
     /// The prototypes.
     pub protos: &'a ItemProtos,
+    /// The special item groups, which a worn unique or ring's applies and effect read.
+    pub groups: &'a gamedata::special_item_group::SpecialItemGroups,
     /// The draw a sash's absorption is rolled from.
     pub dice: &'a mut dyn Dice,
     /// Whether the character attacked or used a skill in the last 1.5 s
@@ -104,6 +105,30 @@ pub(crate) fn roll_sash(item: &mut Item, proto: &ItemProto, dice: &mut dyn Dice)
         };
     }
     rolled
+}
+
+/// The unique and ring tail of the equip effect switch
+/// (`G/char_item.cpp:8592-8604`): the 128 raw path bytes of the attr group the worn
+/// item's `SIGVnum` answers for its own vnum (`GetAttrVnum(item->GetVnum())`, the
+/// masked one), zero-padded as legacy's `memcpy` leaves the packet. `None` when the
+/// item carries no `SIGVnum`, is not a unique or a ring, or its group, row or attr
+/// group went missing. A path past 128 bytes is cut the way the call cuts it.
+fn sig_effect_path(
+    item: &Item,
+    proto: &ItemProto,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
+) -> Option<[u8; 128]> {
+    if item.sig_vnum == 0 || (proto.item_type != ITEM_UNIQUE && proto.item_type != ITEM_RING) {
+        return None;
+    }
+    let key = i32::from_ne_bytes(item.sig_vnum.to_ne_bytes());
+    let bag = groups.special.get(&key)?;
+    let attr = i32::from_ne_bytes(bag.attr_vnum(item.vnum).to_ne_bytes());
+    let group = groups.attr.get(&attr)?;
+    let mut path = [0u8; 128];
+    let len = group.effect_file.len().min(path.len());
+    path[..len].copy_from_slice(&group.effect_file[..len]);
+    Some(path)
 }
 
 impl core::fmt::Debug for Gear<'_> {
@@ -190,6 +215,7 @@ pub fn worn_system_not_ported(
     item: &Item,
     proto: &ItemProto,
     protos: &ItemProtos,
+    groups: &gamedata::special_item_group::SpecialItemGroups,
 ) -> Option<WornSystem> {
     if proto.item_type == ITEM_COSTUME {
         match proto.sub_type {
@@ -215,7 +241,7 @@ pub fn worn_system_not_ported(
     if proto.immune_flags != 0 {
         return Some(WornSystem::Immunity);
     }
-    item_applies(item, proto, protos)
+    item_applies(item, proto, protos, groups)
         .into_iter()
         .find(|(apply, _)| !apply_is_ported(*apply))
         .map(|(apply, _)| WornSystem::Apply(apply))
@@ -653,8 +679,7 @@ impl<'s, 'g> Equipper<'s, 'g> {
 
     /// The applies, then the parts switch, of `ModifyPoints` (`G/item.cpp:781-1375`).
     fn modify_points(&mut self, wear: u16, item: &Item, proto: &'g ItemProto, add: bool) {
-        let protos = self.gear.protos;
-        let applies = item_applies(item, proto, protos);
+        let applies = item_applies(item, proto, self.gear.protos, self.gear.groups);
         let applies = if add {
             applies
         } else {
@@ -665,7 +690,7 @@ impl<'s, 'g> Equipper<'s, 'g> {
             self.push_points(records);
         }
         let points = &*self.gear.points;
-        let change = Equipment::of(self.items, protos).part_change(
+        let change = Equipment::of(self.items, self.gear.protos).part_change(
             wear,
             Worn { item, proto },
             add,
@@ -684,7 +709,7 @@ impl<'s, 'g> Equipper<'s, 'g> {
     /// The tail of `EquipTo` and `Unequip`: a set piece recomputes the points, anything else
     /// the battle points, and the look is sent either way.
     fn recompute(&mut self, vnum: u32) {
-        let equipment = Equipment::of(self.items, self.gear.protos);
+        let equipment = Equipment::of(self.items, self.gear.protos).with_groups(self.gear.groups);
         let records = if is_set_item(vnum) {
             self.gear.points.compute_points_with(&equipment)
         } else {
@@ -852,7 +877,9 @@ impl<'s, 'g> Equipper<'s, 'g> {
                 WornSystem::DragonSoul,
             )));
         }
-        if let Some(system) = worn_system_not_ported(item, proto, self.gear.protos) {
+        if let Some(system) =
+            worn_system_not_ported(item, proto, self.gear.protos, self.gear.groups)
+        {
             return Err(MoveRefused::NotPorted(Unported::Worn(system)));
         }
         Ok(wear)
@@ -909,6 +936,12 @@ impl<'s, 'g> Equipper<'s, 'g> {
             });
         if let Some(effect) = effect {
             self.trail.records.push(MoveRecord::Effect(effect));
+        }
+        // The unique and ring tail (`G/char_item.cpp:8592-8604`): a worn item with a
+        // `SIGVnum` answers its special group's effect path for its own vnum. A group
+        // the reload dropped silences it, as does a row or attr group that went missing.
+        if let Some(path) = sig_effect_path(&item, proto, self.gear.groups) {
+            self.trail.records.push(MoveRecord::SpecificEffect(path));
         }
         Ok(swapped)
     }
@@ -1171,6 +1204,10 @@ mod tests {
     use crate::character::item_move::{MoveFacts, MoveRecord};
     use crate::character::points::PointsRow;
 
+    /// No groups: the sig tail appends nothing.
+    static GROUPS: std::sync::LazyLock<gamedata::special_item_group::SpecialItemGroups> =
+        std::sync::LazyLock::new(gamedata::special_item_group::SpecialItemGroups::default);
+
     const INV: u8 = EWindows::Inventory as u8;
     const WEAPON: u16 = EWearPositions::Weapon as u16;
     const BODY: u16 = EWearPositions::Body as u16;
@@ -1190,6 +1227,7 @@ mod tests {
     const MOUNT_COSTUME: u32 = 52_001;
     const MALE_ONLY: u32 = 11_230;
     const UNIQUE: u32 = 71_001;
+    const RING: u32 = 70_001;
     const LEVEL_TEN_SWORD: u32 = 31;
     const UNIQUE_FLAGGED: u32 = 11_240;
     const SPECIAL: u32 = 71_049;
@@ -1301,6 +1339,7 @@ mod tests {
             proto(WEDDING, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY),
             male_only,
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
+            proto(RING, ITEM_RING, 0, 0),
             level_ten,
             proto(UNIQUE_FLAGGED, ITEM_ARMOR, ARMOR_BODY, WEARABLE_UNIQUE),
             // `ITEM_USE`, 3, `USE_SPECIAL`, 10.
@@ -1345,6 +1384,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         })
     }
 
@@ -1399,6 +1439,7 @@ mod tests {
             let mut gear = Gear {
                 points: &mut self.points,
                 protos: &protos,
+                groups: &GROUPS,
                 dice: &mut dice,
                 recently_fought: self.recently_fought,
             };
@@ -1430,6 +1471,7 @@ mod tests {
             let mut gear = Gear {
                 points: &mut self.points,
                 protos: &protos,
+                groups: &GROUPS,
                 dice: &mut dice,
                 recently_fought: self.recently_fought,
             };
@@ -1652,6 +1694,7 @@ mod tests {
         let mut gear = Gear {
             points: &mut case.points,
             protos: &protos,
+            groups: &GROUPS,
             dice: &mut dice,
             recently_fought: false,
         };
@@ -1667,6 +1710,7 @@ mod tests {
         let mut gear = Gear {
             points: &mut case.points,
             protos: &protos,
+            groups: &GROUPS,
             dice: &mut dice,
             recently_fought: false,
         };
@@ -1705,6 +1749,7 @@ mod tests {
             let mut gear = Gear {
                 points: &mut case.points,
                 protos: &protos,
+                groups: &GROUPS,
                 dice: &mut dice,
                 recently_fought: false,
             };
@@ -2175,6 +2220,7 @@ mod tests {
         let mut gear = Gear {
             points: &mut points,
             protos: &protos,
+            groups: &GROUPS,
             dice: &mut dice,
             recently_fought: false,
         };
@@ -2199,5 +2245,59 @@ mod tests {
             .filter(|change| matches!(change, ItemChange::Created(_)))
             .count();
         assert_eq!(created, 2, "the unknown vnum makes nothing");
+    }
+
+    /// The unique and ring tail of the equip effect switch
+    /// (`G/char_item.cpp:8592-8604`): a ring with a `SIGVnum` sends the attr
+    /// group's effect path, zero-padded; without a group it sends nothing.
+    #[test]
+    fn a_ring_with_a_sig_sends_its_groups_effect_path() {
+        use gamedata::special_item_group::{
+            GroupType, SpecialAttrGroup, SpecialItemGroup, SpecialItemGroups, SpecialItemInfo,
+        };
+        let bag = SpecialItemGroup {
+            vnum: 900,
+            group_type: GroupType::Special,
+            items: vec![SpecialItemInfo {
+                vnum: RING,
+                count: 42,
+                rare: 0,
+            }],
+            totals: vec![1],
+        };
+        let attr = SpecialAttrGroup {
+            vnum: 42,
+            effect_file: b"ring.effect".to_vec(),
+            attrs: Vec::new(),
+        };
+        let mut groups = SpecialItemGroups::default();
+        groups.special.insert(900, bag);
+        groups.attr.insert(42, attr);
+        let equip = |groups: &SpecialItemGroups| {
+            let mut ring = Item::new(7, RING);
+            ring.sig_vnum = 900;
+            let mut case = Case::new(&[(inv(3), ring)]);
+            let protos = protos();
+            let mut dice = Fixed(5);
+            let mut gear = Gear {
+                points: &mut case.points,
+                protos: &protos,
+                groups,
+                dice: &mut dice,
+                recently_fought: false,
+            };
+            let mut equipper = Equipper::new(&mut case.items, &mut gear, 90);
+            let item = equipper.items().item(7).cloned().expect("held");
+            equipper.equip_item(&item).expect("equips");
+            equipper.into_trail()
+        };
+        let trail = equip(&groups);
+        let mut path = [0u8; 128];
+        path[..11].copy_from_slice(b"ring.effect");
+        assert!(trail.records.contains(&MoveRecord::SpecificEffect(path)));
+        assert!(equip(&GROUPS)
+            .records
+            .iter()
+            .all(|record| !matches!(record, MoveRecord::SpecificEffect(_))));
     }
 }

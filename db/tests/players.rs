@@ -724,6 +724,9 @@ fn whole_save() -> PlayerSave {
         sungma_move: 17,
         sungma_immune: 19,
         gaya: 12345,
+        biologist_state: 3,
+        biologist_items_taken: 0x0405,
+        biologist_completed: 1,
         horse: db::players::PlayerHorse {
             level: 23,
             riding: true,
@@ -811,6 +814,18 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
     assert_eq!(read.sungma_move, save.sungma_move);
     assert_eq!(read.sungma_immune, save.sungma_immune);
     assert_eq!(read.gaya, save.gaya, "the gaya rides with the save");
+    assert_eq!(
+        read.biologist_state, save.biologist_state,
+        "the biologist mission rides with the save"
+    );
+    assert_eq!(
+        read.biologist_items_taken, save.biologist_items_taken,
+        "the biologist taken rides with the save"
+    );
+    assert_eq!(
+        read.biologist_completed, save.biologist_completed,
+        "the biologist completed rides with the save"
+    );
     assert_eq!(read.horse, save.horse, "the horse rides with the save");
 }
 
@@ -868,6 +883,9 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         sungma_move: 1,
         sungma_immune: 1,
         gaya: 12345,
+        biologist_state: 0,
+        biologist_items_taken: 0,
+        biologist_completed: 0,
         horse: db::players::PlayerHorse::default(),
     };
     // Bob's account naming Alice's character is a miss, not a write.

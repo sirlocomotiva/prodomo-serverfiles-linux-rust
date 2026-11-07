@@ -5,9 +5,9 @@
 //! passes its `iRarePct`. What the other arms need is established by the drop vnums, not
 //! by guessing at coverage:
 //!
-//! - No drop vnum is ELK, UNIQUE, DS, BLEND, an aura, a socketed vnum, QUEST, RING, or a
+//! - No drop vnum is ELK, UNIQUE, DS, BLEND, an aura, a socketed vnum, or a
 //!   skill book, and none sets MAKECOUNT (plan §2). Those arms are refused paths with the
-//!   vnum named.
+//!   vnum named. QUEST and RING run: the group scans stamp the `SIGVnum`.
 //! - Four armor vnums carry an addon and a magic percent; four costume vnums carry a
 //!   `LIMIT_REAL_TIME` of 86400 s, one with an addon. Those arms run.
 //! - No drop vnum is masked (no `ori_to_new_table.txt` new-vnum), but the mask runs: it
@@ -32,12 +32,13 @@
 
 use gamedata::item_kind::{
     ARMOR_BODY, ARMOR_EAR, ARMOR_FOOTS, ARMOR_GLOVE, ARMOR_HEAD, ARMOR_NECK, ARMOR_SHIELD,
-    ARMOR_WRIST, COSTUME_AURA, COSTUME_BODY, COSTUME_HAIR, COSTUME_WEAPON, ITEM_ARMOR, ITEM_BLEND,
-    ITEM_COSTUME, ITEM_DS, ITEM_ELK, ITEM_QUEST, ITEM_RING, ITEM_TALISMAN, ITEM_UNIQUE,
-    ITEM_WEAPON, LIMIT_REAL_TIME, LIMIT_TIMER_BASED_ON_WEAR, WEAPON_ARROW,
+    ARMOR_WRIST, COSTUME_AURA, COSTUME_BODY, COSTUME_HAIR, COSTUME_MOUNT, COSTUME_WEAPON,
+    ITEM_ARMOR, ITEM_BLEND, ITEM_COSTUME, ITEM_DS, ITEM_ELK, ITEM_QUEST, ITEM_RING, ITEM_TALISMAN,
+    ITEM_UNIQUE, ITEM_WEAPON, LIMIT_REAL_TIME, LIMIT_TIMER_BASED_ON_WEAR, WEAPON_ARROW,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
+use gamedata::special_item_group::SpecialItemGroups;
 use protocol::gc_item_window::ItemAttribute;
 
 use super::dice::{number, Dice};
@@ -108,8 +109,6 @@ pub enum UnportedDrop {
     Aura,
     /// An auto potion or a skill book, whose socket `CreateItem` fills by vnum.
     Vnum(u32),
-    /// `ITEM_QUEST`, `ITEM_RING`, `ITEM_UNIQUE` or `COSTUME_MOUNT`: the `SIGVnum` scans.
-    SigVnum,
     /// `IsDragonSoul`: `DragonSoulItemInitialize`.
     Soul,
 }
@@ -252,9 +251,42 @@ pub fn unported_drop(vnum: u32, proto: &ItemProto) -> Option<UnportedDrop> {
         ITEM_BLEND => Some(UnportedDrop::Blend),
         ITEM_COSTUME if proto.sub_type == COSTUME_AURA => Some(UnportedDrop::Aura),
         _ if SOCKETED_VNUMS.contains(&vnum) => Some(UnportedDrop::Vnum(vnum)),
-        ITEM_QUEST | ITEM_RING => Some(UnportedDrop::SigVnum),
         _ => None,
     }
+}
+
+/// The `SIGVnum` `CreateItem` stamps on a new item of `proto` made from `vnum`
+/// (`G/item_manager.cpp:412-441`): the last group key in map order (legacy's
+/// `std::map`, ascending) whose `quest` bag holds `vnum` (`ITEM_QUEST`), or whose
+/// `special` bag holds it (`ITEM_UNIQUE`, a mount costume, `ITEM_RING`). The scan reads
+/// the creation argument, not the mask it may wear; a mount costume matches by
+/// sub type, whatever its item type is. A group key is an `int` and the stamp a
+/// `DWORD`, so a negative key keeps its bits (`u32::from_ne_bytes`).
+#[must_use]
+pub fn sig_vnum_of(groups: &SpecialItemGroups, proto: &ItemProto, vnum: u32) -> u32 {
+    let map = if proto.item_type == ITEM_QUEST {
+        &groups.quest
+    } else if proto.item_type == ITEM_UNIQUE
+        || proto.sub_type == COSTUME_MOUNT
+        || proto.item_type == ITEM_RING
+    {
+        &groups.special
+    } else {
+        return 0;
+    };
+    let quest = proto.item_type == ITEM_QUEST;
+    let mut sig = 0;
+    for (&key, bag) in map {
+        let typed = if quest {
+            bag.group_type == gamedata::special_item_group::GroupType::Quest
+        } else {
+            bag.group_type == gamedata::special_item_group::GroupType::Special
+        };
+        if typed && bag.contains(vnum) {
+            sig = u32::from_ne_bytes(key.to_ne_bytes());
+        }
+    }
+    sig
 }
 
 /// How many of `NORM_ATTRS` attributes `attributes` holds: the count of leading
@@ -606,6 +638,8 @@ pub struct DropMade<'a> {
     pub attrs: &'a [ItemAttrRecord],
     /// The mask table: `new_vnum -> ori_vnum`.
     pub masks: &'a [(u32, u32)],
+    /// The special item groups, which the creation `SIGVnum` scans read.
+    pub groups: &'a SpecialItemGroups,
     /// `time(0)` at creation, in seconds: the base of a `LIMIT_REAL_TIME` socket.
     pub now_secs: i64,
     /// `g_bItemCountLimit`: the largest stack.
@@ -667,7 +701,8 @@ pub fn stamp_created_sockets(item: &mut Item, proto: &ItemProto, now_secs: i64) 
 /// `bGainSocketPct` (capped at six); the limits stamp socket 0 (`LIMIT_REAL_TIME` from
 /// `made.now_secs`, `LIMIT_TIMER_BASED_ON_WEAR` from its socket, value, or 10 h); the
 /// addon and the magic (`rare_pct`, or the proto's `bAlterToMagicItemPct` on `-1`)
-/// roll when the proto asks; the mask answers the shown vnum.
+/// roll when the proto asks; the mask answers the shown vnum; the group scans stamp
+/// the `SIGVnum` from the creation vnum.
 ///
 /// # Errors
 ///
@@ -699,6 +734,7 @@ pub fn make_drop_item(
     if mask != 0 {
         item.vnum = mask;
     }
+    item.sig_vnum = sig_vnum_of(made.groups, proto, vnum);
     let count = if proto.flags & ITEM_FLAG_STACKABLE == 0 {
         1
     } else {
@@ -788,13 +824,23 @@ mod tests {
         ItemProtos::from_rows(rows)
     }
 
-    fn made<'a>(attrs: &'a [ItemAttrRecord], masks: &'a [(u32, u32)]) -> DropMade<'a> {
+    fn made<'a>(
+        attrs: &'a [ItemAttrRecord],
+        masks: &'a [(u32, u32)],
+        groups: &'a SpecialItemGroups,
+    ) -> DropMade<'a> {
         DropMade {
             attrs,
             masks,
+            groups,
             now_secs: 1_790_000_000,
             count_limit: 5000,
         }
+    }
+
+    /// No groups: every creation scan stamps 0.
+    fn no_groups() -> SpecialItemGroups {
+        SpecialItemGroups::default()
     }
 
     #[test]
@@ -808,7 +854,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             27870,
             DropAsk {
                 count: 3,
@@ -832,7 +878,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             27870,
             DropAsk {
                 count: 0,
@@ -846,7 +892,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             27870,
             DropAsk {
                 count: 99999,
@@ -868,7 +914,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             15370,
             DropAsk {
                 count: 7,
@@ -890,7 +936,7 @@ mod tests {
                 &mut gauss,
                 &mut ids(),
                 &protos,
-                &made(&[], &[]),
+                &made(&[], &[], &no_groups()),
                 999,
                 DropAsk {
                     count: 1,
@@ -912,11 +958,13 @@ mod tests {
             (72723, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(72723)),
             (50300, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(50300)),
             (70037, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(70037)),
-            (30111, ITEM_QUEST, 0, UnportedDrop::SigVnum),
-            (71135, ITEM_RING, 0, UnportedDrop::SigVnum),
         ] {
             let proto = ItemProto::for_category_rule(vnum, item_type, sub_type);
             assert_eq!(unported_drop(vnum, &proto), Some(path), "vnum {vnum}");
+        }
+        for (vnum, item_type) in [(30111, ITEM_QUEST), (71135, ITEM_RING)] {
+            let proto = ItemProto::for_category_rule(vnum, item_type, 0);
+            assert_eq!(unported_drop(vnum, &proto), None, "vnum {vnum}");
         }
     }
 
@@ -931,7 +979,7 @@ mod tests {
                 &mut gauss,
                 &mut no_ids(),
                 &protos,
-                &made(&[], &[]),
+                &made(&[], &[], &no_groups()),
                 27870,
                 DropAsk {
                     count: 1,
@@ -952,7 +1000,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[(39001, 25041)]),
+            &made(&[], &[(39001, 25041)], &no_groups()),
             39001,
             DropAsk {
                 count: 1,
@@ -975,7 +1023,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             27870,
             DropAsk {
                 count: 1,
@@ -992,7 +1040,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             27870,
             DropAsk {
                 count: 1,
@@ -1018,7 +1066,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             41004,
             DropAsk {
                 count: 1,
@@ -1044,7 +1092,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             41004,
             DropAsk {
                 count: 1,
@@ -1070,7 +1118,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             41004,
             DropAsk {
                 count: 1,
@@ -1124,7 +1172,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&[], &[]),
+            &made(&[], &[], &no_groups()),
             15370,
             DropAsk {
                 count: 1,
@@ -1160,7 +1208,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&attrs, &[]),
+            &made(&attrs, &[], &no_groups()),
             15370,
             DropAsk {
                 count: 1,
@@ -1192,7 +1240,7 @@ mod tests {
             &mut gauss,
             &mut ids(),
             &protos,
-            &made(&attrs, &[]),
+            &made(&attrs, &[], &no_groups()),
             15370,
             DropAsk {
                 count: 1,
@@ -1374,5 +1422,35 @@ mod tests {
         assert_eq!(attribute_set_index(ITEM_COSTUME, COSTUME_PET), None);
         assert_eq!(attribute_set_index(ITEM_COSTUME, COSTUME_AURA), None);
         assert_eq!(attribute_set_index(ITEM_TOTEM, 0), None);
+    }
+
+    /// The creation `SIGVnum` scans (`G/item_manager.cpp:412-441`): the last group in
+    /// map order that holds the vnum stamps its key; a quest item reads the quest map,
+    /// a ring the special map, and anything else stamps 0.
+    #[test]
+    fn the_creation_scans_stamp_the_last_group_holding_the_vnum() {
+        use gamedata::item_kind::{ITEM_QUEST, ITEM_RING, ITEM_WEAPON};
+        use gamedata::special_item_group::{GroupType, SpecialItemGroup, SpecialItemInfo};
+        let bag = |typed: GroupType, vnum: u32| SpecialItemGroup {
+            vnum: 0,
+            group_type: typed,
+            items: vec![SpecialItemInfo {
+                vnum,
+                count: 1,
+                rare: 0,
+            }],
+            totals: vec![1],
+        };
+        let mut groups = SpecialItemGroups::default();
+        groups.quest.insert(500, bag(GroupType::Quest, 30006));
+        groups.quest.insert(700, bag(GroupType::Quest, 30006));
+        groups.special.insert(900, bag(GroupType::Special, 50011));
+        let quest = ItemProto::for_category_rule(30006, ITEM_QUEST, 0);
+        let ring = ItemProto::for_category_rule(50011, ITEM_RING, 0);
+        let sword = ItemProto::for_category_rule(50011, ITEM_WEAPON, 0);
+        assert_eq!(sig_vnum_of(&groups, &quest, 30006), 700);
+        assert_eq!(sig_vnum_of(&groups, &ring, 50011), 900);
+        assert_eq!(sig_vnum_of(&groups, &sword, 50011), 0);
+        assert_eq!(sig_vnum_of(&groups, &quest, 99999), 0);
     }
 }

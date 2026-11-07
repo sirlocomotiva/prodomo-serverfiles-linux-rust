@@ -1015,6 +1015,8 @@ pub(super) struct Giver<'s> {
     pub(super) rare: &'s [gamedata::records::ItemAttrRecord],
     /// The mask table.
     pub(super) masks: &'s [(u32, u32)],
+    /// The special item groups, which the creation `SIGVnum` scans read.
+    pub(super) groups: &'s gamedata::special_item_group::SpecialItemGroups,
     /// `GetPlayerID()` of the character, whose rows the gives write.
     pub(super) owner_id: u32,
 }
@@ -1879,6 +1881,7 @@ impl Game for Session<'_> {
         let drop_rules = DropMade {
             attrs: giver.attrs,
             masks: giver.masks,
+            groups: giver.groups,
             now_secs,
             count_limit: giver.rules.count_limit,
         };
@@ -3697,12 +3700,10 @@ impl GameState {
 
     /// `case ITEM_QUEST` of `UseItemEx` (`G/char_item.cpp:2842-2888`) after the world's checks
     /// passed for the item at `at` of the character under `vid`: unless the item's proto carries
-    /// a quest-use flag, `CQuestManager::UseItem` runs its `use` scripts. What they sent and
-    /// changed joins `step`, whose descriptor stores and sends it. The quickslots are taken
-    /// again, since a removal may have synced them.
-    ///
-    /// `GetSIGVnum()` is 0 for every item on the owner's data, whose one special item group has
-    /// no `quest` type, so `SIGUse` never runs.
+    /// a quest-use flag, `CQuestManager::UseItem` runs its `use` scripts, or `SIGUse` runs the
+    /// group's `sig_use` scripts when the item's `SIGVnum` is not 0 (`:2875-2887`). What they
+    /// sent and changed joins `step`, whose descriptor stores and sends it. The quickslots are
+    /// taken again, since a removal may have synced them.
     pub(super) fn use_quest_item(
         &mut self,
         vid: Vid,
@@ -3717,7 +3718,7 @@ impl GameState {
         let Some(item) = character.items().item_at(at) else {
             return;
         };
-        let (id, vnum) = (item.id, item.vnum);
+        let (id, vnum, sig) = (item.id, item.vnum, item.sig_vnum);
         // `GetArena() != NULL || IsObserverMode()` on vnums 50051-50053
         // (`G/char_item.cpp:2843-2850`): no arenas, so the observer arm alone tells
         // `[LS;1205]` and keeps the item.
@@ -3756,7 +3757,11 @@ impl GameState {
             Giving::Items,
             account,
             |manager, game| {
-                manager.use_item(pid, (id, vnum), game);
+                if sig == 0 {
+                    manager.use_item(pid, (id, vnum), game);
+                } else {
+                    manager.sig_use(pid, (id, sig), game);
+                }
             },
         )
         else {
@@ -4168,6 +4173,7 @@ impl GameState {
             item_attrs,
             item_rare_attrs,
             item_masks,
+            item_groups,
             gauss,
             horse_names,
             name_rules,
@@ -4224,6 +4230,7 @@ impl GameState {
                 item_attrs,
                 item_rare_attrs,
                 item_masks,
+                item_groups,
                 quest_targets,
                 stores: giving != Giving::Nothing,
                 name_rules,
@@ -5300,6 +5307,7 @@ struct FinishInputs<'s> {
     item_attrs: &'s [gamedata::records::ItemAttrRecord],
     item_rare_attrs: &'s [gamedata::records::ItemAttrRecord],
     item_masks: &'s gamedata::item_mask::ItemMasks,
+    item_groups: &'s gamedata::special_item_group::SpecialItemGroups,
     quest_targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: &'s crate::select_phase::NameRules,
@@ -5352,6 +5360,7 @@ fn finish_armed_session<'s>(quests: &'s mut Quests, rest: FinishInputs<'s>) -> A
         rest.item_attrs,
         rest.item_rare_attrs,
         rest.item_masks,
+        rest.item_groups,
         rest.quest_targets,
         rest.stores,
         rest.name_rules.clone(),
@@ -5400,6 +5409,7 @@ struct SessionInputs<'s> {
     attrs: &'s [gamedata::records::ItemAttrRecord],
     rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
+    groups: &'s gamedata::special_item_group::SpecialItemGroups,
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
@@ -5692,6 +5702,7 @@ fn arm_item_giver<'s>(
     item_attrs: &'s [gamedata::records::ItemAttrRecord],
     item_rare: &'s [gamedata::records::ItemAttrRecord],
     item_masks: &'s gamedata::item_mask::ItemMasks,
+    item_groups: &'s gamedata::special_item_group::SpecialItemGroups,
     stores_items: bool,
     pid: u32,
 ) -> (Option<&'s mut world::character::Points>, Option<Giver<'s>>) {
@@ -5715,6 +5726,7 @@ fn arm_item_giver<'s>(
         attrs: item_attrs,
         rare: item_rare,
         masks: item_masks.pairs(),
+        groups: item_groups,
         owner_id: pid,
     });
     (points, armed)
@@ -5752,6 +5764,7 @@ fn session_inputs<'s>(
     attrs: &'s [gamedata::records::ItemAttrRecord],
     rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
+    groups: &'s gamedata::special_item_group::SpecialItemGroups,
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
@@ -5791,6 +5804,7 @@ fn session_inputs<'s>(
         attrs,
         rare,
         masks,
+        groups,
         targets,
         stores,
         name_rules,
@@ -5835,6 +5849,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         attrs,
         rare,
         masks,
+        groups,
         targets,
         stores,
         name_rules,
@@ -5874,6 +5889,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         attrs,
         rare,
         masks,
+        groups,
         targets,
         stores,
         name_rules,
@@ -5918,6 +5934,7 @@ fn session_head<'s>(
     attrs: &'s [gamedata::records::ItemAttrRecord],
     rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
+    groups: &'s gamedata::special_item_group::SpecialItemGroups,
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
@@ -5928,7 +5945,6 @@ fn session_head<'s>(
     meley: super::meley::MeleyRuns,
     ship: super::ship::ShipRuns,
 ) -> Session<'s> {
-    let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
     let roster = quest_step_roster(characters);
     let (points, item_giver) = session_armed_giver(session_giver_inputs(
         characters,
@@ -5938,6 +5954,7 @@ fn session_head<'s>(
         attrs,
         rare,
         masks,
+        groups,
         stores,
         pid,
         reader,
@@ -5974,7 +5991,7 @@ fn session_head<'s>(
         pcs: roster.0,
         online: roster.1,
         affects: affects.get_mut(&reader),
-        alignment,
+        alignment: bodies.get(&reader).map_or(0, |body| body.card.alignment),
         horse_name: context.horse_name,
         name_rules,
         alignment_changes: Vec::new(),
@@ -6046,6 +6063,7 @@ struct SessionGiverInputs<'a, 's> {
     attrs: &'a [gamedata::records::ItemAttrRecord],
     rare: &'a [gamedata::records::ItemAttrRecord],
     masks: &'a gamedata::item_mask::ItemMasks,
+    groups: &'a gamedata::special_item_group::SpecialItemGroups,
     stores: bool,
     pid: u32,
     reader: Vid,
@@ -6062,6 +6080,7 @@ fn session_giver_inputs<'a, 's>(
     attrs: &'a [gamedata::records::ItemAttrRecord],
     rare: &'a [gamedata::records::ItemAttrRecord],
     masks: &'a gamedata::item_mask::ItemMasks,
+    groups: &'a gamedata::special_item_group::SpecialItemGroups,
     stores: bool,
     pid: u32,
     reader: Vid,
@@ -6074,6 +6093,7 @@ fn session_giver_inputs<'a, 's>(
         attrs,
         rare,
         masks,
+        groups,
         stores,
         pid,
         reader,
@@ -6092,6 +6112,7 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
         attrs,
         rare,
         masks,
+        groups,
         stores,
         pid,
         reader,
@@ -6105,6 +6126,7 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
         attrs,
         rare,
         masks,
+        groups,
         stores,
         pid,
     )
@@ -6846,6 +6868,7 @@ mod tests {
         quickslots: &'s mut Quickslots,
         ids: &'s mut ItemIds,
         gauss: &'s mut Gauss,
+        groups: &'s gamedata::special_item_group::SpecialItemGroups,
     ) -> Giver<'s> {
         Giver {
             stores: true,
@@ -6862,6 +6885,7 @@ mod tests {
             attrs: &[],
             rare: &[],
             masks: &[],
+            groups,
             owner_id: 42,
         }
     }
@@ -6918,6 +6942,7 @@ mod tests {
         let mut targets = QuestTargets::default();
         let (mut held, mut quickslots) = (CharacterItems::new(), Quickslots::default());
         let (mut gauss, mut points) = (Gauss::new(), god_points());
+        let groups = gamedata::special_item_group::SpecialItemGroups::default();
         let mut session = test_session(TestSession {
             protos: &mobs,
             names: &names,
@@ -6936,6 +6961,7 @@ mod tests {
                 &mut quickslots,
                 &mut ids,
                 &mut gauss,
+                &groups,
             )),
         });
         f(&mut session)

@@ -34,6 +34,7 @@ use gamedata::item_proto_value::type_value;
 use gamedata::locale_string::LocaleStrings;
 use protocol::gc_actors::{GcCharacterGoldChange, GcCharacterUpdate};
 use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::gc_fields::GcSpecificEffect;
 use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect};
 use protocol::item_pos::ItemPos;
 use tokio::sync::watch;
@@ -251,6 +252,10 @@ impl MovedItems {
                 }
                 MoveRecord::Effect(effect_type) => {
                     GcSpecialEffect { effect_type, vid }.encode_into(&mut frame);
+                    Some(RelayScope::ViewExceptSelf)
+                }
+                MoveRecord::SpecificEffect(effect_file) => {
+                    GcSpecificEffect::new(vid, effect_file).encode_into(&mut frame);
                     Some(RelayScope::ViewExceptSelf)
                 }
                 MoveRecord::Notice(text) => {
@@ -864,6 +869,42 @@ mod tests {
         assert_eq!(
             none.records, only,
             "a step with no ground record places nothing"
+        );
+    }
+
+    /// A specific-effect record encodes `HEADER_GC_SPECIFIC_EFFECT` (208) with the
+    /// character's VID and the 128 raw path bytes, and the viewers hear it too
+    /// (`SpecificEffectPacket`'s `PacketAround`, `G/char.cpp:7544-7553`).
+    #[test]
+    fn a_specific_effect_record_reaches_the_mover_and_the_view() {
+        let mut path = [0u8; 128];
+        path[..11].copy_from_slice(b"ring.effect");
+        let done = MoveDone {
+            kind: MoveKind::Moved,
+            records: vec![MoveRecord::SpecificEffect(path)],
+            changes: Vec::new(),
+        };
+        let actor = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            affect_flags: [0; 2],
+            dead: false,
+            alignment: 0,
+            view_guild: (0, 0),
+        };
+        let strings = LocaleStrings::default();
+        let moved = MovedItems::new(7, 0x0102_0304, done, actor, &owners(), &strings);
+        let frame = &moved.records[0];
+        assert_eq!(frame.len(), 133);
+        assert_eq!(frame[0], 208, "HEADER_GC_SPECIFIC_EFFECT");
+        assert_eq!(&frame[1..5], &0x0102_0304u32.to_le_bytes());
+        assert_eq!(&frame[5..16], b"ring.effect");
+        assert_eq!(&frame[16..133], &[0u8; 117]);
+        assert_eq!(
+            moved.around,
+            vec![(RelayScope::ViewExceptSelf, frame.clone())]
         );
     }
 

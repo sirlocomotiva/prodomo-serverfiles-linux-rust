@@ -1397,6 +1397,20 @@ impl Manager {
         })
     }
 
+    /// `CQuestManager::SIGUse` (`G/questmanager.cpp:863-886`): character `pid` used the
+    /// item of ID `item` whose `SIGVnum` is `sig`, so it becomes the quest item
+    /// (`SetCurrentItem`) and the group's `sig_use` scripts run (`NPC::OnSIGUse`,
+    /// `G/questnpc.cpp:291-297`, then `HandleEvent`). Returns whether one ran. Legacy's
+    /// `GetPC` makes the record of a character it never saw, as a click does, and the
+    /// flags ride the login, so no `Loading quest` wait exists.
+    pub fn sig_use(&mut self, pid: u32, (item, sig): (u32, u32), game: &mut dyn Game) -> bool {
+        self.pcs.entry(pid).or_default().item = item;
+        self.operate(pid, game, |run, pc, npcs| match npcs.get(&sig) {
+            Some(npc) => run.handle_event(pc, npc, "sig_use"),
+            None => false,
+        })
+    }
+
     /// `CQuestManager::TakeItem` (`G/questmanager.cpp:791-815`): character `pid` gave the item
     /// of ID `item` to the NPC of race `race`, so it becomes the quest item (`SetCurrentItem`)
     /// and the NPC's `take` scripts run (`NPC::OnTakeItem`, `G/questnpc.cpp:278-281`, then
@@ -7432,6 +7446,21 @@ mod tests {
         assert!(manager.is_running(PID));
         assert!(!manager.use_item(PID, (5, RESET_BOOK), &mut game));
         assert!(game.take().is_empty());
+        manager.disconnect(PID);
+    }
+
+    /// `CQuestManager::SIGUse` (`G/questmanager.cpp:863-886`) on a group with no
+    /// `sig_use` script runs nothing and says nothing: no owner quest of the 51
+    /// has one (a whole-tree `command grep -a "sig_use"` over the quest Lua finds
+    /// nothing), so the dispatch is proved by the miss, as `use_item`'s own miss is.
+    #[test]
+    fn a_sig_use_with_no_script_runs_nothing() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        let mut game = Fake::default();
+        assert!(!manager.sig_use(PID, (5, 50011), &mut game));
+        assert!(game.take().is_empty());
+        assert!(!manager.is_running(PID));
         manager.disconnect(PID);
     }
 

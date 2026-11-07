@@ -114,6 +114,7 @@ use protocol::cg_account::{
 use protocol::cg_arg_u8::CgChangeLanguage;
 use protocol::cg_arg_u8::CgRequestEventData;
 use protocol::cg_attack::CgAttack;
+use protocol::cg_biologist::CgBiologist;
 use protocol::cg_change_look::CgChangeLook;
 use protocol::cg_chat::CgChat;
 use protocol::cg_client_version::CgClientVersion;
@@ -125,7 +126,7 @@ use protocol::cg_gaya_system::CgGayaSystem;
 use protocol::cg_guild_answer::CgAnswerMakeGuild;
 use protocol::cg_inventory::{
     HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
-    HEADER_CG_ATTR67_ADD, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
+    HEADER_CG_ATTR67_ADD, HEADER_CG_BIOLOGIST, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
     HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
     HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CL, HEADER_CG_CLIENT_VERSION,
     HEADER_CG_CLIENT_VERSION2, HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
@@ -350,6 +351,9 @@ struct ConnectionContext {
     /// The item prototypes, shared with the game thread, which the item load at character
     /// select reads for each item's size and flags.
     protos: Arc<ItemProtos>,
+    /// The special item groups, shared with the game thread, which the item load at
+    /// character select stamps each item's `SIGVnum` from.
+    groups: Arc<gamedata::special_item_group::SpecialItemGroups>,
     /// The locale strings every language's chat lines are looked up in, shared with the game
     /// thread.
     locale: Arc<LocaleStrings>,
@@ -1027,6 +1031,13 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
         held_character.sub_skill_point =
             i16::try_from(points.get_point(point_slot::POINT_SUB_SKILL)).unwrap_or(i16::MAX);
         held_character.gaya = points.gaya();
+        // The biologist counters ride the points' fields, not the slots: the state
+        // clamps to mission 9, which fits the `smallint` either way.
+        held_character.biologist_state = i16::try_from(points.bio_state()).unwrap_or(i16::MAX);
+        held_character.biologist_items_taken =
+            i16::try_from(points.bio_taken()).unwrap_or(i16::MAX);
+        held_character.biologist_completed =
+            i16::try_from(points.bio_completed()).unwrap_or(i16::MAX);
         held_character.level_step =
             i16::try_from(points.get_point(point_slot::POINT_LEVEL_STEP)).unwrap_or(i16::MAX);
         held_character.stat_reset_count =
@@ -1251,6 +1262,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_FISH_EVENT_SEND.value()
         || header == HEADER_CG_DAILY_GIFT.value()
         || header == HEADER_CG_GAYA_SYSTEM.value()
+        || header == HEADER_CG_BIOLOGIST.value()
         || is_ground_step(header)
         || is_quickslot_step(header)
 }
@@ -1312,6 +1324,8 @@ where
         daily_gift(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_GAYA_SYSTEM.value() {
         gaya_system(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_BIOLOGIST.value() {
+        biologist(session, addr, context, held, frame).await
     } else {
         drop_an_item(session, addr, context, held, frame).await
     }
@@ -1430,6 +1444,51 @@ where
         .game
         .gaya_system(vid, record.subheader, record.pos, actor)
         .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_BIOLOGIST` (175) in the game phase: `CInputMain::RecvBiologistPacket`
+/// (`G/input_main.cpp:5344-5363`), past the observer block (`:3951`), so no gate guards
+/// it. An unknown sub-header is consumed and ignored, as legacy's `default`-less
+/// `switch` does, and so is `BIOLOGIST_SUBHEADER_CG_CLOSE`, which names no arm. The
+/// world sends the records, and the rows it changed are stored here.
+async fn biologist<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgBiologist::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed BIOLOGIST; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "BIOLOGIST without a character in the world; ignoring");
+        return true;
+    };
+    let step = match record.sub_header {
+        prodomo::game_state::BIOLOGIST_OPEN => prodomo::game_state::BiologistStep::Open,
+        prodomo::game_state::BIOLOGIST_PROVIDES => prodomo::game_state::BiologistStep::Provides {
+            elixir: record.elixir,
+            book: record.book,
+        },
+        prodomo::game_state::BIOLOGIST_SELECTIVE => prodomo::game_state::BiologistStep::Selective {
+            chosen: record.chosen,
+        },
+        prodomo::game_state::BIOLOGIST_TIME => prodomo::game_state::BiologistStep::Time {
+            flower: record.flower,
+        },
+        _ => return true,
+    };
+    let actor = item_actor(held);
+    let answer = context.game.biologist(vid, step, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -6768,7 +6827,7 @@ where
     };
     // `Inven_Point` is 0: the store keeps no value for it yet, and the world's character
     // starts at 0, so a set-aside item and a later grant search the same cells.
-    let load = plan_item_load(&rows, &context.protos, 0, character.level);
+    let load = plan_item_load(&rows, &context.protos, &context.groups, 0, character.level);
     for refusal in &load.refused {
         warn!(
             %addr,
@@ -6802,7 +6861,9 @@ where
         .collect();
     // `EquipTo` computes the points with each worn item as the load places it.
     let storage = load.storage();
-    points.compute_loaded(&world::character::Equipment::of(&storage, &context.protos));
+    let equipment =
+        world::character::Equipment::of(&storage, &context.protos).with_groups(&context.groups);
+    points.compute_loaded(&equipment);
     records.extend(item_load_points(character, points, vid));
     if let Err(error) = send_all(session, &records).await {
         warn!(%addr, %error, "Client session stopped");
@@ -9482,6 +9543,7 @@ fn connection_context(
         locale_dir: config.locale_dir(),
         cells: data.cells,
         protos: data.protos,
+        groups: data.groups,
         locale: data.locale,
         public_ip: config.public_ip,
         routes: Arc::new(map_routes(config, listeners)),
@@ -14270,7 +14332,8 @@ where
                         return false;
                     }
                 };
-            let (items, refused) = prodomo::item_load::stored_items(&rows, &context.protos);
+            let (items, refused) =
+                prodomo::item_load::stored_items(&rows, &context.protos, &context.groups);
             for refusal in &refused {
                 warn!(%addr, ?refusal, "A stored item was not loaded");
             }
@@ -14887,6 +14950,9 @@ mod tests {
             stamina: 800,
             gold: 0,
             gaya: 0,
+            biologist_state: 0,
+            biologist_items_taken: 0,
+            biologist_completed: 0,
             conqueror_exp: 0,
             conqueror_level_step: 0,
             conqueror_point: 0,

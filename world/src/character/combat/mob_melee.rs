@@ -1146,6 +1146,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         })
     }
 
@@ -1444,6 +1445,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         });
         points.set_point(point::POINT_NORMAL_HIT_DEFEND_BONUS, 60);
         points.set_point(point::POINT_RESIST_COMBAT, 60);
@@ -1635,6 +1637,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         });
         points.set_point(point::POINT_RESIST_COMBAT, 10);
         let mut dice = Script::new(&[0]);
@@ -1759,6 +1762,7 @@ mod tests {
             playtime: 0,
             conqueror_exp: 0,
             gaya: 0,
+            biologist: [0; 3],
         });
         points.set_point(point::POINT_RESIST_COMBAT, 60);
         let proto = wind_proto();

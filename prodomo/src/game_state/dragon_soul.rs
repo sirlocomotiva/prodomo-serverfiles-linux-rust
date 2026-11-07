@@ -309,7 +309,8 @@ impl GameState {
         if !time_left(&stone, wear_timed) || is_active(&stone) {
             return;
         }
-        let applies = world::character::item_applies(&stone, proto, &self.protos);
+        let applies =
+            world::character::item_applies(&stone, proto, &self.protos, &self.item_groups);
         // `ModifyPoints(true)` (`G/item.cpp:781-1010`): each apply through `ApplyPoint`, with
         // the current maxima's share kept, not a raw point change.
         if let Some(points) = self.pc_points_mut(vid.raw()) {
@@ -347,7 +348,9 @@ impl GameState {
         let applies = self
             .protos
             .get(stone.vnum)
-            .map(|proto| world::character::item_applies(&stone, proto, &self.protos))
+            .map(|proto| {
+                world::character::item_applies(&stone, proto, &self.protos, &self.item_groups)
+            })
             .unwrap_or_default();
         for (kind, value) in &applies {
             // `ModifyPoints(false)` (`G/item.cpp:781-1010`): each apply unapplied through
