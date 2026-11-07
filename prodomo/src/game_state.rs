@@ -110,6 +110,7 @@ mod pickup;
 mod pk_mode;
 mod polymorph;
 mod pvp;
+mod quest_quiet;
 mod quest_target;
 mod quests;
 mod rank_global;
@@ -129,6 +130,7 @@ mod state;
 mod sync;
 mod target;
 mod target_info;
+mod temple_ochao;
 mod timed_exit;
 mod trade;
 mod use_to_item;
@@ -453,13 +455,19 @@ pub fn world_item_id_range(
 }
 
 /// The world state one game thread owns.
-#[derive(Debug)]
+///
+/// `Default` is the empty world: no characters, no maps, and every table and limit
+/// at its type's zero. [`GameState::new`] overrides the dozen fields whose start is
+/// not the zero (the dice, the lifetimes, the limits, and the test-server flag).
+#[derive(Debug, Default)]
 pub struct GameState {
     characters: CharacterManager,
     item_ids: Option<ItemIds>,
     protos: Arc<ItemProtos>,
     /// The locale strings a chat line is looked up in.
     locale: Arc<LocaleStrings>,
+    /// The quest translations a `notice_all` digit key is looked up in.
+    quest_translate: Arc<gamedata::quest_translate::QuestTranslate>,
     metrics: Arc<GameStateMetrics>,
     last_pulse: u64,
     /// Where each online character's records go, keyed by the VID it entered under.
@@ -680,6 +688,8 @@ pub struct GameState {
     regens: regen::Regens,
     /// The NPCs' state machines and the state set. See [`mob_ai`].
     minds: mob_ai::Minds,
+    /// The Ochao temple's rooms and VIDs. See [`temple_ochao`].
+    temple_ochao: temple_ochao::TempleOchao,
     /// What each non-player keeps of its fight: its killer, its owner and its events. See
     /// [`fight`].
     npc_combat: HashMap<u32, fight::NpcCombat>,
@@ -770,104 +780,19 @@ impl GameState {
     #[must_use]
     pub fn new(protos: impl Into<Arc<ItemProtos>>) -> Self {
         Self {
-            card_tables: cards::CardTables::default(),
-            characters: CharacterManager::new(),
-            item_ids: None,
             protos: protos.into(),
-            locale: Arc::default(),
-            metrics: Arc::new(GameStateMetrics::default()),
-            last_pulse: 0,
-            outboxes: HashMap::new(),
             item_count_limit: common::item_slots::ITEM_COUNT_LIMIT,
             dice: fresh_dice(),
-            ground: BTreeMap::new(),
             next_ground_vid: 1,
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             gold_lifetime: drop_lifetime_pulses(DEFAULT_GOLD_LIFETIME_SECS),
-            clients: None,
-            offline_mail: whisper::OfflineMail::default(),
-            block_modes: HashMap::new(),
-            no_damage: HashMap::new(),
-            detail_logs: std::collections::HashSet::new(),
-            monster_logs: std::collections::HashSet::new(),
-            affect_events: HashMap::new(),
-            affect_sequence: 0,
-            npc_affects: HashMap::new(),
-            npcs: BTreeMap::new(),
-            shops: Arc::default(),
-            motions: Arc::default(),
-            mob_skills: Arc::default(),
-            pc_skill_tables: Arc::default(),
-            skill_names: Arc::default(),
-            guild_skill_tables: Arc::default(),
-            refine_recipes: Arc::default(),
-            refining: std::collections::HashSet::new(),
-            refine_scroll: HashMap::new(),
-            events: None,
-            mob_clips: Arc::default(),
-            drops: Arc::default(),
-            item_attrs: Arc::default(),
-            item_rare_attrs: Arc::default(),
-            item_masks: Arc::default(),
-            item_groups: Arc::default(),
-            fishing: Arc::default(),
-            fishing_events: HashMap::new(),
-            mining_events: HashMap::new(),
-            horse_timers: HashMap::new(),
-            horse_npcs: HashMap::new(),
-            horse_names: HashMap::new(),
-            rank: rank_global::RankBoard::default(),
-            dragon_soul_table: Arc::default(),
-            gauss: world::character::Gauss::new(),
-            shop_price_3x_disabled: false,
-            emotion_mask_disabled: false,
-            emotion_consents: emotion::EmotionConsents::new(),
-            empire_privs: empire_priv::EmpirePriv::table(),
-            mob_rates: event_flag::MobRates::default(),
             test_server: true,
-            shutdown_left: None,
-            shutdown_due: 0,
-            timed_events: HashMap::new(),
-            confirm_timeouts: HashMap::new(),
-            sort_inventory_until: HashMap::new(),
-            duels: duel::Duels::default(),
-            sungzi_maps: Arc::default(),
-            browsing: HashMap::new(),
-            trades: BTreeMap::new(),
-            trading: HashMap::new(),
-            storages: HashMap::new(),
-            sash_windows: HashMap::new(),
-            changelook_windows: std::collections::HashSet::new(),
-            quests: None,
-            attr67_open: std::collections::HashSet::new(),
-            quest_targets: quest_target::QuestTargets::default(),
-            warp_npcs: BTreeMap::new(),
-            portal_times: HashMap::new(),
-            maps: BTreeMap::new(),
-            bodies: HashMap::new(),
-            movers: BTreeSet::new(),
-            clock: motion::WorldClock::default(),
             view_radius: view_radius_of(DEFAULT_VIEW_RANGE),
-            npc_of: HashMap::new(),
-            targets: target::Targets::default(),
-            regens: regen::Regens::default(),
-            minds: mob_ai::Minds::default(),
-            npc_combat: HashMap::new(),
-            pc_combat: HashMap::new(),
-            pc_skills: HashMap::new(),
-            parties: party::Parties::default(),
             exp_limits: DEFAULT_EXP_LIMITS,
             stat_max: DEFAULT_STATUS_POINT_SET_MAX_VALUE,
             max_conqueror_level: DEFAULT_MAX_CONQUEROR_LEVEL,
-            recall: death::Recall::default(),
             protect_level: DEFAULT_PROTECT_LEVEL,
-            guilds: guild::Guilds::default(),
-            messenger: messenger::Relations::default(),
-            war_maps: BTreeMap::new(),
-            dungeons: dungeons::Dungeons::default(),
-            marks: guild_mark::MarkManager::default(),
-            symbols: std::collections::BTreeMap::new(),
-            name_rules: crate::select_phase::NameRules::default(),
+            ..Self::default()
         }
     }
 
@@ -898,6 +823,17 @@ impl GameState {
     #[must_use]
     pub fn with_locale_strings(mut self, locale: Arc<LocaleStrings>) -> Self {
         self.locale = locale;
+        self
+    }
+
+    /// Share the quest translations, which a `notice_all` digit key is looked up in.
+    /// Without them every digit key answers `NoName`.
+    #[must_use]
+    pub fn with_quest_translate(
+        mut self,
+        quest_translate: Arc<gamedata::quest_translate::QuestTranslate>,
+    ) -> Self {
+        self.quest_translate = quest_translate;
         self
     }
 
@@ -5057,6 +4993,7 @@ impl PulseProcessor for GameState {
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_dungeon_ticks(pulse);
+        self.run_temple_ochao(pulse);
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);
         self.expire_empire_privs();

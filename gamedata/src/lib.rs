@@ -39,6 +39,8 @@ pub mod object_proto;
 pub mod pc_motion;
 /// The PC skill rows, the eight power rows, and the `CanUseSkill` gates.
 pub mod pc_skill_data;
+/// The `locale_quest.txt` tables and the quest-text lookup.
+pub mod quest_translate;
 pub mod records;
 pub mod refine;
 pub mod regen;

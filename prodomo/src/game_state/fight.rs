@@ -658,6 +658,18 @@ impl GameState {
             && self.can_begin_fight(target)
         {
             self.begin_fight(target, vid);
+            // The guardian's attack arm (`G/char_battle.cpp:309`): a 6400 on 209 is the
+            // temple's own, none stands wild.
+            if self
+                .npc_by_vid(target)
+                .is_some_and(|npc| npc.vnum == super::temple_ochao::GUARDIAN_VNUM)
+                && self
+                    .npc_of
+                    .get(&target)
+                    .is_some_and(|&(_, map, _)| map == super::temple_ochao::TEMPLE_MAP)
+            {
+                self.temple_guardian_attacked(target);
+            }
         }
         // `BATTLE_DAMAGE` or `BATTLE_DEAD`: `OnMove(true)` (`G/char.cpp:6148-6179`). The victim's
         // `OnMove` holds nothing for a non-player, and no Eunhyung is ported.
@@ -1582,6 +1594,14 @@ impl GameState {
     pub(super) fn dead_npc(&mut self, vid: u32, killer: Option<Vid>) {
         if self.npc_by_vid(vid).is_none_or(|npc| npc.dead) {
             return;
+        }
+        // The guardian's kill arm (`G/char_battle.cpp:1655`): a 6400 whose killer stands
+        // on 209 raises the portal where the killer stands.
+        if self
+            .npc_by_vid(vid)
+            .is_some_and(|npc| npc.vnum == super::temple_ochao::GUARDIAN_VNUM)
+        {
+            self.raise_temple_portal(killer);
         }
         // `m_dwKillerPID = 0`, which legacy says never to drop (`:1261`).
         let pid = self

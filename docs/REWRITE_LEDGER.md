@@ -46555,3 +46555,71 @@ Gates (2026-11-06): `cargo fmt --all -- --check` clean; `cargo build --workspace
 in parallel. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
 width was measured. Afterwards no `prodomo\_%` database remained. No ADR
 changed.
+
+## 413. The quiet globals
+
+Ports `LC`, `notice_all`, `command`, `temple_ochao.initialize` and `set_quest_state`
+(`G/questlua_global.cpp:44-54,730-741,828-862,944-991`,
+`G/questlua_TempleOchao.cpp:15-20`).
+The bridges were written in an earlier session and are covered now: `quiet_api`
+snapshots the six notice slots (`(null)` for a missing one, more than six only
+logs), `LC` answers the tongue, `command` runs a string, `initialize` prepares, and
+`set_quest_state` moves the running quest at once and reserves other quests' moves.
+The world judges after the step (`apply_quiet_calls`): `broadcast_notice` speaks
+`SendLocaleNotice` (`G/cmd_gm.cpp:1252-1313`) to every online character in VID
+order, each in its own language, each `[ENTER]` piece its own notice; `command`
+runs `interpret` on the reader and dispatches the battle-pass usage gate
+(`G/cmd_general.cpp:4184-4219`); `initialize` re-arms the temple.
+`SendLocaleNotice`'s `%d`-to-`%s` rewrite and raw `vsnprintf` are kept
+(`chat_line::notice_text` skips the locale-strings lookup, as the bare `vsnprintf`
+does); the owner's quest texts hold only `%d`, `%s`, `%%` and bare-`%` literals, so
+the ported conversions cover them.
+New reader. `gamedata::quest_translate` loads each language's `locale_quest.txt`
+through the tab-separated CSV reader, skips the header, inserts `atoi` of the first
+column, and answers `NoName` on a miss and `en`'s table past the last language
+(`G/locale.cpp:90-103,146-166`); `LOCALE_YMIR` loads the `en` file. The boot refuses
+to start without the files (a Divergence, as for the locale strings). Two owner
+files carry stray quotes, and legacy's reader fate is kept: the `pl` file's
+unclosed dialog at line 8018 drops its rows from there on (its table ends at key
+7258), and the `cz` file's stray quote at line 10842 never closes cleanly (line
+11154 opens another), so its table ends at key 9825. `csv_table` refuses an
+unterminated file, so the loader cuts the unfinished row's start and re-parses the
+head; the `cz` merge-then-drop and the row counts per language are pinned against
+an independent reading.
+New world. `game_state::temple_ochao` ports `TempleOchao::CMgr`: the eleven rooms
+from map 209's base, the drawn 1-based room, the guardian's and portal's VIDs, the
+30 s activity arm with its 180 s idle and 600 s attacked moves, the 120 s portal
+show, and the victim-on-209 hold. `Prepare` is quiet once armed; the attacked arm
+(`G/char_battle.cpp:309`) and the kill arm (`:1655`) hook into the fight and
+`dead_npc`; no 6400 stands wild in any regen, so the arms read the temple's own.
+Two Divergences (STATUS): a quest's `command` line never trips the anti-flood (the
+flood is fresh on every quest line; the world has no delayed-disconnect path), and
+a click's dialog records beat the world's notices to the socket (the step's records
+go straight to the socket while the broadcasts travel through the outbox; legacy
+sends the notices while the script runs and the dialog at its end). The quest
+`command` dispatches `battle_pass` only; any other line logs and waits for its
+caller. `ENABLE_FULL_NOTICE` is never defined, so the `big_notice` trio stays
+unregistered and off the inventory.
+Also in this slice: `GameState::new` shrank to its twelve non-zero fields over
+`..Self::default()` (the 100-field literal tripped the line lint), with `Default`
+for `Pcg32` (the reference's zero seed) and `ExpLimits`; the dead
+`EmpirePriv::table` went with the cutover; `apply_world_moves` split its reader
+gains and orders into `ReaderGains` and `ReaderOrders`; `spawn_event_mob` answers
+the stood VID.
+Tests. `a_quiet_probe_broadcasts_runs_a_line_and_moves_its_state`: the click's
+dialog says `lang:en`, then the formatted, the quest-text (`A special cloth`) and
+the split notices, then the battle-pass usage, and the quest moves to `second`,
+whose click says `second`. Unit: the quest tables' counts and golden keys
+(including the `pl`/`cz` drops), the notice snapshot/render/broadcast/usage, the
+temple prepare/attack/change/kill, and the bridges' argument rules. Mutants killed:
+the digit lookup, the `[ENTER]` split, the usage text, the prepare guard, the 600 s
+move, the `NoName` miss, and the seven-argument refusal.
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4832 passed 0 failed in 42 targets; `cargo test
+--workspace --doc` 1 passed; `cargo clippy --workspace --all-targets --locked
+--offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean. The quiet scenario passed 8/8
+in parallel. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
+width was measured. Afterwards no `prodomo\_%` database remained. No ADR
+changed.

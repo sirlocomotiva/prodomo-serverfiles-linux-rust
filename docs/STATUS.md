@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-06, after ledger section 412 (the pc tail).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 413
+Last reviewed: 2026-11-06, after ledger section 413 (the quiet globals).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 414
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -433,7 +433,7 @@ support, and rolls the success the quest reads back (`attr67add.holding`,
 home. Since 410 a script reads its party's cached near count (`party.get_near_count`),
 which the Update's resend keeps. Since 411 `/cards` opens, pulls, ends, destroys,
 accepts and restores the Okey hand, the ended games log to the Okey table, and the owner
-quest's chats read both ranks (`pc.get_okay_global_rank`, `pc.get_okay_rund_rank`). Since 412 a script reads the tail names (`pc.get_player_id`, `pc.get_account_id`, `pc.get_empty_inventory_count`, `pc.is_trade0`, `pc.is_busy0`, `pc.give_exp2`, `pc.set_skill_group`, `pc.select`, `pc.get_killee_drop_pct`, `pc.warp_local`, `game.drop_item`). The
+quest's chats read both ranks (`pc.get_okay_global_rank`, `pc.get_okay_rund_rank`). Since 412 a script reads the tail names (`pc.get_player_id`, `pc.get_account_id`, `pc.get_empty_inventory_count`, `pc.is_trade0`, `pc.is_busy0`, `pc.give_exp2`, `pc.set_skill_group`, `pc.select`, `pc.get_killee_drop_pct`, `pc.warp_local`, `game.drop_item`). Since 413 a script reads the tongue (`LC`), broadcasts a notice (`notice_all`) through the quest translations, runs a line (`command`, battle-pass only), re-arms the Ochao temple (`temple_ochao.initialize`), and moves its quest (`set_quest_state`). The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -852,6 +852,7 @@ owner should know about (178.5):
 | `/reload`'s `t` and `m` arms read their files before they swap, so a bad file keeps the live tables (ledger 358.1). | `do_reload` destroys the live maps and groups first (`G/cmd_gm.cpp:2683-2715`), so a bad `special_item_group.txt` or `mob_drop_item.txt` empties them until the next good reload. The caller hears the same Romanian miss lines either way. |
 | V27. A `/shutdown` after the bar restarts nothing, and a `/shutdown` mid-countdown restarts it at 10 (ledger 360). The game thread must not kill the process, so the operator stops it with SIGTERM, which the graceful path already serves; the bar never clears. | `Shutdown()` past the bar calls `thecore_shutdown()` (`G/cmd_general.cpp:246-249`), exiting the process at once; mid-countdown it starts a second concurrent event, whose notices double the first's (`:250-261`). |
 | A login's loaded affects lay their points at the next computation, not while they load, and a saved mount sends no `MountVnum` re-show (ledger 399). The adds, and the mount's and its bonus's removes, ride the burst as legacy's do. | `LoadAffect` runs `ComputeAffect` on each row it loads (`G/char_affect.cpp:633`), so a saved mount re-shows the character mounted and `RemoveAffect(AFFECT_MOUNT)` re-shows it unmounted (`:644-645`); the Rewrite's restore runs before the burst, where point records and a re-show would reach the client ahead of the character it describes. |
+| A quest's `command` line never trips the anti-flood, and a click's dialog records beat the world's notices to the socket (ledger 413). The flood is fresh on every quest line, and the step's records go straight to the socket while the broadcasts travel through the outbox. | `interpret_command` counts quest lines against the character's flood and disconnects past 10 a second (`G/cmd.cpp`), and the notices go out while the script runs with the dialog at its end; the world has no delayed-disconnect path, and the step's records bypass the outbox. |
 
 ## Legacy defects not to reproduce
 

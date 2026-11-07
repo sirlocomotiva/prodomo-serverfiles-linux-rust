@@ -37265,3 +37265,96 @@ fn a_probe_reports_the_tail_numbers_and_lands_the_tail_moves() {
          name = 'Alpha') = 896200",
     );
 }
+
+/// Ledger 413's quiet probe: the skill teacher (vnum 20300, bound but questless)
+/// answers a click with the quiet globals. The first click says the locale, broadcasts
+/// a formatted notice, a quest-text notice and a split notice, runs the battle-pass line,
+/// re-arms the temple, and moves the quest to `second`; the second click says `second`.
+const QUIET_PROBE: &[u8] = b"quest quiet_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('lang:' .. LC())\n\
+    notice_all('Hello %s', 'world')\n\
+    notice_all('1')\n\
+    notice_all('a[ENTER]b')\n\
+    command('battle_pass')\n\
+    temple_ochao.initialize()\n\
+    set_quest_state('quiet_probe', 'second')\n\
+    end\n\
+    end\n\
+    state second begin\n\
+    when 20300.click begin\n\
+    say('second')\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `lua.LC`, `lua.notice_all`, `lua.command`, `lua.temple_ochao.initialize`,
+/// `lua.set_quest_state`: the first click runs the quiet globals — the dialog lands
+/// first, then the formatted, the quest-text and the split notices, then the usage line
+/// (ledger 413) — and the quest moves to `second`, whose click says `second`.
+#[test]
+fn a_quiet_probe_broadcasts_runs_a_line_and_moves_its_state() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let mut channels = default_channels();
+    channels[0].maps.push(209);
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/quiet_probe.lua", QUIET_PROBE)],
+        &channels,
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    // The dialog beats the broadcasts: the step's records go straight to the socket,
+    // while the world's notices travel through the outbox (ledger 413).
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"lang:en[ENTER][DONE]"),
+        "the locale rides the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Hello world"),
+        "the formatted notice"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"A special cloth"),
+        "the quest-text notice"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"a"),
+        "the split notice, first"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"b"),
+        "the split notice, last"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: battle_pass <field> <value>"),
+        "the battle-pass usage"
+    );
+    alice.quiet("the temple and the state move are silent");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"second[ENTER][DONE]"),
+        "the quest moved to second"
+    );
+    alice.quiet("the second click ends the dialog");
+}

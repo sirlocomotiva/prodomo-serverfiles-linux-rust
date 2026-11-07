@@ -508,6 +508,23 @@ pub trait Game {
     /// `test_server` (`G/config.cpp:72`): whether the deployment runs in test-server mode.
     fn test_server(&self) -> bool;
 
+    /// `DESC::GetLanguage` (`G/desc.h:182`): the descriptor's language byte, which `LC`
+    /// reads (`G/questlua_global.cpp:44-54`).
+    fn language(&self) -> u8;
+
+    /// `_notice_all` (`G/questlua_global.cpp:944-991`): the at most six `parts` reach
+    /// every online character as a notice, formatted and quest-translated as
+    /// `SendLocaleNotice` does. The world judges after the step.
+    fn notice_all(&mut self, parts: Vec<Vec<u8>>);
+
+    /// `temple_ochao_initialize` (`G/questlua_TempleOchao.cpp:15-20`): the temple's
+    /// rooms arm and its guardian spawns. The world judges after the step.
+    fn prepare_temple_ochao(&mut self);
+
+    /// `_do_command` (`G/questlua_global.cpp:730-741`): `interpret_command` runs `line`
+    /// as the character. The world judges after the step.
+    fn quest_command(&mut self, line: Vec<u8>);
+
     /// `_find_pc` (`G/questlua_global.cpp:743-757`): the VID of the online PC named `name`,
     /// case-insensitively, and 0 when no PC holds it.
     fn find_pc_vid(&self, name: &[u8]) -> u32;
@@ -1759,6 +1776,7 @@ impl Manager {
             selected: *selected,
             quest: current,
             pending_state: None,
+            pending_others: Vec::new(),
             borrowed: Some(&mut borrowed),
             current: pid,
             stack: Vec::new(),
@@ -2263,6 +2281,9 @@ struct Pc {
     /// that suspended, carried until its thread ends ([`Run::end_running`]) so the
     /// bridge's `&mut Cx` never reaches the `Pc`.
     pending_state: Option<Vec<u8>>,
+    /// `m_QuestStateChange`: the other quests' reserved moves, carried like
+    /// `pending_state` until the thread ends.
+    pending_others: Vec<(u32, Vec<u8>)>,
     npc_vid: u32,
     /// `m_pQuestItem` (`G/char.cpp:7620-7633`): the ID of the item whose `use` ran last, or 0.
     /// Legacy keeps a raw pointer that nothing clears when the item is destroyed, so a later
@@ -2436,6 +2457,11 @@ struct Cx<'g> {
     /// What `set_state` asked for in this step, which [`Run::end_running`] moves the `Pc` to
     /// when the script ends, or the `Pc` carries while the script waits.
     pending_state: Option<Vec<u8>>,
+    /// What `set_quest_state` reserved for other quests in this step, each quest's
+    /// number and its state name, which `end_running` moves after the running quest
+    /// (`DoQuestStateChange`, `G/questpc.cpp:377-419`), or the `Pc` carries while the
+    /// script waits.
+    pending_others: Vec<(u32, Vec<u8>)>,
     /// Every PC's flag map, borrowed from the manager for Lua's length: the bridge
     /// reads and writes the `current` PC's map, and a `q.begin_other_pc_block`
     /// switches `current` to the blocked PC's. `None` only in the direct-call
@@ -2792,7 +2818,8 @@ impl Run<'_, '_> {
     /// changed it (`SendQuestInfoPakcet`, `:342-346`), and then the quest of the script
     /// moves to the state its last `set_state` named, whichever step asked for it
     /// (`quest_setstate` writes the running state at once, `G/questlua_quest.cpp:112-146`),
-    /// running the scripts of the change ([`Run::goto_state`]).
+    /// running the scripts of the change ([`Run::goto_state`]), and then the reserved
+    /// other quests move in order (`DoQuestStateChange`, `G/questpc.cpp:377-419`).
     fn end_running(&self, pc: &mut Pc) {
         let asked = self.cx.borrow_mut().pending_state.take();
         let pending = asked.or_else(|| pc.pending_state.take());
@@ -2808,6 +2835,15 @@ impl Run<'_, '_> {
         }
         if let Some(state) = pending {
             self.goto_state(pc, running.quest, running.state, &state);
+        }
+        let mut others = std::mem::take(&mut pc.pending_others);
+        others.append(&mut self.cx.borrow_mut().pending_others);
+        for (quest, state) in others {
+            if quest == 0 {
+                continue;
+            }
+            let last = pc.quests.get(&quest).copied().unwrap_or(0);
+            self.goto_state(pc, quest, last, &state);
         }
     }
 
@@ -2870,6 +2906,8 @@ impl Run<'_, '_> {
         if let Some(state) = self.cx.borrow_mut().pending_state.take() {
             pc.pending_state = Some(state);
         }
+        pc.pending_others
+            .append(&mut self.cx.borrow_mut().pending_others);
         if let Some(wait) = self.cx.borrow_mut().confirm_wait.take() {
             pc.confirm_wait = Some(wait);
         }
@@ -5487,6 +5525,10 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             }
             None
         }
+        // The quiet globals (see `quiet_api`).
+        b"LC" | b"notice_all" | b"set_quest_state" | b"command" | b"temple_ochao.initialize" => {
+            return quiet_api(lua, cx, name, args, first);
+        }
         // The quest-log pair (see `quest_log`).
         b"char_log" | b"sys_err" => {
             quest_log(lua, cx, name, args, &first)?;
@@ -5498,6 +5540,93 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
                 String::from_utf8_lossy(name)
             )))
         }
+    };
+    Ok(result.into_iter().collect())
+}
+
+/// `get_locale` (`G/locale.cpp:30-56`): the two letters of the language byte.
+/// `LOCALE_YMIR` (0) and anything past `LOCALE_TR` (11) answer `en`, as the
+/// `default` arm does.
+fn locale_code(language: u8) -> &'static [u8] {
+    match language {
+        2 => b"pt",
+        3 => b"es",
+        4 => b"fr",
+        5 => b"de",
+        6 => b"ro",
+        7 => b"pl",
+        8 => b"it",
+        9 => b"cz",
+        10 => b"hu",
+        11 => b"tr",
+        _ => b"en",
+    }
+}
+
+/// The quiet globals: `LC` (`G/questlua_global.cpp:44-54`), `_notice_all`
+/// (`:944-991`), `_set_quest_state` (`:828-862`), `_do_command` (`:730-741`) and
+/// `temple_ochao_initialize` (`G/questlua_TempleOchao.cpp:15-20`). Split out so `api`
+/// stays under the line lint.
+fn quiet_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+    first: Value,
+) -> mlua::Result<MultiValue> {
+    let result = match name {
+        // `_get_locale`: the descriptor's language as two letters.
+        b"LC" => Some(Value::String(
+            lua.create_string(locale_code(cx.game.language()))?,
+        )),
+        // `_notice_all`: at most six parts (`MAX_QUEST_NOTICE_ARGS + 1`); more only
+        // logs. Each part is `snprintf %s`, so a missing one is `(null)` and a number
+        // formats. Pushes nothing.
+        b"notice_all" => {
+            if args.len() > 6 {
+                tracing::warn!("QUEST invalid argument.");
+            } else {
+                let mut parts = Vec::new();
+                for index in 0..6 {
+                    let part = args.get(index).cloned().unwrap_or(Value::Nil);
+                    let text = host::c_string(lua, part)?.unwrap_or_else(|| b"(null)".to_vec());
+                    parts.push(text);
+                }
+                cx.game.notice_all(parts);
+            }
+            None
+        }
+        // `_set_quest_state`: two strings name the quest and its state, else quiet.
+        // The running quest moves at once through `pending_state`, as `pqs->st` does;
+        // another quest's move is reserved for the end, as `m_QuestStateChange` is.
+        // Pushes nothing.
+        b"set_quest_state" => {
+            let quest = host::c_string(lua, first.clone())?;
+            let state = host::c_string(lua, args.get(1).cloned().unwrap_or(Value::Nil))?;
+            if let (Some(quest), Some(state)) = (quest, state) {
+                if quest == cx.quest {
+                    cx.pending_state = Some(state);
+                } else {
+                    let index = cx.quest_indices.get(&quest).copied().unwrap_or(0);
+                    cx.pending_others.push((index, state));
+                }
+            }
+            None
+        }
+        // `_do_command`: a string runs as the character; anything else is quiet.
+        // Pushes nothing.
+        b"command" => {
+            if let Some(line) = host::c_string(lua, first)? {
+                cx.game.quest_command(line);
+            }
+            None
+        }
+        // `temple_ochao_initialize`: the temple prepares. Pushes nothing.
+        b"temple_ochao.initialize" => {
+            cx.game.prepare_temple_ochao();
+            None
+        }
+        _ => return Ok(MultiValue::new()),
     };
     Ok(result.into_iter().collect())
 }
@@ -5715,6 +5844,14 @@ mod tests {
         guild_known: bool,
         /// Whether the deployment runs in test-server mode.
         test_server: bool,
+        /// The language byte `language` answers.
+        language: u8,
+        /// Every `notice_all` call's parts, in order.
+        notices: Vec<Vec<Vec<u8>>>,
+        /// Every `prepare_temple_ochao` call.
+        temple_prepares: usize,
+        /// Every `quest_command` call's line, in order.
+        quest_commands: Vec<Vec<u8>>,
         /// The VID `find_pc_vid` answers for each PC name.
         pcs: BTreeMap<Vec<u8>, u32>,
         /// The PID `pid_of` answers for each VID.
@@ -6220,6 +6357,22 @@ mod tests {
 
         fn test_server(&self) -> bool {
             self.test_server
+        }
+
+        fn language(&self) -> u8 {
+            self.language
+        }
+
+        fn notice_all(&mut self, parts: Vec<Vec<u8>>) {
+            self.notices.push(parts);
+        }
+
+        fn prepare_temple_ochao(&mut self) {
+            self.temple_prepares += 1;
+        }
+
+        fn quest_command(&mut self, line: Vec<u8>) {
+            self.quest_commands.push(line);
         }
 
         fn find_pc_vid(&self, name: &[u8]) -> u32 {
@@ -7565,6 +7718,7 @@ mod tests {
                 selected: None,
                 quest: b"q".to_vec(),
                 pending_state: None,
+                pending_others: Vec::new(),
                 borrowed: Some(&mut self.borrowed),
                 current: self.current,
                 stack: std::mem::take(&mut self.stack),
@@ -7687,6 +7841,62 @@ mod tests {
         for name in ["get_time", "get_global_time"] {
             assert_eq!(probe.call(name, &[]).unwrap(), number(1_790_000_000.0));
         }
+    }
+
+    /// The quiet globals: `LC` answers the tongue, `notice_all` snapshots six parts
+    /// and refuses a seventh argument, `command` runs a string and stays quiet on
+    /// anything else, and `temple_ochao.initialize` prepares. None pushes.
+    #[test]
+    fn the_quiet_globals_snapshot_refuse_and_prepare() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        probe.game.language = 5;
+        assert_eq!(probe.text("LC", &[]), b"de");
+        probe.game.language = 0;
+        assert_eq!(probe.text("LC", &[]), b"en");
+        assert!(probe
+            .call("notice_all", &[string(b"hi")])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe.game.notices.pop(),
+            Some(vec![
+                b"hi".to_vec(),
+                b"(null)".to_vec(),
+                b"(null)".to_vec(),
+                b"(null)".to_vec(),
+                b"(null)".to_vec(),
+                b"(null)".to_vec(),
+            ])
+        );
+        let seven: Vec<Value> = (0..7).map(|_| string(b"x")).collect();
+        assert!(probe.call("notice_all", &seven).unwrap().is_empty());
+        assert!(probe.game.notices.is_empty());
+        assert!(probe
+            .call("command", &[string(b"battle_pass")])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe.game.quest_commands.pop(),
+            Some(b"battle_pass".to_vec())
+        );
+        assert!(probe.call("command", &[Value::Nil]).unwrap().is_empty());
+        assert!(probe.game.quest_commands.is_empty());
+        assert!(probe
+            .call("temple_ochao.initialize", &[])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.temple_prepares, 1);
     }
 
     /// `pc.warp` answers false without two numbers; past them it warps and answers the

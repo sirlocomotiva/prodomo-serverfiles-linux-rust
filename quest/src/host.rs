@@ -236,7 +236,8 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 282] = [
+pub const BRIDGED: [&str; 287] = [
+    "temple_ochao.initialize",
     "attr67add.holding",
     "attr67add.success",
     "attr67add.collect",
@@ -293,10 +294,14 @@ pub const BRIDGED: [&str; 282] = [
     "mob_name",
     "get_time",
     "get_global_time",
+    "command",
     "find_pc_by_name",
     "find_npc_by_vnum",
+    "set_quest_state",
     "notice",
+    "notice_all",
     "warp_to_village",
+    "LC",
     "guild.get_rank",
     "guild.get_ladder_point",
     "guild.high_ranking_string",

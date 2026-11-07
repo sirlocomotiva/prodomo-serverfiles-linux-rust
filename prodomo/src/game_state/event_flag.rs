@@ -247,7 +247,7 @@ impl GameState {
                 // One tree per Channel world hosting Seohan, when it has none.
                 for place in self.places_hosting(SANTA_MAP) {
                     if self.vids_of_race(Some(place.0), XMAS_TREE).is_empty() {
-                        self.spawn_event_mob(
+                        let _stood = self.spawn_event_mob(
                             place,
                             XMAS_TREE,
                             (76_500 + 358_400, 60_900 + 153_600),
@@ -316,7 +316,8 @@ impl GameState {
                     continue;
                 }
                 if let Some((bx, by)) = self.map_base(place) {
-                    self.spawn_event_mob(place, NEW_SANTA, (bx + dx, by + dy), dir, false);
+                    let _stood =
+                        self.spawn_event_mob(place, NEW_SANTA, (bx + dx, by + dy), dir, false);
                 }
             }
         }
@@ -343,7 +344,7 @@ impl GameState {
                 tracing::warn!(?place, "cannot get map base position");
                 continue;
             };
-            self.spawn_event_mob(place, vnum, (bx + dx, by + dy), dir, false);
+            let _stood = self.spawn_event_mob(place, vnum, (bx + dx, by + dy), dir, false);
         }
     }
 

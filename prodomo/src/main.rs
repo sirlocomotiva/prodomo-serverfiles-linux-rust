@@ -8399,6 +8399,8 @@ struct GameData {
     protos: Arc<ItemProtos>,
     /// The locale strings, the same ones the game thread holds.
     locale: Arc<LocaleStrings>,
+    /// The quest translations, the same ones the game thread holds.
+    quest_translate: Arc<gamedata::quest_translate::QuestTranslate>,
     /// What the game thread stands the NPCs up from before it starts.
     npcs: NpcData,
     /// The shops a keeper opens, which the game thread holds.
@@ -8454,6 +8456,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let names = load_name_rules(config)?;
     let protos = load_item_protos(config)?;
     let locale = load_locale_strings(config)?;
+    let quest_translate = load_quest_translate(config)?;
     let npcs = load_npc_data(config, &atlas)?;
     let cells = load_map_cells(config, &atlas)?;
     let shops = load_npc_shops(config, &protos)?;
@@ -8478,6 +8481,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         names,
         protos,
         locale,
+        quest_translate,
         npcs,
         shops,
         drops,
@@ -8688,6 +8692,21 @@ fn load_sungzi_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::Sungz
     })?;
     info!(maps = maps.indices().len(), "SungZi maps loaded");
     Ok(Arc::new(maps))
+}
+
+/// Load the quest translations (`LocaleService_LoadQuestTranslateFile`,
+/// `G/locale_service.cpp:462-479`).
+///
+/// A file that cannot be read stops the server, as for every other Game data file (a
+/// Divergence: legacy goes on without a file it cannot open). The Rewrite needs the
+/// translations a `notice_all` digit key is looked up in.
+fn load_quest_translate(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::quest_translate::QuestTranslate>, String> {
+    let tables = gamedata::quest_translate::QuestTranslate::load(&config.country_dir())
+        .map_err(|error| format!("Quest translations are unusable: {error}"))?;
+    info!("Quest translations loaded");
+    Ok(Arc::new(tables))
 }
 
 /// Load what the NPCs are stood up from: `mob_proto.txt` with its names, the `LOCALE_YMIR` mob
@@ -9116,6 +9135,7 @@ fn build_world(
         .with_view_range(config.game.view_range)
         .with_no_wander(config.game.no_wander)
         .with_locale_strings(Arc::clone(&data.locale))
+        .with_quest_translate(Arc::clone(&data.quest_translate))
         .with_quests(quests)
         .with_max_level(config.game.max_level)
         .with_max_conqueror_level(config.game.max_conqueror_level)

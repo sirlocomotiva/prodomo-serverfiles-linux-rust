@@ -436,6 +436,12 @@ struct WorldMoves {
     skill_groups: Vec<u8>,
     /// Every `game.drop_item` vnum and count, in order, for the ground after the step.
     plain_drops: Vec<(u32, i32)>,
+    /// Every `notice_all` call's six parts, in order, for the broadcasts after the step.
+    notices_all: Vec<super::quest_quiet::NoticeParts>,
+    /// Every `temple_ochao.initialize` call, for the prepares after the step.
+    temple_prepares: usize,
+    /// Every `command` call's line, in order, for the commands after the step.
+    quest_commands: Vec<Vec<u8>>,
 }
 
 impl WorldMoves {
@@ -475,6 +481,13 @@ impl WorldMoves {
             exp2: std::mem::take(&mut session.tail.exp2),
             skill_groups: std::mem::take(&mut session.tail.skill_groups),
             plain_drops: std::mem::take(&mut session.tail.plain_drops),
+            notices_all: std::mem::take(&mut session.queues.notices_all)
+                .iter()
+                .map(|parts| GameState::snapshot_notice(parts))
+                .collect(),
+            temple_prepares: usize::try_from(std::mem::take(&mut session.queues.temple_prepares))
+                .unwrap_or(usize::MAX),
+            quest_commands: std::mem::take(&mut session.queues.quest_commands),
         }
     }
 }
@@ -519,6 +532,15 @@ pub(super) struct SessionQueues {
     /// Every `game.set_event_flag` call's name and value, in order, for the world's
     /// flags after the step.
     pub(super) event_sets: Vec<(Vec<u8>, i32)>,
+    /// Every `notice_all` call's six parts, in order, for the broadcasts after the
+    /// step (legacy sends in the call).
+    pub(super) notices_all: Vec<Vec<Vec<u8>>>,
+    /// Every `temple_ochao.initialize` call, in order, for the prepares after the
+    /// step (legacy prepares in the call).
+    pub(super) temple_prepares: u32,
+    /// Every `command` call's line, in order, for the commands after the step
+    /// (legacy interprets in the call).
+    pub(super) quest_commands: Vec<Vec<u8>>,
 }
 
 pub(super) struct Session<'s> {
@@ -2594,6 +2616,22 @@ impl Game for Session<'_> {
         self.test_server
     }
 
+    fn language(&self) -> u8 {
+        self.mover.language
+    }
+
+    fn notice_all(&mut self, parts: Vec<Vec<u8>>) {
+        self.queues.notices_all.push(parts);
+    }
+
+    fn prepare_temple_ochao(&mut self) {
+        self.queues.temple_prepares += 1;
+    }
+
+    fn quest_command(&mut self, line: Vec<u8>) {
+        self.queues.quest_commands.push(line);
+    }
+
     fn find_pc_vid(&self, name: &[u8]) -> u32 {
         // `FindPC`'s lower-cased map (`G/char_manager.cpp:244-259`): names are ASCII and
         // unique regardless of case, so a case-insensitive match is the map's answer.
@@ -4004,6 +4042,79 @@ impl GameState {
         let open = protocol::gc_changelook::GcChangeLook::open().encode();
         let _sent = self.write_to_client(reader, open);
     }
+}
+
+/// The [`WorldMoves`] the reader itself gains: its drops, its quiet calls, its
+/// `give_exp2` grants, and its skill groups.
+struct ReaderGains {
+    laid: Vec<world::item::Item>,
+    drops: Vec<(u32, i32, Option<i32>)>,
+    plain_drops: Vec<(u32, i32)>,
+    notices_all: Vec<super::quest_quiet::NoticeParts>,
+    temple_prepares: usize,
+    quest_commands: Vec<Vec<u8>>,
+    exp2: Vec<i64>,
+    skill_groups: Vec<u8>,
+}
+
+/// The [`WorldMoves`] the reader orders: its village and conqueror counts, its window
+/// opens, its minings, its horse and DS calls, its party flags, its confirms, its rank
+/// points, its empire moves, and its warps.
+struct ReaderOrders {
+    villages: u32,
+    conquerors: u32,
+    sash_opens: Vec<bool>,
+    changelooks: u32,
+    minings: Vec<u32>,
+    horse_ops: Vec<super::horse_summon::HorseOp>,
+    ds_refines: u32,
+    ds_attrs: u32,
+    party_sets: Vec<(Vec<u8>, i32)>,
+    confirm_records: Vec<(u32, Vec<u8>)>,
+    confirm_timeouts: Vec<(u32, i32)>,
+    rank_points: Vec<(u8, i32)>,
+    empire_moves: Vec<u8>,
+    account_pids: Vec<u32>,
+    warps: Vec<(i32, i32, i32)>,
+    observes: Vec<(u32, u32)>,
+}
+
+impl GameState {
+    /// The reader's own gains after the step: the quest drops, the quiet calls, the
+    /// `give_exp2` grants, and the skill groups. Split out so `apply_world_moves` stays
+    /// under the line lint.
+    fn apply_reader_gains(
+        &mut self,
+        reader: Vid,
+        place: GroundPlace,
+        mover: Mover,
+        gains: ReaderGains,
+    ) {
+        let ReaderGains {
+            laid,
+            drops,
+            plain_drops,
+            notices_all,
+            temple_prepares,
+            quest_commands,
+            exp2,
+            skill_groups,
+        } = gains;
+        self.apply_quest_drops(reader, place, laid, drops, plain_drops, mover);
+        self.apply_quiet_calls(
+            reader,
+            mover,
+            &notices_all,
+            temple_prepares,
+            &quest_commands,
+        );
+        for grant in exp2 {
+            self.gain_pc_exp(reader, grant);
+        }
+        for group in skill_groups {
+            self.run_skill_group(reader, group);
+        }
+    }
 
     /// A step's [`WorldMoves`] in the queues' old application order: the laid and
     /// dropped items, the village and conqueror counts, the sash and changelook
@@ -4051,31 +4162,25 @@ impl GameState {
             exp2,
             skill_groups,
             plain_drops,
+            notices_all,
+            temple_prepares,
+            quest_commands,
         } = queued;
-        self.apply_quest_drops(reader, place, laid, drops, plain_drops, mover);
-        for grant in exp2 {
-            self.gain_pc_exp(reader, grant);
-        }
-        for group in skill_groups {
-            self.run_skill_group(reader, group);
-        }
-        for _ in 0..villages {
-            self.order_village_warp(reader, mover);
-        }
-        for _ in 0..conquerors {
-            self.make_conqueror(reader, mover);
-        }
-        for combination in sash_opens {
-            self.open_sash(reader, mover, combination);
-        }
-        for _ in 0..changelooks {
-            self.open_changelook(reader, mover);
-        }
-        for npc in minings {
-            self.mining(reader, npc, mover);
-        }
-        self.apply_horse_ops(reader, horse_ops);
-        self.apply_ds_calls(reader, ds_refines, ds_attrs);
+        self.apply_reader_gains(
+            reader,
+            place,
+            mover,
+            ReaderGains {
+                laid,
+                drops,
+                plain_drops,
+                notices_all,
+                temple_prepares,
+                quest_commands,
+                exp2,
+                skill_groups,
+            },
+        );
         let staged = self.apply_dungeon_moves(
             reader,
             super::dungeons::DungeonMoves {
@@ -4094,11 +4199,87 @@ impl GameState {
                 event_sets,
             },
         );
+        let (staged, home) = staged;
+        self.apply_reader_orders(
+            reader,
+            mover,
+            pid,
+            &staged,
+            home,
+            ReaderOrders {
+                villages,
+                conquerors,
+                sash_opens,
+                changelooks,
+                minings,
+                horse_ops,
+                ds_refines,
+                ds_attrs,
+                party_sets,
+                confirm_records,
+                confirm_timeouts,
+                rank_points,
+                empire_moves,
+                account_pids,
+                warps,
+                observes,
+            },
+        )
+    }
+
+    /// The reader's orders after the step: its village and conqueror counts, its
+    /// window opens, its minings, its horse and DS calls, its party flags (a staged
+    /// slot reads the created index, a failed one the reader's own dungeon), its
+    /// confirms, its rank points, its empire moves, and its warps. Split out so
+    /// `apply_world_moves` stays under the line lint.
+    fn apply_reader_orders(
+        &mut self,
+        reader: Vid,
+        mover: Mover,
+        pid: u32,
+        staged: &std::collections::BTreeMap<i32, i32>,
+        home: i32,
+        orders: ReaderOrders,
+    ) -> Option<u8> {
+        let ReaderOrders {
+            villages,
+            conquerors,
+            sash_opens,
+            changelooks,
+            minings,
+            horse_ops,
+            ds_refines,
+            ds_attrs,
+            party_sets,
+            confirm_records,
+            confirm_timeouts,
+            rank_points,
+            empire_moves,
+            account_pids,
+            warps,
+            observes,
+        } = orders;
+        for _ in 0..villages {
+            self.order_village_warp(reader, mover);
+        }
+        for _ in 0..conquerors {
+            self.make_conqueror(reader, mover);
+        }
+        for combination in sash_opens {
+            self.open_sash(reader, mover, combination);
+        }
+        for _ in 0..changelooks {
+            self.open_changelook(reader, mover);
+        }
+        for npc in minings {
+            self.mining(reader, npc, mover);
+        }
+        self.apply_horse_ops(reader, horse_ops);
+        self.apply_ds_calls(reader, ds_refines, ds_attrs);
         // A party flag set to a staged slot reads the created index: the step saw the
         // jump's index before the create ran (`GetDungeonForce`), and the flag keeps
         // what the script read. A slot whose create failed reads the reader's own
         // dungeon, as the calls after it did.
-        let (staged, home) = staged;
         for (flag, value) in party_sets {
             let value = staged
                 .get(&value)

@@ -727,8 +727,9 @@ impl GameState {
     }
 
     /// `SpawnMob(vnum, map, x, y, 0, spawn_motion, dir)` on `place` for an event arm: the
-    /// point is absolute, `-1` draws the facing. A point no sectree holds, a cell that
-    /// refuses, or a missing proto stands nothing, as legacy's null return does.
+    /// point is absolute, `-1` draws the facing. Answers the stood VID, or nothing when
+    /// a point no sectree holds, a cell that refuses, or a missing proto stands nothing,
+    /// as legacy's null return does.
     pub(super) fn spawn_event_mob(
         &mut self,
         place: (u8, i32),
@@ -736,14 +737,14 @@ impl GameState {
         at: (i32, i32),
         dir: i32,
         spawn_motion: bool,
-    ) {
+    ) -> Option<u32> {
         let pulse = self.last_pulse;
         let (Some(region), Some(cells), Some(respawner)) = (
             self.regens.regions.get(&place).cloned(),
             self.regens.cells.get(place.1).cloned(),
             self.regens.respawner.as_mut(),
         ) else {
-            return;
+            return None;
         };
         match respawner.spawn_directed(
             (&region, &cells),
@@ -753,9 +754,16 @@ impl GameState {
             spawn_motion,
             &mut self.dice,
         ) {
-            Ok(Some(stood)) => self.stand_runtime(place, vec![stood], pulse),
-            Ok(None) => {}
-            Err(error) => warn!(?place, %error, "an event spawn outnumbered the VIDs left"),
+            Ok(Some(stood)) => {
+                let vid = stood.vid;
+                self.stand_runtime(place, vec![stood], pulse);
+                Some(vid)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                warn!(?place, %error, "an event spawn outnumbered the VIDs left");
+                None
+            }
         }
     }
 

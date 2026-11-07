@@ -70,7 +70,15 @@ pub fn chat_text(to: Recipient<'_>, chat_type: u8, format: &[u8], args: &[Arg<'_
     } else {
         to.strings.find(format, to.language)
     };
-    let mut text = vsnprintf(format, args);
+    notice_text(format, args)
+}
+
+/// The rendered text `SendLocaleNotice` speaks (`G/cmd_gm.cpp:1252-1313`): the
+/// arguments substituted into a format that skips the locale-strings lookup, and
+/// the text cut to `CHAT_MAX_LEN`.
+#[must_use]
+pub fn notice_text(format: &[u8], args: &[Arg<'_>]) -> Vec<u8> {
+    let mut text = vsnprintf(c_string(format), args);
     text.truncate(CHAT_MAX_LEN);
     text
 }
