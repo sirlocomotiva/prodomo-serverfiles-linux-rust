@@ -65,6 +65,7 @@ pub mod cg_whisper;
 pub mod cg_wire;
 pub mod gc;
 pub mod gc_actors;
+pub mod gc_aura;
 pub mod gc_changelook;
 pub mod gc_channel_status;
 pub mod gc_chat;

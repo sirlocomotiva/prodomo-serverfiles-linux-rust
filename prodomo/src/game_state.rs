@@ -604,6 +604,8 @@ pub struct GameState {
     card_tables: cards::CardTables,
     /// The dragon soul table, which `/ds_change_attr` redraws a stone's attributes from.
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
+    /// The Gaya `ITEM` roll list, which a fresh market shelf rolls its nine from.
+    gaya_table: Arc<gamedata::gaya::GayaTable>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
     gauss: world::character::Gauss,
     /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
@@ -666,6 +668,14 @@ pub struct GameState {
     /// The characters whose changelook (Transmutation) window stands:
     /// `m_bChangeLook` (`G/char.cpp:10504-10535`). Absent when no window stands.
     changelook_windows: std::collections::HashSet<common::vid::Vid>,
+    /// The aura refine window each character has open, keyed by its VID:
+    /// `m_bAuraRefineWindowType` and `m_pAuraRefineWindowOpener`
+    /// (`G/char_aura.cpp:14-71`). Absent when no window stands.
+    aura_windows: HashMap<common::vid::Vid, (u8, u32)>,
+    /// The Gaya market shelf of each character that has one, keyed by its VID:
+    /// the nine items and the six slot unlocks (`<Name>_gaya_system.txt`,
+    /// `G/char_gaya.cpp:175-273`). Absent until the market opens.
+    gaya_markets: HashMap<common::vid::Vid, quest_quiet::GayaMarket>,
     quests: Option<Quests>,
     /// The characters the quests marked for their characters' clients (`CTargetManager`).
     quest_targets: quest_target::QuestTargets,

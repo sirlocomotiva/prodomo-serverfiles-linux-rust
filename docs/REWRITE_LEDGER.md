@@ -46668,3 +46668,48 @@ clean; the suite `cargo test --workspace --all-targets --locked --offline --no-f
 --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo
 doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin`
 pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 415. The Gaya market, the aura windows and the event pair
+
+Seven quest names, all called by owner quests: `event_panel.quest` drives `start_event` /
+`end_event` from its GM menu, `sistem_gaia.lua` opens the Gaya pair, and `aura_system.quest`
+opens the aura trio (`BRIDGED` 295).
+
+`game.open_gaya` chats `OpenGuiGaya`. `game.open_gaya_market` refreshes the market and chats
+`OpenGuiGayaMarket`: a reader with no row gets nine rolls of `number(1, size - 1)` from the
+21-row `gaya.txt` (a new `gamedata::gaya` reader, loaded at boot and shared like the other
+tables) with the six slots locked and the 5-hour stamp in `system_gaya.gaya_time_world_4`,
+then the markers (`GayaMarketClear`, the nine `GayaMarketItems`, `GayaMarketSlotsDesblock`,
+`GayaMarketTime`) reach the client. The shelf lives on the world (a Divergence: legacy keeps
+it in per-character `<Name>_gaya_system.txt` files, and `UpdateItemsGayaMarker0` faults on a
+missing file). A one-row table rolls nothing: legacy's `number(1, 0)` has no range.
+
+The aura trio shares `OpenAuraRefineWindow` (`G/char_aura.cpp:14-71`): an open window chats
+`[LS;1014]`, an opener at `DISTANCE_APPROX` 1000 or more chats `[LS;459]`, else the new
+`protocol::gc_aura` open (header 214, size 5, subheader 0, the window byte) goes out and the
+window stands. `gc.aura` is `partial`: the item and refine subheaders wait for their systems.
+GC coverage is now 118 of 134 (16 missing: 7 fixed, 9 dynamic).
+
+`start_event` / `end_event` run `SetEventState` (`G/event_manager.cpp:719-779`): an unknown
+index or an unchanged state is quiet, else the flag moves (the 14 `GetEventState` flags,
+`:663-716`, pinned by a unit table) and the exp/loot arms grant their empire privs and speak
+their notices. The priv runs a week (`RequestGiveEmpirePriv`'s maximum,
+`G/priv_manager.cpp:47-66`), clamped 0-200, because the quest call carries no row times and a
+week is what the scheduled path would grant at most. Every other arm waits for its system;
+a zero exp/loot value moves the flag and grants nothing, as `SetExperienceEvent` refuses it.
+
+Scenario `a_click_opens_windows_and_runs_the_exp_event` (8/8 stable): the dialog, the Gaya
+window, the market markers, the absorb open, the priv notice and both exp notices, in order.
+Units: the bridges' argument rules, the event flags/grants/notices, the flag table, the
+market roll and markers, the aura gate. Mutants killed: the event index +1, a flag typo
+(after a table test caught the class), the aura range at 10. Refactors for the lints:
+`time_find_api` out of `api`, `QuietCalls`/`QuietOwned` bundles, `ReaderGains::take` and
+`ReaderOrders::take`. No width was measured.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4844 passed 0 failed in 42 targets; `cargo test --workspace --doc --locked
+--offline` 9 ok; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

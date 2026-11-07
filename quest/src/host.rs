@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 288] = [
+pub const BRIDGED: [&str; 295] = [
     "temple_ochao.initialize",
     "attr67add.holding",
     "attr67add.success",
@@ -269,6 +269,11 @@ pub const BRIDGED: [&str; 288] = [
     "game.set_event_flag",
     "game.drop_item",
     "game.drop_item_with_ownership",
+    "game.open_gaya",
+    "game.open_gaya_market",
+    "game.open_aura_absorb_window",
+    "game.open_aura_growth_window",
+    "game.open_aura_evolve_window",
     "sys_err",
     "char_log",
     "set_state",
@@ -303,6 +308,8 @@ pub const BRIDGED: [&str; 288] = [
     "notice_all",
     "warp_to_village",
     "LC",
+    "start_event",
+    "end_event",
     "guild.get_rank",
     "guild.get_ladder_point",
     "guild.high_ranking_string",

@@ -445,6 +445,8 @@ struct WorldMoves {
     /// Every `add_ox_quiz` call's level, question and answer, in order, for the
     /// OX list after the step.
     ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
+    /// The window and event queues, in call order each.
+    quiet: super::quest_quiet::QuietOwned,
 }
 
 impl WorldMoves {
@@ -492,6 +494,55 @@ impl WorldMoves {
                 .unwrap_or(usize::MAX),
             quest_commands: std::mem::take(&mut session.queues.quest_commands),
             ox_quizzes: std::mem::take(&mut session.queues.ox_quizzes),
+            quiet: super::quest_quiet::QuietOwned {
+                gaya_opens: std::mem::take(&mut session.queues.gaya_opens),
+                gaya_market_opens: std::mem::take(&mut session.queues.gaya_market_opens),
+                aura_opens: std::mem::take(&mut session.queues.aura_opens),
+                event_starts: std::mem::take(&mut session.queues.event_starts),
+                event_ends: std::mem::take(&mut session.queues.event_ends),
+            },
+        }
+    }
+}
+
+impl ReaderGains {
+    /// Take the gains half out of a step's moves.
+    fn take(queued: &mut WorldMoves) -> Self {
+        Self {
+            laid: std::mem::take(&mut queued.laid),
+            drops: std::mem::take(&mut queued.drops),
+            plain_drops: std::mem::take(&mut queued.plain_drops),
+            notices_all: std::mem::take(&mut queued.notices_all),
+            temple_prepares: std::mem::take(&mut queued.temple_prepares),
+            quest_commands: std::mem::take(&mut queued.quest_commands),
+            ox_quizzes: std::mem::take(&mut queued.ox_quizzes),
+            quiet: std::mem::take(&mut queued.quiet),
+            exp2: std::mem::take(&mut queued.exp2),
+            skill_groups: std::mem::take(&mut queued.skill_groups),
+        }
+    }
+}
+
+impl ReaderOrders {
+    /// Take the orders half out of a step's moves.
+    fn take(queued: &mut WorldMoves) -> Self {
+        Self {
+            villages: std::mem::take(&mut queued.villages),
+            conquerors: std::mem::take(&mut queued.conquerors),
+            sash_opens: std::mem::take(&mut queued.sash_opens),
+            changelooks: std::mem::take(&mut queued.changelooks),
+            minings: std::mem::take(&mut queued.minings),
+            horse_ops: std::mem::take(&mut queued.horse_ops),
+            ds_refines: std::mem::take(&mut queued.ds_refines),
+            ds_attrs: std::mem::take(&mut queued.ds_attrs),
+            party_sets: std::mem::take(&mut queued.party_sets),
+            confirm_records: std::mem::take(&mut queued.confirm_records),
+            confirm_timeouts: std::mem::take(&mut queued.confirm_timeouts),
+            rank_points: std::mem::take(&mut queued.rank_points),
+            empire_moves: std::mem::take(&mut queued.empire_moves),
+            account_pids: std::mem::take(&mut queued.account_pids),
+            warps: std::mem::take(&mut queued.warps),
+            observes: std::mem::take(&mut queued.observes),
         }
     }
 }
@@ -548,6 +599,18 @@ pub(super) struct SessionQueues {
     /// Every `add_ox_quiz` call's level, question and answer, in order, for the
     /// OX list after the step (legacy lands in the call).
     pub(super) ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
+    /// The `game.open_gaya` calls, for the window after the step.
+    pub(super) gaya_opens: u32,
+    /// The `game.open_gaya_market` calls, for the market after the step.
+    pub(super) gaya_market_opens: u32,
+    /// The aura window opens, in order: the window (0 absorb, 1 growth, 2
+    /// evolve) and the opener's VID.
+    pub(super) aura_opens: Vec<(u8, u32)>,
+    /// Every `start_event` call's index and two values, in order, for the events
+    /// after the step.
+    pub(super) event_starts: Vec<(i32, i32, i32)>,
+    /// Every `end_event` call's index, in order, for the events after the step.
+    pub(super) event_ends: Vec<i32>,
 }
 
 pub(super) struct Session<'s> {
@@ -2647,6 +2710,34 @@ impl Game for Session<'_> {
         self.queues.ox_quizzes.push((level, question, answer));
     }
 
+    fn open_gaya(&mut self) {
+        self.queues.gaya_opens += 1;
+    }
+
+    fn open_gaya_market(&mut self) {
+        self.queues.gaya_market_opens += 1;
+    }
+
+    fn open_aura_absorb(&mut self, npc_vid: u32) {
+        self.queues.aura_opens.push((0, npc_vid));
+    }
+
+    fn open_aura_growth(&mut self, npc_vid: u32) {
+        self.queues.aura_opens.push((1, npc_vid));
+    }
+
+    fn open_aura_evolve(&mut self, npc_vid: u32) {
+        self.queues.aura_opens.push((2, npc_vid));
+    }
+
+    fn start_event(&mut self, index: i32, value0: i32, value1: i32) {
+        self.queues.event_starts.push((index, value0, value1));
+    }
+
+    fn end_event(&mut self, index: i32) {
+        self.queues.event_ends.push(index);
+    }
+
     fn find_pc_vid(&self, name: &[u8]) -> u32 {
         // `FindPC`'s lower-cased map (`G/char_manager.cpp:244-259`): names are ASCII and
         // unique regardless of case, so a case-insensitive match is the map's answer.
@@ -4069,6 +4160,7 @@ struct ReaderGains {
     temple_prepares: usize,
     quest_commands: Vec<Vec<u8>>,
     ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
+    quiet: super::quest_quiet::QuietOwned,
     exp2: Vec<i64>,
     skill_groups: Vec<u8>,
 }
@@ -4114,6 +4206,7 @@ impl GameState {
             temple_prepares,
             quest_commands,
             ox_quizzes,
+            quiet,
             exp2,
             skill_groups,
         } = gains;
@@ -4121,10 +4214,17 @@ impl GameState {
         self.apply_quiet_calls(
             reader,
             mover,
-            &notices_all,
-            temple_prepares,
-            &quest_commands,
-            &ox_quizzes,
+            super::quest_quiet::QuietCalls {
+                notices: &notices_all,
+                prepares: temple_prepares,
+                commands: &quest_commands,
+                quizzes: &ox_quizzes,
+                gaya_opens: quiet.gaya_opens,
+                gaya_market_opens: quiet.gaya_market_opens,
+                aura_opens: &quiet.aura_opens,
+                event_starts: &quiet.event_starts,
+                event_ends: &quiet.event_ends,
+            },
         );
         for grant in exp2 {
             self.gain_pc_exp(reader, grant);
@@ -4145,78 +4245,24 @@ impl GameState {
         pid: u32,
         queued: WorldMoves,
     ) -> Option<u8> {
-        let WorldMoves {
-            laid,
-            warps,
-            drops,
-            villages,
-            conquerors,
-            sash_opens,
-            changelooks,
-            minings,
-            horse_ops,
-            ds_refines,
-            ds_attrs,
-            party_sets,
-            dungeon_sets,
-            dungeon_jumps,
-            dungeon_notices,
-            dungeon_warps,
-            dungeon_exits,
-            dungeon_spawns,
-            dungeon_singles,
-            dungeon_clears,
-            dungeon_kills,
-            damage_race_sets,
-            damage_affect_sets,
-            server_timer_ops,
-            event_sets,
-            confirm_records,
-            confirm_timeouts,
-            rank_points,
-            empire_moves,
-            account_pids,
-            observes,
-            exp2,
-            skill_groups,
-            plain_drops,
-            notices_all,
-            temple_prepares,
-            quest_commands,
-            ox_quizzes,
-        } = queued;
-        self.apply_reader_gains(
-            reader,
-            place,
-            mover,
-            ReaderGains {
-                laid,
-                drops,
-                plain_drops,
-                notices_all,
-                temple_prepares,
-                quest_commands,
-                ox_quizzes,
-                exp2,
-                skill_groups,
-            },
-        );
+        let mut queued = queued;
+        self.apply_reader_gains(reader, place, mover, ReaderGains::take(&mut queued));
         let staged = self.apply_dungeon_moves(
             reader,
             super::dungeons::DungeonMoves {
-                sets: dungeon_sets,
-                jumps: dungeon_jumps,
-                notices: dungeon_notices,
-                warps: dungeon_warps,
-                exits: dungeon_exits,
-                spawns: dungeon_spawns,
-                singles: dungeon_singles,
-                clears: dungeon_clears,
-                kills: dungeon_kills,
-                damage_race: damage_race_sets,
-                damage_affect: damage_affect_sets,
-                timer_ops: server_timer_ops,
-                event_sets,
+                sets: std::mem::take(&mut queued.dungeon_sets),
+                jumps: std::mem::take(&mut queued.dungeon_jumps),
+                notices: std::mem::take(&mut queued.dungeon_notices),
+                warps: std::mem::take(&mut queued.dungeon_warps),
+                exits: std::mem::take(&mut queued.dungeon_exits),
+                spawns: std::mem::take(&mut queued.dungeon_spawns),
+                singles: std::mem::take(&mut queued.dungeon_singles),
+                clears: std::mem::take(&mut queued.dungeon_clears),
+                kills: std::mem::take(&mut queued.dungeon_kills),
+                damage_race: std::mem::take(&mut queued.damage_race_sets),
+                damage_affect: std::mem::take(&mut queued.damage_affect_sets),
+                timer_ops: std::mem::take(&mut queued.server_timer_ops),
+                event_sets: std::mem::take(&mut queued.event_sets),
             },
         );
         let (staged, home) = staged;
@@ -4226,24 +4272,7 @@ impl GameState {
             pid,
             &staged,
             home,
-            ReaderOrders {
-                villages,
-                conquerors,
-                sash_opens,
-                changelooks,
-                minings,
-                horse_ops,
-                ds_refines,
-                ds_attrs,
-                party_sets,
-                confirm_records,
-                confirm_timeouts,
-                rank_points,
-                empire_moves,
-                account_pids,
-                warps,
-                observes,
-            },
+            ReaderOrders::take(&mut queued),
         )
     }
 

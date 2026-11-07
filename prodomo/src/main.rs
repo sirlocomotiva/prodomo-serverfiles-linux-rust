@@ -8434,6 +8434,8 @@ struct GameData {
     fishing: Arc<gamedata::fishing::Fishing>,
     /// The dragon soul table, which the game thread holds.
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
+    /// The Gaya table, which the game thread holds.
+    gaya_table: Arc<gamedata::gaya::GayaTable>,
     /// The SungZi map indices, which the game thread holds.
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,
 }
@@ -8473,6 +8475,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let refine_recipes = load_refine_recipes(config)?;
     let fishing = load_fishing(config)?;
     let dragon_soul_table = load_dragon_soul_table(config)?;
+    let gaya_table = load_gaya_table(config)?;
     let sungzi_maps = load_sungzi_maps(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
@@ -8498,6 +8501,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         refine_recipes,
         fishing,
         dragon_soul_table,
+        gaya_table,
         sungzi_maps,
     };
     Ok((data, quests))
@@ -8674,6 +8678,19 @@ fn load_dragon_soul_table(
             )
         })?;
     info!("Dragon soul table loaded");
+    Ok(Arc::new(table))
+}
+
+/// Load the Gaya table (`CHARACTER::lOAD_GAYA`, `G/char_gaya.cpp:19-76`).
+///
+/// A file that cannot be read stops the server, as every Game data read the world needs
+/// does, so a client is never accepted into a world whose market cannot be stocked.
+fn load_gaya_table(config: &ServerConfig) -> Result<Arc<gamedata::gaya::GayaTable>, String> {
+    let path = config.locale_dir().join("gaya.txt");
+    let text = std::fs::read(&path)
+        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+    let table = gamedata::gaya::GayaTable::load(&text);
+    info!(items = table.items.len(), "Gaya table loaded");
     Ok(Arc::new(table))
 }
 
@@ -9124,6 +9141,7 @@ fn build_world(
         .with_refine_recipes(Arc::clone(&data.refine_recipes))
         .with_fishing(Arc::clone(&data.fishing))
         .with_dragon_soul_table(Arc::clone(&data.dragon_soul_table))
+        .with_gaya_table(Arc::clone(&data.gaya_table))
         .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)

@@ -530,6 +530,37 @@ pub trait Game {
     /// `G/OXEvent.cpp:175-186`). The world judges after the step.
     fn add_ox_quiz(&mut self, level: u8, question: Vec<u8>, answer: bool);
 
+    /// `game_open_gaya_c` (`G/questlua_game.cpp:95-101`): the client opens the Gaya
+    /// window. The world judges after the step.
+    fn open_gaya(&mut self);
+
+    /// `game_open_gaya_m` (`G/questlua_game.cpp:103-126`): the Gaya market markers are
+    /// refreshed and the client opens the Gaya market. The world judges after the step.
+    fn open_gaya_market(&mut self);
+
+    /// `game_open_aura_absorb_window` (`G/questlua_game.cpp:312-323`): the absorb
+    /// window opens on the NPC `npc_vid` (0 with none). The world judges after the
+    /// step.
+    fn open_aura_absorb(&mut self, npc_vid: u32);
+
+    /// `game_open_aura_growth_window` (`G/questlua_game.cpp:326-337`): the growth
+    /// window opens on the NPC `npc_vid` (0 with none). The world judges after the
+    /// step.
+    fn open_aura_growth(&mut self, npc_vid: u32);
+
+    /// `game_open_aura_evolve_window` (`G/questlua_game.cpp:340-351`): the evolve
+    /// window opens on the NPC `npc_vid` (0 with none). The world judges after the
+    /// step.
+    fn open_aura_evolve(&mut self, npc_vid: u32);
+
+    /// `_start_event` (`G/questlua_global.cpp:1636-1665`): the event `index` starts
+    /// with `value0` and `value1`. The world judges after the step.
+    fn start_event(&mut self, index: i32, value0: i32, value1: i32);
+
+    /// `_end_event` (`G/questlua_global.cpp:1668-1686`): the event `index` ends. The
+    /// world judges after the step.
+    fn end_event(&mut self, index: i32);
+
     /// `_find_pc` (`G/questlua_global.cpp:743-757`): the VID of the online PC named `name`,
     /// case-insensitively, and 0 when no PC holds it.
     fn find_pc_vid(&self, name: &[u8]) -> u32;
@@ -5486,29 +5517,20 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             lua.create_string(named_thing(lua, cx, name, first)?)?,
         )),
         b"get_time" | b"get_global_time" => number(cx.game.global_time()),
-        // `_time_to_str` (`G/questlua_global.cpp:65-70`): `asctime(gmtime())` of
-        // `(time_t)` of the last argument, a number or a text one.
-        b"time_to_str" => {
-            let stamp = lua.coerce_number(last)?;
-            Some(Value::String(lua.create_string(time_to_str(stamp))?))
-        }
-        // `_is_test_server` (`G/questlua_global.cpp:298-302`).
-        b"is_test_server" => Some(Value::Boolean(cx.game.test_server())),
-        // `_find_pc` (`G/questlua_global.cpp:743-757`): the VID of the online PC the
-        // first argument names, and 0 for a non-string or an unknown name.
-        b"find_pc_by_name" => {
-            let vid = match first {
-                Value::String(text) => host::c_string(lua, Value::String(text.clone()))?
-                    .map_or(0, |name| cx.game.find_pc_vid(&name)),
-                _ => 0,
-            };
-            number(vid)
+        // The time, test-server and find-PC arms (see `time_find_api`).
+        b"time_to_str" | b"is_test_server" | b"find_pc_by_name" => {
+            return time_find_api(lua, cx, name, first, last);
         }
         // The game, NPC and warp arms (see `game_npc_api`).
         b"game.get_event_flag"
         | b"game.request_make_guild"
         | b"game.drop_item"
         | b"game.drop_item_with_ownership"
+        | b"game.open_gaya"
+        | b"game.open_gaya_market"
+        | b"game.open_aura_absorb_window"
+        | b"game.open_aura_growth_window"
+        | b"game.open_aura_evolve_window"
         | b"warp_to_village"
         | b"npc.getrace"
         | b"npc.get_race"
@@ -5531,6 +5553,8 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         | b"set_quest_state"
         | b"command"
         | b"add_ox_quiz"
+        | b"start_event"
+        | b"end_event"
         | b"temple_ochao.initialize" => {
             return quiet_api(lua, cx, name, args, first);
         }
@@ -5578,7 +5602,8 @@ fn locale_code(language: u8) -> &'static [u8] {
 
 /// The quiet globals: `LC` (`G/questlua_global.cpp:44-54`), `_notice_all`
 /// (`:944-991`), `_set_quest_state` (`:828-862`), `_do_command` (`:730-741`),
-/// `_add_ox_quiz` (`:1144-1156`) and `temple_ochao_initialize`
+/// `_add_ox_quiz` (`:1144-1156`), `_start_event` (`:1636-1665`), `_end_event`
+/// (`:1668-1686`) and `temple_ochao_initialize`
 /// (`G/questlua_TempleOchao.cpp:15-20`). Split out so `api` stays under the line lint.
 fn quiet_api(
     lua: &Lua,
@@ -5651,6 +5676,36 @@ fn quiet_api(
             }
             Some(Value::Number(f64::from(level)))
         }
+        // `_start_event` (`G/questlua_global.cpp:1636-1665`): a number-like first
+        // argument names the event, number-like second and third its two values
+        // (`lua_isnumber`, so a numeric string counts and anything else reads 0).
+        // Pushes nothing; a non-number first pushes 0 and starts nothing.
+        b"start_event" => {
+            let Some(index) = lua.coerce_number(first)? else {
+                return Ok(MultiValue::from_vec(vec![Value::Number(0.0)]));
+            };
+            let value0 = lua
+                .coerce_number(args.get(1).cloned().unwrap_or(Value::Nil))?
+                .unwrap_or(0.0);
+            let value1 = lua
+                .coerce_number(args.get(2).cloned().unwrap_or(Value::Nil))?
+                .unwrap_or(0.0);
+            cx.game.start_event(
+                host::c_int(lua, Value::Number(index))?,
+                host::c_int(lua, Value::Number(value0))?,
+                host::c_int(lua, Value::Number(value1))?,
+            );
+            None
+        }
+        // `_end_event` (`G/questlua_global.cpp:1668-1686`): a number-like first
+        // argument names the event. Pushes nothing; a non-number first pushes 0.
+        b"end_event" => {
+            let Some(index) = lua.coerce_number(first)? else {
+                return Ok(MultiValue::from_vec(vec![Value::Number(0.0)]));
+            };
+            cx.game.end_event(host::c_int(lua, Value::Number(index))?);
+            None
+        }
         // `temple_ochao_initialize`: the temple prepares. Pushes nothing.
         b"temple_ochao.initialize" => {
             cx.game.prepare_temple_ochao();
@@ -5661,9 +5716,44 @@ fn quiet_api(
     Ok(result.into_iter().collect())
 }
 
+/// The time, test-server and find-PC arms: `_time_to_str`
+/// (`G/questlua_global.cpp:65-70`), `_is_test_server` (`:298-302`) and `_find_pc`
+/// (`:743-757`). Split out so `api` stays under the line lint.
+fn time_find_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    first: Value,
+    last: Value,
+) -> mlua::Result<MultiValue> {
+    let result = match name {
+        // `_time_to_str`: `asctime(gmtime())` of `(time_t)` of the last argument, a
+        // number or a text one.
+        b"time_to_str" => {
+            let stamp = lua.coerce_number(last)?;
+            Some(Value::String(lua.create_string(time_to_str(stamp))?))
+        }
+        // `_is_test_server`.
+        b"is_test_server" => Some(Value::Boolean(cx.game.test_server())),
+        // `_find_pc`: the VID of the online PC the first argument names, and 0 for
+        // a non-string or an unknown name.
+        b"find_pc_by_name" => {
+            let vid = match first {
+                Value::String(text) => host::c_string(lua, Value::String(text.clone()))?
+                    .map_or(0, |name| cx.game.find_pc_vid(&name)),
+                _ => 0,
+            };
+            Some(Value::Number(f64::from(vid)))
+        }
+        _ => None,
+    };
+    Ok(result.into_iter().collect())
+}
+
 /// The game, NPC and village-warp arms: `game.get_event_flag`
 /// (`G/questlua_game.cpp`), `game_request_make_guild` (`:51-62`),
-/// `game_drop_item_with_ownership`, `_warp_to_village` (`G/questlua_global.cpp:1060-1071`),
+/// `game_drop_item_with_ownership`, the Gaya pair (`:95-126`) and the aura trio
+/// (`:312-351`), `_warp_to_village` (`G/questlua_global.cpp:1060-1071`),
 /// `npc_getrace`, `npc_get_empire` (`G/questlua_npc.cpp:43-52`) and `npc_get_guild`
 /// (`:60-70`). Split out so `api` stays under the line lint.
 fn game_npc_api(
@@ -5699,6 +5789,27 @@ fn game_npc_api(
         // `game_drop_item_with_ownership` (see `drop_with_ownership`): pushes nothing.
         b"game.drop_item_with_ownership" => {
             drop_with_ownership(lua, cx, args)?;
+            None
+        }
+        // The Gaya pair and the aura trio: each opens its window. Push nothing.
+        b"game.open_gaya" => {
+            cx.game.open_gaya();
+            None
+        }
+        b"game.open_gaya_market" => {
+            cx.game.open_gaya_market();
+            None
+        }
+        b"game.open_aura_absorb_window" => {
+            cx.game.open_aura_absorb(cx.npc_vid);
+            None
+        }
+        b"game.open_aura_growth_window" => {
+            cx.game.open_aura_growth(cx.npc_vid);
+            None
+        }
+        b"game.open_aura_evolve_window" => {
+            cx.game.open_aura_evolve(cx.npc_vid);
             None
         }
         // `_warp_to_village` (`G/questlua_global.cpp:1060-1071`): pushes nothing.
@@ -5884,6 +5995,17 @@ mod tests {
         quest_commands: Vec<Vec<u8>>,
         /// Every `add_ox_quiz` call, in order.
         ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
+        /// The `open_gaya` calls.
+        gaya_opens: usize,
+        /// The `open_gaya_market` calls.
+        gaya_market_opens: usize,
+        /// The aura window opens, in order: the window (0 absorb, 1 growth, 2
+        /// evolve) and the opener's VID.
+        aura_opens: Vec<(u8, u32)>,
+        /// Every `start_event` call, in order.
+        event_starts: Vec<(i32, i32, i32)>,
+        /// Every `end_event` call, in order.
+        event_ends: Vec<i32>,
         /// The VID `find_pc_vid` answers for each PC name.
         pcs: BTreeMap<Vec<u8>, u32>,
         /// The PID `pid_of` answers for each VID.
@@ -6409,6 +6531,34 @@ mod tests {
 
         fn add_ox_quiz(&mut self, level: u8, question: Vec<u8>, answer: bool) {
             self.ox_quizzes.push((level, question, answer));
+        }
+
+        fn open_gaya(&mut self) {
+            self.gaya_opens += 1;
+        }
+
+        fn open_gaya_market(&mut self) {
+            self.gaya_market_opens += 1;
+        }
+
+        fn open_aura_absorb(&mut self, npc_vid: u32) {
+            self.aura_opens.push((0, npc_vid));
+        }
+
+        fn open_aura_growth(&mut self, npc_vid: u32) {
+            self.aura_opens.push((1, npc_vid));
+        }
+
+        fn open_aura_evolve(&mut self, npc_vid: u32) {
+            self.aura_opens.push((2, npc_vid));
+        }
+
+        fn start_event(&mut self, index: i32, value0: i32, value1: i32) {
+            self.event_starts.push((index, value0, value1));
+        }
+
+        fn end_event(&mut self, index: i32) {
+            self.event_ends.push(index);
         }
 
         fn find_pc_vid(&self, name: &[u8]) -> u32 {
@@ -7983,6 +8133,79 @@ mod tests {
             matches!(quiz.unwrap()[..], [Value::Number(level)] if level.to_bits() == 3.0_f64.to_bits())
         );
         assert!(probe.game.ox_quizzes.is_empty());
+    }
+
+    /// The window globals push nothing: the Gaya pair opens, and the aura trio opens
+    /// on the click's NPC.
+    #[test]
+    fn the_window_globals_open_on_the_npc() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        assert!(probe.call("game.open_gaya", &[]).unwrap().is_empty());
+        assert!(probe.call("game.open_gaya_market", &[]).unwrap().is_empty());
+        assert_eq!(
+            (probe.game.gaya_opens, probe.game.gaya_market_opens),
+            (1, 1)
+        );
+        assert!(probe
+            .call("game.open_aura_absorb_window", &[])
+            .unwrap()
+            .is_empty());
+        assert!(probe
+            .call("game.open_aura_growth_window", &[])
+            .unwrap()
+            .is_empty());
+        assert!(probe
+            .call("game.open_aura_evolve_window", &[])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.aura_opens, [(0, VID), (1, VID), (2, VID)]);
+    }
+
+    /// `start_event` stages the index and its two values (a numeric string counts, a
+    /// missing value reads 0) and pushes nothing; a non-number first pushes 0 and
+    /// stages nothing. `end_event` stages the index the same way.
+    #[test]
+    fn the_event_pair_stages_or_pushes_zero() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        assert!(probe
+            .call(
+                "start_event",
+                &[Value::Number(1.0), string(b"50"), Value::Nil]
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.event_starts, [(1, 50, 0)]);
+        let pushed = probe.call("start_event", &[string(b"bogus")]).unwrap();
+        assert!(matches!(pushed[..], [Value::Number(zero)] if zero.to_bits() == 0.0_f64.to_bits()));
+        assert_eq!(probe.game.event_starts.len(), 1);
+        assert!(probe
+            .call("end_event", &[Value::Number(1.0)])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.event_ends, [1]);
+        let pushed = probe.call("end_event", &[]).unwrap();
+        assert!(matches!(pushed[..], [Value::Number(zero)] if zero.to_bits() == 0.0_f64.to_bits()));
+        assert_eq!(probe.game.event_ends.len(), 1);
     }
 
     /// `pc.warp` answers false without two numbers; past them it warps and answers the

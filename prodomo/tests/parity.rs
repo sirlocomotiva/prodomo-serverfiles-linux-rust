@@ -1623,6 +1623,7 @@ fn game_len(header: u8) -> usize {
         | GC_REQUEST_MAKE_GUILD
         | GC_DS_PLUS_CHANGE_ATTR_OPEN => 1,
         GC_SASH => SASH_LEN,
+        GC_AURA => AURA_OPEN_LEN,
         GC_CL => CL_LEN,
         GC_DRAGON_SOUL_REFINE => DS_REFINE_LEN,
         GC_VIEW_EQUIP => VIEW_EQUIP_LEN,
@@ -6299,6 +6300,11 @@ const GOLD_CHANGE_LEN: usize = 4 + 4 + 8 + 8;
 const GC_SASH: u8 = 231;
 /// `sizeof(TPacketSash)`: the whole sash record.
 const SASH_LEN: usize = 23;
+
+/// `HEADER_GC_AURA` (`G/packet.h:2981-3055`): the aura refine window's answers.
+const GC_AURA: u8 = 214;
+/// The aura open: the head and the one window-type byte.
+const AURA_OPEN_LEN: usize = 5;
 
 /// `HEADER_GC_CL` (`G/packet.h:2836-2853`): the changelook window's answers.
 const GC_CL: u8 = 234;
@@ -37415,4 +37421,112 @@ fn a_quiz_lands_from_a_click_and_show_quiz_lists_it() {
         assert_eq!(alice.read_game(), an_info_line(line));
     }
     alice.quiet("the list is the line's whole answer");
+}
+
+/// Ledger 415's window-and-event probe: the skill teacher (vnum 20300, bound but
+/// questless) answers a click by opening the Gaya window, the Gaya market, the aura
+/// absorb window on itself, and starting then ending the exp event.
+const WINDOW_PROBE: &[u8] = b"quest window_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    game.open_gaya()\n\
+    game.open_gaya_market()\n\
+    game.open_aura_absorb_window()\n\
+    start_event(1, 50)\n\
+    end_event(1)\n\
+    say('windows open')\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `lua.game.open_gaya`, `lua.game.open_gaya_market`,
+/// `lua.game.open_aura_absorb_window`, `lua.start_event`, `lua.end_event`: the click
+/// opens the Gaya window and market (the clear, nine items, the slots, the stamp),
+/// the absorb window, and starts then ends the exp event (both notices); the growth
+/// and evolve windows refuse while the absorb stands (`[LS;1014]`).
+#[test]
+fn a_click_opens_windows_and_runs_the_exp_event() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/window_probe.lua",
+            WINDOW_PROBE,
+        )],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    // The dialog rides first, then the window calls in order (ledger 413).
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"windows open[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenGuiGaya"),
+        "the Gaya window"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaMarketClear"),
+        "the market clear"
+    );
+    for _ in 0..9 {
+        let line = alice.read_game();
+        let text = &line[10..];
+        assert!(
+            text.starts_with(b"GayaMarketItems "),
+            "a market item: {text:?}"
+        );
+    }
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaMarketSlotsDesblock 0 0 0 0 0 0"),
+        "the locked slots"
+    );
+    let stamp = alice.read_game();
+    assert!(
+        stamp[10..].starts_with(b"GayaMarketTime "),
+        "the stamp: {stamp:?}"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenGuiGayaMarket"),
+        "the market window"
+    );
+    assert_eq!(alice.read_game(), vec![214, 5, 0, 0, 0], "the absorb open");
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"[LS;724;[LS;1037];[LS;1040];50]"),
+        "the exp priv notice"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Experience Boost Event has started. Enjoy the leveling."
+        ),
+        "the exp start"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Experience Boost Event has ended."),
+        "the exp end"
+    );
+    alice.quiet("the step ends");
 }

@@ -16,6 +16,7 @@ pub mod drop;
 pub mod event;
 pub mod fishing;
 pub mod forked;
+pub mod gaya;
 /// The guild skill rows, 151-162.
 pub mod guild_skill_data;
 pub mod item_attr;

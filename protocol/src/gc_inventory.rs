@@ -1314,7 +1314,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_AURA"),
         cpp_type: "TPacketGCAura",
         framing: GcFraming::DynamicSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_CUBE_RENEWAL,
@@ -1570,8 +1570,8 @@ mod tests {
             .filter(|entry| entry.implemented_in_rust)
             .map(|entry| entry.client_name)
             .collect();
-        assert_eq!(done.len(), 117);
-        assert_eq!(gc_missing_codec_count(), 17);
+        assert_eq!(done.len(), 118);
+        assert_eq!(gc_missing_codec_count(), 16);
         for name in [
             "HEADER_GC_AFFECT_ADD",
             "HEADER_GC_PLAYER_POINT_CHANGE",
@@ -1677,6 +1677,6 @@ mod tests {
             !six.implemented_in_rust,
             "byte 6 has no server producer and must not claim a codec"
         );
-        assert_eq!(gc_missing_codec_count(), 17);
+        assert_eq!(gc_missing_codec_count(), 16);
     }
 }
