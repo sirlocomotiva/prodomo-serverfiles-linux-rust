@@ -413,7 +413,7 @@ impl GameState {
             );
         }
         debug_assert!(take_sides.is_empty(), "take rows outside a dialog step");
-        let (records, _, _, block_mode, _, _, _) = run;
+        let (records, _, _, block_mode, _, _, _, _, _) = run;
         if let Some(mode) = block_mode {
             self.block_modes.insert(vid, mode);
         }

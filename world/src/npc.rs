@@ -229,6 +229,9 @@ pub struct Npc {
     /// `m_setNDAFlag`: the attacker affect flags `battle_is_icedamage` requires
     /// (`d.set_damage_from_affect`), every one of which the attacker must hold.
     pub nda: std::collections::BTreeSet<u32>,
+    /// `m_pGuild` (`CObject::RegenNPC`, `G/building.cpp:268-298`): the guild of a
+    /// building's NPC, and `None` for every other NPC.
+    pub npc_guild: Option<u32>,
 }
 
 impl Npc {
@@ -852,6 +855,7 @@ impl<'a> NpcSpawner<'a> {
             dead: false,
             ndr: 0,
             nda: std::collections::BTreeSet::new(),
+            npc_guild: None,
         });
         self.report.spawned += 1;
         if proto.mob_type == CHAR_TYPE_STONE {
@@ -1239,6 +1243,15 @@ impl Respawner {
         self.vids = spawner.into_vids();
         Ok(std::mem::take(&mut site.npcs))
     }
+
+    /// The next non-player VID (`CHARACTER_MANAGER::AllocVID`, `G/char_manager.cpp:91-95`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] once `u32::MAX` has been handed out.
+    pub fn take_vid(&mut self) -> Result<u32, NpcVidsExhausted> {
+        self.vids.take()
+    }
 }
 
 /// `iMaxHP = m_pkMobData->m_table.dwMaxHP` (`G/char.cpp:3017`): the `DWORD` read into an `int`.
@@ -1513,6 +1526,7 @@ mod tests {
                 dead: false,
                 ndr: 0,
                 nda: std::collections::BTreeSet::new(),
+                npc_guild: None,
             }]
         );
         assert_eq!(report.spawned, 1);

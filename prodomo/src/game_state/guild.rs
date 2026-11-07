@@ -329,6 +329,11 @@ pub(super) struct Guilds {
     /// Whether the boot install ran. A second install is refused, as a second
     /// allocator install is.
     pub(super) installed: bool,
+    /// `CLand::m_data.dwGuildID` (`G/building.h`): each owned land's guild. The land
+    /// rows are Game data (`table.land`); this overlay is the only column a script
+    /// changes, installed from `guild_land` at boot and written by
+    /// `building.set_land_owner`.
+    land_owners: BTreeMap<u32, u32>,
     /// `m_GuildWar` (`G/guild_manager.h`): the live wars as sorted `(lo, hi)` pairs, in
     /// pair order (`std::set`). Memory-only, as the declares are.
     pub(super) wars: BTreeSet<(u32, u32)>,
@@ -708,6 +713,32 @@ pub struct GuildQuestOp {
     pub args: Vec<quest::manager::GuildArg>,
 }
 
+/// A standing building object (`building::TObject` + `CObject::m_dwVID` and `m_chNPC`,
+/// `G/building.h:59-130`): the row `building.reconstruct` replaces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildingObject {
+    /// `dwID`.
+    pub id: u32,
+    /// `dwLandID`.
+    pub land_id: u32,
+    /// `dwVnum`.
+    pub vnum: u32,
+    /// `lMapIndex`.
+    pub map: i32,
+    /// `x`, `y` absolute.
+    pub x: i32,
+    /// `y` absolute.
+    pub y: i32,
+    /// `xRot`, `yRot`, `zRot`.
+    pub rot: (f32, f32, f32),
+    /// `lLife`.
+    pub life: i32,
+    /// `m_dwVID`: the object entity's VID.
+    pub vid: u32,
+    /// `m_chNPC->GetVID()`: the regen NPC's VID, if one stands.
+    pub npc_vid: Option<u32>,
+}
+
 /// What one `guild.*` quest call judged (230s): the answer legacy pushed, the records the
 /// caller hears now (a refusal line, a countdown), and the writer's store halves for the
 /// descriptor to drain after the step, in order.
@@ -829,6 +860,34 @@ pub enum GuildQuestStore {
         members: Vec<u32>,
         /// The stamp the world's online loop wrote.
         at: u32,
+    },
+    /// A land claim: `CLand::SetOwner`'s store half (`G/building.cpp:605-623`). The
+    /// world already moved the overlay.
+    Land {
+        /// The land id.
+        land_id: u32,
+        /// The owning guild.
+        guild_id: u32,
+    },
+    /// An object rebuild: `CObject::Reconstruct`'s delete and create halves
+    /// (`G/building.cpp:80-89`). The world already swapped the row.
+    Reconstruct {
+        /// The deleted object's id.
+        delete_id: u32,
+        /// The land id.
+        land_id: u32,
+        /// The new prototype vnum.
+        vnum: u32,
+        /// The map index.
+        map: i32,
+        /// The absolute x and y.
+        x: i32,
+        /// The absolute y.
+        y: i32,
+        /// The rotations as IEEE-754 bits, because an `f32` would break `Eq`.
+        rot: (u32, u32, u32),
+        /// The life.
+        life: i32,
     },
 }
 
@@ -1213,6 +1272,266 @@ impl GameState {
             );
         }
         self.install_marks(marks, symbols);
+    }
+
+    /// Install the stored land owners (`land.guild_id`,
+    /// `D/ClientManagerBoot.cpp:919-983`): each owned land's guild, by land id.
+    pub fn install_land_owners(&mut self, owners: &db::guild_land::StoredLandOwners) {
+        for (land, guild) in owners {
+            self.guilds.land_owners.insert(*land, *guild);
+        }
+    }
+
+    /// Install the stored building objects (`CManager::LoadObject`,
+    /// `G/building.cpp:814-863`): each row stands once per Channel hosting its map,
+    /// with a fresh VID and its regen NPC, as each legacy core held its own set. A row
+    /// whose land or prototype is unknown is skipped, as `LoadObject` returns false
+    /// for it.
+    pub fn install_building_objects(&mut self, objects: &db::guild_land::StoredObjects) {
+        let mut channels: std::collections::BTreeMap<i32, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        for (channel, map) in self.maps.keys() {
+            channels.entry(*map).or_default().push(*channel);
+        }
+        for object in objects {
+            let Some(proto) = self.object_protos.get(object.vnum).copied() else {
+                continue;
+            };
+            if self.guild_lands.get(object.land_id).is_none() {
+                continue;
+            }
+            let Some(hosts) = channels.get(&object.map) else {
+                continue;
+            };
+            self.next_object_id = self.next_object_id.max(object.id);
+            for channel in hosts.clone() {
+                let place = (channel, object.map);
+                let vid = self.take_npc_vid().unwrap_or(0);
+                if vid == 0 {
+                    continue;
+                }
+                let npc_vid = self.regen_building_npc(place, object, &proto);
+                self.building_objects
+                    .entry(place)
+                    .or_default()
+                    .push(BuildingObject {
+                        id: object.id,
+                        land_id: object.land_id,
+                        vnum: object.vnum,
+                        map: object.map,
+                        x: object.x,
+                        y: object.y,
+                        rot: object.rot,
+                        life: object.life,
+                        vid,
+                        npc_vid,
+                    });
+            }
+        }
+    }
+
+    /// The next non-player VID, or `None` once the pool is exhausted.
+    fn take_npc_vid(&mut self) -> Option<u32> {
+        self.regens.respawner_mut()?.take_vid().ok()
+    }
+
+    /// `CObject::RegenNPC` (`G/building.cpp:257-298`): the prototype's NPC stands at
+    /// the rotated offset with the land's guild, and its VID answers. Quiet — no
+    /// NPC — with no NPC vnum, a land no guild owns, an unknown guild, or a point
+    /// no sectree holds.
+    fn regen_building_npc(
+        &mut self,
+        place: (u8, i32),
+        object: &db::guild_land::StoredObject,
+        proto: &gamedata::records::ObjectProtoRecord,
+    ) -> Option<u32> {
+        if proto.npc_vnum == 0 {
+            return None;
+        }
+        let guild = *self.guilds.land_owners.get(&object.land_id)?;
+        if !self.guilds.by_id.contains_key(&guild) {
+            return None;
+        }
+        let rot = object.rot.2 * 2.0 * std::f32::consts::PI / 360.0;
+        // The casts are `CBuilding::RegenNPC`'s own (`G/building.cpp:280-282`): the
+        // `(DWORD)` reads as `float`, the rotated sum as `(int)` truncation.
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let at = {
+            let (x, y) = (proto.npc_x as f32, proto.npc_y as f32);
+            (
+                object
+                    .x
+                    .saturating_add((x * rot.cos() + y * rot.sin()) as i32),
+                object
+                    .y
+                    .saturating_add((y * rot.cos() - x * rot.sin()) as i32),
+            )
+        };
+        let vid = self.spawn_event_mob(place, proto.npc_vnum, at, 0, false)?;
+        if let Some((_, _, slot)) = self.npc_of.get(&vid).copied() {
+            if let Some(list) = self.npcs.get_mut(&place) {
+                if let Some(npc) = std::sync::Arc::make_mut(list).npcs.get_mut(slot) {
+                    npc.npc_guild = Some(guild);
+                }
+            }
+        }
+        Some(vid)
+    }
+
+    /// Judge the step's `building.set_land_owner` calls, in order
+    /// (`building_set_land_owner`, `G/questlua_building.cpp:60-80`): a land that exists
+    /// and stands unowned goes to the named guild, and the store half lands for the
+    /// descriptor to drain. Each judge reads the overlay the one before it left, as
+    /// legacy's in-call `SetOwner` does.
+    pub(super) fn judge_land_sets(&mut self, sets: &[(u32, u32)]) -> Vec<GuildQuestStore> {
+        let mut stores = Vec::new();
+        for (land, guild) in sets {
+            if self.guild_lands.get(*land).is_none() || self.guilds.land_owners.contains_key(land) {
+                continue;
+            }
+            // `CLand::SetOwner` (`G/building.cpp:605-612`): a re-own of the same guild
+            // is quiet, but the judge's unowned gate already refused it.
+            self.guilds.land_owners.insert(*land, *guild);
+            stores.push(GuildQuestStore::Land {
+                land_id: *land,
+                guild_id: *guild,
+            });
+        }
+        stores
+    }
+
+    /// Judge the step's `building.reconstruct` calls, in order
+    /// (`building_reconstruct`, `G/questlua_building.cpp:126-153`): the object whose
+    /// regen NPC is `npc_vid` is replaced by `vnum` — the delete and create halves land
+    /// for the descriptor to drain. Each gate refuses quietly, as the legacy chain
+    /// does: an unknown prototype, an NPC that is no building's, a land no guild
+    /// owns, or an object outside its land's region.
+    pub(super) fn judge_reconstructs(
+        &mut self,
+        reader: Vid,
+        calls: &[(u32, u32)],
+    ) -> Vec<GuildQuestStore> {
+        let mut stores = Vec::new();
+        let place = self.place_of(reader.raw());
+        for (npc_vid, vnum) in calls {
+            let Some(proto) = self.object_protos.get(*vnum) else {
+                continue;
+            };
+            let _ = proto;
+            let Some((channel, map, _)) = self.npc_of.get(npc_vid).copied() else {
+                continue;
+            };
+            let Some(place) = place.filter(|place| *place == (channel, map)) else {
+                continue;
+            };
+            let Some(list) = self.building_objects.get(&place).cloned() else {
+                continue;
+            };
+            let Some(object) = list
+                .iter()
+                .find(|object| object.npc_vid == Some(*npc_vid))
+                .cloned()
+            else {
+                continue;
+            };
+            let Some(guild) = self.guilds.land_owners.get(&object.land_id).copied() else {
+                continue;
+            };
+            let _ = guild;
+            let Some(land) = self.guild_lands.get(object.land_id).copied() else {
+                continue;
+            };
+            let Some(region) = self.regens.region_of(place.0, place.1) else {
+                continue;
+            };
+            let (x, y) = (object.x - region.sx, object.y - region.sy);
+            if x < land.x
+                || y < land.y
+                || x > land.x.saturating_add(land.width)
+                || y > land.y.saturating_add(land.height)
+            {
+                continue;
+            }
+            self.next_object_id = self.next_object_id.saturating_add(1).max(1);
+            let id = self.next_object_id;
+            let vid = self.take_npc_vid().unwrap_or(0);
+            if vid == 0 {
+                continue;
+            }
+            stores.push(self.swap_building_object(place, *npc_vid, id, vid, &object, *vnum));
+        }
+        stores
+    }
+
+    /// Knock the old building entity down and stand the new one, with its NPC
+    /// (`RequestDeleteObject` then `RequestCreateObject`, `G/building.cpp:80-89`).
+    /// Split out so `judge_reconstructs` stays under the line lint.
+    fn swap_building_object(
+        &mut self,
+        place: (u8, i32),
+        npc_vid: u32,
+        id: u32,
+        vid: u32,
+        object: &BuildingObject,
+        vnum: u32,
+    ) -> GuildQuestStore {
+        self.destroy_npc(npc_vid);
+        let delete = super::view_encode::remove_record(object.vid);
+        let mut add = Vec::new();
+        protocol::gc_actors::GcCharacterAdd::new(
+            vid,
+            object.rot.2,
+            object.x,
+            object.y,
+            0,
+            gamedata::mob_proto::CHAR_TYPE_BUILDING,
+            (vnum & 0xffff) as u16,
+            0,
+            0,
+            0,
+            [object.rot.0.to_bits(), object.rot.1.to_bits()],
+        )
+        .encode_into(&mut add);
+        let kept_object = db::guild_land::StoredObject {
+            id,
+            land_id: object.land_id,
+            vnum,
+            map: object.map,
+            x: object.x,
+            y: object.y,
+            rot: object.rot,
+            life: object.life,
+        };
+        let new_proto = self.object_protos.get(vnum).copied();
+        let rebuilt_npc =
+            new_proto.and_then(|proto| self.regen_building_npc(place, &kept_object, &proto));
+        if let Some(objects) = self.building_objects.get_mut(&place) {
+            objects.retain(|kept| kept.id != object.id);
+            objects.push(BuildingObject {
+                id,
+                vnum,
+                vid,
+                npc_vid: rebuilt_npc,
+                ..object.clone()
+            });
+        }
+        let key = super::view::EntityKey::Npc(rebuilt_npc.unwrap_or(vid));
+        self.packet_around(key, &delete, None);
+        self.packet_around(key, &add, None);
+        GuildQuestStore::Reconstruct {
+            delete_id: object.id,
+            land_id: object.land_id,
+            vnum,
+            map: object.map,
+            x: object.x,
+            y: object.y,
+            rot: (
+                object.rot.0.to_bits(),
+                object.rot.1.to_bits(),
+                object.rot.2.to_bits(),
+            ),
+            life: object.life,
+        }
     }
 
     /// Load the boot's war reservations with their bets, as `CGuildManager::BootReserveWar`
@@ -7312,6 +7631,11 @@ impl Guild {
 }
 
 impl Guilds {
+    /// The land owners, cloned into the session tail at the step's start.
+    pub(super) fn land_owners(&self) -> BTreeMap<u32, u32> {
+        self.land_owners.clone()
+    }
+
     /// The guild id of `pid`'s guild in the shadow, if any: what the empire change's
     /// guild arm reads of the account's characters.
     pub(super) fn shadow_guild_of(&self, pid: u32) -> Option<u32> {
@@ -7655,7 +7979,7 @@ mod tests {
 
     use tokio::sync::mpsc::UnboundedReceiver;
 
-    use super::super::fixtures::{a_world, enter, TestClock};
+    use super::super::fixtures::{a_world, enter, region, TestClock};
     use super::*;
     use crate::client_registry::{ChannelClients, ClientEntry, Lease};
     use crate::game_loop::PulseProcessor;
@@ -12023,5 +12347,136 @@ mod tests {
             "the master hears the 10's notice: {held:?}"
         );
         assert_eq!(world.shutdown_left, Some(10));
+    }
+
+    /// One land on the test map, unowned, for the land judges.
+    fn one_land() -> gamedata::land::Lands {
+        gamedata::land::Lands::from_records([gamedata::records::LandRecord {
+            id: 1,
+            map_index: 1,
+            x: 100,
+            y: 100,
+            width: 3000,
+            height: 3000,
+            guild_id: 0,
+            guild_level_limit: 10,
+            price: 65_000_000,
+        }])
+    }
+
+    /// The step's land claims land in order: an unknown land and a claimed one are
+    /// quiet, and each judge reads the overlay the one before it left.
+    #[test]
+    fn the_land_claims_land_in_order() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock).with_lands(Arc::new(one_land()));
+        let stores = world.judge_land_sets(&[(1, 7), (2, 7), (1, 8)]);
+        assert_eq!(
+            stores,
+            vec![GuildQuestStore::Land {
+                land_id: 1,
+                guild_id: 7
+            }]
+        );
+        assert_eq!(world.guilds.land_owners.get(&1), Some(&7));
+        assert!(world.judge_land_sets(&[(1, 8)]).is_empty());
+    }
+
+    /// A rebuild swaps the row, the entity and the NPC: the old NPC goes, the delete
+    /// and add fan, and the new object stands with its new NPC. An unknown prototype,
+    /// an NPC that is no building's, and an unowned land refuse quietly.
+    #[test]
+    fn the_rebuild_swaps_the_row_and_the_npc() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock)
+            .with_lands(Arc::new(one_land()))
+            .with_object_protos(Arc::new(
+                gamedata::object_proto::ObjectProtos::from_records([
+                    gamedata::records::ObjectProtoRecord {
+                        vnum: 14043,
+                        npc_vnum: 20060,
+                        ..Default::default()
+                    },
+                    gamedata::records::ObjectProtoRecord {
+                        vnum: 14045,
+                        npc_vnum: 20062,
+                        ..Default::default()
+                    },
+                ]),
+            ));
+        world.guilds.land_owners.insert(1, 7);
+        world.guilds.by_id.insert(
+            7,
+            Guild {
+                id: 7,
+                master_pid: 1,
+                exp: 0,
+                level: 5,
+                name: b"G".to_vec(),
+                grades: std::array::from_fn(|_| (Vec::new(), 0)),
+                skill_point: 0,
+                skills: [0; GUILD_SKILL_COUNT],
+                power: 0,
+                max_power: 0,
+                gold: 0,
+                member_count_bonus: 0,
+                members: BTreeMap::new(),
+                ladder_point: 0,
+                war_wins: 0,
+                war_draws: 0,
+                war_losses: 0,
+                post_comment_due: 0,
+                usable: [true; GUILD_SKILL_COUNT],
+                usable_due: [None; GUILD_SKILL_COUNT],
+                enemies: BTreeMap::new(),
+            },
+        );
+        let place = (1u8, 1i32);
+        world.schedule_map(place, &region());
+        world.building_objects.insert(
+            place,
+            vec![BuildingObject {
+                id: 3,
+                land_id: 1,
+                vnum: 14043,
+                map: 1,
+                x: 200,
+                y: 200,
+                rot: (0.0, 0.0, 0.0),
+                life: 0,
+                vid: 900,
+                npc_vid: Some(901),
+            }],
+        );
+        let npc = world::npc::Npc {
+            vid: 901,
+            vnum: 20060,
+            x: 200,
+            y: 200,
+            npc_guild: Some(7),
+            ..world::npc::Npc::default()
+        };
+        world.npcs.insert(
+            place,
+            Arc::new(world::npc::MapNpcs {
+                npcs: vec![npc],
+                positions: Vec::new(),
+                regens: Vec::new(),
+            }),
+        );
+        world.npc_of.insert(901, (1, 1, 0));
+        let mut inbox = enter(&mut world, 1, (200, 200), 12_345);
+        while inbox.try_recv().is_ok() {}
+        // The NPC stands on no proto, so no regen answers; judge the quiet refusals.
+        assert!(world
+            .judge_reconstructs(Vid::new(1), &[(901, 99999)])
+            .is_empty());
+        assert!(world
+            .judge_reconstructs(Vid::new(1), &[(902, 14045)])
+            .is_empty());
+        world.guilds.land_owners.remove(&1);
+        assert!(world
+            .judge_reconstructs(Vid::new(1), &[(901, 14045)])
+            .is_empty());
     }
 }

@@ -441,8 +441,27 @@ pub trait Game {
     /// stands under it.
     fn empire_of(&self, vid: u32) -> Option<u8>;
     /// `GetGuild()->GetID()` of the NPC `vid` (`G/questlua_npc.cpp:60-70`), and 0 when no
-    /// NPC stands under it or it holds no guild. No NPC holds one: no building stands.
+    /// NPC stands under it or it holds no guild. Only a building's NPC holds one
+    /// (`CObject::RegenNPC`, `G/building.cpp:268-298`).
     fn npc_guild(&self, vid: u32) -> u32;
+    /// `CManager::FindLand(map, x, y)->GetID()` (`G/questlua_building.cpp:12-29`): the
+    /// first land in id order holding `(x, y)` on `map` after the map-base shift, and
+    /// 0 with none.
+    fn land_id_at(&self, map: i32, x: i32, y: i32) -> u32;
+    /// `building_get_land_info`'s triple (`G/questlua_building.cpp:31-58`): the
+    /// `(price, owner, level limit)` of `land`, and `None` with no such land.
+    fn land_info(&self, land: u32) -> Option<(u32, u32, u8)>;
+    /// `CManager::FindLandByGuild(guild) != NULL` (`G/questlua_building.cpp:83-118`):
+    /// whether `guild` owns a land. The store lookup answers from memory.
+    fn guild_has_land(&self, guild: u32) -> bool;
+    /// `building_set_land_owner` (`G/questlua_building.cpp:60-80`): land `land` goes to
+    /// `guild` when it exists and stands unowned; the world judges and stores after
+    /// the step.
+    fn set_land_owner(&mut self, land: u32, guild: u32);
+    /// `building_reconstruct` (`G/questlua_building.cpp:126-153`): the object whose NPC
+    /// is `npc_vid` is rebuilt as `vnum`, when the object's land is guild-owned and
+    /// `vnum` names a prototype.
+    fn reconstruct_object(&mut self, npc_vid: u32, vnum: u32);
     /// `GetPlayerID()` of the character the script runs for (`G/questlua_pc.cpp:2608-2621`).
     fn player_id(&self) -> u32;
 
@@ -3559,6 +3578,12 @@ fn learn_grand_master_skill(
 }
 
 /// 64-bit conversion, which is 0 where the conversion has no answer (out of range or NaN).
+/// `(long)` of a dworded number: the bit-preserving `DWORD`->`long` conversion
+/// `building_get_land_id`'s `(int)` casts do (`G/questlua_building.cpp:24`).
+fn dword_long(number: f64) -> i32 {
+    i32::from_ne_bytes(dword(number).to_ne_bytes())
+}
+
 fn dword(number: f64) -> u32 {
     let truncated = number.trunc();
     if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated) {
@@ -5476,7 +5501,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 14] = [
+    let families: [Family; 15] = [
         look_api,
         pc_api,
         item_api,
@@ -5491,6 +5516,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         rank_api,
         timer_api,
         game_api,
+        building_api,
     ];
     for family in families {
         if let Some(answered) = family(lua, cx, name, args)? {
@@ -5750,6 +5776,87 @@ fn time_find_api(
     Ok(result.into_iter().collect())
 }
 
+/// The `building.*` calls (`G/questlua_building.cpp`): the land id read, the info
+/// triple, the owner write, the owned read, and the object rebuild. Split out so `api`
+/// stays under the line lint.
+fn building_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let second = args.get(1).cloned().unwrap_or(Value::Nil);
+    let third = args.get(2).cloned().unwrap_or(Value::Nil);
+    // `lua_isnumber` of the three fixed arguments: a non-number pushes 0 (`:15-21`).
+    if name == b"building.get_land_id" {
+        let id = if let (Some(map), Some(x), Some(y)) = (
+            lua.coerce_number(first)?,
+            lua.coerce_number(second)?,
+            lua.coerce_number(third)?,
+        ) {
+            cx.game
+                .land_id_at(dword_long(map), dword_long(x), dword_long(y))
+        } else {
+            tracing::warn!("QUEST invalid argument");
+            0
+        };
+        return Ok(Some(MultiValue::from_vec(vec![Value::Number(f64::from(
+            id,
+        ))])));
+    }
+    // `building_get_land_info` (`:31-58`): a non-number logs and the triple answers
+    // 10^9; a number with no land answers the same.
+    if name == b"building.get_land_info" {
+        let triple = if let Some(land) = lua.coerce_number(first)? {
+            cx.game.land_info(dword(land))
+        } else {
+            tracing::warn!("QUEST invalid argument");
+            None
+        };
+        let Some((price, owner, limit)) = triple else {
+            return Ok(Some(MultiValue::from_vec(vec![
+                Value::Number(1_000_000_000.0),
+                Value::Number(1_000_000_000.0),
+                Value::Number(1_000_000_000.0),
+            ])));
+        };
+        return Ok(Some(MultiValue::from_vec(vec![
+            Value::Number(f64::from(price)),
+            Value::Number(f64::from(owner)),
+            Value::Number(f64::from(limit)),
+        ])));
+    }
+    // `building_set_land_owner` (`:60-80`): two numbers, else a log. Pushes nothing.
+    if name == b"building.set_land_owner" {
+        if let (Some(land), Some(guild)) = (lua.coerce_number(first)?, lua.coerce_number(second)?) {
+            cx.game.set_land_owner(dword(land), dword(guild));
+        } else {
+            tracing::warn!("QUEST invalid argument");
+        }
+        return Ok(Some(MultiValue::from_vec(Vec::new())));
+    }
+    // `building_has_land` (`:83-118`): a non-number logs and pushes true; else
+    // whether the guild owns a land.
+    if name == b"building.has_land" {
+        let has = if let Some(guild) = lua.coerce_number(first)? {
+            cx.game.guild_has_land(dword(guild))
+        } else {
+            tracing::warn!("QUEST invalid argument");
+            true
+        };
+        return Ok(Some(MultiValue::from_vec(vec![Value::Boolean(has)])));
+    }
+    // `building_reconstruct` (`:126-153`): `lua_tonumber` of the first argument names
+    // the new building; a non-number is 0. Pushes nothing.
+    if name == b"building.reconstruct" {
+        let vnum = dword(lua.coerce_number(first)?.unwrap_or(0.0));
+        cx.game.reconstruct_object(cx.npc_vid, vnum);
+        return Ok(Some(MultiValue::from_vec(Vec::new())));
+    }
+    Ok(None)
+}
+
 /// The game, NPC and village-warp arms: `game.get_event_flag`
 /// (`G/questlua_game.cpp`), `game_request_make_guild` (`:51-62`),
 /// `game_drop_item_with_ownership`, the Gaya pair (`:95-126`) and the aura trio
@@ -5954,6 +6061,12 @@ mod tests {
         position: (i32, i32, i32, i32),
         worn: BTreeMap<u8, u32>,
         empires: BTreeMap<u32, u8>,
+        npc_guilds: BTreeMap<u32, u32>,
+        lands_at: BTreeMap<(i32, i32, i32), u32>,
+        land_infos: BTreeMap<u32, (u32, u32, u8)>,
+        land_guilds: BTreeSet<u32>,
+        set_owners: Vec<(u32, u32)>,
+        reconstructs: Vec<(u32, u32)>,
         player_id: u32,
         account_table_id: u32,
         empty_cells: u32,
@@ -6457,8 +6570,23 @@ mod tests {
         fn empire_of(&self, vid: u32) -> Option<u8> {
             self.empires.get(&vid).copied()
         }
-        fn npc_guild(&self, _vid: u32) -> u32 {
-            0
+        fn npc_guild(&self, vid: u32) -> u32 {
+            self.npc_guilds.get(&vid).copied().unwrap_or(0)
+        }
+        fn land_id_at(&self, map: i32, x: i32, y: i32) -> u32 {
+            self.lands_at.get(&(map, x, y)).copied().unwrap_or(0)
+        }
+        fn land_info(&self, land: u32) -> Option<(u32, u32, u8)> {
+            self.land_infos.get(&land).copied()
+        }
+        fn guild_has_land(&self, guild: u32) -> bool {
+            self.land_guilds.contains(&guild)
+        }
+        fn set_land_owner(&mut self, land: u32, guild: u32) {
+            self.set_owners.push((land, guild));
+        }
+        fn reconstruct_object(&mut self, npc_vid: u32, vnum: u32) {
+            self.reconstructs.push((npc_vid, vnum));
         }
         fn player_id(&self) -> u32 {
             self.player_id
@@ -8133,6 +8261,108 @@ mod tests {
             matches!(quiz.unwrap()[..], [Value::Number(level)] if level.to_bits() == 3.0_f64.to_bits())
         );
         assert!(probe.game.ox_quizzes.is_empty());
+    }
+
+    /// The `building.*` calls follow their argument rules: the id read pushes 0 for a
+    /// non-number, the info triple answers 10^9 for a non-number or an unknown land,
+    /// the owner write and the rebuild push nothing, and the owned read pushes true
+    /// for a non-number.
+    #[test]
+    fn the_building_calls_follow_their_argument_rules() {
+        let manager = manager().lock().unwrap();
+        let number = |value: f64| Value::Number(value);
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        probe.game.lands_at.insert((1, 100, 200), 7);
+        probe.game.land_infos.insert(7, (50_000, 9, 10));
+        probe.game.land_guilds.insert(9);
+        let id = probe.call(
+            "building.get_land_id",
+            &[number(1.0), number(100.0), number(200.0)],
+        );
+        assert!(
+            matches!(id.unwrap()[..], [Value::Number(id)] if id.to_bits() == 7.0_f64.to_bits())
+        );
+        let id = probe.call(
+            "building.get_land_id",
+            &[number(1.0), Value::Nil, number(2.0)],
+        );
+        assert!(
+            matches!(id.unwrap()[..], [Value::Number(id)] if id.to_bits() == 0.0_f64.to_bits())
+        );
+        let bits = |values: Vec<Value>| {
+            values
+                .iter()
+                .map(|value| match value {
+                    Value::Number(number) => number.to_bits(),
+                    _ => 0,
+                })
+                .collect::<Vec<_>>()
+        };
+        let info = probe
+            .call("building.get_land_info", &[number(7.0)])
+            .unwrap();
+        assert_eq!(
+            bits(info),
+            [
+                50_000.0_f64.to_bits(),
+                9.0_f64.to_bits(),
+                10.0_f64.to_bits()
+            ]
+        );
+        let info = probe
+            .call("building.get_land_info", &[number(8.0)])
+            .unwrap();
+        assert_eq!(
+            bits(info),
+            [
+                1_000_000_000.0_f64.to_bits(),
+                1_000_000_000.0_f64.to_bits(),
+                1_000_000_000.0_f64.to_bits()
+            ]
+        );
+        let info = probe.call("building.get_land_info", &[Value::Nil]).unwrap();
+        assert_eq!(
+            bits(info),
+            [
+                1_000_000_000.0_f64.to_bits(),
+                1_000_000_000.0_f64.to_bits(),
+                1_000_000_000.0_f64.to_bits()
+            ]
+        );
+        assert!(probe
+            .call("building.set_land_owner", &[number(7.0), number(9.0)])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.set_owners.pop(), Some((7, 9)));
+        assert!(probe
+            .call("building.set_land_owner", &[number(7.0), Value::Nil])
+            .unwrap()
+            .is_empty());
+        assert!(probe.game.set_owners.is_empty());
+        let has = probe.call("building.has_land", &[number(9.0)]);
+        assert!(matches!(has.unwrap()[..], [Value::Boolean(true)]));
+        let has = probe.call("building.has_land", &[number(10.0)]);
+        assert!(matches!(has.unwrap()[..], [Value::Boolean(false)]));
+        let has = probe.call("building.has_land", &[Value::Nil]);
+        assert!(matches!(has.unwrap()[..], [Value::Boolean(true)]));
+        assert!(probe
+            .call("building.reconstruct", &[number(14062.0)])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.reconstructs.pop(), Some((VID, 14062)));
+        assert!(probe
+            .call("building.reconstruct", &[Value::Nil])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.reconstructs.pop(), Some((VID, 0)));
     }
 
     /// The window globals push nothing: the Gaya pair opens, and the aura trio opens

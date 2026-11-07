@@ -221,6 +221,8 @@ type QuestRun = (
     Vec<i32>,
     Vec<i64>,
     Vec<(u8, bool)>,
+    Vec<(u32, u32)>,
+    Vec<(u32, u32)>,
 );
 
 /// The bit of a `CG_SCRIPT_BUTTON` word that asks for the quest's information
@@ -865,6 +867,19 @@ pub(super) struct SessionTail<'s> {
     /// Every `game.drop_item` call's vnum and count, in order, for the ground after the
     /// step (legacy lays in the call).
     pub(super) plain_drops: Vec<(u32, i32)>,
+    /// The guild lands, which the `building.*` calls read.
+    pub(super) lands: Option<&'s gamedata::land::Lands>,
+    /// The building object prototypes, which `building.reconstruct` reads.
+    pub(super) object_protos: Option<&'s gamedata::object_proto::ObjectProtos>,
+    /// The land owners at the step's start, which the `building.*` calls read and
+    /// `set_land_owner` moves before the world judges them.
+    pub(super) land_owners: std::collections::BTreeMap<u32, u32>,
+    /// Every `building.set_land_owner` call's land and guild, in order, for the world
+    /// after the step (legacy's `SetOwner` runs in the call).
+    pub(super) land_sets: Vec<(u32, u32)>,
+    /// Every `building.reconstruct` call's NPC VID and vnum, in order, for the world
+    /// after the step.
+    pub(super) reconstructs: Vec<(u32, u32)>,
 }
 
 impl<'s> SessionTail<'s> {
@@ -880,7 +895,28 @@ impl<'s> SessionTail<'s> {
             priv_item_drop: pre.priv_item_drop,
             mob_item_rate: pre.mob_item_rate,
             plain_drops: Vec::new(),
+            lands: None,
+            object_protos: None,
+            land_owners: std::collections::BTreeMap::new(),
+            land_sets: Vec::new(),
+            reconstructs: Vec::new(),
         }
+    }
+
+    /// Build with the guild lands and object prototypes the `building.*` calls read,
+    /// and the land owners at the step's start.
+    pub(super) fn with_buildings(
+        pre: QuestStepState,
+        atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+        lands: &'s gamedata::land::Lands,
+        object_protos: &'s gamedata::object_proto::ObjectProtos,
+        guilds: &super::guild::Guilds,
+    ) -> Self {
+        let mut tail = Self::new(pre, atlas);
+        tail.lands = Some(lands);
+        tail.object_protos = Some(object_protos);
+        tail.land_owners = guilds.land_owners();
+        tail
     }
 }
 
@@ -2574,9 +2610,70 @@ impl Game for Session<'_> {
     fn npc_guild(&self, vid: u32) -> u32 {
         // `npc_get_guild` (`G/questlua_npc.cpp:60-70`): the NPC's guild ID, 0 with no
         // NPC or no guild. Only a building's NPC holds one (`CObject::RegenNPC`,
-        // `G/building.cpp:269-295`); none stands, so no lookup answers.
-        let _ = vid;
-        0
+        // `G/building.cpp:268-298`).
+        self.npcs
+            .iter()
+            .flat_map(|map| map.npcs.iter())
+            .find(|npc| npc.vid == vid)
+            .and_then(|npc| npc.npc_guild)
+            .unwrap_or(0)
+    }
+    fn land_id_at(&self, map: i32, x: i32, y: i32) -> u32 {
+        // `building_get_land_id` (`G/questlua_building.cpp:12-29`): the first land in
+        // id order holding `(x, y)` on `map` after the map-base shift
+        // (`CManager::FindLand`, `G/building.cpp:765-796`). The shift is skipped with
+        // no region, as `FindLand` returns NULL with none.
+        let Some(lands) = self.tail.lands else {
+            return 0;
+        };
+        let (x, y) = self
+            .tail
+            .atlas
+            .and_then(|atlas| atlas.region(map))
+            .map_or((x, y), |region| (x - region.sx, y - region.sy));
+        lands
+            .ordered()
+            .find(|land| {
+                land.map_index == map
+                    && x >= land.x
+                    && y >= land.y
+                    && x <= land.x.saturating_add(land.width)
+                    && y <= land.y.saturating_add(land.height)
+            })
+            .map_or(0, |land| land.id)
+    }
+    fn land_info(&self, land: u32) -> Option<(u32, u32, u8)> {
+        // `building_get_land_info` (`G/questlua_building.cpp:31-58`): the (price,
+        // owner, level limit) of `land`. The owner is the step's shadow, which
+        // `set_land_owner` moves before the world judges it.
+        self.tail.lands?.get(land).map(|row| {
+            (
+                row.price,
+                self.tail.land_owners.get(&land).copied().unwrap_or(0),
+                row.guild_level_limit,
+            )
+        })
+    }
+    fn guild_has_land(&self, guild: u32) -> bool {
+        // `building_has_land` (`G/questlua_building.cpp:83-118`): the store's
+        // `COUNT(*)`, answered from the step's shadow.
+        self.tail.land_owners.values().any(|owner| *owner == guild)
+    }
+    fn set_land_owner(&mut self, land: u32, guild: u32) {
+        // `building_set_land_owner` (`G/questlua_building.cpp:60-80`): the shadow moves
+        // at once, so a later call in the step reads it; the world judges the queue
+        // after the step.
+        if self.tail.lands.and_then(|lands| lands.get(land)).is_some()
+            && !self.tail.land_owners.contains_key(&land)
+        {
+            self.tail.land_owners.insert(land, guild);
+        }
+        self.tail.land_sets.push((land, guild));
+    }
+    fn reconstruct_object(&mut self, npc_vid: u32, vnum: u32) {
+        // `building_reconstruct` (`G/questlua_building.cpp:126-153`): queued for the
+        // world, which judges the chain after the step.
+        self.tail.reconstructs.push((npc_vid, vnum));
     }
     fn player_id(&self) -> u32 {
         self.blocked_pc().map_or(self.pid, |blocked| blocked.pid)
@@ -3073,7 +3170,7 @@ impl GameState {
         );
         let Some((
             (),
-            (mut records, climbs, ops, block_mode, _, gold_moves, _),
+            (mut records, climbs, ops, block_mode, _, gold_moves, _, land_sets, reconstructs),
             items,
             claimed,
             take_sides,
@@ -3100,6 +3197,8 @@ impl GameState {
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
+        stores.extend(self.judge_land_sets(&land_sets));
+        stores.extend(self.judge_reconstructs(vid, &reconstructs));
         Ok((
             records, climbs, stores, items, gold, claimed, take_sides, landed,
         ))
@@ -3130,7 +3229,7 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, _, _, block_mode, _, _, _))) = self.run_quests(
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = self.run_quests(
             place,
             mover,
             level,
@@ -3194,7 +3293,7 @@ impl GameState {
         let login = account.login.clone();
         let Some((
             taken,
-            (mut records, climbs, ops, block_mode, _, gold_moves, _),
+            (mut records, climbs, ops, block_mode, _, gold_moves, _, land_sets, reconstructs),
             items,
             claimed,
             take_sides,
@@ -3224,6 +3323,8 @@ impl GameState {
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
+        stores.extend(self.judge_land_sets(&land_sets));
+        stores.extend(self.judge_reconstructs(vid, &reconstructs));
         (
             taken,
             (
@@ -3280,16 +3381,22 @@ impl GameState {
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
         let login = account.login.clone();
-        let Some(((), (records, climbs, ops, block_mode, _, _, _), items, _, take_sides, landed)) =
-            self.run_quests_giving(
-                place,
-                (mover, level, pid),
-                Giving::Items,
-                account,
-                |manager, game| {
-                    manager.use_item(pid, (id, vnum), game);
-                },
-            )
+        let Some((
+            (),
+            (records, climbs, ops, block_mode, _, _, _, land_sets, reconstructs),
+            items,
+            _,
+            take_sides,
+            landed,
+        )) = self.run_quests_giving(
+            place,
+            (mover, level, pid),
+            Giving::Items,
+            account,
+            |manager, game| {
+                manager.use_item(pid, (id, vnum), game);
+            },
+        )
         else {
             return;
         };
@@ -3313,6 +3420,8 @@ impl GameState {
             step.records.extend(judged.own);
             stores.extend(judged.stores);
         }
+        stores.extend(self.judge_land_sets(&land_sets));
+        stores.extend(self.judge_reconstructs(vid, &reconstructs));
         step.quest = (climbs, stores, landed);
         if let Ok(character) = self.characters.find_by_vid(vid) {
             step.quickslots = Some(character.quickslots().clone());
@@ -3456,7 +3565,7 @@ impl GameState {
                 manager.levelup(pid, game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -3502,7 +3611,7 @@ impl GameState {
                 manager.kill(pid, race, leader, game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -3595,6 +3704,7 @@ impl GameState {
                 hides,
                 takes,
                 rank: rank_step,
+                tail,
                 ..
             } = armed.session;
             let run = (
@@ -3605,6 +3715,8 @@ impl GameState {
                 alignment_changes,
                 gold_changes,
                 hides,
+                tail.land_sets,
+                tail.reconstructs,
             );
             (
                 answer,
@@ -3678,6 +3790,8 @@ impl GameState {
             rank,
             card_tables,
             recall,
+            guild_lands,
+            object_protos,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -3696,54 +3810,45 @@ impl GameState {
             account,
         );
         finish_context(&mut context, card_tables);
-        let Quests {
-            manager,
-            protos,
-            names,
-            item_names,
-            goto_info: _,
-        } = &mut *quests;
-        let mut session = build_session(session_inputs(
-            dungeons.flags_snapshot(),
-            place,
-            mover,
-            level,
-            pid,
-            reader,
-            context,
-            npcs,
-            protos,
-            names,
-            item_names,
-            items,
-            locale,
-            pc_skill_tables,
-            dice,
-            bodies,
-            characters,
-            pc_skills,
-            affect_events,
-            *test_server,
-            *last_pulse,
-            guilds,
-            item_count_limit,
-            item_ids,
-            gauss,
-            item_attrs,
-            item_rare_attrs,
-            item_masks,
-            quest_targets,
-            giving != Giving::Nothing,
-            name_rules.clone(),
-            pre,
-            recall.atlas(),
-        ));
-        open_rank_prizes(&mut session, giving, rank, pid);
-        Some(ArmedSession {
-            manager,
-            session,
-            reader,
-        })
+        Some(finish_armed_session(
+            quests,
+            FinishInputs {
+                flags: dungeons.flags_snapshot(),
+                place,
+                mover,
+                level,
+                pid,
+                reader,
+                context,
+                npcs,
+                items,
+                locale,
+                pc_skill_tables,
+                dice,
+                bodies,
+                characters,
+                pc_skills,
+                affect_events,
+                test_server: *test_server,
+                last_pulse: *last_pulse,
+                guilds,
+                item_count_limit,
+                item_ids,
+                gauss,
+                item_attrs,
+                item_rare_attrs,
+                item_masks,
+                quest_targets,
+                stores: giving != Giving::Nothing,
+                name_rules,
+                pre,
+                atlas: recall.atlas(),
+                guild_lands,
+                object_protos,
+                giving,
+                rank,
+            },
+        ))
     }
     /// Apply the `pc.change_alignment` amounts a step recorded, in order, as legacy's
     /// `UpdateAlignment` runs at each call (`G/char_battle.cpp:3477-3565`): each amount is
@@ -4766,6 +4871,100 @@ struct ReaderContext {
 
 /// Every borrow [`GameState::arm_quest_session`] threads into its [`Session`], as
 /// one struct so the builder stays under the argument lint.
+/// The tail half of [`GameState::arm_quest_session`]'s borrows: everything the session
+/// build needs once the context stands. Bundled so the arm stays under the line lint.
+struct FinishInputs<'s> {
+    flags: std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
+    place: GroundPlace,
+    mover: Mover,
+    level: u8,
+    pid: u32,
+    reader: Vid,
+    context: ReaderContext,
+    npcs: &'s BTreeMap<(u8, i32), Arc<MapNpcs>>,
+    items: &'s ItemProtos,
+    locale: &'s LocaleStrings,
+    pc_skill_tables: &'s gamedata::pc_skill_data::PcSkills,
+    dice: &'s mut Pcg32,
+    bodies: &'s std::collections::HashMap<Vid, super::motion::Body>,
+    characters: &'s mut world::character::CharacterManager,
+    pc_skills: &'s mut std::collections::HashMap<u32, super::pc_skill::PcSkillState>,
+    affect_events: &'s mut std::collections::HashMap<Vid, super::affect::AffectEvent>,
+    test_server: bool,
+    last_pulse: u64,
+    guilds: &'s super::guild::Guilds,
+    item_count_limit: &'s u16,
+    item_ids: &'s mut Option<world::item::ItemIds>,
+    gauss: &'s mut world::character::Gauss,
+    item_attrs: &'s [gamedata::records::ItemAttrRecord],
+    item_rare_attrs: &'s [gamedata::records::ItemAttrRecord],
+    item_masks: &'s gamedata::item_mask::ItemMasks,
+    quest_targets: &'s mut QuestTargets,
+    stores: bool,
+    name_rules: &'s crate::select_phase::NameRules,
+    pre: QuestStepState,
+    atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+    guild_lands: &'s gamedata::land::Lands,
+    object_protos: &'s gamedata::object_proto::ObjectProtos,
+    giving: Giving,
+    rank: &'s super::rank_global::RankBoard,
+}
+
+/// Build the [`Session`] and open its rank prizes: the tail half of
+/// [`GameState::arm_quest_session`].
+fn finish_armed_session<'s>(quests: &'s mut Quests, rest: FinishInputs<'s>) -> ArmedSession<'s> {
+    let Quests {
+        manager,
+        protos,
+        names,
+        item_names,
+        goto_info: _,
+    } = &mut *quests;
+    let mut session = build_session(session_inputs(
+        rest.flags,
+        rest.place,
+        rest.mover,
+        rest.level,
+        rest.pid,
+        rest.reader,
+        rest.context,
+        rest.npcs,
+        protos,
+        names,
+        item_names,
+        rest.items,
+        rest.locale,
+        rest.pc_skill_tables,
+        rest.dice,
+        rest.bodies,
+        rest.characters,
+        rest.pc_skills,
+        rest.affect_events,
+        rest.test_server,
+        rest.last_pulse,
+        rest.guilds,
+        rest.item_count_limit,
+        rest.item_ids,
+        rest.gauss,
+        rest.item_attrs,
+        rest.item_rare_attrs,
+        rest.item_masks,
+        rest.quest_targets,
+        rest.stores,
+        rest.name_rules.clone(),
+        rest.pre,
+        rest.atlas,
+        rest.guild_lands,
+        rest.object_protos,
+    ));
+    open_rank_prizes(&mut session, rest.giving, rest.rank, rest.pid);
+    ArmedSession {
+        manager,
+        session,
+        reader: rest.reader,
+    }
+}
+
 struct SessionInputs<'s> {
     /// The living dungeons' flags at the step's start, by private index.
     dungeon_flags: std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
@@ -4803,6 +5002,10 @@ struct SessionInputs<'s> {
     pre: QuestStepState,
     /// The map atlas, which `pc.warp_local` reads regions from.
     atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+    /// The guild lands, which the `building.*` calls read.
+    lands: &'s gamedata::land::Lands,
+    /// The building object prototypes, which `building.reconstruct` reads.
+    object_protos: &'s gamedata::object_proto::ObjectProtos,
 }
 
 /// What a session knows of the world's step-start state: the reader's open windows,
@@ -5145,6 +5348,8 @@ fn session_inputs<'s>(
     name_rules: crate::select_phase::NameRules,
     pre: QuestStepState,
     atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+    lands: &'s gamedata::land::Lands,
+    object_protos: &'s gamedata::object_proto::ObjectProtos,
 ) -> SessionInputs<'s> {
     SessionInputs {
         dungeon_flags,
@@ -5180,6 +5385,8 @@ fn session_inputs<'s>(
         name_rules,
         pre,
         atlas,
+        lands,
+        object_protos,
     }
 }
 
@@ -5220,6 +5427,8 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         name_rules,
         pre,
         atlas,
+        lands,
+        object_protos,
     } = inputs;
     session_head(
         dungeon_flags,
@@ -5255,6 +5464,8 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         name_rules,
         pre,
         atlas,
+        lands,
+        object_protos,
     )
 }
 
@@ -5295,6 +5506,8 @@ fn session_head<'s>(
     name_rules: crate::select_phase::NameRules,
     pre: QuestStepState,
     atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
+    lands: &'s gamedata::land::Lands,
+    object_protos: &'s gamedata::object_proto::ObjectProtos,
 ) -> Session<'s> {
     let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
     let roster = quest_step_roster(characters);
@@ -5394,7 +5607,7 @@ fn session_head<'s>(
         okay_ranks: context.okay_ranks,
         empire_moves: Vec::new(),
         windows: pre.windows,
-        tail: SessionTail::new(pre, atlas),
+        tail: SessionTail::with_buildings(pre, atlas, lands, object_protos, guilds),
     }
 }
 

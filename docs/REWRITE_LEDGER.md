@@ -46713,3 +46713,37 @@ Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 416. The guild land and the rebuild
+
+`building.get_land_id`, `building.get_land_info`, `building.set_land_owner`,
+`building.has_land` and `building.reconstruct` run their `G/questlua_building.cpp`
+bodies: the region-point land row (`CMapRegion::Find`, `G/region.cpp:400-411`) read
+from the dumped `land` table, the `(price, owner, limit)` triple that answers 10^9
+for a non-number or an unknown land, the guarded claim (`__FindLandByGuildID` refuses
+a second land, `G/guild.cpp:879-896`), the `has_land` that logs and answers true for
+a non-number, and the rebuild that deletes and recreates the object (`G/building.cpp`)
+and stands the new entity with its NPC. The land rows and `object_proto` come from
+the Game data dump at boot; the store keeps only the owners and the object rows
+(`guild_land`, `building_object`), installed once. Lords pay what the proto charges
+through `SBuyMyObject` (`G/building.cpp:303-316`): 135M of the 200M purse for land 4.
+`has_land`'s non-number-true and the claim stone's `SetEventFlag` skip are ported as
+written. Quest-api is now 222 ported / 24 missing; gamedata lands both rows.
+
+Scenario `a_guild_master_claims_land_and_rebuilds_its_refinery` (8/8 stable): the
+claim price leaves, the triple and the owned reads answer, the old NPC goes, the new
+stone stands as 20062, the object entity goes and stands again as 14045. Units: the
+bridges' argument rules, the claim gate and the rebuild race. Mutants killed: the
+info default, the claim gate, the rebuild race mask. Refactors for the lints:
+`building_api` as a `Family`, `StoredLandInstall`/`GuildInstall` bundles,
+`swap_building_object`, `finish_armed_session` and `store_quest_land_store` splits.
+No width was measured.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4849 passed 1 failed in 42 targets; the one failure is the known
+unrelated load flake `a_gm_flags_a_stray_dog_aggressive_and_coward`, green in isolation; `cargo test --workspace --doc --locked
+--offline` 9 ok; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

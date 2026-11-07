@@ -231,6 +231,10 @@ pub enum GameCommand {
         reservations: Vec<db::guilds::StoredReservation>,
         /// The boot's war bets (`CGuildWarReserve::Initialize`).
         bets: Vec<db::guilds::StoredBet>,
+        /// Every owned land and stored building object (`land.guild_id`,
+        /// `D/ClientManagerBoot.cpp:919-983`), bundled so the command stays
+        /// under the argument lint.
+        land: db::guild_land::StoredLandInstall,
         /// Where the game thread reports whether it installed.
         reply: oneshot::Sender<bool>,
     },
@@ -3368,6 +3372,7 @@ impl GameLoopController {
         symbols: Vec<db::guilds::StoredSymbol>,
         reservations: Vec<db::guilds::StoredReservation>,
         bets: Vec<db::guilds::StoredBet>,
+        land: db::guild_land::StoredLandInstall,
     ) -> Result<Result<(), InstallError>, InstallError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::InstallGuilds {
@@ -3376,6 +3381,7 @@ impl GameLoopController {
             symbols,
             reservations,
             bets,
+            land,
             reply,
         })
         .await

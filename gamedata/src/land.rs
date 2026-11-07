@@ -666,6 +666,110 @@ pub fn build_land_table_legacy(
     build_records(rows, limits, decode_land_query_row_legacy)
 }
 
+/// The enabled lands by id: `CManager::m_map_pkLand` (`G/building.h:148`). Legacy's
+/// `std::map::insert` keeps the first row of each id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lands {
+    by_id: std::collections::BTreeMap<u32, LandRecord>,
+}
+
+impl Lands {
+    /// Build the lands from decoded rows, keeping the first row of each id.
+    #[must_use]
+    pub fn from_records(records: impl IntoIterator<Item = LandRecord>) -> Self {
+        let mut by_id = std::collections::BTreeMap::new();
+        for record in records {
+            by_id.entry(record.id).or_insert(record);
+        }
+        Self { by_id }
+    }
+
+    /// Read the `land` rows of the owner's `player.sql` dump: the nine columns
+    /// `CClientManager::InitializeLandTable` selects
+    /// (`D/ClientManagerBoot.cpp:937-941`), keeping only `enable='YES'` rows in dump
+    /// order (the statement's `ORDER BY id`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LandDumpError`] when the dump cannot be read, a selected column is
+    /// missing, or a value does not decode.
+    pub fn from_dump(dump: &[u8]) -> Result<Self, LandDumpError> {
+        let table = crate::sql_dump::read_table(dump, "land").map_err(LandDumpError::Dump)?;
+        if table.rows.is_empty() {
+            return Ok(Self::default());
+        }
+        let at = |name: &'static str| table.column(name).ok_or(LandDumpError::NoColumn(name));
+        let enable = at("enable")?;
+        let mut index = [0_usize; LAND_TABLE_QUERY_COLUMNS];
+        for (slot, name) in index.iter_mut().zip(LAND_TABLE_QUERY_COLUMN_NAMES) {
+            *slot = table.column(name).ok_or(LandDumpError::NoColumn(name))?;
+        }
+        let rows: Vec<LandTableQueryRow> = table
+            .rows
+            .iter()
+            .filter(|values| values[enable] == crate::sql_dump::SqlValue::Text(b"YES".to_vec()))
+            .map(|values| {
+                LandTableQueryRow::new(index.iter().map(|&column| match &values[column] {
+                    crate::sql_dump::SqlValue::Null => LandQueryValue::Null,
+                    crate::sql_dump::SqlValue::Text(text)
+                    | crate::sql_dump::SqlValue::Bare(text) => {
+                        LandQueryValue::Text(String::from_utf8_lossy(text).into_owned())
+                    }
+                }))
+            })
+            .collect();
+        let records =
+            build_land_table(&rows, LandLimits::default()).map_err(LandDumpError::Table)?;
+        Ok(Self::from_records(records))
+    }
+
+    /// `CManager::FindLand(id)`: the land of `id`, if any.
+    #[must_use]
+    pub fn get(&self, id: u32) -> Option<&LandRecord> {
+        self.by_id.get(&id)
+    }
+
+    /// The lands in id order, as `FindLand(map, x, y)` scans them.
+    pub fn ordered(&self) -> impl Iterator<Item = &LandRecord> {
+        self.by_id.values()
+    }
+
+    /// How many lands there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    /// Whether there are no lands.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+}
+
+/// Why the `land` rows could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LandDumpError {
+    /// The dump could not be read.
+    Dump(crate::sql_dump::SqlDumpError),
+    /// A selected column is missing.
+    NoColumn(&'static str),
+    /// A value does not decode.
+    Table(LandTableError),
+}
+
+impl std::fmt::Display for LandDumpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dump(error) => error.fmt(formatter),
+            Self::NoColumn(name) => write!(formatter, "the land dump has no {name} column"),
+            Self::Table(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for LandDumpError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,5 +1002,23 @@ mod tests {
             build_land_table(&[valid, invalid], LandLimits::default()),
             Err(LandTableError::Row { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn the_owner_dump_loads_its_lands() {
+        let dump = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../legacy/sql/gamedata/player.sql"),
+        )
+        .unwrap();
+        let lands = Lands::from_dump(&dump).unwrap();
+        assert_eq!(lands.len(), 108);
+        let first = lands.get(1).unwrap();
+        assert_eq!((first.map_index, first.x, first.y), (1, 20200, 10000));
+        assert_eq!(
+            (first.guild_id, first.guild_level_limit, first.price),
+            (0, 10, 65_000_000)
+        );
+        assert!(lands.get(0).is_none());
     }
 }

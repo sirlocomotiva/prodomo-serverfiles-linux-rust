@@ -654,6 +654,16 @@ pub struct GameState {
     /// The SungZi map indices (`forkedmapindex.txt`'s `sungzi:` lines), whose
     /// players skip the exit's `IsHack` gate (`IsSungZiMapIndex`).
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,
+    /// The guild lands (`CManager::m_map_pkLand`, `G/building.h:148`).
+    guild_lands: Arc<gamedata::land::Lands>,
+    /// The building object prototypes (`CManager::m_map_pkObjectProto`).
+    object_protos: Arc<gamedata::object_proto::ObjectProtos>,
+    /// The standing building objects by (Channel, map) (`CLand::m_map_pkObject`,
+    /// `G/building.h:66`).
+    building_objects: BTreeMap<(u8, i32), Vec<guild::BuildingObject>>,
+    /// The next building object id (`CObject::m_dwID`, from the `object` table's
+    /// auto-increment).
+    next_object_id: u32,
     browsing: HashMap<common::vid::Vid, shop::Browsing>,
     /// The open trades, keyed by the VID of the character that started each.
     trades: BTreeMap<u32, trade::Deal>,
@@ -877,6 +887,20 @@ impl GameState {
         self
     }
 
+    /// Share the guild lands, which the `building.*` calls read owners from.
+    #[must_use]
+    pub fn with_lands(mut self, lands: Arc<gamedata::land::Lands>) -> Self {
+        self.guild_lands = lands;
+        self
+    }
+
+    /// Share the building object prototypes, which `building.reconstruct` reads.
+    #[must_use]
+    pub fn with_object_protos(mut self, protos: Arc<gamedata::object_proto::ObjectProtos>) -> Self {
+        self.object_protos = protos;
+        self
+    }
+
     /// Set `g_bItemCountLimit`, the largest stack a merge may build.
     ///
     /// The configured `game.item_count_limit`, which `ServerConfig::validate` has already
@@ -1031,6 +1055,17 @@ impl GameState {
     pub fn last_pulse(&self) -> u64 {
         self.last_pulse
     }
+}
+
+/// The guild install's borrowed payload: every stored row the boot read, bundled
+/// so the answer stays under the argument lint.
+struct GuildInstall<'a> {
+    stored: &'a db::guilds::StoredGuilds,
+    marks: &'a [db::guilds::StoredMark],
+    symbols: &'a [db::guilds::StoredSymbol],
+    reservations: &'a [db::guilds::StoredReservation],
+    bets: &'a [db::guilds::StoredBet],
+    land: &'a db::guild_land::StoredLandInstall,
 }
 
 impl GameState {
@@ -2139,8 +2174,19 @@ impl GameState {
                 symbols,
                 reservations,
                 bets,
+                land,
                 reply,
-            } => self.answer_install_guilds(&stored, &marks, &symbols, &reservations, &bets, reply),
+            } => self.answer_install_guilds(
+                &GuildInstall {
+                    stored: &stored,
+                    marks: &marks,
+                    symbols: &symbols,
+                    reservations: &reservations,
+                    bets: &bets,
+                    land: &land,
+                },
+                reply,
+            ),
             GameCommand::InstallEvents { events, reply } => {
                 self.answer_install_events(events, reply);
             }
@@ -2716,26 +2762,20 @@ impl GameState {
 
     /// Install the stored guilds and tell the caller whether it took. A second install
     /// is refused, as a second allocator install is: `serve` treats it as a bug.
-    fn answer_install_guilds(
-        &mut self,
-        stored: &db::guilds::StoredGuilds,
-        marks: &[db::guilds::StoredMark],
-        symbols: &[db::guilds::StoredSymbol],
-        reservations: &[db::guilds::StoredReservation],
-        bets: &[db::guilds::StoredBet],
-        reply: oneshot::Sender<bool>,
-    ) {
+    fn answer_install_guilds(&mut self, install: &GuildInstall<'_>, reply: oneshot::Sender<bool>) {
         let installed = if self.guilds.installed {
             false
         } else {
-            self.install_guilds(stored, marks, symbols);
-            self.install_reservations(reservations, bets);
+            self.install_guilds(install.stored, install.marks, install.symbols);
+            self.install_reservations(install.reservations, install.bets);
+            self.install_land_owners(&install.land.owners);
+            self.install_building_objects(&install.land.objects);
             self.guilds.installed = true;
             true
         };
         if reply.send(installed).is_err() {
             warn!(
-                guilds = stored.guilds.len(),
+                guilds = install.stored.guilds.len(),
                 "the stored guilds were installed but nobody was left to hear about it"
             );
         }
@@ -4581,7 +4621,7 @@ impl GameState {
                 manager.take(pid, (id, race), game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -5460,13 +5500,34 @@ mod tests {
         };
         let mut state = a_state();
         let (first_reply, first_answer) = tokio::sync::oneshot::channel();
-        state.answer_install_guilds(&stored, &[], &[], &[], &[], first_reply);
+        let empty = db::guild_land::StoredLandInstall::default();
+        state.answer_install_guilds(
+            &GuildInstall {
+                stored: &stored,
+                marks: &[],
+                symbols: &[],
+                reservations: &[],
+                bets: &[],
+                land: &empty,
+            },
+            first_reply,
+        );
         assert!(
             first_answer.blocking_recv().expect("an answer"),
             "the first install takes"
         );
         let (second_reply, second_answer) = tokio::sync::oneshot::channel();
-        state.answer_install_guilds(&stored, &[], &[], &[], &[], second_reply);
+        state.answer_install_guilds(
+            &GuildInstall {
+                stored: &stored,
+                marks: &[],
+                symbols: &[],
+                reservations: &[],
+                bets: &[],
+                land: &empty,
+            },
+            second_reply,
+        );
         assert!(
             !second_answer.blocking_recv().expect("an answer"),
             "the second install is refused"

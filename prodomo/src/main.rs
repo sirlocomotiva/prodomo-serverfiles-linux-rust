@@ -5362,7 +5362,79 @@ where
                     return false;
                 }
             }
+            GuildQuestStore::Land { .. } | GuildQuestStore::Reconstruct { .. } => {
+                if !store_quest_land_store(addr, context, store).await {
+                    return false;
+                }
+            }
         }
+    }
+    true
+}
+
+/// Store one land half a quest step judged: a claim's owner or a rebuild's object row.
+/// Split out so `store_quest_guild_stores` stays under the line lint.
+async fn store_quest_land_store(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    store: &GuildQuestStore,
+) -> bool {
+    match store {
+        GuildQuestStore::Land { land_id, guild_id } => {
+            if let Err(error) = db::guild_land::set_owner(&context.store, *land_id, *guild_id).await
+            {
+                warn!(%addr, %error, "A quest land claim could not be stored; closing");
+                return false;
+            }
+        }
+        GuildQuestStore::Reconstruct { .. } => {
+            if !store_quest_reconstruct(addr, context, store).await {
+                return false;
+            }
+        }
+        _ => {}
+    }
+    true
+}
+/// Store one object rebuild: the delete row goes, then the create row lands with the
+/// world's judged id. Answers whether the step may be sent.
+async fn store_quest_reconstruct(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    store: &GuildQuestStore,
+) -> bool {
+    let GuildQuestStore::Reconstruct {
+        delete_id,
+        land_id,
+        vnum,
+        map,
+        x,
+        y,
+        rot,
+        life,
+    } = store
+    else {
+        return true;
+    };
+    if let Err(error) = db::guild_land::reconstruct(
+        &context.store,
+        *delete_id,
+        *land_id,
+        *vnum,
+        *map,
+        *x,
+        *y,
+        (
+            f32::from_bits(rot.0),
+            f32::from_bits(rot.1),
+            f32::from_bits(rot.2),
+        ),
+        *life,
+    )
+    .await
+    {
+        warn!(%addr, %error, "A quest rebuild could not be stored; closing");
+        return false;
     }
     true
 }
@@ -8438,6 +8510,10 @@ struct GameData {
     gaya_table: Arc<gamedata::gaya::GayaTable>,
     /// The SungZi map indices, which the game thread holds.
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,
+    /// The guild lands, which the game thread holds.
+    lands: Arc<gamedata::land::Lands>,
+    /// The building object prototypes, which the game thread holds.
+    object_protos: Arc<gamedata::object_proto::ObjectProtos>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -8477,6 +8553,8 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let dragon_soul_table = load_dragon_soul_table(config)?;
     let gaya_table = load_gaya_table(config)?;
     let sungzi_maps = load_sungzi_maps(config)?;
+    let lands = load_lands(config)?;
+    let object_protos = load_object_protos(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -8503,6 +8581,8 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         dragon_soul_table,
         gaya_table,
         sungzi_maps,
+        lands,
+        object_protos,
     };
     Ok((data, quests))
 }
@@ -8709,6 +8789,34 @@ fn load_sungzi_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::Sungz
     })?;
     info!(maps = maps.indices().len(), "SungZi maps loaded");
     Ok(Arc::new(maps))
+}
+
+/// Load the guild lands: the `land` rows (`CClientManager::InitializeLandTable`,
+/// `D/ClientManagerBoot.cpp:919-983`). A dump that does not parse stops the server
+/// before any port opens.
+fn load_lands(config: &ServerConfig) -> Result<Arc<gamedata::land::Lands>, String> {
+    let player_path = config.game_tables.join("player.sql");
+    let player = std::fs::read(&player_path)
+        .map_err(|error| format!("Failed to read {}: {error}", player_path.display()))?;
+    let lands = gamedata::land::Lands::from_dump(&player)
+        .map_err(|error| format!("Guild lands are unusable: {error}"))?;
+    info!(lands = lands.len(), "Guild lands loaded");
+    Ok(Arc::new(lands))
+}
+
+/// Load the building object prototypes: the `object_proto` rows
+/// (`CClientManager::InitializeObjectProto`, `D/ClientManagerBoot.cpp`). A dump that
+/// does not parse stops the server before any port opens.
+fn load_object_protos(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::object_proto::ObjectProtos>, String> {
+    let player_path = config.game_tables.join("player.sql");
+    let player = std::fs::read(&player_path)
+        .map_err(|error| format!("Failed to read {}: {error}", player_path.display()))?;
+    let protos = gamedata::object_proto::ObjectProtos::from_dump(&player)
+        .map_err(|error| format!("Building object prototypes are unusable: {error}"))?;
+    info!(protos = protos.len(), "Building object prototypes loaded");
+    Ok(Arc::new(protos))
 }
 
 /// Load the quest translations (`LocaleService_LoadQuestTranslateFile`,
@@ -9081,6 +9189,13 @@ async fn install_guilds(
     let (reservations, bets) = db::guilds::load_reservations(store)
         .await
         .map_err(|error| format!("Stored war reservations are unusable: {error}"))?;
+    let owners = db::guild_land::load_all(store)
+        .await
+        .map_err(|error| format!("Stored land owners are unusable: {error}"))?;
+    let objects = db::guild_land::load_objects(store)
+        .await
+        .map_err(|error| format!("Stored building objects are unusable: {error}"))?;
+    let land = db::guild_land::StoredLandInstall { owners, objects };
     info!(
         guilds = stored.guilds.len(),
         marks = marks.len(),
@@ -9091,7 +9206,7 @@ async fn install_guilds(
     );
     match game_loop
         .controller()
-        .install_guilds(stored, marks, symbols, reservations, bets)
+        .install_guilds(stored, marks, symbols, reservations, bets, land)
         .await?
     {
         Ok(()) => Ok(()),
@@ -9143,6 +9258,8 @@ fn build_world(
         .with_dragon_soul_table(Arc::clone(&data.dragon_soul_table))
         .with_gaya_table(Arc::clone(&data.gaya_table))
         .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
+        .with_lands(Arc::clone(&data.lands))
+        .with_object_protos(Arc::clone(&data.object_protos))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
-use gamedata::mob_proto::{CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
+use gamedata::mob_proto::{CHAR_TYPE_BUILDING, CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
 use parity::client::Quiet;
 use parity::inventory::{self, Status};
 use parity::server::{default_channels, ChannelSpec};
@@ -37529,4 +37529,150 @@ fn a_click_opens_windows_and_runs_the_exp_event() {
         "the exp end"
     );
     alice.quiet("the step ends");
+}
+
+/// The probe quest the land scenario adds: the claim stone reports the land under
+/// Alpha, claims it, and reports the claim; the melt stone reports its guild and
+/// rebuilds as the next refinery.
+const LAND_PROBE: &[u8] = b"quest land_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    local land = building.get_land_id(1, 466700, 907100)\n\
+    local price, owner, limit = building.get_land_info(land)\n\
+    say('land '..land..' price '..price..' owner '..owner..' limit '..limit)\n\
+    say('has '..tostring(building.has_land(pc.get_guild())))\n\
+    pc.changegold(-price)\n\
+    building.set_land_owner(land, pc.get_guild())\n\
+    local _, owner2, _ = building.get_land_info(land)\n\
+    say('owned '..owner2)\n\
+    say('has2 '..tostring(building.has_land(pc.get_guild())))\n\
+    end\n\
+    when 20060.click begin\n\
+    say('npcguild '..npc.get_guild())\n\
+    building.reconstruct(14045)\n\
+    say('rebuilt')\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `lua.building.get_land_id`, `lua.building.get_land_info`,
+/// `lua.building.set_land_owner`, `lua.building.has_land`, `lua.building.reconstruct`:
+/// Alice's guild master claims land 4 at its stone (the id, triple, claim and owned
+/// read, in order), and the refinery's stone rebuilds it as 14045 (the NPC's guild,
+/// the delete and the add).
+/// The expected 0xe1 gold-change record against the shown character's VID.
+fn gold_change_of(shown: &[u8], amount: u64) -> Vec<u8> {
+    let vid = u32::from_le_bytes(shown[1..5].try_into().expect("four bytes"));
+    let mut want = vec![0xe1, 0, 0, 0];
+    want.extend_from_slice(&vid.to_le_bytes());
+    want.extend_from_slice(&0i64.to_le_bytes());
+    want.extend_from_slice(&amount.to_le_bytes());
+    want
+}
+
+#[test]
+fn a_guild_master_claims_land_and_rebuilds_its_refinery() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO guild (id, name, master_pid, level) SELECT 7, 'MyGuild', id, 10 FROM          player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN          grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 15) grade",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 7, 1 FROM player WHERE          name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 200000000, x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (5, 7)",
+    );
+    sql(
+        &database,
+        "INSERT INTO building_object (id, land_id, vnum, map_index, x, y, x_rot, y_rot,          z_rot, life) VALUES (3, 5, 14043, 1, 468200, 901300, 0, 0, 0, 0)",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/land_probe.lua", LAND_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let paid = alice.read_game();
+    assert_eq!(
+        paid,
+        gold_change_of(&entered.add, 135_000_000),
+        "the price leaves"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"land 4 price 65000000 owner 0 limit 10[ENTER]has true[ENTER]owned 7[ENTER]has2 \
+              true[ENTER][DONE]"
+        ),
+        "the triple, the claim and the owned reads"
+    );
+    alice.quiet("the claim step ends");
+    // The refinery's stone on land 5, which the boot stood with guild 7's NPC: a
+    // guildless clicker rebuilds it as 14045 (the melt quest's `with` fails for it,
+    // so only the probe runs).
+    sql(
+        &database,
+        "UPDATE player SET x = 468200, y = 901610 WHERE name = 'Beta'",
+    );
+    let (mut beta, _listed, entered) = enter_world_seeing(&server, b"alice", 1);
+    let refinery = shown_vid(&entered, 20_060, "land 5 shows its refinery stone");
+    beta.send_record(&client_click(refinery));
+    assert_eq!(
+        beta.read_game(),
+        server_script(1, b"npcguild 7[ENTER]rebuilt[ENTER][DONE]"),
+        "the rebuild"
+    );
+    // The old stone's NPC goes, then the object entity is deleted and re-added as
+    // 14045 (the fan around the new NPC).
+    assert_eq!(
+        beta.read_game(),
+        [vec![0x02], refinery.to_le_bytes().to_vec()].concat(),
+        "the old NPC goes"
+    );
+    let stone = beta.read_game();
+    assert_eq!(
+        stone[0], GC_CHARACTER_ADD,
+        "the new stone stands: {stone:02x?}"
+    );
+    assert_eq!(
+        u16::from_le_bytes(stone[22..24].try_into().expect("two bytes")),
+        20_062,
+        "as 20062: {stone:02x?}"
+    );
+    assert_eq!(
+        beta.read_game()[0],
+        GC_CHAR_ADDITIONAL_INFO,
+        "the new stone's name"
+    );
+    let delete = beta.read_game();
+    assert_eq!(delete[0], 0x02, "the object entity goes");
+    let add = beta.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD, "the object stands again");
+    assert_eq!(add[21], CHAR_TYPE_BUILDING, "a building: {add:02x?}");
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        14_045,
+        "as 14045: {add:02x?}"
+    );
+    beta.quiet("the rebuild step ends");
 }

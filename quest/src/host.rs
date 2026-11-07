@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 295] = [
+pub const BRIDGED: [&str; 300] = [
     "temple_ochao.initialize",
     "attr67add.holding",
     "attr67add.success",
@@ -244,6 +244,11 @@ pub const BRIDGED: [&str; 295] = [
     "attr67add.item_vnum",
     "attr67add.window_type",
     "attr67add.window_cell",
+    "building.get_land_id",
+    "building.get_land_info",
+    "building.set_land_owner",
+    "building.has_land",
+    "building.reconstruct",
     "ds.open_refine_window",
     "ds.open_attr_change_window",
     "ds.give_qualification",
