@@ -120,6 +120,7 @@ mod reload;
 mod reward;
 mod safebox;
 mod set_attr;
+mod ship;
 mod shop;
 mod shutdown;
 mod skill_admin;
@@ -742,6 +743,9 @@ pub struct GameState {
     /// The guilds whose Meley run lives, by guild id (`MeleyLair::CMgr::m_RegGuilds`,
     /// `G/MeleyLair.cpp:953-1453`). See [`meley`].
     meley: meley::MeleyRuns,
+    /// The ship-defence runs, by leader PID (`CShipDefenseManager::m_mapShipDefense`,
+    /// `G/ShipDefense.cpp:1489-1808`). See [`ship`].
+    ship: ship::ShipRuns,
     /// The messenger's relations. See [`messenger`].
     messenger: messenger::Relations,
     /// The war maps the live wars are fought on, keyed by the private map index
@@ -4641,7 +4645,7 @@ impl GameState {
                 manager.take(pid, (id, race), game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -5066,6 +5070,7 @@ impl PulseProcessor for GameState {
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_dungeon_ticks(pulse);
+        self.run_ship_ticks(pulse);
         self.run_temple_ochao(pulse);
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);

@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 309] = [
+pub const BRIDGED: [&str; 322] = [
     "MeleyLair.GetRequirments",
     "MeleyLair.GetPartecipantsLimit",
     "MeleyLair.GetSubMapIndex",
@@ -540,6 +540,19 @@ pub const BRIDGED: [&str; 309] = [
     "q.getcurrentquestname",
     "q.begin_other_pc_block",
     "q.end_other_pc_block",
+    "ship_defense_mgr.create",
+    "ship_defense_mgr.start",
+    "ship_defense_mgr.join",
+    "ship_defense_mgr.leave",
+    "ship_defense_mgr.land",
+    "ship_defense_mgr.is_created",
+    "ship_defense_mgr.is_running",
+    "ship_defense_mgr.need_party",
+    "ship_defense_mgr.need_ticket",
+    "ship_defense_mgr.spawn_wood_repair",
+    "ship_defense_mgr.require_cooldown",
+    "ship_defense_mgr.set_alliance_hp_pct",
+    "ship_defense_mgr.can_join",
     "target.vid",
     "target.npc",
     "target.pc",

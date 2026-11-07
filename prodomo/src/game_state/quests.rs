@@ -224,6 +224,7 @@ type QuestRun = (
     Vec<(u32, u32)>,
     Vec<(u32, u32)>,
     (u32, u32, u32, u32),
+    (u32, u32, u32, u32, u32, Vec<u8>),
 );
 
 /// The bit of a `CG_SCRIPT_BUTTON` word that asks for the quest's information
@@ -893,6 +894,23 @@ pub(super) struct SessionTail<'s> {
     pub(super) meley_checks: u32,
     /// The `MeleyLair.Leave` calls, for the world's leaves after the step.
     pub(super) meley_leaves: u32,
+    /// The ship runs at the step's start, by leader PID, which the lobby calls
+    /// read. Writers queue for the world; the create stands the shadow at once, so
+    /// a later call in the step reads it.
+    pub(super) ship: super::ship::ShipRuns,
+    /// The `ship_defense_mgr.create` calls, for the world's creates after the step.
+    pub(super) ship_creates: u32,
+    /// The `ship_defense_mgr.start` calls, for the world's starts after the step.
+    pub(super) ship_starts: u32,
+    /// The `ship_defense_mgr.join` calls, for the world's joins after the step.
+    pub(super) ship_joins: u32,
+    /// The `ship_defense_mgr.leave` calls, for the world's leaves after the step.
+    pub(super) ship_leaves: u32,
+    /// The `ship_defense_mgr.land` calls, for the world's lands after the step.
+    pub(super) ship_lands: u32,
+    /// Every `ship_defense_mgr.set_alliance_hp_pct` call's byte, in order, for the
+    /// world's heals after the step.
+    pub(super) ship_heals: Vec<u8>,
 }
 
 impl<'s> SessionTail<'s> {
@@ -918,6 +936,13 @@ impl<'s> SessionTail<'s> {
             meley_enters: 0,
             meley_checks: 0,
             meley_leaves: 0,
+            ship: super::ship::ShipRuns::default(),
+            ship_creates: 0,
+            ship_starts: 0,
+            ship_joins: 0,
+            ship_leaves: 0,
+            ship_lands: 0,
+            ship_heals: Vec::new(),
         }
     }
 
@@ -930,12 +955,14 @@ impl<'s> SessionTail<'s> {
         object_protos: &'s gamedata::object_proto::ObjectProtos,
         guilds: &super::guild::Guilds,
         meley: super::meley::MeleyRuns,
+        ship: super::ship::ShipRuns,
     ) -> Self {
         let mut tail = Self::new(pre, atlas);
         tail.lands = Some(lands);
         tail.object_protos = Some(object_protos);
         tail.land_owners = guilds.land_owners();
         tail.meley = meley;
+        tail.ship = ship;
         tail
     }
 }
@@ -1303,6 +1330,25 @@ fn skill_can_up(vnum: u32, level: impl Fn(u32) -> u8) -> bool {
 }
 
 impl Session<'_> {
+    /// The shadow's leader PID behind the caller: its party's leader, or its own
+    /// PID with no party (`GetLeaderPID(c_lpChar, false)`,
+    /// `G/ShipDefense.cpp:1652-1674`).
+    fn shadow_ship_leader(&self) -> Option<u32> {
+        let pid = self.caller?;
+        Some(self.party_leader.unwrap_or(pid))
+    }
+
+    /// The shadow's create leader: the caller's party leader when the caller is the
+    /// leader, else its own PID when it holds no party (`GetLeaderPID(c_lpChar,
+    /// true)`). `None` when a member reads it, as the call is the leader's.
+    fn shadow_ship_create_leader(&self) -> Option<u32> {
+        let pid = self.caller?;
+        match self.party_leader {
+            None => Some(pid),
+            Some(leader) => (leader == pid).then_some(leader),
+        }
+    }
+
     /// The shadow of `CMgr::Register` (`G/MeleyLair.cpp:992-1073`): the (`iRes1`,
     /// `iRes2`) pair the reader's guild reads now, so the script's selects see it.
     /// A passing register moves the shadow triple and ladder at once, as the call
@@ -2831,6 +2877,75 @@ impl Game for Session<'_> {
         // after the step, which warps a stranger out.
         self.tail.meley_checks += 1;
     }
+    fn ship_create(&mut self) {
+        // `ship_defense_mgr_create` (`G/questlua_shipdefense_mgr.cpp:28-42`): the
+        // shadow stands the run at once, so a later call in the step reads it; the
+        // world judges the queued call again after the step, which hosts the map,
+        // stamps the cooldown, fans the ready line and warps the reader in.
+        self.tail.ship_creates += 1;
+        let Some(leader) = self.shadow_ship_create_leader() else {
+            return;
+        };
+        if self.tail.ship.of(leader).is_some() {
+            return;
+        }
+        if !super::ship::base_hosted(self.tail.atlas, self.channel, super::ship::MAP) {
+            return;
+        }
+        self.tail.ship.insert(leader, 0);
+    }
+    fn ship_start(&mut self) {
+        // `ship_defense_mgr_start` (`G/questlua_shipdefense_mgr.cpp:44-62`): queued
+        // for the world after the step, which runs the deck.
+        self.tail.ship_starts += 1;
+        let Some(leader) = self.shadow_ship_create_leader() else {
+            return;
+        };
+        if let Some(run) = self.tail.ship.of_mut(leader) {
+            run.state = super::ship::STATE_START;
+        }
+    }
+    fn ship_join(&mut self) {
+        // `ship_defense_mgr_join` (`G/questlua_shipdefense_mgr.cpp:64-74`): queued
+        // for the world after the step, which warps the reader in.
+        self.tail.ship_joins += 1;
+    }
+    fn ship_leave(&mut self) {
+        // `ship_defense_mgr_leave` (`G/questlua_shipdefense_mgr.cpp:76-86`): queued
+        // for the world after the step, which warps the reader out.
+        self.tail.ship_leaves += 1;
+    }
+    fn ship_land(&mut self) {
+        // `ship_defense_mgr_land` (`G/questlua_shipdefense_mgr.cpp:88-98`): queued
+        // for the world after the step, which warps the reader to the port.
+        self.tail.ship_lands += 1;
+    }
+    fn ship_is_created(&self) -> bool {
+        // `ship_defense_mgr_is_created` (`G/questlua_shipdefense_mgr.cpp:100-111`):
+        // the shadow's state arm.
+        self.shadow_ship_leader()
+            .and_then(|leader| self.tail.ship.of(leader))
+            .is_some_and(|run| run.state == super::ship::STATE_CREATE)
+    }
+    fn ship_is_running(&self) -> bool {
+        // `ship_defense_mgr_is_running` (`G/questlua_shipdefense_mgr.cpp:113-124`):
+        // the shadow's state arm.
+        self.shadow_ship_leader()
+            .and_then(|leader| self.tail.ship.of(leader))
+            .is_some_and(|run| run.state == super::ship::STATE_START)
+    }
+    fn ship_heal(&mut self, pct: u8) {
+        // `ship_defense_mgr_set_alliance_hp_pct`
+        // (`G/questlua_shipdefense_mgr.cpp:142-159`): queued for the world after the
+        // step, which heals the mast, chats the HP and stuns the reader.
+        self.tail.ship_heals.push(pct);
+    }
+    fn ship_can_join(&self) -> bool {
+        // `ship_defense_mgr_can_join` (`G/questlua_shipdefense_mgr.cpp:161-174`):
+        // the party leader holds a shadow run.
+        self.party_leader
+            .is_some_and(|leader| self.tail.ship.of(leader).is_some())
+    }
     fn meley_leave(&mut self) {
         // `MeleyLair_Leave` (`G/questlua_MeleyLair.cpp:109-117`): queued for the world
         // after the step, which drops the reader and warps it out.
@@ -3352,6 +3467,7 @@ impl GameState {
                 land_sets,
                 reconstructs,
                 meley,
+                ship,
             ),
             items,
             claimed,
@@ -3382,6 +3498,7 @@ impl GameState {
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
         stores.extend(self.judge_meley_calls(vid, meley, now));
+        self.judge_ship_calls(vid, ship, now);
         Ok((
             records, climbs, stores, items, gold, claimed, take_sides, landed,
         ))
@@ -3412,7 +3529,7 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = self.run_quests(
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _, _))) = self.run_quests(
             place,
             mover,
             level,
@@ -3487,6 +3604,7 @@ impl GameState {
                 land_sets,
                 reconstructs,
                 meley,
+                ship,
             ),
             items,
             claimed,
@@ -3520,6 +3638,7 @@ impl GameState {
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
         stores.extend(self.judge_meley_calls(vid, meley, now));
+        self.judge_ship_calls(vid, ship, now);
         (
             taken,
             (
@@ -3578,7 +3697,7 @@ impl GameState {
         let login = account.login.clone();
         let Some((
             (),
-            (records, climbs, ops, block_mode, _, _, _, land_sets, reconstructs, meley),
+            (records, climbs, ops, block_mode, _, _, _, land_sets, reconstructs, meley, ship),
             items,
             _,
             take_sides,
@@ -3618,6 +3737,7 @@ impl GameState {
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
         stores.extend(self.judge_meley_calls(vid, meley, now));
+        self.judge_ship_calls(vid, ship, now);
         step.quest = (climbs, stores, landed);
         if let Ok(character) = self.characters.find_by_vid(vid) {
             step.quickslots = Some(character.quickslots().clone());
@@ -3761,7 +3881,7 @@ impl GameState {
                 manager.levelup(pid, game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -3807,7 +3927,7 @@ impl GameState {
                 manager.kill(pid, race, leader, game);
             },
         );
-        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _))) = landed else {
+        let Some(((), (records, _, _, block_mode, _, _, _, _, _, _, _))) = landed else {
             return Vec::new();
         };
         if let Some(mode) = block_mode {
@@ -3919,6 +4039,14 @@ impl GameState {
                     tail.meley_checks,
                     tail.meley_leaves,
                 ),
+                (
+                    tail.ship_creates,
+                    tail.ship_starts,
+                    tail.ship_joins,
+                    tail.ship_leaves,
+                    tail.ship_lands,
+                    tail.ship_heals,
+                ),
             );
             (
                 answer,
@@ -3995,6 +4123,7 @@ impl GameState {
             guild_lands,
             object_protos,
             meley,
+            ship,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -4051,6 +4180,7 @@ impl GameState {
                 giving,
                 rank,
                 meley: meley.clone(),
+                ship: ship.clone(),
             },
         ))
     }
@@ -5120,6 +5250,7 @@ struct FinishInputs<'s> {
     giving: Giving,
     rank: &'s super::rank_global::RankBoard,
     meley: super::meley::MeleyRuns,
+    ship: super::ship::ShipRuns,
 }
 
 /// Build the [`Session`] and open its rank prizes: the tail half of
@@ -5169,6 +5300,7 @@ fn finish_armed_session<'s>(quests: &'s mut Quests, rest: FinishInputs<'s>) -> A
         rest.guild_lands,
         rest.object_protos,
         rest.meley,
+        rest.ship,
     ));
     open_rank_prizes(&mut session, rest.giving, rest.rank, rest.pid);
     ArmedSession {
@@ -5221,6 +5353,8 @@ struct SessionInputs<'s> {
     object_protos: &'s gamedata::object_proto::ObjectProtos,
     /// The Meley registrations at the step's start, which the lobby calls read.
     meley: super::meley::MeleyRuns,
+    /// The ship runs at the step's start, which the lobby calls read.
+    ship: super::ship::ShipRuns,
 }
 
 /// What a session knows of the world's step-start state: the reader's open windows,
@@ -5566,6 +5700,7 @@ fn session_inputs<'s>(
     lands: &'s gamedata::land::Lands,
     object_protos: &'s gamedata::object_proto::ObjectProtos,
     meley: super::meley::MeleyRuns,
+    ship: super::ship::ShipRuns,
 ) -> SessionInputs<'s> {
     SessionInputs {
         dungeon_flags,
@@ -5604,6 +5739,7 @@ fn session_inputs<'s>(
         lands,
         object_protos,
         meley,
+        ship,
     }
 }
 
@@ -5647,6 +5783,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         lands,
         object_protos,
         meley,
+        ship,
     } = inputs;
     session_head(
         dungeon_flags,
@@ -5685,6 +5822,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         lands,
         object_protos,
         meley,
+        ship,
     )
 }
 
@@ -5728,6 +5866,7 @@ fn session_head<'s>(
     lands: &'s gamedata::land::Lands,
     object_protos: &'s gamedata::object_proto::ObjectProtos,
     meley: super::meley::MeleyRuns,
+    ship: super::ship::ShipRuns,
 ) -> Session<'s> {
     let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
     let roster = quest_step_roster(characters);
@@ -5827,7 +5966,7 @@ fn session_head<'s>(
         okay_ranks: context.okay_ranks,
         empire_moves: Vec::new(),
         windows: pre.windows,
-        tail: SessionTail::with_buildings(pre, atlas, lands, object_protos, guilds, meley),
+        tail: SessionTail::with_buildings(pre, atlas, lands, object_protos, guilds, meley, ship),
     }
 }
 
@@ -6068,6 +6207,55 @@ mod tests {
             windows: WindowFlags::default(),
             tail: SessionTail::new(QuestStepState::default(), None),
         }
+    }
+
+    /// The ship shadow's reads: the leader's create stands a shadow run which
+    /// `is_created` answers and `can_join` names through the party leader; a
+    /// member's create queues but stands nothing; the start flips the shadow to
+    /// running.
+    #[test]
+    fn the_ship_shadow_stands_reads_and_starts() {
+        use crate::game_state::ship::MAP;
+        let protos = MobProtos::default();
+        let names = MobNamesByLanguage::default();
+        let items = ItemProtos::default();
+        let item_names = ItemNamesByLanguage::default();
+        let atlas: &'static gamedata::map_atlas::MapAtlas =
+            Box::leak(Box::new(gamedata::map_atlas::MapAtlas::from_regions(vec![
+                gamedata::map_atlas::MapRegion {
+                    index: MAP,
+                    name: b"ship".to_vec(),
+                    sx: 100_000,
+                    sy: 100_000,
+                    ex: 200_000,
+                    ey: 200_000,
+                    spawn: (113_000, 113_000),
+                    empire_spawns: None,
+                },
+            ])));
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            use quest::manager::Game;
+            // The leader's create stands the shadow.
+            session.caller = Some(100);
+            session.party_leader = Some(100);
+            session.tail.atlas = Some(atlas);
+            session.ship_create();
+            assert_eq!(session.tail.ship_creates, 1);
+            assert!(session.tail.ship.of(100).is_some());
+            assert!(session.ship_is_created());
+            assert!(!session.ship_is_running());
+            assert!(session.ship_can_join());
+            // A member's create queues but stands nothing.
+            session.caller = Some(101);
+            session.ship_create();
+            assert_eq!(session.tail.ship_creates, 2);
+            assert!(session.tail.ship.of(101).is_none());
+            // The leader's start flips the shadow to running.
+            session.caller = Some(100);
+            session.ship_start();
+            assert!(session.ship_is_running());
+            assert!(!session.ship_is_created());
+        });
     }
 
     /// The Meley shadow's pairs: the caller's guild reads, the register's (6, 300)

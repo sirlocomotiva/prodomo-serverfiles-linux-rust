@@ -413,7 +413,7 @@ impl GameState {
             );
         }
         debug_assert!(take_sides.is_empty(), "take rows outside a dialog step");
-        let (records, _, _, block_mode, _, _, _, _, _, meley) = run;
+        let (records, _, _, block_mode, _, _, _, _, _, meley, ship) = run;
         if let Some(mode) = block_mode {
             self.block_modes.insert(vid, mode);
         }
@@ -422,6 +422,7 @@ impl GameState {
         // lands nowhere, because the event has no descriptor step to drain it — no
         // owner quest registers outside a dialog.
         let _stores = self.judge_meley_calls(vid, meley, super::quests::quest_now());
+        self.judge_ship_calls(vid, ship, super::quests::quest_now());
         for record in records {
             let _sent = self.write_to_client(vid, record);
         }

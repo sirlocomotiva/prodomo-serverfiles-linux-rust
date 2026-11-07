@@ -968,7 +968,7 @@ impl GameState {
     /// `PointChange` of the non-player under `vid`: the slot moves, with no packet — the
     /// caller sends the one update for the whole change. Slot 0 (`POINT_NONE`) changes
     /// nothing but still lands in the row, as `ComputeAffect` still writes the field.
-    fn change_npc_point(&mut self, vid: u32, slot: usize, value: i32) {
+    pub(super) fn change_npc_point(&mut self, vid: u32, slot: usize, value: i32) {
         if slot == point::POINT_NONE {
             return;
         }

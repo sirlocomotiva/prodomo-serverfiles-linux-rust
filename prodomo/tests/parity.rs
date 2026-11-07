@@ -37860,3 +37860,180 @@ fn a_guild_registers_enters_and_leaves_meleys_lair() {
     // The leave runs through the same ordered warp: a dialog-step `Leave()`
     // would need an NPC on the run's map, which legacy never places there.
 }
+
+/// The ship defence probe: 9009's board arm reads the four constant flags and the
+/// shadow pair, creates, and says whether the shadow stands; the wheel's start arm
+/// starts, reads the shadow, heals, and says so; the wheel's land arm lands.
+const SHIP_PROBE: &[u8] = b"quest ship_probe begin\n\
+    state start begin\n\
+    when 9009.chat.\"probe board\" begin\n\
+    say(\"flags \" .. tostring(ship_defense_mgr.need_party()) .. tostring(ship_defense_mgr.need_ticket()) .. tostring(ship_defense_mgr.spawn_wood_repair()) .. tostring(ship_defense_mgr.require_cooldown()))\n\
+    say(\"before \" .. tostring(ship_defense_mgr.is_created()))\n\
+    ship_defense_mgr.create()\n\
+    say(\"made \" .. tostring(ship_defense_mgr.is_created()))\n\
+    end\n\
+    when 20436.chat.\"probe start\" begin\n\
+    ship_defense_mgr.start()\n\
+    say(\"runs \" .. tostring(ship_defense_mgr.is_running()))\n\
+    ship_defense_mgr.set_alliance_hp_pct(1)\n\
+    say(\"healed\")\n\
+    end\n\
+    when 20436.chat.\"probe land\" begin\n\
+    ship_defense_mgr.land()\n\
+    say(\"landed\")\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// The start step's burst after its script: the start's broadcast (the mast's
+/// target HP), the wave's pair, the heal's own notice, the stun's flag update and
+/// affect add, and the heal's broadcast again.
+fn read_ship_start_burst(alice: &mut Keyed) {
+    let target = alice.read_game();
+    assert_eq!(target[0], GC_TARGET, "the mast HP broadcasts");
+    let first = alice.read_game();
+    assert_eq!(first[0], GC_CHAT, "the attack warning chats");
+    let second = alice.read_game();
+    assert_eq!(second[0], GC_CHAT, "the wave line chats");
+    let notice = alice.read_game();
+    assert_eq!(notice[0], GC_CHAT, "the mast HP chats");
+    // The stun's flag update lands before its affect add.
+    let flags = alice.read_game();
+    assert_eq!(flags[0], GC_CHARACTER_UPDATE, "the stun flags land");
+    let stun = alice.read_game();
+    assert_eq!(stun[0], GC_AFFECT_ADD, "the reader stuns");
+    let cast = alice.read_game();
+    assert_eq!(cast[0], GC_TARGET, "the mast HP broadcasts again");
+}
+
+/// The Channels the ship defence runs on: Channel 1 hosts the cape (135), the ship
+/// (358) and the port (359), the create's and the land's gates.
+fn ship_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 3, 135, 358, 359],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// `lua.ship_defense_mgr.create`, `lua.ship_defense_mgr.start`,
+/// `lua.ship_defense_mgr.join`, `lua.ship_defense_mgr.leave`,
+/// `lua.ship_defense_mgr.land`, `lua.ship_defense_mgr.is_created`,
+/// `lua.ship_defense_mgr.is_running`, `lua.ship_defense_mgr.need_party`,
+/// `lua.ship_defense_mgr.need_ticket`,
+/// `lua.ship_defense_mgr.spawn_wood_repair`,
+/// `lua.ship_defense_mgr.require_cooldown`,
+/// `lua.ship_defense_mgr.set_alliance_hp_pct`, `lua.ship_defense_mgr.can_join`:
+/// Alpha stands beside 9009 on the cape (135). Its board chats the four true
+/// flags, the shadow pair around the create, and enters warped to the recall spot
+/// on the run's index. Coming back, the wheel (20436) stands on the run; its start
+/// chats the running read, heals the mast (the HP notice and the stun land), and
+/// its land ships out to the port. (`ship_defense_mgr.join` needs a party, which
+/// one client cannot form; the unit join pins the warp.)
+#[test]
+fn a_captain_boards_starts_and_lands_the_ship_defence() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    // 9009 of `Metin2_map_CapeDragonHead/npc.txt:9` stands at (838, 1187) times
+    // 100 past the cape's base (1024000, 1664000).
+    sql(
+        &database,
+        "UPDATE player SET map_index = 135, x = 1107800, y = 1782700 WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/ship_probe.lua", SHIP_PROBE)],
+        &ship_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, listed, entered) = enter_world_seeing(&server, b"alice", 0);
+    let npc = shown_vid(&entered, 9009, "the cape shows 9009");
+    alice.send_record(&client_click(npc));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;probe board|3;Inchide]",),
+        "the quest's chat, the probe's, and the close"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"flags truetruetruetrue[ENTER]before false[ENTER]made true[ENTER][DONE]"
+        ),
+        "the flags and the shadow pair around the create"
+    );
+    let port = server.channel(1).port();
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((166_700, 522_300), port),
+        "the recall spot on the run"
+    );
+    alice.quiet("the create step ends");
+    wait_for(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 3580000",
+    );
+    // Coming back, the wheel stands on the run: its start chats the running read,
+    // heals the mast, and the HP notice and the stun land.
+    drop(alice);
+    let (mut alice, _character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_view(&mut alice);
+    let wheel = shown_vid(&entered, 20436, "the run shows the wheel");
+    alice.send_record(&client_click(wheel));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Incepe Apararea Navei|2;Opreste Calatoria|3;probe start|4;probe land|5;Inchide]",
+        ),
+        "the quest's chats, the probes, and the close"
+    );
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"runs true[ENTER]healed[ENTER][DONE]"),
+        "the running read and the heal"
+    );
+    read_ship_start_burst(&mut alice);
+    alice.quiet("the start step ends");
+    // The land ships out to the port spot.
+    alice.send_record(&client_click(wheel));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu again");
+    alice.send_record(&client_script_answer(3));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"landed[ENTER][DONE]"),
+        "the land says so"
+    );
+    // The land's own delete and warp, in order.
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((168_500, 611_200), port),
+        "the port spot"
+    );
+    alice.quiet("the land step ends");
+    wait_for(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 359",
+    );
+}

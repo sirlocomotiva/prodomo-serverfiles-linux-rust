@@ -1623,6 +1623,10 @@ impl GameState {
         if let Some(npc) = self.npc_mut(vid) {
             npc.dead = true;
         }
+        // `CHARACTER_MANAGER::DestroyCharacter`'s ship arm
+        // (`G/char_manager.cpp:150-154`): a non-player's death on the ship's map runs
+        // the deck's kill first, before the reward halves.
+        self.ship_on_kill(vid, killer);
         self.clear_npc_affects(vid, false);
         self.cancel_npc_poison(vid);
         // `ClearSync` (`:1461`): its own release, then what it owns, then the stun event

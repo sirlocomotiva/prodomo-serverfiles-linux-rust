@@ -468,6 +468,34 @@ pub trait Game {
     /// `MeleyLair_Leave` (`G/questlua_MeleyLair.cpp:109-117`): the leave is queued
     /// for the world after the step.
     fn meley_leave(&mut self);
+    /// `ship_defense_mgr_create` (`G/questlua_shipdefense_mgr.cpp:28-42`): queued for
+    /// the world after the step, which stands the run and warps the reader in.
+    fn ship_create(&mut self);
+    /// `ship_defense_mgr_start` (`G/questlua_shipdefense_mgr.cpp:44-62`): queued for
+    /// the world after the step, which runs the deck.
+    fn ship_start(&mut self);
+    /// `ship_defense_mgr_join` (`G/questlua_shipdefense_mgr.cpp:64-74`): queued for
+    /// the world after the step, which warps the reader in.
+    fn ship_join(&mut self);
+    /// `ship_defense_mgr_leave` (`G/questlua_shipdefense_mgr.cpp:76-86`): queued for
+    /// the world after the step, which warps the reader out.
+    fn ship_leave(&mut self);
+    /// `ship_defense_mgr_land` (`G/questlua_shipdefense_mgr.cpp:88-98`): queued for
+    /// the world after the step, which warps the reader to the port.
+    fn ship_land(&mut self);
+    /// `ship_defense_mgr_is_created` (`G/questlua_shipdefense_mgr.cpp:100-111`):
+    /// whether the reader's leaders' run stands unstarted.
+    fn ship_is_created(&self) -> bool;
+    /// `ship_defense_mgr_is_running` (`G/questlua_shipdefense_mgr.cpp:113-124`):
+    /// whether the reader's leaders' run has started.
+    fn ship_is_running(&self) -> bool;
+    /// `ship_defense_mgr_set_alliance_hp_pct`
+    /// (`G/questlua_shipdefense_mgr.cpp:142-159`): queued for the world after the
+    /// step, which heals the mast, chats the HP and stuns the reader.
+    fn ship_heal(&mut self, pct: u8);
+    /// `ship_defense_mgr_can_join` (`G/questlua_shipdefense_mgr.cpp:161-174`):
+    /// whether the reader's party leader holds a run.
+    fn ship_can_join(&self) -> bool;
     /// `building_get_land_info`'s triple (`G/questlua_building.cpp:31-58`): the
     /// `(price, owner, level limit)` of `land`, and `None` with no such land.
     fn land_info(&self, land: u32) -> Option<(u32, u32, u8)>;
@@ -5521,7 +5549,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 16] = [
+    let families: [Family; 17] = [
         look_api,
         pc_api,
         item_api,
@@ -5538,6 +5566,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         game_api,
         building_api,
         meley_api,
+        ship_api,
     ];
     for family in families {
         if let Some(answered) = family(lua, cx, name, args)? {
@@ -5877,6 +5906,79 @@ fn meley_api(
     Ok(None)
 }
 
+/// The `ship_defense_mgr.*` lobby calls (`G/questlua_shipdefense_mgr.cpp`): the four
+/// `EInstance` constant booleans, the created/running/join reads, and the six queued
+/// writes. Split out so `api` stays under the line lint.
+///
+/// It cannot fail, but the [`Family`] table calls through `Result`, so it keeps the wrap.
+#[allow(clippy::unnecessary_wraps)]
+fn ship_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let yes = |flag: bool| MultiValue::from_vec(vec![Value::Boolean(flag)]);
+    // `ship_defense_mgr_create` (`:28-42`), `ship_defense_mgr_start` (`:44-62`),
+    // `ship_defense_mgr_join` (`:64-74`), `ship_defense_mgr_leave` (`:76-86`) and
+    // `ship_defense_mgr_land` (`:88-98`): queued, pushing nothing.
+    if name == b"ship_defense_mgr.create" {
+        cx.game.ship_create();
+        return Ok(Some(MultiValue::new()));
+    }
+    if name == b"ship_defense_mgr.start" {
+        cx.game.ship_start();
+        return Ok(Some(MultiValue::new()));
+    }
+    if name == b"ship_defense_mgr.join" {
+        cx.game.ship_join();
+        return Ok(Some(MultiValue::new()));
+    }
+    if name == b"ship_defense_mgr.leave" {
+        cx.game.ship_leave();
+        return Ok(Some(MultiValue::new()));
+    }
+    if name == b"ship_defense_mgr.land" {
+        cx.game.ship_land();
+        return Ok(Some(MultiValue::new()));
+    }
+    // `ship_defense_mgr_is_created` (`:100-111`) and `ship_defense_mgr_is_running`
+    // (`:113-124`): the shadow pair.
+    if name == b"ship_defense_mgr.is_created" {
+        return Ok(Some(yes(cx.game.ship_is_created())));
+    }
+    if name == b"ship_defense_mgr.is_running" {
+        return Ok(Some(yes(cx.game.ship_is_running())));
+    }
+    // `ship_defense_mgr_need_party` (`:126-130`), `ship_defense_mgr_need_ticket`
+    // (`:132-136`), `ship_defense_mgr_spawn_wood_repair` (`:138-142`) and
+    // `ship_defense_mgr_require_cooldown` (`:144-148`): the `EInstance` constants
+    // (`ShipDefense.h:19-24`), all true in this build.
+    if name == b"ship_defense_mgr.need_party"
+        || name == b"ship_defense_mgr.need_ticket"
+        || name == b"ship_defense_mgr.spawn_wood_repair"
+        || name == b"ship_defense_mgr.require_cooldown"
+    {
+        return Ok(Some(yes(true)));
+    }
+    // `ship_defense_mgr_set_alliance_hp_pct` (`:142-159`): `lua_isnumber` of the one
+    // argument, queued, pushing nothing; a non-number logs and queues nothing.
+    if name == b"ship_defense_mgr.set_alliance_hp_pct" {
+        let Some(number) = lua.coerce_number(args.front().cloned().unwrap_or(Value::Nil))? else {
+            tracing::warn!("QUEST invalid argument");
+            return Ok(Some(MultiValue::new()));
+        };
+        cx.game.ship_heal(dword(number).to_le_bytes()[0]);
+        return Ok(Some(MultiValue::new()));
+    }
+    // `ship_defense_mgr_can_join` (`:161-174`): the shadow read (false with no
+    // character, as the `NULL` arm pushes).
+    if name == b"ship_defense_mgr.can_join" {
+        return Ok(Some(yes(cx.game.ship_can_join())));
+    }
+    Ok(None)
+}
+
 fn building_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
@@ -6173,6 +6275,15 @@ mod tests {
         meley_map: bool,
         meley_checks: usize,
         meley_leaves: usize,
+        ship_creates: usize,
+        ship_starts: usize,
+        ship_joins: usize,
+        ship_leaves: usize,
+        ship_lands: usize,
+        ship_created: bool,
+        ship_running: bool,
+        ship_heals: Vec<u8>,
+        ship_joinable: bool,
         player_id: u32,
         account_table_id: u32,
         empty_cells: u32,
@@ -6713,6 +6824,33 @@ mod tests {
         }
         fn meley_leave(&mut self) {
             self.meley_leaves += 1;
+        }
+        fn ship_create(&mut self) {
+            self.ship_creates += 1;
+        }
+        fn ship_start(&mut self) {
+            self.ship_starts += 1;
+        }
+        fn ship_join(&mut self) {
+            self.ship_joins += 1;
+        }
+        fn ship_leave(&mut self) {
+            self.ship_leaves += 1;
+        }
+        fn ship_land(&mut self) {
+            self.ship_lands += 1;
+        }
+        fn ship_is_created(&self) -> bool {
+            self.ship_created
+        }
+        fn ship_is_running(&self) -> bool {
+            self.ship_running
+        }
+        fn ship_heal(&mut self, pct: u8) {
+            self.ship_heals.push(pct);
+        }
+        fn ship_can_join(&self) -> bool {
+            self.ship_joinable
         }
         fn player_id(&self) -> u32 {
             self.player_id
@@ -8446,6 +8584,79 @@ mod tests {
         assert_eq!(probe.game.meley_checks, 1);
         assert!(probe.call("MeleyLair.Leave", &[]).unwrap().is_empty());
         assert_eq!(probe.game.meley_leaves, 1);
+    }
+
+    /// The ship lobby's answers: the four constants are true, the two state reads
+    /// answer the shadow, the five warps queue pushing nothing, the heal queues its
+    /// low byte (`(BYTE)` of the number) and a non-number logs and queues nothing,
+    /// and `can_join` answers the shadow.
+    #[test]
+    fn the_ship_lobby_answers_its_constants_and_queues_its_warps() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        for name in [
+            "ship_defense_mgr.need_party",
+            "ship_defense_mgr.need_ticket",
+            "ship_defense_mgr.spawn_wood_repair",
+            "ship_defense_mgr.require_cooldown",
+        ] {
+            let answer = probe.call(name, &[]).unwrap();
+            assert!(matches!(answer[..], [Value::Boolean(true)]), "{name}");
+        }
+        probe.game.ship_created = true;
+        let answer = probe.call("ship_defense_mgr.is_created", &[]).unwrap();
+        assert!(matches!(answer[..], [Value::Boolean(true)]));
+        probe.game.ship_running = true;
+        let answer = probe.call("ship_defense_mgr.is_running", &[]).unwrap();
+        assert!(matches!(answer[..], [Value::Boolean(true)]));
+        assert!(probe
+            .call("ship_defense_mgr.create", &[])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.ship_creates, 1);
+        assert!(probe
+            .call("ship_defense_mgr.start", &[])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.ship_starts, 1);
+        assert!(probe.call("ship_defense_mgr.join", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.ship_joins, 1);
+        assert!(probe
+            .call("ship_defense_mgr.leave", &[])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.ship_leaves, 1);
+        assert!(probe.call("ship_defense_mgr.land", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.ship_lands, 1);
+        let answer = probe
+            .call(
+                "ship_defense_mgr.set_alliance_hp_pct",
+                &[Value::Number(257.0)],
+            )
+            .unwrap();
+        assert!(answer.is_empty());
+        assert_eq!(probe.game.ship_heals, [1]);
+        let answer = probe
+            .call(
+                "ship_defense_mgr.set_alliance_hp_pct",
+                &[Value::String(
+                    probe.manager.host.lua().create_string(b"no").unwrap(),
+                )],
+            )
+            .unwrap();
+        assert!(answer.is_empty());
+        assert_eq!(probe.game.ship_heals, [1]);
+        probe.game.ship_joinable = true;
+        let answer = probe.call("ship_defense_mgr.can_join", &[]).unwrap();
+        assert!(matches!(answer[..], [Value::Boolean(true)]));
     }
 
     #[test]
