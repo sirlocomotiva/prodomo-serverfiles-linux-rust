@@ -16,7 +16,7 @@
 //!   `NormalAttackAffect` is never already poisoned, stunned or slowed;
 //! * no proto column or apply gives a non-player `POINT_BLOCK` or `POINT_REFLECT_MELEE`, so there
 //!   is no block draw and no reflected damage;
-//! * the quest-set multipliers `attMul` and `damMul` are 1.0, `cannot_dead` is false, the user
+//! * the quest-set multipliers `attMul` and `damMul` are 1.0, the user
 //!   damage rate is 100 and `BlueDragon_Damage` is the identity for every race the Rewrite stands
 //!   up. The gold steal draws its amount and returns it on [`Strike::stolen_gold`]; the caller
 //!   applies `ChangeGold` (the cap refusal, the purse, the gold record).
@@ -144,6 +144,16 @@ pub struct Striker<'a> {
     /// `user_dam` event flag while a quest set it. The caller reads it; no premium time
     /// exists, so the buyer rate never applies.
     pub user_rate: i32,
+    /// `Damage`'s Meley gate (`G/char_battle.cpp:1746-1759`): the caller judged the
+    /// statue's step or the boss already, and the hit blocks — `DAMAGE_BLOCK` shows
+    /// and no hit points move. Defaults off; a test that never sets it never blocks.
+    pub meley_blocked: bool,
+    /// `cannot_dead` (`G/char_battle.cpp:2376-2392`): the caller stood the armada on
+    /// the victim, and the hit lands but the hit points never move. Defaults off.
+    pub cannot_dead: bool,
+    /// The statue floor (`:2379-2381`): the caller guards a Meley statue, whose
+    /// lethal hit stops at 1 HP. Defaults off.
+    pub meley_statue: bool,
 }
 
 /// What a hit shows, in the order legacy sends it.
@@ -829,6 +839,15 @@ fn damage_normal(
         });
         return (Struck::Refused, 0);
     }
+    // `Damage`'s Meley arms (`:1746-1759`): the caller judged the statue's step or
+    // the boss already — after `battle_hit`'s draws, before `Damage`'s own dice.
+    if striker.meley_blocked {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_BLOCK,
+        });
+        return (Struck::Refused, 0);
+    }
     let (damage, flag) = damage_chances(dice, striker.points, victim, damage, events);
     let stolen_gold = damage_steals(dice, striker.points, victim, damage, current_hp, events);
     let damage = damage_bonuses(striker, victim, damage, events);
@@ -855,8 +874,17 @@ fn damage_normal(
     // `dam = tempDam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
     events.push(HitEvent::DamageInfo { damage, flag });
+    // `cannot_dead` (`:2376-2392`): the armada lands the hit but moves nothing.
+    if striker.cannot_dead {
+        return (Struck::Landed { damage: 0 }, stolen_gold);
+    }
+    // The statue floor (`:2379-2381`): a lethal hit on a Meley statue stops at 1.
     let damage = if victim.hp.wrapping_sub(damage) <= 0 {
-        victim.hp
+        if striker.meley_statue {
+            victim.hp.saturating_sub(1)
+        } else {
+            victim.hp
+        }
     } else {
         damage
     };
@@ -884,6 +912,15 @@ pub fn damage_special(
     damage: i32,
 ) -> (Struck, Vec<HitEvent>) {
     let mut events = Vec::new();
+    // `Damage`'s Meley arms (`:1746-1759`): the caller judged the statue's step or
+    // the boss already, before the tail's own work.
+    if striker.meley_blocked {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_BLOCK,
+        });
+        return (Struck::Refused, events);
+    }
     let mut damage = damage;
     // The monarch power-up (`:2224-2228`): off, as in `damage_bonuses`.
     let points = &mut *striker.points;
@@ -922,8 +959,17 @@ pub fn damage_special(
         damage,
         flag: DAMAGE_NORMAL,
     });
+    // `cannot_dead` (`:2376-2392`): the armada lands the hit but moves nothing.
+    if striker.cannot_dead {
+        return (Struck::Landed { damage: 0 }, events);
+    }
+    // The statue floor (`:2379-2381`): a lethal hit on a Meley statue stops at 1.
     let damage = if victim.hp.wrapping_sub(damage) <= 0 {
-        victim.hp
+        if striker.meley_statue {
+            victim.hp.saturating_sub(1)
+        } else {
+            victim.hp
+        }
     } else {
         damage
     };
@@ -951,6 +997,15 @@ pub fn damage_melee(
     damage: i32,
 ) -> (Struck, Vec<HitEvent>) {
     let mut events = Vec::new();
+    // `Damage`'s Meley arms (`:1746-1759`): the caller judged the statue's step or
+    // the boss already, before `Damage`'s own dice.
+    if striker.meley_blocked {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_BLOCK,
+        });
+        return (Struck::Refused, events);
+    }
     let current_hp = victim.hp;
     let (damage, flag) = damage_melee_chances(dice, striker.points, victim, damage, &mut events);
     damage_melee_steals(
@@ -984,8 +1039,17 @@ pub fn damage_melee(
     // legacy would heal, and the Rewrite never ports a heal-by-damage.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5).max(0);
     events.push(HitEvent::DamageInfo { damage, flag });
+    // `cannot_dead` (`:2376-2392`): the armada lands the hit but moves nothing.
+    if striker.cannot_dead {
+        return (Struck::Landed { damage: 0 }, events);
+    }
+    // The statue floor (`:2379-2381`): a lethal hit on a Meley statue stops at 1.
     let damage = if victim.hp.wrapping_sub(damage) <= 0 {
-        victim.hp
+        if striker.meley_statue {
+            victim.hp.saturating_sub(1)
+        } else {
+            victim.hp
+        }
     } else {
         damage
     };
@@ -1040,6 +1104,15 @@ pub fn damage_normal_range(
         });
         return (Struck::Refused, 0, events);
     }
+    // `Damage`'s Meley arms (`:1746-1759`): the caller judged the statue's step or
+    // the boss already, above the dodge draw.
+    if striker.meley_blocked {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_BLOCK,
+        });
+        return (Struck::Refused, 0, events);
+    }
     if victim.fight.point(point::POINT_DODGE) != 0
         && number(dice, 1, 100) <= victim.fight.point(point::POINT_DODGE)
     {
@@ -1081,8 +1154,17 @@ pub fn damage_normal_range(
     }
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
     events.push(HitEvent::DamageInfo { damage, flag });
+    // `cannot_dead` (`:2376-2392`): the armada lands the hit but moves nothing.
+    if striker.cannot_dead {
+        return (Struck::Landed { damage: 0 }, stolen_gold, events);
+    }
+    // The statue floor (`:2379-2381`): a lethal hit on a Meley statue stops at 1.
     let damage = if victim.hp.wrapping_sub(damage) <= 0 {
-        victim.hp
+        if striker.meley_statue {
+            victim.hp.saturating_sub(1)
+        } else {
+            victim.hp
+        }
     } else {
         damage
     };
@@ -1533,6 +1615,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         strike_npc(dice, &mut striker, victim, false)
     }
@@ -1636,6 +1721,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut victim = dog();
         let hit = strike_npc(&mut Script::new(&[]), &mut striker, &mut victim, false);
@@ -2150,6 +2238,9 @@ mod tests {
                 empire,
                 map,
                 user_rate: 100,
+                meley_blocked: false,
+                cannot_dead: false,
+                meley_statue: false,
             };
             let hit = strike_npc(&mut Script::new(&[0, 1]), &mut striker, &mut victim, false);
             assert_eq!(hit.events[0], HitEvent::DamageInfo { damage, flag: 1 });
@@ -2160,6 +2251,9 @@ mod tests {
             empire: 1,
             map: 500,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         victim.hp = 1000;
         let hit = strike_npc(&mut Script::new(&[0, 1]), &mut striker, &mut victim, false);
@@ -2256,6 +2350,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut dice = Script::new(&[0]);
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, true);
@@ -2403,6 +2500,9 @@ mod tests {
             empire: 1,
             map: 25,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         damage_special(dice, &mut striker, victim, damage)
     }
@@ -2514,6 +2614,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 200,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         // 322 doubles to 644; the dog has 126.
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
@@ -2627,6 +2730,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut dice = Script::new(&[]);
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
@@ -2665,6 +2771,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut dice = Script::new(&[50, 50, 5, 60]);
         let (struck, events) = damage_melee(&mut dice, &mut striker, &mut victim, 20);
@@ -2786,6 +2895,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut dice = Script::new(&[50, 50, 5, 60]);
         let (struck, _events) = damage_range(&mut dice, &mut striker, &mut victim, 20);
@@ -2805,6 +2917,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut dice = Script::new(&[50, 50, 5, 60]);
         let (struck, events) = damage_magic(&mut dice, &mut striker, &mut victim, 20);
@@ -2836,6 +2951,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut dice = Script::new(&[30]);
         let (struck, stolen, events) =
@@ -2864,6 +2982,9 @@ mod tests {
             empire: 1,
             map: 1,
             user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
         };
         let mut dice = Script::new(&[99, 7, 3, 60]);
         let (struck, stolen, events) =

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 418 (the ship defence).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 419
+Last reviewed: 2026-11-07, after ledger section 419 (Meley's fight).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 420
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -438,7 +438,7 @@ Since 415 a click can open the Gaya window and market, the aura windows and the 
 Since 416 a guild master claims its land at the claim stone and rebuilds its refinery, through the five `building.*` calls over the dumped lands and prototypes. The
 Since 417 a guild registers for Meley's Lair, enters it, and leaves it: the
 lobby's nine quest names run their `CMgr` gates, the ladder debit and the `[LS;1001]` line land, and the
-enter warps to the recall spot on the run's private index. Since 418 a captain boards the ship defence, starts it and lands it: the thirteen `ship_defense_mgr` names are bridged and judged, the deck stands, the waves run, and the heal ignores its argument as legacy does. The
+enter warps to the recall spot on the run's private index. Since 418 a captain boards the ship defence, starts it and lands it: the thirteen `ship_defense_mgr` names are bridged and judged, the deck stands, the waves run, and the heal ignores its argument as legacy does. Since 419 the guild gate click starts Meley's fight (`meley_gate_click`, the two guild lines, the gate's death, step 1 and the hour), the statues flag at their HP line and strip on the kill limits, seals break step-4 statues, and `MeleyLair.CanGetReward`/`MeleyLair.Reward` bridge the chest's take. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

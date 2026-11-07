@@ -468,6 +468,14 @@ pub trait Game {
     /// `MeleyLair_Leave` (`G/questlua_MeleyLair.cpp:109-117`): the leave is queued
     /// for the world after the step.
     fn meley_leave(&mut self);
+    /// `MeleyLair_CanGetReward` (`G/questlua_MeleyLair.cpp:119-131`): whether the
+    /// reader may take the chest — a step-4 participant past the chest's clock who
+    /// took no reward yet.
+    fn meley_can_reward(&self) -> bool;
+    /// `MeleyLair_Reward` (`G/questlua_MeleyLair.cpp:133-145`): the argument's
+    /// chest is queued for the world after the step, which rows the take and gives
+    /// the chest.
+    fn meley_reward(&mut self, arg: u8);
     /// `ship_defense_mgr_create` (`G/questlua_shipdefense_mgr.cpp:28-42`): queued for
     /// the world after the step, which stands the run and warps the reader in.
     fn ship_create(&mut self);
@@ -5840,7 +5848,7 @@ fn time_find_api(
 /// It cannot fail, but the [`Family`] table calls through `Result`, so it keeps the wrap.
 #[allow(clippy::unnecessary_wraps)]
 fn meley_api(
-    _lua: &Lua,
+    lua: &Lua,
     cx: &mut Cx<'_>,
     name: &[u8],
     args: &MultiValue,
@@ -5901,6 +5909,21 @@ fn meley_api(
     }
     if name == b"MeleyLair.Leave" {
         cx.game.meley_leave();
+        return Ok(Some(MultiValue::new()));
+    }
+    // `MeleyLair_CanGetReward` (`:119-131`): the shadow read.
+    if name == b"MeleyLair.CanGetReward" {
+        return Ok(Some(MultiValue::from_vec(vec![Value::Boolean(
+            cx.game.meley_can_reward(),
+        )])));
+    }
+    // `MeleyLair_Reward` (`:133-145`): `lua_isnumber` of the one argument, queued,
+    // pushing nothing; a non-number queues nothing, as the early return does.
+    if name == b"MeleyLair.Reward" {
+        let Some(number) = lua.coerce_number(args.front().cloned().unwrap_or(Value::Nil))? else {
+            return Ok(Some(MultiValue::new()));
+        };
+        cx.game.meley_reward(dword(number).to_le_bytes()[0]);
         return Ok(Some(MultiValue::new()));
     }
     Ok(None)
@@ -6275,6 +6298,8 @@ mod tests {
         meley_map: bool,
         meley_checks: usize,
         meley_leaves: usize,
+        meley_rewardable: bool,
+        meley_rewards: Vec<u8>,
         ship_creates: usize,
         ship_starts: usize,
         ship_joins: usize,
@@ -6824,6 +6849,12 @@ mod tests {
         }
         fn meley_leave(&mut self) {
             self.meley_leaves += 1;
+        }
+        fn meley_can_reward(&self) -> bool {
+            self.meley_rewardable
+        }
+        fn meley_reward(&mut self, arg: u8) {
+            self.meley_rewards.push(arg);
         }
         fn ship_create(&mut self) {
             self.ship_creates += 1;

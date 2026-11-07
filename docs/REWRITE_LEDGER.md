@@ -46848,3 +46848,58 @@ test --workspace --all-targets --locked --offline --no-fail-fast` 4862 passed 0 
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 419. Meley's fight
+
+The fight engine behind the lobby (`prodomo/src/game_state/meley.rs`, from the
+`CMgrMap` half of `G/MeleyLair.cpp:84-951`): the gate click starts the fight
+(`meley_gate_click`, hooked before the shop's click), the statues flag at their
+HP line and move the step on (`meley_statue_damage`), the spawn/effect/statue
+ticks run on the pulse (`run_meley_ticks`), the kill hook counts stones and
+step-3 bosses and strips the statue flags (`meley_on_npc_kill` from
+`dead_npc`), seals break step-4 statues (`meley_gift` from `give_item`'s new
+`MeleyStatue` arm), and the win stamps the chest's clock and stands the chest
+(`meley_dungeon_result`). `Damage`'s Meley arms gate in `world` behind three
+`Striker` flags (`meley_blocked`, `cannot_dead`, `meley_statue`), judged in
+`fight.rs` and `pc_skill.rs` before each world damage call; the armada VIDs
+live on the game thread (`meley_cannot_dead`).
+
+The last two `MeleyLair` names are bridged (`quest/src/host.rs` `BRIDGED`, now
+`[&str; 324]`; the `meley_api` arms in `quest/src/manager.rs`) and judged: the
+shadow reads `CanGetReward` (step 4, participant, past the chest's clock, no
+take yet), `Reward` queues its argument, and the world re-judges and gives
+chest 1 for argument 1 else chest 2 (`meley_reward`, with `auto_give`). The
+queued takes drain into the dialog, click and use-item steps' records and rows;
+the event step drops them, as it drops the ladder store.
+
+Three legacy readings pin the port. `GiveReward` (`:939-951`) never checks the
+step or the clock — the quest does — so the judge re-checks what the shadow
+read. `OnKill`'s step-2 strip (`:809-830`) only lifts `AFF_STATUE1`; a step-2
+stone kill past all-`AFF_STATUE2` statues counts but strips nothing. The
+statue's HP line (`CMgrMap::Damage`, `:729-783`) heals back to the line: the
+flagged hit lands the line, not zero.
+
+`a_guild_starts_meleys_fight_and_the_reward_refuses`: Alpha registers, enters
+in guild PK mode, and clicks the gate on the run — over the wire the statues
+have no proto on the owner's data (6118, 6112/6113/6115, 6116/6117 are absent
+from `mob_proto.txt`), so a piece is missing and the three failed-start lines
+chat with the `[LS;1001;600]` return; the shelter NPC's reward probe then reads
+`may false` and the take gives nothing. The units pin what the wire cannot:
+the real start and the statue flags (`the_gate_click_starts_the_fight_and_the_statues_flag_at_their_line`),
+the kill strip (`the_stone_kills_strip_the_statues_at_the_limit`), and the
+chest's one take past the clock (`the_reward_gives_one_chest_past_the_clock`).
+8 parallel runs of the scenario pass.
+
+Quest-api is now 246 ported, 0 missing, 370 unused and 83 partial;
+`quest.meleylair_zone` stays `partial` (its gate-click arm is empty in the
+source; the engine's failed start covers it). One suite run hit an unrelated
+`Keyed` EAGAIN flake in `a_gm_aggregates_and_forgets_the_dogs_around`, green
+alone and green on rerun.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean; `cargo build --workspace
+--locked --offline` clean; `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` 4866 passed 0 failed in 42 targets; `cargo test --workspace --doc
+--locked --offline` 0 ok; `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+--locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1).
+No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

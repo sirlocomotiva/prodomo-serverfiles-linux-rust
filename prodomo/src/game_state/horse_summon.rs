@@ -505,7 +505,13 @@ impl GameState {
     }
 
     /// `item->SetCount(item->GetCount() - 1)` of the gift `item_id`, into `moved`.
-    fn spend_gift(&mut self, vid: Vid, item_id: u32, actor: Mover, moved: &mut MovedItems) {
+    pub(super) fn spend_gift(
+        &mut self,
+        vid: Vid,
+        item_id: u32,
+        actor: Mover,
+        moved: &mut MovedItems,
+    ) {
         let Ok(character) = self.characters.find_by_vid_mut(vid) else {
             return;
         };

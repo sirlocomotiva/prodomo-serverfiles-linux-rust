@@ -743,6 +743,9 @@ pub struct GameState {
     /// The guilds whose Meley run lives, by guild id (`MeleyLair::CMgr::m_RegGuilds`,
     /// `G/MeleyLair.cpp:953-1453`). See [`meley`].
     meley: meley::MeleyRuns,
+    /// The VIDs `SetArmada` stands on (`CHARACTER::cannot_dead`, `G/char.h:2106`):
+    /// Meley's step-4 statues, whose hits land but never move the HP.
+    meley_cannot_dead: BTreeSet<u32>,
     /// The ship-defence runs, by leader PID (`CShipDefenseManager::m_mapShipDefense`,
     /// `G/ShipDefense.cpp:1489-1808`). See [`ship`].
     ship: ship::ShipRuns,
@@ -4520,10 +4523,7 @@ impl GameState {
         place: GroundPlace,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
-        if self.sash_windows.contains_key(&vid)
-            || self.changelook_windows.contains(&vid)
-            || self.under_refine(vid)
-        {
+        if self.give_blocked(vid) {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
         }
         let pid = self
@@ -4601,14 +4601,17 @@ impl GameState {
             }
             GiveAnswer::Refused => Ok(moved),
             answer @ (GiveAnswer::HorseRevive | GiveAnswer::HorseFeed) => {
-                let revive = answer == GiveAnswer::HorseRevive;
-                self.horse_gift(vid, (target, id), revive, (actor, &mut moved));
+                self.give_horse_answer(vid, target, id, answer, actor, &mut moved);
                 Ok(moved)
             }
             answer @ (GiveAnswer::RefineNormal | GiveAnswer::RefineMoneyOnly) => {
                 let money_only = answer == GiveAnswer::RefineMoneyOnly;
                 let records = self.smith_gift(vid, at, money_only, proto.refine_set, actor);
                 moved.records.extend(records);
+                Ok(moved)
+            }
+            GiveAnswer::MeleyStatue => {
+                self.meley_gift(vid, target, place, (id, vnum), actor, &mut moved);
                 Ok(moved)
             }
             arm => match world::character::unported_of(arm) {
@@ -4618,6 +4621,29 @@ impl GameState {
                 None => Ok(moved),
             },
         }
+    }
+
+    /// Whether [`Self::give_item`] refuses for an open window: the sash, the
+    /// changelook, or the refine.
+    fn give_blocked(&self, vid: common::vid::Vid) -> bool {
+        self.sash_windows.contains_key(&vid)
+            || self.changelook_windows.contains(&vid)
+            || self.under_refine(vid)
+    }
+
+    /// The horse arms of [`Self::give_item`]: a revive herb or a feed runs the
+    /// gift. Split out so `give_item` stays under the line lint.
+    fn give_horse_answer(
+        &mut self,
+        vid: common::vid::Vid,
+        target: u32,
+        id: u32,
+        answer: GiveAnswer,
+        actor: Mover,
+        moved: &mut MovedItems,
+    ) {
+        let revive = answer == GiveAnswer::HorseRevive;
+        self.horse_gift(vid, (target, id), revive, (actor, moved));
     }
 
     /// The `take` scripts of the NPC `target` of `race` for the item `id` the player `pid`
@@ -5071,6 +5097,7 @@ impl PulseProcessor for GameState {
         self.run_war_map_ticks(pulse);
         self.run_dungeon_ticks(pulse);
         self.run_ship_ticks(pulse);
+        self.run_meley_ticks(pulse);
         self.run_temple_ochao(pulse);
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);

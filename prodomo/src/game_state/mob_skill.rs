@@ -118,7 +118,7 @@ fn damage_roll_low_high(npc: &Npc) -> (i32, i32) {
 
 /// `SendMovePacket`'s heading byte, as `send_move_wait` builds it
 /// (`G/char_state.cpp:2021-2022`): `(int)rotation / 5`, unsigned.
-fn rotation_byte(rotation: f32) -> u8 {
+pub(super) fn rotation_byte(rotation: f32) -> u8 {
     (f32_to_i32(rotation) / 5).to_le_bytes()[0]
 }
 

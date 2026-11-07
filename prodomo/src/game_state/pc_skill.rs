@@ -2801,6 +2801,11 @@ impl GameState {
             .npc_of
             .get(&target_vid)
             .expect("the victim stood above");
+        let blocked = self.meley_blocks_hit(vid, target_vid);
+        let armada = self.meley_cannot_dead.contains(&target_vid);
+        let statue = self
+            .npc_by_vid(target_vid)
+            .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -2815,6 +2820,9 @@ impl GameState {
             empire,
             map,
             user_rate,
+            meley_blocked: blocked,
+            cannot_dead: armada,
+            meley_statue: statue,
         };
         let npcs = self
             .npcs
@@ -2860,6 +2868,11 @@ impl GameState {
                 Equipment::of(character.items(), &self.protos).wear(EWearPositions::Weapon as u16)
             })
             .map(|worn| worn.proto.clone());
+        let blocked = self.meley_blocks_hit(vid, target_vid);
+        let armada = self.meley_cannot_dead.contains(&target_vid);
+        let statue = self
+            .npc_by_vid(target_vid)
+            .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -2874,6 +2887,9 @@ impl GameState {
             empire,
             map,
             user_rate,
+            meley_blocked: blocked,
+            cannot_dead: armada,
+            meley_statue: statue,
         };
         let npcs = self
             .npcs

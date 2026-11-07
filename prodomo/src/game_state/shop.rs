@@ -350,6 +350,11 @@ impl GameState {
         if self.is_dead(vid.raw()) {
             return ShopAnswer::silent(ShopDeclined::Dead);
         }
+        // `OnClick`'s Meley arm (`G/char.cpp:6192-6197`): a click on the gate on
+        // Meley's map starts the clicker's fight and answers nothing.
+        if self.meley_gate_click(vid, target, place) {
+            return ShopAnswer::Sent(Vec::new());
+        }
         let Some(race) = self.npc_at(place, target).map(|npc| npc.race) else {
             return ShopAnswer::silent(ShopDeclined::NoSuchNpc { target });
         };

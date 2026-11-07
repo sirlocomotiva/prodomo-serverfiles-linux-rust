@@ -421,7 +421,7 @@ impl GameState {
         // quest's `when login` runs `MeleyLair.Check()`. A register's ladder store
         // lands nowhere, because the event has no descriptor step to drain it — no
         // owner quest registers outside a dialog.
-        let _stores = self.judge_meley_calls(vid, meley, super::quests::quest_now());
+        let (_stores, _rewards) = self.judge_meley_calls(vid, meley, super::quests::quest_now());
         self.judge_ship_calls(vid, ship, super::quests::quest_now());
         for record in records {
             let _sent = self.write_to_client(vid, record);

@@ -223,7 +223,7 @@ type QuestRun = (
     Vec<(u8, bool)>,
     Vec<(u32, u32)>,
     Vec<(u32, u32)>,
-    (u32, u32, u32, u32),
+    (u32, u32, u32, u32, Vec<u8>),
     (u32, u32, u32, u32, u32, Vec<u8>),
 );
 
@@ -894,6 +894,9 @@ pub(super) struct SessionTail<'s> {
     pub(super) meley_checks: u32,
     /// The `MeleyLair.Leave` calls, for the world's leaves after the step.
     pub(super) meley_leaves: u32,
+    /// Every `MeleyLair.Reward` call's argument, in order, for the world's
+    /// rewards after the step.
+    pub(super) meley_rewards: Vec<u8>,
     /// The ship runs at the step's start, by leader PID, which the lobby calls
     /// read. Writers queue for the world; the create stands the shadow at once, so
     /// a later call in the step reads it.
@@ -936,6 +939,7 @@ impl<'s> SessionTail<'s> {
             meley_enters: 0,
             meley_checks: 0,
             meley_leaves: 0,
+            meley_rewards: Vec::new(),
             ship: super::ship::ShipRuns::default(),
             ship_creates: 0,
             ship_starts: 0,
@@ -2877,6 +2881,40 @@ impl Game for Session<'_> {
         // after the step, which warps a stranger out.
         self.tail.meley_checks += 1;
     }
+    fn meley_can_reward(&self) -> bool {
+        // `MeleyLair_CanGetReward` (`G/questlua_MeleyLair.cpp:119-131`): the shadow
+        // read — a step-4 participant past the chest's clock who took no reward
+        // yet. The chest's clock is epoch seconds, read against `quest_now`.
+        let Some(pid) = self.caller else {
+            return false;
+        };
+        let Some(id) = self.guilds.shadow_guild_of(pid) else {
+            return false;
+        };
+        let Some(run) = self.tail.meley.of(id) else {
+            return false;
+        };
+        run.step == 4
+            && run.participants.contains(&pid)
+            && run.reward_at <= quest_now()
+            && !run.rewarded.contains(&pid)
+    }
+    fn meley_reward(&mut self, arg: u8) {
+        // `MeleyLair_Reward` (`G/questlua_MeleyLair.cpp:133-145`): queued for the
+        // world after the step, which rows the take and gives the chest. The
+        // shadow rows it at once, so a second take in the step reads taken.
+        self.tail.meley_rewards.push(arg);
+        if let (Some(pid), Some(id)) = (
+            self.caller,
+            self.caller.and_then(|pid| self.guilds.shadow_guild_of(pid)),
+        ) {
+            if let Some(run) = self.tail.meley.of_mut(id) {
+                if !run.rewarded.contains(&pid) {
+                    run.rewarded.push(pid);
+                }
+            }
+        }
+    }
     fn ship_create(&mut self) {
         // `ship_defense_mgr_create` (`G/questlua_shipdefense_mgr.cpp:28-42`): the
         // shadow stands the run at once, so a later call in the step reads it; the
@@ -3469,7 +3507,7 @@ impl GameState {
                 meley,
                 ship,
             ),
-            items,
+            mut items,
             claimed,
             take_sides,
             landed,
@@ -3497,7 +3535,12 @@ impl GameState {
         }
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
-        stores.extend(self.judge_meley_calls(vid, meley, now));
+        let (meley_stores, meley_rewards) = self.judge_meley_calls(vid, meley, now);
+        stores.extend(meley_stores);
+        for moved in meley_rewards {
+            records.extend(moved.records);
+            items.extend(moved.changes);
+        }
         self.judge_ship_calls(vid, ship, now);
         Ok((
             records, climbs, stores, items, gold, claimed, take_sides, landed,
@@ -3606,7 +3649,7 @@ impl GameState {
                 meley,
                 ship,
             ),
-            items,
+            mut items,
             claimed,
             take_sides,
             landed,
@@ -3637,7 +3680,12 @@ impl GameState {
         }
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
-        stores.extend(self.judge_meley_calls(vid, meley, now));
+        let (meley_stores, meley_rewards) = self.judge_meley_calls(vid, meley, now);
+        stores.extend(meley_stores);
+        for moved in meley_rewards {
+            records.extend(moved.records);
+            items.extend(moved.changes);
+        }
         self.judge_ship_calls(vid, ship, now);
         (
             taken,
@@ -3736,7 +3784,12 @@ impl GameState {
         }
         stores.extend(self.judge_land_sets(&land_sets));
         stores.extend(self.judge_reconstructs(vid, &reconstructs));
-        stores.extend(self.judge_meley_calls(vid, meley, now));
+        let (meley_stores, meley_rewards) = self.judge_meley_calls(vid, meley, now);
+        stores.extend(meley_stores);
+        for moved in meley_rewards {
+            step.records.extend(moved.records);
+            step.changes.extend(moved.changes);
+        }
         self.judge_ship_calls(vid, ship, now);
         step.quest = (climbs, stores, landed);
         if let Ok(character) = self.characters.find_by_vid(vid) {
@@ -4038,6 +4091,7 @@ impl GameState {
                     tail.meley_enters,
                     tail.meley_checks,
                     tail.meley_leaves,
+                    tail.meley_rewards,
                 ),
                 (
                     tail.ship_creates,

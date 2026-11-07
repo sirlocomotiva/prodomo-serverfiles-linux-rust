@@ -282,6 +282,22 @@ pub const AFF_PLAYER_TOP_2: u32 = 45;
 /// `AFF_PLAYER_TOP_3` (`G/affect.h:264`), numbered from 1.
 pub const AFF_PLAYER_TOP_3: u32 = 46;
 
+/// `AFFECT_STATUE` (`G/affect.h:187`): Meley's statues carry one row, whose flag
+/// climbs `AFF_STATUE1` to `AFF_STATUE4` through the steps.
+pub const AFFECT_STATUE: u32 = 700;
+
+/// `AFF_STATUE1` (`G/affect.h:265`), numbered from 1.
+pub const AFF_STATUE1: u32 = 47;
+
+/// `AFF_STATUE2` (`G/affect.h:266`), numbered from 1.
+pub const AFF_STATUE2: u32 = 48;
+
+/// `AFF_STATUE3` (`G/affect.h:267`), numbered from 1.
+pub const AFF_STATUE3: u32 = 49;
+
+/// `AFF_STATUE4` (`G/affect.h:268`), numbered from 1.
+pub const AFF_STATUE4: u32 = 50;
+
 /// `INFINITE_AFFECT_DURATION` (`G/affect.h:289`) as the 32-bit `long` the legacy's
 /// `AddAffect` takes: sixty years of seconds, which the word holds as 1,471,228,928.
 pub const INFINITE_AFFECT_DURATION: i32 = 1_471_228_928;

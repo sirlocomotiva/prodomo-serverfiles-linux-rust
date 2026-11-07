@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 322] = [
+pub const BRIDGED: [&str; 324] = [
     "MeleyLair.GetRequirments",
     "MeleyLair.GetPartecipantsLimit",
     "MeleyLair.GetSubMapIndex",
@@ -246,6 +246,8 @@ pub const BRIDGED: [&str; 322] = [
     "MeleyLair.IsMeleyMap",
     "MeleyLair.Check",
     "MeleyLair.Leave",
+    "MeleyLair.CanGetReward",
+    "MeleyLair.Reward",
     "temple_ochao.initialize",
     "attr67add.holding",
     "attr67add.success",

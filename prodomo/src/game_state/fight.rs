@@ -774,6 +774,13 @@ impl GameState {
         let &(channel, map, at) = self.npc_of.get(&target)?;
         let empire = self.bodies.get(&vid)?.card.empire;
         let user_rate = self.user_damage_rate();
+        // `Damage`'s Meley gate runs before the swing's damage: the step's heal,
+        // flags and step moves land even though the hit then blocks.
+        let blocked = self.meley_blocks_hit(vid, target);
+        let armada = self.meley_cannot_dead.contains(&target);
+        let statue = self
+            .npc_by_vid(target)
+            .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
         let character = self.characters.find_by_vid_mut(vid).ok()?;
         let (items, points) = character.items_and_points_mut();
         let points = points?;
@@ -789,6 +796,9 @@ impl GameState {
             empire,
             map,
             user_rate,
+            meley_blocked: blocked,
+            cannot_dead: armada,
+            meley_statue: statue,
         };
         // `battle_is_attackable` refused a victim on an `ATTR_BANPK` cell, and a standing
         // non-player has a sectree, so `Damage` never refuses it here.
@@ -1004,6 +1014,11 @@ impl GameState {
             return;
         };
         let user_rate = self.user_damage_rate();
+        let blocked = self.meley_blocks_hit(victim, mob);
+        let armada = self.meley_cannot_dead.contains(&mob);
+        let statue = self
+            .npc_by_vid(mob)
+            .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
         let Ok(character) = self.characters.find_by_vid_mut(victim) else {
             return;
         };
@@ -1026,6 +1041,9 @@ impl GameState {
             empire,
             map,
             user_rate,
+            meley_blocked: blocked,
+            cannot_dead: armada,
+            meley_statue: statue,
         };
         let (struck, events) = damage_special(&mut self.dice, &mut striker, npc, damage);
         self.show_strike(victim, mob, events);
@@ -1627,6 +1645,10 @@ impl GameState {
         // (`G/char_manager.cpp:150-154`): a non-player's death on the ship's map runs
         // the deck's kill first, before the reward halves.
         self.ship_on_kill(vid, killer);
+        // `Dead`'s Meley arm (`G/char_battle.cpp:1678-1688`): a stone's or a step-3
+        // boss's death counts its kill, and any other monster's death past step 3
+        // may drop a seal.
+        self.meley_on_npc_kill(vid, killer);
         self.clear_npc_affects(vid, false);
         self.cancel_npc_poison(vid);
         // `ClearSync` (`:1461`): its own release, then what it owns, then the stun event

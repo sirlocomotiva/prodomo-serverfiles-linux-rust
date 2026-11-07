@@ -38037,3 +38037,154 @@ fn a_captain_boards_starts_and_lands_the_ship_defence() {
         "(SELECT map_index FROM player WHERE name = 'Alpha') = 359",
     );
 }
+
+/// The fight's probe: the NPC's reward arm reads `CanGetReward` and attempts the
+/// take, so the wire pins the gate's refusal before the fight is won.
+const MELEY_FIGHT_PROBE: &[u8] = b"quest meley_fight_probe begin\n\
+    state start begin\n\
+    when 20419.chat.\"probe register\" begin\n\
+    local r1, r2 = MeleyLair.Register()\n\
+    say(\"got \" .. r1 .. \" \" .. r2)\n\
+    end\n\
+    when 20419.chat.\"probe enter\" begin\n\
+    local ok, limit = MeleyLair.Enter()\n\
+    say(\"in \" .. tostring(ok) .. \" \" .. limit)\n\
+    end\n\
+    when 20419.chat.\"probe reward\" begin\n\
+    say(\"may \" .. tostring(MeleyLair.CanGetReward()))\n\
+    MeleyLair.Reward(1)\n\
+    say(\"tried\")\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `lua.MeleyLair.CanGetReward`, `lua.MeleyLair.Reward`: Alpha leads `MyGuild`
+/// and stands beside the sub map's NPC (20419). The probe register passes, the
+/// probe enter in guild PK mode warps it to the run, and the gate click refuses
+/// the failed start over the wire: the statues have no proto on the owner's
+/// data, so a piece is missing and the three failed-start lines chat. (The
+/// units pin the real start, the statue flags, the kill strip and the chest's
+/// take.)
+#[test]
+fn a_guild_starts_meleys_fight_and_the_reward_refuses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    seed_meley_guild(&database);
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/meley_fight_probe.lua",
+            MELEY_FIGHT_PROBE,
+        )],
+        &meley_channels(),
+        "no_wander = true",
+    );
+    meley_fight_registers_and_enters(&server, &database);
+}
+
+/// The fight's first half: the probe register passes, guild PK mode lands, and
+/// the probe enter warps Alpha to the recall spot on the run.
+fn meley_fight_registers_and_enters(server: &Server, database: &ScratchDatabase) {
+    let (mut alice, listed, entered) = enter_world_seeing_guilded(server, b"alice", 0, 1);
+    let npc = shown_vid(&entered, 20_419, "the sub map shows 20419");
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu");
+    alice.send_record(&client_script_answer(3));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"got 6 300[ENTER][DONE]"),
+        "the register passes"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1001;0]"),
+        "the ladder line"
+    );
+    alice.quiet("the register step ends");
+    wait_for(
+        database,
+        "(SELECT ladder_point FROM guild WHERE id = 7) = 0",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 4"));
+    assert_eq!(read_update_mode(&mut alice, listed.id), 4, "guild lands");
+    alice.quiet("the switch ends");
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu again");
+    alice.send_record(&client_script_answer(4));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"in true 0[ENTER][DONE]"),
+        "the enter passes"
+    );
+    let port = server.channel(1).port();
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((320_000, 1_529_000), port),
+        "the recall spot on the run"
+    );
+    alice.quiet("the enter step ends");
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 2120000",
+    );
+    drop(alice);
+    meley_fight_clicks_the_gate(server);
+}
+
+/// The fight's second half: coming back, the gate click refuses the failed
+/// start, and the shelter NPC's reward probe reads false and gives nothing.
+fn meley_fight_clicks_the_gate(server: &Server) {
+    let (keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let mut alice = keyed;
+    let entered = enter_game_guilded(&mut alice, 1);
+    assert_eq!((character.x, character.y), (320_000, 1_529_000));
+    let gate = shown_vid(&entered, 20_388, "the run shows the gate");
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let _marks = read_login_letters(&mut alice, false);
+    read_login_update(&mut alice);
+    alice.quiet("the login ends");
+    alice.send_record(&client_click(gate));
+    let first = alice.read_game();
+    assert_eq!(first[0], GC_CHAT, "the failed-start line");
+    let second = alice.read_game();
+    assert_eq!(second[0], GC_CHAT, "the ladder return");
+    let third = alice.read_game();
+    assert_eq!(third[0], GC_CHAT, "the warp-out line");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1001;600]"),
+        "the returned ladder"
+    );
+    alice.quiet("the click ends");
+    let shelter = shown_vid(&entered, 20_419, "the run shows the shelter NPC");
+    alice.send_record(&client_click(shelter));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Leave the shelter!|2;probe register|3;probe enter|4;probe reward|5;Inchide]",
+        ),
+        "the run's menu"
+    );
+    alice.send_record(&client_script_answer(3));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"may false[ENTER]tried[ENTER][DONE]"),
+        "no take before the win"
+    );
+    alice.quiet("the reward step ends");
+}
