@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 424 (the skill-hit ticks).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 425
+Last reviewed: 2026-11-07, after ledger section 425 (the descriptor ticks).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 426
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -443,7 +443,8 @@ enter warps to the recall spot on the run's private index. Since 418 a captain b
 legacy does, not the 120 s ledger 413 had written. Since 422 the poison and fire ticks, the guild invite lapse, and the party's request, invite and update ticks are
 `ported`. Since 423 the dungeon's dead tick is `ported` and its two eliminate timers are
 `unused` (owner question 39). Since 424 the mob hit tick is `ported` and the gwihwan timer is
-`unused` (owner question 40). The
+`unused` (owner question 40). Since 425 the save, ping and disconnect ticks are
+`ported`, each proved by its binary scenario. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

@@ -47035,3 +47035,35 @@ clean, the suite 4875 passed 1 failed in 42 targets — the failure is the known
 -- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `legacy/` clean, `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 425. The descriptor ticks
+
+Three timed-event rows stood `missing` though each runs with a binary scenario against
+the real server. No code changed; the slice marks all three `ported`.
+
+`event.char.save_event` (`G/char.cpp:5064-5082`): every `save_event_second_cycle` the
+character is queued and saved (`prodomo/src/main.rs::SaveEvent`). The shared delayed-save
+queue is not reproduced (ADR-0002: one process, the descriptor writes the row itself);
+what the client can see is that the row lands within one cycle and on disconnect.
+`the_save_cycle_writes_the_row_while_the_character_is_still_connected` runs the binary
+with a 1 s cycle and reads the moved point from the store while the descriptor is open.
+
+`event.desc.ping_event` (`G/desc.cpp:163-204`): every `ping_event_second_cycle`, past the
+admin bypass, a descriptor with no pong closes; else it sends `GC_PING`, clears its pong,
+and sends the handshake (`prodomo/src/heartbeat.rs`).
+`the_ping_cycle_closes_a_silent_client` runs the binary with a 1 s cycle.
+
+`event.desc.disconnect_event` (`G/desc.cpp:812-828`): `DelayedDisconnect` closes the
+descriptor when the delay runs out (`prodomo/src/chat.rs::ChatEffect::DelayedDisconnect`).
+`a_tenth_whisper_in_a_run_closes_the_connection` runs the binary through the whisper
+spam limit.
+
+Timed-events: 53 `missing` / 38 `ported` / 5 `partial` / 3 `unused`.
+
+Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace --locked --offline`
+clean, the suite 4875 passed 1 failed in 42 targets — the failure is an unrelated load flake
+`a_gm_pulls_the_dogs_and_attracts_the_ranger`, which passes alone (9.14 s) — `cargo test
+--workspace --doc --locked --offline` clean, `cargo clippy --workspace --all-targets --locked --offline
+-- -D warnings` clean, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `legacy/` clean, `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
