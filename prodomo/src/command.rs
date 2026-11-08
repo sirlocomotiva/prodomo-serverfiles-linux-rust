@@ -305,6 +305,8 @@ impl CommandEntry {
                 | "do_end_all_duel"
                 | "do_threeway_war_myinfo"
                 | "do_weeklyevent"
+                | "do_siege"
+                | "do_frog"
         )
     }
     /// The tail GM lines: split out so `mid_name` stays under the line lint.
@@ -353,6 +355,8 @@ impl CommandEntry {
             "do_end_duel" => Command::GmLine(GmLine::EndArenaDuel),
             "do_end_all_duel" => Command::GmLine(GmLine::EndAllArenaDuel),
             "do_weeklyevent" => Command::GmLine(GmLine::WeeklyEvent),
+            "do_siege" => Command::GmLine(GmLine::Siege),
+            "do_frog" => Command::GmLine(GmLine::Frog),
             _ => Command::NotPorted(self.handler),
         }
     }

@@ -49221,3 +49221,52 @@ in 46 targets, up 7 from 5035), `cargo test --workspace --doc --locked --offline
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 471. The castle's shut gates
+
+`/siege` (`do_siege`, `G/cmd_gm.cpp:4336-4365`) and `/frog` (`do_frog`,
+`G/cmd_gm.cpp:4390-4419`) are ported, in the new `prodomo/src/game_state/castle_lines.rs`
+with the `GmLine::Siege` and `GmLine::Frog` arms.
+
+Both lines run against the castle maps 181-183 (`IS_CASTLE_MAP`, `G/castle.h:22`), and
+none of the three is in the owner's 59-map index (controls 112 and 374 present), so both
+refuse on the owner's data:
+- `/siege` parses its empire and tower words (`strtol`: empty or garbage reads 0), draws
+  1-3 for a 0 empire and 5-10 for a tower word outside 5-10, and attempts the siege,
+  which fails on the missing maps (`castle_siege`'s NULL-map 0, `G/castle.cpp:565-572`),
+  so the caller hears `SIEGE FAILED`. The GG siege notice is retired with the
+  game-to-game protocol: the one process runs the attempt once. Map 374
+  (`metin2_map_empirecastle`) is a different map; the castle knows only 181-183.
+- `/frog` answers `Usage: empire(1, 2, 3)` for a missing or out-of-range empire, and a
+  caller off the castle maps hears `You must spawn frog in castle`.
+
+The parse and the draws still run before the refusal, as legacy orders them.
+
+`sys.event.castle_monarch` is `partial` with the remainder: the siege core, its two
+timers, the boot and save files, the frog/guard/tower deaths, `castle_can_attack`, the
+summonable and target gates beside the ported ones, `castle_save`, and the monarch
+powers (`IsPowerUp`, `IsDefenceUp`, `HealMyEmpire`, 70021). Monarch sides already live
+elsewhere: the treasuries, identities, `/temp`, `/check_mmoney`, `/setmonarch`,
+`/rmmonarch`, `/minfo`, `/mnotice`, `/mto`, `/mtr`, `/mtax` and `/mmob`.
+
+Tests:
+- The scenario `a_gm_finds_no_castle_to_besiege_or_stock_with_frogs`: a HIGH_WIZARD runs
+  `/siege 1 7` and hears `SIEGE FAILED`, `/frog` and `/frog 4` and hears the usage, and
+  `/frog 2` and hears the must-spawn line. It passed 8 of 8 in a parallel flake check.
+
+Mutants, each killed semantically and restored by checksum:
+- the siege's told line changed;
+- the siege's map gate inverted (hosted reads missing);
+- the frog's empire range widened to 1-4;
+- the frog's castle gate inverted.
+
+Inventory: `cmd.siege` and `cmd.frog` are `ported`; `sys.event.castle_monarch` is
+`partial`. Six commands remain `missing`.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5043 passed, 0 failed
+in 46 targets, up 1 from 5042), `cargo test --workspace --doc --locked --offline` (1 passed),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

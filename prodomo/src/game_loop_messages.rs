@@ -3014,6 +3014,10 @@ pub enum GmLine {
     EndAllArenaDuel,
     /// `/weeklyevent` (`do_weeklyevent`, `G/cmd_gm.cpp:4475-4501`): the battle arena.
     WeeklyEvent,
+    /// `/siege` (`do_siege`, `G/cmd_gm.cpp:4336-4365`): the castle siege.
+    Siege,
+    /// `/frog` (`do_frog`, `G/cmd_gm.cpp:4390-4419`): the castle frogs.
+    Frog,
 }
 
 /// Which restart a dead player asks for.

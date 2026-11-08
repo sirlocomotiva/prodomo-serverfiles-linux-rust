@@ -291,6 +291,14 @@ impl GameState {
                 self.run_weeklyevent_line(vid, rest, mover);
                 None
             }
+            GmLine::Siege => {
+                self.run_siege_line(vid, rest, mover);
+                None
+            }
+            GmLine::Frog => {
+                self.run_frog_line(vid, rest, mover);
+                None
+            }
             _ => None,
         }
     }

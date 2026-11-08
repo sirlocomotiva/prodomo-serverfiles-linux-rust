@@ -19746,6 +19746,39 @@ fn a_gm_starts_and_force_ends_the_weekly_event() {
     alice.quiet_allowing_farm("the force-end re-arms silently");
 }
 
+/// `cmd.siege` and `cmd.frog` (`do_siege`, `do_frog`, `G/cmd_gm.cpp:4336-4419`): a
+/// `HIGH_WIZARD` runs both. None of 181-183 loads on the owner's data, so the siege
+/// attempt finds no maps and answers `SIEGE FAILED`, and the frog answers the usage
+/// and the must-spawn line.
+#[test]
+fn a_gm_finds_no_castle_to_besiege_or_stock_with_frogs() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/siege 1 7"));
+    assert_eq!(alice.read_game(), an_info_line(b"SIEGE FAILED"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/frog"));
+    assert_eq!(alice.read_game(), an_info_line(b"Usage: empire(1, 2, 3)"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/frog 4"));
+    assert_eq!(alice.read_game(), an_info_line(b"Usage: empire(1, 2, 3)"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/frog 2"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"You must spawn frog in castle")
+    );
+    alice.quiet("the refusals say no more");
+}
+
 /// `cmd.block_chat` (`do_block_chat`, `G/cmd_gm.cpp:3364-3433`): a `HIGH_WIZARD`
 /// silences a character for a parsed time and the silence answers every chat arm.
 /// Alice silences Yankee for `1m30s`, and Yankee hears the `[LS;852]` first and

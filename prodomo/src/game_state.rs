@@ -68,6 +68,7 @@ mod attr67;
 mod battle_arena;
 mod biologist;
 mod cards;
+mod castle_lines;
 mod changelook;
 mod conqueror;
 mod costume;

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 470 (the weekly battle arena).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 471
+Last reviewed: 2026-11-08, after ledger section 471 (the castle's shut gates).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 472
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -513,7 +513,10 @@ are live too: the login arms, `/pvp`'s gate, the item, potion and horse refusals
 limit are `ported`, arena observers are confirmed unreachable (owner question 60), and only the
 battle arena keeps `sys.event.arena` `partial`. Since 470 the battle arena is live too:
 `/weeklyevent`, its eight states, the stone and boss spawns and the home warp are `ported`, and
-`sys.event.arena` stays `partial` only on the guards that wait for other systems. The
+`sys.event.arena` stays `partial` only on the guards that wait for other systems. Since 471
+`/siege` and `/frog` are `ported`, refusal-only because none of the castle maps 181-183 loads,
+and `sys.event.castle_monarch` is `partial` with the siege core and the monarch powers waiting
+on those maps. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
