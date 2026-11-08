@@ -257,11 +257,13 @@ pub enum GameCommand {
         /// Where the game thread reports that it installed.
         reply: oneshot::Sender<()>,
     },
-    /// Installs the monarch treasuries (`db::monarch::load_all`), once, after migration.
-    /// See `game_state::monarch`.
+    /// Installs the monarch treasuries and identities (`db::monarch::load_all`,
+    /// `load_pids`, `names_by_pids`), once, after migration. See `game_state::monarch`.
     InstallMonarch {
-        /// The four cells, by empire slot.
+        /// The four treasury cells, by empire slot.
         money: crate::game_state::InstalledMonarchMoney,
+        /// The four pids with their names, by empire slot.
+        identity: crate::game_state::InstalledMonarchIdentity,
         /// Where the game thread reports that it installed.
         reply: oneshot::Sender<()>,
     },
@@ -2502,6 +2504,29 @@ pub enum GameCommand {
         /// Where the game thread reports the slot with the landed cell.
         reply: oneshot::Sender<Option<(u8, i64)>>,
     },
+    /// Runs one `/setmonarch` line (`do_setmonarch`, `G/cmd_gm.cpp:4267-4281`): the name's
+    /// account's empire names the name its monarch and refills its treasury from the
+    /// name's gold. See `game_state::monarch`.
+    SetMonarch {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// The store's candidate lookup: the empire, pid and gold behind the name.
+        candidate: Option<(u8, u32, i64)>,
+        /// Where the game thread reports what the line named.
+        reply: oneshot::Sender<Option<crate::game_state::SetMonarchLanded>>,
+    },
+    /// Runs one `/rmmonarch` line (`do_rmmonarch`, `G/cmd_gm.cpp:4283-4297`): the
+    /// caller's empire clears when the name is its monarch. See `game_state::monarch`.
+    RmMonarch {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the cleared empire.
+        reply: oneshot::Sender<Option<u8>>,
+    },
     /// Runs one `/invisible` line (`do_invisibility`,
     /// `G/cmd_gm.cpp:2253-2264`): the caller's invisibility toggles. See
     /// `game_state::affect::toggle_invisible`.
@@ -2745,6 +2770,8 @@ impl GameCommand {
                 | GameCommand::SetSkillPoint { .. }
                 | GameCommand::SetJob { .. }
                 | GameCommand::Temp { .. }
+                | GameCommand::SetMonarch { .. }
+                | GameCommand::RmMonarch { .. }
                 | GameCommand::Invisible { .. }
                 | GameCommand::Cooltime { .. }
                 | GameCommand::AffectRemove { .. }
@@ -2938,6 +2965,18 @@ pub enum GmLine {
     CloseShop,
     /// `/check_mmoney` (`do_check_monarch_money`).
     CheckMmoney,
+    /// `/mto` (`do_monarch_warpto`), a player's line.
+    MonarchWarp,
+    /// `/mtr` (`do_monarch_transfer`), a player's line.
+    MonarchTransfer,
+    /// `/minfo` (`do_monarch_info`), a player's line.
+    MonarchInfo,
+    /// `/mtax` (`do_monarch_tax`), a player's line.
+    MonarchTax,
+    /// `/mmob` (`do_monarch_mob`), a player's line.
+    MonarchMob,
+    /// `/mnotice` (`do_monarch_notice`), a player's line.
+    MonarchNotice,
 }
 
 /// Which restart a dead player asks for.
@@ -6192,11 +6231,16 @@ impl GameLoopController {
     pub async fn install_monarch(
         &self,
         money: crate::game_state::InstalledMonarchMoney,
+        identity: crate::game_state::InstalledMonarchIdentity,
     ) -> Result<(), InstallError> {
         let (reply, answer) = oneshot::channel();
-        self.send_command(GameCommand::InstallMonarch { money, reply })
-            .await
-            .map_err(|_| InstallError::NotSent)?;
+        self.send_command(GameCommand::InstallMonarch {
+            money,
+            identity,
+            reply,
+        })
+        .await
+        .map_err(|_| InstallError::NotSent)?;
         answer.await.map_err(|_| InstallError::NoAnswer)
     }
 
@@ -7520,6 +7564,45 @@ impl GameLoopController {
     ) -> Result<Option<(u8, i64)>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Temp { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/setmonarch` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn set_monarch_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        candidate: Option<(u8, u32, i64)>,
+    ) -> Result<Option<crate::game_state::SetMonarchLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetMonarch {
+            vid,
+            rest,
+            candidate,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/rmmonarch` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn rm_monarch_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<u8>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::RmMonarch { vid, rest, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)

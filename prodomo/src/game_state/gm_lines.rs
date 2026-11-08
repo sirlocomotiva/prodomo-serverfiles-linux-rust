@@ -67,6 +67,9 @@ pub struct GmRows {
     pub cleared_skills: Vec<u8>,
     /// The gold the line's move spent or granted, stored with the rows.
     pub gold: i64,
+    /// The monarch spend the line charged: the slot with the landed cell, stored with
+    /// the rows. `None` for a line that moved no treasury.
+    pub monarch: Option<(u8, i64)>,
     /// The mover's points after the line's move, which the descriptor holds.
     pub points: Option<world::character::Points>,
     /// The mover's quickslots after the line's syncs, which the descriptor holds.
@@ -232,6 +235,18 @@ impl GameState {
                 self.run_check_mmoney(vid, rest, mover);
                 None
             }
+            GmLine::MonarchWarp => self.run_monarch_warp(vid, rest, mover),
+            GmLine::MonarchTransfer => self.run_monarch_transfer(vid, rest, mover),
+            GmLine::MonarchInfo => {
+                self.run_monarch_info(vid, mover);
+                None
+            }
+            GmLine::MonarchTax => self.run_monarch_tax(vid, rest, mover),
+            GmLine::MonarchMob => self.run_monarch_mob(vid, rest, mover),
+            GmLine::MonarchNotice => {
+                self.run_monarch_notice(vid, rest, mover);
+                None
+            }
         }
     }
     /// `/fetch_casket_items <vnum>` (`do_fetch_casket_items`,
@@ -337,6 +352,7 @@ impl GameState {
             changes: outcome.changes,
             cleared_skills: Vec::new(),
             gold: outcome.gold.unwrap_or(0),
+            monarch: None,
             points: outcome.points,
             quickslots: outcome.quickslots,
         })
@@ -399,6 +415,7 @@ impl GameState {
             changes: Vec::new(),
             cleared_skills,
             gold: 0,
+            monarch: None,
             points: None,
             quickslots: None,
         })
@@ -590,6 +607,7 @@ impl GameState {
             changes: moved.changes,
             cleared_skills: Vec::new(),
             gold: 0,
+            monarch: None,
             points: None,
             quickslots: None,
         })
@@ -709,6 +727,7 @@ impl GameState {
             changes: rolled.changes,
             cleared_skills: Vec::new(),
             gold: 0,
+            monarch: None,
             points: None,
             quickslots: None,
         })

@@ -43088,3 +43088,390 @@ fn a_temp_moves_a_treasury_and_a_check_names_it() {
         "(SELECT money FROM monarch_money WHERE empire = 1) = 0",
     );
 }
+
+/// `cmd.setmonarch`, `cmd.rmmonarch`, `cmd.minfo` and `cmd.mnotice` (`do_setmonarch`,
+/// `do_rmmonarch`, `do_monarch_info`, `do_monarch_notice`, `G/cmd_gm.cpp:4267-4281`,
+/// `:4283-4297`, `G/cmd_general.cpp:2721-2747`, `G/cmd_gm.cpp:1670-1681`). The usages
+/// answer; the info names the three empires with the stranger's head; the notice
+/// refuses a commoner; naming Alpha monarch refills empire 1's treasury from her
+/// gold, shows her the money, and speaks to her empire; and clearing her returns
+/// the stranger's lines. The rows follow on the store.
+#[test]
+fn a_monarch_is_named_informed_and_cleared() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 60000 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setmonarch"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: setmonarch <name>"),
+        "the set usage answers"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/rmmonarch"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: rmmonarch <name>"),
+        "the clear usage answers"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setmonarch Nobody"));
+    alice.still("a name the store misses names nothing");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/minfo"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;563]"),
+        "the stranger's head"
+    );
+    for text in [
+        &b"[LS;562;[LS;793];]"[..],
+        b"[LS;562;[LS;794];]",
+        b"[LS;562;[LS;795];]",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(text), "an empty throne");
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mnotice hear me"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"#ERR_CODE: 1432030623"),
+        "a commoner's notice is refused"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setmonarch Alpha"));
+    alice.still("naming lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/minfo"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;560]"),
+        "the monarch's head"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;561;[LS;793];Alpha;60000]"),
+        "the monarch sees the money"
+    );
+    for text in [&b"[LS;562;[LS;794];]"[..], b"[LS;562;[LS;795];]"] {
+        assert_eq!(alice.read_game(), an_info_line(text), "the other thrones");
+    }
+    check(
+        &database,
+        "(SELECT pid FROM monarch_money WHERE empire = 1) = \
+         (SELECT id FROM player WHERE name = 'Alpha')",
+    );
+    check(
+        &database,
+        "(SELECT money FROM monarch_money WHERE empire = 1) = 60000",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mnotice hear me"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b" hear me"),
+        "the empire hears its monarch, space and all"
+    );
+    yankee.still("another empire hears nothing");
+    monarch_clearing(&mut alice, &database);
+}
+
+/// `cmd.mto`, `cmd.mtr`, `cmd.mtax` and `cmd.mmob` (`do_monarch_warpto`,
+/// `do_monarch_transfer`, `do_monarch_tax`, `do_monarch_mob`,
+/// `G/cmd_general.cpp:2489-2600`, `:2602-2720`, `:2794-2834`, `:2862-2960`). A
+/// commoner's powers are refused; an empty word names its lack; a poor treasury
+/// names the price; and the monarch's summon moves her subject to her side when
+/// the treasury holds the 10000 to the coin, her tax sets the flag with its two
+/// broadcasts (a wild tax is told off and lands anyway), a strange vnum is
+/// refused, her summon stands its Fox when the treasury holds the 5000000 to
+/// the coin, and the second summon waits out its hour. The spends follow on
+/// the store.
+#[test]
+fn a_monarch_warps_summons_and_taxes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 6000000 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let (mut yankee, subject) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/mto Alpha"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;1007]"),
+        "a commoner's warp is refused"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/mtax 10"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;564]"),
+        "a commoner's tax is refused"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setmonarch Alpha"));
+    alice.still_allowing_farm("naming lands silently");
+    monarch_empty_words(&mut alice);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 -5990000"));
+    alice.still("draining to 10000 lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mmob 191"));
+    assert_eq!(
+        read_info_past_ambient(&mut alice),
+        an_info_line(b"[LS;552;10000;5000000]"),
+        "a poor treasury names the price"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 4990000"));
+    alice.still("topping up to the price lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mmob 191"));
+    let exact = read_summon_past_ambient(&mut alice, 191, ALPHA_ENTERS_AT, 5000);
+    assert_eq!(
+        u16::from_le_bytes([exact[22], exact[23]]),
+        191,
+        "a treasury holding the price to the coin still summons"
+    );
+    check(
+        &database,
+        "(SELECT money FROM monarch_money WHERE empire = 1) = 0",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mto Yankee"));
+    assert_eq!(
+        read_info_past_ambient(&mut alice),
+        an_info_line(b"[LS;552;0;10000]"),
+        "an empty treasury names the warp price"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 10000"));
+    alice.still("topping up to the warp price lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mtr Yankee"));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&subject.id.to_le_bytes());
+    assert_eq!(
+        yankee.read_game(),
+        removed,
+        "a treasury holding the warp price to the coin still summons"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_warp_record(ALPHA_ENTERS_AT, server.channel(1).port()),
+        "the subject warps to the monarch"
+    );
+    check(
+        &database,
+        "(SELECT money FROM monarch_money WHERE empire = 1) = 0",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 6000000"));
+    alice.still_allowing_farm("refilling lands silently");
+    monarch_taxes(&mut alice);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mmob 101"));
+    let wait = read_info_past_ambient(&mut alice);
+    assert!(
+        wait == an_info_line(b"[LS;551;3600]") || wait == an_info_line(b"[LS;551;3599]"),
+        "the summon waits out its hour: {wait:02x?}"
+    );
+    check(
+        &database,
+        "(SELECT money FROM monarch_money WHERE empire = 1) = 6000000",
+    );
+}
+
+/// The next [`GC_CHAT`] record past the map's ambient business: monster damage,
+/// ownership, stuns, deaths, effects, point changes, foreign character updates
+/// (`G/char.cpp` sends the look update on every tick while the VID lives) and
+/// the summon loop's own phase echo.
+fn read_info_past_ambient(keyed: &mut Keyed) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game();
+        if record[0] == GC_CHAT {
+            return record;
+        }
+        assert!(
+            is_ambient(&record),
+            "only ambient monster business sits ahead of the info: {record:02x?}"
+        );
+    }
+}
+
+/// Whether `record` is one of the map's ambient doings: monster damage,
+/// ownership, stuns, deaths, effects, point changes, foreign character updates
+/// and the phase echo.
+fn is_ambient(record: &[u8]) -> bool {
+    matches!(
+        record[0],
+        GC_DAMAGE_INFO
+            | GC_OWNERSHIP
+            | GC_STUN
+            | GC_DEAD
+            | GC_SPECIAL_EFFECT
+            | GC_POINT_CHANGE
+            | GC_CHARACTER_UPDATE
+            | GC_AFFECT_ADD
+            | GC_AFFECT_REMOVE
+    ) || *record == [GC_PHASE, 6]
+}
+
+/// The next [`GC_CHARACTER_ADD`] of race `vnum` within `reach` of `at`, past the map's
+/// ambient business: the summoned mob stands beside its summoner, while
+/// [`Keyed::monster_record`] would swallow its monster-typed insert, so this reads raw.
+fn read_summon_past_ambient(keyed: &mut Keyed, vnum: u16, at: (i32, i32), reach: i32) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game_raw();
+        eprintln!("GAME {:02x?}", &record[..record.len().min(24)]);
+        if is_heartbeat_record(&record)
+            || is_stamina_refill(&record)
+            || keyed.timer_record(&record)
+            || is_ambient(&record)
+            || (record[0] == GC_CHAR_ADDITIONAL_INFO
+                && u16::from_le_bytes([record[22], record[23]]) != vnum)
+        {
+            continue;
+        }
+        if record[0] == GC_CHARACTER_ADD && u16::from_le_bytes([record[22], record[23]]) == vnum {
+            let (x, y) = inserted_at(&record);
+            if (x - at.0).abs() <= reach && (y - at.1).abs() <= reach {
+                return record;
+            }
+        }
+    }
+}
+
+/// The empty words of the monarch's powers: each names its lack.
+fn monarch_empty_words(alice: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mto"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;553]"),
+        "the empty warp names its lack"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mtr"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1006]"),
+        "the empty summon names its lack"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mmob 101"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;567]"),
+        "a strange vnum is refused"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mtax"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: monarch_tax <1-50>"),
+        "the empty tax names its lack"
+    );
+}
+
+/// The monarch's taxes: the answer with its two broadcasts, and a wild tax that
+/// is told off and lands anyway.
+fn monarch_taxes(alice: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mtax 10"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;375;10]"),
+        "the tax answers"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"In the name of the monarch, the tax has been changed to 10%"
+        ),
+        "the tax broadcasts first"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"In the future, 10% of the transaction amount will go into the national treasury."
+        ),
+        "the tax broadcasts second"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mtax 60"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;565]"),
+        "a wild tax is told off"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;375;60]"),
+        "the wild tax lands anyway"
+    );
+    alice.read_game();
+    alice.read_game();
+}
+
+/// The monarch's clearing: a stranger's name clears nothing, the monarch's
+/// clears silently, and the throne reads empty again.
+fn monarch_clearing(alice: &mut Keyed, database: &ScratchDatabase) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/rmmonarch Yankee"));
+    alice.still("a stranger's name clears nothing");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/rmmonarch Alpha"));
+    alice.still("clearing lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/minfo"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;563]"),
+        "the throne is empty again"
+    );
+    for text in [
+        &b"[LS;562;[LS;793];]"[..],
+        b"[LS;562;[LS;794];]",
+        b"[LS;562;[LS;795];]",
+    ] {
+        assert_eq!(
+            alice.read_game(),
+            an_info_line(text),
+            "an empty throne again"
+        );
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mnotice hear me"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"#ERR_CODE: 1432030623"),
+        "the cleared monarch is refused"
+    );
+    check(
+        database,
+        "(SELECT pid FROM monarch_money WHERE empire = 1) = 0",
+    );
+    check(
+        database,
+        "(SELECT money FROM monarch_money WHERE empire = 1) = 0",
+    );
+}

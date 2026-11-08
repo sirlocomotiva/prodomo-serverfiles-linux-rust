@@ -526,7 +526,7 @@ impl GameState {
     }
 
     /// `BroadcastNotice(text)`: every online character hears `text` as a notice.
-    fn broadcast_notice_text(&self, text: &[u8]) {
+    pub(super) fn broadcast_notice_text(&self, text: &[u8]) {
         let mut parts: NoticeParts = Default::default();
         parts[0] = text.to_vec();
         for slot in &mut parts[1..] {

@@ -9980,10 +9980,17 @@ async fn install_monarch(
     let money = db::monarch::load_all(store)
         .await
         .map_err(|error| format!("Stored monarch treasuries are unusable: {error}"))?;
+    let pids = db::monarch::load_pids(store)
+        .await
+        .map_err(|error| format!("Stored monarch identities are unusable: {error}"))?;
+    let names = db::monarch::names_by_pids(store, &pids)
+        .await
+        .map_err(|error| format!("Stored monarch names are unusable: {error}"))?;
     info!("Stored monarch treasuries loaded");
+    let identity = std::array::from_fn(|slot| (pids[slot], names[slot].clone()));
     game_loop
         .controller()
-        .install_monarch(money)
+        .install_monarch(money, identity)
         .await
         .map_err(|error| format!("The world refused the monarch treasuries: {error}").into())
 }
@@ -10474,6 +10481,8 @@ where
         LineCommand::Console => console_step(addr, context, held).await,
         LineCommand::SetAttr => set_attr_step(addr, context, held, rest).await,
         LineCommand::Temp => temp_step(addr, context, held, rest).await,
+        LineCommand::SetMonarch => set_monarch_step(addr, context, held, rest).await,
+        LineCommand::RmMonarch => rm_monarch_step(addr, context, held, rest).await,
         command @ (LineCommand::GlobalNotice
         | LineCommand::MapNotice
         | LineCommand::BigNotice
@@ -13305,6 +13314,12 @@ async fn gm_line_step(
                 return false;
             }
         }
+        if let Some((empire, money)) = rows.monarch {
+            if let Err(error) = db::monarch::store_money(&context.store, empire, money).await {
+                warn!(%addr, %error, ?line, "The monarch spend could not be stored; closing");
+                return false;
+            }
+        }
         if let Some(points) = rows.points {
             hold_points(held, points);
         }
@@ -13857,6 +13872,78 @@ async fn temp_step(
         return false;
     }
     info!(%addr, "Treasury moved");
+    true
+}
+/// `do_setmonarch`: the store looks the name up (the candidate's empire, pid and
+/// gold), the world names the monarch and refills from the gold, and the row
+/// follows on the store. A name the store misses names nothing, silently.
+async fn set_monarch_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Setmonarch without a character in the world; ignoring");
+        return true;
+    };
+    let name = String::from_utf8_lossy(&prodomo::command::one_argument(&rest).0).into_owned();
+    let candidate = match db::monarch::candidate_by_name(&context.store, &name).await {
+        Ok(found) => found.map(|found| (found.empire, found.pid, found.gold)),
+        Err(error) => {
+            warn!(%addr, %error, "The monarch candidate could not be read; closing");
+            return false;
+        }
+    };
+    let landed = match context.game.set_monarch_command(vid, rest, candidate).await {
+        Ok(landed) => landed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a setmonarch; closing");
+            return false;
+        }
+    };
+    let Some(landed) = landed else {
+        info!(%addr, "Setmonarch named nothing");
+        return true;
+    };
+    if let Err(error) =
+        db::monarch::store_monarch(&context.store, landed.empire, landed.pid, landed.money).await
+    {
+        warn!(%addr, %error, "The monarch could not be stored; closing");
+        return false;
+    }
+    info!(%addr, "Monarch named");
+    true
+}
+
+/// `do_rmmonarch`: the world clears the caller's empire when the name is its
+/// monarch; the cleared row follows on the store.
+async fn rm_monarch_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Rmmonarch without a character in the world; ignoring");
+        return true;
+    };
+    let cleared = match context.game.rm_monarch_command(vid, rest).await {
+        Ok(cleared) => cleared,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a rmmonarch; closing");
+            return false;
+        }
+    };
+    let Some(empire) = cleared else {
+        info!(%addr, "Rmmonarch cleared nothing");
+        return true;
+    };
+    if let Err(error) = db::monarch::clear_monarch(&context.store, empire).await {
+        warn!(%addr, %error, "The monarch could not be cleared; closing");
+        return false;
+    }
+    info!(%addr, "Monarch cleared");
     true
 }
 /// `do_purge` and `do_weaken`: the world destroys or weakens the NPCs

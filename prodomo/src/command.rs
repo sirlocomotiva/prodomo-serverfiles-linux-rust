@@ -233,7 +233,13 @@ impl CommandEntry {
             | "do_fetch_casket_items"
             | "do_break_marriage"
             | "do_close_shop"
-            | "do_check_monarch_money" => self.gm_tail_name(),
+            | "do_check_monarch_money"
+            | "do_monarch_warpto"
+            | "do_monarch_transfer"
+            | "do_monarch_info"
+            | "do_monarch_tax"
+            | "do_monarch_mob"
+            | "do_monarch_notice" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -310,6 +316,12 @@ impl CommandEntry {
             "do_break_marriage" => Command::GmLine(GmLine::BreakMarriage),
             "do_close_shop" => Command::GmLine(GmLine::CloseShop),
             "do_check_monarch_money" => Command::GmLine(GmLine::CheckMmoney),
+            "do_monarch_warpto" => Command::GmLine(GmLine::MonarchWarp),
+            "do_monarch_transfer" => Command::GmLine(GmLine::MonarchTransfer),
+            "do_monarch_info" => Command::GmLine(GmLine::MonarchInfo),
+            "do_monarch_tax" => Command::GmLine(GmLine::MonarchTax),
+            "do_monarch_mob" => Command::GmLine(GmLine::MonarchMob),
+            "do_monarch_notice" => Command::GmLine(GmLine::MonarchNotice),
             _ => Command::NotPorted(self.handler),
         }
     }
@@ -346,6 +358,8 @@ impl CommandEntry {
                 | "do_advance_skill_select"
                 | "do_click_special_inv"
                 | "do_temp"
+                | "do_setmonarch"
+                | "do_rmmonarch"
         )
     }
 
@@ -378,6 +392,8 @@ impl CommandEntry {
             "do_advance_skill_select" => Command::AdvanceSkill,
             "do_click_special_inv" => Command::ClickSpecialInv,
             "do_temp" => Command::Temp,
+            "do_setmonarch" => Command::SetMonarch,
+            "do_rmmonarch" => Command::RmMonarch,
             _ => Command::NotPorted(handler),
         }
     }
@@ -932,6 +948,12 @@ pub enum Command {
     SetAttr,
     /// `do_temp`: the empire's treasury moves (`G/cmd_gm.cpp:4368-4388`).
     Temp,
+    /// `do_setmonarch`: the name's account's empire names the name its monarch
+    /// (`G/cmd_gm.cpp:4267-4281`).
+    SetMonarch,
+    /// `do_rmmonarch`: the caller's empire clears when the name is its monarch
+    /// (`G/cmd_gm.cpp:4283-4297`).
+    RmMonarch,
     /// `do_advance_skill_select`: the caller's skill group becomes the line's,
     /// then the skills clear (`G/cmd_general.cpp:3982-4002`).
     AdvanceSkill,

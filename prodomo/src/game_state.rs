@@ -179,7 +179,9 @@ pub use guild::{
 };
 pub use letters::LettersTrade;
 pub use level::{AdvanceLanded, LevelHeld, ResetHeld};
-pub use monarch::InstalledMonarchMoney;
+pub use monarch::{
+    InstalledMonarchIdentity, InstalledMonarchMoney, MonarchPower, SetMonarchLanded,
+};
 pub use premium::{
     PremiumStep, PREMIUM_ACTIVATE, PREMIUM_AFFECTS, PREMIUM_AFFECT_DURATION, PREMIUM_DURATION,
     PREMIUM_GC_LIST, PREMIUM_GC_OPEN, PREMIUM_LIST, PREMIUM_OPEN, PREMIUM_VOUCHER,
@@ -693,6 +695,16 @@ pub struct GameState {
     /// The monarch treasuries (`TMonarchInfo.money`, `C/tables.h:1574-1580`), by empire
     /// slot, installed from the store before the gate opens.
     monarch_money: [i64; 4],
+    /// The monarch pids (`TMonarchInfo.pid`), by empire slot, installed from the store
+    /// before the gate opens. 0 is no monarch.
+    monarch_pids: [u32; 4],
+    /// The monarch names (`TMonarchInfo.name`), by empire slot, installed with the
+    /// pids. Empty is no monarch.
+    monarch_names: [Vec<u8>; 4],
+    /// The monarch cooldowns (`m_dwMonarchCooltime`, `G/char.h:1984`), by VID and slot:
+    /// the Pulse the power last fired on. A missing entry is a power never fired,
+    /// which `InitMC`'s negative seed reads as ready.
+    monarch_cooldowns: HashMap<common::vid::Vid, [u64; 5]>,
     /// The shutdown countdown's seconds left (`shutdown_event_data::seconds`,
     /// `G/cmd_general.cpp:188-196`), or `None` while no `/shutdown` runs. The tick
     /// that reaches 0 sends every player the `quit` command, bars new clients, and
@@ -1533,6 +1545,8 @@ impl GameState {
                 | GameCommand::SetSkillPoint { .. }
                 | GameCommand::SetJob { .. }
                 | GameCommand::Temp { .. }
+                | GameCommand::SetMonarch { .. }
+                | GameCommand::RmMonarch { .. }
                 | GameCommand::AllSkillMaster { .. }
                 | GameCommand::ItemFullSet { .. }
                 | GameCommand::AttrFullSet { .. }
@@ -1669,6 +1683,8 @@ impl GameState {
             | GameCommand::SetSkillPoint { .. }
             | GameCommand::SetJob { .. }
             | GameCommand::Temp { .. }
+            | GameCommand::SetMonarch { .. }
+            | GameCommand::RmMonarch { .. }
             | GameCommand::AllSkillMaster { .. }
             | GameCommand::ItemFullSet { .. }
             | GameCommand::AttrFullSet { .. }
@@ -1783,6 +1799,23 @@ impl GameState {
                 let landed = self.run_temp(vid, &rest);
                 if reply.send(landed).is_err() {
                     debug!(?vid, "nobody was left to hear a temp's answer");
+                }
+            }
+            GameCommand::SetMonarch {
+                vid,
+                rest,
+                candidate,
+                reply,
+            } => {
+                let landed = self.run_setmonarch(vid, &rest, candidate);
+                if reply.send(landed).is_err() {
+                    debug!(?vid, "nobody was left to hear a setmonarch's answer");
+                }
+            }
+            GameCommand::RmMonarch { vid, rest, reply } => {
+                let cleared = self.run_rmmonarch(vid, &rest);
+                if reply.send(cleared).is_err() {
+                    debug!(?vid, "nobody was left to hear a rmmonarch's answer");
                 }
             }
             GameCommand::AdvanceSkill { vid, rest, reply } => {
@@ -2384,8 +2417,13 @@ impl GameState {
                     debug!("nobody was left to hear the rank install");
                 }
             }
-            GameCommand::InstallMonarch { money, reply } => {
+            GameCommand::InstallMonarch {
+                money,
+                identity,
+                reply,
+            } => {
                 self.install_monarch_money(money);
+                self.install_monarch_identity(identity);
                 if reply.send(()).is_err() {
                     debug!("nobody was left to hear the monarch install");
                 }
