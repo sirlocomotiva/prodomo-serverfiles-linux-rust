@@ -10228,6 +10228,7 @@ mod tests {
         let (tx, mut late) = tokio::sync::mpsc::unbounded_channel();
         world
             .enter_world(
+                "",
                 Vid::new(300),
                 300,
                 "P300",
@@ -11170,6 +11171,9 @@ mod tests {
         let mut follower = enter(&mut world, MASTER_VID + 2, EAST, 0);
         world.link_guild(Vid::new(MASTER_VID + 2));
         let _ = heard(&mut follower);
+        // The follower's enter check told the pair its farm rows.
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
         let answer = world.guild_war(Vid::new(MASTER_VID + 2), b"Wolves", NOW);
         assert_eq!(answer.notice, None);
         assert!(

@@ -1267,6 +1267,8 @@ mod tests {
         let mut world = a_world(&clock);
         let mut seven = enter(&mut world, 7, (3200, 3200), 820);
         let mut eight = enter(&mut world, 8, (-5, 3200), 820);
+        // 8's enter check told 7 its farm rows; that burst is not the sectree's news.
+        let _farm = drained(&mut seven);
         assert!(
             drained(&mut seven).is_empty(),
             "8 entered outside every sectree"
@@ -1351,6 +1353,8 @@ mod tests {
         let drain = |inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>| {
             std::iter::from_fn(|| inbox.try_recv().ok()).count()
         };
+        // 8's enter check told 9 its farm rows; that burst is not motion's news.
+        let _farm = drain(&mut far);
         assert_eq!((drain(&mut far), drain(&mut near)), (0, 0));
         assert!(world.goto(9, 4800, 3200));
         assert!(world.goto(8, 12_200, 3200));
@@ -1654,6 +1658,7 @@ mod tests {
         let (tx, _still) = tokio::sync::mpsc::unbounded_channel();
         world
             .enter_world_with_items(
+                "",
                 Vid::new(7),
                 7,
                 "Unloaded",

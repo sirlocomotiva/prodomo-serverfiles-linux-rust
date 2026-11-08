@@ -30,9 +30,6 @@
 //!
 //! # Not ported
 //!
-//! - The multi-farm block (`ENABLE_MULTI_FARM_BLOCK`, `G/char.cpp:5251-5254`), whose
-//!   registry is `sys.custom.multi_farm`: without it every character fishes, as a
-//!   character whose status is set does.
 //! - The `fishevent` highscore (`:666-684`), which waits on the highscore boards
 //!   (`lua.highscore.register`).
 //! - `LogManager::FishLog`, the log database this build does not have.
@@ -204,6 +201,22 @@ impl GameState {
         // `SetRotation(p->dir * 5)`: the float of an `int`.
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.rotation = f32::from(dir) * 5.0;
+        }
+        // `ENABLE_MULTI_FARM_BLOCK` (`G/char.cpp:5251-5254`): unfarming fishes nothing,
+        // not even the take.
+        if !self.multi_status_of(vid) {
+            return Ok(MovedItems::new(
+                pid,
+                vid.raw(),
+                MoveDone {
+                    kind: MoveKind::Socketed,
+                    records: Vec::new(),
+                    changes: Vec::new(),
+                },
+                mover,
+                &self.protos,
+                &self.locale,
+            ));
         }
         let changes = if self.fishing_events.contains_key(&vid) {
             self.fishing_take(vid, pid, mover)

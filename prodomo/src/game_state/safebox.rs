@@ -536,7 +536,7 @@ mod tests {
         let mut state = GameState::new(protos);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         state
-            .enter_world_with_items(HOLDER, 70, "Keeper", items, ClientOutbox::new(tx))
+            .enter_world_with_items("", HOLDER, 70, "Keeper", items, ClientOutbox::new(tx))
             .unwrap();
         state.last_pulse = NOW;
         state

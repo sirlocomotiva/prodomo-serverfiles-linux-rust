@@ -110,6 +110,7 @@ mod mob_skill;
 mod mob_strike;
 mod motion;
 mod move_channel;
+mod multi_farm;
 mod observer;
 mod party;
 mod pc_heal;
@@ -728,6 +729,18 @@ pub struct GameState {
     trades: BTreeMap<u32, trade::Deal>,
     /// The trade each trading character is in and its side of it, keyed by its VID.
     trading: HashMap<common::vid::Vid, (u32, Side)>,
+    /// The multi-farm registry (`m_mapmultiFarm`, `G/char_manager.h:151`): the rows by
+    /// address, in join order. Gone rows prune on the next check.
+    multi_farm: HashMap<String, Vec<multi_farm::MultiFarmRow>>,
+    /// The farm status of each character that toggled (`m_bmultiFarmStatus`,
+    /// `G/char.h:693`): absent is `false`, the constructed default (`G/char.cpp:372`).
+    multi_status: HashMap<common::vid::Vid, bool>,
+    /// The `time(0)` each character's `multi-farm` protect ends at
+    /// (`GetProtectTime`/`SetProtectTime`, `G/char.h:689-690`).
+    multi_protect: HashMap<common::vid::Vid, u32>,
+    /// The host address each entered character came from, which the multi-farm
+    /// registry keys on (`GetHostName`, `G/desc.h:55`).
+    multi_addr: HashMap<common::vid::Vid, String>,
     /// The safebox and mall of each character that has opened one, keyed by its VID.
     storages: HashMap<common::vid::Vid, safebox::Storage>,
     /// The sash window each character has open, keyed by its VID:
@@ -1217,7 +1230,9 @@ impl GameState {
                 loaded,
                 outbox,
                 reply,
-            } => self.answer_enter_world(vid, player_id, &name, &items, loaded, outbox, reply),
+            } => {
+                self.answer_enter_world(vid, player_id, &name, &items, loaded, outbox, reply);
+            }
             GameCommand::DeliverRecord { vid, record, reply } => {
                 self.answer_deliver(vid, record, reply);
             }
@@ -1524,6 +1539,7 @@ impl GameState {
                 | GameCommand::Costume { .. }
                 | GameCommand::DsList { .. }
                 | GameCommand::DsChangeAttr { .. }
+                | GameCommand::MultiFarm { .. }
                 | GameCommand::Dice { .. }
                 | GameCommand::Gift { .. }
                 | GameCommand::Hair { .. }
@@ -1656,6 +1672,7 @@ impl GameState {
             | GameCommand::Costume { .. }
             | GameCommand::DsList { .. }
             | GameCommand::DsChangeAttr { .. }
+            | GameCommand::MultiFarm { .. }
             | GameCommand::Dice { .. }
             | GameCommand::Gift { .. }
             | GameCommand::Hair { .. }
@@ -1772,6 +1789,7 @@ impl GameState {
             | GameCommand::DsChangeAttr { .. }) => self.apply_kit_line(command),
             GameCommand::ClearAffect { .. }
             | GameCommand::DsList { .. }
+            | GameCommand::MultiFarm { .. }
             | GameCommand::Dice { .. }
             | GameCommand::Gift { .. }
             | GameCommand::Hair { .. }
@@ -1881,6 +1899,12 @@ impl GameState {
                 self.run_ds_list(vid);
                 if reply.send(()).is_err() {
                     debug!(?vid, "nobody was left to hear a ds list's answer");
+                }
+            }
+            GameCommand::MultiFarm { vid, addr, reply } => {
+                multi_farm::run_multi_farm(self, vid, &addr);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a multi farm's answer");
                 }
             }
             GameCommand::Dice { vid, rest, reply } => {
@@ -2531,7 +2555,7 @@ impl GameState {
         outbox: ClientOutbox,
         reply: tokio::sync::oneshot::Sender<Result<Shown, EnterWorldRefused>>,
     ) {
-        let answer = self.enter_world_with_items(vid, player_id, name, items, outbox);
+        let answer = self.enter_world_with_items(&loaded.addr, vid, player_id, name, items, outbox);
         let answer = answer.map(|()| {
             // `CPVPManager::Connect` and `SendList` (`G/input_login.cpp:669-670`): the
             // entrant's live pairs re-stamp its VID, and every live pair replays.
@@ -3031,12 +3055,13 @@ impl GameState {
     /// the descriptor can close without the two sides disagreeing about who exists.
     pub fn enter_world(
         &mut self,
+        addr: &str,
         vid: common::vid::Vid,
         player_id: u32,
         name: &str,
         outbox: ClientOutbox,
     ) -> Result<(), EnterWorldRefused> {
-        self.enter_world_with_items(vid, player_id, name, &[], outbox)
+        self.enter_world_with_items(addr, vid, player_id, name, &[], outbox)
     }
 
     /// Puts a live client's character into the world holding the items its load placed.
@@ -3232,6 +3257,7 @@ impl GameState {
     /// player id or Name, and an item that would not go where the load put it.
     pub fn enter_world_with_items(
         &mut self,
+        addr: &str,
         vid: common::vid::Vid,
         player_id: u32,
         name: &str,
@@ -3258,6 +3284,10 @@ impl GameState {
             return Err(refused);
         }
         let _previous = self.outboxes.insert(vid, outbox);
+        // `CheckMultiFarmAccount(..., true)` (`G/input_login.cpp:666`): the entrant
+        // starts farming, or farm-off when two already farm that address.
+        self.multi_addr.insert(vid, addr.to_owned());
+        self.check_multi_farm_account(addr, vid, true);
         self.link_party(vid);
         self.link_guild(vid);
         // `CGuildManager::SendGuildWar` (`G/guild_manager.cpp:803-823`, called from
@@ -3318,6 +3348,11 @@ impl GameState {
     /// stunned or dead stands first with 50 hit points (B5), and its fight's events end; a
     /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
     pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
+        // `CheckMultiFarmAccount(..., false)` (`G/char.cpp:1791`): the leaver stops
+        // farming before its body goes.
+        if let Some(addr) = self.multi_addr.remove(&vid) {
+            self.check_multi_farm_account(&addr, vid, false);
+        }
         self.cancel_trade(vid);
         self.unlink_party(vid);
         self.unlink_guild(vid);
@@ -3747,6 +3782,9 @@ impl GameState {
         }
         if self.campfire_at(vid, at) {
             return self.use_campfire_item(vid, at, actor);
+        }
+        if multi_farm::premium_at(self, vid, at) {
+            return multi_farm::use_premium(self, vid, at, actor);
         }
         // The book the read passed, and the slot it climbed, for the store: `None` while
         // the step is no read.
@@ -5608,7 +5646,7 @@ mod tests {
         // enter-game burst already put on the wire. A world that allocated its own
         // would hold the character under an identity the client has never seen.
         state
-            .enter_world(Vid::new(4_242), 4_242, "Shaman", outbox)
+            .enter_world("", Vid::new(4_242), 4_242, "Shaman", outbox)
             .expect("the character is admitted");
         assert_eq!(state.online_count(), 1);
         assert!(state.is_online(Vid::new(4_242)));
@@ -5625,11 +5663,11 @@ mod tests {
         let mut state = a_state();
         let (outbox, _first) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the first character is admitted");
         let (second_outbox, _second) = a_live_outbox();
         assert_eq!(
-            state.enter_world(Vid::new(7), 8, "Warrior", second_outbox),
+            state.enter_world("", Vid::new(7), 8, "Warrior", second_outbox),
             Err(EnterWorldRefused::DuplicateVid { vid: Vid::new(7) })
         );
         // The refusal left one character, not two, and the one that is there is
@@ -5649,14 +5687,14 @@ mod tests {
         let mut state = a_state();
         let (outbox, _inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the first character is admitted");
         let (other, _inbox) = a_live_outbox();
         // Legacy lowercases into its name index (`str_lower` in
         // `CHARACTER_MANAGER::CreateCharacter`), so a second login as `shaman` is the
         // same character as far as the world is concerned.
         assert_eq!(
-            state.enter_world(Vid::new(8), 8, "sHaMaN", other),
+            state.enter_world("", Vid::new(8), 8, "sHaMaN", other),
             Err(EnterWorldRefused::DuplicateName {
                 name: "sHaMaN".to_owned()
             })
@@ -5669,14 +5707,16 @@ mod tests {
         let mut state = a_state();
         let (outbox, _inbox) = a_live_outbox();
         assert_eq!(
-            state.enter_world(Vid::NULL, 1, "Shaman", outbox),
+            state.enter_world("", Vid::NULL, 1, "Shaman", outbox),
             Err(EnterWorldRefused::NullVid)
         );
         // Nothing was indexed, not even under the player id, so a later admission of
         // the same character is not blocked by a half-made one.
         assert_eq!(state.online_count(), 0);
         let (retry, _inbox) = a_live_outbox();
-        assert!(state.enter_world(Vid::new(1), 1, "Shaman", retry).is_ok());
+        assert!(state
+            .enter_world("", Vid::new(1), 1, "Shaman", retry)
+            .is_ok());
     }
 
     #[test]
@@ -5684,10 +5724,10 @@ mod tests {
         let mut state = a_state();
         let (outbox, _inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the first character is admitted");
         let (second, _inbox) = a_live_outbox();
-        let _refused = state.enter_world(Vid::new(7), 8, "Warrior", second);
+        let _refused = state.enter_world("", Vid::new(7), 8, "Warrior", second);
         // The refused sender was never inserted, so leaving the real character is the
         // only entry the map had and it leaves cleanly. A sender for a character that
         // was never admitted would keep a record addressable to a client the world
@@ -5713,7 +5753,7 @@ mod tests {
             (ItemPos::new(inventory, 277), a_loaded_item(12, 1)),
         ];
         state
-            .enter_world_with_items(Vid::new(7), 7, "Shaman", &items, outbox)
+            .enter_world_with_items("", Vid::new(7), 7, "Shaman", &items, outbox)
             .expect("the character is admitted with its items");
         let character = state
             .characters()
@@ -5750,7 +5790,7 @@ mod tests {
             (ItemPos::new(inventory, 0), a_loaded_item(12, 1)),
         ];
         assert_eq!(
-            state.enter_world_with_items(Vid::new(7), 7, "Shaman", &items, outbox),
+            state.enter_world_with_items("", Vid::new(7), 7, "Shaman", &items, outbox),
             Err(EnterWorldRefused::ItemRefused {
                 id: 12,
                 reason: Rejected::AlreadyOccupied {
@@ -5767,7 +5807,7 @@ mod tests {
         assert!(!state.write_to_client(Vid::new(7), vec![0x2B]));
         let (retry, _inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", retry)
+            .enter_world("", Vid::new(7), 7, "Shaman", retry)
             .expect("the same character is admitted afterwards");
     }
 
@@ -5776,7 +5816,7 @@ mod tests {
         let mut state = a_state();
         let (outbox, mut inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the character is admitted");
         // The enter walk sent the empty WAR_LIST first; drain it.
         let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
@@ -5794,7 +5834,7 @@ mod tests {
         let mut state = a_state();
         let (outbox, mut inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the character is admitted");
         state.leave_world(Vid::new(7));
         assert!(!state.write_to_client(Vid::new(7), vec![0x2B]));
@@ -5808,7 +5848,7 @@ mod tests {
         let mut state = a_state();
         let (outbox, _inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the character is admitted");
         assert!(state.leave_world(Vid::new(7)).is_some());
         // Both halves are gone together, which is what a grant checks before it
@@ -5860,7 +5900,7 @@ mod tests {
         let mut state = a_state();
         let (outbox, _inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the character is admitted");
         let request = GrantRequest {
             target: "shaman".to_owned(),
@@ -5877,7 +5917,7 @@ mod tests {
     fn a_write_to_a_dropped_client_is_reported_as_failed() {
         let mut state = a_state();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", a_dropped_outbox())
+            .enter_world("", Vid::new(7), 7, "Shaman", a_dropped_outbox())
             .expect("the character is admitted even though its descriptor is gone");
         // The world holds the character, so a grant would still place an item; the
         // notification is what cannot be delivered. Reporting that separately is the
@@ -6414,7 +6454,7 @@ mod tests {
         };
         let (outbox, _inbox) = a_live_outbox();
         state
-            .enter_world_with_items(Vid::new(7), 7, "Shaman", items, outbox)
+            .enter_world_with_items("", Vid::new(7), 7, "Shaman", items, outbox)
             .expect("the character is admitted with its items");
         host_place(&mut state);
         state
@@ -6490,6 +6530,7 @@ mod tests {
         sword.set_size(2).expect("a two-cell sword");
         world
             .enter_world_with_items(
+                "",
                 Vid::new(7),
                 7,
                 "Warrior",
@@ -7098,7 +7139,7 @@ mod tests {
         let mut state = a_state();
         let (outbox, _inbox) = a_live_outbox();
         state
-            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .enter_world("", Vid::new(7), 7, "Shaman", outbox)
             .expect("the character is admitted");
         state.start_a_quest(Vid::new(7));
         let running = |state: &GameState| state.quests().expect("loaded").manager().is_running(7);
@@ -7603,6 +7644,7 @@ mod tests {
         let (outbox, inbox) = a_live_outbox();
         state
             .enter_world_with_items(
+                "",
                 Vid::new(7),
                 7,
                 "Shaman",
@@ -7902,6 +7944,7 @@ mod tests {
                 daily_gift: (None, 0),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
+                addr: String::new(),
             }),
             outbox,
             reply,
@@ -7960,6 +8003,7 @@ mod tests {
                 daily_gift: (None, 0),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
+                addr: String::new(),
             }),
             outbox,
             reply,
@@ -8173,7 +8217,7 @@ mod tests {
         let mut state = a_state();
         let (outbox, mut inbox) = a_live_outbox();
         state
-            .enter_world_with_items(Vid::new(7), 7, "Shaman", &[], outbox)
+            .enter_world_with_items("", Vid::new(7), 7, "Shaman", &[], outbox)
             .expect("the character is admitted");
         let npcs = vec![
             an_npc(901, 10_100, 20_100),

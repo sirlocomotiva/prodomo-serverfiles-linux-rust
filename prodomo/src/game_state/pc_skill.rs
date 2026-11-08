@@ -4680,6 +4680,7 @@ mod tests {
         let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
         world
             .enter_world_with_items(
+                "",
                 Vid::new(1),
                 1,
                 "P1",

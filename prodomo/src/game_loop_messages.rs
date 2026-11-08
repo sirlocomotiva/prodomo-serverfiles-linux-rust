@@ -2020,6 +2020,17 @@ pub enum GameCommand {
         /// Where the game thread reports the moved items.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Run one `/multi_farm` line (`do_multi_farm`, `G/cmd_general.cpp:304-317`): the
+    /// caller's farm status toggles past its 10 s protect. See
+    /// `game_state::multi_farm::run_multi_farm`.
+    MultiFarm {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The descriptor's host address, which the registry keys on.
+        addr: String,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
     /// Run one `/dice` line (`do_dice`, `G/cmd_general.cpp:3455-3489`): the roll to the
     /// caller, or the party. See `game_state::dice::run_dice`.
     Dice {
@@ -2745,6 +2756,7 @@ impl GameCommand {
                 | GameCommand::DsList { .. }
                 | GameCommand::DsChangeAttr { .. }
                 | GameCommand::Dice { .. }
+                | GameCommand::MultiFarm { .. }
                 | GameCommand::Gift { .. }
                 | GameCommand::Hair { .. }
                 | GameCommand::FishSimul { .. }
@@ -3356,6 +3368,9 @@ pub struct Loaded {
     /// scripts judge by. The descriptor reads them before it sends the admission, as
     /// the dialog steps do before theirs.
     pub account: QuestAccount,
+    /// The descriptor's host address, which the multi-farm registry keys on
+    /// (`GetHostName`, `G/desc.h:55`).
+    pub addr: String,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -6673,6 +6688,23 @@ impl GameLoopController {
         })
         .await
         .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/multi_farm` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_multi_farm(
+        &self,
+        vid: common::vid::Vid,
+        addr: String,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MultiFarm { vid, addr, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

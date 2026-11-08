@@ -753,15 +753,18 @@ impl GameState {
     }
 
     /// `Reward`'s item half (`G/char_battle.cpp:833-990`): the multi-farm gate, the movable
-    /// point, `CreateDropItem`'s draws, and the placement. Every character is treated as
-    /// allowed (the gate's GG flow has no Rewrite equivalent; a Divergence while it waits
-    /// for the owner's call). The point's z is the monster's (it stands still while dead,
-    /// and `GetMovablePosition` rewrites x/y only).
+    /// point, `CreateDropItem`'s draws, and the placement. The point's z is the monster's
+    /// (it stands still while dead, and `GetMovablePosition` rewrites x/y only).
     ///
     /// D5: each hit is a made item, laid at the point with `MONSTER_DROP_LIFETIME`; the
     /// owner list, the `SetOwnership` calls, and every `number(-7, 7)` draw run in legacy's
     /// order. No hosted kill reaches a hit.
     pub(super) fn reward_drops(&mut self, vid: u32, attacker: Vid) {
+        // `ENABLE_MULTI_FARM_BLOCK` (`G/char_battle.cpp:836-840`): an unfarming
+        // attacker drops nothing.
+        if !self.multi_status_of(attacker) {
+            return;
+        }
         let hits = self.create_drop_item(vid, attacker);
         // Zero items: nothing but the damage-map clear (the empty `size() == 0` arm,
         // `:867-869`, still reaches `:992`).

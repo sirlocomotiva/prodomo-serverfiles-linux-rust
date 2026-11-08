@@ -324,7 +324,7 @@ impl GameState {
     }
 
     /// The VID `pid` is online under, if any.
-    fn vid_of_pid(&self, pid: CharacterId) -> Option<Vid> {
+    pub(super) fn vid_of_pid(&self, pid: CharacterId) -> Option<Vid> {
         self.characters
             .find_by_pid(pid)
             .ok()
@@ -2872,13 +2872,15 @@ mod tests {
         // leave's own view effects.
         world.leave_world(Vid::new(GUEST_VID));
         let frames = heard(&mut leader);
-        assert_eq!(
-            frames.first().map(|record| record[0]),
-            Some(HEADER_GC_PARTY_UNLINK)
-        );
+        // The leave's farm rows go out before the unlink
+        // (`CheckMultiFarmAccount(..., false)` runs first, `G/char.cpp:1791`).
+        let unlink = frames
+            .iter()
+            .position(|record| record[0] == HEADER_GC_PARTY_UNLINK)
+            .expect("the unlink goes out");
         assert!(!frames
             .iter()
-            .skip(1)
+            .skip(unlink + 1)
             .any(|record| record[0] == protocol::gc::HEADER_GC_PLAYER_POINT_CHANGE));
         assert!(world.party_leader_of(GUEST_VID).is_some());
     }

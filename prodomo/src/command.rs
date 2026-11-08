@@ -322,6 +322,7 @@ impl CommandEntry {
                 | "do_ds_list"
                 | "do_ds_change_attr"
                 | "do_dice"
+                | "do_multi_farm"
                 | "do_gift"
                 | "do_hair"
                 | "do_fishing_simul"
@@ -353,6 +354,7 @@ impl CommandEntry {
             | "do_ds_list"
             | "do_ds_change_attr"
             | "do_dice"
+            | "do_multi_farm"
             | "do_gift"
             | "do_hair"
             | "do_fishing_simul"
@@ -475,6 +477,7 @@ impl CommandEntry {
             "do_ds_list" => Command::DsList,
             "do_ds_change_attr" => Command::DsChangeAttr,
             "do_dice" => Command::Dice,
+            "do_multi_farm" => Command::MultiFarm,
             "do_gift" => Command::Gift,
             "do_hair" => Command::Hair,
             "do_fishing_simul" => Command::FishSimul,
@@ -879,6 +882,9 @@ pub enum Command {
     /// `do_dice`: a rolled number to the caller, or the party
     /// (`G/cmd_general.cpp:3455-3489`).
     Dice,
+    /// `do_multi_farm`: the caller's farm status toggles past its 10 s protect
+    /// (`G/cmd_general.cpp:304-317`).
+    MultiFarm,
     /// `do_gift`: the client opens its gift window
     /// (`G/cmd_general.cpp:3251-3254`).
     Gift,
@@ -1397,6 +1403,7 @@ mod tests {
             ("do_dragon_soul", "dragon_soul"),
             ("do_ds_list", "ds_list"),
             ("do_dice", "dice"),
+            ("do_multi_farm", "multi_farm"),
             ("do_gift", "gift"),
             ("do_hair", "hair"),
             ("do_fishing_simul", "fish_simul"),

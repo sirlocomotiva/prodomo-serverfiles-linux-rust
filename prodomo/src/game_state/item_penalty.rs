@@ -696,7 +696,7 @@ mod tests {
             });
             let inbox = lease.take_receiver().expect("the inbox is home");
             self.world
-                .enter_world_with_items(Vid::new(vid), vid, &name, items, lease.outbox())
+                .enter_world_with_items("", Vid::new(vid), vid, &name, items, lease.outbox())
                 .expect("the player enters the world");
             self.world
                 .characters

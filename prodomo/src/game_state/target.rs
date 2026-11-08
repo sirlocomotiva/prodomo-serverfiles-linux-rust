@@ -459,6 +459,8 @@ mod tests {
         world.host_map(99, PLACE.1, grid);
         let _three = enter_on(&mut world, (PLACE.0, 42), 3, (100, 100), 800);
         let _four = enter_on(&mut world, (99, PLACE.1), 4, (100, 100), 800);
+        // The later enters told 1 their farm rows; that burst is not targeting's news.
+        let _farm = drained(&mut one);
         world.target(Vid::new(1), 3);
         world.target(Vid::new(1), 4);
         assert!(drained(&mut one).is_empty());

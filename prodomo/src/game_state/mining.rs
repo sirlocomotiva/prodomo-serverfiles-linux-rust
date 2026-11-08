@@ -14,8 +14,6 @@
 //!
 //! # Not ported
 //!
-//! - The multi-farm block (`ENABLE_MULTI_FARM_BLOCK`, `G/mining.cpp:375-378`), whose
-//!   registry is `sys.custom.multi_farm`: without it every character digs.
 //! - `SendMoneyLog(MONEY_LOG_DROP, ...)`, the log database this build does not have.
 
 use common::vid::Vid;
@@ -141,6 +139,10 @@ impl GameState {
     /// `CHARACTER::mining` (`G/char.cpp:5207-5245`) of the character under `vid` on the NPC
     /// under `npc`.
     pub(super) fn mining(&mut self, vid: Vid, npc: u32, mover: Mover) {
+        // `ENABLE_MULTI_FARM_BLOCK` (`G/mining.cpp:375-378`): unfarming digs nothing.
+        if !self.multi_status_of(vid) {
+            return;
+        }
         if self.mining_events.contains_key(&vid) {
             self.cancel_mining(vid);
             return;

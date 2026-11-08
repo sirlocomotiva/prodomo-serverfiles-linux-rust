@@ -2030,6 +2030,7 @@ mod tests {
     use super::super::target::target_record;
     use super::super::view_encode::remove_record;
     use super::*;
+    use crate::chat_line::{chat_packet, Arg};
     use crate::game_loop::PulseProcessor;
     use crate::loading_phase::PK_MODE_PEACE;
     use crate::sync_position::SYNC_POSITION_PREFIX_SIZE;
@@ -2164,6 +2165,27 @@ mod tests {
         let mut inbox = enter(world, vid, at, 12_345);
         drained(&mut inbox);
         inbox
+    }
+
+    /// The leave burst the survivor `vid` hears when a leaver checks out farm-off:
+    /// `UpdateMultiFarmAffect 1 0`, then one `UpdateMultiFarmPlayer` naming `survivor`.
+    fn farm_left(world: &GameState, vid: Vid, survivor: &[u8]) -> Vec<Vec<u8>> {
+        let mover = world.own_mover(vid).expect("the survivor has a mover");
+        let to = mover.recipient(&world.locale);
+        vec![
+            chat_packet(
+                to,
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                b"UpdateMultiFarmAffect %d %d",
+                &[Arg::Int(1), Arg::Int(0)],
+            ),
+            chat_packet(
+                to,
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                b"UpdateMultiFarmPlayer %s",
+                &[Arg::Text(survivor)],
+            ),
+        ]
     }
 
     /// The player under `vid` hits `target` with a type 0 `CG_ATTACK`.
@@ -3643,16 +3665,18 @@ mod tests {
         world.target(Vid::new(1), ME);
         hit(&mut world, 1, ME);
         let _kept = world.leave_world(Vid::new(1));
-        assert_eq!(
-            drained(&mut beta),
-            [
-                stun_record(),
-                owner(1),
+        // The leave's farm rows go out before the releases
+        // (`CheckMultiFarmAccount(..., false)` runs first, `G/char.cpp:1791`).
+        let expected: Vec<Vec<u8>> = [stun_record(), owner(1)]
+            .into_iter()
+            .chain(farm_left(&world, Vid::new(2), b"P2"))
+            .chain([
                 ownership_record(Vid::new(0), Vid::new(1)),
                 owner(0),
-                remove_record(1)
-            ]
-        );
+                remove_record(1),
+            ])
+            .collect();
+        assert_eq!(drained(&mut beta), expected);
         world.process_pulse(P0 + 75);
         assert_eq!(drained(&mut beta), [owner(0), dead_record()]);
         assert_eq!(world.npc_combat[&ME].killer_pid, 0);
@@ -4406,15 +4430,18 @@ mod tests {
         world.bodies.get_mut(&Vid::new(3)).unwrap().sync = claimed;
         drained(&mut beta);
         let _kept = world.leave_world(Vid::new(1));
-        assert_eq!(
-            drained(&mut beta),
-            [
+        // The leave's farm rows go out before the releases; the third enter stayed
+        // farm-off (two already farmed the address), so only P2 lists.
+        let expected: Vec<Vec<u8>> = farm_left(&world, Vid::new(2), b"P2")
+            .into_iter()
+            .chain([
                 ownership_record(Vid::new(0), Vid::new(1)),
                 ownership_record(Vid::new(0), Vid::new(3)),
                 owner(0),
-                remove_record(1)
-            ]
-        );
+                remove_record(1),
+            ])
+            .collect();
+        assert_eq!(drained(&mut beta), expected);
         let released = SyncOwnershipState {
             owner: None,
             ..claimed

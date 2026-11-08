@@ -1527,7 +1527,7 @@ mod tests {
             let mut points = points_at(level, 12_345, EXP);
             let _computed = points.take_target_broadcasts();
             self.world
-                .enter_world_with_items(vid, vid.raw(), &name, items, lease.outbox())
+                .enter_world_with_items("", vid, vid.raw(), &name, items, lease.outbox())
                 .expect("the player enters");
             self.world
                 .characters
@@ -1791,6 +1791,28 @@ mod tests {
 
     fn unowned(vid: Vid) -> Vec<u8> {
         ownership_record(Vid::new(0), vid)
+    }
+
+    /// The leave burst the survivor `vid` hears when a leaver checks out
+    /// farm-off: `UpdateMultiFarmAffect 1 0`, then one `UpdateMultiFarmPlayer`
+    /// naming the survivor.
+    fn farm_left(world: &GameState, vid: Vid, survivor: &[u8]) -> Vec<Vec<u8>> {
+        let mover = world.own_mover(vid).expect("the survivor has a mover");
+        let to = mover.recipient(&world.locale);
+        vec![
+            chat_packet(
+                to,
+                CHAT_TYPE_COMMAND,
+                b"UpdateMultiFarmAffect %d %d",
+                &[Arg::Int(1), Arg::Int(0)],
+            ),
+            chat_packet(
+                to,
+                CHAT_TYPE_COMMAND,
+                b"UpdateMultiFarmPlayer %s",
+                &[Arg::Text(survivor)],
+            ),
+        ]
     }
 
     fn revive() -> Vec<u8> {
@@ -3016,9 +3038,13 @@ mod tests {
             field.quiet();
 
             let _kept = field.leave(ALPHA, departure);
+            // The leave's farm rows go out before the releases
+            // (`CheckMultiFarmAccount(..., false)` runs first, `G/char.cpp:1791`).
+            let farm = farm_left(&field.world, BRAVO, b"P2");
             let own = (departure == Departure::Disconnect).then(|| unowned(ALPHA));
-            let expected: Vec<Vec<u8>> = own
+            let expected: Vec<Vec<u8>> = farm
                 .into_iter()
+                .chain(own)
                 .chain([unowned(BRAVO), remove_record(ALPHA.raw())])
                 .collect();
             assert_eq!(field.heard(BRAVO), expected, "{departure:?}");

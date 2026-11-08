@@ -789,7 +789,7 @@ mod tests {
         let _other = state.npcs.insert((2, 41), other);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         state
-            .enter_world_with_items(SHOPPER, 7, "Shaman", items, ClientOutbox::new(tx))
+            .enter_world_with_items("", SHOPPER, 7, "Shaman", items, ClientOutbox::new(tx))
             .unwrap();
         state
             .characters
@@ -1520,7 +1520,7 @@ mod tests {
         assert!(state.browsing.is_empty());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         state
-            .enter_world(SHOPPER, 7, "Shaman", ClientOutbox::new(tx))
+            .enter_world("", SHOPPER, 7, "Shaman", ClientOutbox::new(tx))
             .unwrap();
         shopper(&mut state).set_gold(10_000);
         let none = ShopAnswer::silent(ShopDeclined::NotBrowsing);

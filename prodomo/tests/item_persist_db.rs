@@ -410,6 +410,7 @@ async fn a_world_with_a_client(database: &ScratchDatabase, name: &str) -> AWorld
     let (tx, inbox) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     state
         .enter_world(
+            "",
             common::vid::Vid::new(owner),
             owner,
             name,

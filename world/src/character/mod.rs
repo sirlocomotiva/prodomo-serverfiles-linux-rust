@@ -24,6 +24,7 @@ mod model;
 mod points;
 mod polymorph;
 mod potion;
+mod premium;
 mod purge;
 mod quickslot;
 mod recovery;
@@ -123,6 +124,7 @@ pub use polymorph::{
     polymorph_power, POLYMORPH_MAX_LEVEL, POLYMORPH_POWER_BY_LEVEL, SKILL_POLYMORPH,
 };
 pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
+pub use premium::{is_premium, use_premium, PREMIUM_VNUMS};
 pub use purge::{
     book_give, purge_all, slow_give, BOOK_SOCKET, BOOK_VNUM, DRAGON_SOUL_SLOTS, SLOW_COUNT,
     SLOW_SOCKET, SLOW_VNUM,

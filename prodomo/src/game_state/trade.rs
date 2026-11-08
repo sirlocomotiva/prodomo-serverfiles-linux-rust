@@ -954,6 +954,27 @@ mod tests {
         }
     }
 
+    /// The leave burst the survivor `vid` hears when a leaver checks out farm-off:
+    /// `UpdateMultiFarmAffect 1 0`, then one `UpdateMultiFarmPlayer` naming `survivor`.
+    fn farm_left(state: &GameState, vid: Vid, survivor: &[u8]) -> Vec<Vec<u8>> {
+        let mover = state.own_mover(vid).expect("the survivor has a mover");
+        let to = mover.recipient(&state.locale);
+        vec![
+            chat_packet(
+                to,
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                b"UpdateMultiFarmAffect %d %d",
+                &[Arg::Int(1), Arg::Int(0)],
+            ),
+            chat_packet(
+                to,
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                b"UpdateMultiFarmPlayer %s",
+                &[Arg::Text(survivor)],
+            ),
+        ]
+    }
+
     /// Everybody at the spot beside a keeper on map 41, Alpha holding `alpha` and 1000 gold,
     /// Yankee `yankee` and 400.
     fn a_square(alpha: &[(ItemPos, Item)], yankee: &[(ItemPos, Item)]) -> Square {
@@ -995,15 +1016,20 @@ mod tests {
             });
             let items = [alpha, yankee].get(at).copied().unwrap_or_default();
             state
-                .enter_world_with_items(vid, vid.raw() * 10, name, items, lease.outbox())
+                .enter_world_with_items("", vid, vid.raw() * 10, name, items, lease.outbox())
                 .unwrap();
             let _own = state.place_body(vid, standing_on(map), a_card(name, empire));
             leases.push(lease);
         }
-        // Drain the enter WAR_LIST each admission sent, so the tests read only what
-        // their steps send.
+        // Drain the enter WAR_LIST and the multi-farm check each admission sent, so
+        // the tests read only what their steps send.
         for lease in &mut leases {
-            let _list = lease.try_next().expect("the enter WAR_LIST is queued");
+            let mut drained = 0;
+            while lease.try_next().is_some() {
+                drained += 1;
+                assert!(drained < 20, "the enter burst is bounded");
+            }
+            assert!(drained >= 1, "the enter WAR_LIST is queued");
         }
         let mut square = Square {
             state,
@@ -1827,11 +1853,15 @@ mod tests {
         let _item = sent(square.step(Y, add));
         let _told = square.heard(A);
         let _kept = square.state.leave_world(ALPHA);
+        // The leave's farm rows go out before the trade ends
+        // (`CheckMultiFarmAccount(..., false)` runs first, `G/char.cpp:1791`).
+        let farm = farm_left(&square.state, PEOPLE[Y].0, b"Yankee");
         let removed = super::super::view_encode::remove_record(ALPHA.raw());
         let unowned = crate::sync_position::ownership_record(Vid::new(0), ALPHA);
+        let expected: Vec<Vec<u8>> = farm.into_iter().chain([end(), unowned, removed]).collect();
         assert_eq!(
             square.heard(Y),
-            vec![end(), unowned, removed],
+            expected,
             "the trade ends before the viewers hear the release and the removal \
              (`G/char.cpp:641-655`)"
         );

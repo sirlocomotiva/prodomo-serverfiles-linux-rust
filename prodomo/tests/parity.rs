@@ -26,6 +26,7 @@ use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload,
 use protocol::cg_variable::encode_guild_symbol_upload;
 use protocol::gc_chat::{
     CHAT_TYPE_BIG_NOTICE, CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE, CHAT_TYPE_TALKING,
+    GC_CHAT_WIRE_SIZE,
 };
 use protocol::gc_guild::{
     GUILD_NAME_FIELD_SIZE, GUILD_SUBHEADER_GC_CHANGE_EXP, GUILD_SUBHEADER_GC_CHANGE_MEMBER_GENERAL,
@@ -2888,7 +2889,7 @@ impl Keyed {
             (false, false, false, false, false);
         loop {
             let record = read_past_pings(self);
-            if is_npc_chatter(&record) || is_mark_update(&record) {
+            if is_npc_chatter(&record) || is_mark_update(&record) || is_farm_line(&record) {
                 continue;
             }
             // The revive's records of an earlier enter (Alice's own): the
@@ -3206,8 +3207,19 @@ impl Keyed {
         self.quiet_for(note, QUIET_WINDOW);
     }
 
+    /// [`Keyed::quiet`] after another client's enter or leave, whose farm burst is the
+    /// only news beside the ping.
+    fn quiet_allowing_farm(&mut self, note: &str) {
+        self.quiet_with(note, QUIET_WINDOW, true);
+    }
+
     /// [`Keyed::quiet`] over a `window` of its own, for a check that must outlast a second.
     fn quiet_for(&mut self, note: &str, window: Duration) {
+        self.quiet_with(note, window, false);
+    }
+
+    /// [`Keyed::quiet_for`], letting the enter/leave farm burst through when `farm` is set.
+    fn quiet_with(&mut self, note: &str, window: Duration, farm: bool) {
         let key = self.output;
         let deadline = std::time::Instant::now() + window;
         let mut wire = Vec::new();
@@ -3269,7 +3281,8 @@ impl Keyed {
                     || self.timer_restate(record)
                     || is_stamina_refill(record)
                     || is_mark_update(record)
-                    || is_npc_chatter(record),
+                    || is_npc_chatter(record)
+                    || (farm && is_farm_line(record)),
                 "only a ping may arrive while nothing is expected ({note}): {record:02x?}"
             );
             at += width.div_ceil(8) * 8;
@@ -3426,12 +3439,19 @@ impl Keyed {
 
     /// Read the next loading or enter-game record that is not the revive timer's own, a
     /// monster's, a stamina refill nor a mark's update: the first two are noted by
-    /// [`Keyed::timer_record`] and [`Keyed::monster_record`], and all four are skipped
-    /// ([`is_stamina_refill`], [`is_mark_update`]). A scenario that checks the timer or the
-    /// refill reads with [`Keyed::read_game_raw`] instead, and one that checks the update with
-    /// [`Keyed::read_game_marked`].
+    /// [`Keyed::timer_record`] and [`Keyed::monster_record`], and all five are skipped
+    /// ([`is_stamina_refill`], [`is_mark_update`], [`is_farm_line`]). A scenario that checks
+    /// the timer or the refill reads with [`Keyed::read_game_raw`] instead, one that checks
+    /// the update with [`Keyed::read_game_marked`], and one that checks the farm lines
+    /// with [`Keyed::read_game_farm`].
     fn read_game(&mut self) -> Vec<u8> {
-        self.read_game_with(false)
+        self.read_game_with(false, false)
+    }
+
+    /// [`Keyed::read_game`], keeping the multi-farm lines: the `UpdateMultiFarmAffect`
+    /// and `UpdateMultiFarmPlayer` fan-out reads as ordinary records.
+    fn read_game_farm(&mut self) -> Vec<u8> {
+        self.read_game_with(false, true)
     }
 
     /// [`Keyed::read_game`] past the affect event's tick records: a step that runs
@@ -3452,11 +3472,12 @@ impl Keyed {
     }
     /// [`Keyed::read_game`] with the marks' updates kept.
     fn read_game_marked(&mut self) -> Vec<u8> {
-        self.read_game_with(true)
+        self.read_game_with(true, false)
     }
 
-    /// [`Keyed::read_game`], keeping the marks' updates when `marks` is set.
-    fn read_game_with(&mut self, marks: bool) -> Vec<u8> {
+    /// [`Keyed::read_game`], keeping the marks' updates when `marks` is set and the
+    /// multi-farm lines when `farm` is set.
+    fn read_game_with(&mut self, marks: bool, farm: bool) -> Vec<u8> {
         loop {
             let record = self.read_game_raw_with(marks);
             eprintln!("GAME {:02x?}", &record[..record.len().min(24)]);
@@ -3468,6 +3489,7 @@ impl Keyed {
             if !self.monster_record(&record)
                 && !self.timer_record(&record)
                 && !is_stamina_refill(&record)
+                && (farm || !is_farm_line(&record))
             {
                 return record;
             }
@@ -3489,6 +3511,7 @@ impl Keyed {
             if !self.monster_record(&record)
                 && !self.timer_record(&record)
                 && !is_stamina_refill(&record)
+                && !is_farm_line(&record)
             {
                 return Some(record);
             }
@@ -3639,16 +3662,23 @@ impl Keyed {
 
     /// [`Keyed::still`] over a `window` of its own.
     fn still_for(&mut self, note: &str, window: Duration) {
-        self.still_with(note, window, false);
+        self.still_with(note, window, false, false);
+    }
+
+    /// [`Keyed::still`] after another client's enter or leave, whose farm burst is the
+    /// only news beside the ping.
+    fn still_allowing_farm(&mut self, note: &str) {
+        self.still_with(note, QUIET_WINDOW, false, true);
     }
 
     /// [`Keyed::still_for`], with a mark's update a finding too.
     fn still_marked_for(&mut self, note: &str, window: Duration) {
-        self.still_with(note, window, true);
+        self.still_with(note, window, true, false);
     }
 
-    /// [`Keyed::still_for`], letting a mark's update through unless `marks` is set.
-    fn still_with(&mut self, note: &str, window: Duration, marks: bool) {
+    /// [`Keyed::still_for`], letting a mark's update through unless `marks` is set,
+    /// and the enter/leave farm burst through when `farm` is set.
+    fn still_with(&mut self, note: &str, window: Duration, marks: bool, farm: bool) {
         let (records, quiet) = self.drain_wire(window, |header| match header {
             GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
             GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
@@ -3663,6 +3693,7 @@ impl Keyed {
                     && (marks || !is_mark_update(record))
                     && !self.timer_end(record)
                     && !self.timer_restate(record)
+                    && (!farm || !is_farm_line(record))
             })
             .collect();
         assert!(others.is_empty(), "{note}: {others:02x?}");
@@ -7033,7 +7064,7 @@ fn a_whisper_reaches_the_character_it_names() {
         whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"hello"),
         "the line reaches the character it names"
     );
-    alice.quiet("the sender hears nothing");
+    alice.quiet_allowing_farm("the sender hears nothing");
 
     // The name is matched without regard to the case (`FindPC`, `G/char_manager.cpp:244-260`).
     alice.send_record(&client_whisper(b"yankee", b"again"));
@@ -7042,7 +7073,7 @@ fn a_whisper_reaches_the_character_it_names() {
         whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"again"),
         "the name is matched without regard to the case"
     );
-    alice.quiet("the sender hears nothing");
+    alice.quiet_allowing_farm("the sender hears nothing");
 
     // The target on another Channel: the legacy's P2P manager found it and relayed the
     // line to the core that had it (`G/input_main.cpp:403-415`).
@@ -7052,17 +7083,17 @@ fn a_whisper_reaches_the_character_it_names() {
         whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"across"),
         "the line crosses the Channel"
     );
-    alice.quiet("the sender hears nothing");
+    alice.quiet_allowing_farm("the sender hears nothing");
 
     // `if (pkChr == ch) return (iExtraLen);` (`G/input_main.cpp:372`): the sender's own
     // name drops the line.
     alice.send_record(&client_whisper(b"Alpha", b"myself"));
-    alice.quiet("the sender hears nothing");
+    alice.quiet_allowing_farm("the sender hears nothing");
     yankee.quiet("the neighbour hears nothing either");
 
     // `if (buflen > 0)` (`G/input_main.cpp:622`): an empty line sends nothing.
     alice.send_record(&client_whisper(b"Yankee", b""));
-    alice.quiet("the sender hears nothing");
+    alice.quiet_allowing_farm("the sender hears nothing");
     yankee.quiet("the neighbour hears nothing either");
 }
 
@@ -7126,6 +7157,7 @@ fn a_tenth_whisper_in_a_run_closes_the_connection() {
     while let Some(record) = yankee.read_game_raw_until(quiet_deadline) {
         assert!(
             is_stamina_refill(&record)
+                || is_farm_line(&record)
                 || yankee.timer_end(&record)
                 || record[0] == HEADER_GC_OWNERSHIP.value()
                 || record[0] == GC_CHARACTER_DEL,
@@ -7907,7 +7939,7 @@ fn a_shout_reaches_its_empire_on_every_channel() {
         line,
         "the Shared Channel hears the shouter's empire"
     );
-    yankee.quiet("another empire hears nothing");
+    yankee.quiet_allowing_farm("another empire hears nothing");
 
     alice.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"again"));
     alice.quiet("the cooldown refuses without a line");
@@ -8027,7 +8059,7 @@ fn a_shout_from_another_empire_stays_in_that_empire() {
         line,
         "the Shared Channel hears the shouter's empire"
     );
-    alice.quiet("empire 1 hears nothing");
+    alice.quiet_allowing_farm("empire 1 hears nothing");
     yankee.quiet("one line per shout");
 }
 
@@ -8198,8 +8230,8 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     assert_eq!(yankee_info[57], 3, "Yankee's bPKMode");
     assert_eq!(alpha_info[57], 0, "Alpha's bPKMode");
     let (mut charlie, _) = enter_world(&server, b"carol", 0);
-    alice.quiet("Charlie enters out of Alpha's view");
-    yankee.quiet("and out of Yankee's");
+    alice.quiet_allowing_farm("Charlie enters out of Alpha's view");
+    yankee.quiet_allowing_farm("and out of Yankee's");
 
     // `FUNC_COMBO` is 3. A step lands at the position, and the record carries no duration.
     let step = client_move(3, 7, 40, 470_100, 950_100, 0x5eed);
@@ -8751,8 +8783,8 @@ fn players_and_npcs_within_view_range_see_each_other_on_entry() {
         "nobody within reach"
     );
     assert!(charlie_entered.shown.list.is_some());
-    alice.quiet("Charlie is 13228 away");
-    yankee.quiet("and 11116 from Yankee");
+    alice.quiet_allowing_farm("Charlie is 13228 away");
+    yankee.quiet_allowing_farm("and 11116 from Yankee");
     charlie.quiet("Charlie's burst is over");
 }
 
@@ -8772,7 +8804,7 @@ fn a_player_in_another_row_of_sectrees_is_not_seen_even_within_range() {
     assert_eq!(seen.len(), 2, "idx18's pair alone");
     assert_idx18(&seen[0]);
     assert!(yankee_entered.shown.list.is_some());
-    alice.quiet("Yankee's sectree is not around Alpha's");
+    alice.quiet_allowing_farm("Yankee's sectree is not around Alpha's");
     yankee.quiet("Yankee's burst is over");
 }
 
@@ -8808,7 +8840,7 @@ fn a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both(
     let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
     let yankee_listed = yankee_listed.id;
-    alice.quiet("out of view");
+    alice.quiet_allowing_farm("out of view");
 
     let row_146 = (444_100, 940_000);
     let sent = std::time::Instant::now();
@@ -8898,7 +8930,7 @@ fn a_step_never_recomputes_the_view_and_a_goto_does_at_its_sample() {
 
     yankee.send_record(&client_move(FUNC_COMBO, 0, 0, 444_100, 940_000, 0x6200));
     yankee.quiet("a step shows the stepper nobody");
-    alice.quiet("and nobody the stepper");
+    alice.quiet_allowing_farm("and nobody the stepper");
 
     let dest = (444_100, 938_400);
     yankee.send_record(&client_move(FUNC_MOVE, 0, 0, dest.0, dest.1, 0x6201));
@@ -8959,13 +8991,13 @@ fn a_leaving_player_is_removed_from_its_viewers_only() {
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
     alice.sees_enter(yankee_listed.id, false, None);
     let (mut charlie, _, _) = enter_world_seeing(&server, b"carol", 0);
-    alice.quiet("Charlie is out of view");
+    alice.quiet_allowing_farm("Charlie is out of view");
 
     drop(alice);
     server.wait_for("Character left the world");
     yankee.sees_disconnect(alpha.id);
     yankee.quiet("one removal");
-    charlie.quiet("Charlie never saw Alpha");
+    charlie.quiet_allowing_farm("Charlie never saw Alpha");
 }
 
 /// `sys.world.view`: a walking player's walk mode rides with its insert. Each entrant at no
@@ -11189,8 +11221,8 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     let (mut charlie, _, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
     let charlie_grounds = charlie_entered.shown.ground_adds();
     assert!(charlie_grounds.is_empty(), "{charlie_grounds:02x?}");
-    alpha.quiet("Charlie enters out of Alpha's view");
-    zulu.quiet("and out of Zulu's");
+    alpha.quiet_allowing_farm("Charlie enters out of Alpha's view");
+    zulu.quiet_allowing_farm("and out of Zulu's");
 
     // When: once the second has passed, Alpha drops the rest whole and shouts, in one write.
     std::thread::sleep(Duration::from_millis(1100).saturating_sub(dropped_at.elapsed()));
@@ -13425,7 +13457,7 @@ impl Keyed {
                 other => panic!("an unexpected record: header {other}"),
             });
             assert_eq!(quiet, Quiet::Open, "the connection stays open");
-            wire.extend(records);
+            wire.extend(records.into_iter().filter(|record| !is_farm_line(record)));
         }
         wire
     }
@@ -17266,6 +17298,15 @@ fn a_notice_line(text: &[u8]) -> Vec<u8> {
     record
 }
 
+/// Whether `record` is a multi-farm fan-out line (`UpdateMultiFarmAffect` or
+/// `UpdateMultiFarmPlayer`, `G/char_manager.cpp:1290-1304`).
+fn is_farm_line(record: &[u8]) -> bool {
+    record.first() == Some(&GC_CHAT)
+        && record
+            .get(GC_CHAT_WIRE_SIZE..)
+            .is_some_and(|text| text.starts_with(b"UpdateMultiFarm"))
+}
+
 /// A `CHAT_TYPE_COMMAND` line to a character of empire 1 — the shape the war's map
 /// counts take (`ChatPacket(CHAT_TYPE_COMMAND, ...)`, `G/war_map.cpp:319-321`).
 fn a_command_line(text: &[u8]) -> Vec<u8> {
@@ -17810,7 +17851,7 @@ fn a_betting_pair_ready_on(
         enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
     let (yankee, yankee_listed, _yankee_entered) =
         enter_world_seeing_guilded_with_team(&server, b"bob", 0, 1, Some(b"Alpha"));
-    alice.still("yankee enters out of view");
+    alice.still_allowing_farm("yankee enters out of view");
     Some((
         database,
         server,
@@ -18086,7 +18127,7 @@ fn an_observer_warps_to_the_wars_watchers_start() {
     let mut removed = vec![GC_CHARACTER_DEL];
     removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
     // Yankee stands out of Alice's view, so he sees nothing of the leave.
-    yankee.still("the other master sees nothing out of view");
+    yankee.still_allowing_farm("the other master sees nothing out of view");
 }
 
 /// The flag war map's start positions (`CWarMapManager::LoadWarMapInfo`,
@@ -19394,7 +19435,12 @@ fn drain_relogin_tail(yankee: &mut Keyed) {
         (19, CHARACTER_UPDATE_LEN),
         (19, CHARACTER_UPDATE_LEN),
     ] {
-        let tail = yankee.read_game_raw();
+        let tail = loop {
+            let tail = yankee.read_game_raw();
+            if !is_farm_line(&tail) {
+                break tail;
+            }
+        };
         assert_eq!((tail[0], tail.len()), (header, len), "{tail:02x?}");
     }
 }
@@ -19773,7 +19819,7 @@ fn a_gm_lists_the_silences_and_the_vote_stays_quiet() {
         an_info_line(b"there is no such command"),
         "a player cannot list"
     );
-    alice.quiet("the refusal reaches only the caller");
+    alice.quiet_allowing_farm("the refusal reaches only the caller");
 
     // Empty: the GM hears the one line.
     alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat_list"));
@@ -24430,7 +24476,7 @@ fn a_gm_disconnects_a_character_and_the_target_closes() {
         an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
         "a player cannot disconnect"
     );
-    alice.quiet("the refusal reaches only the caller");
+    alice.quiet_allowing_farm("the refusal reaches only the caller");
 
     // The usage, the unknown name, and the wrong-cased name.
     alice.send_record(&client_chat(CHAT_TALKING, b"/dc"));
@@ -24451,7 +24497,7 @@ fn a_gm_disconnects_a_character_and_the_target_closes() {
         an_info_line(b"yankee: no such a player."),
         "the match is exact"
     );
-    yankee.quiet("an unlanded line reaches nobody");
+    yankee.quiet_allowing_farm("an unlanded line reaches nobody");
 
     // The caller itself.
     alice.send_record(&client_chat(CHAT_TALKING, b"/dc Alpha"));
@@ -24521,7 +24567,7 @@ fn a_gm_transfers_a_character_and_the_target_warps_to_its_side() {
         an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
         "a player cannot transfer"
     );
-    alice.quiet("the refusal reaches only the caller");
+    alice.quiet_allowing_farm("the refusal reaches only the caller");
 
     // The usage, the unknown name, the other Channel, and the caller itself.
     alice.send_record(&client_chat(CHAT_TALKING, b"/transfer"));
@@ -24548,8 +24594,8 @@ fn a_gm_transfers_a_character_and_the_target_warps_to_its_side() {
         an_info_line(b"Transfer me?!?"),
         "the match ignores the case"
     );
-    yankee.quiet("an unlanded line reaches nobody");
-    charlie.quiet("the Shared Channel hears nothing");
+    yankee.quiet_allowing_farm("an unlanded line reaches nobody");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
 
     // The landed line: Yankee's client is sent its own removal and the warp
     // to Alpha's feet. The row was written first.
@@ -24664,7 +24710,7 @@ fn read_kill_poison_misses(alice: &mut Keyed, yankee: &mut Keyed) {
         an_info_line(b"yankee: no such a player"),
         "the poison's match is exact"
     );
-    yankee.quiet("an unlanded line reaches nobody");
+    yankee.quiet_allowing_farm("an unlanded line reaches nobody");
 }
 
 /// `cmd.kill` and `cmd.poison` (`do_kill` and `do_poison`,
@@ -24829,7 +24875,7 @@ fn a_gm_stuns_a_character_and_the_target_hears_its_add() {
         an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
         "a player cannot stun"
     );
-    alice.quiet("the refusal reaches only the caller");
+    alice.quiet_allowing_farm("the refusal reaches only the caller");
 
     alice.send_record(&client_chat(CHAT_TALKING, b"/stun"));
     assert_eq!(
@@ -24843,7 +24889,7 @@ fn a_gm_stuns_a_character_and_the_target_hears_its_add() {
         an_info_line(b"Nobody is not in same map"),
         "the miss names its map"
     );
-    yankee.quiet("an unlanded line reaches nobody");
+    yankee.quiet_allowing_farm("an unlanded line reaches nobody");
 
     // The lowered match: another case still lands. The add's flag update
     // fans around, so the caller reads it before the confirmation, which
@@ -24941,7 +24987,7 @@ fn warp_answers_its_refusals(alice: &mut Keyed, yankee: &mut Keyed, charlie: &mu
         an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
         "a player cannot warp"
     );
-    alice.quiet("the refusal reaches only the caller");
+    alice.quiet_allowing_farm("the refusal reaches only the caller");
     alice.send_record(&client_chat(CHAT_TALKING, b"/warp"));
     assert_eq!(
         alice.read_game(),
@@ -24960,8 +25006,8 @@ fn warp_answers_its_refusals(alice: &mut Keyed, yankee: &mut Keyed, charlie: &mu
         an_info_line(b"Target(Charlie) is in 99 channel (my channel 1)"),
         "the cross-Channel line names the Channel"
     );
-    yankee.quiet("an unlanded line reaches nobody");
-    charlie.quiet("the Shared Channel hears nothing");
+    yankee.quiet_allowing_farm("an unlanded line reaches nobody");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
 }
 
 /// Run `line` on `caller` and read the landing: the `heard` confirmation,
@@ -25093,7 +25139,7 @@ fn a_gm_warps_to_metres_and_a_name() {
         (470_100, 950_000),
         "the list shows the metres",
     );
-    charlie.quiet("the Shared Channel hears nothing");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
 }
 
 /// `cmd.rewarp` (`do_rewarp`, `G/cmd_gm.cpp:459-465`, behind
@@ -25149,7 +25195,7 @@ fn a_gm_rewarps_in_place() {
     assert_eq!(dave.read_game(), removed, "EncodeRemovePacket(this)");
     let port = server.channel(1).port();
     assert_eq!(dave.read_game(), a_warp_record(dave_at, port));
-    charlie.quiet("the Shared Channel hears nothing");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
 }
 
 /// A same-sectree `Show`'s view tail: every viewed NPC re-sent as an insert
@@ -25217,7 +25263,7 @@ fn a_gm_gotoes_to_metres_and_a_name() {
     );
     alice.send_record(&client_chat(CHAT_TALKING, b"/goto zzznope"));
     alice.quiet("the miss is silent");
-    charlie.quiet("the Shared Channel hears nothing");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
     // Map 1's base is (409600, 896000): the line's (605, 542) lands at
     // (470100, 950200), 200 south of the enter, in the same sectree.
     alice.send_record(&client_chat(CHAT_TALKING, b"/goto 605 542"));
@@ -25255,7 +25301,7 @@ fn a_gm_gotoes_to_metres_and_a_name() {
         wire.iter().all(|record| record[0] != GC_WARP),
         "no warp on a show"
     );
-    charlie.quiet("the Shared Channel hears nothing");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
     // The named map: `settings.lua`'s a1, on hosted map 1, without the
     // spurious line. Alpha departs, so this lands last.
     alice.send_record(&client_chat(CHAT_TALKING, b"/goto a1"));
@@ -25280,7 +25326,7 @@ fn a_gm_gotoes_to_metres_and_a_name() {
         (469_300, 964_200),
         "the list shows the entry",
     );
-    charlie.quiet("the Shared Channel hears nothing");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
 }
 
 /// `cmd.level` (`do_level`, `G/cmd_gm.cpp:2740-2758`). The GM gate is the
@@ -25351,7 +25397,7 @@ fn a_gm_levels_a_champion() {
     alice.send_record(&client_chat(CHAT_TALKING, b"/level 30"));
     let wire = alice.wire_for(std::time::Duration::from_secs(2));
     assert_level_wire(&wire);
-    charlie.quiet("the Shared Channel hears nothing");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
     check(
         &database,
         "(SELECT COUNT(*) FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
@@ -25375,7 +25421,7 @@ fn a_gm_levels_a_champion() {
         messenger_login(2, b"Alpha"),
         "the teammate hears the logout"
     );
-    charlie.quiet("the Shared Channel hears nothing");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing");
 }
 
 /// A fresh key lists `level` for the login's first character.
@@ -25652,7 +25698,7 @@ fn a_gm_sets_skill_points_and_group() {
         messenger_login(2, b"Alpha"),
         "the teammate hears the logout"
     );
-    charlie.quiet("the Shared Channel hears nothing else");
+    charlie.quiet_allowing_farm("the Shared Channel hears nothing else");
 }
 
 /// A `GC_POINT_CHANGE` record as (kind, amount, value).
@@ -27901,7 +27947,7 @@ fn set_state_moves_the_sash_to_information(keyed: &mut Keyed) {
 fn read_chat_line(keyed: &mut Keyed) -> Vec<u8> {
     loop {
         let record = keyed.read_game_raw();
-        if record[0] == GC_CHAT {
+        if record[0] == GC_CHAT && !is_farm_line(&record) {
             return record;
         }
     }
@@ -28081,7 +28127,7 @@ fn qf_runs_against(server: &Server) {
     );
     let (mut yankee, _yankee_listed) =
         enter_world_on_with_team(server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
-    alice.still("Yankee enters out of view");
+    alice.still_allowing_farm("Yankee enters out of view");
     // A fresh login ran only letters, so the login's last quest answers the
     // first `/qf`: the Yohara quest, moved to a state it does not have.
     alice.send_record(&client_chat(CHAT_TALKING, b"/qf go_to_disciple"));
@@ -28122,7 +28168,7 @@ fn qf_runs_against(server: &Server) {
         server_script(1, &titled_page(b"teowahdan", SASH_BUTTON, b"[DONE]")),
         "the sash's info page"
     );
-    alice.still("the page is the press's one answer");
+    alice.still_allowing_farm("the page is the press's one answer");
     qf_moves_the_sash_and_the_clear_forgets_it(&mut alice);
     drop(alice);
 }
@@ -28442,7 +28488,8 @@ fn drain_silence(keyed: &mut Keyed, note: &str) {
                 || record[0] == GC_CHARACTER_DEL
                 || is_stamina_refill(&record)
                 || keyed.timer_record(&record)
-                || keyed.timer_restate(&record),
+                || keyed.timer_restate(&record)
+                || is_farm_line(&record),
             "{note}: {record:02x?}"
         );
     }
@@ -35466,6 +35513,52 @@ fn a_dig_ends_on_a_second_call_or_a_step() {
         Duration::from_secs(2 * strokes + 1),
     );
     check(&database, "(SELECT socket0 FROM item WHERE id = 50) = 0");
+}
+/// `sys.custom.multi_farm`, `cmd.multi_farm`: an entrant farms (the login checks it in
+/// with `true`, `G/input_login.cpp:666`), so a vein click digs. `/multi_farm` toggles it
+/// off — `UpdateMultiFarmAffect 0 1` with no `UpdateMultiFarmPlayer` — and the next click
+/// digs nothing. An immediate second `/multi_farm` answers the slow line with its wait.
+#[test]
+fn a_multi_farm_toggle_stops_the_dig_and_the_protect_slows_the_next() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _digger) = mining_stage(&database, true);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    let vein = shown_vein(&entered);
+    let _strokes = start_digging(&mut alice, vid, vein);
+    alice.send_record(&client_click(vein));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;815]"),
+        "the dig cancels"
+    );
+    alice.send_record(&slash(b"/multi_farm"));
+    assert_eq!(
+        alice.read_game_farm(),
+        a_command_line(b"UpdateMultiFarmAffect 0 1"),
+        "farm-off, and the toggler"
+    );
+    alice.quiet("no farming row lists");
+    alice.send_record(&client_click(vein));
+    alice.quiet("an unfarming click digs nothing");
+    alice.send_record(&slash(b"/multi_farm"));
+    let slow = alice.read_game();
+    assert_eq!(slow[0], GC_CHAT, "the slow line chats");
+    let text = &slow[GC_CHAT_WIRE_SIZE..];
+    assert!(
+        text.starts_with(b"@@(cmd_general)tradus:You need be slow! You can try after ")
+            && text.ends_with(b" second."),
+        "the slow line: {text:02x?}"
+    );
+    let wait: u32 = std::str::from_utf8(
+        &text[b"@@(cmd_general)tradus:You need be slow! You can try after ".len()..text.len() - 8],
+    )
+    .expect("a number")
+    .parse()
+    .expect("a wait");
+    assert!((1..=10).contains(&wait), "the protect waits: {wait}");
 }
 
 /// `CHARACTER::mining` without a pick in the weapon cell: `[LS;816]`, and no dig starts.

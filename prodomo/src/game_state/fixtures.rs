@@ -185,11 +185,16 @@ pub(super) fn enter_seeing_with(
     let (tx, mut inbox) = unbounded_channel();
     let name = format!("P{vid}");
     world
-        .enter_world_with_items(Vid::new(vid), vid, &name, items, ClientOutbox::new(tx))
+        .enter_world_with_items("", Vid::new(vid), vid, &name, items, ClientOutbox::new(tx))
         .expect("the player enters");
-    // The enter walk sent the WAR_LIST before the body was placed; drain it so the
-    // tests read only what placing and their steps send.
-    let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
+    // The enter walk sent the WAR_LIST and the multi-farm check before the body was
+    // placed; drain them so the tests read only what placing and their steps send.
+    let mut drained = 0;
+    while inbox.try_recv().is_ok() {
+        drained += 1;
+        assert!(drained < 20, "the enter burst is bounded");
+    }
+    assert!(drained >= 1, "the enter WAR_LIST is queued");
     world
         .characters
         .find_by_vid_mut(Vid::new(vid))

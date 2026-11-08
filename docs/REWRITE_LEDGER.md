@@ -48247,3 +48247,48 @@ failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --wo
 --no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
 changed.
+
+## 454. The multi-farm block
+
+`sys.custom.multi_farm` and `cmd.multi_farm` are `ported`, in scenario
+`a_multi_farm_toggle_stops_the_dig_and_the_protect_slows_the_next`.
+
+- The toggle (`do_multi_farm`, `G/cmd_general.cpp:304-317`): past its 10 s protect the
+  caller's farm status toggles through `CheckMultiFarmAccount`; too soon answers the slow
+  line with its wait. New `Command::MultiFarm`, `GameCommand::MultiFarm`, the kit, the
+  dispatch arms, and `multi_farm_step` keyed on the descriptor's host address.
+- The registry (`prodomo/src/game_state/multi_farm.rs`): rows by address in join order,
+  the prune of gone PIDs with its empty-address drop, the login check-in with `true`
+  (`G/input_login.cpp:666`), the leaver's check-out with `false` (`G/char.cpp:1791`),
+  the two-farming cap with its recurse-false, the premium's type and end time, and the
+  `UpdateMultiFarmAffect`/`UpdateMultiFarmPlayer` fan-out. The GG send has no Rewrite
+  equivalent: one process holds every Channel (ADR-0002), so the registry is already
+  global. `Loaded` carries the address; the world keeps it per VID for the leave.
+- The premium use (`G/char_item.cpp:3901-3923`): vnum 55610-55615, an already-held premium
+  refused with the line and the item kept, else `AddAffect(998, POINT_NONE, value1,
+  AFF_NONE, value0, 0, false, false)`, one item consumed (`world::character::premium`),
+  the registry re-check of the caller's own status, and the two added lines.
+- The gates: mining (`G/mining.cpp:375-378`), fishing (`G/char.cpp:5251-5254`), and the
+  drop side of `Reward` (`G/char_battle.cpp:836-840`) refuse while unfarming. The entrant
+  farms (the login check), so the mining scenario digs unchanged.
+- Ledger 355's route test caught the same trap again: `do_multi_farm` reached
+  `kit_name` but neither `is_tail_line` nor `tail_name`, so the toggle answered nothing
+  until both unions named it. The test now lists it.
+
+Harness: `read_game` and `read_game_until` skip the farm lines as client-UI noise (the
+stamina/timer precedent), `read_game_farm` keeps them for the multi scenario, and
+`quiet_allowing_farm`/`still_allowing_farm` cover the enters, leaves, warps and relogins
+whose burst is the only news. The leave-burst expectations of ten lib tests name the
+`G/char.cpp:1791` order. The `every_ported_kit_line_routes_past_not_ported` row is the
+regression test for the trap above.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo
+clippy --workspace --all-targets --locked --offline -- -D warnings`, and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass:
+the full workspace run is 4965 passed with 1 failure (`a_gm_sets_skill_points_and_group`,
+a `quiet` beside a leave burst, fixed after by `quiet_allowing_farm`), and the parity
+confirm after the fix is 340 passed, 0 failed. `rustfmt` and `cargo-clippy` are the
+`/usr/bin`
+pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No
+ADR changed.

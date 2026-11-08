@@ -2149,6 +2149,7 @@ mod tests {
         let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
         world
             .enter_world_with_items(
+                "",
                 Vid::new(OTHER),
                 OTHER,
                 "P101",
@@ -2247,6 +2248,7 @@ mod tests {
         let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
         world
             .enter_world_with_items(
+                "",
                 Vid::new(OTHER),
                 OTHER,
                 "Nobody",
@@ -2289,6 +2291,7 @@ mod tests {
         let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
         world
             .enter_world_with_items(
+                "",
                 Vid::new(OTHER),
                 OTHER,
                 "Nobody",

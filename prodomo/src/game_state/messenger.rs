@@ -984,14 +984,15 @@ mod tests {
         let world = world.with_test_server(false);
         let mut world = world;
         world.answer_messenger_add_by_vid(Vid::new(VID), Vid::new(OTHER));
-        let _enter = inbox.try_recv().expect("the enter burst is queued");
-        let _placed = inbox.try_recv().expect("the placing is queued");
-        let _spawn = inbox.try_recv().expect("the spawn is queued");
+        let mut frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        // The enter, the placing, the spawn and the later enter's farm rows queued
+        // before the answer; the answer is the last line.
+        assert!(frames.len() >= 4, "the burst queued: {frames:?}");
+        let line = frames.pop().expect("the caller was told");
         assert!(
             !world.messenger.waits(&world, Vid::new(OTHER), b"P100"),
             "no pair waits"
         );
-        let line = inbox.try_recv().expect("the caller was told");
         assert_eq!(
             line,
             chat_packet(

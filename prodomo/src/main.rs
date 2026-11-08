@@ -7355,7 +7355,7 @@ where
         return false;
     };
     let account = quest_account(context, addr, held).await.unwrap_or_default();
-    let loaded = loaded_state(held, Some(show), messenger, account);
+    let loaded = loaded_state(addr, held, Some(show), messenger, account);
     let Some((world_vid, shown)) =
         join_the_world(context, addr, character, vid, (items, loaded), outbox).await
     else {
@@ -7556,6 +7556,7 @@ fn place_entering_character(context: &ConnectionContext, addr: SocketAddr, held:
 /// The store's `CHECK` keeps `player.gold` from being negative, so the fall-back to 0 is not
 /// a path a row can reach.
 fn loaded_state(
+    addr: std::net::SocketAddr,
     held: &Held,
     show: Option<prodomo::game_loop_messages::Showing>,
     messenger: MessengerLoad,
@@ -7588,6 +7589,7 @@ fn loaded_state(
             .as_ref()
             .map_or_else(Vec::new, |character| character.horse.name.clone()),
         account,
+        addr: addr.ip().to_string(),
     }
 }
 
@@ -10434,6 +10436,7 @@ where
         LineCommand::DsList => ds_list_step(addr, context, held).await,
         LineCommand::DsChangeAttr => ds_change_attr_step(session, addr, context, held, rest).await,
         LineCommand::Dice => dice_step(addr, context, held, rest).await,
+        LineCommand::MultiFarm => multi_farm_step(addr, context, held).await,
         LineCommand::Gift => gift_step(addr, context, held).await,
         LineCommand::Hair => hair_step(addr, context, held).await,
         LineCommand::FishSimul => fish_simul_step(addr, context, held, rest).await,
@@ -11512,6 +11515,25 @@ async fn dice_step(
         return false;
     }
     info!(%addr, "Dice rolled");
+    true
+}
+
+/// `do_multi_farm` (`G/cmd_general.cpp:304-317`): the caller's farm status toggles past
+/// its 10 s protect. The registry keys on the descriptor's host address.
+async fn multi_farm_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Held) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "MultiFarm without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context
+        .game
+        .run_multi_farm(vid, addr.ip().to_string())
+        .await
+    {
+        warn!(%addr, %error, "The world could not be asked for a multi farm; closing");
+        return false;
+    }
+    info!(%addr, "MultiFarm toggled");
     true
 }
 
