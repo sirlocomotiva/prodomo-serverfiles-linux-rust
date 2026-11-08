@@ -3377,6 +3377,10 @@ impl GameState {
         // the flag.
         self.install_daily_gift(vid, loaded.daily_gift.0, loaded.daily_gift.1);
         let fish_lines = self.fish_event_report(vid);
+        // `CManager::SendLandList` (`G/building.cpp:938-989`) runs in `Entergame`
+        // after the show, so the body's map is placed and the list names its lands.
+        // The lines ride the burst before the time record.
+        let land_lines = self.land_list_lines(vid);
         Shown {
             records,
             update,
@@ -3385,6 +3389,7 @@ impl GameState {
             priv_lines,
             letters_event,
             fish_lines,
+            land_lines,
             observer: self.is_observing(vid),
             landed: None,
         }

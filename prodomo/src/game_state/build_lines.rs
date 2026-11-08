@@ -894,6 +894,12 @@ impl GameState {
         }
         self.guilds.drop_land_owner(land_id);
         self.build_halves.push(GuildQuestStore::Clear { land_id });
+        // `CManager::UpdateLand`'s fan (`G/building.cpp:740-752`): in legacy the
+        // DB answers the `RequestUpdate` the clear's `SetOwner(0)` sent
+        // (`G/building.cpp:1031`) and the game fans the cleared land to every
+        // client on its map. The Rewrite has no DB peer, so the clear fans at
+        // once, once the owner is dropped.
+        self.fan_land_update(land_id);
         if let (Some(land), Some(region)) = (
             self.guild_lands.get(land_id).copied(),
             self.regens.region_of(place.0, place.1),
@@ -1540,7 +1546,14 @@ mod tests {
         assert_eq!(world.guilds.land_owner(1), None);
         let clear = text_of(&inbox.try_recv().expect("the cleared tell"));
         assert!(clear.windows(7).any(|w| w == b"Cleared"), "{clear:?}");
-        assert!(inbox.try_recv().is_err(), "one tell");
+        // The clear fans the land's update behind the notice: the one-element
+        // list with no owner (the guildless names no NAME).
+        let fan = inbox.try_recv().expect("the cleared land's fan");
+        assert_eq!(fan[0], 130, "HEADER_GC_LAND_LIST");
+        assert_eq!(fan.len(), 3 + 24);
+        assert_eq!(&fan[3..7], &1u32.to_le_bytes(), "land 1");
+        assert_eq!(&fan[23..27], &0u32.to_le_bytes(), "no owner");
+        assert!(inbox.try_recv().is_err(), "the tell and the fan");
     }
     /// The wall-block runs span the center ±2000 at size 1, past a 3000-square
     /// land's edges, so the block tests widen land 1 to 10000 square: every

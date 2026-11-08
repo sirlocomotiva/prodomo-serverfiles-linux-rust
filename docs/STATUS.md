@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 474 (the guild's buildings).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 475
+Last reviewed: 2026-11-08, after ledger section 475 (the land list).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 476
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -525,8 +525,10 @@ client-unhandled, so the send is wire-only, and the MESSAGES/CHEST_OPEN/PLAYTIME
 their unwired paths. Since 474 `/build` and `/clear_land` are `ported`: the six arms, the
 land gates, the proto gates, the spend and the drain, with the wipe, the owner drop and the
 claim stone; the single and block walls parse and run but the owner's 41 object protos name
-no wall vnum, so like legacy they stand nothing there. The
-next slice is the owner's call: the forest's leader branch is ported,
+no wall vnum, so like legacy they stand nothing there. Since 475 `gc.land_list` is `ported`:
+the enter-game list and the ownership fan, with the guild NAMEs leading each. Stood
+buildings still never show: their ADD and DEL fan through a view key no sectree holds, so
+both vanish — the next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

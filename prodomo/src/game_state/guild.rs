@@ -46,6 +46,7 @@ use protocol::gc_guild::{
     GcGuildSkillInfo, GUILD_COMMENT_MAX_LEN, GUILD_GRADE_COUNT, GUILD_GRADE_NAME_MAX_LEN,
     GUILD_NAME_MAX_LEN, GUILD_SKILL_COUNT,
 };
+use protocol::gc_land_list::{GcLandList, GcLandListEntry};
 use world::character::{Character, MoveDone, MoveKind, MoveRecord, PointRecord};
 
 use super::affect::{affect_remove_frame, Affect};
@@ -1442,8 +1443,86 @@ impl GameState {
                 land_id: *land,
                 guild_id: *guild,
             });
+            // `CManager::UpdateLand`'s fan (`G/building.cpp:740-752`): in legacy the
+            // DB answers the `RequestUpdate` and the game fans the changed land to
+            // every client on its map. The Rewrite has no DB peer, so the judge fans
+            // at once, once the owner is in.
+            self.fan_land_update(*land);
         }
         stores
+    }
+
+    /// One land's list element: its rect and its owning guild, 0 unowned.
+    fn land_element(&self, land: &gamedata::records::LandRecord) -> GcLandListEntry {
+        GcLandListEntry::new(
+            land.id,
+            land.x,
+            land.y,
+            land.width,
+            land.height,
+            self.guilds.land_owners.get(&land.id).copied().unwrap_or(0),
+        )
+    }
+
+    /// `CManager::SendLandList` for the viewer `to`
+    /// (`G/building.cpp:938-989`): each land on the viewer's map names its guild
+    /// first (`SendGuildName`), then the one list carries every land's element.
+    /// Nothing when the map holds no land. Lands walk in id order, as legacy's
+    /// `m_map_pkLand` (`std::map`) does.
+    pub(super) fn land_list_lines(&mut self, to: Vid) -> Vec<Vec<u8>> {
+        let Some((_, map)) = self.place_of(to.raw()) else {
+            return Vec::new();
+        };
+        let lands: Vec<gamedata::records::LandRecord> = self
+            .guild_lands
+            .ordered()
+            .filter(|land| land.map_index == map)
+            .copied()
+            .collect();
+        if lands.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        for land in &lands {
+            if let Some(name) = self.send_guild_name(
+                to.raw(),
+                self.guilds.land_owners.get(&land.id).copied().unwrap_or(0),
+            ) {
+                lines.push(name);
+            }
+        }
+        let mut list = Vec::new();
+        GcLandList::new(lands.iter().map(|land| self.land_element(land)).collect())
+            .encode_into(&mut list)
+            .expect("the map's lands fit the size word");
+        lines.push(list);
+        lines
+    }
+
+    /// `CManager::UpdateLand`'s fan (`G/building.cpp:709-752`): the changed land's
+    /// guild names itself first, then the one-element list reaches every body on
+    /// the land's map. Quiet for an unknown land.
+    pub(super) fn fan_land_update(&mut self, land_id: u32) {
+        let Some(land) = self.guild_lands.get(land_id).copied() else {
+            return;
+        };
+        let element = self.land_element(&land);
+        let mut list = Vec::new();
+        GcLandList::new(vec![element])
+            .encode_into(&mut list)
+            .expect("one element fits the size word");
+        let vids: Vec<Vid> = self
+            .bodies
+            .iter()
+            .filter(|(_, body)| body.map == land.map_index)
+            .map(|(vid, _)| *vid)
+            .collect();
+        for vid in vids {
+            if let Some(name) = self.send_guild_name(vid.raw(), element.guild_id) {
+                let _sent = self.write_to_client(vid, name);
+            }
+            let _sent = self.write_to_client(vid, list.clone());
+        }
     }
 
     /// Judge the step's `building.reconstruct` calls, in order
@@ -8158,7 +8237,7 @@ mod tests {
 
     use tokio::sync::mpsc::UnboundedReceiver;
 
-    use super::super::fixtures::{a_world, enter, region, TestClock};
+    use super::super::fixtures::{a_world, enter, enter_on, region, TestClock};
     use super::*;
     use crate::client_registry::{ChannelClients, ClientEntry, Lease};
     use crate::game_loop::PulseProcessor;
@@ -8168,6 +8247,179 @@ mod tests {
     use quest::manager::Manager;
 
     use crate::game_state::QuestStep;
+
+    /// The enter-game list names each owned land's guild first, then carries every
+    /// land on the viewer's map in id order. A viewer off any land's map hears
+    /// nothing, and a known guild is not named again.
+    #[test]
+    fn the_enter_names_the_guilds_then_lists_the_map() {
+        use protocol::gc_guild::GUILD_SKILL_COUNT;
+        let clock = TestClock::default();
+        let mut world =
+            a_world(&clock).with_lands(Arc::new(gamedata::land::Lands::from_records([
+                gamedata::records::LandRecord {
+                    id: 2,
+                    map_index: 1,
+                    x: 200,
+                    y: 200,
+                    width: 100,
+                    height: 100,
+                    guild_id: 0,
+                    guild_level_limit: 0,
+                    price: 1,
+                },
+                gamedata::records::LandRecord {
+                    id: 1,
+                    map_index: 1,
+                    x: 100,
+                    y: 100,
+                    width: 100,
+                    height: 100,
+                    guild_id: 0,
+                    guild_level_limit: 0,
+                    price: 1,
+                },
+            ])));
+        let mut region = region();
+        region.index = 1;
+        world.schedule_map((1, 1), &region);
+        world.host_map(
+            1,
+            1,
+            gamedata::server_attr::SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 10,
+                rows: 10,
+            },
+        );
+        world.install_guilds(
+            &db::guilds::StoredGuilds {
+                guilds: vec![db::guilds::StoredGuild {
+                    id: 7,
+                    name: "G".to_string(),
+                    master_pid: 1,
+                    sp: 0,
+                    level: 5,
+                    exp: 0,
+                    gold: 0,
+                    ladder_point: 0,
+                    win: 0,
+                    draw: 0,
+                    loss: 0,
+                    skill_point: 0,
+                    skills: vec![0; GUILD_SKILL_COUNT],
+                }],
+                grades: Vec::new(),
+                members: Vec::new(),
+            },
+            &[],
+            &[],
+        );
+        world.install_land_owners(&vec![(2, 7)]);
+        let mut inbox = enter_on(&mut world, (1, 1), 1, (2000, 2000), 10_000);
+        while inbox.try_recv().is_ok() {}
+        let lines = world.land_list_lines(Vid::new(1));
+        assert_eq!(lines.len(), 2, "the NAME, then the list");
+        assert_eq!(lines[0][0], 75, "HEADER_GC_GUILD");
+        assert_eq!(lines[1][0], 130, "HEADER_GC_LAND_LIST");
+        assert_eq!(lines[1].len(), 3 + 2 * 24, "map 1's two lands");
+        assert_eq!(
+            &lines[1][3..7],
+            &1u32.to_le_bytes(),
+            "id order, not insert order"
+        );
+        assert_eq!(&lines[1][27..31], &2u32.to_le_bytes());
+        assert_eq!(&lines[1][23..27], &0u32.to_le_bytes(), "land 1 unowned");
+        assert_eq!(&lines[1][47..51], &7u32.to_le_bytes(), "land 2 owned");
+        // The guild is known now: a second look names nothing.
+        let again = world.land_list_lines(Vid::new(1));
+        assert_eq!(again.len(), 1, "only the list");
+        // Off any land's map: nothing.
+        let mut far = enter(&mut world, 2, (2000, 2000), 10_000);
+        while far.try_recv().is_ok() {}
+        assert!(world.land_list_lines(Vid::new(2)).is_empty());
+    }
+
+    /// The land claims fan the changed land: the judge's claim names the guild and
+    /// lists the one land to every body on its map, and a claim of an unknown land
+    /// (or a claimed one) is quiet. The NAME rides only once per viewer.
+    #[test]
+    fn the_claim_fans_the_changed_land() {
+        use protocol::gc_guild::GUILD_SKILL_COUNT;
+        let clock = TestClock::default();
+        let mut world =
+            a_world(&clock).with_lands(Arc::new(gamedata::land::Lands::from_records([
+                gamedata::records::LandRecord {
+                    id: 1,
+                    map_index: 1,
+                    x: 100,
+                    y: 100,
+                    width: 3000,
+                    height: 3000,
+                    guild_id: 0,
+                    guild_level_limit: 0,
+                    price: 1,
+                },
+            ])));
+        let mut region = region();
+        region.index = 1;
+        world.schedule_map((1, 1), &region);
+        world.host_map(
+            1,
+            1,
+            gamedata::server_attr::SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 10,
+                rows: 10,
+            },
+        );
+        world.install_guilds(
+            &db::guilds::StoredGuilds {
+                guilds: vec![db::guilds::StoredGuild {
+                    id: 7,
+                    name: "G".to_string(),
+                    master_pid: 1,
+                    sp: 0,
+                    level: 5,
+                    exp: 0,
+                    gold: 0,
+                    ladder_point: 0,
+                    win: 0,
+                    draw: 0,
+                    loss: 0,
+                    skill_point: 0,
+                    skills: vec![0; GUILD_SKILL_COUNT],
+                }],
+                grades: Vec::new(),
+                members: Vec::new(),
+            },
+            &[],
+            &[],
+        );
+        let mut inbox = enter_on(&mut world, (1, 1), 1, (2000, 2000), 10_000);
+        while inbox.try_recv().is_ok() {}
+        let stores = world.judge_land_sets(&[(1, 7), (2, 7), (1, 8)]);
+        assert_eq!(
+            stores,
+            vec![GuildQuestStore::Land {
+                land_id: 1,
+                guild_id: 7
+            }]
+        );
+        let name = inbox.try_recv().expect("the NAME leads");
+        assert_eq!(name[0], 75, "HEADER_GC_GUILD");
+        let list = inbox.try_recv().expect("the one-element list");
+        assert_eq!(list[0], 130, "HEADER_GC_LAND_LIST");
+        assert_eq!(list.len(), 3 + 24);
+        assert_eq!(&list[3..7], &1u32.to_le_bytes(), "the land id");
+        assert_eq!(&list[23..27], &7u32.to_le_bytes(), "the owning guild");
+        assert!(inbox.try_recv().is_err(), "one claim fans once");
+        // A second claim of another land would name no new guild: the NAME rides once.
+        world.judge_land_sets(&[(1, 7)]);
+        assert!(inbox.try_recv().is_err(), "a claimed land is quiet");
+    }
 
     /// The master, at the origin.
     const MASTER_VID: u32 = 100;

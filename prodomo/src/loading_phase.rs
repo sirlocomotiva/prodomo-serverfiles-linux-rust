@@ -1328,6 +1328,9 @@ pub struct BurstAfter {
     /// The fish-event login report's records: the enable record, then one `SHAPE_ADD`
     /// per main cell (`FishEventGeneralInfo`, `G/char.cpp:10880-10913`).
     pub fish_lines: Vec<Vec<u8>>,
+    /// The map's guild lands: each owned land's NAME, then the one list
+    /// (`CManager::SendLandList`, `G/building.cpp:938-989`).
+    pub land_lines: Vec<Vec<u8>>,
 }
 
 /// The records the enter-game burst sends, in legacy order.
@@ -1388,8 +1391,12 @@ pub fn enter_game_burst(
     // transition, so it is the boundary between the two halves rather than a record here.
     // The hide restore's lines lead the far half, as legacy sends them right after
     // `SetPhase` (`G/input_login.cpp:612-638`).
-    let mut out = Vec::with_capacity(3 + after.hide_lines.len());
+    let mut out = Vec::with_capacity(3 + after.hide_lines.len() + after.land_lines.len());
     out.extend(after.hide_lines);
+    // `CManager::SendLandList` (`G/input_login.cpp:676`) runs after the guild-war
+    // send and before the time record; the marriage and kingdom-war records it sits
+    // among belong to unported systems, so the land lines ride directly before time.
+    out.extend(after.land_lines);
     out.push(encoded(
         &mut GcHeaderAndDword::new(HEADER_GC_TIME.value(), now),
         "the time record",
@@ -2285,6 +2292,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             1_600_000_000,
@@ -2316,6 +2324,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2401,6 +2410,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2444,6 +2454,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2473,6 +2484,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             4,
             1_600_000_000,
@@ -2504,6 +2516,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2544,6 +2557,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2569,6 +2583,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: true,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2591,6 +2606,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2739,6 +2755,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2766,6 +2783,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2789,6 +2807,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2866,6 +2885,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2898,6 +2918,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,
@@ -2926,6 +2947,7 @@ mod tests {
                 priv_lines: Vec::new(),
                 letters_event: false,
                 fish_lines: Vec::new(),
+                land_lines: Vec::new(),
             },
             1,
             0,

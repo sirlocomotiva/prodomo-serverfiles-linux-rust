@@ -3235,6 +3235,10 @@ pub struct Shown {
     /// the enable record, then one `SHAPE_ADD` per main cell. The burst carries them
     /// last, where legacy sends them at the end of `Entergame` (`G/input_login.cpp:939`).
     pub fish_lines: Vec<Vec<u8>>,
+    /// The map's guild lands (`CManager::SendLandList`, `G/building.cpp:938-989`):
+    /// each owned land's NAME, then the one list. The burst carries them before the
+    /// time record, where legacy sends them before it (`G/input_login.cpp:676-685`).
+    pub land_lines: Vec<Vec<u8>>,
     /// Whether the character observes: a war map's watch sets the flag at admission
     /// (`CWarMap::IncMember`, `G/war_map.cpp:384`). The descriptor gates the records by it.
     pub observer: bool,

@@ -80,6 +80,7 @@ pub mod gc_fields;
 pub mod gc_guild;
 pub mod gc_inventory;
 pub mod gc_item_window;
+pub mod gc_land_list;
 pub mod gc_mark;
 pub mod gc_messenger;
 pub mod gc_nested;

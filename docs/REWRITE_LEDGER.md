@@ -49535,3 +49535,47 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 cargo doc --workspace --no-deps --locked --offline`, the 238 scenario 8x, and `legacy/` is
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 475. The land list
+
+`gc.land_list` is `ported`: the codec, the enter-game send, and the ownership-change fan.
+`protocol/src/gc_land_list.rs` (new) carries the 24-byte elements (`dwID`, `x`, `y`,
+`width`, `height`, `dwGuildID`) under the 3-byte header, with the count implicit in `size`;
+the widths were measured by compiling the verbatim struct bodies for i386 next to the
+8-byte two-`long` control (`.scratch/probe475/`; the link needs a 32-bit libc the machine
+lacks, but the `static_assert`s are the measurement).
+
+`GameState::land_list_lines` builds the enter-game lines: each land on the viewer's map
+names its guild first (`SendGuildName`, deduped per viewer), then the one list carries
+every land's element in id order, as legacy's `m_map_pkLand` walks. Nothing is sent on a
+map with no land. The lines ride `Shown.land_lines` into the burst directly before the
+time record, where the module doc already placed them. `GameState::fan_land_update` is
+`CManager::UpdateLand`'s fan: the changed land's guild names itself, then the one-element
+list reaches every body on the land's map. In legacy the DB answers the `RequestUpdate`
+and the game fans; the Rewrite has no DB peer, so the two ownership-change sites fan at
+once: `judge_land_sets` (the quest claim) and `clear_build_land` (the wipe, whose
+`SetOwner(0)` is legacy `building.cpp:1031`).
+
+The harness reads the lines centrally: `read_land_lines` consumes the burst's NAMEs and
+list (or nothing) in all four burst readers, and `finish_enter_game` stashes them on
+`Entered.lands` for the scenario.
+
+Evidence: eight codec tests (golden bytes, the empty list, the ragged size, the
+truncations, the wrong header, the overflow), two world tests (the enter names-then-lists
+in id order with the dedup and the off-map silence; the claim fans NAME-then-list once and
+a claimed land is quiet), and the extended `a_master_builds_on_its_land_and_clears_it`,
+which reads map 1's 18-land list with land 1 owned and the clear's ownerless fan.
+
+Known gap, found by this slice's scenario draft: stood buildings never show. Their ADD
+and DEL fan through `packet_around` with an `EntityKey::Npc` no sectree holds (the object
+VID is not a regen NPC), so both vanish — the scenario first asserted the clear's DEL and
+read the land fan instead. Registering building entities in the view is follow-up work,
+not this slice.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the scenario 8x, and `legacy/` is
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). A width was measured
+(the 24/3 land pair, `.scratch/probe475/`). Afterwards no `prodomo\_%` database remained.
+No ADR changed.

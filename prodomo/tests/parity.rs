@@ -1422,6 +1422,7 @@ fn dynamic_len(header: u8) -> usize {
         | GC_DUEL_START
         | GC_WORLD_BOSS
         | GC_BATTLE_PASS
+        | GC_LAND_LIST
         | GC_QUEST_INFO => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
@@ -1444,6 +1445,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
             | GC_QUEST_INFO
             | GC_DUEL_START
             | GC_WORLD_BOSS
+            | GC_LAND_LIST
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1485,6 +1487,11 @@ const WALK_MODE_LEN: usize = 1 + 4 + 1;
 /// `HEADER_GC_NPC_POSITION`: `TPacketGCNPCPosition`, a `WORD wSize` and a `WORD count`, then
 /// `count` 34-byte `TNPCPosition` entries (`G/packet.h`).
 const GC_NPC_POSITION: u8 = 115;
+/// `HEADER_GC_LAND_LIST` (130): `TPacketGCLandList`, a `WORD size` and 24-byte
+/// `TLandPacketElement` entries (`G/packet.h:2509-2521`).
+const GC_LAND_LIST: u8 = 130;
+/// `TLandPacketElement`: `dwID`, `x`, `y`, `width`, `height`, `dwGuildID`.
+const LAND_LIST_ELEMENT_LEN: usize = 24;
 /// `TNPCPosition`: `bType`, `name[25]`, `x`, `y`.
 const NPC_POSITION_LEN: usize = 1 + 25 + 4 + 4;
 const GC_AFFECT_ADD: u8 = 126;
@@ -1571,9 +1578,8 @@ fn game_len(header: u8) -> usize {
         // GC_MESSENGER rides the same `size`-word framing as the other dynamic records
         // (`TPacketGCMessenger`, `G/packet.h:1896-1901`).
         GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER
-        | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START | GC_WORLD_BOSS | GC_BATTLE_PASS => {
-            dynamic_len(header)
-        }
+        | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START | GC_WORLD_BOSS | GC_BATTLE_PASS
+        | GC_LAND_LIST => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -2548,12 +2554,22 @@ fn read_marking_letters(
     sent
 }
 
+/// The game phase, the hide restore, the land lines and the time record of an enter-game
+/// burst the scenario reads by hand, answering the time record.
+fn read_game_phase_tail(keyed: &mut Keyed) -> Vec<u8> {
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(keyed, [false; 5]);
+    let _lands = read_land_lines(keyed);
+    keyed.read_game()
+}
+
 /// The rest of an enter-game burst whose view the scenario read by hand: the game phase,
 /// the time, the Channel 1 record, the `letters_event` command line, the fish-event
 /// report, the war list, then the quest login event.
 fn read_enter_tail(keyed: &mut Keyed) {
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(keyed, [false; 5]);
+    let _lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
@@ -2579,6 +2595,9 @@ struct Entered {
     affect: Vec<u8>,
     /// Its fish-event login report: the enable record, then one `SHAPE_ADD` per main cell.
     report: Vec<Vec<u8>>,
+    /// Its map's guild lands: each owned land's NAME, then the one list — or nothing on
+    /// a map with no land.
+    lands: Vec<Vec<u8>>,
 }
 
 /// [`enter_game_records`], answering what the burst showed.
@@ -2678,6 +2697,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
     assert_eq!(affect[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(keyed, [false; 5]);
+    let lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
@@ -2690,6 +2710,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
         shown,
         affect,
         report,
+        lands,
     }
 }
 
@@ -4294,9 +4315,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(&affect[10..14], &28u32.to_le_bytes(), "AFFECT_FLAG 28");
     assert_eq!(&affect[14..18], &5i32.to_le_bytes(), "five seconds");
     // The phase record is between the affect and the time record, so exactly one is written.
-    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
-    read_hide_restore(&mut keyed, [false; 5]);
-    let time = keyed.read_game();
+    let time = read_game_phase_tail(&mut keyed);
     assert_eq!(time.len(), TIME_LEN);
     assert_eq!(time[0], GC_TIME);
     let channel = keyed.read_game();
@@ -5628,6 +5647,7 @@ fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
     assert_eq!(seen.len(), 1, "map 1 has one {vnum}, in view");
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(keyed, [false; 5]);
+    let _lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
@@ -5655,6 +5675,7 @@ fn enter_beside_shown(keyed: &mut Keyed, vnum: u16) -> (u32, u32) {
     assert_eq!(seen.len(), 1, "map 1 has one {vnum}, in view");
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(keyed, [false; 5]);
+    let _lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
@@ -17349,7 +17370,27 @@ fn a_master_builds_on_its_land_and_clears_it() {
         "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD'          FROM account WHERE login = 'alice'",
     );
     let server = Server::start(binary(), database.url());
-    let (mut alice, _, _) = enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    let (mut alice, _, entered) =
+        enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    // The enter names no guild — the walk already named MyGuild — and lists map 1's
+    // 18 lands, land 1 first, owned by guild 1.
+    assert_eq!(
+        entered.lands.iter().map(|line| line[0]).collect::<Vec<_>>(),
+        vec![GC_LAND_LIST],
+        "only the list"
+    );
+    let list = &entered.lands[0];
+    assert_eq!(
+        list.len(),
+        3 + 18 * LAND_LIST_ELEMENT_LEN,
+        "map 1's 18 lands"
+    );
+    assert_eq!(&list[3..7], &1u32.to_le_bytes(), "land 1 first");
+    assert_eq!(&list[7..11], &20200i32.to_le_bytes(), "land 1's x");
+    assert_eq!(&list[11..15], &10000i32.to_le_bytes(), "land 1's y");
+    assert_eq!(&list[15..19], &3000i32.to_le_bytes(), "land 1's width");
+    assert_eq!(&list[19..23], &3000i32.to_le_bytes(), "land 1's height");
+    assert_eq!(&list[23..27], &1u32.to_le_bytes(), "land 1's guild");
     // Fewer than six words tells `Invalid syntax`.
     alice.send_record(&slash(b"/build c 14043"));
     assert_eq!(
@@ -17372,7 +17413,8 @@ fn a_master_builds_on_its_land_and_clears_it() {
     // An unknown VID knocks nothing and tells nothing.
     alice.send_record(&slash(b"/build d 1"));
     alice.still("the unknown VID is quiet");
-    // The clear wipes the land: the notice tells, the row goes, the owner drops.
+    // The clear wipes the land: the notice tells and the cleared land fans its
+    // one-element list with no owner and no NAME (the guildless names none).
     alice.send_record(&slash(b"/clear_land"));
     let cleared = alice.read_game();
     assert_eq!(
@@ -17380,6 +17422,11 @@ fn a_master_builds_on_its_land_and_clears_it() {
         an_info_line(b"Guild Land(1) Cleared"),
         "the cleared notice"
     );
+    let fan = alice.read_game();
+    assert_eq!(fan[0], GC_LAND_LIST, "the cleared land's list: {fan:02x?}");
+    assert_eq!(fan.len(), 3 + LAND_LIST_ELEMENT_LEN);
+    assert_eq!(&fan[3..7], &1u32.to_le_bytes(), "land 1");
+    assert_eq!(&fan[23..27], &0u32.to_le_bytes(), "no owner");
     wait_for(
         &database,
         "(SELECT count(*) FROM building_object WHERE land_id = 1) = 0 AND (SELECT count(*) FROM          guild_land WHERE land_id = 1) = 0",
@@ -20627,6 +20674,7 @@ fn a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin() {
     assert_eq!(revive_add(&mut alice, affect)[0], GC_AFFECT_ADD);
     assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(&mut alice, [true, false, false, false, false]);
+    let _lands = read_land_lines(&mut alice);
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
@@ -23384,6 +23432,7 @@ fn a_gm_grants_an_empire_rate_and_every_client_hears_it() {
     let (_shown, _affect) = read_shown(&mut zulu);
     assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(&mut zulu, [false; 5]);
+    let _lands = read_land_lines(&mut zulu);
     let time = zulu.read_game();
     assert_eq!(time[0], GC_TIME);
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
@@ -23470,6 +23519,7 @@ fn a_gm_sets_a_flag_and_a_late_login_reads_it() {
     let (_shown, _affect) = read_shown(&mut zulu);
     assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(&mut zulu, [false; 5]);
+    let _lands = read_land_lines(&mut zulu);
     let time = zulu.read_game();
     assert_eq!(time[0], GC_TIME);
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
@@ -23695,6 +23745,7 @@ fn a_player_trades_the_six_letters_for_the_box_draw() {
     let (_shown, _affect) = read_shown(&mut zulu);
     assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(&mut zulu, [false; 5]);
+    let _lands = read_land_lines(&mut zulu);
     let time = zulu.read_game();
     assert_eq!(time[0], GC_TIME);
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
@@ -23892,6 +23943,7 @@ fn a_pkmode_line_lands_its_mode_with_an_update() {
     let (_shown, _affect) = read_shown(&mut zulu);
     assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(&mut zulu, [false; 5]);
+    let _lands = read_land_lines(&mut zulu);
     let time = zulu.read_game();
     assert_eq!(time[0], GC_TIME);
     assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
@@ -29922,6 +29974,7 @@ fn enter_with_hair_burst(server: &Server) -> Keyed {
     assert_eq!(&revive[1..5], &215u32.to_le_bytes(), "the revive kind");
     assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
     read_hide_restore(&mut alice, [false; 5]);
+    let _lands = read_land_lines(&mut alice);
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, alice.channel_number]);
     let notice = alice.read_game();
@@ -35048,6 +35101,36 @@ fn client_fish_event_shape(pos: u8) -> Vec<u8> {
     vec![CG_FISH_EVENT_SEND, 1, pos]
 }
 
+/// The map's guild lands behind the burst's hide lines: each owned land's NAME, then
+/// the one list — or nothing on a map with no land. The NAMEs lead the list, so the
+/// first record that is neither a NAME nor the list is pushed back unread.
+fn read_land_lines(keyed: &mut Keyed) -> Vec<Vec<u8>> {
+    let mut lines = Vec::new();
+    loop {
+        let record = keyed.read_game();
+        if record[0] == GC_GUILD && guild_subheader(&record) == GUILD_SUBHEADER_GC_GUILD_NAME {
+            lines.push(record);
+            continue;
+        }
+        if record[0] == GC_LAND_LIST {
+            assert_eq!(
+                word_sized(&record),
+                Some(record.len()),
+                "size is the whole record"
+            );
+            assert!(
+                record.len() >= 3 && (record.len() - 3) % LAND_LIST_ELEMENT_LEN == 0,
+                "a run of 24-byte elements: {}",
+                record.len()
+            );
+            lines.push(record);
+            return lines;
+        }
+        keyed.unread(vec![record]);
+        return lines;
+    }
+}
+
 /// The fish-event login report behind the burst's letters line: the enable record, then
 /// one `SHAPE_ADD` per main cell the board holds.
 fn read_fish_report(keyed: &mut Keyed) -> Vec<Vec<u8>> {
@@ -38808,15 +38891,26 @@ fn a_guild_master_claims_land_and_rebuilds_its_refinery() {
         ),
         "the triple, the claim and the owned reads"
     );
+    // The claim fans land 4's update behind the script: the one-element list with
+    // guild 7 (MyGuild, already named by the walk, so no NAME leads).
+    let fan = alice.read_game();
+    assert_eq!(fan[0], GC_LAND_LIST, "the claimed land's list: {fan:02x?}");
+    assert_eq!(fan.len(), 3 + LAND_LIST_ELEMENT_LEN);
+    assert_eq!(&fan[3..7], &4u32.to_le_bytes(), "land 4");
+    assert_eq!(&fan[23..27], &7u32.to_le_bytes(), "guild 7");
     alice.quiet("the claim step ends");
-    // The refinery's stone on land 5, which the boot stood with guild 7's NPC: a
-    // guildless clicker rebuilds it as 14045 (the melt quest's `with` fails for it,
-    // so only the probe runs).
+    rebuild_the_refinery_on_land_5(&server, &database);
+}
+
+/// The refinery's stone on land 5, which the boot stood with guild 7's NPC: a
+/// guildless clicker rebuilds it as 14045 (the melt quest's `with` fails for it,
+/// so only the probe runs).
+fn rebuild_the_refinery_on_land_5(server: &Server, database: &ScratchDatabase) {
     sql(
-        &database,
+        database,
         "UPDATE player SET x = 468200, y = 901610 WHERE name = 'Beta'",
     );
-    let (mut beta, _listed, entered) = enter_world_seeing(&server, b"alice", 1);
+    let (mut beta, _listed, entered) = enter_world_seeing(server, b"alice", 1);
     let refinery = shown_vid(&entered, 20_060, "land 5 shows its refinery stone");
     beta.send_record(&client_click(refinery));
     assert_eq!(
