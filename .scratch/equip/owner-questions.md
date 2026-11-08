@@ -531,3 +531,15 @@ owner answers.
     exactly one empire below it. No owner quest sets the flag. Shared Channel 99 hosts
     the SungZi maps 121 and 125 and the pass maps 118-120. The rest of questions 43
     and 55 stands. Nothing to decide; both rows port with the arms.
+58. **The three-way war never runs on your data (ledger 466; replaces question 57).**
+    Question 57 was wrong to call the two timers reachable. Your `locale/europe/map/index`
+    lists 59 maps and none of the forked maps 114-128, and the Rewrite builds every map from
+    that index, as legacy's `SECTREE_MANAGER` does. Shared Channel 99's `MAP_ALLOW` names
+    118-128, but none of them loads, so nobody can die on a forked map and
+    `CThreeWayWar::onDead` never runs. The rows `event.threeway_war.regen_mob_event` and
+    `event.questlua_global.warp_all_to_map_my_empire_event` are therefore `unused` again,
+    for this reason. Question 43's evidence for the second row was wrong: `onDead` does arm
+    it, but `onDead` never runs. `/threeway_info` and `/threeway_myinfo` work and show the
+    idle war. The war's elimination and victory arms wait on the SungZi and pass map folders.
+    Waits on it: whether you plan to add those map folders. If you do, the arms are the next
+    port; if not, confirm the two rows `unused`.

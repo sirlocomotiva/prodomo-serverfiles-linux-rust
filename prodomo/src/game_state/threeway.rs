@@ -11,8 +11,8 @@
 //!
 //! No owner quest starts the war (every `forked.*` name is `unused`, ledger 401), so
 //! the state is `Initialize`'s: regen flag 0, scores 0, no tokens, and the event
-//! indices read the unset flags as entry 0 of each list. That state is live: a player
-//! dying on a forked map runs [`GameState::threeway_dead`].
+//! indices read the unset flags as entry 0 of each list. A player dying on a forked map
+//! runs [`GameState::threeway_dead`], though the owner's map index loads no forked map.
 
 use common::vid::Vid;
 
@@ -162,10 +162,9 @@ impl GameState {
     /// a nonzero score is noticed to the SungZi map: on every kill on a test server,
     /// else on every fifth point.
     ///
-    /// The elimination and victory arms (`:332-552`) are not ported: they compare
-    /// the scores against the `threeway_war_kill_count` flag, which no owner quest
-    /// sets (every `forked.*` name is `unused`, ledger 401), so only a GM's
-    /// `/setflag` reaches them.
+    /// The elimination and victory arms (`:332-552`) are not ported. The owner's map
+    /// index loads none of the forked maps 114-128, so no death reaches this hook on
+    /// the owner's data (ledger 466); the arms wait on those map folders.
     pub(super) fn threeway_dead(&mut self, vid: Vid, killer: Option<super::death::Attacker>) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return;

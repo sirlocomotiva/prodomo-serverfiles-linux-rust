@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 465 (the three-way war's lines and death hook).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 466
+Last reviewed: 2026-11-08, after ledger section 466 (the three-way war's reach, corrected).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 467
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -500,7 +500,10 @@ seat with the multi-IP kick, the roster pair, and the warp-keep/disconnect-drop
 leave. Since 465 `cmd.threeway_info` and `cmd.threeway_myinfo` are `ported` and
 `sys.event.threeway_war` is `partial`: the full forked map index, the death hook up to
 the score notice, and the forked-map penalty skip; the elimination and victory arms are
-next, with the two timers ledger 465 moved back to `missing`. The
+next, with the two timers ledger 465 moved back to `missing`. Since 466 that is
+corrected: the owner's map index loads none of the forked maps 114-128, so the hook never
+runs on the owner's data, the two timers are `unused` again (owner question 58), and the
+arms wait on the map folders. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

@@ -48819,3 +48819,38 @@ Gates (2026-11-08):
 
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 466. The three-way war's reach, corrected
+
+Ledger 465 claimed too much. It said that in the owner's deployment a death on the pass maps
+118-120 or the SungZi maps 121 and 125 runs the three-way hook, because Shared Channel 99's
+`maps` list names them. It does not. The owner's `locale/europe/map/index` lists 59 maps and none
+of the forked maps 114-128; maps 1 and 113 are listed, as positive controls, and
+`gamedata::map_atlas::MapAtlas::load` builds every region from that index. No character can stand
+on a forked map, so `Dead`'s `isForked` is never true and `CThreeWayWar::onDead` never runs on the
+owner's Game data. Legacy's `SECTREE_MANAGER` builds from the same index, so this is parity, not
+a gap.
+
+The code of ledger 465 stands and is tested against the forked maps a test builds. It covers the
+two GM lines, which answer the idle war, the hook up to the score notice, and the forked-map
+penalty skip.
+
+Inventory changes:
+- `event.threeway_war.regen_mob_event` and `event.questlua_global.warp_all_to_map_my_empire_event`
+  are `unused` again, with this evidence. Their only arming sites are `onDead`'s elimination and
+  victory arms (`G/threeway_war.cpp:356-385`, `:410-418`, `:443-470`). Ledger 465 was still right
+  that ledger 429's sweep missed the `quest::`-qualified creates.
+- `sys.event.threeway_war` stays `partial`: the arms wait on the forked map folders.
+- Owner question 58 replaces question 57 and asks whether those folders are coming.
+- The `threeway.rs` docs no longer call the arms reachable through `/eventflag`.
+
+This slice changed no behaviour and no test count.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+the inventory tests (`cargo test -p parity --locked --offline -- inventory`), `cargo test
+--workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline
+-- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline` passed, and `legacy/` is clean. The full suite was not rerun: only doc comments,
+inventory notes, owner questions and the status changed since ledger 465's 4993-test run.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards
+no `prodomo\_%` database remained. No ADR changed.
