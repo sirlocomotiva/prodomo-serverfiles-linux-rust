@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 460 (the monarch powers).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 461
+Last reviewed: 2026-11-08, after ledger section 461 (the monarch naming).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 462
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -486,7 +486,11 @@ the group's rows and the sort. Since 458 `cmd.break_marriage` and `cmd.close_sho
 Since 459 `cmd.temp` and `cmd.check_mmoney` are `ported`: the test-server gate, the
 guards, and the store install. Since 460 `cmd.mto`, `cmd.mtr`, `cmd.mtax` and
 `cmd.mmob` are `ported`: the monarch, cooldown and money gates, the warps, the
-two tax broadcasts, and the summon list. The
+two tax broadcasts, and the summon list. Since 461 `cmd.setmonarch`,
+`cmd.rmmonarch`, `cmd.minfo` and `cmd.mnotice` are `ported` (implemented in 460's
+code commit, inventoried here) and `cmd.elect` and `cmd.rmcandidacy` are
+`unused` (the election tally reads nothing and its answers have no game-side
+reader). The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

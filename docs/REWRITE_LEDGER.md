@@ -48495,3 +48495,42 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
 and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
 No ADR changed.
+
+## 461. The monarch naming
+
+`cmd.setmonarch`, `cmd.rmmonarch`, `cmd.minfo`, `cmd.mnotice`, `cmd.elect` and
+`cmd.rmcandidacy`.
+
+- The naming lines were already implemented in 460's code commit (migration
+  `0038_monarch_identity`, the identity cells, the usage tellings, the
+  `[LS;560-563]` info, the empire notice and its `#ERR_CODE: 1432030623`
+  refusal, with the scenario `a_monarch_is_named_informed_and_cleared`), but
+  460's inventory edit named only the four powers. This slice inventories the
+  four naming lines as `ported` under that same scenario.
+- `/elect` and `/rmcandidacy` are `unused`: `do_elect`
+  (`G/cmd_general.cpp:2749-2752`) only sends `HEADER_GD_COME_TO_VOTE`, whose
+  tally fills an array it deletes without reading (`CMonarch::ElectMonarch`,
+  `D/Monarch.cpp:39-63`) and answers nothing; the candidacy answers
+  (`HEADER_DG_RMCANDIDACY`, `HEADER_DG_ELECT_MONARCH`,
+  `HEADER_DG_COME_TO_VOTE`) have no game-side case (no hit in `G/`, against
+  the positive control of the money cases at `G/input_db.cpp:2151-2164`), so
+  no client observes anything. The module note's "not ported" line is updated.
+
+Inventory: `cmd.setmonarch`, `cmd.rmmonarch`, `cmd.minfo` and `cmd.mnotice`
+are `ported`, `cmd.elect` and `cmd.rmcandidacy` are `unused` (commands 243
+ported / 19 missing).
+
+Tests: no new code, so no new scenario; the existing
+`a_monarch_is_named_informed_and_cleared` covers the four naming lines, and
+the absence sweep above is the evidence for the two `unused` rows. No
+mutants: nothing executable changed.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` (4975 passed, 0 failed in 45 targets), `cargo test --workspace
+--doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline`, no `prodomo\_%` database remained
+and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
+No ADR changed.

@@ -26,8 +26,11 @@
 //! (`D/Monarch.cpp:124`), so `/temp 5 1` writes past the array. The Rewrite refuses an
 //! empire outside 0 to 3.
 //!
-//! Not ported: `/elect` and `/rmcandidacy` (their answers have no game-side reader),
-//! `/siege`, and the `windate`; they wait for `sys.event.castle_monarch`.
+//! Not ported: `/siege` and the `windate`; they wait for `sys.event.castle_monarch`.
+//! `/elect` and `/rmcandidacy` are `unused`: the DB server's election tally reads
+//! nothing (`CMonarch::ElectMonarch` fills `s` and deletes it, `D/Monarch.cpp:39-63`)
+//! and the candidacy answers (`HEADER_DG_RMCANDIDACY`, `HEADER_DG_ELECT_MONARCH`,
+//! `HEADER_DG_COME_TO_VOTE`) have no game-side case, so no client observes anything.
 
 use common::vid::Vid;
 use protocol::gc_chat::CHAT_TYPE_INFO;
