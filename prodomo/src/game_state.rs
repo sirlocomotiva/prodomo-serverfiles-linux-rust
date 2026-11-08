@@ -76,6 +76,7 @@ mod detail_log;
 mod dice;
 mod dragon_soul;
 mod duel;
+mod dungeon_info;
 mod dungeons;
 mod emotion;
 mod empire_priv;
@@ -166,6 +167,7 @@ pub use daily_gift::{
     DailyGiftState, DailyGiftStep, DAILY_GIFT_CLOSE, DAILY_GIFT_COLLECT,
     DAILY_GIFT_COLLECT_USE_TICKET, DAILY_GIFT_OPEN,
 };
+pub use dungeon_info::DungeonRankAsk;
 pub use extend_inven::unlock_price;
 pub use fish_event::{FishBoard, FishCell, FishEventStep, FISH_EVENT_SLOTS};
 pub use gaya_system::{GAYA_CRAFT, GAYA_MARKET, GAYA_REFRESH};
@@ -1368,6 +1370,7 @@ impl GameState {
                 | GameCommand::DailyGiftEvent { .. }
                 | GameCommand::EventLine { .. }
                 | GameCommand::GiveReward { .. }
+                | GameCommand::DungeonRank { .. }
                 | GameCommand::LettersOpen { .. }
                 | GameCommand::Stat { .. }
                 | GameCommand::StatVal { .. }
@@ -2231,6 +2234,17 @@ impl GameState {
                 let trade = self.run_give_reward(vid, mover);
                 if reply.send(trade).is_err() {
                     debug!(?vid, "nobody was left to hear a reward's answer");
+                }
+            }
+            GameCommand::DungeonRank {
+                vid,
+                rest,
+                mover,
+                reply,
+            } => {
+                let ask = Self::ask_dungeon_rank(vid, &rest, mover);
+                if reply.send(ask).is_err() {
+                    debug!(?vid, "nobody was left to hear a dungeon rank ask");
                 }
             }
             GameCommand::LettersOpen { vid, mover, reply } => {

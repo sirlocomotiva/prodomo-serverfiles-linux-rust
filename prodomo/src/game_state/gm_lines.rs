@@ -118,7 +118,7 @@ pub(super) fn int_word(word: &[u8]) -> Option<i32> {
 /// `strtoul(word, NULL, 10)` on the 32-bit target: leading space and one sign skipped,
 /// garbage reading 0, a value past `ULONG_MAX` saturating to it, and a negative value
 /// negated as an unsigned `long`.
-fn unsigned_word(word: &[u8]) -> u32 {
+pub(super) fn unsigned_word(word: &[u8]) -> u32 {
     let Some(start) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
         return 0;
     };
@@ -249,6 +249,10 @@ impl GameState {
             }
             GmLine::RewardSystem => {
                 self.run_reward_system(vid, rest, mover);
+                None
+            }
+            GmLine::DungeonInfo => {
+                self.run_dungeon_info(vid, rest, mover);
                 None
             }
         }

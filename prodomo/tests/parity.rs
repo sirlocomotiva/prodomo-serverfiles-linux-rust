@@ -43551,3 +43551,67 @@ fn a_reward_update_opens_the_window_and_a_dog_kill_marks_nothing() {
     );
     check(&database, "(SELECT count(*) FROM reward_solo) = 0");
 }
+
+/// `cmd.dungeon_info` (`do_dungeon_info`, `G/cmd_general.cpp:4095-4117`): a bare line, a
+/// strange second word and a short `rank` stay silent; `rank 1092 0` fans
+/// `dungeon_log_info 1092 0 -` (no flag stored), then `test_cooldown` stamps the three
+/// cooldowns and fans the full line — level 70 sits in the 1092 and 1093 windows, so
+/// two cells with the stored counts — and `update` fans the full line again.
+#[test]
+fn a_dungeon_info_rank_cooldown_and_update_fan_their_lines() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 70 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id,           'dungeon.1092_completed'::bytea, 5 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id,           'dungeon.1092_damage'::bytea, 322 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info"));
+    alpha.still("a bare line stays silent");
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info rank"));
+    alpha.still("a short rank stays silent");
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info rank 1092"));
+    alpha.still("a rank without its rank stays silent");
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info rank 1092 0"));
+    assert_eq!(
+        read_chat_past_ambient(&mut alpha),
+        a_command_line(b"dungeon_log_info 1092 0 Alpha|5|70#"),
+        "the stored flag ranks its writer"
+    );
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info test_cooldown"));
+    let stamped = read_chat_past_ambient(&mut alpha);
+    let text = &stamped[GC_CHAT_WIRE_SIZE..];
+    assert!(
+        text.starts_with(b"dungeon_info_cooldown 1 1092|"),
+        "the 1092 cell leads: {text:?}"
+    );
+    assert!(
+        text.windows(b"|5|0|322#1093|".len())
+            .any(|window| window == b"|5|0|322#1093|"),
+        "the counts ride, and 1093 follows: {text:?}"
+    );
+    assert!(
+        text.ends_with(b"|0|0|0#"),
+        "1093's counts are empty: {text:?}"
+    );
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info update"));
+    assert_eq!(
+        read_chat_past_ambient(&mut alpha),
+        stamped,
+        "update fans the full line again"
+    );
+}

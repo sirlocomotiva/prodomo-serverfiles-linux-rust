@@ -145,3 +145,67 @@ async fn a_flag_name_is_stored_as_its_exact_bytes() {
         vec![flag(&name, 5)]
     );
 }
+
+/// The dungeon rank reads the store (`SendDungeonRank`'s query,
+/// `G/char_manager.cpp:1346-1350`): the flag's rows with a positive value, most first
+/// (rank 1: least first), each with its Name and level; a zero value is no row and a
+/// missing flag reads empty.
+#[tokio::test]
+async fn the_dungeon_rank_reads_the_flags_most_first() {
+    use db::quest_flags::{dungeon_rank, StoredDungeonRank};
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let alpha = player(store, "acctdr1", "DrAlpha").await;
+    let beta = player(store, "acctdr2", "DrBeta").await;
+    save_flags(store, alpha, &[flag(b"dungeon.1092_completed", 5)])
+        .await
+        .unwrap();
+    save_flags(store, beta, &[flag(b"dungeon.1092_completed", 9)])
+        .await
+        .unwrap();
+    assert_eq!(
+        dungeon_rank(store, b"dungeon.1092_completed", 0)
+            .await
+            .unwrap(),
+        vec![
+            StoredDungeonRank {
+                name: b"DrBeta".to_vec(),
+                level: 1,
+                value: 9,
+            },
+            StoredDungeonRank {
+                name: b"DrAlpha".to_vec(),
+                level: 1,
+                value: 5,
+            },
+        ],
+        "most first"
+    );
+    assert_eq!(
+        dungeon_rank(store, b"dungeon.1092_completed", 1)
+            .await
+            .unwrap(),
+        vec![
+            StoredDungeonRank {
+                name: b"DrAlpha".to_vec(),
+                level: 1,
+                value: 5,
+            },
+            StoredDungeonRank {
+                name: b"DrBeta".to_vec(),
+                level: 1,
+                value: 9,
+            },
+        ],
+        "rank 1 reads least first"
+    );
+    assert!(
+        dungeon_rank(store, b"dungeon.1092_fastest", 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a missing flag reads empty"
+    );
+}

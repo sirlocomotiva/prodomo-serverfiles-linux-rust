@@ -48602,3 +48602,62 @@ cargo doc --workspace --no-deps --locked --offline`, no `prodomo\_%` database
 remained and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin`
 pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+## 463. The dungeon board (`cmd.dungeon_info`)
+
+`do_dungeon_info` (`G/cmd_general.cpp:4095-4117`), `CHARACTER::SendDungeonCooldown`
+(`G/char.cpp:11818-11863`), `CHARACTER_MANAGER::SendDungeonRank`
+(`G/char_manager.cpp:1309-1388`), the six `m_mapDungeonList` rows
+(`G/constants.cpp:1340-1347`), and the `Damage` arm (`G/char_battle.cpp:2322-2336`).
+
+- The six rows are compiled in (`DUNGEON_ROWS`, in the map's order): 1092
+  (60-75, `SpiderDungeon`), 1093 (40-75, `deviltower_zone`), 2598 (75-90,
+  `devilcatacomb_zone`), 2692, 6001 and 6418 (100-120, `meley`, `hydra`, `jotun`).
+- Fewer than two words stays silent. `rank <mob> <rank>` parses by
+  `str_to_number(DWORD)` and `str_to_number(BYTE)` (`C/utils.h:20-26`, `:52-58`;
+  `unsigned_word` is now shared with `gm_lines`), stays silent past a parse miss, a
+  boss off the six or a rank past 2, else asks the world for the flag and the
+  descriptor reads it from the store and fans
+  `dungeon_log_info <mob> <rank> <name|value|level#... or ->`. The rank's flag is
+  `dungeon.<mob>_completed/fastest/damage`; rank 1 orders least first, the others
+  most first; positive values only; the join drops flags whose player row is gone.
+- `test_cooldown` stamps `jotun/hydra/meley.cooldown` at now + 30/60/90 and fans the
+  full line; `update` fans the full line. Both gate on `ch->IsGM()`, which the
+  always-on test-server mode always passes, so both always run. The full line lists
+  every row the caller's level sits in as
+  `<boss>|<cooldown-now>|<completed>|<fastest>|<damage>#`, or `-` with none; a boss
+  argument fans that row's single line.
+- The `Damage` arm runs in `fight.rs` before the damage record: a player attacker on
+  one of the six whose hit tops the `dungeon.<race>_damage` flag raises the flag and
+  fans the boss's single line. The comparison is strict (`<`), pinned by the unit
+  test.
+- The 5-minute `m_mapDungeonRank` cache is not ported: every `rank` line reads the
+  store (a recorded Divergence). The ranks therefore see what the last save wrote,
+  as the legacy's `DirectQuery` sees what the DB process wrote.
+- The wiring needed two fixes found by the scenario's first runs: `DungeonRank` had
+  no `is_chat_line_tail` arm, so the ask never reached the world and the short rank
+  closed the connection; and the cooldown line's first draft asserted literal
+  `1093|0|...` cells, but an unset cooldown is `0 - now`, a large negative — the
+  scenario pins the counts' window instead.
+
+Inventory: `cmd.dungeon_info` is `ported` (commands 245 ported / 17 missing).
+
+Tests: scenario `a_dungeon_info_rank_cooldown_and_update_fan_their_lines` (the bare
+line, the short rank and the rank without its rank stay silent; `rank 1092 0` fans
+`Alpha|5|70#` from the stored flag; `test_cooldown` stamps and fans the two cells
+at level 70; `update` fans the same line again), the store test
+`the_dungeon_rank_reads_the_flags_most_first` (most/least-first, the missing flag's
+empty read), and three unit tests (the ask's parse, the six rows, the strict
+comparison with the single line's bytes). Mutants: the rank guard, the flag name
+and the store's order killed by the unit/store tests; the rank verb killed by the
+scenario; the `>=`/`>` flip killed by the unit test. The `fight.rs` hook removal
+survives the unit tests, as designed: only the scenario's wire stages a hit.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` (4985 passed, 0 failed in 46 targets), `cargo test --workspace
+--doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline`, no `prodomo\_%` database remained
+and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
+No ADR changed.

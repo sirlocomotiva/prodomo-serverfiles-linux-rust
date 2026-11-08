@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 462 (the reward window).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 463
+Last reviewed: 2026-11-08, after ledger section 463 (the dungeon board).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 464
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -492,7 +492,9 @@ code commit, inventoried here) and `cmd.elect` and `cmd.rmcandidacy` are
 `unused` (the election tally reads nothing and its answers have no game-side
 reader). Since 462 `cmd.reward_system` and `sys.custom.reward` are `ported`: the
 `RewardData` open pair, the solo/global row tables with the completion prize, and
-the kill and level-up call sites. The
+the kill and level-up call sites. Since 463 `cmd.dungeon_info` is `ported`: the
+six-row table, the store-read `dungeon_log_info` rank, the `dungeon_info_cooldown`
+line with the `test_cooldown` stamps, and the `Damage` arm. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -919,6 +921,7 @@ owner should know about (178.5):
 | A cube category past 100 bytes is truncated to the wire, and `/reload c` reads before it swaps (ledger 448): a bad or missing file keeps the live recipes, silently. | `memcpy` of the whole string into `char[100]` (`G/cuberenewal.cpp:559`); `Cube_init` destroys the proto first, so a miss leaves no recipes (`G/cmd_gm.cpp:2716-2719`). |
 
 | The `envanter` column refuses unlocks past 18 at the store (ledger 449): a hand-written row cannot name cells past the base inventory. | Legacy's `player.envanter` is an unchecked `INT` (`player.sql:866`), copied straight into `m_points.envanter` (`G/char.cpp:2346`). |
+| Every `/dungeon_info rank` line reads the store (ledger 463): the 5-minute `m_mapDungeonRank` cache is not ported. | `SendDungeonRank` caches each rank for 5 minutes (`G/char_manager.cpp:1340-1380`). |
 ## Legacy defects not to reproduce
 
 - When a character enters the game with no movable point within 1000 of its saved position,

@@ -240,7 +240,8 @@ impl CommandEntry {
             | "do_monarch_tax"
             | "do_monarch_mob"
             | "do_monarch_notice"
-            | "do_reward_system" => self.gm_tail_name(),
+            | "do_reward_system"
+            | "do_dungeon_info" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -324,6 +325,7 @@ impl CommandEntry {
             "do_monarch_mob" => Command::GmLine(GmLine::MonarchMob),
             "do_monarch_notice" => Command::GmLine(GmLine::MonarchNotice),
             "do_reward_system" => Command::GmLine(GmLine::RewardSystem),
+            "do_dungeon_info" => Command::GmLine(GmLine::DungeonInfo),
             _ => Command::NotPorted(self.handler),
         }
     }

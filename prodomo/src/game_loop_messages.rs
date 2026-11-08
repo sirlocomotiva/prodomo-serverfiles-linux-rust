@@ -1758,6 +1758,20 @@ pub enum GameCommand {
         /// Where the game thread reports the rows, or `None` when nothing is stored.
         reply: oneshot::Sender<Option<crate::game_state::GmRows>>,
     },
+    /// Asks the world for one dungeon rank's flag (`/dungeon_info rank <mob> <rank>`,
+    /// `do_dungeon_info`, `G/cmd_general.cpp:4099-4107`): silent past a parse or table
+    /// miss, else the flag the descriptor reads and fans. See
+    /// `game_state::dungeon_info`.
+    DungeonRank {
+        /// The VID of the asking character.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the flag to read, or `None` on silence.
+        reply: oneshot::Sender<Option<crate::game_state::DungeonRankAsk>>,
+    },
     /// Run one `/letters_open` line: the caller hears the box's table and opens the
     /// window. See `game_state::letters`.
     LettersOpen {
@@ -2808,6 +2822,7 @@ impl GameCommand {
                 | GameCommand::GiveReward { .. }
                 | GameCommand::SocketItem { .. }
                 | GameCommand::GmLine { .. }
+                | GameCommand::DungeonRank { .. }
                 | GameCommand::LettersOpen { .. }
                 | GameCommand::Stat { .. }
                 | GameCommand::StatVal { .. }
@@ -2979,6 +2994,8 @@ pub enum GmLine {
     MonarchNotice,
     /// `/reward_system` (`do_reward_system`), a player's line.
     RewardSystem,
+    /// `/dungeon_info` (`do_dungeon_info`), a player's line.
+    DungeonInfo,
 }
 
 /// Which restart a dead player asks for.
@@ -6306,6 +6323,29 @@ impl GameLoopController {
         self.send_command(GameCommand::GmLine {
             vid,
             line,
+            rest,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world for one dungeon rank's flag. The answer is the flag the caller
+    /// reads and fans, or `None` on silence.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn dungeon_rank(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        mover: crate::item_move::Mover,
+    ) -> Result<Option<crate::game_state::DungeonRankAsk>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DungeonRank {
+            vid,
             rest,
             mover,
             reply,

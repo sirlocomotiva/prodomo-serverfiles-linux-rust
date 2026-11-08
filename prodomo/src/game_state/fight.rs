@@ -1095,6 +1095,7 @@ impl GameState {
                 HitEvent::VictimHp => self.broadcast_npc_target(victim),
                 HitEvent::Chat(index) => self.monster_say(victim, index),
                 HitEvent::DamageInfo { damage, flag } => {
+                    self.dungeon_damage(attacker, victim, damage);
                     self.send_damage_packet(victim, attacker, damage, flag);
                     self.log_npc_damage(attacker, victim);
                 }

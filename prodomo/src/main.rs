@@ -10582,6 +10582,9 @@ where
         LineCommand::Polyitem => polyitem_step(session, addr, context, held, rest).await,
         LineCommand::SocketItem => socket_item_step(session, addr, context, held, rest).await,
         LineCommand::SaveAti => save_ati_step(session, addr, context, held, rest).await,
+        LineCommand::GmLine(prodomo::game_loop_messages::GmLine::DungeonInfo) => {
+            dungeon_info_step(session, addr, context, held, rest).await
+        }
         LineCommand::GmLine(line) => gm_line_step(addr, context, held, line, rest).await,
         LineCommand::ForgetMe => forget_me_step(addr, context, held).await,
         LineCommand::Aggregate => aggregate_step(addr, context, held).await,
@@ -13274,6 +13277,84 @@ where
     true
 }
 
+/// `/dungeon_info ...` (`do_dungeon_info`, `G/cmd_general.cpp:4095-4117`): the `rank`
+/// arm asks the world for the flag, reads the rank from the store and fans
+/// `dungeon_log_info <mob> <rank> <cells or ->`; every other word runs as a small GM
+/// line (the cooldown arms) through the world.
+async fn dungeon_info_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use prodomo::chat_line::Arg;
+    let Some(vid) = held.world else {
+        info!(%addr, "Dungeon info without a character in the world; ignoring");
+        return true;
+    };
+    let (word, _) = prodomo::command::one_argument(&rest);
+    if word != b"rank" {
+        return gm_line_step(
+            addr,
+            context,
+            held,
+            prodomo::game_loop_messages::GmLine::DungeonInfo,
+            rest,
+        )
+        .await;
+    }
+    let ask = match context.game.dungeon_rank(vid, rest, item_actor(held)).await {
+        Ok(ask) => ask,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a dungeon rank; closing");
+            return false;
+        }
+    };
+    let Some(ask) = ask else {
+        info!(%addr, "Dungeon rank asked nothing");
+        return true;
+    };
+    let rows = match db::quest_flags::dungeon_rank(&context.store, &ask.flag, ask.rank).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%addr, %error, "The dungeon rank could not be read; closing");
+            return false;
+        }
+    };
+    let mut cells = Vec::new();
+    for row in &rows {
+        cells.extend_from_slice(&row.name);
+        cells.push(b'|');
+        cells.extend_from_slice(row.value.to_string().as_bytes());
+        cells.push(b'|');
+        cells.extend_from_slice(row.level.to_string().as_bytes());
+        cells.push(b'#');
+    }
+    if cells.is_empty() {
+        cells.extend_from_slice(b"-");
+    }
+    let line = prodomo::chat_line::chat_packet(
+        ask.mover.recipient(&context.locale),
+        CHAT_TYPE_COMMAND,
+        b"dungeon_log_info %u %u %s",
+        &[
+            Arg::Int(i64::from(ask.mob)),
+            Arg::Int(i64::from(ask.rank)),
+            Arg::Text(&cells),
+        ],
+    );
+    if let Err(error) = send_all(session, &[line]).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    info!(%addr, "Dungeon rank fanned");
+    true
+}
+
 /// The small GM lines of `game_state::gm_lines`: the world runs the line and tells what
 /// it tells through the outbox; an item write's rows are stored here, and the skills a
 /// clear zeroed lose their rows.
@@ -13288,6 +13369,7 @@ async fn gm_line_step(
         info!(%addr, ?line, "GM line without a character in the world; ignoring");
         return true;
     };
+
     // `/observer` flips both sides' flag: the world's when it runs the line, and this one
     // before it is asked, so the records after the line are gated by the new mode. The line
     // cannot fail, so the pure toggle cannot desync.

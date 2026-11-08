@@ -93,3 +93,52 @@ pub async fn save_flags(
     transaction.commit().await?;
     Ok(())
 }
+
+/// One dungeon-rank place: the Name, the level and the value
+/// (`TDungeonRank`, `C/tables.h:1845-1850`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDungeonRank {
+    /// The Name, as stored.
+    pub name: Vec<u8>,
+    /// Its level on the `player` row.
+    pub level: i16,
+    /// The flag's value.
+    pub value: i32,
+}
+
+/// The dungeon rank of one flag (`SendDungeonRank`'s query,
+/// `G/char_manager.cpp:1346-1350`): the ten rows with a positive value of flag `name`,
+/// most first (`rank` 1: least first), each with the Name and level of its `player` row.
+///
+/// The query reads the store, so it sees what the last save wrote, as the legacy's
+/// `DirectQuery` sees what the DB process wrote. A flag value that fits no legacy row
+/// is no row here either: positive values only, and the join drops a flag whose player
+/// row is gone.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`] when the store cannot be read.
+pub async fn dungeon_rank(
+    store: &Store,
+    name: &[u8],
+    rank: u8,
+) -> Result<Vec<StoredDungeonRank>, AccountError> {
+    let order = if rank == 1 { "ASC" } else { "DESC" };
+    let query = format!(
+        "SELECT p.name, p.level, q.value FROM quest_flag q JOIN player p ON p.id = q.player_id \
+         WHERE q.name = $1 AND q.value > 0 ORDER BY q.value {order} LIMIT 10"
+    );
+    let rows = sqlx::query(&query)
+        .bind(name)
+        .fetch_all(store.pool())
+        .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(StoredDungeonRank {
+                name: row.try_get::<String, _>("name")?.into_bytes(),
+                level: row.try_get("level")?,
+                value: row.try_get("value")?,
+            })
+        })
+        .collect()
+}
