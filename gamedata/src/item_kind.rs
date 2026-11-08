@@ -108,6 +108,12 @@ pub const USE_POTION: i32 = 0;
 pub const USE_TUNING: i32 = 2;
 /// `USE_DETACHMENT` (`C/item_length.h:268`): a stone or sash detachment scroll.
 pub const USE_DETACHMENT: i32 = 14;
+/// `USE_ELEMENT_UPGRADE` (`C/item_length.h:293`): an element upgrade scroll.
+pub const USE_ELEMENT_UPGRADE: i32 = 36;
+/// `USE_ELEMENT_DOWNGRADE` (`C/item_length.h:294`): an element downgrade scroll.
+pub const USE_ELEMENT_DOWNGRADE: i32 = 37;
+/// `USE_ELEMENT_CHANGE` (`C/item_length.h:295`): an element change scroll.
+pub const USE_ELEMENT_CHANGE: i32 = 38;
 /// `USE_BAIT`: a bait, which `UseItemEx` puts on the worn rod (`G/char_item.cpp:6800-6825`).
 pub const USE_BAIT: i32 = 6;
 /// `USE_ABILITY_UP`: a potion that raises a point for a while.

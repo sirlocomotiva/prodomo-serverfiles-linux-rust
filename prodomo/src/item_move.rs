@@ -436,6 +436,10 @@ pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
                 id: *id,
                 look: *look,
             },
+            ItemChange::Elemented { id, element } => RowChange::Elemented {
+                id: *id,
+                element: *element,
+            },
             ItemChange::Stored { id, account, pos } => RowChange::Stored {
                 id: *id,
                 account: *account,

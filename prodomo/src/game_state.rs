@@ -124,6 +124,7 @@ mod quest_quiet;
 mod quest_target;
 mod quests;
 mod rank_global;
+mod refine_element;
 mod regen;
 mod reload;
 mod reward;
@@ -186,6 +187,11 @@ pub use protected::{
 };
 pub use quests::{QuestStep, QuestStepOutcome, Quests};
 pub use rank_global::SeasonEnd;
+pub use refine_element::{
+    REFINE_ELEMENT_CHANGE, REFINE_ELEMENT_CHANGE_DONE, REFINE_ELEMENT_CLOSE,
+    REFINE_ELEMENT_DOWNGRADE, REFINE_ELEMENT_DOWNGRADE_DONE, REFINE_ELEMENT_FAILED,
+    REFINE_ELEMENT_UPGRADE, REFINE_ELEMENT_UPGRADE_DONE,
+};
 pub use reload::ReloadRead;
 pub use safebox::{
     SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
@@ -598,6 +604,12 @@ pub struct GameState {
     /// (`m_iRefineAdditionalCell`), which closing the window leaves. A character with no
     /// entry has none: a smith's window sets -1, and legacy never initialises the field.
     refine_scroll: HashMap<common::vid::Vid, u16>,
+    /// The element window each character has open, keyed by its VID: the scroll cell,
+    /// the weapon cell and the kind (`m_sRefineElementSrcCell`, `m_sRefineElementDstCell`,
+    /// `m_cRefineElementType`, `G/char.h:2501-2503`). Absent when no window stands.
+    element_windows: HashMap<common::vid::Vid, (u16, u16, u8)>,
+    /// The lines the last element-window refusal chatted, held while the arms run.
+    element_lines: Option<Vec<Vec<u8>>>,
     /// The characters whose 6th/7th-bonus window stands open
     /// (`m_bIsOpenAttr67Add`), by VID.
     attr67_open: std::collections::HashSet<common::vid::Vid>,
@@ -2372,6 +2384,7 @@ impl GameState {
             | GameCommand::DropGold { .. }
             | GameCommand::DestroyItem { .. }
             | GameCommand::Refine { .. }
+            | GameCommand::RefineElement { .. }
             | GameCommand::Attr67 { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
@@ -4381,14 +4394,8 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.destroy_item(vid, at, mover));
             }
-            GameCommand::Refine {
-                vid,
-                pos,
-                refine_type,
-                mover,
-                reply,
-            } => {
-                answer_item_step(vid, reply, self.refine(vid, pos, refine_type, mover));
+            command @ (GameCommand::Refine { .. } | GameCommand::RefineElement { .. }) => {
+                self.apply_refine_step(command);
             }
             GameCommand::Attr67 {
                 vid,
@@ -4460,6 +4467,31 @@ impl GameState {
             | GameCommand::ExtendInven { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_event_step(command),
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
+        }
+    }
+
+    /// The refines of [`GameState::apply_ground`], split out so neither trips the line
+    /// lint: the smith's and the element's.
+    fn apply_refine_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::Refine {
+                vid,
+                pos,
+                refine_type,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.refine(vid, pos, refine_type, mover));
+            }
+            GameCommand::RefineElement {
+                vid,
+                arg,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.refine_element(vid, arg, mover));
+            }
+            _ => debug_assert!(false, "only refines reach apply_refine_step"),
         }
     }
 

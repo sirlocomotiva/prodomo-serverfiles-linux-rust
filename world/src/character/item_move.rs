@@ -312,6 +312,14 @@ pub enum ItemChange {
         /// Its transmutation now: the look's vnum, or 0 for none.
         look: u32,
     },
+    /// The item's element changed: an element scroll laid its packed element onto it
+    /// (`CItem::SetRefineElement`, `G/item.cpp:288-293`).
+    Elemented {
+        /// The item.
+        id: ItemId,
+        /// Its element now, packed `%d%d%02d%02d%d%02d`, or 0 for none.
+        element: u32,
+    },
     /// A trade gave the item to another character, which stores it here.
     Given {
         /// The item.

@@ -1630,6 +1630,7 @@ fn game_len(header: u8) -> usize {
         GC_WHISPER_DETAILS => WHISPER_DETAILS_LEN,
         GC_TARGET_INFO => TARGET_INFO_LEN,
         GC_REFINE_INFORMATION => REFINE_INFORMATION_LEN,
+        GC_REFINE_ELEMENT => REFINE_ELEMENT_LEN,
         GC_QUEST_CONFIRM => QUEST_CONFIRM_LEN,
         GC_FISHING => FISHING_LEN,
         GC_FISH_EVENT_INFO => FISH_EVENT_INFO_LEN,
@@ -33781,6 +33782,12 @@ fn the_target_window_lists_what_a_monster_may_drop() {
 const CG_REFINE: u8 = 0x60;
 /// The server's `HEADER_GC_REFINE_INFORMATION` (`G/packet.h:192`), the client's `_NEW` byte.
 const GC_REFINE_INFORMATION: u8 = 0x77;
+/// `HEADER_CG_REFINE_ELEMENT` (`G/packet.h`): the header, then the argument.
+const CG_REFINE_ELEMENT: u8 = 227;
+/// `HEADER_GC_REFINE_ELEMENT`: the header, the scroll and weapon cells, the type.
+const GC_REFINE_ELEMENT: u8 = 0xe4;
+/// `TPacketGCRefineElement`: 1 + 2 + 2 + 1.
+const REFINE_ELEMENT_LEN: usize = 6;
 /// `TPacketGCRefineInformation`: three bytes, two DWORDs, the count byte, two ints and five
 /// eight-byte materials.
 const REFINE_INFORMATION_LEN: usize = 1 + 1 + 1 + 4 + 4 + 1 + 4 + 4 + 5 * 8;
@@ -33788,6 +33795,21 @@ const REFINE_INFORMATION_LEN: usize = 1 + 1 + 1 + 4 + 4 + 1 + 4 + 4 + 5 * 8;
 /// A `CG_REFINE` for the inventory `cell` with `refine_type`.
 fn client_refine(cell: u8, refine_type: u8) -> Vec<u8> {
     vec![CG_REFINE, cell, refine_type]
+}
+
+/// A `CG_REFINE_ELEMENT` with `arg`: the change's element, or 255 to close.
+fn client_refine_element(arg: u8) -> Vec<u8> {
+    vec![CG_REFINE_ELEMENT, arg]
+}
+
+/// The `GC_REFINE_ELEMENT` that lands `element_type` for the scroll at `src` on the
+/// weapon at `dst`.
+fn server_refine_element(src: u16, dst: u16, element_type: u8) -> Vec<u8> {
+    let mut out = vec![GC_REFINE_ELEMENT];
+    out.extend_from_slice(&src.to_le_bytes());
+    out.extend_from_slice(&dst.to_le_bytes());
+    out.push(element_type);
+    out
 }
 
 /// The smith's window for the normal refine of `src` in `cell` into `result`, at `cost` and
@@ -34075,6 +34097,119 @@ fn a_stone_and_a_blessing_are_used_on_a_sword() {
     wait_for(
         &database,
         "SELECT gold = 49400 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `cg.game.refine_element`, `gc.window.refine_element`: an element scroll (56004, lightning)
+/// used on the +7 sword (17) stands the upgrade window for it; `CG_REFINE_ELEMENT` with a
+/// change's element lands the upgrade, spending the scroll and the 3,000,000 fee; a hex
+/// scroll (56008) used on the sword stands the downgrade window, and the downgrade at +1
+/// clears the element. A scroll used on the +6 sword is refused with the min-level line;
+/// closing the window chats nothing.
+#[test]
+fn an_element_scroll_upgrades_and_a_hex_scroll_downgrades() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 20000000 WHERE name = 'Alpha'",
+    );
+    for (id, cell, count, vnum) in [
+        (41, 0, 1, 17),
+        (42, 2, 2, 56_004),
+        (43, 3, 1, 56_008),
+        (44, 4, 1, 16),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id,                  1, {cell}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let own = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
+
+    // When: Alpha uses the lightning scroll on the +7 sword. Then: the upgrade window.
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(alpha.read_game(), server_refine_element(2, 0, 0));
+    alpha.quiet("the window stands alone");
+    // When: Alpha answers with a change's element. Then: the upgrade lands anyway: the
+    // scroll goes, the sword's element sets, the landed answer, and the fee goes.
+    alpha.send_record(&client_refine_element(4));
+    let scroll = alpha.read_game();
+    assert_eq!(scroll[..6], [ITEM_UPDATE, 1, 2, 0, 1, 0], "one scroll left");
+    let sword = alpha.read_game();
+    assert_eq!(sword[..4], [ITEM_UPDATE, 1, 0, 0], "the sword updates");
+    let element = u32::from_le_bytes(sword[6..10].try_into().expect("an element"));
+    let kind = element / 100_000_000;
+    let plus = element / 10_000_000 % 10;
+    assert_eq!((kind, plus), (1, 1), "lightning +1: {element}");
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_element(2, 0, 10),
+        "the landed answer"
+    );
+    assert_eq!(alpha.read_game(), gold_change(own, 0, 17_000_000));
+    alpha.quiet("the upgrade's records end with the fee");
+    // The landed element is stored on the row, not only on the wire.
+    check(
+        &database,
+        "SELECT refine_element > 100000000 AND refine_element < 200000000 FROM item WHERE id = 41",
+    );
+
+    // When: Alpha uses the hex scroll on the sword and downgrades. Then: the downgrade
+    // window, the scroll clears, the element clears, the landed answer, and the fee goes.
+    alpha.send_record(&client_use_to_item(3, 0));
+    assert_eq!(alpha.read_game(), server_refine_element(3, 0, 1));
+    alpha.send_record(&client_refine_element(0));
+    let hex = alpha.read_game();
+    assert_eq!(
+        hex[..8],
+        [ITEM_SET, 1, 3, 0, 0, 0, 0, 0],
+        "the hex scroll clears"
+    );
+    let bare = alpha.read_game();
+    assert_eq!(bare[..4], [ITEM_UPDATE, 1, 0, 0], "the sword updates");
+    assert_eq!(
+        u32::from_le_bytes(bare[6..10].try_into().expect("an element")),
+        0,
+        "the downgrade at +1 clears"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_element(3, 0, 12),
+        "the landed downgrade"
+    );
+    assert_eq!(alpha.read_game(), gold_change(own, 0, 7_000_000));
+    alpha.quiet("the downgrade's records end with the fee");
+
+    // When: Alpha uses the scroll on the +6 sword. Then: the min-level line only.
+    alpha.send_record(&client_use_to_item(2, 4));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"The elemental enchantment is only available for +7 weapons or higher.")
+    );
+    alpha.quiet("the refused scroll changes nothing");
+    // When: Alpha closes. Then: nothing answers.
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(alpha.read_game(), server_refine_element(2, 0, 0));
+    alpha.send_record(&client_refine_element(255));
+    alpha.quiet("the close answers nothing");
+    check(
+        &database,
+        "SELECT refine_element = 0 FROM item WHERE id = 41",
+    );
+    drop(alpha);
+    wait_for(
+        &database,
+        "SELECT gold = 7000000 FROM player WHERE name = 'Alpha'",
     );
 }
 

@@ -513,6 +513,18 @@ pub enum GameCommand {
         /// Where the game thread reports what the refine did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_REFINE_ELEMENT` for the character online under `vid`, answered as a
+    /// move is.
+    RefineElement {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The request's argument: the change's element, or 255 for a closed window.
+        arg: u8,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the refine did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_ATTR67_ADD` for the character online under `vid`, answered as a move is.
     Attr67 {
         /// The VID of the character whose client sent the request.
@@ -3969,6 +3981,29 @@ impl GameLoopController {
             vid,
             pos,
             refine_type,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run an element-refine request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn refine_element(
+        &self,
+        vid: common::vid::Vid,
+        arg: u8,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::RefineElement {
+            vid,
+            arg,
             mover,
             reply,
         })

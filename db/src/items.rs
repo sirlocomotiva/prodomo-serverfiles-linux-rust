@@ -964,6 +964,13 @@ pub enum RowChange {
         /// Its transmutation now: the look's vnum, or 0 for none.
         look: u32,
     },
+    /// The item's element changed: an element scroll laid its packed element onto it.
+    Elemented {
+        /// The item.
+        id: u32,
+        /// Its element now, packed `%d%d%02d%02d%d%02d`, or 0 for none.
+        element: u32,
+    },
     /// A trade gave the item to another character, into this window and cell, in stored
     /// terms (`CExchange::Done`, `G/exchange.cpp`). Only [`apply_exchange`] writes one, and
     /// only to another side of the same Transfer.
@@ -1565,6 +1572,17 @@ async fn write_change(
                     .rows_affected();
             (*id, touched)
         }
+        RowChange::Elemented { id, element } => {
+            let touched =
+                sqlx::query("UPDATE item SET refine_element = $3 WHERE id = $1 AND owner_id = $2")
+                    .bind(i64::from(*id))
+                    .bind(i64::from(owner_id))
+                    .bind(i64::from(*element))
+                    .execute(&mut *connection)
+                    .await?
+                    .rows_affected();
+            (*id, touched)
+        }
         change @ (RowChange::Given { .. }
         | RowChange::Stored { .. }
         | RowChange::Retrieved { .. }) => {
@@ -1716,6 +1734,7 @@ fn taken_cell(owner_id: u32, sides: &[TransferSide<'_>], shared: &[(i16, i64)]) 
                 | RowChange::Sockets { .. }
                 | RowChange::Attributes { .. }
                 | RowChange::Transmuted { .. }
+                | RowChange::Elemented { .. }
                 | RowChange::Stored { .. } => return None,
             };
             (holder == owner_id).then_some((id, window_type, pos))
@@ -1775,6 +1794,7 @@ fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(),
         | RowChange::Sockets { .. }
         | RowChange::Attributes { .. }
         | RowChange::Transmuted { .. }
+        | RowChange::Elemented { .. }
         | RowChange::Stored { .. } => {}
     }
     Ok(())

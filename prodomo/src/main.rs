@@ -112,8 +112,8 @@ use protocol::cg_account::{
     CgEnterGame, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
 };
 use protocol::cg_arg_u8::CgChangeLanguage;
-use protocol::cg_arg_u8::CgPremiumPlayers;
 use protocol::cg_arg_u8::CgRequestEventData;
+use protocol::cg_arg_u8::{CgPremiumPlayers, CgRefineElement};
 use protocol::cg_attack::CgAttack;
 use protocol::cg_biologist::CgBiologist;
 use protocol::cg_change_look::CgChangeLook;
@@ -143,7 +143,7 @@ use protocol::cg_inventory::{
     HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
     HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS,
     HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
-    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REFINE_ELEMENT,
     HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
     HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
     HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
@@ -1313,14 +1313,15 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// Whether `header` is `CG_ITEM_USE`, a destroy, a gift, a refine, a fishing record, a
-/// fish-event record, a ground step or a quickslot request.
+/// Whether `header` is `CG_ITEM_USE`, a destroy, a gift, a refine, an element refine, a
+/// fishing record, a fish-event record, a ground step or a quickslot request.
 fn is_belongings_step(header: u8) -> bool {
     header == HEADER_CG_ITEM_USE.value()
         || header == HEADER_CG_ITEM_USE_TO_ITEM.value()
         || header == HEADER_CG_ITEM_DESTROY.value()
         || header == HEADER_CG_ITEM_GIVE.value()
         || header == HEADER_CG_REFINE.value()
+        || header == HEADER_CG_REFINE_ELEMENT.value()
         || header == HEADER_CG_ATTR67_ADD.value()
         || header == HEADER_CG_SASH.value()
         || header == HEADER_CG_CL.value()
@@ -1385,6 +1386,8 @@ where
         give_an_item(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_REFINE.value() {
         refine_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_REFINE_ELEMENT.value() {
+        refine_an_element(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ATTR67_ADD.value() {
         attr67_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_SASH.value() {
@@ -2012,6 +2015,34 @@ where
         .game
         .refine(vid, (record.pos, record.ty), actor)
         .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_REFINE_ELEMENT` (227) in the game phase: `CInputMain::RefineElement`
+/// (`G/input_main.cpp:3233-3249`).
+async fn refine_an_element<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgRefineElement::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed REFINE_ELEMENT; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "REFINE_ELEMENT without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.refine_element(vid, record.b_arg, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -15120,6 +15151,7 @@ mod tests {
             (HEADER_CG_REQUEST_EVENT_DATA, MainRecord::World),
             (HEADER_CG_QUICKSLOT_ADD, MainRecord::Belongings),
             (HEADER_CG_REFINE, MainRecord::Belongings),
+            (HEADER_CG_REFINE_ELEMENT, MainRecord::Belongings),
             (HEADER_CG_ATTR67_ADD, MainRecord::Belongings),
             (HEADER_CG_SASH, MainRecord::Belongings),
             (HEADER_CG_CL, MainRecord::Belongings),

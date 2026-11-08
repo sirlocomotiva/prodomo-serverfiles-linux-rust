@@ -14,7 +14,10 @@
 //! A sash cleaning scroll (`USE_DETACHMENT` with `VALUE0` 7) cleans the sash's absorbed
 //! socket and attributes (`CleanSashAttr`, `G/char.cpp:10481-10500`); a changelook's
 //! (`VALUE0` 8) cleans the transmutation (`CleanTransmutation`, `G/char.cpp:10746-10768`).
-//! The owner's protos have neither scroll.
+//! The owner's protos have neither scroll. An element scroll (`USE_ELEMENT_UPGRADE`,
+//! `USE_ELEMENT_DOWNGRADE`, `USE_ELEMENT_CHANGE`) stands the element window on the
+//! target (`RefineElementInformation`, `G/char_item.cpp:10452-10472`), which
+//! `CG_REFINE_ELEMENT` answers.
 //!
 //!
 //! Divergence: a scroll or a target outside the inventory window opens no window, where
@@ -27,7 +30,10 @@ use std::ops::RangeInclusive;
 
 use common::item_slots::EWindows;
 use common::vid::Vid;
-use gamedata::item_kind::{ITEM_METIN, ITEM_USE, USE_DETACHMENT, USE_TUNING};
+use gamedata::item_kind::{
+    ITEM_METIN, ITEM_USE, USE_DETACHMENT, USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE,
+    USE_ELEMENT_UPGRADE, USE_TUNING,
+};
 use gamedata::item_proto::ItemProto;
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::item_pos::ItemPos;
@@ -118,6 +124,9 @@ enum Arm {
     CleanSash,
     /// `USE_DETACHMENT` with `VALUE0` 8: a transmutation cleaning scroll.
     CleanLook,
+    /// `USE_ELEMENT_UPGRADE`, `USE_ELEMENT_DOWNGRADE` or `USE_ELEMENT_CHANGE`: an
+    /// element scroll, with its sub-type.
+    Element(i32),
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -159,6 +168,9 @@ impl GameState {
             Arm::Scroll(value) => value,
             Arm::CleanLook => {
                 return self.clean_look_step(vid, at, dest, actor);
+            }
+            Arm::Element(kind) => {
+                return self.element_step(vid, at, dest, kind, actor);
             }
             Arm::Stone | Arm::CleanSash | Arm::Plain => {
                 return self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
@@ -263,6 +275,35 @@ impl GameState {
 
     /// The arm the item at `at` runs; an item with no proto runs the plain use, which
     /// refuses it.
+    /// The `USE_ELEMENT_*` arms of `UseItemEx` (`G/char_item.cpp:3663-3779`): the
+    /// element scroll at `at` stands its window on the item at `dest`. The use's checks
+    /// run first, as the scroll arm's do; the window or the refusing line rides `moved`.
+    fn element_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        kind: i32,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let used = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(used.vnum)
+                .ok_or(MoveRefused::UnknownVnum(used.vnum))?;
+            world::character::use_checks(&used, proto, rules, gear.points)?;
+            Ok(MoveDone {
+                kind: MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            })
+        })?;
+        let window = self.element_window(vid, at, dest, kind, actor);
+        moved.records.extend(window);
+        Ok(moved)
+    }
+
     fn use_arm(&self, vid: Vid, at: ItemPos) -> Arm {
         let proto = self
             .characters
@@ -292,6 +333,14 @@ impl GameState {
                     && proto.values[0] == CL_CLEAN_ATTR_VALUE0 =>
             {
                 Arm::CleanLook
+            }
+            Some(proto)
+                if proto.item_type == ITEM_USE
+                    && (proto.sub_type == USE_ELEMENT_UPGRADE
+                        || proto.sub_type == USE_ELEMENT_DOWNGRADE
+                        || proto.sub_type == USE_ELEMENT_CHANGE) =>
+            {
+                Arm::Element(proto.sub_type)
             }
             _ => Arm::Plain,
         }
