@@ -17399,8 +17399,10 @@ fn a_master_builds_on_its_land_and_clears_it() {
         "the short line tells"
     );
     // The create stands and spends (14300: no group gates, 300000 gold, five 90010s):
-    // the gold record lands and the claim half is stored.
+    // the stood object enters its sectree first, so its ADD fans before the spend
+    // records (14300, a wall, regens no NPC, so the entity's own key carries it).
     alice.send_record(&slash(b"/build c 14300 21200 11000 0 0 0"));
+    let object_vid = read_stood_object(&mut alice);
     let gold = alice.read_game();
     assert_eq!(gold[0], GC_POINT_CHANGE, "the spend record: {gold:02x?}");
     let spent = alice.read_game();
@@ -17413,14 +17415,21 @@ fn a_master_builds_on_its_land_and_clears_it() {
     // An unknown VID knocks nothing and tells nothing.
     alice.send_record(&slash(b"/build d 1"));
     alice.still("the unknown VID is quiet");
-    // The clear wipes the land: the notice tells and the cleared land fans its
-    // one-element list with no owner and no NAME (the guildless names none).
+    // The clear wipes the land: the notice tells, the stood object's removal fans,
+    // and the cleared land fans its one-element list with no owner and no NAME (the
+    // guildless names none).
     alice.send_record(&slash(b"/clear_land"));
     let cleared = alice.read_game();
     assert_eq!(
         cleared,
         an_info_line(b"Guild Land(1) Cleared"),
         "the cleared notice"
+    );
+    let gone = alice.read_game();
+    assert_eq!(
+        gone,
+        [vec![GC_CHARACTER_DEL], object_vid.to_le_bytes().to_vec()].concat(),
+        "the object's removal"
     );
     let fan = alice.read_game();
     assert_eq!(fan[0], GC_LAND_LIST, "the cleared land's list: {fan:02x?}");
@@ -38900,6 +38909,26 @@ fn a_guild_master_claims_land_and_rebuilds_its_refinery() {
     assert_eq!(&fan[23..27], &7u32.to_le_bytes(), "guild 7");
     alice.quiet("the claim step ends");
     rebuild_the_refinery_on_land_5(&server, &database);
+}
+
+/// A stood building object's ADD: header 1, `CHAR_TYPE_BUILDING`, the vnum, answering
+/// the entity's VID.
+fn read_stood_object(alice: &mut Keyed) -> u32 {
+    let stood = alice.read_game();
+    assert_eq!(
+        stood[0], GC_CHARACTER_ADD,
+        "the stood object shows: {stood:02x?}"
+    );
+    assert_eq!(
+        stood[21], 5,
+        "a building (CHAR_TYPE_BUILDING): {stood:02x?}"
+    );
+    assert_eq!(
+        u16::from_le_bytes(stood[22..24].try_into().expect("two bytes")),
+        14_300,
+        "as 14300: {stood:02x?}"
+    );
+    u32::from_le_bytes(stood[1..5].try_into().expect("four bytes"))
 }
 
 /// The refinery's stone on land 5, which the boot stood with guild 7's NPC: a

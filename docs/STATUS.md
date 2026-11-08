@@ -526,9 +526,11 @@ their unwired paths. Since 474 `/build` and `/clear_land` are `ported`: the six 
 land gates, the proto gates, the spend and the drain, with the wipe, the owner drop and the
 claim stone; the single and block walls parse and run but the owner's 41 object protos name
 no wall vnum, so like legacy they stand nothing there. Since 475 `gc.land_list` is `ported`:
-the enter-game list and the ownership fan, with the guild NAMEs leading each. Stood
-buildings still never show: their ADD and DEL fan through a view key no sectree holds, so
-both vanish — the next slice is the owner's call: the forest's leader branch is ported,
+the enter-game list and the ownership fan, with the guild NAMEs leading each. Since 476
+the stood buildings show: the object entity enters its sectree on the stand, so the ADD
+and the DEL fan, through a `building_places` reverse map and a shared ADD encoder; the
+attribute region the legacy `Show` sets is not ported, and the Rewrite walks by
+server-attr cells, which no object writes. The next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

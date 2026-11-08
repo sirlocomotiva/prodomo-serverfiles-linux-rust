@@ -751,6 +751,31 @@ pub struct BuildingObject {
     pub npc_vid: Option<u32>,
 }
 
+impl BuildingObject {
+    /// `CObject::EncodeInsertPacket` (`G/building.cpp:92-128`): the `GC_CHARACTER_ADD`
+    /// with `CHAR_TYPE_BUILDING`, the z-rotation as the angle, and the x/y rotations
+    /// as the affect words. The guild field stays 0: legacy's write is commented
+    /// out (`:121-124`).
+    pub(super) fn add_record(&self) -> Vec<u8> {
+        let mut add = Vec::new();
+        protocol::gc_actors::GcCharacterAdd::new(
+            self.vid,
+            self.rot.2,
+            self.x,
+            self.y,
+            0,
+            gamedata::mob_proto::CHAR_TYPE_BUILDING,
+            (self.vnum & 0xffff) as u16,
+            0,
+            0,
+            0,
+            [self.rot.0.to_bits(), self.rot.1.to_bits()],
+        )
+        .encode_into(&mut add);
+        add
+    }
+}
+
 /// What one `guild.*` quest call judged (230s): the answer legacy pushed, the records the
 /// caller hears now (a refusal line, a countdown), and the writer's store halves for the
 /// descriptor to drain after the step, in order.
@@ -1358,21 +1383,36 @@ impl GameState {
                     continue;
                 }
                 let npc_vid = self.regen_building_npc(place, object, &proto);
+                let stood = BuildingObject {
+                    id: object.id,
+                    land_id: object.land_id,
+                    vnum: object.vnum,
+                    map: object.map,
+                    x: object.x,
+                    y: object.y,
+                    rot: object.rot,
+                    life: object.life,
+                    vid,
+                    npc_vid,
+                };
                 self.building_objects
                     .entry(place)
                     .or_default()
-                    .push(BuildingObject {
-                        id: object.id,
-                        land_id: object.land_id,
-                        vnum: object.vnum,
-                        map: object.map,
-                        x: object.x,
-                        y: object.y,
-                        rot: object.rot,
-                        life: object.life,
-                        vid,
-                        npc_vid,
-                    });
+                    .push(stood.clone());
+                self.building_places.insert(vid, place);
+                // `CManager::FinalizeBoot` (`G/building.cpp:865-879`): every
+                // booted object shows, so a late entrant's view finds it. No
+                // client is connected yet, so the inserts land nowhere.
+                let mut effects = Vec::new();
+                if let Some(index) = self.maps.get_mut(&place) {
+                    let _shown = index.show(
+                        super::view::EntityKey::Npc(vid),
+                        (stood.x, stood.y, 0),
+                        self.view_radius,
+                        &mut effects,
+                    );
+                }
+                self.deliver(&effects, None);
             }
         }
     }
@@ -1601,22 +1641,6 @@ impl GameState {
         vnum: u32,
     ) -> GuildQuestStore {
         self.destroy_npc(npc_vid);
-        let delete = super::view_encode::remove_record(object.vid);
-        let mut add = Vec::new();
-        protocol::gc_actors::GcCharacterAdd::new(
-            vid,
-            object.rot.2,
-            object.x,
-            object.y,
-            0,
-            gamedata::mob_proto::CHAR_TYPE_BUILDING,
-            (vnum & 0xffff) as u16,
-            0,
-            0,
-            0,
-            [object.rot.0.to_bits(), object.rot.1.to_bits()],
-        )
-        .encode_into(&mut add);
         let kept_object = db::guild_land::StoredObject {
             id,
             land_id: object.land_id,
@@ -1630,19 +1654,36 @@ impl GameState {
         let new_proto = self.object_protos.get(vnum).copied();
         let rebuilt_npc =
             new_proto.and_then(|proto| self.regen_building_npc(place, &kept_object, &proto));
+        // `CObject::Reconstruct` (`G/building.cpp:80-89`) is the delete then the
+        // create: the old entity leaves its sectree and the new one enters.
+        let rebuilt = BuildingObject {
+            id,
+            vnum,
+            vid,
+            npc_vid: rebuilt_npc,
+            ..object.clone()
+        };
         if let Some(objects) = self.building_objects.get_mut(&place) {
             objects.retain(|kept| kept.id != object.id);
-            objects.push(BuildingObject {
-                id,
-                vnum,
-                vid,
-                npc_vid: rebuilt_npc,
-                ..object.clone()
-            });
+            objects.push(rebuilt.clone());
         }
-        let key = super::view::EntityKey::Npc(rebuilt_npc.unwrap_or(vid));
-        self.packet_around(key, &delete, None);
-        self.packet_around(key, &add, None);
+        self.building_places.remove(&object.vid);
+        self.building_places.insert(vid, place);
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&place) {
+            index.remove(super::view::EntityKey::Npc(object.vid), &mut effects);
+        }
+        self.deliver(&effects, None);
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&place) {
+            let _shown = index.show(
+                super::view::EntityKey::Npc(vid),
+                (rebuilt.x, rebuilt.y, 0),
+                self.view_radius,
+                &mut effects,
+            );
+        }
+        self.deliver(&effects, None);
         GuildQuestStore::Reconstruct {
             delete_id: object.id,
             land_id: object.land_id,

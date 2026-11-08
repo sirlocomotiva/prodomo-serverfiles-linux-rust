@@ -823,6 +823,10 @@ pub struct GameState {
     /// The standing building objects by (Channel, map) (`CLand::m_map_pkObject`,
     /// `G/building.h:66`).
     building_objects: BTreeMap<(u8, i32), Vec<guild::BuildingObject>>,
+    /// A standing building object's (Channel, map) by its entity VID
+    /// (`CManager::m_map_pkObjByVID`, `G/building.cpp:843-844`): the reverse of
+    /// [`GameState::building_objects`], so the view keys an object by its VID.
+    building_places: HashMap<u32, (u8, i32)>,
     /// The next building object id (`CObject::m_dwID`, from the `object` table's
     /// auto-increment).
     next_object_id: u32,

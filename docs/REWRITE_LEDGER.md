@@ -49579,3 +49579,39 @@ cargo doc --workspace --no-deps --locked --offline`, the scenario 8x, and `legac
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). A width was measured
 (the 24/3 land pair, `.scratch/probe475/`). Afterwards no `prodomo\_%` database remained.
 No ADR changed.
+
+## 476. The buildings show
+
+Ledger 475 found that a stood building's ADD and DEL fan through a view key no sectree
+holds, so both vanish. This slice registers the object entity in its sectree, as legacy
+`CObject::Show` does (`G/building.cpp:150-187`): the stand shows, the knock hides, and
+the viewers hear both.
+
+`GameState::building_places` (new, `prodomo/src/game_state.rs`) is the reverse of
+`building_objects`: the object entity's VID to its (Channel, map), mirroring
+`CManager::m_map_pkObjByVID` (`:843-844`). `map_key_of` falls back to it for an NPC key
+no regen NPC holds, and `deliver_insert` answers a building insert from it, so a late
+entrant walking into view sees the standing objects too. `BuildingObject::add_record`
+(new, `guild.rs`) is `CObject::EncodeInsertPacket` (`:92-128`), shared by the stand, the
+swap and the enter-view path; the guild field stays 0, as legacy's commented-out write
+does (`:121-124`).
+
+The three stood paths change: `stand_build_object` shows the entity instead of fanning
+around the NPC key, `install_building_objects` shows the booted objects (no client hears
+yet), and the knock, the clear wipe and the quest swap remove instead. The swap keeps
+legacy's delete-then-create order (`CObject::Reconstruct`, `:80-89`). The attribute
+region `Show` sets (`:179-186`) is not ported: the Rewrite walks by server-attr cells,
+which no object writes.
+
+The build scenario asserts the ADD (header 1, type 5, vnum 14300) before the spend
+records and the DEL (header 2, the entity's VID) behind the clear's notice. Four unit
+tests move with the new records: the walls and the block walls count their ADDs, the
+delete reads the knock's DEL, and the clear reads the wipe's DEL. No fixture proto
+stands the claim stone (the mob table is empty), which the clear test now says.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the scenario 8x, and `legacy/` is
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

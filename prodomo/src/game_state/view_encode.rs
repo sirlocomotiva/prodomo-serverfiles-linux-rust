@@ -354,6 +354,12 @@ impl GameState {
                 }
             }
             EntityKey::Npc(npc) => {
+                // A building object's entity shares the NPC key: its insert is
+                // `CObject::EncodeInsertPacket`, not a regen NPC's.
+                if let Some(object) = self.building_by_vid(npc) {
+                    self.send_to(to, object.add_record(), reply);
+                    return;
+                }
                 let Some(npc) = self.npc_by_vid(npc) else {
                     return;
                 };
@@ -382,6 +388,16 @@ impl GameState {
         }
     }
 
+    /// The building object standing under the entity `vid`, if one does.
+    fn building_by_vid(&self, vid: u32) -> Option<super::guild::BuildingObject> {
+        let place = self.building_places.get(&vid).copied()?;
+        self.building_objects
+            .get(&place)?
+            .iter()
+            .find(|object| object.vid == vid)
+            .cloned()
+    }
+
     /// The NPC standing under `vid`.
     pub(super) fn npc_by_vid(&self, vid: u32) -> Option<&world::npc::Npc> {
         let &(channel, map, at) = self.npc_of.get(&vid)?;
@@ -395,7 +411,8 @@ impl GameState {
             EntityKey::Npc(vid) => self
                 .npc_of
                 .get(&vid)
-                .map(|&(channel, map, _)| (channel, map)),
+                .map(|&(channel, map, _)| (channel, map))
+                .or_else(|| self.building_places.get(&vid).copied()),
             EntityKey::Ground(vid) => self
                 .ground
                 .get(&vid)

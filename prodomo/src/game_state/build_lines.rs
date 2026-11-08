@@ -741,21 +741,6 @@ impl GameState {
         let vid = self.take_npc_vid()?;
         self.next_object_id = self.next_object_id.saturating_add(1).max(1);
         let id = self.next_object_id;
-        let mut add = Vec::new();
-        protocol::gc_actors::GcCharacterAdd::new(
-            vid,
-            rot.2,
-            x,
-            y,
-            0,
-            gamedata::mob_proto::CHAR_TYPE_BUILDING,
-            (vnum & 0xffff) as u16,
-            0,
-            0,
-            0,
-            [rot.0.to_bits(), rot.1.to_bits()],
-        )
-        .encode_into(&mut add);
         let kept = db::guild_land::StoredObject {
             id,
             land_id,
@@ -784,9 +769,11 @@ impl GameState {
             .entry(place)
             .or_default()
             .push(object.clone());
+        self.building_places.insert(vid, place);
         self.apply_member_bonus(land_id, vnum, true);
-        let key = super::view::EntityKey::Npc(npc_vid.unwrap_or(vid));
-        self.packet_around(key, &add, None);
+        // `CObject::Show` (`G/building.cpp:150-187`): the entity enters the
+        // sectree, and the insert fans to whoever sees it.
+        self.show_building_object(place, &object);
         self.build_halves.push(GuildQuestStore::Create {
             id,
             land_id,
@@ -798,6 +785,34 @@ impl GameState {
             life,
         });
         Some(object)
+    }
+
+    /// `CObject::Show`'s enter (`G/building.cpp:150-187`): the object entity
+    /// joins the sectree, and the insert fans to its viewers. The attribute
+    /// region (`:179-186`) is not ported: the Rewrite walks by server-attr
+    /// cells, which no object writes.
+    fn show_building_object(&mut self, place: (u8, i32), object: &BuildingObject) {
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&place) {
+            let _shown = index.show(
+                super::view::EntityKey::Npc(object.vid),
+                (object.x, object.y, 0),
+                self.view_radius,
+                &mut effects,
+            );
+        }
+        self.deliver(&effects, None);
+    }
+
+    /// The sectree's half of `CLand::DeleteObject` (`:430-447`): the object
+    /// entity leaves, and the delete fans to whoever saw it.
+    fn hide_building_object(&mut self, place: (u8, i32), object: &BuildingObject) {
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&place) {
+            index.remove(super::view::EntityKey::Npc(object.vid), &mut effects);
+        }
+        self.deliver(&effects, None);
+        self.building_places.remove(&object.vid);
     }
 
     /// `CObject::ApplySpecialEffect` and `RemoveSpecialEffect` (`:192-255`):
@@ -853,13 +868,11 @@ impl GameState {
         if let Some(npc) = object.npc_vid {
             self.destroy_npc(npc);
         }
-        let delete = super::view_encode::remove_record(object.vid);
         if let Some(objects) = self.building_objects.get_mut(&place) {
             objects.retain(|kept| kept.id != object.id);
         }
         self.apply_member_bonus(object.land_id, object.vnum, false);
-        let key = super::view::EntityKey::Npc(object.npc_vid.unwrap_or(object.vid));
-        self.packet_around(key, &delete, None);
+        self.hide_building_object(place, object);
         self.build_halves
             .push(GuildQuestStore::Delete { id: object.id });
     }
@@ -884,9 +897,7 @@ impl GameState {
             if let Some(npc) = object.npc_vid {
                 self.destroy_npc(npc);
             }
-            let delete = super::view_encode::remove_record(object.vid);
-            let key = super::view::EntityKey::Npc(object.npc_vid.unwrap_or(object.vid));
-            self.packet_around(key, &delete, None);
+            self.hide_building_object(place, object);
             self.apply_member_bonus(land_id, object.vnum, false);
         }
         if let Some(objects) = self.building_objects.get_mut(&place) {
@@ -1482,6 +1493,13 @@ mod tests {
             .get(&PLACE)
             .expect("the land lists")
             .is_empty());
+        let gone = inbox.try_recv().expect("the knock's DEL");
+        assert_eq!(gone[0], 2, "HEADER_GC_CHARACTER_DEL");
+        assert_eq!(
+            u32::from_le_bytes([gone[1], gone[2], gone[3], gone[4]]),
+            target,
+            "the entity goes"
+        );
         // An unknown VID and a bare word are quiet past the gates.
         assert!(world.run_build_line(vid, b"d 1", mover).is_none());
         assert!(world.run_build_line(vid, b"d", mover).is_none());
@@ -1512,7 +1530,12 @@ mod tests {
             at,
             vec![(600, 1600), (1600, 238), (1600, 2962), (2600, 1600)]
         );
-        assert!(inbox.try_recv().is_err(), "the stand is silent");
+        let mut adds = 0;
+        while let Ok(add) = inbox.try_recv() {
+            assert_eq!(add[0], 1, "HEADER_GC_CHARACTER_ADD");
+            adds += 1;
+        }
+        assert_eq!(adds, 4, "the four walls show");
         // An unknown direction tells its line.
         world.run_build_line(vid, b"w q", mover);
         let unknown = text_of(&inbox.try_recv().expect("the direction tell"));
@@ -1520,6 +1543,60 @@ mod tests {
             unknown.windows(17).any(|w| w == b"unknown_direction"),
             "{unknown:?}"
         );
+    }
+
+    /// The stood object's ADD fans through its sectree, and the knock's DEL
+    /// after it: the master in view sees both, keyed by the object entity's
+    /// own VID (no NPC stands for a wall).
+    #[test]
+    fn the_stand_shows_and_the_knock_hides() {
+        let clock = TestClock::default();
+        let mut world = built(&clock);
+        let (vid, mover, mut inbox) = master(&mut world);
+        while inbox.try_recv().is_ok() {}
+        world
+            .run_build_line(vid, b"c 14043 200 200 0 0 0", mover)
+            .expect("the piece stands");
+        let object = world.building_objects[&PLACE]
+            .iter()
+            .find(|object| object.vnum == 14_043)
+            .expect("the piece stands")
+            .clone();
+        assert_eq!(
+            world.building_places.get(&object.vid),
+            Some(&PLACE),
+            "the entity keys its place"
+        );
+        let stood = inbox.try_recv().expect("the stand's ADD");
+        assert_eq!(stood[0], 1, "HEADER_GC_CHARACTER_ADD");
+        assert_eq!(stood[21], 5, "CHAR_TYPE_BUILDING");
+        assert_eq!(
+            u16::from_le_bytes([stood[22], stood[23]]),
+            14_043,
+            "as 14043"
+        );
+        assert_eq!(
+            u32::from_le_bytes([stood[1], stood[2], stood[3], stood[4]]),
+            object.vid,
+            "the entity's own VID"
+        );
+        // The create's spend records follow the ADD; the knock's DEL is next.
+        while inbox.try_recv().is_ok() {}
+        world
+            .run_build_line(vid, format!("d {}", object.vid).as_bytes(), mover)
+            .expect("the knock halves");
+        let gone = inbox.try_recv().expect("the knock's DEL");
+        assert_eq!(gone[0], 2, "HEADER_GC_CHARACTER_DEL");
+        assert_eq!(
+            u32::from_le_bytes([gone[1], gone[2], gone[3], gone[4]]),
+            object.vid,
+            "the entity goes"
+        );
+        assert!(
+            !world.building_places.contains_key(&object.vid),
+            "the place unkeys"
+        );
+        assert!(inbox.try_recv().is_err(), "the ADD and the DEL");
     }
 
     /// `clear_land` wipes the land: the object goes, the owner drops, the
@@ -1546,6 +1623,8 @@ mod tests {
         assert_eq!(world.guilds.land_owner(1), None);
         let clear = text_of(&inbox.try_recv().expect("the cleared tell"));
         assert!(clear.windows(7).any(|w| w == b"Cleared"), "{clear:?}");
+        let gone = inbox.try_recv().expect("the wiped object's DEL");
+        assert_eq!(gone[0], 2, "HEADER_GC_CHARACTER_DEL");
         // The clear fans the land's update behind the notice: the one-element
         // list with no owner (the guildless names no NAME).
         let fan = inbox.try_recv().expect("the cleared land's fan");
@@ -1553,7 +1632,9 @@ mod tests {
         assert_eq!(fan.len(), 3 + 24);
         assert_eq!(&fan[3..7], &1u32.to_le_bytes(), "land 1");
         assert_eq!(&fan[23..27], &0u32.to_le_bytes(), "no owner");
-        assert!(inbox.try_recv().is_err(), "the tell and the fan");
+        // No claim stone stands: the fixture's mob table is empty, so the
+        // center spawn finds no proto.
+        assert!(inbox.try_recv().is_err(), "the tell, the DEL and the fan");
     }
     /// The wall-block runs span the center ±2000 at size 1, past a 3000-square
     /// land's edges, so the block tests widen land 1 to 10000 square: every
@@ -1588,7 +1669,12 @@ mod tests {
             24
         );
         assert!(objects.iter().all(|object| object.land_id == 1));
-        assert!(inbox.try_recv().is_err(), "the stand is silent");
+        let mut adds = 0;
+        while let Ok(add) = inbox.try_recv() {
+            assert_eq!(add[0], 1, "HEADER_GC_CHARACTER_ADD");
+            adds += 1;
+        }
+        assert_eq!(adds, 28, "the blocks show");
         let rows = world
             .run_build_line(vid, b"E 14105", mover)
             .expect("the erase halves");
