@@ -2,8 +2,8 @@
 //! (`:4523-4552`), `/effect` (`:4176-4184`), `/add_socket` (`:3934-3939`), `/set_socket`
 //! (`:4698-4713`), `/change_attr` (`:3920-3925`), `/add_attr` (`:3927-3932`),
 //! `/change_rare_attr` (`:3942-3947`), `/add_rare_attr` (`:3949-3954`), `/reset_subskill`
-//! (`:4315-4334`), `/flush` (`:4425-4446`), `/observer` (`:3226-3229`) and `/force_logout`
-//! (`G/cmd_general.cpp:3503-3509`).
+//! (`:4315-4334`), `/flush` (`:4425-4446`), `/observer` (`:3226-3229`), `/force_logout`
+//! (`G/cmd_general.cpp:3503-3509`) and `/fetch_casket_items` (`:4136-4173`).
 //!
 //! [`GameState::run_gm_line`] runs one. The list, the count and the effect store nothing.
 //! The socket and attribute lines write an item in place, send its `GC_ITEM_UPDATE` to the
@@ -11,7 +11,8 @@
 //! caller's descriptor stores; the holder may be another character, whose row it is.
 //! `/reset_subskill` answers the named character's zeroed sub-skills, whose rows go;
 //! `/flush` has the caller's descriptor write its row now; `/observer` toggles the caller's
-//! observer mode; `/force_logout` closes the caller's own descriptor.
+//! observer mode; `/force_logout` closes the caller's own descriptor; `/fetch_casket_items`
+//! tells the named group's rows and the sort.
 //!
 //! Two legacy Defects are not reproduced. `CItem::AddSocket` (`G/item.cpp:1786-1793`) writes
 //! `m_alSockets` with neither `UpdatePacket` nor `Save`, so the GM's client keeps showing the
@@ -211,7 +212,49 @@ impl GameState {
                 self.cube_command(vid, rest);
                 None
             }
+            GmLine::FetchCasket => {
+                self.fetch_casket_items(vid, rest, mover);
+                None
+            }
         }
+    }
+    /// `/fetch_casket_items <vnum>` (`do_fetch_casket_items`,
+    /// `G/cmd_general.cpp:4136-4173`): an empty line is silent; else the special item
+    /// group named by `atoi`'s reading of the word tells one `AddCasketItem <vnum>
+    /// <item> <count>` command line per row, in order, and then `SortCasketWindow`.
+    /// With no group the quest-registered preview map is read, which is always empty:
+    /// no owner quest calls `add_casket_item` (it is `unused`, ledger 401), so the line
+    /// stays silent.
+    fn fetch_casket_items(&self, vid: Vid, rest: &[u8], mover: Mover) {
+        let (word, _) = one_argument(rest);
+        if word.is_empty() {
+            return;
+        }
+        let key = int_word(&word).unwrap_or(0);
+        let Some(group) = self.item_groups.special.get(&key) else {
+            return;
+        };
+        // `DWORD dwVnum = atoi(arg1)`: the bits of the `int`, as `%u` prints them; the
+        // count likewise.
+        let shown = u32::from_ne_bytes(key.to_ne_bytes());
+        for item in &group.items {
+            let count = u32::from_ne_bytes(item.count.to_ne_bytes());
+            let line = format!("AddCasketItem {shown} {} {count}", item.vnum);
+            self.tell(
+                vid,
+                mover,
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                line.as_bytes(),
+                &[],
+            );
+        }
+        self.tell(
+            vid,
+            mover,
+            protocol::gc_chat::CHAT_TYPE_COMMAND,
+            b"SortCasketWindow",
+            &[],
+        );
     }
 
     /// `/w_gaya <craft|market|refresh> [slot]` (`do_gaya_system`,

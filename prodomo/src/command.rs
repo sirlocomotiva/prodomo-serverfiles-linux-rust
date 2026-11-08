@@ -229,7 +229,8 @@ impl CommandEntry {
             | "do_user_horse_feed"
             | "do_oxevent_show_quiz"
             | "do_gaya_system"
-            | "do_cube" => self.gm_tail_name(),
+            | "do_cube"
+            | "do_fetch_casket_items" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -302,6 +303,7 @@ impl CommandEntry {
             "do_oxevent_show_quiz" => Command::GmLine(GmLine::ShowQuiz),
             "do_gaya_system" => Command::GmLine(GmLine::GayaSystem),
             "do_cube" => Command::GmLine(GmLine::Cube),
+            "do_fetch_casket_items" => Command::GmLine(GmLine::FetchCasket),
             _ => Command::NotPorted(self.handler),
         }
     }

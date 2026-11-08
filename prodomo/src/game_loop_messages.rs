@@ -2911,6 +2911,8 @@ pub enum GmLine {
     GayaSystem,
     /// `/cube` (`do_cube`), a player's line.
     Cube,
+    /// `/fetch_casket_items` (`do_fetch_casket_items`), a player's line.
+    FetchCasket,
 }
 
 /// Which restart a dead player asks for.

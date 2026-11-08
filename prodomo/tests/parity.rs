@@ -42927,3 +42927,43 @@ fn a_gm_mounts_by_test_vnum_and_the_re_show_mounts() {
     let cleared = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
     assert_eq!(shown_mount(&cleared, vid), 0, "0 unmounts");
 }
+
+/// `cmd.fetch_casket_items` (`do_fetch_casket_items`,
+/// `G/cmd_general.cpp:4136-4173`). An empty line and an unknown vnum are silent; group
+/// 50011 tells one `AddCasketItem` command line per row, in order, and then
+/// `SortCasketWindow`.
+#[test]
+fn a_fetch_lists_a_caskets_rows_and_sorts() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/fetch_casket_items"));
+    alice.still("an empty line runs nothing");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/fetch_casket_items 999999999"));
+    alice.still("an unknown vnum runs nothing");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/fetch_casket_items 50011"));
+    let sort = a_command_line(b"SortCasketWindow");
+    let mut rows = Vec::new();
+    loop {
+        let record = alice.read_game();
+        if record == sort {
+            break;
+        }
+        rows.push(record);
+    }
+    assert_eq!(rows.len(), 29, "one line per group row");
+    assert_eq!(
+        rows[0],
+        a_command_line(b"AddCasketItem 50011 71084 15"),
+        "the first row leads"
+    );
+    assert_eq!(
+        rows[28],
+        a_command_line(b"AddCasketItem 50011 30053 1"),
+        "the last row closes"
+    );
+}

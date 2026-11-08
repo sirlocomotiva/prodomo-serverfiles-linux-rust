@@ -48346,3 +48346,28 @@ failed. Clippy (`-D warnings`) clean. `RUSTDOCFLAGS="-D warnings" cargo doc --wo
 --no-deps --locked --offline` pass. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR
 changed.
+
+## 457. The casket fetch
+
+`cmd.fetch_casket_items` is `ported`, in scenario
+`a_fetch_lists_a_caskets_rows_and_sorts`.
+
+- `do_fetch_casket_items` (`G/cmd_general.cpp:4136-4173`, behind
+  `__CASKET_PREVIEW_ENABLE__`, which the owner's build defines) joins the `GmLine`
+  family: an empty line is silent; else `atoi`'s reading of the word names a special
+  item group, whose rows tell one `AddCasketItem <vnum> <item> <count>` command line
+  each, in order, then `SortCasketWindow`. The vnum and the count render as `%u` does,
+  which is the bits of the `int` (`u32::from_ne_bytes`, after Clippy refused the
+  sign-loss cast). With no group the quest-registered preview map is read, which is
+  always empty — no owner quest calls `add_casket_item` (it is `unused`, ledger 401) —
+  so the line stays silent.
+- The scenario fetches the owner's group 50011 (29 rows: first `71084 15`, last `30053
+  1`), and an empty line and an unknown vnum stay silent.
+- Mutant killed: the sort misspelled never arrives and the scenario fails.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4969 passed, 0 failed in 44 targets (twice: before and after
+the cast refactor). Doc tests: 1 passed, 0 failed. Clippy (`-D warnings`) clean.
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
