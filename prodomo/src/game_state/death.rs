@@ -379,6 +379,22 @@ impl GameState {
         for _ in 0..outcome.level_ups {
             self.raise_quest_levelup(vid);
         }
+        // `DoReward(LEVEL_UP)` at the new level (`G/char.cpp:4051-4055`): after the
+        // quest `LevelUp` raise, with the store writes folded into the next save.
+        if outcome.level_after != outcome.level_before {
+            let level = outcome.level_after;
+            if let Some(mover) = self.own_mover(vid) {
+                let writes = self.do_reward(
+                    vid,
+                    mover,
+                    super::reward_window::MISSION_LEVEL_UP,
+                    u32::from(level),
+                    1,
+                    0,
+                );
+                self.hold_reward_writes(vid, writes);
+            }
+        }
         let crossed = outcome.level_before < self.protect_level
             && outcome.level_after >= self.protect_level
             && self

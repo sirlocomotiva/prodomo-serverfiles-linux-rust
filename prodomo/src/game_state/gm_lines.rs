@@ -247,6 +247,10 @@ impl GameState {
                 self.run_monarch_notice(vid, rest, mover);
                 None
             }
+            GmLine::RewardSystem => {
+                self.run_reward_system(vid, rest, mover);
+                None
+            }
         }
     }
     /// `/fetch_casket_items <vnum>` (`do_fetch_casket_items`,

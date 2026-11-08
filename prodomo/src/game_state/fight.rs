@@ -1688,6 +1688,12 @@ impl GameState {
                 self.reward_drops(vid, attacker);
             }
         }
+        // `DoReward` on the kill (`G/char_battle.cpp:1283-1292`): a stone, a boss at
+        // rank 4 and up, else a monster — each at the race with the victim's level.
+        // The killer `Dead` was given pays, as the call sites do.
+        if let Some(killer) = killer {
+            self.reward_kill(vid, killer);
+        }
         self.packet_around(
             EntityKey::Npc(vid),
             &header_and_vid(HEADER_GC_DEAD.value(), vid),

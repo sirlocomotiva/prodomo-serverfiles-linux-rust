@@ -43341,6 +43341,20 @@ fn is_ambient(record: &[u8]) -> bool {
     ) || *record == [GC_PHASE, 6]
 }
 
+/// The next [`GC_CHAT`] past the map's ambient business.
+fn read_chat_past_ambient(keyed: &mut Keyed) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game();
+        if record[0] == GC_CHAT {
+            return record;
+        }
+        assert!(
+            is_ambient(&record),
+            "only ambient business sits ahead of the chat: {record:02x?}"
+        );
+    }
+}
+
 /// The next [`GC_CHARACTER_ADD`] of race `vnum` within `reach` of `at`, past the map's
 /// ambient business: the summoned mob stands beside its summoner, while
 /// [`Keyed::monster_record`] would swallow its monster-typed insert, so this reads raw.
@@ -43474,4 +43488,66 @@ fn monarch_clearing(alice: &mut Keyed, database: &ScratchDatabase) {
         database,
         "(SELECT money FROM monarch_money WHERE empire = 1) = 0",
     );
+}
+
+/// `cmd.reward_system` (`do_reward_system`, `G/cmd_general.cpp:4299-4310`): a bare line
+/// and a strange second word stay silent; `update` opens the window with the global
+/// full fan (`empty`, nothing claimed) and then the solo full fan (every count 0).
+/// Punching the stray dog to death marks nothing — its `KILL_MONSTER` row does not
+/// exist — but the window stays open: a second `update` fans the same pair again.
+#[test]
+fn a_reward_update_opens_the_window_and_a_dog_kill_marks_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, _alpha_vid, entered) = alpha_swinging_by(&database, DOG_AT_ALPHA);
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/reward_system"));
+    alpha.still("a bare line stays silent");
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/reward_system rank"));
+    alpha.still("a strange second word stays silent");
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/reward_system update"));
+    let global = read_chat_past_ambient(&mut alpha);
+    assert_eq!(
+        global,
+        a_command_line(b"RewardData 1 1 empty"),
+        "the global full fan opens empty"
+    );
+    let mut solo = b"RewardData 0 1 ".to_vec();
+    for mission in 0..18u8 {
+        solo.extend_from_slice(mission.to_string().as_bytes());
+        solo.extend_from_slice(b"?0#");
+    }
+    assert_eq!(
+        read_chat_past_ambient(&mut alpha),
+        a_command_line(&solo),
+        "the solo full fan opens at zero"
+    );
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+    alpha.send_record(&client_attack(dog));
+    let mut saw_dead = false;
+    while !saw_dead {
+        let record = alpha.read_fight();
+        assert_ne!(
+            record[0], GC_CHAT,
+            "the dog's kill fans nothing: {record:02x?}"
+        );
+        saw_dead = record == dead_of(dog);
+    }
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/reward_system update"));
+    assert_eq!(
+        read_chat_past_ambient(&mut alpha),
+        a_command_line(b"RewardData 1 1 empty"),
+        "the window reopens empty"
+    );
+    assert_eq!(
+        read_chat_past_ambient(&mut alpha),
+        a_command_line(&solo),
+        "the kill marked no solo line"
+    );
+    check(&database, "(SELECT count(*) FROM reward_solo) = 0");
 }

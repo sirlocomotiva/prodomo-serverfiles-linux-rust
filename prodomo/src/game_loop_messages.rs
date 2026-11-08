@@ -2977,6 +2977,8 @@ pub enum GmLine {
     MonarchMob,
     /// `/mnotice` (`do_monarch_notice`), a player's line.
     MonarchNotice,
+    /// `/reward_system` (`do_reward_system`), a player's line.
+    RewardSystem,
 }
 
 /// Which restart a dead player asks for.

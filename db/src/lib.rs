@@ -23,6 +23,7 @@ pub mod players;
 pub mod quest_flags;
 pub mod quickslots;
 pub mod rank_global;
+pub mod reward;
 pub mod safebox;
 pub mod store;
 

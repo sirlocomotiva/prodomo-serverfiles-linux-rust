@@ -130,6 +130,7 @@ mod refine_element;
 mod regen;
 mod reload;
 mod reward;
+mod reward_window;
 mod safebox;
 mod sash;
 mod set_attr;
@@ -728,6 +729,9 @@ pub struct GameState {
     sort_inventory_until: HashMap<common::vid::Vid, (u32, u32)>,
     /// The live consent duels (`CPVPManager::m_map_pkPVP`, `G/pvp.h:92`).
     duels: duel::Duels,
+    /// The reward window's counts (`m_mapRewardData`, `G/char.h`, and the
+    /// `reward_global/%u` files): the solo counts by VID and the claims by mission.
+    reward_counts: reward_window::RewardState,
     /// The SungZi map indices (`forkedmapindex.txt`'s `sungzi:` lines), whose
     /// players skip the exit's `IsHack` gate (`IsSungZiMapIndex`).
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,

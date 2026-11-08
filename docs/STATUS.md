@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 461 (the monarch naming).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 462
+Last reviewed: 2026-11-08, after ledger section 462 (the reward window).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 463
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -490,7 +490,9 @@ two tax broadcasts, and the summon list. Since 461 `cmd.setmonarch`,
 `cmd.rmmonarch`, `cmd.minfo` and `cmd.mnotice` are `ported` (implemented in 460's
 code commit, inventoried here) and `cmd.elect` and `cmd.rmcandidacy` are
 `unused` (the election tally reads nothing and its answers have no game-side
-reader). The
+reader). Since 462 `cmd.reward_system` and `sys.custom.reward` are `ported`: the
+`RewardData` open pair, the solo/global row tables with the completion prize, and
+the kill and level-up call sites. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

@@ -48534,3 +48534,71 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
 and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
 No ADR changed.
+## 462. The reward window (`cmd.reward_system`, `sys.custom.reward`)
+
+`do_reward_system` (`G/cmd_general.cpp:4299-4310`), `CHARACTER_MANAGER::SendRewardInfo`
+and `DoReward` (`G/char_manager.cpp:1831-2043`), the kill call site
+(`G/char_battle.cpp:1283-1292`), the level-up call site (`G/char.cpp:4051-4055`),
+and the store (`reward_solo`/`reward_global`, `G/char.cpp:12991-13049`,
+`G/char_manager.cpp:1831-1863`).
+
+- The command name reaches `split_argument`'s word list as legacy passes the whole
+  line: the handler's first word is `reward_system`, the second must be `update`.
+  Fewer than two words, or any second word but `update`, stays silent. `update`
+  stamps the caller's open and fans the open pair: the global full line
+  (`RewardData 1 1 empty`, nothing claimed) then the solo full line (every count
+  0). The two changes from the first green run: the wire initially stayed silent
+  because `do_reward_system` had a `gm_tail_name` arm but no `mid_name` arm, so it
+  fell to `NotPorted` — wired now.
+- `SendRewardInfo` fans `RewardData <global 0/1> <clean 0/1> <body>`: the full fans
+  (`mission` 255) for the opener, the singles behind the open gate. The P2P
+  `isP2P` fan-out has no Rewrite equivalent (one process, ADR-0002); the global
+  single fans to every opener on this server.
+- `DoReward` claims unclaimed globals of `kind` whose `sub` passes (fanning the
+  single, paying the `{31111, 1}` prize through `AutoGiveItem`), then adds `value`
+  to the passing solo rows, clamps to the row's max, fans the single, and pays the
+  prize exactly on reaching the max. The row tables are `m_mapRewardGlobal`
+  (17 rows, 0-16; the source names 1 twice, so the second 1 is lost) and
+  `m_mapRewardSolo` (18 rows). The prize rows ride back to the descriptor for
+  storing, as the GM-line prizes do.
+- The kill site pays `KILL_STONE`, `KILL_BOSS` at rank 4 and up, else
+  `KILL_MONSTER`, at the race with the victim's level, unconditionally (outside the
+  exp `no_reward`/war gates, as the `Dead` call site does). The level-up site pays
+  `LEVEL_UP` at the new level after the quest `LevelUp` raise. The other eleven
+  `DoReward` call sites (skills, item use, `FIRST_ITEM`, addon bonus, `pc.do_reward`,
+  shops) port with their systems; `pc.do_reward` is `unused` (no Lua file calls it,
+  ledger 401).
+- The store is `0039_reward.sql` (`reward_solo` with the 0-17/0-100000 checks,
+  `reward_global` with the 0-16 check), loaded at select and written on the next
+  save, with the second global claim keeping the first name.
+- The scenario's history matters: the first draft killed the dog expecting mission
+  15 to mark, but the dog is `PAWN` rank 0, so the kill pays `KILL_MONSTER`/101,
+  which no row carries — the kill fans nothing. A metin stone would pay
+  `KILL_STONE`, but the smallest (8001, 14550 HP) needs dozens of swings, so the
+  ship-side coverage splits: the scenario proves the open pair and the dog kill's
+  silence (with the second `update` fanning the same pair and `reward_solo` empty
+  on the store), and the unit test `do_reward_marks_counts_and_pays_the_prize_once_at_the_max`
+  proves the positive arms (the mark, the single's bytes, the clamp, the once-only
+  prize, the `sub` 0 catch-all, and the at-max silence).
+
+Inventory: `cmd.reward_system` and `sys.custom.reward` are `ported` (commands 244
+ported / 18 missing).
+
+Tests: scenario `a_reward_update_opens_the_window_and_a_dog_kill_marks_nothing`,
+unit test above, store test `db/tests/reward.rs` (the solo count round-trip, the
+missing-pid empty load, the global claim and the second-claim keep). Mutants: the
+`RewardData` global flip killed by the scenario, the sub-filter removal and the
+clamp removal killed by the unit test, the store count off-by-one killed by the
+store test. The kill-hook removal and (before the unit test) the sub-filter
+removal survive the scenario, as designed: the dog's kill fans nothing.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` (4977 passed, 1 failed in 46 targets — the known unrelated load
+flake `a_gm_flags_a_stray_dog_aggressive_and_coward`, green alone), `cargo test
+--workspace --doc --locked --offline` (1 passed), `cargo clippy --workspace
+--all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, no `prodomo\_%` database
+remained and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin`
+pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.
