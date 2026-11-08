@@ -1,6 +1,6 @@
 //! The ride: `CHARACTER::StartRiding` and `StopRiding` (`G/char_horse.cpp:16-113`),
-//! `MountVnum` (`G/char.cpp:7852-7883`), the GM line `/horse_ride`
-//! (`G/cmd_gm.cpp:3800-3806`), the player's `/user_horse_ride`
+//! `MountVnum` (`G/char.cpp:7852-7883`), the GM lines `/horse_ride` and `/mount_test`
+//! (`G/cmd_gm.cpp:3800-3806`, `:3212-3224`), the player's `/user_horse_ride`
 //! (`G/cmd_general.cpp:58-86`), `/ride` and `/unmount`, and the quest mount (`pc.mount`,
 //! `pc.mount_bonus`, `pc.unmount`).
 //!
@@ -180,6 +180,16 @@ impl GameState {
         }
         self.mount_swaps(vid, vnum);
         self.mount_land(vid, vnum);
+    }
+    /// `do_mount_test`'s word: an empty line runs nothing; else the leading digits mod
+    /// 2^32 mount through [`GameState::mount_vnum`].
+    pub(super) fn run_mount_test(&mut self, vid: Vid, rest: &[u8]) {
+        let (word, _) = crate::command::one_argument(rest);
+        if word.is_empty() {
+            return;
+        }
+        let vnum = super::skill_admin::str_to_dword(&word);
+        self.mount_vnum(vid, vnum);
     }
 
     /// The rest of `StopRiding` when the horse's ride already ended by an update

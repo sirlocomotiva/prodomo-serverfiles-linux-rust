@@ -167,6 +167,7 @@ impl CommandEntry {
             "do_horse_ride" => Command::Horse(HorseLine::Ride),
             "do_user_horse_ride" => Command::Horse(HorseLine::UserRide),
             "do_unmount" => Command::Horse(HorseLine::Unmount),
+            "do_mount_test" => Command::Horse(HorseLine::MountTest),
             "do_ride" => Command::Ride,
             "do_cards" => Command::Cards,
             "do_open_global_rank" => Command::RankLine(RankLine::Open),

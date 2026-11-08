@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 455 (the skill-select lines).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 456
+Last reviewed: 2026-11-08, after ledger section 456 (the mount test).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 457
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -479,7 +479,8 @@ Since 454 `sys.custom.multi_farm` and `cmd.multi_farm` are `ported`: the toggle 
 and the mining, fishing and drop gates. Since 455 `cmd.advance_skill_select` and
 `cmd.do_click_special_inv` are `ported`: the select's syntax and `YOU_CAN_NOT_DO_THAT`
 gates, the set and the clear with no confirmation line, and the click's
-`ShowSpecialInventory`. The
+`ShowSpecialInventory`. Since 456 `cmd.mount_test` is `ported`: the word's vnum
+mounts through the ported `MountVnum`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

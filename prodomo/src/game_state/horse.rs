@@ -86,6 +86,12 @@ impl GameState {
                 self.unmount(vid);
                 None
             }
+            // `do_mount_test` (`G/cmd_gm.cpp:3212-3224`): the word's vnum mounts, 0 when the
+            // line is empty, through the same `MountVnum` the rides run.
+            HorseLine::MountTest => {
+                self.run_mount_test(vid, rest);
+                None
+            }
         };
         if reply.send(landed).is_err() {
             tracing::debug!(?vid, "nobody was left to hear a horse line's answer");

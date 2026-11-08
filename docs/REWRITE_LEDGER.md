@@ -48324,3 +48324,25 @@ lint splits), and the new scenario with the setjob pair re-passed after the move
 `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 456. The mount test
+
+`cmd.mount_test` is `ported`, in scenario
+`a_gm_mounts_by_test_vnum_and_the_re_show_mounts`.
+
+- `do_mount_test` (`G/cmd_gm.cpp:3212-3224`) joins the `HorseLine` family: an empty line
+  runs nothing (legacy's `if (*arg1)`), else the word's leading digits mod 2^32 mount
+  through the ported `MountVnum` — the re-show to the caller and its viewers with no
+  removals, the swap through 0, the compute and the update. Nothing rides and nothing is
+  stored: the mount vnum is memory-only, as legacy keeps it.
+- The scenario mounts 20201 (the re-show's additional record and the update carry it,
+  the viewer sees it, no removal leads), swaps to 20202 (the additionals read 0 then
+  20202 across the two updates), and unmounts with 0.
+- Mutant killed: the parsed vnum plus one mounts the wrong vnum and the scenario fails.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4968 passed, 0 failed in 44 targets. Doc tests: 1 passed, 0
+failed. Clippy (`-D warnings`) clean. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --locked --offline` pass. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR
+changed.

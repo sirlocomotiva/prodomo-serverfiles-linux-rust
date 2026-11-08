@@ -42862,3 +42862,68 @@ fn a_skill_select_sets_and_clears_and_a_click_shows_the_special_window() {
          player WHERE name = 'Alpha') = 9",
     );
 }
+
+/// `cmd.mount_test` (`do_mount_test`, `G/cmd_gm.cpp:3212-3224`). An empty line is
+/// silent. A vnum re-shows the caller to itself and to its viewer with the mount in
+/// the additional record and the update, with no removal; a second vnum swaps through
+/// 0 first; and 0 unmounts.
+#[test]
+fn a_gm_mounts_by_test_vnum_and_the_re_show_mounts() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, alpha) = enter_world_as_implementor(&server);
+    let vid = alpha.id;
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    yankee.quiet("the viewer settles");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mount_test"));
+    alice.still("an empty line runs nothing");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mount_test 20201"));
+    let read = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&read, vid), 20_201, "the re-show mounts");
+    assert!(
+        !read
+            .iter()
+            .any(|record| { record[0] == GC_CHARACTER_DEL && record[1..5] == vid.to_le_bytes() }),
+        "no removal before the re-show"
+    );
+    let update = read
+        .iter()
+        .find(|record| record[0] == GC_CHARACTER_UPDATE && record[1..5] == vid.to_le_bytes())
+        .expect("the compute's update");
+    assert_eq!(update_mount(update), 20_201);
+    let heard = read_until_headed(&mut yankee, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(
+        shown_mount(&heard, vid),
+        20_201,
+        "the viewer sees the mount"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mount_test 20202"));
+    let mut swapped = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    swapped.extend(read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid));
+    let mounts: Vec<u32> = swapped
+        .iter()
+        .filter(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == vid.to_le_bytes())
+        .map(|info| additional_mount(info))
+        .collect();
+    assert_eq!(mounts, vec![0, 20_202], "the swap unmounts first");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/mount_test 0"));
+    let cleared = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&cleared, vid), 0, "0 unmounts");
+}
