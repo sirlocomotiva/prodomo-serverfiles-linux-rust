@@ -48661,3 +48661,41 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
 and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
 No ADR changed.
+## 464. The OX seat and its two lines
+
+`do_oxevent_log` and `do_oxevent_get_attender` (`G/cmd_oxevent.cpp:18-40`) are `GmLine::LogOxevent`
+and `GmLine::GetOxeventAtt`: the log char-logs every still-online attender `OXEVENT
+LastManStanding` in pid order and answers `[LS;814]` (the `[LS;803]` arm never runs, because
+`LogWinner` always answers true, `G/OXEvent.cpp:442-454`), and the count answers `[LS;825;%d]`
+with the attender count.
+
+The seat is `COXEventManager::Enter` (`G/OXEvent.cpp:91-115`, `G/input_login.cpp:853-874`), run at
+the admit right after the show and before the revive-invisible add: on map 113 (instance maps
+folded onto it) while the `oxevent_status` flag is not finished, the attender spot
+(896500, 24600) joins the roster and the attenders past the multi-IP kick, and the audience spot
+(896300, 28900) joins the roster only. A finished event and any other foot seats nobody, and a
+refused player — but not a GM — is `WarpSet` to the empire start, ordered through the client
+registry as a restart warp is. The kick is `CheckIpAddress` (`G/OXEvent.cpp:119-135`,
+`ENABLE_KICK_MULTI_IP_OX`): a same-host attender on the same map that is a live online character
+(the `FindByPID` and `GetDesc` arms) is hack-logged `MULTI_IP_OX` and sent home, and the seat does
+not land. The leave drops the seat and the roster on a disconnect from map 113 only
+(`RemoveFromAttenderList`, `G/char.cpp:1827-1830`); a warp keeps both. The login mount-strip is
+`ENABLE_MOUNT_COSTUME_SYSTEM`-gated and belongs to the mount-costume gap of ledger 399's note.
+
+The two world tests (`gm_lines.rs::the_spots_seat_and_the_lines_count_the_attender`,
+`gm_lines.rs::a_finished_event_refuses_and_the_leave_drops_the_seat`) seat both spots with golden
+values, kick a same-host second seat, refuse a finished event to a GM with no warp order, read
+both lines, and prove the warp-keep/disconnect-drop leave pair. Mutants killed: the attender
+spot +1, the finished status +1, the GM arm inverted, the audience roster dropped, the online-desc
+arm inverted, and the leave map 113 to 114. The first attender-spot mutant survived because the
+test reused the production constants; the test now spells the golden spots.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` (4986 passed, 1 failed in
+46 targets: `a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya` failed once with
+left 17 right 136 at `parity.rs:30323`, then passed alone and 4 of 4 in the flake check, so a
+load flake unrelated to this slice), `cargo test --workspace --doc --locked --offline`, `cargo
+clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, no `prodomo\_%` database remained and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

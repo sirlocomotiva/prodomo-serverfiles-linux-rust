@@ -241,7 +241,9 @@ impl CommandEntry {
             | "do_monarch_mob"
             | "do_monarch_notice"
             | "do_reward_system"
-            | "do_dungeon_info" => self.gm_tail_name(),
+            | "do_dungeon_info"
+            | "do_oxevent_log"
+            | "do_oxevent_get_attender" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -326,6 +328,8 @@ impl CommandEntry {
             "do_monarch_notice" => Command::GmLine(GmLine::MonarchNotice),
             "do_reward_system" => Command::GmLine(GmLine::RewardSystem),
             "do_dungeon_info" => Command::GmLine(GmLine::DungeonInfo),
+            "do_oxevent_log" => Command::GmLine(GmLine::LogOxevent),
+            "do_oxevent_get_attender" => Command::GmLine(GmLine::GetOxeventAtt),
             _ => Command::NotPorted(self.handler),
         }
     }

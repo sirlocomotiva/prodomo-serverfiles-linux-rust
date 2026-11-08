@@ -2994,6 +2994,10 @@ pub enum GmLine {
     MonarchNotice,
     /// `/reward_system` (`do_reward_system`), a player's line.
     RewardSystem,
+    /// `/log_oxevent` (`do_oxevent_log`), a GM's line.
+    LogOxevent,
+    /// `/get_oxevent_att` (`do_oxevent_get_attender`), a GM's line.
+    GetOxeventAtt,
     /// `/dungeon_info` (`do_dungeon_info`), a player's line.
     DungeonInfo,
 }

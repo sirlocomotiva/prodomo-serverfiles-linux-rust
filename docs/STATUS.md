@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 463 (the dungeon board).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 464
+Last reviewed: 2026-11-08, after ledger section 464 (the OX seat).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 465
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -494,7 +494,10 @@ reader). Since 462 `cmd.reward_system` and `sys.custom.reward` are `ported`: the
 `RewardData` open pair, the solo/global row tables with the completion prize, and
 the kill and level-up call sites. Since 463 `cmd.dungeon_info` is `ported`: the
 six-row table, the store-read `dungeon_log_info` rank, the `dungeon_info_cooldown`
-line with the `test_cooldown` stamps, and the `Damage` arm. The
+line with the `test_cooldown` stamps, and the `Damage` arm. Since 464
+`cmd.log_oxevent`, `cmd.get_oxevent_att` and `sys.event.ox` are `ported`: the enter
+seat with the multi-IP kick, the roster pair, and the warp-keep/disconnect-drop
+leave. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

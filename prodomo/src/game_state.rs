@@ -561,6 +561,15 @@ pub struct GameState {
     /// The OX quiz list (`COXEventManager::m_vec_quiz`, `G/OXEvent.h:28`), by level:
     /// every `add_ox_quiz` call lands here after its step, and `/show_quiz` reads it.
     ox_quiz: Vec<Vec<quest_quiet::OxQuiz>>,
+    /// The OX attenders (`COXEventManager::m_map_attender`, `G/OXEvent.h:25`): the PIDs
+    /// the login seated at the attender spot while the event ran, which
+    /// `/get_oxevent_att` counts and `/log_oxevent` logs. A session's own: the leave
+    /// forgets it, as `CloseEvent`'s clear does for a finished event.
+    ox_attenders: std::collections::HashSet<u32>,
+    /// The OX roster (`COXEventManager::m_map_char`, `G/OXEvent.h:27`): every entrant the
+    /// event took, attenders and audience alike, which `CloseEvent`'s warp names.
+    /// `Default` is empty, and both paths' leave drops it with the rest.
+    ox_roster: std::collections::HashSet<u32>,
     /// The block mode of each character (`m_pointsInstant.bBlockMode`, `G/char.h:471`):
     /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist. A
     /// session's own: the leave forgets it.
@@ -3222,6 +3231,7 @@ impl GameState {
             Some(show) => {
                 let records = self.place_body(vid, show.place, show.card);
                 self.start_pc_recovery(vid);
+                self.seat_ox_attender(vid, player_id, show.place);
                 (records, self.enter_revive_invisible(vid))
             }
             None => (Vec::new(), None),
@@ -3547,6 +3557,19 @@ impl GameState {
         self.changelook_windows.remove(&vid);
         self.changelook_held.remove(&vid);
         self.forget_whisper_session(vid);
+        // `COXEventManager::RemoveFromAttenderList` on the disconnect path only
+        // (`G/char.cpp:1827-1830`): a character that leaves map 113 drops its attender
+        // seat, and the roster with it (legacy drops nothing on a warp; the seat is a
+        // map-113 stay). A warp keeps both: no warp path clears them.
+        if departure == Departure::Disconnect
+            && self.bodies.get(&vid).is_some_and(|body| body.map == 113)
+        {
+            if let Ok(character) = self.characters.find_by_vid(vid) {
+                let pid = character.player_id();
+                self.ox_attenders.remove(&pid);
+                self.ox_roster.remove(&pid);
+            }
+        }
         let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
         let character = self.characters.find_by_vid(vid).ok()?;

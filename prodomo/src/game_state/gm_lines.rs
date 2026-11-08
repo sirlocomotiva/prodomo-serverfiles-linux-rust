@@ -45,7 +45,7 @@ use world::item::{ItemId, ATTRIBUTES, SOCKETS};
 use super::view::EntityKey;
 use super::GameState;
 use crate::chat_line::Arg;
-use crate::command::{one_argument, two_arguments};
+use crate::command::{one_argument, two_arguments, GM_PLAYER};
 use crate::game_loop_messages::GmLine;
 use crate::item_move::{MovedItems, Mover};
 
@@ -54,6 +54,21 @@ const WEAPON_CELL: u16 = INVENTORY_MAX_NUM + common::enums::EWearPositions::Weap
 
 /// `MAX_NORM_ATTR_NUM` (`item_length.h:32`): the attributes `ClearAttribute` clears.
 const NORM_ATTRS: usize = 5;
+
+/// `OXEVENT_MAP_INDEX` (`G/OXEvent.h:2`).
+const OXEVENT_MAP_INDEX: i32 = 113;
+
+/// The `oxevent_status` event flag (`G/OXEvent.cpp:39-58`), 0 finished.
+const OXEVENT_STATUS: &[u8] = b"oxevent_status";
+
+/// The finished status (`OXEVENT_FINISH`), which seats nobody.
+const OXEVENT_FINISHED: i32 = 0;
+
+/// The attender spot (`G/OXEvent.cpp:98-101`): the feet that join the attenders.
+const OXEVENT_ATTENDER_SPOT: (i32, i32) = (896_500, 24_600);
+
+/// The audience spot (`G/OXEvent.cpp:102-105`): the feet that join the roster only.
+const OXEVENT_AUDIENCE_SPOT: (i32, i32) = (896_300, 28_900);
 
 /// The rows a GM line changed, which its descriptor's caller stores: the store id of the
 /// character whose rows they are, the item changes, and the skills a clear zeroed.
@@ -214,10 +229,7 @@ impl GameState {
             GmLine::UserHorseFeed => self.user_horse_feed(vid, mover),
             GmLine::ShowQuiz => self.show_quiz(vid, mover),
             GmLine::GayaSystem => self.run_gaya_command(vid, rest, mover),
-            GmLine::Cube => {
-                self.cube_command(vid, rest);
-                None
-            }
+            GmLine::Cube => self.run_cube_command(vid, rest),
             GmLine::FetchCasket => {
                 self.fetch_casket_items(vid, rest, mover);
                 None
@@ -255,6 +267,38 @@ impl GameState {
                 self.run_dungeon_info(vid, rest, mover);
                 None
             }
+            GmLine::LogOxevent | GmLine::GetOxeventAtt => {
+                self.run_ox_line(vid, line, mover);
+                None
+            }
+        }
+    }
+
+    /// `do_cube`'s own step, split out so the dispatcher stays under the line limit.
+    fn run_cube_command(&mut self, vid: Vid, rest: &[u8]) -> Option<GmRows> {
+        self.cube_command(vid, rest);
+        None
+    }
+
+    /// The attenders the test reads, pid by pid.
+    #[cfg(test)]
+    fn ox_attenders(&self) -> &std::collections::HashSet<u32> {
+        &self.ox_attenders
+    }
+
+    /// The roster the test reads, pid by pid.
+    #[cfg(test)]
+    fn ox_roster(&self) -> &std::collections::HashSet<u32> {
+        &self.ox_roster
+    }
+
+    /// The OX roster lines (`do_oxevent_log`, `do_oxevent_get_attender`): the caller's
+    /// own choice, split out so the dispatcher stays under the line limit.
+    fn run_ox_line(&self, vid: Vid, line: GmLine, mover: Mover) {
+        match line {
+            GmLine::LogOxevent => self.log_oxevent(vid, mover),
+            GmLine::GetOxeventAtt => self.get_oxevent_att(vid, mover),
+            _ => {}
         }
     }
     /// `/fetch_casket_items <vnum>` (`do_fetch_casket_items`,
@@ -479,6 +523,35 @@ impl GameState {
             &[],
         );
         None
+    }
+
+    /// `/log_oxevent` (`do_oxevent_log`, `G/cmd_oxevent.cpp:18-28`, and
+    /// `COXEventManager::LogWinner`, `G/OXEvent.cpp:442-454`): every attender still
+    /// online is char-logged `OXEVENT LastManStanding`, and the caller hears
+    /// `[LS;814]`. The `[LS;803]` arm never runs: `LogWinner` always answers true.
+    fn log_oxevent(&self, vid: Vid, mover: Mover) {
+        let mut attenders: Vec<u32> = self.ox_attenders.iter().copied().collect();
+        attenders.sort_unstable();
+        for pid in attenders {
+            if self.characters.find_by_pid(pid).is_ok() {
+                tracing::info!(pid, "CHAR_LOG OXEVENT LastManStanding");
+            }
+        }
+        self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;814]", &[]);
+    }
+
+    /// `/get_oxevent_att` (`do_oxevent_get_attender`, `G/cmd_oxevent.cpp:30-33`): the
+    /// caller hears the attender count (`[LS;825;%d]`).
+    fn get_oxevent_att(&self, vid: Vid, mover: Mover) {
+        self.tell(
+            vid,
+            mover,
+            CHAT_TYPE_INFO,
+            b"[LS;825;%d]",
+            &[Arg::Int(
+                i64::try_from(self.ox_attenders.len()).unwrap_or(i64::MAX),
+            )],
+        );
     }
 
     fn item_id_list(&self, vid: Vid, mover: Mover) {
@@ -754,5 +827,350 @@ mod tests {
         assert_eq!(int_word(b"-3"), Some(-3));
         assert_eq!(int_word(b"99999999999"), Some(i32::MAX));
         assert_eq!(int_word(b"-99999999999"), Some(i32::MIN));
+    }
+}
+
+impl GameState {
+    /// `COXEventManager::Enter`'s seat (`G/OXEvent.cpp:91-104`,
+    /// `G/input_login.cpp:853-874`): an entrant on map 113 while the event is not
+    /// finished whose feet are exactly the attender spot joins the roster and the
+    /// attenders — past the multi-IP kick, which sends a same-host second seat home
+    /// instead. The audience spot joins the roster only. A finished event and every
+    /// other foot seats nobody, and a refused player (but not a GM) is `WarpSet` to its
+    /// empire start.
+    pub(super) fn seat_ox_attender(
+        &mut self,
+        vid: Vid,
+        pid: u32,
+        place: crate::game_loop_messages::EnterPlace,
+    ) {
+        if crate::loading_phase::public_map_index(place.map) != OXEVENT_MAP_INDEX {
+            return;
+        }
+        let status = self
+            .quests
+            .as_ref()
+            .map_or(0, |quests| quests.manager().event_flag(OXEVENT_STATUS));
+        if status == OXEVENT_FINISHED {
+            if self.ox_refuses_player(vid) {
+                self.send_ox_kick_home(vid);
+            }
+            return;
+        }
+        if (place.x, place.y) == OXEVENT_ATTENDER_SPOT {
+            if self.ox_kicks_multi_ip(vid, place.map) {
+                return;
+            }
+            self.ox_roster.insert(pid);
+            self.ox_attenders.insert(pid);
+            return;
+        }
+        if (place.x, place.y) == OXEVENT_AUDIENCE_SPOT {
+            self.ox_roster.insert(pid);
+            return;
+        }
+        if self.ox_refuses_player(vid) {
+            self.send_ox_kick_home(vid);
+        }
+    }
+
+    /// The `Enter` refusal: a player is `WarpSet` home (`G/input_login.cpp:868-873`), a
+    /// GM stays put. A character with no loaded points refuses, as a player does.
+    fn ox_refuses_player(&self, vid: Vid) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .is_none_or(|points| points.gm_level() == GM_PLAYER)
+    }
+}
+
+impl GameState {
+    /// `WarpSet(EMPIRE_START_X, EMPIRE_START_Y)` for a refused or kicked OX entrant
+    /// (`G/input_login.cpp:868-873`, `G/char.cpp:8616-8619`): the empire start,
+    /// ordered through the client registry, as a restart warp is.
+    fn send_ox_kick_home(&self, vid: Vid) {
+        let Some(body) = self.bodies.get(&vid) else {
+            return;
+        };
+        let Some((x, y)) = crate::warp::go_home(body.card.empire) else {
+            return;
+        };
+        self.order_warp(vid, (x, y));
+    }
+
+    /// `COXEventManager::CheckIpAddress` (`G/OXEvent.cpp:119-135`,
+    /// `ENABLE_KICK_MULTI_IP_OX`): whether the entrant shares its host with an
+    /// attender on the same map — the other must be a live online character, as
+    /// legacy's `FindByPID` and `GetDesc` arms require. A kicked entrant is
+    /// hack-logged and sent home; the seat does not land.
+    fn ox_kicks_multi_ip(&mut self, vid: Vid, map: i32) -> bool {
+        let Some(addr) = self.multi_addr.get(&vid).cloned() else {
+            return false;
+        };
+        let hit = self.ox_attenders.iter().any(|pid| {
+            let Ok(other) = self.characters.find_by_pid(*pid) else {
+                return false;
+            };
+            let other = other.vid();
+            if other == vid {
+                return false;
+            }
+            // `!tch->GetDesc()`: the other must be online, which the outbox proves.
+            if !self.outboxes.contains_key(&other) {
+                return false;
+            }
+            if self.bodies.get(&other).is_none_or(|body| body.map != map) {
+                return false;
+            }
+            self.multi_addr
+                .get(&other)
+                .is_some_and(|other| *other == addr)
+        });
+        if hit {
+            tracing::info!("HACK_LOG MULTI_IP_OX");
+            self.send_ox_kick_home(vid);
+        }
+        hit
+    }
+}
+
+#[cfg(test)]
+mod ox_seat_tests {
+    use common::vid::Vid;
+    use gamedata::mob_locale_names::MobNamesByLanguage;
+    use gamedata::server_attr::SectreeGrid;
+
+    use super::super::fixtures::{a_world, enter_on, TestClock};
+    use super::OXEVENT_MAP_INDEX;
+
+    const fn mover() -> crate::item_move::Mover {
+        crate::item_move::Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            affect_flags: [0; 2],
+            dead: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        }
+    }
+
+    fn text_of(line: &[u8]) -> Vec<u8> {
+        let size = usize::from(u16::from_le_bytes([line[1], line[2]]));
+        assert_eq!(size, line.len());
+        assert_eq!(line[0], 4, "HEADER_GC_CHAT");
+        line[10..].to_vec()
+    }
+
+    /// The OX map on Channel 1, wide enough for the spots, with a client registry
+    /// so the refusal's warp order lands somewhere the test can read.
+    fn ox_world(
+        clock: &TestClock,
+    ) -> (
+        super::super::GameState,
+        std::sync::Arc<crate::client_registry::ChannelClients>,
+    ) {
+        let clients = std::sync::Arc::new(crate::client_registry::ChannelClients::new());
+        let mut world = a_world(clock).with_clients(std::sync::Arc::clone(&clients));
+        world.host_map(
+            1,
+            OXEVENT_MAP_INDEX,
+            SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 40,
+                rows: 40,
+            },
+        );
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager =
+            quest::manager::Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        world.quests = Some(super::super::quests::Quests::new(
+            manager,
+            std::sync::Arc::default(),
+            MobNamesByLanguage::default(),
+        ));
+        (world, clients)
+    }
+
+    /// A seat at `at` for `vid`.
+    fn seat(world: &mut super::super::GameState, vid: u32, at: (i32, i32)) {
+        world.seat_ox_attender(
+            Vid::new(vid),
+            vid,
+            crate::game_loop_messages::EnterPlace {
+                channel: 1,
+                map: OXEVENT_MAP_INDEX,
+                x: at.0,
+                y: at.1,
+                z: 0,
+            },
+        );
+    }
+
+    /// A world with the OX event running.
+    fn open_world(
+        clock: &TestClock,
+    ) -> (
+        super::super::GameState,
+        std::sync::Arc<crate::client_registry::ChannelClients>,
+    ) {
+        let (mut world, clients) = ox_world(clock);
+        world
+            .quests
+            .as_mut()
+            .expect("the quests are installed")
+            .manager_mut()
+            .set_event_flag(super::OXEVENT_STATUS, 1);
+        (world, clients)
+    }
+
+    /// `Enter`'s seat: the attender spot joins while the event runs, the audience
+    /// spot joins the roster only, and `/get_oxevent_att` counts the one attender.
+    /// A same-host second seat kicks home instead of landing.
+    #[test]
+    fn the_spots_seat_and_the_lines_count_the_attender() {
+        let clock = TestClock::default();
+        let (mut world, _clients) = open_world(&clock);
+        let mut seater = enter_on(
+            &mut world,
+            (1, OXEVENT_MAP_INDEX),
+            7,
+            (896_500, 24_600),
+            820,
+        );
+        let mut onlooker = enter_on(
+            &mut world,
+            (1, OXEVENT_MAP_INDEX),
+            8,
+            (896_300, 28_900),
+            820,
+        );
+        seat(&mut world, 7, (896_500, 24_600));
+        seat(&mut world, 8, (896_300, 28_900));
+        assert!(
+            world.ox_roster().contains(&8),
+            "the audience joins the roster"
+        );
+        assert!(
+            !world.ox_attenders().contains(&8),
+            "the audience is no attender"
+        );
+        // The enter walk's own lines (multi-farm, registry) land before the count.
+        while seater.try_recv().is_ok() {}
+        while onlooker.try_recv().is_ok() {}
+        world.get_oxevent_att(Vid::new(7), mover());
+        let count = seater.try_recv().expect("the count answers");
+        assert_eq!(text_of(&count), b"[LS;825;1]");
+        seat(&mut world, 8, (896_500, 24_600));
+        world.get_oxevent_att(Vid::new(7), mover());
+        let count = seater.try_recv().expect("the count answers again");
+        assert_eq!(text_of(&count), b"[LS;825;1]");
+        // `/log_oxevent` answers `[LS;814]`; the char-log is the operator log's own.
+        world.log_oxevent(Vid::new(7), mover());
+        let logged = seater.try_recv().expect("the log answers");
+        assert_eq!(text_of(&logged), b"[LS;814]");
+        // A finished event refuses a later seat: the count stays 1.
+        world
+            .quests
+            .as_mut()
+            .expect("the quests are installed")
+            .manager_mut()
+            .set_event_flag(super::OXEVENT_STATUS, 0);
+        let mut late = enter_on(
+            &mut world,
+            (1, OXEVENT_MAP_INDEX),
+            9,
+            (896_500, 24_600),
+            820,
+        );
+        while late.try_recv().is_ok() {}
+        seat(&mut world, 9, (896_500, 24_600));
+        while seater.try_recv().is_ok() {}
+        world.get_oxevent_att(Vid::new(7), mover());
+        let count = seater
+            .try_recv()
+            .expect("the count answers after the late seat");
+        assert_eq!(text_of(&count), b"[LS;825;1]");
+    }
+
+    /// A finished event refuses: a GM is sent nowhere, and a warp keeps the seat
+    /// while a disconnect from map 113 drops it (`G/char.cpp:1827-1830`).
+    #[test]
+    fn a_finished_event_refuses_and_the_leave_drops_the_seat() {
+        let clock = TestClock::default();
+        let (mut world, clients) = ox_world(&clock);
+        let mut seater = enter_on(
+            &mut world,
+            (1, OXEVENT_MAP_INDEX),
+            7,
+            (896_500, 24_600),
+            820,
+        );
+        while seater.try_recv().is_ok() {}
+        let mut points = super::super::fixtures::points(820);
+        points.set_gm_level(crate::command::GM_IMPLEMENTOR);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(7))
+            .expect("the GM is in the world")
+            .set_points(Some(points));
+        // The lease joins the registry's map-113 roster before the finished seat, as
+        // the descriptor's does — so the seat's own order would land here.
+        let mut lease = clients.join(crate::client_registry::ClientEntry {
+            channel: 1,
+            map: OXEVENT_MAP_INDEX,
+            name: "P7".to_string(),
+            vid: 7,
+            empire: 1,
+            language: 0,
+        });
+        seat(&mut world, 7, (896_500, 24_600));
+        let mut orders = lease.take_orders().expect("the queue is home");
+        assert!(orders.try_recv().is_err(), "a refused GM is sent nowhere");
+        // The seat never landed; the leave drops nothing and keeps nothing.
+        world.leave_world_by(Vid::new(7), crate::game_loop_messages::Departure::Warp);
+        assert!(world.ox_attenders().is_empty(), "no seat ever landed");
+        world.leave_world_by(
+            Vid::new(7),
+            crate::game_loop_messages::Departure::Disconnect,
+        );
+        assert!(world.ox_roster().is_empty(), "no roster ever landed");
+        // The running event seats, and the leave keeps the seat on a warp and drops
+        // it with the roster on a disconnect from map 113.
+        world
+            .quests
+            .as_mut()
+            .expect("the quests are installed")
+            .manager_mut()
+            .set_event_flag(super::OXEVENT_STATUS, 1);
+        let mut rider = enter_on(
+            &mut world,
+            (1, OXEVENT_MAP_INDEX),
+            8,
+            (896_500, 24_600),
+            820,
+        );
+        while rider.try_recv().is_ok() {}
+        seat(&mut world, 8, (896_500, 24_600));
+        assert!(world.ox_attenders().contains(&8), "the seater sits");
+        world.leave_world_by(Vid::new(7), crate::game_loop_messages::Departure::Warp);
+        assert!(world.ox_attenders().contains(&8), "a warp keeps the seat");
+        world.leave_world_by(
+            Vid::new(8),
+            crate::game_loop_messages::Departure::Disconnect,
+        );
+        assert!(
+            !world.ox_attenders().contains(&8),
+            "a disconnect from map 113 drops the seat"
+        );
+        assert!(
+            !world.ox_roster().contains(&8),
+            "a disconnect from map 113 drops the roster too"
+        );
     }
 }
