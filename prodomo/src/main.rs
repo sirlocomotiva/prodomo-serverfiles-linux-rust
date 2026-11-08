@@ -6728,10 +6728,11 @@ fn empty_view() -> Neighbourhood {
 
 /// The time `get_global_time()` reports: `time(0)` plus the game server's gap.
 ///
-/// The Rewrite has no accumulated game time, so this is the wall clock. Legacy's
-/// `get_global_time` adds a gap that starts at zero and grows with uptime (`G/game.cpp:106`),
-/// which a client that shows a countdown would read differently; that is a Divergence until
-/// the world system owns the clock.
+/// The Rewrite has no accumulated game time, so this is the wall clock. Legacy's gap
+/// starts at zero and only the DB peer's boot and time packets move it
+/// (`set_global_time`, `G/utils.cpp:12-21`, called from `G/input_db.cpp:773,1642`); the
+/// DB peer is retired, so nothing in the Rewrite sets one. The `G/game.cpp:106` citation
+/// the earlier doc carried names a file that does not exist in the frozen source.
 fn global_time() -> u32 {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -570,3 +570,13 @@ owner answers.
       target (your deployment: every Channel hosts every empire start), else on the
       lowest-numbered Channel that does.
     Waits on it: nothing blocks.
+59. **`/in_game_mall` needs a website (ledger 477).** `do_in_game_mall`
+ (`G/cmd_general.cpp:3382-3459`) answers any player with a `mall https://.../ishop`
+ command line signed by MD5 with the fixed key `GF9001`, which the client opens in a
+ browser. The owner said there is no website, so the command's effect has nowhere to
+ land. Waits on it: whether to port the URL-sender anyway (a `WebMallURL` setting and an
+ MD5 dependency, ask first per the dependency rule), or to leave `cmd.in_game_mall`
+ `missing` until a shop exists. `cmd.in_game_mall` stays `missing`.
+60. **`sys.net.udp_block` is `unused` (ledger 477).** Legacy defines `__UDP_BLOCK__`
+ (`C/prodomodefines.h:195`), so the UDP bind and watch in `G/main.cpp:678-694` never
+ compile and no UDP socket is bound. Waits on it: confirm the row `unused`.

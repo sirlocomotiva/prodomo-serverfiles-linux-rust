@@ -49615,3 +49615,43 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 cargo doc --workspace --no-deps --locked --offline`, the scenario 8x, and `legacy/` is
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 477. The mislabeled systems
+
+Four system rows claimed `missing` for work that is done, unreachable, or half-done. This
+slice corrects the labels; the only code change is a doc comment.
+
+`sys.char.empire_change` is `ported`: ledger 405 already carries `ChangeEmpire` in full
+(the 1-4 refusals, the account move with the re-show, the 999) and the change-count read,
+through `the_empire_exchange_moves_the_account`, which still passes. `sys.world.channel_move`
+is `ported`: `run_move_channel`, the countdown and the re-gated `MoveChannel` are all in
+`move_channel.rs`, through `a_channel_change_counts_down_and_warps_the_character_to_the_other_channel`,
+which still passes.
+
+`sys.world.time` is `partial`: `GC_TIME` at login is ported (the legacy-order scenario
+asserts it) and `lua.get_time`/`lua.get_global_time` are backed on the wall clock (ledger
+227, unit tests only, no scenario yet). The row's "day and night" names nothing: the sweep
+finds `get_global_time` in 35 game files (the positive control) but `DayNight`,
+`DAY_NIGHT`, `day_night`, `SetDay`, `GAMETIME_` and `game_time` match nothing in
+`server/server/game/`. The gap half is closed too: only the retired DB peer's packets move
+it (`set_global_time`, `G/utils.cpp:12-21`, from `G/input_db.cpp:773,1642`), so the wall
+clock is the whole port. The `global_time` doc (`prodomo/src/main.rs`) said otherwise —
+a Divergence "until the world system owns the clock", citing `G/game.cpp:106`, a file that
+does not exist in the frozen source — and now says this.
+
+`sys.net.udp_block` is `unused`: legacy defines `__UDP_BLOCK__`
+(`C/prodomodefines.h:195`), so the bind and the watch at `G/main.cpp:678-694` never compile
+and no UDP socket is bound. Owner question 60 asks for confirmation. Question 59 asks about
+`/in_game_mall`, the last missing command: it answers any player with a signed shop URL
+(`G/cmd_general.cpp:3382-3459`), and the owner's deployment has no website to open.
+
+This slice also repairs a 476 slip: the STATUS header still named 475 after the buildings
+slice, because the header edit died with the slice-sentence assert. Both lines now name
+477.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the two scenarios, and `legacy/` is
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
