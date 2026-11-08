@@ -8794,6 +8794,7 @@ async fn run_accept_loop(
                         // answers every event board empty.
                         install_events(game_loop, store).await?;
                         install_rank(game_loop, store).await?;
+                        install_monarch(game_loop, store).await?;
                        ready = true;
                        ready_gate.open();
                        info!("Accepting clients");
@@ -9968,6 +9969,24 @@ async fn install_rank(game_loop: &mut GameLoopHandle, store: &Store) -> Result<(
         .await
         .map_err(|error| format!("The world refused the global rank: {error}").into())
 }
+/// The monarch treasuries `serve` moves into the game thread once the store is up.
+///
+/// Every failure here stops the server instead of opening the gate: a world without its
+/// treasuries would move money off a zeroed board and store over the real rows.
+async fn install_monarch(
+    game_loop: &mut GameLoopHandle,
+    store: &Store,
+) -> Result<(), Box<dyn Error>> {
+    let money = db::monarch::load_all(store)
+        .await
+        .map_err(|error| format!("Stored monarch treasuries are unusable: {error}"))?;
+    info!("Stored monarch treasuries loaded");
+    game_loop
+        .controller()
+        .install_monarch(money)
+        .await
+        .map_err(|error| format!("The world refused the monarch treasuries: {error}").into())
+}
 
 /// The stored guilds `serve` moves into the game thread once the store is up.
 ///
@@ -10454,6 +10473,7 @@ where
         LineCommand::Book => book_step(session, addr, context, held, rest).await,
         LineCommand::Console => console_step(addr, context, held).await,
         LineCommand::SetAttr => set_attr_step(addr, context, held, rest).await,
+        LineCommand::Temp => temp_step(addr, context, held, rest).await,
         command @ (LineCommand::GlobalNotice
         | LineCommand::MapNotice
         | LineCommand::BigNotice
@@ -13807,6 +13827,36 @@ async fn advance_skill_step(
         }
     }
     info!(%addr, "Skill group selected");
+    true
+}
+/// `do_temp`: the world moves the empire's treasury; the landed cell follows on the
+/// store. Silent either way, as legacy's send path is.
+async fn temp_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Temp without a character in the world; ignoring");
+        return true;
+    };
+    let landed = match context.game.temp_command(vid, rest).await {
+        Ok(landed) => landed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a temp; closing");
+            return false;
+        }
+    };
+    let Some((empire, money)) = landed else {
+        info!(%addr, "Temp moved nothing");
+        return true;
+    };
+    if let Err(error) = db::monarch::store_money(&context.store, empire, money).await {
+        warn!(%addr, %error, "The treasury could not be stored; closing");
+        return false;
+    }
+    info!(%addr, "Treasury moved");
     true
 }
 /// `do_purge` and `do_weaken`: the world destroys or weakens the NPCs

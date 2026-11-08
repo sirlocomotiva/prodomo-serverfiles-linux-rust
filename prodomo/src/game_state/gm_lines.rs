@@ -228,6 +228,10 @@ impl GameState {
             // (`GetMyShop` is never set, `sys.trade.private_shop` is missing), so the line
             // always stays silent; the arms land with the shop's slice.
             GmLine::CloseShop => None,
+            GmLine::CheckMmoney => {
+                self.run_check_mmoney(vid, rest, mover);
+                None
+            }
         }
     }
     /// `/fetch_casket_items <vnum>` (`do_fetch_casket_items`,

@@ -232,7 +232,8 @@ impl CommandEntry {
             | "do_cube"
             | "do_fetch_casket_items"
             | "do_break_marriage"
-            | "do_close_shop" => self.gm_tail_name(),
+            | "do_close_shop"
+            | "do_check_monarch_money" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -308,6 +309,7 @@ impl CommandEntry {
             "do_fetch_casket_items" => Command::GmLine(GmLine::FetchCasket),
             "do_break_marriage" => Command::GmLine(GmLine::BreakMarriage),
             "do_close_shop" => Command::GmLine(GmLine::CloseShop),
+            "do_check_monarch_money" => Command::GmLine(GmLine::CheckMmoney),
             _ => Command::NotPorted(self.handler),
         }
     }
@@ -343,6 +345,7 @@ impl CommandEntry {
                 | "do_set"
                 | "do_advance_skill_select"
                 | "do_click_special_inv"
+                | "do_temp"
         )
     }
 
@@ -374,6 +377,7 @@ impl CommandEntry {
             "do_set" => Command::SetAttr,
             "do_advance_skill_select" => Command::AdvanceSkill,
             "do_click_special_inv" => Command::ClickSpecialInv,
+            "do_temp" => Command::Temp,
             _ => Command::NotPorted(handler),
         }
     }
@@ -926,6 +930,8 @@ pub enum Command {
     Console,
     /// `do_set`: the named PC's field set (`G/cmd_gm.cpp:1862-2074`).
     SetAttr,
+    /// `do_temp`: the empire's treasury moves (`G/cmd_gm.cpp:4368-4388`).
+    Temp,
     /// `do_advance_skill_select`: the caller's skill group becomes the line's,
     /// then the skills clear (`G/cmd_general.cpp:3982-4002`).
     AdvanceSkill,

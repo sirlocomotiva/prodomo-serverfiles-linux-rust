@@ -48399,3 +48399,49 @@ the lint inline). Doc tests: 1 passed, 0 failed. Clippy (`-D warnings`) clean.
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 459. The monarch treasuries (`cmd.temp`, `cmd.check_mmoney`)
+
+`/temp` moves one of the four monarch treasury cells (`TMonarchInfo.money`,
+`C/tables.h:1574-1580`) and `/check_mmoney` names one, per `do_temp`
+(`G/cmd_gm.cpp:4368-4388`) and `do_check_monarch_money` (`G/cmd_gm.cpp:4299-4313`)
+with the DB server's guards (`D/Monarch.cpp:122-147`).
+
+- The store: migration `0037_monarch_money.sql` holds the four rows (`empire`
+  0 to 3, seeded at 0, `CHECK` behind the world's range), and `db::monarch`
+  loads them (`load_all`, a missing row reading as legacy's zeroed struct
+  does) and writes a moved cell (`store_money`). A boot call in `serve`
+  (`install_monarch`, in the guilds/events/rank order) installs them on the
+  world before the gate opens.
+- The world (`game_state::monarch`): `/temp` answers nothing outside the
+  test-server mode, answers `Usage: empire money` for a word missing, moves
+  silently when the cell stays within 0 to 2000000000, and reports the slot
+  with the landed cell for the store; `/check_mmoney` stays silent on an
+  empty line and tells `____: %d __` (byte-exact from the frozen source)
+  else, 0 for a slot past 3.
+- One Defect is not reproduced: the game's send guard takes the empire as a
+  `BYTE` but passes the full `int` on, and the DB server indexes the array
+  with it unchecked (`G/monarch.cpp:118-132`, `D/Monarch.cpp:124`), so legacy
+  writes out of bounds for an empire past 3. The Rewrite refuses it
+  (recorded in `docs/STATUS.md`). Monarch identities, elections and the
+  remaining monarch lines wait for `sys.event.castle_monarch`.
+
+Inventory: `cmd.temp` and `cmd.check_mmoney` are `ported` (commands 235
+ported / 29 missing).
+
+Tests: the scenario `a_temp_moves_a_treasury_and_a_check_names_it` (usage,
+the empty check, the zero start, the silent move, the check, the empire-5
+and over-cap silences, draining to exactly 0 and moving to exactly
+2000000000, and the stored cell), the store test
+`treasuries_seed_load_and_store`, and one mutant (the cap at 2000000001):
+killed. 8 parallel runs stayed green.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` (4973 passed, 0 failed in 45 targets), `cargo test --workspace
+--doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline`, no `prodomo\_%` database remained
+and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
+No ADR changed.

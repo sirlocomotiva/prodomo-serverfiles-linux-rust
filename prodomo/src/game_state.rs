@@ -108,6 +108,7 @@ mod mob_battle;
 mod mob_party;
 mod mob_skill;
 mod mob_strike;
+mod monarch;
 mod motion;
 mod move_channel;
 mod multi_farm;
@@ -178,6 +179,7 @@ pub use guild::{
 };
 pub use letters::LettersTrade;
 pub use level::{AdvanceLanded, LevelHeld, ResetHeld};
+pub use monarch::InstalledMonarchMoney;
 pub use premium::{
     PremiumStep, PREMIUM_ACTIVATE, PREMIUM_AFFECTS, PREMIUM_AFFECT_DURATION, PREMIUM_DURATION,
     PREMIUM_GC_LIST, PREMIUM_GC_OPEN, PREMIUM_LIST, PREMIUM_OPEN, PREMIUM_VOUCHER,
@@ -688,6 +690,9 @@ pub struct GameState {
     /// ten in it (`G/war_map.cpp:700`), which is the rule that uses it here; the other
     /// rules wait for the `test_server` audit (owner question 5).
     test_server: bool,
+    /// The monarch treasuries (`TMonarchInfo.money`, `C/tables.h:1574-1580`), by empire
+    /// slot, installed from the store before the gate opens.
+    monarch_money: [i64; 4],
     /// The shutdown countdown's seconds left (`shutdown_event_data::seconds`,
     /// `G/cmd_general.cpp:188-196`), or `None` while no `/shutdown` runs. The tick
     /// that reaches 0 sends every player the `quit` command, bars new clients, and
@@ -1215,7 +1220,8 @@ impl GameState {
             command @ (GameCommand::InstallItemIdRange { .. }
             | GameCommand::InstallGuilds { .. }
             | GameCommand::InstallEvents { .. }
-            | GameCommand::InstallRank { .. }) => self.apply_install(command),
+            | GameCommand::InstallRank { .. }
+            | GameCommand::InstallMonarch { .. }) => self.apply_install(command),
             GameCommand::RevokeGrant { target, id, reply } => {
                 self.answer_revoke(&target, id, reply);
             }
@@ -1526,6 +1532,7 @@ impl GameState {
                 | GameCommand::SetSkillOther { .. }
                 | GameCommand::SetSkillPoint { .. }
                 | GameCommand::SetJob { .. }
+                | GameCommand::Temp { .. }
                 | GameCommand::AllSkillMaster { .. }
                 | GameCommand::ItemFullSet { .. }
                 | GameCommand::AttrFullSet { .. }
@@ -1661,6 +1668,7 @@ impl GameState {
             | GameCommand::SetSkillOther { .. }
             | GameCommand::SetSkillPoint { .. }
             | GameCommand::SetJob { .. }
+            | GameCommand::Temp { .. }
             | GameCommand::AllSkillMaster { .. }
             | GameCommand::ItemFullSet { .. }
             | GameCommand::AttrFullSet { .. }
@@ -1769,6 +1777,12 @@ impl GameState {
                 let landed = self.run_setjob(vid, &rest);
                 if reply.send(landed).is_err() {
                     debug!(?vid, "nobody was left to hear a setjob's answer");
+                }
+            }
+            GameCommand::Temp { vid, rest, reply } => {
+                let landed = self.run_temp(vid, &rest);
+                if reply.send(landed).is_err() {
+                    debug!(?vid, "nobody was left to hear a temp's answer");
                 }
             }
             GameCommand::AdvanceSkill { vid, rest, reply } => {
@@ -2368,6 +2382,12 @@ impl GameState {
                 self.install_rank(boot);
                 if reply.send(()).is_err() {
                     debug!("nobody was left to hear the rank install");
+                }
+            }
+            GameCommand::InstallMonarch { money, reply } => {
+                self.install_monarch_money(money);
+                if reply.send(()).is_err() {
+                    debug!("nobody was left to hear the monarch install");
                 }
             }
             _ => debug_assert!(false, "the dispatch routes only installs here"),

@@ -257,6 +257,14 @@ pub enum GameCommand {
         /// Where the game thread reports that it installed.
         reply: oneshot::Sender<()>,
     },
+    /// Installs the monarch treasuries (`db::monarch::load_all`), once, after migration.
+    /// See `game_state::monarch`.
+    InstallMonarch {
+        /// The four cells, by empire slot.
+        money: crate::game_state::InstalledMonarchMoney,
+        /// Where the game thread reports that it installed.
+        reply: oneshot::Sender<()>,
+    },
     /// Takes a granted item back out of the world after its row could not be written.
     ///
     /// The world is mutated before the row exists, because only the world can choose a
@@ -2484,6 +2492,16 @@ pub enum GameCommand {
         /// Where the game thread reports the group with the clear.
         reply: oneshot::Sender<Option<crate::game_state::SetJobLanded>>,
     },
+    /// Runs one `/temp` line (`do_temp`, `G/cmd_gm.cpp:4368-4388`): the empire's
+    /// treasury moves. See `game_state::monarch`.
+    Temp {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the slot with the landed cell.
+        reply: oneshot::Sender<Option<(u8, i64)>>,
+    },
     /// Runs one `/invisible` line (`do_invisibility`,
     /// `G/cmd_gm.cpp:2253-2264`): the caller's invisibility toggles. See
     /// `game_state::affect::toggle_invisible`.
@@ -2726,6 +2744,7 @@ impl GameCommand {
                 | GameCommand::SetSkillOther { .. }
                 | GameCommand::SetSkillPoint { .. }
                 | GameCommand::SetJob { .. }
+                | GameCommand::Temp { .. }
                 | GameCommand::Invisible { .. }
                 | GameCommand::Cooltime { .. }
                 | GameCommand::AffectRemove { .. }
@@ -2917,6 +2936,8 @@ pub enum GmLine {
     BreakMarriage,
     /// `/close_shop` (`do_close_shop`), a player's line.
     CloseShop,
+    /// `/check_mmoney` (`do_check_monarch_money`).
+    CheckMmoney,
 }
 
 /// Which restart a dead player asks for.
@@ -6162,6 +6183,22 @@ impl GameLoopController {
             .map_err(|_| InstallError::NotSent)?;
         answer.await.map_err(|_| InstallError::NoAnswer)
     }
+    /// Installs the monarch treasuries.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallError::NotSent`] when the command never reached the game thread and
+    /// [`InstallError::NoAnswer`] when it closed the reply without sending.
+    pub async fn install_monarch(
+        &self,
+        money: crate::game_state::InstalledMonarchMoney,
+    ) -> Result<(), InstallError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::InstallMonarch { money, reply })
+            .await
+            .map_err(|_| InstallError::NotSent)?;
+        answer.await.map_err(|_| InstallError::NoAnswer)
+    }
 
     /// Asks the world to run one `/give_reward` line. What the line shows rides the
     /// outbox before the answer, which is the stored rows or `None` for a refusal
@@ -7467,6 +7504,22 @@ impl GameLoopController {
     ) -> Result<Option<crate::game_state::SetJobLanded>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::SetJob { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/temp` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn temp_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<(u8, i64)>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Temp { vid, rest, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)

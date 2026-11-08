@@ -43006,3 +43006,85 @@ fn a_gm_divorces_two_pids_and_a_shop_close_stays_silent() {
     let _dance = read_up_to(&mut alice, &mode);
     alice.still("nothing follows the mode");
 }
+
+/// `/check_mmoney`'s line for `money`: the format's bytes with the number in.
+fn monarch_money_line(money: &[u8]) -> Vec<u8> {
+    let mut text = b"\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd: ".to_vec();
+    text.extend_from_slice(money);
+    text.extend_from_slice(b" \xef\xbf\xbd\xef\xbf\xbd");
+    an_info_line(&text)
+}
+
+/// `cmd.temp` and `cmd.check_mmoney` (`do_temp`, `do_check_monarch_money`,
+/// `G/cmd_gm.cpp:4368-4388`, `:4299-4313`). A short line answers the usage; a move lands
+/// silently and the check names the cell; an empire past 3 and a move past the cap stay
+/// silent; and the landed cell is on the store.
+#[test]
+fn a_temp_moves_a_treasury_and_a_check_names_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: empire money"),
+        "a short line answers the usage"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/check_mmoney"));
+    alice.still("an empty check is silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/check_mmoney 1"));
+    assert_eq!(
+        alice.read_game(),
+        monarch_money_line(b"0"),
+        "the treasury starts at 0"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 500"));
+    alice.still("a move lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/check_mmoney 1"));
+    assert_eq!(
+        alice.read_game(),
+        monarch_money_line(b"500"),
+        "the check names the cell"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 5 1"));
+    alice.still("an empire past 3 stays silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 1999999500"));
+    alice.still("a move to the cap lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/check_mmoney 1"));
+    assert_eq!(
+        alice.read_game(),
+        monarch_money_line(b"2000000000"),
+        "the cap is inclusive"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 1"));
+    alice.still("one past the cap stays silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/check_mmoney 1"));
+    assert_eq!(
+        alice.read_game(),
+        monarch_money_line(b"2000000000"),
+        "the over-cap move moved nothing"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 -2000000001"));
+    alice.still("a drain past 0 stays silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 -2000000000"));
+    alice.still("a drain to 0 lands silently");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/check_mmoney 1"));
+    assert_eq!(
+        alice.read_game(),
+        monarch_money_line(b"0"),
+        "0 is inclusive"
+    );
+    check(
+        &database,
+        "(SELECT money FROM monarch_money WHERE empire = 1) = 0",
+    );
+}
