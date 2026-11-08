@@ -66,6 +66,7 @@ mod alignment;
 mod arena;
 mod attr67;
 mod battle_arena;
+mod battle_pass;
 mod biologist;
 mod cards;
 mod castle_lines;
@@ -613,6 +614,17 @@ pub struct GameState {
     pub(super) world_boss_ranking: Vec<world_boss::BossRankRow>,
     pub(super) world_boss_throttle: std::collections::HashMap<u32, u64>,
     pub(super) world_boss_table: std::sync::Arc<gamedata::world_boss::WorldBossTable>,
+    pub(super) battle_pass_table: std::sync::Arc<gamedata::battle_pass::BattlePassTable>,
+    /// The battle-pass missions of each character, keyed by its VID: the daily
+    /// bucket (0) and the weekly bucket (1) (`battlePass`, `G/char.h:2644`).
+    /// Absent until `open` deals them or the load installs them.
+    pub(super) battle_pass: std::collections::HashMap<
+        u32,
+        std::collections::BTreeMap<u8, Vec<battle_pass::PlayerMission>>,
+    >,
+    /// The characters whose pass window stands open (`battlePassOpen`,
+    /// `G/char.h:2645`).
+    pub(super) battle_pass_open: std::collections::HashSet<u32>,
     /// The three-way kill scores (`CThreeWayWar::KillScore_`, `G/threeway_war.h:61`):
     /// one per empire, by empire minus 1. `-1` marks an eliminated empire, which the
     /// death hook skips. `Default` is all zero, as `Initialize` leaves them.
@@ -1106,6 +1118,15 @@ impl GameState {
         table: Arc<gamedata::world_boss::WorldBossTable>,
     ) -> Self {
         self.world_boss_table = table;
+        self
+    }
+    /// Share the battle-pass table, which the mission draws and the rewards read.
+    #[must_use]
+    pub fn with_battle_pass_table(
+        mut self,
+        table: Arc<gamedata::battle_pass::BattlePassTable>,
+    ) -> Self {
+        self.battle_pass_table = table;
         self
     }
 
@@ -2863,6 +2884,7 @@ impl GameState {
                 affects,
                 fish_board: self.kept_fish_board(vid),
                 daily_gift: self.kept_daily_gift(vid),
+                battle_pass: self.kept_pass_stored(vid),
                 horse_name: character.points().map(|_| {
                     self.horse_names
                         .get(&player_id)
@@ -3287,6 +3309,9 @@ impl GameState {
         // `HEADER_GD_REQ_HORSE_NAME`'s answer (`G/input_login.cpp:891-892`): the stored
         // horse name is what the manager holds for the rider from the admission on.
         let _installed = self.horse_names.insert(player_id, loaded.horse_name);
+        // `GetBattlePass` (`G/char.cpp:2434-2436`): the stored missions split into
+        // the buckets, then both refresh.
+        self.install_pass_loaded(vid, &loaded.battle_pass);
         if !loaded.skills.is_empty() {
             let state = self.pc_skills.entry(vid.raw()).or_default();
             for slot in &loaded.skills {
@@ -3667,6 +3692,7 @@ impl GameState {
             affects,
             fish_board,
             daily_gift,
+            battle_pass: self.kept_pass_stored(vid),
             horse_name: character.points().map(|_| {
                 self.horse_names
                     .get(&character.player_id())
@@ -4030,6 +4056,20 @@ impl GameState {
                 climbed = Some((slot, level, i32::from_ne_bytes(stamp.to_ne_bytes())));
             }
         }
+        // The battle-pass use hook (`G/char_item.cpp:2822-2831`): the used
+        // item's vnum and type, read before the step consumes it.
+        let used = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at));
+        let (used_vnum, used_type) = used.map_or((0, -1), |item| {
+            let item_type = self
+                .protos
+                .get(item.vnum)
+                .map_or(-1, |proto| proto.item_type);
+            (item.vnum, item_type)
+        });
         let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
             // `G/char_item.cpp:7236-7241`, before the summon arms; the refusal chats the popup.
             if rules.secured {
@@ -4037,6 +4077,11 @@ impl GameState {
             }
             use_item(items, at, rules, gear)
         })?;
+        // Past the step: a non-blend use counts, and vnum 40004 ends the use
+        // on the premium arm before the type switch.
+        if self.pass_on_use_item(vid, actor, used_vnum, used_type) {
+            return Ok(moved);
+        }
         if let Some((vnum, sub_type)) = potion {
             self.arena_consumed_potion(vid, vnum, sub_type, &moved);
         }
@@ -8159,6 +8204,7 @@ mod tests {
                 affects: Vec::new(),
                 fish_board: (Vec::new(), 0),
                 daily_gift: (None, 0),
+                battle_pass: Vec::new(),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
                 addr: String::new(),
@@ -8218,6 +8264,7 @@ mod tests {
                 affects: Vec::new(),
                 fish_board: (Vec::new(), 0),
                 daily_gift: (None, 0),
+                battle_pass: Vec::new(),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
                 addr: String::new(),

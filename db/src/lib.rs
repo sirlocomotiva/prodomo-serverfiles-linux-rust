@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod accounts;
+pub mod battle_pass;
 pub mod credentials;
 pub mod daily_gift;
 pub mod events;

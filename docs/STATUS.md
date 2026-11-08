@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 472 (the world boss).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 473
+Last reviewed: 2026-11-08, after ledger section 473 (the battle pass).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 474
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -518,7 +518,11 @@ battle arena keeps `sys.event.arena` `partial`. Since 470 the battle arena is li
 and `sys.event.castle_monarch` is `partial` with the siege core and the monarch powers waiting
 on those maps. Since 472 the world boss is live: `/worldboss`, its flag bridge, the three
 timers, the spawn, escape, kill, damage, reward and ranking arms, the CG/GC 148 records and the
-boot table are `ported`, with the season bank dropped as website-only. The
+boot table are `ported`, with the season bank dropped as website-only. Since 473 the battle
+pass is live: `/battle_pass` and `/battle_pass_admin`, the 158-mission boot table, the mission
+buckets, the kill/use/sell/craft/drop hooks and the 238 record are `ported`; 238 is
+client-unhandled, so the send is wire-only, and the MESSAGES/CHEST_OPEN/PLAYTIME arms wait on
+their unwired paths. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1530,6 +1534,9 @@ owner should know about (178.5):
 - `GiveItemFromSpecialItemGroup` returns an uninitialised `bSuccess` when the draw is
   empty (`G/char_item.cpp:9586-9589`, `:9689`). The Rewrite's world-boss reward refuses
   an empty group (ledger 472).
+- `BattlePassAction`'s tier loop indexes `rewardsFree[i]` and `rewardsPremium[i]`
+  with the crossed levels unchecked (`G/char.cpp:12893-12899`), so a level past the
+  lists reads past them. The Rewrite grants only the tiers the table holds (ledger 473).
 
 ## Environment
 

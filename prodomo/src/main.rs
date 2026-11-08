@@ -447,6 +447,10 @@ struct Held {
     daily_gift: (Option<db::daily_gift::StoredDailyGift>, u32),
     /// The account's cash as the load read it, which the save's delta starts from.
     daily_cash_loaded: u32,
+    /// The battle-pass missions the load read (`battle_pass`), which the world holds
+    /// as the character's mission buckets from the admission on, and which the save
+    /// writes back.
+    battle_pass: Vec<db::battle_pass::StoredPassMission>,
     /// The character's global rank row as the world last held it, with the generation to
     /// save it under, which the save writes; `None` before it ever scored.
     rank: Option<(i64, db::rank_global::StoredRank)>,
@@ -1170,6 +1174,7 @@ fn hold_kept(held: &mut Held, kept: Kept) {
     held.affects = kept.affects;
     held.fish_board = kept.fish_board;
     held.daily_gift = kept.daily_gift;
+    held.battle_pass = kept.battle_pass;
     held.rank = kept.rank;
     if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
         avatar.map = map;
@@ -6772,7 +6777,7 @@ where
     let mut burst = loading_burst(&character, &points, vid, &view);
     // `PlayerLoad` sets each stored quickslot right after the map test and before the points
     // packet (`G/input_db.cpp:439-440`), and `TPlayerTable::skills` rides the player row.
-    let Some((quickslots, skills, quest_flags, affects, fish_board, daily_gift)) =
+    let Some((quickslots, skills, quest_flags, affects, fish_board, daily_gift, battle_pass)) =
         load_select_rows(
             &context.store,
             addr,
@@ -6793,6 +6798,7 @@ where
     held.affects = affects;
     held.fish_board = fish_board;
     held.daily_gift = daily_gift;
+    held.battle_pass = battle_pass;
     held.daily_cash_loaded = daily_gift.1;
     held.character = Some(character.clone());
     held.channel = seat.number;
@@ -6842,12 +6848,7 @@ where
         return false;
     };
     held.items = items;
-    // The item load's `CheckMaximumPoints` may have brought the pools down, and the worn items
-    // set the parts; the save writes both from the held row (`G/char.cpp:1606`).
-    hold_points(held, points);
-    // `CHARACTER::Initialize` sets `m_dwLastSkillTime` when the character is created
-    // (`G/char.cpp:380`), which is the select.
-    held.selected_at = Some(tokio::time::Instant::now());
+    hold_selected_points(held, points);
     // The index the map test resolved is the character's map. It is held here because the
     // first thing the game phase does with it is join the client set.
     held.map = map_index;
@@ -7059,6 +7060,7 @@ async fn load_select_rows(
     Vec<db::player_affects::StoredAffect>,
     (Vec<db::fish_event::StoredFishCell>, u32),
     (Option<db::daily_gift::StoredDailyGift>, u32),
+    Vec<db::battle_pass::StoredPassMission>,
 )> {
     let stored = match db::quickslots::load_quickslots(store, player).await {
         Ok(stored) => stored,
@@ -7127,6 +7129,15 @@ async fn load_select_rows(
             return None;
         }
     };
+    // `tab.battlePass` (`G/char.cpp:2434-2436`): the mission rows the character
+    // carries from the admission on.
+    let battle_pass = match db::battle_pass::load_missions(store, player).await {
+        Ok(battle_pass) => battle_pass,
+        Err(error) => {
+            warn!(%addr, player, %error, "Battle-pass load failed; closing");
+            return None;
+        }
+    };
     Some((
         quickslots,
         skills,
@@ -7134,6 +7145,7 @@ async fn load_select_rows(
         affects,
         fish_board,
         (daily_week, daily_cash),
+        battle_pass,
     ))
 }
 
@@ -7625,6 +7637,7 @@ fn loaded_state(
         affects: held.affects.clone(),
         fish_board: held.fish_board.clone(),
         daily_gift: held.daily_gift,
+        battle_pass: held.battle_pass.clone(),
         horse_name: held
             .character
             .as_ref()
@@ -7921,6 +7934,12 @@ async fn save_stored_rows(store: &db::store::Store, player: u32, held: &Held) ->
         db::fish_event::save_board(store, player, &held.fish_board.0, held.fish_board.1).await
     {
         warn!(player, %error, "Could not save the fish-event board");
+        return false;
+    }
+    // `tab.battlePass` (`G/char.cpp:1635-1650`): the mission rows the character
+    // holds, written after the player row.
+    if let Err(error) = db::battle_pass::save_missions(store, player, &held.battle_pass).await {
+        warn!(player, %error, "Could not save the battle-pass missions");
         return false;
     }
     true
@@ -9314,6 +9333,8 @@ struct GameData {
     cube_recipes: Arc<gamedata::cube::CubeRecipes>,
     /// The world-boss table, which the game thread holds.
     world_boss: Arc<gamedata::world_boss::WorldBossTable>,
+    /// The battle-pass table, which the game thread holds.
+    battle_pass: Arc<gamedata::battle_pass::BattlePassTable>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -9359,6 +9380,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let daily_weeks = load_daily_weeks(config)?;
     let cube_recipes = load_cube_recipes(config)?;
     let world_boss = load_world_boss(config)?;
+    let battle_pass = load_battle_pass(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -9391,6 +9413,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         daily_weeks,
         cube_recipes,
         world_boss,
+        battle_pass,
     };
     Ok((data, quests))
 }
@@ -9672,9 +9695,28 @@ fn load_daily_weeks(
 /// Load the world-boss table (`CWorldBoss::ReadWorldBossTableFile`,
 /// `G/worldboss.cpp:192-219`, loaded from `G/input_db.cpp:969-976`).
 ///
-/// A file that cannot be read stops the server, as for every other Game data file (a
-/// Divergence: legacy logs and goes on with a zeroed table). The Rewrite needs the
 /// config a `/worldboss start` runs on.
+///
+/// Load the battle-pass table (`CBattlePass::BootBattlePassMap`,
+/// `G/BattlePassManager.cpp:80-245`, run from `G/main.cpp:416`).
+///
+/// A file that cannot be read stops the server, as for every other Game data file (a
+/// Divergence: legacy logs and goes on with an empty map). The Rewrite needs the
+/// missions an `open` deals.
+fn load_battle_pass(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::battle_pass::BattlePassTable>, String> {
+    let table = gamedata::battle_pass::BattlePassTable::load(&config.locale_dir())
+        .map_err(|error| format!("Battle-pass table is unusable: {error}"))?;
+    info!(
+        missions = table.missions.len(),
+        free = table.settings.rewards_free.len(),
+        premium = table.settings.rewards_premium.len(),
+        "Battle-pass table loaded"
+    );
+    Ok(Arc::new(table))
+}
+
 fn load_world_boss(
     config: &ServerConfig,
 ) -> Result<Arc<gamedata::world_boss::WorldBossTable>, String> {
@@ -10185,6 +10227,7 @@ fn build_world(
         .with_daily_weeks(Arc::clone(&data.daily_weeks))
         .with_cube_recipes(Arc::clone(&data.cube_recipes))
         .with_world_boss_table(Arc::clone(&data.world_boss))
+        .with_battle_pass_table(Arc::clone(&data.battle_pass))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)
@@ -13453,6 +13496,15 @@ where
 }
 
 /// The small GM lines of `game_state::gm_lines`: the world runs the line and tells what
+/// Hold the select's aftermath: the item load's `CheckMaximumPoints` may have brought
+/// the pools down, and the worn items set the parts, so the save writes both from the
+/// held row (`G/char.cpp:1606`); and `CHARACTER::Initialize` sets `m_dwLastSkillTime`
+/// when the character is created (`G/char.cpp:380`), which is the select.
+fn hold_selected_points(held: &mut Held, points: world::character::Points) {
+    hold_points(held, points);
+    held.selected_at = Some(tokio::time::Instant::now());
+}
+
 /// it tells through the outbox; an item write's rows are stored here, and the skills a
 /// clear zeroed lose their rows.
 async fn gm_line_step(
@@ -15848,6 +15900,7 @@ mod tests {
                 affects: Vec::new(),
                 fish_board: (Vec::new(), 0),
                 daily_gift: (None, 0),
+                battle_pass: Vec::new(),
                 horse_name: None,
                 rank: None,
             },

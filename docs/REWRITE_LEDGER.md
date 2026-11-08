@@ -49377,3 +49377,112 @@ in 46 targets, up 15 from 5043), `cargo test --workspace --doc --locked --offlin
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 473. The battle pass
+
+`CBattlePass` (`G/BattlePassManager.cpp:1-345`), `do_battle_pass` and
+`do_battle_pass_admin` (`G/cmd_general.cpp:4176-4294`), the `CHARACTER` block
+(`G/char.cpp:12762-12990`), and `HEADER_GC_BATTLE_PASS` (238,
+`G/packet.h:3507-3527`) are ported. A delegated agent wrote the first pass (the JSON
+read, the table, the lines, the buckets, the hooks, the store, the unit tests); it was
+force-stopped, and the rest below is the finish: the clippy cleanups, the shipped-file
+pin, the scenario with the 238 framing, the mutant kills, and every verification in
+this entry, which was re-derived from the sources rather than taken from the residue.
+
+The table boots from the owner's `locale/europe/battlepass.json` (158 missions, 30
+free and 30 premium tiers, `endTime` 1704578399), through a hand-rolled reader
+(`gamedata/src/battle_pass.rs`): no new dependency, since adding one needs the
+owner's approval first. The reader follows legacy's rapidjson rules: numbers count
+only as unsigned 32-bit plain digits (`IsUint`/`GetUint`), unknown `missionType` /
+`missionSpecific` / `timeInfo` strings fall back to KILL / SPECIFIC / DAILY
+(`:25-68`), a mission missing a field is skipped (`continue`), and a missing or
+unusable `Settings` or `missions` refuses the file (boot-fatal here, where legacy
+only logs and boots with an empty or half-cleared map: a Divergence). The mission id
+is the array index (`missionMap[i] = mission`). Day math counts UTC midnights and
+weeks (a Divergence: legacy's `localtime`/`mktime` counts the host zone). The id is
+an array index that fits in 13 bits here, so the id's low word and the reward cells'
+`u32` bit patterns match legacy's.
+
+The lines run at their legacy levels (`G/cmd.cpp:522-523`: `battle_pass` GM_PLAYER,
+`battle_pass_admin` GM_IMPLEMENTOR, already in the table since ledger 226).
+`battle_pass` needs two words for the usage; `open` opens once (the parsed `value`
+is unused) and sends the init record; `premium` runs the premium arm on ticket
+30018, with the retro tiers guarded by the list length; overlong and unknown words
+fall out of the `switch` silently. `battle_pass_admin` likewise needs two words
+even for the list and the reset; `completemission` tops every held row of the
+named id up (legacy's unsigned underflow when `progress > maxProgress` cannot
+happen, since progress never passes the cap: checked, not a Divergence);
+`getmissions` lists every held row; `resetMissions` clears and re-deals, weekly
+before daily, then sends the init record (`ClearBattlePass`, `:12976-12987`).
+`open` never re-deals: legacy deals only under `resetMissions` and at login
+(`GetBattlePass`, `:12826-12850`, splitting the ten stored rows by nonzero end
+time), so a stale bucket waits for the reset.
+
+`BattlePassAction` (`:12852-12911`) is in legacy order: the pass-expiry gate, the
+slot lookup (an unknown id answers the zeroed row and stays silent, as
+`missionMap[mission]` default-constructs one), the filled check, the cap with
+the points flag, the completion notice, the tier loop (one notice per crossed
+tier, then the free tier and, when premium, the premium tier), and the update
+record. The tier indexes are unbounded in legacy (`rewardsFree[i]` past the
+list reads past it): a recorded Defect (see `docs/STATUS.md`), which the port
+guards. The `test_server` info line stays silent (the build is never a test
+server). The kill, use-item (non-`ITEM_BLEND`, with vnum 40004 ending the use
+on the premium arm before the type switch, `:2822-2831`), sell (the clamped
+count), craft and drop hooks run at their legacy order positions; the shop
+hook reads the vnum and count before the sale moves them. Quest flags
+(`battlepass.points`, `battlepass.isPremium`) ride the existing `quest_flag`
+rows, and the ten stored rows ride the new `battle_pass` table (migration
+0040), written only when both buckets hold at least five (`:1635-1650`).
+
+Byte 238 was never registered in the client's decode table (134 headers in
+`protocol/src/gc_inventory.rs`; near 238 only 231, 234 and 245; controls 0xe7
+and 0xea present), so the record the port sends byte-exact (9-byte head,
+11-byte rows, daily before weekly, `wSize` over the whole record) is
+wire-only on a live client. No inventory row is invented.
+
+Three mission types are never reached in legacy: DESTROY, FINISH_DUNGEON and
+POLYMORPH have no `Register*` call site (the string map at `:27-35` names
+them, but the ten call sites at `char.cpp:1524`, `char_battle.cpp:1272`,
+`char_item.cpp:2825/3196/4302/7105`, `cuberenewal.cpp:459`,
+`input_main.cpp:874`, `item_manager.cpp:1327` and `shop_manager.cpp:574` never
+pass 2, 7 or 8), so the owner's 32 DESTROY and 2 POLYMORPH missions can only
+be completed by the admin line. MESSAGES, CHEST_OPEN and PLAYTIME wait on
+their paths: the shout fan-out lives in `main.rs` and never reaches the
+world, no box-open flow is ported (the two `CHEST_OPEN` sites at
+`char_item.cpp:3196/4302` wait with it), and no per-minute play tick exists
+(the 60 s `Save` arm at `char.cpp:1518-1524` has no Rewrite path). The
+`battle_pass.lua` quest's helpers are undefined: `quest_functions` names
+`clear_old_battlepass` and `monthIndex`, but no Lua body and no C++ binding
+defines them (a whole-`locale/europe` byte sweep finds only the quest's own
+two call sites), so `quest.battle_pass` stays `partial`. The `ITEM_BLEND`
+`USE_ITEM` site at `char_item.cpp:7105` sits inside the blend-use arm, which
+is itself unported, so its count waits with that arm. `maxDailyMissions` and
+`maxWeeklyMissions` are parsed and never read (legacy's draw always takes
+five).
+
+Tests: 9 `battle_pass` unit tests (the byte-exact wire goldens with
+byte-asymmetric values, the open-once rule, kill progress and completion with
+the exact notice count, wrong-race silence, pass expiry, row re-deal, and the
+admin list/complete/reset), 13 `gamedata::battle_pass` tests (the minimal
+file, the fallbacks, the skip and refuse rules, the escapes, and the owner's
+158-mission file pinned), the quest `command("battle_pass ...")` usage test,
+and the scenario `a_player_opens_the_battle_pass_and_the_admin_lists_it` (the
+usage, `open` dealing the 119-byte init record, the silent second open, the
+ten list lines, the admin usage, the reset re-deal). Mutants killed: `SUB_INIT
+0->7`, header `238->239`, `MIN_LEVEL 30->31`, the KILL fallback `->SELL`, and
+the reward-notice `!=->==` (the last first survived on a `>= 1` chat count
+and is now pinned at exactly one). `select_character`'s tail split into
+`hold_selected_points` keeps the line lint.
+
+Inventory: `cmd.battle_pass`, `cmd.battle_pass_admin` and
+`sys.custom.battle_pass` are `ported`; commands are 259 ported with 3
+missing, systems 383 missing. `quest.battle_pass` stays `partial`.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` (5080 passed, 0 failed in 46 targets, up 22 from 5058), `cargo
+test --workspace --doc --locked --offline`, `cargo clippy --workspace
+--all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the 238 scenario 8x, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -562,20 +562,41 @@ impl GameState {
             // cannot be sold. Silent, as legacy is.
             return Ok(ShopAnswer::silent(ShopDeclined::Locked));
         }
+        // The battle-pass sell hook (`G/shop_manager.cpp:573-574`): the sold
+        // item's vnum and count, read before the sale moves it.
+        let (sold_vnum, sold_count) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| {
+                character
+                    .items()
+                    .item_at(protocol::item_pos::ItemPos::new(1, cell))
+            })
+            .map_or((0, 0), |item| (item.vnum, item.count));
         let character = self
             .characters
             .find_by_vid_mut(vid)
             .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
         let gold = character.gold();
         match sell_item(character.items_mut(), gold, cell, count, &self.protos) {
-            Ok((done, held)) => Ok(ShopAnswer::Moved(paid(
-                character,
-                done,
-                held,
-                mover,
-                &self.protos,
-                &self.locale,
-            ))),
+            Ok((done, held)) => {
+                let answer = ShopAnswer::Moved(paid(
+                    character,
+                    done,
+                    held,
+                    mover,
+                    &self.protos,
+                    &self.locale,
+                ));
+                // Past the sale: the clamped count counts on the sold item
+                // (`RegisterItemMission(MISSION_TYPE_SELL, bCount, ...)`).
+                if matches!(answer, ShopAnswer::Moved(_)) {
+                    let clamped = count.min(sold_count).max(1);
+                    self.pass_on_sell(vid, mover, clamped, sold_vnum);
+                }
+                Ok(answer)
+            }
             Err(refused) => Ok(refusal(refused, mover, &self.locale)),
         }
     }

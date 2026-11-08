@@ -14,6 +14,7 @@ use common::vid::Vid;
 use super::GameState;
 use crate::chat_line::Arg;
 use crate::command::{self, Caller, Command, CommandFlood, Interpreted};
+use crate::game_loop_messages::GmLine;
 use crate::item_move::Mover;
 
 /// The six notice slots legacy snapshots (`MAX_QUEST_NOTICE_ARGS + 1`, `C/length.h:1197`).
@@ -166,7 +167,7 @@ impl GameState {
     /// fresh, so a quest line never trips it: the world has no delayed-disconnect
     /// path (a Divergence). The dispatch runs the battle-pass usage gate; any other
     /// line is logged and ignored, as an unported chat line is.
-    pub(super) fn run_quest_command(&self, reader: Vid, mover: Mover, line: &[u8]) {
+    pub(super) fn run_quest_command(&mut self, reader: Vid, mover: Mover, line: &[u8]) {
         let gm_level = self
             .characters
             .find_by_vid(reader)
@@ -201,7 +202,7 @@ impl GameState {
                 );
             }
             Interpreted::Run { entry, rest } => match entry.command() {
-                Command::NotPorted("battle_pass") => {
+                Command::GmLine(GmLine::BattlePass) => {
                     self.run_battle_pass_line(reader, mover, &rest);
                 }
                 Command::NotPorted(handler) => {
@@ -214,10 +215,10 @@ impl GameState {
         }
     }
 
-    /// `do_battle_pass` (`G/cmd_general.cpp:4184-4219`): fewer than two words tells the
-    /// usage; `open` and `premium` are unported (the pass never opens), and any other
-    /// first word is quiet, as the `switch` falls through.
-    fn run_battle_pass_line(&self, reader: Vid, mover: Mover, rest: &[u8]) {
+    /// `do_battle_pass` (`G/cmd_general.cpp:4184-4223`): the line runs as the
+    /// caller's own, so a quest's `open` deals and sends the init record while an
+    /// overlong word still falls out of the `switch` silently.
+    fn run_battle_pass_line(&mut self, reader: Vid, mover: Mover, rest: &[u8]) {
         let (first, second) = command::two_arguments(rest);
         if first.is_empty() || second.is_empty() {
             self.tell(
@@ -229,12 +230,12 @@ impl GameState {
             );
             return;
         }
-        for word in ["open", "premium"] {
-            if word.as_bytes().starts_with(&first) {
-                tracing::info!("Command not ported; ignoring");
-                return;
-            }
-        }
+        // `do_battle_pass` on the reader: `open` deals, `premium` runs the
+        // premium arm, and anything else is quiet.
+        let mut owned = first.clone();
+        owned.push(b' ');
+        owned.extend_from_slice(&second);
+        let _ = self.run_battle_pass_gm_line(reader, &owned, mover);
     }
 
     /// An `add_ox_quiz` call after the step: the quiz lands in the OX list, as
@@ -701,8 +702,10 @@ mod tests {
         while high.try_recv().is_ok() {}
     }
 
-    /// A bare `battle_pass` tells the usage; `open` and `premium` are unported and
-    /// quiet; another first word is quiet too.
+    /// A bare `battle_pass` tells the usage; `open` marks the window (with no
+    /// table installed the draw is empty, so no record rides, as legacy's
+    /// `UpdateBattlePass` stays silent with no missions); another first word
+    /// is quiet too.
     #[test]
     fn the_quest_command_runs_the_battle_pass_usage() {
         let clock = TestClock::default();
@@ -716,8 +719,9 @@ mod tests {
             b"Usage: battle_pass <field> <value>"
         );
         world.run_quest_command(Vid::new(0x6001), mover, b"battle_pass open 1");
+        assert!(inbox.try_recv().is_err(), "no table means no missions");
         world.run_quest_command(Vid::new(0x6001), mover, b"battle_pass bogus 1");
-        assert!(inbox.try_recv().is_err(), "nothing unported speaks");
+        assert!(inbox.try_recv().is_err(), "nothing unknown speaks");
         while inbox.try_recv().is_ok() {}
     }
 

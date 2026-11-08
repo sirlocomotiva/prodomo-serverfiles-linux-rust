@@ -766,6 +766,14 @@ impl GameState {
             return;
         }
         let hits = self.create_drop_item(vid, attacker);
+        // The battle-pass drop hook (`G/item_manager.cpp:1326-1327`): each drawn
+        // item's count counts on the killer (`pkKiller`).
+        if !hits.is_empty() {
+            let drops: Vec<(u32, u16)> = hits.iter().map(|item| (item.vnum, item.count)).collect();
+            if let Some(mover) = self.own_mover(attacker) {
+                self.pass_on_drop(attacker, mover, &drops);
+            }
+        }
         // Zero items: nothing but the damage-map clear (the empty `size() == 0` arm,
         // `:867-869`, still reaches `:992`).
         if hits.is_empty() {

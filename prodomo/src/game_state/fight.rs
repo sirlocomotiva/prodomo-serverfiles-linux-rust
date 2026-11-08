@@ -1620,7 +1620,7 @@ impl GameState {
     }
 
     /// `Dead` of the non-player under `vid` (`G/char_battle.cpp:1238-1696`), killed by `killer`
-    /// or else by the player whose PID it kept. The battle pass, the reward missions and the
+    /// or else by the player whose PID it kept. The reward missions and the
     /// duel, arena and siege hooks hold nothing for a monster a player kills; `Reward` runs
     /// between the stun cancel and `GC_DEAD`: exp, then gold, then the item draws, whose
     /// hits wait for D5 (V17c narrows). The `BOSS_KILL_LOG` and `STACK_ATTR` hooks are
@@ -1636,6 +1636,15 @@ impl GameState {
             .is_some_and(|npc| npc.vnum == super::temple_ochao::GUARDIAN_VNUM)
         {
             self.raise_temple_portal(killer);
+        }
+        // The battle-pass kill hook (`G/char_battle.cpp:1270-1272`): the
+        // killer's race match counts before the target clears. The mover is the
+        // killer's own.
+        if let Some(killer) = killer {
+            let race = self.npc_by_vid(vid).map_or(0, |npc| npc.vnum);
+            if let Some(mover) = self.own_mover(killer) {
+                self.pass_on_kill(killer, mover, race);
+            }
         }
         // `m_dwKillerPID = 0`, which legacy says never to drop (`:1261`).
         let pid = self

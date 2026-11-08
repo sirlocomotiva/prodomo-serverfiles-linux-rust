@@ -323,6 +323,13 @@ impl GameState {
             return;
         }
         let granted = self.grant_cube_reward(vid, &recipe, wins, &mut done);
+        // The battle-pass craft hook (`G/cuberenewal.cpp:458-459`): the made
+        // count counts on the made item.
+        if granted {
+            let total = u64::from(recipe.reward.count) * u64::from(wins);
+            let made = u16::try_from(total.min(u64::from(u16::MAX))).unwrap_or(u16::MAX);
+            self.pass_on_craft(vid, actor, made, recipe.reward.vnum);
+        }
         self.pack_cube_done(vid, actor, moved, done);
         if !granted {
             moved

@@ -3033,6 +3033,11 @@ pub enum GmLine {
     Frog,
     /// `/worldboss` (`do_worldboss`, `G/cmd_gm.cpp:5204-5237`): the world-boss event.
     Worldboss,
+    /// `/battle_pass` (`do_battle_pass`, `G/cmd_general.cpp:4184-4223`), a player's line.
+    BattlePass,
+    /// `/battle_pass_admin` (`do_battle_pass_admin`, `G/cmd_general.cpp:4232-4294`), an
+    /// implementor's line.
+    BattlePassAdmin,
 }
 
 /// Which restart a dead player asks for.
@@ -3519,6 +3524,9 @@ pub struct Loaded {
     /// with the account's cash, which the world holds as the character's gift week from
     /// the admission on. The open and loaded flags are memory-only and never load.
     pub daily_gift: (Option<db::daily_gift::StoredDailyGift>, u32),
+    /// The battle-pass missions the load read (`battle_pass`), which the world holds
+    /// as the character's mission buckets from the admission on.
+    pub battle_pass: Vec<db::battle_pass::StoredPassMission>,
     /// The account's character PIDs and empire-change count, which the login event's
     /// scripts judge by. The descriptor reads them before it sends the admission, as
     /// the dialog steps do before theirs.
@@ -3557,6 +3565,9 @@ pub struct Kept {
     /// account's cash, which a save writes (`G/char_daily_gifts.cpp:258`, `:368-370`).
     /// The open and loaded flags are memory-only and never keep.
     pub daily_gift: (Option<db::daily_gift::StoredDailyGift>, u32),
+    /// The battle-pass missions the world holds, which a save writes
+    /// (`tab.battlePass`, `G/char.cpp:1635-1650`).
+    pub battle_pass: Vec<db::battle_pass::StoredPassMission>,
     /// The horse name the world holds (`CHorseNameManager`), which a save writes with the
     /// character row. `None` for a character that entered without points.
     pub horse_name: Option<Vec<u8>>,

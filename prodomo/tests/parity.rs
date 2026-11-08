@@ -1421,6 +1421,7 @@ fn dynamic_len(header: u8) -> usize {
         | GC_MESSENGER
         | GC_DUEL_START
         | GC_WORLD_BOSS
+        | GC_BATTLE_PASS
         | GC_QUEST_INFO => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
@@ -1459,6 +1460,10 @@ fn client_enter_game() -> Vec<u8> {
 const GC_ENTITY: u8 = 249;
 /// `HEADER_GC_WORLD_BOSS` (148): the header, the size word and the subheader.
 const GC_WORLD_BOSS: u8 = 148;
+/// `HEADER_GC_BATTLE_PASS` (238): the header, the size word and the subheader
+/// (`TPacketBattlePass`, `G/packet.h:3510-3518`), so it sizes from its own
+/// `WORD wSize`, like the other dynamic records.
+const GC_BATTLE_PASS: u8 = 238;
 const GC_MAIN_CHARACTER2_EMPIRE: u8 = 113;
 const GC_CHARACTER_GOLD: u8 = 224;
 const GC_PLAYER_POINTS: u8 = 16;
@@ -1566,7 +1571,9 @@ fn game_len(header: u8) -> usize {
         // GC_MESSENGER rides the same `size`-word framing as the other dynamic records
         // (`TPacketGCMessenger`, `G/packet.h:1896-1901`).
         GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER
-        | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START | GC_WORLD_BOSS => dynamic_len(header),
+        | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START | GC_WORLD_BOSS | GC_BATTLE_PASS => {
+            dynamic_len(header)
+        }
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -44551,6 +44558,78 @@ fn arena_visitor_reads_countdown(
             }
         }
     }
+}
+
+/// The pass opens and the admin lists: `open` deals five daily and five weekly from
+/// the owner's 158 (`battlepass.json`), sends the 119-byte 238 init record the client
+/// never registered, and stays silent on the second open; `getmissions` lists the ten
+/// rows; a bare line tells the usage.
+#[test]
+fn a_player_opens_the_battle_pass_and_the_admin_lists_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/battle_pass"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: battle_pass <field> <value>"),
+        "the usage opens"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/battle_pass open 1"));
+    let init = alice.read_game();
+    assert_eq!(init[0], 238, "HEADER_GC_BATTLE_PASS");
+    assert_eq!(init.len(), 9 + 10 * 11, "five daily and five weekly");
+    assert_eq!(
+        u16::from_le_bytes([init[1], init[2]]),
+        u16::try_from(init.len()).expect("a short record")
+    );
+    assert_eq!(init[3], 0, "BATTLEPASS_GC_SUB_INIT");
+    assert_eq!(init[4], 0, "not premium");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/battle_pass open 1"));
+    assert!(
+        alice
+            .read_game_until(std::time::Instant::now() + QUIET_WINDOW)
+            .is_none(),
+        "the second open is silent"
+    );
+
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        b"/battle_pass_admin getmissions 1",
+    ));
+    let mut listed = 0;
+    while let Some(record) = alice.read_game_until(std::time::Instant::now() + QUIET_WINDOW) {
+        assert_eq!(record[0], GC_CHAT, "only the list rides");
+        listed += 1;
+    }
+    assert_eq!(listed, 10, "all ten rows list");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/battle_pass_admin"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: battle_pass_admin <field> <value>"),
+        "the admin usage"
+    );
+
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        b"/battle_pass_admin resetMissions 1",
+    ));
+    let redealt = alice.read_game();
+    assert_eq!(redealt[0], GC_BATTLE_PASS, "the reset re-deals");
+    assert_eq!(redealt.len(), 9 + 10 * 11, "five daily and five weekly");
+    assert_eq!(redealt[3], 0, "BATTLEPASS_GC_SUB_INIT");
 }
 
 fn arena_nonmember_login_returns_home(server: &mut Server) {

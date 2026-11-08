@@ -9,6 +9,7 @@
 //! is the `CTextFileLoader` port that most of them sit on.
 
 pub mod banword;
+pub mod battle_pass;
 pub mod belt_inventory;
 pub mod csv_table;
 pub mod cube;

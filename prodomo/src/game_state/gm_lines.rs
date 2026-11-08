@@ -303,6 +303,8 @@ impl GameState {
                 self.run_worldboss_line(vid, rest, mover);
                 None
             }
+            GmLine::BattlePass => self.run_battle_pass_gm_line(vid, rest, mover),
+            GmLine::BattlePassAdmin => self.run_battle_pass_admin_gm_line(vid, rest, mover),
             _ => None,
         }
     }
