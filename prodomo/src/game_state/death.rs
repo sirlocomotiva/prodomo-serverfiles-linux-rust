@@ -199,6 +199,16 @@ pub(super) struct Attacker {
     pub(super) pc: bool,
 }
 
+/// `INSTANT_FLAG_DEATH_PENALTY` after `Dead` (`G/char_battle.cpp:1372-1387`): set for a
+/// non-player killer off the forked maps and left as it was (`flag`) on them; cleared for
+/// a player killer and for no killer.
+fn death_penalty_flag(flag: bool, killer: Option<Attacker>, forked: bool) -> bool {
+    match killer {
+        Some(killer) if !killer.pc => flag || !forked,
+        _ => false,
+    }
+}
+
 /// What [`GameState::damage_pc_head`] decided: the victim is gone (no combat row or no
 /// points), died by `Dead`, was already dead, or is open for the hit-point change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -758,10 +768,19 @@ impl GameState {
             // kills (`raise_alignment`), where legacy never checks the war.
             self.guild_war_kill(killer.vid, vid);
         }
+        // `isForked` (`:1325-1331`): a player that dies on a forked map skips the
+        // penalty and runs the three-way hook (`:1359-1362`).
+        let forked = self
+            .bodies
+            .get(&vid)
+            .is_some_and(|body| self.forked_maps.is_forked(body.map));
         // `ItemDropPenalty` (`:1338-1346`): the victim loses the items its own alignment
         // and the draws choose. The call is outside the player-killer arm, because legacy's
         // is: a monster's kill reaches it too, and only the war and the agreed duel skip it.
         self.item_drop_penalty(vid, killer, agreed_pvp);
+        if forked {
+            self.threeway_dead(vid, killer);
+        }
         // `IsHorseRiding() → StopRiding()` (`:1242-1245`): the ride ends while the rider is
         // still up, so the horse is summoned back. A mount costume is a gap.
         if self
@@ -781,9 +800,7 @@ impl GameState {
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.fighting = false;
         }
-        // `INSTANT_FLAG_DEATH_PENALTY`: set for a non-player killer, as no map is forked; cleared
-        // for a player killer and for no killer (`:1372-1387`).
-        combat.death_penalty = killer.is_some_and(|killer| !killer.pc);
+        combat.death_penalty = death_penalty_flag(combat.death_penalty, killer, forked);
         self.clear_affects_on_death(vid);
         // `ClearSync` (`:1461`), then the stun event ends (`:1464`). The poison event ends
         // with the victim: legacy cancels nothing, but the Rewrite's tick resolves the
@@ -2038,6 +2055,26 @@ mod tests {
         assert!(field.heard(ALPHA).is_empty());
         assert!(field.heard(BRAVO).is_empty());
         assert_eq!(field.combat(ALPHA).dead_due, Some(10 + 4_500));
+    }
+
+    /// On a forked map a monster's kill sets no death-penalty flag (`!isForked`,
+    /// `G/char_battle.cpp:1374-1381`), and `Dead` runs the three-way hook: the
+    /// victim spends a revive token (`G/threeway_war.cpp:301`).
+    #[test]
+    fn a_monster_kill_on_a_forked_map_sets_no_penalty_and_spends_a_token() {
+        let mut field = a_field(true);
+        field.world.forked_maps = Arc::new(gamedata::forked::ForkedMaps::read(
+            format!("sungzi: {}\n", PLACE.1).as_bytes(),
+        ));
+        let _alpha = field.join(ALPHA, HERE);
+        field.struck_down(ALPHA);
+        field.pulse(10);
+        field.quiet();
+
+        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1, None));
+        let combat = field.combat(ALPHA);
+        assert!(combat.dead && !combat.death_penalty);
+        assert_eq!(field.world.threeway_tokens.get(&ALPHA.raw()), Some(&-1));
     }
 
     /// The stun keeps a player hitter's PID, which `Dead` reads and resets: that killer drops

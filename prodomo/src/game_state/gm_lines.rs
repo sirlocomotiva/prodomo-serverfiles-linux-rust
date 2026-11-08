@@ -267,9 +267,9 @@ impl GameState {
                 self.run_dungeon_info(vid, rest, mover);
                 None
             }
-            GmLine::LogOxevent | GmLine::GetOxeventAtt => {
-                self.run_ox_line(vid, line, mover);
-                None
+            GmLine::LogOxevent | GmLine::GetOxeventAtt => self.run_ox_line(vid, line, mover),
+            GmLine::ThreewayInfo | GmLine::ThreewayMyinfo => {
+                self.run_threeway_line(vid, line, mover)
             }
         }
     }
@@ -293,14 +293,17 @@ impl GameState {
     }
 
     /// The OX roster lines (`do_oxevent_log`, `do_oxevent_get_attender`): the caller's
-    /// own choice, split out so the dispatcher stays under the line limit.
-    fn run_ox_line(&self, vid: Vid, line: GmLine, mover: Mover) {
+    /// own choice, split out so the dispatcher stays under the line limit. They change
+    /// no row.
+    fn run_ox_line(&self, vid: Vid, line: GmLine, mover: Mover) -> Option<GmRows> {
         match line {
             GmLine::LogOxevent => self.log_oxevent(vid, mover),
             GmLine::GetOxeventAtt => self.get_oxevent_att(vid, mover),
             _ => {}
         }
+        None
     }
+
     /// `/fetch_casket_items <vnum>` (`do_fetch_casket_items`,
     /// `G/cmd_general.cpp:4136-4173`): an empty line is silent; else the special item
     /// group named by `atoi`'s reading of the word tells one `AddCasketItem <vnum>

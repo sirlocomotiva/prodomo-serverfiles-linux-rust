@@ -3000,6 +3000,10 @@ pub enum GmLine {
     GetOxeventAtt,
     /// `/dungeon_info` (`do_dungeon_info`), a player's line.
     DungeonInfo,
+    /// `/threeway_info` (`do_threeway_war_info`), a GM's line.
+    ThreewayInfo,
+    /// `/threeway_myinfo` (`do_threeway_war_myinfo`), a GM's line.
+    ThreewayMyinfo,
 }
 
 /// Which restart a dead player asks for.

@@ -19,9 +19,9 @@
 //!
 //! The private shop (`GetMyShop`, `:1019-1021`) and the protected inventory (`IsSecured`,
 //! `:1101-1104` and `:1145-1148`) are not ported, so those two refusals cannot happen here.
-//! The agreed PvP (`isAgreedPVP`, `:1280`), the arena duel (`isDuel`, `:1295`) and the forked
-//! road (`isForked`, `:1329`) are not ported either, so those three flags are always false,
-//! which is what keeps the penalty running.
+//! The arena duel (`isDuel`, `:1295`) is not ported either, so that flag is always false.
+//! The agreed PvP (`isAgreedPVP`, `:1280`) and the forked road (`isForked`, `:1329`, ledger
+//! 465) are.
 //!
 //! # The draws
 //!
@@ -226,6 +226,11 @@ impl GameState {
         if CASTLE_MAPS.contains(&map) {
             return;
         }
+        // `isForked` (`:1325-1331` and `:1337`): a death on any forked map runs the
+        // three-way hook instead.
+        if self.forked_maps.is_forked(map) {
+            return;
+        }
         // `GetRealAlignment()` (`:1040-1058`), the alignment the rules read and the store
         // keeps, not the one the client is shown.
         let alignment = self.real_alignment_of(vid.raw());
@@ -348,8 +353,8 @@ impl GameState {
     /// Whether the death is the one legacy's `Dead` hands to the penalty
     /// (`G/char_battle.cpp:1333-1345`).
     ///
-    /// The arena duel and the forked road are not ported, so their flags are
-    /// always false; the guild war and the agreed duel are.
+    /// The arena duel is not ported, so its flag is always false; the guild war and
+    /// the agreed duel are, and the forked road is read with the maps below.
     fn penalty_applies(&self, vid: Vid, killer: Option<Attacker>, agreed_pvp: bool) -> bool {
         // `pkKiller` (`:1333`): a death with no killer is not the penalty's.
         let Some(killer) = killer else {
@@ -912,12 +917,21 @@ mod tests {
         );
     }
 
-    /// A victim on a battle arena map or a castle map loses nothing
-    /// (`G/char_battle.cpp:1025-1029` and `:1339`).
+    /// A victim on a battle arena map, a castle map or a forked map loses nothing
+    /// (`G/char_battle.cpp:1025-1029`, `:1337` and `:1339`). The dice are the dropping
+    /// seed's, so the ordinary map drops the item: the control.
     #[test]
     fn a_victim_on_a_spared_map_keeps_its_items() {
-        for map in [BATTLE_ARENA_MAPS[0], CASTLE_MAPS[0]] {
+        for (map, spared) in [
+            (PLACE.1, false),
+            (BATTLE_ARENA_MAPS[0], true),
+            (CASTLE_MAPS[0], true),
+            (118, true),
+        ] {
             let mut field = Field::a_field();
+            field.world.forked_maps = std::sync::Arc::new(gamedata::forked::ForkedMaps::read(
+                b"pass: 118 0 0 a 119 0 0 b 120 0 0 c\n",
+            ));
             field.world.host_map(
                 PLACE.0,
                 map,
@@ -929,6 +943,7 @@ mod tests {
                 },
             );
             field.join_on(VICTIM, map, 60, WORST, &[in_inventory(0)]);
+            field.world.dice = Pcg32::new(a_dropping_seed(), 0);
             field.world.item_drop_penalty(
                 Vid::new(VICTIM),
                 Some(Attacker {
@@ -937,9 +952,10 @@ mod tests {
                 }),
                 false,
             );
-            assert!(
+            assert_eq!(
                 field.holds(EWindows::Inventory, 0),
-                "the item keeps its slot on {map}"
+                spared,
+                "whether the item keeps its slot on {map}"
             );
         }
     }

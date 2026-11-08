@@ -9261,6 +9261,8 @@ struct GameData {
     gaya_table: Arc<gamedata::gaya::GayaTable>,
     /// The SungZi map indices, which the game thread holds.
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,
+    /// The forked maps, which the game thread holds.
+    forked_maps: Arc<gamedata::forked::ForkedMaps>,
     /// The guild lands, which the game thread holds.
     lands: Arc<gamedata::land::Lands>,
     /// The building object prototypes, which the game thread holds.
@@ -9308,6 +9310,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let dragon_soul_table = load_dragon_soul_table(config)?;
     let gaya_table = load_gaya_table(config)?;
     let sungzi_maps = load_sungzi_maps(config)?;
+    let forked_maps = load_forked_maps(config)?;
     let lands = load_lands(config)?;
     let object_protos = load_object_protos(config)?;
     let daily_weeks = load_daily_weeks(config)?;
@@ -9338,6 +9341,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         dragon_soul_table,
         gaya_table,
         sungzi_maps,
+        forked_maps,
         lands,
         object_protos,
         daily_weeks,
@@ -9547,6 +9551,22 @@ fn load_sungzi_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::Sungz
         )
     })?;
     info!(maps = maps.indices().len(), "SungZi maps loaded");
+    Ok(Arc::new(maps))
+}
+
+fn load_forked_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::ForkedMaps>, String> {
+    let locale_dir = config.locale_dir();
+    let maps = gamedata::forked::ForkedMaps::load(&locale_dir).map_err(|error| {
+        format!(
+            "Forked map index is unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(
+        sungzi = maps.sungzi().len(),
+        passes = maps.passes().len(),
+        "Forked maps loaded"
+    );
     Ok(Arc::new(maps))
 }
 
@@ -10084,6 +10104,7 @@ fn build_world(
         .with_dragon_soul_table(Arc::clone(&data.dragon_soul_table))
         .with_gaya_table(Arc::clone(&data.gaya_table))
         .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
+        .with_forked_maps(Arc::clone(&data.forked_maps))
         .with_lands(Arc::clone(&data.lands))
         .with_object_protos(Arc::clone(&data.object_protos))
         .with_daily_weeks(Arc::clone(&data.daily_weeks))

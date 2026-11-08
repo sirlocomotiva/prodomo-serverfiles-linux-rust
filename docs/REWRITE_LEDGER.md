@@ -48699,3 +48699,123 @@ clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLA
 cargo doc --workspace --no-deps --locked --offline`, no `prodomo\_%` database remained and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 465. The three-way war's lines and death hook
+
+`cmd.threeway_info` and `cmd.threeway_myinfo` are `ported`; `sys.event.threeway_war` and
+`data.map.index` are `partial`.
+
+The forked map index is now read whole: `gamedata::forked::ForkedMaps` keeps the SungZi indices
+and the pass triples with `LoadSetting`'s `%d` scan (`G/threeway_war.cpp:137-197`), skipping each
+pass group's coordinates and map name. The boot loads it beside the SungZi half and refuses an
+unreadable file, as `G/main.cpp:658-665` does. The world holds `Initialize`'s state
+(`G/threeway_war.cpp:80-87`): regen flag 0, scores 0, no revive tokens. No owner quest starts the
+war, because every `forked.*` name is `unused` (ledger 401). The unset `threeway_war_*_idx` flags
+therefore select entry 0 of each list: SungZi map 114 and the pass triple 118, 119, 120. A
+negative or too-large flag reads map 0. Legacy indexes its vectors with the flag unchecked
+(`:201-213`), a Defect recorded in `docs/STATUS.md`.
+
+`/threeway_info` (`G/cmd_gm.cpp:4204-4226`) speaks:
+- the header;
+- the map line;
+- `ThreewayPhase %d`;
+- one `%s killscore %d usercount %d` line per empire. The `%s` is `EMPIRE_NAME`,
+  `LC_TEXT(g_nation_name[e])`. The one-argument `locale_find` defaults to `LOCALE_YMIR`
+  (`G/locale.hpp:10,31`), which answers the string as it is, so the line carries the raw CP949
+  nation name (`G/start_position.cpp:5-11`). The country tables do translate those three keys,
+  but this call never reaches them. The count is `FCountInMap`'s PCs of the empire on the event
+  SungZi map, on the caller's Channel, the legacy process.
+
+`/threeway_myinfo` (`:4228-4233`) speaks the header and `Deadcount %d`. That is 0 for a PID never
+registered, because `GetReviveTokenForPlayer` default-inserts it. The two `LC_TEXT` formats match
+no country table.
+
+The death hook is `CThreeWayWar::onDead` (`G/threeway_war.cpp:290-330`). `Dead` computes
+`isForked` for a PC on any SungZi or pass map (`G/char_battle.cpp:1325-1331`), and it then:
+- skips `ItemDropPenalty` (`:1337`);
+- leaves `INSTANT_FLAG_DEATH_PENALTY` as it was on a monster's kill (`:1374-1381`);
+- runs the hook after the penalty (`:1359-1362`).
+
+The hook:
+1. stops for a GM unless the server is a test server;
+2. stops once the regen flag is -1;
+3. spends one revive token (`:128-134`, an unregistered PID reaching -1);
+4. stops unless the map is any SungZi map (`IsSungZiMapIndex` walks the whole list, not the
+   event's) and the killer is a PC of another empire;
+5. adds `GetKillValue` (1/2/3 for the victim's level bands 30-39, 40-49, 50-99) to the killer's
+   empire unless it is eliminated (-1);
+6. notices a nonzero score to the event SungZi map. The notice goes out on every kill on a test
+   server, else on every fifth point. It is the CP949 format cut to `szBuf`'s 64 bytes and
+   re-used as each recipient's format, as `SendNoticeMap` does (`G/cmd_gm.cpp:1453-1484`), and
+   only on the victim's Channel.
+
+In the owner's deployment, Shared Channel 99 hosts the pass maps 118-120 and the SungZi maps 121
+and 125, but not 114. A death there spends tokens and skips the penalty, and a cross-empire kill
+on 121 or 125 scores. The notice to 114 reaches nobody, and the info line's user count reads 0.
+
+Not ported: the elimination and victory arms (`G/threeway_war.cpp:332-552`). They cover the
+empire warps, the map scripts, the broadcast, the `regen_mob_event` reload and the boss spawn.
+They compare the scores with `threeway_war_kill_count`. No quest sets that flag, but a
+`HIGH_WIZARD`'s `/eventflag` (ledger 291) does, so they are reachable. That corrects two
+`unused` timer rows. `event.questlua_global.warp_all_to_map_my_empire_event` was marked
+`unused` because ledger 429's sweep found no `event_create`; it missed the `quest::`-qualified
+creates in `onDead` (`:356-385`, `:443-470`). `event.threeway_war.regen_mob_event` (ledger 439)
+waited on the hook that now runs. Both are `missing` again, and owner question 57 withdraws them
+from questions 43 and 55.
+
+Tests:
+- The scenario `a_gm_reads_the_threeway_progress_and_its_dead_count` runs both lines through the
+  real binary. Its golden bytes cover the 114/118/119/120 map line, phase 0, the three raw CP949
+  names and `Deadcount 0`.
+- The world test `threeway::tests::the_lines_speak_the_progress_and_the_dead_count` covers the
+  scores, phase -1, the token count, and a second-Channel PC the count must not include.
+- `threeway::tests::a_forked_death_spends_a_token_and_scores_the_killer` covers the bands
+  (45→2, 30→1, 50→3, 100→0), the same-empire and pass-map spend-only arms, any-SungZi scoring on
+  121, the eliminated skip, the regen -1 gate before the spend, and the notice's golden bytes.
+- `death::tests::a_monster_kill_on_a_forked_map_sets_no_penalty_and_spends_a_token` covers the
+  `Dead` wiring.
+- `item_penalty::tests::a_victim_on_a_spared_map_keeps_its_items` gains the forked map. It now
+  seeds the dropping dice and asserts an ordinary-map control drops. Before this, the unseeded
+  draw kept the item on every map, so its arena and castle arms proved nothing: the castle-gate
+  mutant survived it.
+
+Mutants killed:
+- the nation name;
+- the SungZi index +1;
+- the pass slot -1;
+- the myinfo default;
+- the user count without the Channel filter;
+- the regen gate removed;
+- the event-map-only SungZi gate;
+- the notice's test-server arm;
+- the 64-byte cut;
+- the eliminated `>= 0` to `> 0`;
+- both band edges;
+- the penalty's forked and castle gates;
+- the `Dead` flag's forked arm;
+- the hook call.
+
+Two survivors are equivalent:
+- The SungZi gate rewritten as "a pass map returns" agrees on every forked map, the hook's only
+  domain.
+- `ThreewayPhase %u` renders the same, because the Rewrite's `vsnprintf` prints `%u` from the
+  argument's own signed value.
+
+Two refactors keep the 100-line limit. `Dead`'s death-penalty flag moved to
+`death::death_penalty_flag`. `run_ox_line` and `run_threeway_line` now return the
+dispatcher's `Option<GmRows>`, as `run_cube_command` does.
+
+Gates (2026-11-08):
+- `cargo fmt --all -- --check` and `cargo build --workspace --locked --offline` passed.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 4993 passed, 0
+  failed in 46 targets. An earlier run, before the Clippy refactors, failed
+  `a_gm_aggregates_and_forgets_the_dogs_around` once in the client read. It then passed alone
+  and 8 of 8 in the flake check: a load flake unrelated to this slice.
+- The new scenario passed 8 of 8 in the flake check.
+- `cargo test --workspace --doc --locked --offline` passed.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed.
+- `legacy/` is clean.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

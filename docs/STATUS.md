@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 464 (the OX seat).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 465
+Last reviewed: 2026-11-08, after ledger section 465 (the three-way war's lines and death hook).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 466
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -497,7 +497,10 @@ six-row table, the store-read `dungeon_log_info` rank, the `dungeon_info_cooldow
 line with the `test_cooldown` stamps, and the `Damage` arm. Since 464
 `cmd.log_oxevent`, `cmd.get_oxevent_att` and `sys.event.ox` are `ported`: the enter
 seat with the multi-IP kick, the roster pair, and the warp-keep/disconnect-drop
-leave. The
+leave. Since 465 `cmd.threeway_info` and `cmd.threeway_myinfo` are `ported` and
+`sys.event.threeway_war` is `partial`: the full forked map index, the death hook up to
+the score notice, and the forked-map penalty skip; the elimination and victory arms are
+next, with the two timers ledger 465 moved back to `missing`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1495,6 +1498,9 @@ owner should know about (178.5):
 - `do_monarch_warpto` stamps `MI_WARP` again when its 60-second `FuncCheckWarp` fires
   (`G/cmd_general.cpp:672-682`), so an offline target re-arms the cooldown, but no
   client observes the second stamp. The Rewrite stamps once (ledger 460).
+- `GetEventSungZiMapInfo` and `GetEventPassMapInfo` index their vectors with the
+  `threeway_war_*_idx` flags unchecked (`G/threeway_war.cpp:201-213`), so a negative or
+  too-large flag reads past the list. The Rewrite reads map 0 there (ledger 465).
 
 ## Environment
 

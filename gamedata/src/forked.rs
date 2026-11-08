@@ -5,14 +5,19 @@
 //! lines name the SungZi maps whose players skip the exit's `IsHack` check
 //! (`CThreeWayWar::IsSungZiMapIndex`, `G/threeway_war.cpp:220-232`, read by `do_cmd`,
 //! `G/cmd_general.cpp:421-423`); the `pass:` lines name the flame-pass maps of the
-//! three-way war itself, which is not ported, so they are skipped. Only the SungZi
-//! map indices are kept.
+//! three-way war itself, three per line (`ForkedPassMapInfo`, `G/threeway_war.h:13-19`).
+//! `ForkedMaps` keeps both lists, as `SungZiInfoMap_` and `PassInfoMap_` do.
 //!
-//! Each `sungzi:` line starts with the map index (`sscanf(szLine+7, "%d ...")`,
-//! `:160-165`): leading whitespace skipped, an optional sign, then the digit run,
-//! trailing garbage ignored. A line without a digit run keeps legacy's
-//! uninitialised `sungziinfo.m_iForkedSung` — a Defect this build does not
-//! reproduce: the line is skipped instead.
+//! Each line's `%d` fields scan as `sscanf` scans them (`:160-165`, `:177-184`):
+//! leading whitespace skipped, an optional sign, then the digit run, trailing garbage
+//! ignored. A `sungzi:` line without a digit run keeps legacy's uninitialised
+//! `sungziinfo.m_iForkedSung` — a Defect this build does not reproduce: the line is
+//! skipped instead. A `pass:` line without all three indices is skipped the same way,
+//! against legacy's uninitialised struct.
+//!
+//! A line matches when its first bytes are the prefix, exactly as legacy's `strncmp`
+//! tests it; the `#pass:` line stays a comment. Only the map indices are kept: the
+//! SungZi starts, the boss vnum and the map names reach no ported reader yet.
 //!
 //! `G/` = `server/server/game/`.
 
@@ -24,6 +29,9 @@ pub const FORKED_FILE: &str = "forkedmapindex.txt";
 
 /// The `sungzi:` line prefix (`G/threeway_war.cpp:155`).
 const SUNGZI_PREFIX: &[u8] = b"sungzi:";
+
+/// The `pass:` line prefix (`G/threeway_war.cpp:172`).
+const PASS_PREFIX: &[u8] = b"pass:";
 
 /// The SungZi map indices: the maps whose players skip the exit's `IsHack` check.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +60,9 @@ impl SungziMaps {
     /// match. The index is the `%d` at the rest: the digit run past whitespace and
     /// an optional sign, clamped to `i32`, trailing garbage ignored. A line with
     /// no digit run is skipped.
+    ///
+    /// [`ForkedMaps::read`] is the full read; this one keeps the SungZi half for the
+    /// exit gate.
     #[must_use]
     pub fn read(bytes: &[u8]) -> Self {
         let mut indices = BTreeSet::new();
@@ -150,4 +161,153 @@ mod tests {
         );
         assert_eq!(maps.indices(), vec![114, 121]);
     }
+
+    /// The owner's file: three SungZi maps and three pass triples, in file order,
+    /// with the `#pass:` comment skipped.
+    #[test]
+    fn the_owner_file_reads_both_lists() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../legacy/gamedata/locale/europe/forkedmapindex.txt"),
+        )
+        .expect("the owner's forked index reads");
+        let maps = ForkedMaps::read(&bytes);
+        assert_eq!(maps.sungzi(), &[114, 121, 125]);
+        assert_eq!(
+            maps.passes(),
+            &[[118, 119, 120], [122, 123, 124], [126, 127, 128]]
+        );
+        assert!(maps.is_sungzi(121));
+        assert!(!maps.is_sungzi(119));
+        assert!(maps.is_forked(114));
+        assert!(maps.is_forked(127));
+        assert!(!maps.is_forked(1));
+    }
+
+    /// A `pass:` line missing a number or a name is skipped, not zero-filled.
+    #[test]
+    fn a_short_pass_line_is_skipped() {
+        let maps =
+            ForkedMaps::read(b"pass: 118 1 2 hill_01 119 3\npass: 122 1 2 a 123 4 5 b 124 6 7 c\n");
+        assert_eq!(maps.passes(), &[[122, 123, 124]]);
+    }
+}
+
+/// The forked maps: the SungZi list and the pass list, as `LoadSetting` keeps them
+/// (`SungZiInfoMap_`, `PassInfoMap_`, `G/threeway_war.h:64-65`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForkedMaps {
+    /// The SungZi map indices, in file order.
+    sungzi: Vec<i32>,
+    /// The pass triples, in file order: one per `pass:` line.
+    passes: Vec<[i32; 3]>,
+}
+
+impl ForkedMaps {
+    /// Parse the file's bytes: the SungZi indices and the pass triples.
+    ///
+    /// A `sungzi:` line notes its `%d`; a `pass:` line notes its three pass maps'
+    /// `%d` fields, which are the first, fourth and seventh numbers on the line
+    /// (each index heads two start coordinates and a map name). A line missing its
+    /// numbers is skipped.
+    #[must_use]
+    pub fn read(bytes: &[u8]) -> Self {
+        let mut sungzi = Vec::new();
+        let mut passes = Vec::new();
+        for line in bytes.split(|byte| *byte == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if let Some(rest) = line.strip_prefix(SUNGZI_PREFIX) {
+                if let Some(index) = scan_index(rest) {
+                    sungzi.push(index);
+                }
+            } else if let Some(rest) = line.strip_prefix(PASS_PREFIX) {
+                if let Some(triple) = scan_pass(rest) {
+                    passes.push(triple);
+                }
+            }
+        }
+        Self { sungzi, passes }
+    }
+
+    /// Read both lists from the Locale folder, as `LoadSetting` does.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read. Legacy stops the game server then
+    /// (`G/main.cpp:658-665`); the caller refuses the boot the same way.
+    pub fn load(locale_dir: &Path) -> Result<Self, std::io::Error> {
+        let bytes = std::fs::read(locale_dir.join(FORKED_FILE))?;
+        Ok(Self::read(&bytes))
+    }
+
+    /// The SungZi indices, in file order.
+    #[must_use]
+    pub fn sungzi(&self) -> &[i32] {
+        &self.sungzi
+    }
+
+    /// The pass triples, in file order.
+    #[must_use]
+    pub fn passes(&self) -> &[[i32; 3]] {
+        &self.passes
+    }
+
+    /// Whether `map` is a SungZi map (`IsSungZiMapIndex`).
+    #[must_use]
+    pub fn is_sungzi(&self, map: i32) -> bool {
+        self.sungzi.contains(&map)
+    }
+
+    /// Whether `map` is any forked map (`IsThreeWayWarMapIndex`).
+    #[must_use]
+    pub fn is_forked(&self, map: i32) -> bool {
+        self.sungzi.contains(&map) || self.passes.iter().any(|pass| pass.contains(&map))
+    }
+}
+
+/// The three pass indices on a `pass:` line's rest: each `%d %d %d %s` group heads
+/// its index (`G/threeway_war.cpp:177-184`). The coordinates and the map name are
+/// skipped; only the index is kept.
+fn scan_pass(rest: &[u8]) -> Option<[i32; 3]> {
+    let mut indices = [0; 3];
+    let mut rest = rest;
+    for slot in &mut indices {
+        *slot = scan_index(rest)?;
+        rest = past_number(rest);
+        rest = past_number(rest);
+        rest = past_number(rest);
+        rest = past_word(rest);
+    }
+    Some(indices)
+}
+
+/// The bytes after the first `%d` on `rest`: past its whitespace, sign and digits.
+fn past_number(rest: &[u8]) -> &[u8] {
+    let mut rest = rest;
+    while rest.first().is_some_and(u8::is_ascii_whitespace) {
+        rest = &rest[1..];
+    }
+    if rest
+        .first()
+        .is_some_and(|byte| *byte == b'-' || *byte == b'+')
+    {
+        rest = &rest[1..];
+    }
+    while rest.first().is_some_and(u8::is_ascii_digit) {
+        rest = &rest[1..];
+    }
+    rest
+}
+
+/// The bytes after the first `%s` on `rest`: past its whitespace and its word, as
+/// `sscanf`'s `%s` scans the map name.
+fn past_word(rest: &[u8]) -> &[u8] {
+    let mut rest = rest;
+    while rest.first().is_some_and(u8::is_ascii_whitespace) {
+        rest = &rest[1..];
+    }
+    while rest.first().is_some_and(|byte| !byte.is_ascii_whitespace()) {
+        rest = &rest[1..];
+    }
+    rest
 }

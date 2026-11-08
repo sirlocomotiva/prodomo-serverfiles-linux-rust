@@ -19650,6 +19650,45 @@ fn a_player_lists_a_gm_but_hears_logout_for_the_name() {
     wait_for(&database, "(SELECT count(*) FROM messenger_list) = 2");
 }
 
+/// `cmd.threeway_info` and `cmd.threeway_myinfo` (`G/cmd_gm.cpp:4204-4233`): a
+/// `HIGH_WIZARD` reads the three-way progress of a war no quest started. The map
+/// line names the owner file's first SungZi map and first pass triple (the unset
+/// `threeway_war_*_idx` flags read entry 0), the phase is `Initialize`'s 0, each
+/// empire line carries the raw CP949 nation name (`EMPIRE_NAME` looks it up as
+/// `LOCALE_YMIR`, which answers it as it is) with score 0 and nobody on the map, and
+/// the caller's dead count is 0: no token was ever set.
+#[test]
+fn a_gm_reads_the_threeway_progress_and_its_dead_count() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/threeway_info"));
+    for line in [
+        b"Progress information for each empire".as_slice(),
+        b"Select Map Information Holy Land 114 Passage 118 119 120",
+        b"ThreewayPhase 0",
+        b"\xbd\xc5\xbc\xf6\xb1\xb9 killscore 0 usercount 0",
+        b"\xc3\xb5\xc1\xb6\xb1\xb9 killscore 0 usercount 0",
+        b"\xc1\xf8\xb3\xeb\xb1\xb9 killscore 0 usercount 0",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(line));
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/threeway_myinfo"));
+    assert_eq!(alice.read_game(), an_info_line(b"My three-way progress"));
+    assert_eq!(alice.read_game(), an_info_line(b"Deadcount 0"));
+    alice.quiet("the two lines say no more");
+}
+
 /// `cmd.block_chat` (`do_block_chat`, `G/cmd_gm.cpp:3364-3433`): a `HIGH_WIZARD`
 /// silences a character for a parsed time and the silence answers every chat arm.
 /// Alice silences Yankee for `1m30s`, and Yankee hears the `[LS;852]` first and

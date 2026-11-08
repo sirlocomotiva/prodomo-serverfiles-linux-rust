@@ -148,6 +148,7 @@ mod sync;
 mod target;
 mod target_info;
 mod temple_ochao;
+mod threeway;
 mod timed_exit;
 mod trade;
 mod use_to_item;
@@ -570,6 +571,17 @@ pub struct GameState {
     /// event took, attenders and audience alike, which `CloseEvent`'s warp names.
     /// `Default` is empty, and both paths' leave drops it with the rest.
     ox_roster: std::collections::HashSet<u32>,
+    /// The three-way kill scores (`CThreeWayWar::KillScore_`, `G/threeway_war.h:61`):
+    /// one per empire, by empire minus 1. `-1` marks an eliminated empire, which the
+    /// death hook skips. `Default` is all zero, as `Initialize` leaves them.
+    threeway_scores: [i32; 3],
+    /// The three-way regen flag (`CThreeWayWar::RegenFlag_`, `G/threeway_war.h:62`):
+    /// 0 counts the first elimination, 1 the victory, -1 ends the war.
+    threeway_regen: i32,
+    /// The three-way revive tokens (`CThreeWayWar::ReviveTokenMap_`,
+    /// `G/threeway_war.h:70`): the dead counts left per PID, which `/threeway_myinfo`
+    /// reads. `Default` is empty: an unregistered PID reads 0.
+    threeway_tokens: std::collections::HashMap<u32, i32>,
     /// The block mode of each character (`m_pointsInstant.bBlockMode`, `G/char.h:471`):
     /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist. A
     /// session's own: the leave forgets it.
@@ -746,6 +758,9 @@ pub struct GameState {
     /// The SungZi map indices (`forkedmapindex.txt`'s `sungzi:` lines), whose
     /// players skip the exit's `IsHack` gate (`IsSungZiMapIndex`).
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,
+    /// The forked maps (`ForkedMaps`), which the three-way lines and the death hook
+    /// read for the event's SungZi and pass indices.
+    forked_maps: Arc<gamedata::forked::ForkedMaps>,
     /// The guild lands (`CManager::m_map_pkLand`, `G/building.h:148`).
     guild_lands: Arc<gamedata::land::Lands>,
     /// The building object prototypes (`CManager::m_map_pkObjectProto`).
@@ -1011,6 +1026,13 @@ impl GameState {
     #[must_use]
     pub fn with_sungzi_maps(mut self, maps: Arc<gamedata::forked::SungziMaps>) -> Self {
         self.sungzi_maps = maps;
+        self
+    }
+
+    /// Share the forked maps, which the three-way lines and the death hook read.
+    #[must_use]
+    pub fn with_forked_maps(mut self, maps: Arc<gamedata::forked::ForkedMaps>) -> Self {
+        self.forked_maps = maps;
         self
     }
 

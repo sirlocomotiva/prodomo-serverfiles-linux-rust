@@ -243,7 +243,9 @@ impl CommandEntry {
             | "do_reward_system"
             | "do_dungeon_info"
             | "do_oxevent_log"
-            | "do_oxevent_get_attender" => self.gm_tail_name(),
+            | "do_oxevent_get_attender"
+            | "do_threeway_war_info"
+            | "do_threeway_war_myinfo" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -330,6 +332,8 @@ impl CommandEntry {
             "do_dungeon_info" => Command::GmLine(GmLine::DungeonInfo),
             "do_oxevent_log" => Command::GmLine(GmLine::LogOxevent),
             "do_oxevent_get_attender" => Command::GmLine(GmLine::GetOxeventAtt),
+            "do_threeway_war_info" => Command::GmLine(GmLine::ThreewayInfo),
+            "do_threeway_war_myinfo" => Command::GmLine(GmLine::ThreewayMyinfo),
             _ => Command::NotPorted(self.handler),
         }
     }

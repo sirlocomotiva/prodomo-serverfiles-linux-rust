@@ -519,3 +519,15 @@ owner answers.
     are `unused`; each fires home with its first event start or end. With them
     the timed-events inventory has no `missing` row left. Waits on it: nothing
     blocks.
+57. **Two timers withdrawn from questions 43 and 55 (ledger 465).** Both are
+    reachable after all, so they are `missing`, not `unused`. Question 43 said nothing
+    arms `warp_all_to_map_my_empire_event`, but its sweep missed the `quest::`-qualified
+    creates in `CThreeWayWar::onDead` (`G/threeway_war.cpp:356-385`, `:443-470`).
+    Question 55 said `regen_mob_event` waits on an unported war. Ledger 465 ports the
+    war's death hook, which runs on every forked map from `Dead`
+    (`G/char_battle.cpp:1325-1362`), because `Initialize` leaves the regen flag at 0.
+    Its elimination arm, which arms both timers, runs once a `HIGH_WIZARD` sets
+    `threeway_war_kill_count` with `/eventflag` and the scores on a SungZi map leave
+    exactly one empire below it. No owner quest sets the flag. Shared Channel 99 hosts
+    the SungZi maps 121 and 125 and the pass maps 118-120. The rest of questions 43
+    and 55 stands. Nothing to decide; both rows port with the arms.
