@@ -95,6 +95,7 @@ pub mod gc_small;
 pub mod gc_vid;
 pub mod gc_view_equip;
 pub mod gc_whisper;
+pub mod gc_world_boss;
 pub mod item_pos;
 pub mod simple_player;
 pub mod tea;

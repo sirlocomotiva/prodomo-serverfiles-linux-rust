@@ -299,6 +299,10 @@ impl GameState {
                 self.run_frog_line(vid, rest, mover);
                 None
             }
+            GmLine::Worldboss => {
+                self.run_worldboss_line(vid, rest, mover);
+                None
+            }
             _ => None,
         }
     }

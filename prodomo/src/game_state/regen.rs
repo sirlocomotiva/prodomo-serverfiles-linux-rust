@@ -90,6 +90,12 @@ pub(super) enum Due {
     /// (a Divergence — legacy's heap order at equal priority is heap-shape dependent,
     /// as the other arms note).
     BattleArena,
+    /// The world-boss timers (`worldboss_cooldown_event`, `worldboss_combat_event`,
+    /// `worldboss_spawn_event`, `G/worldboss.cpp:46-130`): the run's own arm tells
+    /// which one fires. It sorts after [`Due::BattleArena`]: at an equal Pulse the
+    /// arena runs first (a Divergence — legacy's heap order at equal priority is
+    /// heap-shape dependent, as the other arms note).
+    WorldBoss,
     /// `spawn_santa_event` (`G/xmas_event.cpp:115-141`): Santa's 50 min respawn on this map.
     /// It sorts first here: at an equal Pulse it fires before any other event (a Divergence
     /// — legacy's heap order at equal priority is heap-shape dependent, as the other arms
@@ -317,6 +323,7 @@ impl GameState {
                 Due::Vein(vid) | Due::Campfire(vid) => self.destroy_npc(vid),
                 Due::SantaSpawn { map } => self.fire_santa_spawn(map, pulse),
                 Due::BattleArena => {}
+                Due::WorldBoss => self.run_world_boss_tick(pulse),
                 Due::Regen { channel, map, at } => self.fire_regen((channel, map), at, pulse),
                 Due::Stun(vid) => self.stun_event(vid),
                 Due::Dead(vid) => self.dead_event(vid),
@@ -767,6 +774,14 @@ impl GameState {
             .filter(|&&(_, hosted)| hosted == map)
             .copied()
             .collect()
+    }
+
+    /// Whether the process hosts `channel` at all.
+    pub(super) fn channel_hosts(&self, channel: u8) -> bool {
+        self.regens
+            .regions
+            .keys()
+            .any(|&(hosted, _)| hosted == channel)
     }
 
     /// `GetMapBasePositionByMapIndex`: the map's top-left corner in centimetres.

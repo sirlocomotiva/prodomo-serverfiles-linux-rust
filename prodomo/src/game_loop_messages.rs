@@ -1655,6 +1655,19 @@ pub enum GameCommand {
         /// Where the game thread reports the rows the step changed.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Run one `CG_WORLD_BOSS` for the character online under `vid`: the info, the
+    /// reward draw, or the ranking. The records reach the client through the world;
+    /// the answer carries the reward's rows to store.
+    WorldBoss {
+        /// The VID of the character whose client sent the record.
+        vid: common::vid::Vid,
+        /// The decoded ask.
+        step: crate::game_state::WorldBossStep,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the rows the ask changed.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Run one `/daily_gift_event` line: the usage, or the event starts or stops. See
     /// `game_state::daily_gift`.
     DailyGiftEvent {
@@ -3018,6 +3031,8 @@ pub enum GmLine {
     Siege,
     /// `/frog` (`do_frog`, `G/cmd_gm.cpp:4390-4419`): the castle frogs.
     Frog,
+    /// `/worldboss` (`do_worldboss`, `G/cmd_gm.cpp:5204-5237`): the world-boss event.
+    Worldboss,
 }
 
 /// Which restart a dead player asks for.
@@ -6127,6 +6142,29 @@ impl GameLoopController {
     ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::DailyGift {
+            vid,
+            step,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `CG_WORLD_BOSS` ask. What the ask shows rides the
+    /// outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn world_boss(
+        &self,
+        vid: common::vid::Vid,
+        step: crate::game_state::WorldBossStep,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::WorldBoss {
             vid,
             step,
             mover,

@@ -1420,6 +1420,7 @@ fn dynamic_len(header: u8) -> usize {
         | GC_WHISPER
         | GC_MESSENGER
         | GC_DUEL_START
+        | GC_WORLD_BOSS
         | GC_QUEST_INFO => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
@@ -1441,6 +1442,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
             | GC_MESSENGER
             | GC_QUEST_INFO
             | GC_DUEL_START
+            | GC_WORLD_BOSS
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1455,6 +1457,8 @@ fn client_enter_game() -> Vec<u8> {
 
 /// The loading and enter-game records, by header, for the two bursts.
 const GC_ENTITY: u8 = 249;
+/// `HEADER_GC_WORLD_BOSS` (148): the header, the size word and the subheader.
+const GC_WORLD_BOSS: u8 = 148;
 const GC_MAIN_CHARACTER2_EMPIRE: u8 = 113;
 const GC_CHARACTER_GOLD: u8 = 224;
 const GC_PLAYER_POINTS: u8 = 16;
@@ -1562,7 +1566,7 @@ fn game_len(header: u8) -> usize {
         // GC_MESSENGER rides the same `size`-word framing as the other dynamic records
         // (`TPacketGCMessenger`, `G/packet.h:1896-1901`).
         GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER
-        | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START => dynamic_len(header),
+        | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START | GC_WORLD_BOSS => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -19777,6 +19781,152 @@ fn a_gm_finds_no_castle_to_besiege_or_stock_with_frogs() {
         an_info_line(b"You must spawn frog in castle")
     );
     alice.quiet("the refusals say no more");
+}
+
+/// `cmd.worldboss`, `cg.game.world_boss` and `gc.world_boss` (`do_worldboss`,
+/// `CWorldBoss`, `G/cmd_gm.cpp:5204-5237`, `G/worldboss.cpp`): an `IMPLEMENTOR`
+/// runs the event on a Channel 1 hosting map 61. The empty line answers the
+/// three-line usage; `start` sets the flag, speaks the start notice and the
+/// `worldboss 1` command line; the owner's 1-second cooldown speaks the
+/// coming-soon and the 5-second test notices; the boss stands and its notice
+/// speaks; the info ask answers state 2 with the owner's minimum damage; the
+/// ranking ask answers empty; the reward ask is refused while the boss stands;
+/// `stop` speaks the
+/// completion and the `worldboss 0` line, and the flag list holds the event at
+/// 0 with the state at 2.
+/// The run's notices after `start`: the coming-soon and the 5-second test
+/// notices on the cooldown's fire, then the spawn notice naming Mount Sohan
+/// and the test-server coordinates behind it.
+fn await_world_boss_spawn(alice: &mut Keyed) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut saw_soon = false;
+    let mut saw_test = false;
+    loop {
+        let record = alice
+            .read_game_until(deadline)
+            .expect("the spawn notice within 30 s");
+        assert_eq!(record[0], GC_CHAT, "only notices speak: {record:02x?}");
+        let text = &record[10..];
+        if text == b"[World boss] Caution: the world boss will appear soon!" {
+            saw_soon = true;
+            continue;
+        }
+        if text == b"[Test World boss] The boss will appear in 5 secconds." {
+            saw_test = true;
+            continue;
+        }
+        assert!(
+            text.starts_with(b"[World boss] In Channel 1, "),
+            "the spawn notice: {text:?}"
+        );
+        assert!(
+            text.ends_with(
+                b"has appeared and is terrorising the area of Mount Sohan. Let's go hunting!"
+            ),
+            "the spawn notice names Mount Sohan: {text:?}"
+        );
+        break;
+    }
+    assert!(saw_soon, "the coming-soon notice spoke");
+    assert!(saw_test, "the 5-second test notice spoke");
+    let coords = alice
+        .read_game_until(deadline)
+        .expect("the coordinates within 30 s");
+    assert_eq!(coords[0], GC_CHAT);
+    assert!(
+        coords[10..].starts_with(b"[World Boss Test] ")
+            && coords[10..]
+                .windows(b" spawn at ".len())
+                .any(|window| window == b" spawn at "),
+        "the coordinates: {:?}",
+        &coords[10..]
+    );
+}
+
+#[test]
+fn a_gm_runs_the_world_boss_event() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(61);
+    let server = Server::start_with(binary(), database.url(), &channels);
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let command_line = |text: &[u8]| {
+        let size = u8::try_from(10 + text.len()).expect("a short line");
+        let mut record = vec![GC_CHAT, size, 0, CHAT_TYPE_COMMAND, 0, 0, 0, 0, 1, 1];
+        record.extend_from_slice(text);
+        record
+    };
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/worldboss"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: worldboss start"),
+        "the usage opens"
+    );
+    assert_eq!(alice.read_game(), an_info_line(b"       worldboss stop"));
+    assert_eq!(alice.read_game(), an_info_line(b"       worldboss flush"));
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/worldboss start"));
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[World boss] Event started")
+    );
+    assert_eq!(alice.read_game(), command_line(b"worldboss 1"));
+
+    await_world_boss_spawn(&mut alice);
+
+    alice.send_record(&[148, 0]);
+    let info = alice.read_game();
+    assert_eq!(&info[0..4], &[148, 24, 0, 0]);
+    assert_eq!(
+        u32::from_le_bytes(info[4..8].try_into().unwrap()),
+        2,
+        "spawned"
+    );
+    assert_eq!(
+        u32::from_le_bytes(info[20..24].try_into().unwrap()),
+        250_000,
+        "the owner's minimum damage"
+    );
+    alice.send_record(&[148, 2]);
+    assert_eq!(
+        alice.read_game(),
+        vec![148, 4, 0, 2],
+        "the ranking is empty"
+    );
+    alice.send_record(&[148, 1]);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[World boss] You can't receive a reward now."),
+        "the boss still stands"
+    );
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/worldboss stop"));
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[World boss] Event completed")
+    );
+    assert_eq!(alice.read_game(), command_line(b"worldboss 0"));
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/geteventflag"));
+    for expected in [
+        b"guild_disband_delay 1".as_slice(),
+        b"guild_withdraw_delay 1",
+        b"world_boss_event 0",
+        b"world_boss_state 2",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(expected));
+    }
+    alice.quiet("the stop says no more");
 }
 
 /// `cmd.block_chat` (`do_block_chat`, `G/cmd_gm.cpp:3364-3433`): a `HIGH_WIZARD`

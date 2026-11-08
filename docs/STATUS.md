@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 471 (the castle's shut gates).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 472
+Last reviewed: 2026-11-08, after ledger section 472 (the world boss).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 473
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -516,7 +516,9 @@ battle arena keeps `sys.event.arena` `partial`. Since 470 the battle arena is li
 `sys.event.arena` stays `partial` only on the guards that wait for other systems. Since 471
 `/siege` and `/frog` are `ported`, refusal-only because none of the castle maps 181-183 loads,
 and `sys.event.castle_monarch` is `partial` with the siege core and the monarch powers waiting
-on those maps. The
+on those maps. Since 472 the world boss is live: `/worldboss`, its flag bridge, the three
+timers, the spawn, escape, kill, damage, reward and ranking arms, the CG/GC 148 records and the
+boot table are `ported`, with the season bank dropped as website-only. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1525,6 +1527,9 @@ owner should know about (178.5):
 - `do_duel` and `CArena::StartDuel` accept one character as both duelists and a character
   already in another arena (`G/cmd_gm.cpp:4013-4052`, `G/arena.cpp:466-495`), so two arenas
   claim one player. The Rewrite refuses both with the start-failure line (ledger 467).
+- `GiveItemFromSpecialItemGroup` returns an uninitialised `bSuccess` when the draw is
+  empty (`G/char_item.cpp:9586-9589`, `:9689`). The Rewrite's world-boss reward refuses
+  an empty group (ledger 472).
 
 ## Environment
 

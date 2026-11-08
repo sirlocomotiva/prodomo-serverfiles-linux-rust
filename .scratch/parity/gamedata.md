@@ -33,7 +33,7 @@ byte-exact and a scenario exercises the system that uses it.
 | `data.gaya` | `locale/europe/gaya.txt` | `G/char_gaya.cpp` | `sys.custom.gaya` | ported | `a_gaya_craft_spends_and_a_market_opens` | Ledger 444: the roll list and all ten scalars. |
 | `data.daily_gift` | `locale/europe/daily_gift.txt` | `G/char_daily_gifts.cpp` | `sys.custom.daily_gift` | ported | `daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews` | The four owner weeks. |
 | `data.battle_pass` | `locale/europe/battlepass.json` | `G/BattlePassManager.cpp` | `sys.custom.battle_pass` | missing | | |
-| `data.world_boss` | `locale/europe/world_boss.txt` | `G/input_db.cpp` | `sys.event.world_boss` | missing | | |
+| `data.world_boss` | `locale/europe/world_boss.txt` | `G/input_db.cpp` | `sys.event.world_boss` | ported | `a_gm_runs_the_world_boss_event` | Ledger 472: `world_boss.txt` (Config/Map/Boss/Ranking) read at boot; a refused file stops the server (legacy logs on with a zeroed table). |
 | `data.dungeon_info` | `locale/europe/dungeon_info.txt` | `G/dungeon_info.cpp` | `sys.dungeon.info` | missing | | |
 | `data.ox` | `locale/europe/oxquiz.lua` | `G/questlua_oxevent.cpp` | `sys.event.ox` | missing | | |
 | `data.lua.settings` | `locale/europe/settings.lua`, `locale/europe/translate.lua` | `G/questlua.cpp:737-790` (with `quest/questlib.lua` and `quest/locale.lua`) | `sys.quest.runtime` | missing | | |

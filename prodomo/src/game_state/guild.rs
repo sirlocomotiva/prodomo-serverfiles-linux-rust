@@ -5278,7 +5278,7 @@ impl GameState {
 
     /// One side's `id` name for the over notice, empty when the guild is gone (the
     /// caller already checked, but the notice reads after the math).
-    fn guild_name_of(&self, id: u32) -> Vec<u8> {
+    pub(super) fn guild_name_of(&self, id: u32) -> Vec<u8> {
         self.guilds
             .by_id
             .get(&id)

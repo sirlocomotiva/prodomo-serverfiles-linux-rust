@@ -113,6 +113,7 @@ use protocol::cg_account::{
 };
 use protocol::cg_arg_u8::CgChangeLanguage;
 use protocol::cg_arg_u8::CgRequestEventData;
+use protocol::cg_arg_u8::CgWorldBoss;
 use protocol::cg_arg_u8::{CgPremiumPlayers, CgRefineElement};
 use protocol::cg_attack::CgAttack;
 use protocol::cg_biologist::CgBiologist;
@@ -148,7 +149,7 @@ use protocol::cg_inventory::{
     HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
     HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
     HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
-    HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
+    HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS, HEADER_CG_WORLD_BOSS,
 };
 use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
@@ -1329,6 +1330,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_FISHING.value()
         || header == HEADER_CG_FISH_EVENT_SEND.value()
         || header == HEADER_CG_DAILY_GIFT.value()
+        || header == HEADER_CG_WORLD_BOSS.value()
         || header == HEADER_CG_GAYA_SYSTEM.value()
         || header == HEADER_CG_BIOLOGIST.value()
         || header == HEADER_CG_PREMIUM_PLAYERS.value()
@@ -1362,6 +1364,7 @@ fn is_belongings_step(header: u8) -> bool {
 ///   (`:3711-3714`).
 /// - `CG_QUICKSLOT_ADD` (16), `CG_QUICKSLOT_DEL` (17) and `CG_QUICKSLOT_SWAP` (18), which no
 ///   observer check guards (`G/input_main.cpp:3742-3755`).
+/// - `CG_WORLD_BOSS` (148): `CInputMain::WorldBoss` (`G/input_main.cpp:3553-3570`).
 async fn belongings_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1402,6 +1405,8 @@ where
         fish_event(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_DAILY_GIFT.value() {
         daily_gift(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_WORLD_BOSS.value() {
+        world_boss(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_GAYA_SYSTEM.value() {
         gaya_system(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_BIOLOGIST.value() {
@@ -1488,6 +1493,42 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.daily_gift(vid, step, actor).await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_WORLD_BOSS` (148) in the game phase: `CInputMain::WorldBoss`
+/// (`G/input_main.cpp:3553-3570`). An unknown sub-header is consumed and ignored, as
+/// legacy's missing `default` arm does; the world sends the records, and the rows the
+/// reward changed are stored here.
+async fn world_boss<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgWorldBoss::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed WORLD_BOSS; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "WORLD_BOSS without a character in the world; ignoring");
+        return true;
+    };
+    let step = match record.b_sub_header {
+        0 => prodomo::game_state::WorldBossStep::Info,
+        1 => prodomo::game_state::WorldBossStep::Reward,
+        2 => prodomo::game_state::WorldBossStep::Ranking,
+        _ => return true,
+    };
+    let actor = item_actor(held);
+    let answer = context.game.world_boss(vid, step, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -9271,6 +9312,8 @@ struct GameData {
     daily_weeks: Arc<gamedata::daily_gift::DailyGiftWeeks>,
     /// The cube recipes, which the game thread holds.
     cube_recipes: Arc<gamedata::cube::CubeRecipes>,
+    /// The world-boss table, which the game thread holds.
+    world_boss: Arc<gamedata::world_boss::WorldBossTable>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -9315,6 +9358,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let object_protos = load_object_protos(config)?;
     let daily_weeks = load_daily_weeks(config)?;
     let cube_recipes = load_cube_recipes(config)?;
+    let world_boss = load_world_boss(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -9346,6 +9390,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         object_protos,
         daily_weeks,
         cube_recipes,
+        world_boss,
     };
     Ok((data, quests))
 }
@@ -9624,6 +9669,36 @@ fn load_daily_weeks(
 /// A file that cannot be read stops the server, as for every other Game data file (a
 /// Divergence: legacy goes on without a file it cannot open). The Rewrite needs the
 /// recipes a `/cube open` lists.
+/// Load the world-boss table (`CWorldBoss::ReadWorldBossTableFile`,
+/// `G/worldboss.cpp:192-219`, loaded from `G/input_db.cpp:969-976`).
+///
+/// A file that cannot be read stops the server, as for every other Game data file (a
+/// Divergence: legacy logs and goes on with a zeroed table). The Rewrite needs the
+/// config a `/worldboss start` runs on.
+fn load_world_boss(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::world_boss::WorldBossTable>, String> {
+    let path = config.locale_dir().join("world_boss.txt");
+    let bytes = std::fs::read(&path).map_err(|error| {
+        format!(
+            "World-boss table is unreadable in {}: {error}",
+            path.display()
+        )
+    })?;
+    let table = gamedata::world_boss::read(&bytes).map_err(|error| {
+        format!(
+            "World-boss table is unusable in {}: {error}",
+            path.display()
+        )
+    })?;
+    info!(
+        maps = table.maps.len(),
+        bosses = table.bosses.len(),
+        "World-boss table loaded"
+    );
+    Ok(Arc::new(table))
+}
+
 fn load_cube_recipes(config: &ServerConfig) -> Result<Arc<gamedata::cube::CubeRecipes>, String> {
     let locale_dir = config.locale_dir();
     let recipes = gamedata::cube::CubeRecipes::load(&locale_dir).map_err(|error| {
@@ -10109,6 +10184,7 @@ fn build_world(
         .with_object_protos(Arc::clone(&data.object_protos))
         .with_daily_weeks(Arc::clone(&data.daily_weeks))
         .with_cube_recipes(Arc::clone(&data.cube_recipes))
+        .with_world_boss_table(Arc::clone(&data.world_boss))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)

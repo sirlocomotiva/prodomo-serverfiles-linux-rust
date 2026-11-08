@@ -17,15 +17,16 @@
 //! Legacy's DB process forwards every set to every core before it compares
 //! (`D/ClientManagerEventFlag.cpp:31-63`), so an arm runs even when the value did not
 //! change. The ported arms are the six rates, the Christmas arms of `xmas::ProcessEventFlag`
-//! (`G/xmas_event.cpp`), `newyear_boom`, `eclipse`, `day`, `pre_event_hc` and
-//! `new_xmas_event`. A line every client hears goes to every in-game character of every
-//! Channel: each legacy core told its own. A spawn or a removal runs once per Channel world
-//! hosting the map, as each core hosting it ran it.
+//! (`G/xmas_event.cpp`), `newyear_boom`, `eclipse`, `day`, `pre_event_hc`,
+//! `new_xmas_event`, `daily_gift_event` and `world_boss_event`. A line every client hears
+//! goes to every in-game character of every Channel: each legacy core told its own. A
+//! spawn or a removal runs once per Channel world hosting the map, as each core hosting
+//! it ran it.
 //!
 //! Not ported, so their names only set the table: the premium (`_buyer`) rates, which no
 //! character can use (there is no premium time); `crcdisconnect`; the drop events
 //! (`drop_char_stone*`, `refine_box*`); the four time limits and the three `no_*` switches
-//! (their readers keep the compiled-in values); `daily_gift_event`; `world_boss_event`.
+//! (their readers keep the compiled-in values).
 //!
 //! The table is the quest manager's (`Manager::event_flags`): the same flags
 //! `game.get_event_flag` reads. When boot loaded no quests, the set is kept nowhere and
@@ -235,6 +236,11 @@ impl GameState {
             b"pre_event_hc" => self.pre_event_arm(prev, value),
             b"new_xmas_event" => self.new_xmas_arm(value),
             b"daily_gift_event" => self.daily_gift_event_arm(value),
+            // `world_boss_event` (`G/questmanager.cpp:1344-1348`): the flag
+            // takes the value, then `Enable` runs — even when the value did
+            // not change, as the DB peer forwards every set before the compare
+            // (`D/ClientManagerEventFlag.cpp:31-63`).
+            b"world_boss_event" => self.world_boss_enable(value != 0),
             _ => {}
         }
     }

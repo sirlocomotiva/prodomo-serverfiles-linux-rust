@@ -49270,3 +49270,110 @@ in 46 targets, up 1 from 5042), `cargo test --workspace --doc --locked --offline
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 472. The world boss
+
+`CWorldBoss` (`G/worldboss.h`, `G/worldboss.cpp:1-908`) and `do_worldboss`
+(`G/cmd_gm.cpp:5204-5237`) are ported. A delegated agent wrote the first pass
+(the table reader, the GC codec, the state machine, the wiring); the review
+found real breakage and finished the slice (the CG dispatch, the hooks, the
+boot load, the tests, the scenario).
+
+What the Rewrite does now:
+- **`/worldboss`**: the three-line usage for an empty word; case-insensitive
+  `start`/`stop` through the `world_boss_event` flag bridge (which legacy runs
+  in `SetEventFlag`, `G/questmanager.cpp:1344-1348`); `flush` parses and lands
+  nowhere; any other word is silent.
+- **`Enable`**: re-initialise, start the cooldown and speak (or speak the
+  completion), then every connected PC hears its quest letter for
+  `daily_world_boss` where the quest exists and its `worldboss %d` command line.
+- **The three timers** on Pulse countdowns: the one-shot cooldown runs the run
+  time; the every-second combat arm starts the cooldown past the duration and
+  escapes a spawned boss at half; the one-shot spawn stands the boss. The
+  owner's table reads cooldown 1, runtime 14400, min damage 250000, min level
+  30, map 61, vnum 6418.
+- **`Spawn`** on the channel-1 copy of the drawn map: the random map and vnum,
+  the spawn and test-server-coordinates notices, the cleared temp ranking, and
+  the state flag. **`Escape`** destroys the boss and speaks. **`Kill`** ranks
+  the hunters on the boss's map past the level (`>=`) and damage (`>`) bars,
+  clears every connected PC's `world_boss_reward` flag first, and speaks.
+- **`Process`**: the info ask (state, both absolute seconds-left, the asker's
+  total, the minimum) and the damage ask (the first hit speaks, then the total
+  answers). **`GetRanking`** answers the temp ranking sorted by damage.
+  **`Reward`**: the spawned-state wait line, the 3-second throttle (GMs skip),
+  the killed-state, flag, level, damage and rank bars, the loot line, the
+  group draw with the 7200-second mall-bonus affect, and the flag set.
+- **The CG/GC 148 records** (`G/packet.h:3328-3361`): the 2-byte asks and the
+  24-byte info, 8-byte damage, bare head and 43-byte ranking rows, with the
+  analyzer gate and the harness framing opened for the byte.
+- **The hooks**: a PC's hit on the boss answers its damage
+  (`G/char_battle.cpp:2401-2406`, after the damage map fills), and the boss's
+  death ranks (`:1672-1673`, before the Meley arm).
+- **The boot table** (`world_boss.txt`): Config/Map/Boss/Ranking read at boot.
+
+Legacy readings that shaped the port:
+- The spawn wait is always 5 seconds: legacy builds `dist` and never samples
+  it (`:596-599`, `random_time` stays 5).
+- A refused file leaves legacy's table zeroed: the `EConfig` defaults die in
+  the constructor's own `memset` (`:134-135`), and the loader zeroes before it
+  reads (`:240`).
+- The congrats lines speak before the give: a failed give still spoke them,
+  and only the affect and the flag wait.
+- The need count draws its own roll set (a BYTE sum, wrapping), as the give
+  draws its own (`GetMultiIndex` runs twice).
+- `GetRankingPointsByLootLevel` has no caller, so it has no port.
+
+Divergences: the season bank is dropped (its only sink is the SQL season table,
+which no game code reads back — the ranking answers come from the temp table —
+so `/flush` is silent); a refused table stops the server (legacy logs on with
+zeros, as for every other Game data file); equal-Pulse fires run
+cooldown/combat/spawn, equal damage ranks by stable sort, and the kill walks
+VIDs in order where legacy's orders are heap/pointer-dependent; channel 1
+reads as hosted here. One Defect is not reproduced: the empty-draw give
+returns an uninitialised `bSuccess` (`G/char_item.cpp:9586-9589`, `:9689`).
+
+Gaps: the quest bridges stay `unused` (ledger 401); quest `event_sets` bypass
+every flag arm (pre-existing, all arms alike); no quest sets
+`world_boss_event`; keyword group rows land nothing, as `/letters_open`'s draw
+does.
+
+Review fixes: the spawn-wait draw (legacy never samples; now a plain 5), the
+majority-Channel heuristic (now a hosted-channel-1 check), the `EConfig`
+fallbacks (now zeros), the season double-bank (`/flush` banked again after the
+kill; the bank is dropped), the kill's flag reset (all connected PCs, not just
+ranked hunters) and dedup (legacy appends), the reward's order (congrats before
+the give), need count (the drawn subset, not all rows) and rolls (one per row,
+not one), the `IsGM` throttle (any GM level or the test server), the two
+`#[allow(dead_code)]` (the dead enum member and function are gone), the missing
+analyzer gate (148 closed the descriptor), and the harness framing for GC 148.
+
+Tests:
+- 9 unit tests pin the line parse and bridge, the cooldown-to-runtime chain
+  with both notices, the escape and re-cooldown arms, the spawn refusal and
+  stand on map 61, the kill ranking and flag clear, the first-hit speak and
+  damage answers, the info record, the reward gates, and the player throttle
+  on a live server.
+- The scenario `a_gm_runs_the_world_boss_event`: an IMPLEMENTOR on a Channel 1
+  hosting map 61 reads the usage, starts (the notice and `worldboss 1`), reads
+  the coming-soon, 5-second and Mount Sohan spawn notices with the coordinates,
+  asks info (state 2, minimum 250000) and the empty ranking, is refused the
+  reward while the boss stands, stops (the completion and `worldboss 0`), and
+  reads `world_boss_event 0` with `world_boss_state 2` in the flag list.
+
+Mutants, each killed semantically and restored by checksum:
+- the usage's first line shortened (scenario);
+- start setting the flag to 0 (scenario);
+- the spawn armed at 6 (the unit due pin; the scenario cannot time 5 from 6);
+- the kill notice shortened (units).
+
+Inventory: `cmd.worldboss`, `cg.game.world_boss`, `gc.world_boss`,
+`sys.event.world_boss`, the three `event.worldboss.*` timers and
+`data.world_boss` are `ported`. Five commands remain `missing`.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5058 passed, 0 failed
+in 46 targets, up 15 from 5043), `cargo test --workspace --doc --locked --offline` (1 passed),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

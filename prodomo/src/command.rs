@@ -307,6 +307,7 @@ impl CommandEntry {
                 | "do_weeklyevent"
                 | "do_siege"
                 | "do_frog"
+                | "do_worldboss"
         )
     }
     /// The tail GM lines: split out so `mid_name` stays under the line lint.
@@ -357,6 +358,7 @@ impl CommandEntry {
             "do_weeklyevent" => Command::GmLine(GmLine::WeeklyEvent),
             "do_siege" => Command::GmLine(GmLine::Siege),
             "do_frog" => Command::GmLine(GmLine::Frog),
+            "do_worldboss" => Command::GmLine(GmLine::Worldboss),
             _ => Command::NotPorted(self.handler),
         }
     }

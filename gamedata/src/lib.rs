@@ -54,3 +54,4 @@ pub mod skill;
 pub mod special_item_group;
 pub mod sql_dump;
 pub mod text_file;
+pub mod world_boss;

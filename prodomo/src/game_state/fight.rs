@@ -1425,6 +1425,12 @@ impl GameState {
             self.start_recovery(victim);
             self.update_aggr_point_ex(victim, attacker, kind, damage);
         }
+        // `Damage`'s world-boss arm (`:2401-2406`): a PC's hit on the boss
+        // answers its accumulated damage (and speaks the first hit). The
+        // accumulation is the damage map above; NPC hits never reach here.
+        if victim == self.world_boss_vid && self.bodies.contains_key(&attacker) {
+            self.world_boss_damaged(attacker);
+        }
         if self.npc_by_vid(victim).is_some_and(|npc| npc.hp <= 0) {
             self.stun_npc(victim);
             self.npc_combat.entry(victim).or_default().killer_pid = attacker.raw();
@@ -1655,6 +1661,15 @@ impl GameState {
         // (`G/char_manager.cpp:150-154`): a non-player's death on the ship's map runs
         // the deck's kill first, before the reward halves.
         self.ship_on_kill(vid, killer);
+        // `Dead`'s world-boss arm (`G/char_battle.cpp:1672-1673`): the boss's death
+        // ranks its hunters, before the Meley arm.
+        if vid == self.world_boss_vid {
+            let name = self
+                .npc_by_vid(vid)
+                .map(|npc| npc.name.clone())
+                .unwrap_or_default();
+            self.world_boss_kill(&name);
+        }
         // `Dead`'s Meley arm (`G/char_battle.cpp:1678-1688`): a stone's or a step-3
         // boss's death counts its kill, and any other monster's death past step 3
         // may drop a seal.

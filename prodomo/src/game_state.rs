@@ -161,6 +161,7 @@ mod walk_mode;
 mod war_map;
 mod warp_npc;
 mod whisper;
+mod world_boss;
 
 pub use attr67::{Attr67Regist, ATTR67_ADD_WAIT_TIME, ATTR67_CLOSE, ATTR67_OPEN, ATTR67_REGIST};
 pub use biologist::{
@@ -224,6 +225,7 @@ pub use trade::{
     EXCHANGE_SUBHEADER_CG_CANCEL, EXCHANGE_SUBHEADER_CG_ELK_ADD, EXCHANGE_SUBHEADER_CG_ITEM_ADD,
     EXCHANGE_SUBHEADER_CG_ITEM_DEL, EXCHANGE_SUBHEADER_CG_START,
 };
+pub use world_boss::WorldBossStep;
 
 /// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
 const PICKUP_DISTANCE: i32 = 300;
@@ -589,6 +591,28 @@ pub struct GameState {
     battle_due: Option<u64>,
     battle_state: u8,
     battle_wait: u8,
+    /// The world boss (`CWorldBoss`, `G/worldboss.h:128-164`): the boss's map,
+    /// vnum and VID, whether it stands, whether it has been hit, the state,
+    /// the three armed Pulses (`m_pCooldownEvent`, `m_pRunEvent`,
+    /// `m_pSpawnEvent`), the combat count and duration, the wall-clock
+    /// seconds left, the temp ranking, the season table, the per-PC request
+    /// throttle, and the boot table. `Default` is at rest, as `Initialize`
+    /// leaves it.
+    pub(super) world_boss_map: i32,
+    pub(super) world_boss_vnum: u32,
+    pub(super) world_boss_vid: u32,
+    pub(super) world_boss_marks: world_boss::BossMarks,
+    pub(super) world_boss_state: world_boss::BossState,
+    pub(super) world_boss_cooldown_due: Option<u64>,
+    pub(super) world_boss_combat_due: Option<u64>,
+    pub(super) world_boss_spawn_due: Option<u64>,
+    pub(super) world_boss_passed: u32,
+    pub(super) world_boss_duration: u32,
+    pub(super) world_boss_run_left: u64,
+    pub(super) world_boss_cooldown_left: u64,
+    pub(super) world_boss_ranking: Vec<world_boss::BossRankRow>,
+    pub(super) world_boss_throttle: std::collections::HashMap<u32, u64>,
+    pub(super) world_boss_table: std::sync::Arc<gamedata::world_boss::WorldBossTable>,
     /// The three-way kill scores (`CThreeWayWar::KillScore_`, `G/threeway_war.h:61`):
     /// one per empire, by empire minus 1. `-1` marks an eliminated empire, which the
     /// death hook skips. `Default` is all zero, as `Initialize` leaves them.
@@ -1072,6 +1096,16 @@ impl GameState {
     #[must_use]
     pub fn with_cube_recipes(mut self, recipes: Arc<gamedata::cube::CubeRecipes>) -> Self {
         self.cube_recipes = recipes;
+        self
+    }
+
+    /// Share the world-boss table, which the spawns and the rewards read.
+    #[must_use]
+    pub fn with_world_boss_table(
+        mut self,
+        table: Arc<gamedata::world_boss::WorldBossTable>,
+    ) -> Self {
+        self.world_boss_table = table;
         self
     }
 
@@ -2562,6 +2596,7 @@ impl GameState {
             | GameCommand::Fishing { .. }
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
+            | GameCommand::WorldBoss { .. }
             | GameCommand::Biologist { .. }
             | GameCommand::Premium { .. }
             | GameCommand::Protected { .. }
@@ -4672,6 +4707,7 @@ impl GameState {
             command @ (GameCommand::Fishing { .. }
             | GameCommand::FishEvent { .. }
             | GameCommand::DailyGift { .. }
+            | GameCommand::WorldBoss { .. }
             | GameCommand::Biologist { .. }
             | GameCommand::Premium { .. }
             | GameCommand::Protected { .. }
@@ -4770,6 +4806,12 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.daily_gift(vid, step, mover)),
+            GameCommand::WorldBoss {
+                vid,
+                step,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, Ok(self.world_boss_step(vid, step, mover))),
             GameCommand::Biologist {
                 vid,
                 step,
