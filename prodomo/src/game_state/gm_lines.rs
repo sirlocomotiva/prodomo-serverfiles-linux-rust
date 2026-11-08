@@ -3,7 +3,9 @@
 //! (`:4698-4713`), `/change_attr` (`:3920-3925`), `/add_attr` (`:3927-3932`),
 //! `/change_rare_attr` (`:3942-3947`), `/add_rare_attr` (`:3949-3954`), `/reset_subskill`
 //! (`:4315-4334`), `/flush` (`:4425-4446`), `/observer` (`:3226-3229`), `/force_logout`
-//! (`G/cmd_general.cpp:3503-3509`) and `/fetch_casket_items` (`:4136-4173`).
+//! (`G/cmd_general.cpp:3503-3509`) and `/fetch_casket_items` (`:4136-4173`), plus
+//! `/break_marriage` (`G/cmd_gm.cpp:4162-4174`) and `/close_shop`
+//! (`G/cmd_general.cpp:2004-2012`).
 //!
 //! [`GameState::run_gm_line`] runs one. The list, the count and the effect store nothing.
 //! The socket and attribute lines write an item in place, send its `GC_ITEM_UPDATE` to the
@@ -12,7 +14,8 @@
 //! `/reset_subskill` answers the named character's zeroed sub-skills, whose rows go;
 //! `/flush` has the caller's descriptor write its row now; `/observer` toggles the caller's
 //! observer mode; `/force_logout` closes the caller's own descriptor; `/fetch_casket_items`
-//! tells the named group's rows and the sort.
+//! tells the named group's rows and the sort; `/break_marriage` names its PIDs; and
+//! `/close_shop` stays silent with no own shop.
 //!
 //! Two legacy Defects are not reproduced. `CItem::AddSocket` (`G/item.cpp:1786-1793`) writes
 //! `m_alSockets` with neither `UpdatePacket` nor `Save`, so the GM's client keeps showing the
@@ -216,6 +219,15 @@ impl GameState {
                 self.fetch_casket_items(vid, rest, mover);
                 None
             }
+            GmLine::BreakMarriage => {
+                self.break_marriage(vid, rest, mover);
+                None
+            }
+            // `do_close_shop` (`G/cmd_general.cpp:2004-2012`): an observer is silent, and a
+            // caller with no own shop is silent. No caller of this build holds one
+            // (`GetMyShop` is never set, `sys.trade.private_shop` is missing), so the line
+            // always stays silent; the arms land with the shop's slice.
+            GmLine::CloseShop => None,
         }
     }
     /// `/fetch_casket_items <vnum>` (`do_fetch_casket_items`,
@@ -254,6 +266,28 @@ impl GameState {
             protocol::gc_chat::CHAT_TYPE_COMMAND,
             b"SortCasketWindow",
             &[],
+        );
+    }
+    /// `/break_marriage <pid1> <pid2>` (`do_break_marriage`,
+    /// `G/cmd_gm.cpp:4162-4174`): the caller hears `Divorce Player %d and Player %d.`
+    /// with the words' `strtoul` readings, printed as `%d` prints the `DWORD`s. The DB
+    /// divorce then removes the pair from the marriage manager, which holds nobody:
+    /// no character of this build is married (`sys.marriage` is missing), so nothing
+    /// is stored.
+    fn break_marriage(&self, vid: Vid, rest: &[u8], mover: Mover) {
+        let (first, second) = two_arguments(rest);
+        let pid1 = unsigned_word(&first);
+        let pid2 = unsigned_word(&second);
+        let args = [
+            Arg::Int(i64::from(i32::from_ne_bytes(pid1.to_ne_bytes()))),
+            Arg::Int(i64::from(i32::from_ne_bytes(pid2.to_ne_bytes()))),
+        ];
+        self.tell(
+            vid,
+            mover,
+            CHAT_TYPE_INFO,
+            b"Divorce Player %d and Player %d.",
+            &args,
         );
     }
 

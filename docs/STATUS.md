@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 457 (the casket fetch).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 458
+Last reviewed: 2026-11-08, after ledger section 458 (the divorce and the shop close).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 459
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -481,7 +481,9 @@ and the mining, fishing and drop gates. Since 455 `cmd.advance_skill_select` and
 gates, the set and the clear with no confirmation line, and the click's
 `ShowSpecialInventory`. Since 456 `cmd.mount_test` is `ported`: the word's vnum
 mounts through the ported `MountVnum`. Since 457 `cmd.fetch_casket_items` is `ported`:
-the group's rows and the sort. The
+the group's rows and the sort. Since 458 `cmd.break_marriage` and `cmd.close_shop` are
+`ported` and `cmd.special_item` is `unused` (a local file conversion no client observes).
+The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

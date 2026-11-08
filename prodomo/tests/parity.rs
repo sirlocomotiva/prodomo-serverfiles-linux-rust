@@ -42967,3 +42967,42 @@ fn a_fetch_lists_a_caskets_rows_and_sorts() {
         "the last row closes"
     );
 }
+
+/// `cmd.break_marriage` and `cmd.close_shop` (`do_break_marriage`,
+/// `do_close_shop`, `G/cmd_gm.cpp:4162-4174`, `G/cmd_general.cpp:2004-2012`). The divorce
+/// names its two PIDs; a shop close with no own shop stays silent, observing or not.
+#[test]
+fn a_gm_divorces_two_pids_and_a_shop_close_stays_silent() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/break_marriage 11 22"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Divorce Player 11 and Player 22."),
+        "the divorce names its PIDs"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/close_shop"));
+    alice.still("no own shop stays silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/observer"));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"ObserverMode 1"),
+        "the hider hears its mode"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/close_shop"));
+    alice.still("an observer stays silent");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/observer"));
+    let mode = a_command_line(b"ObserverMode 0");
+    let _dance = read_up_to(&mut alice, &mode);
+    alice.still("nothing follows the mode");
+}

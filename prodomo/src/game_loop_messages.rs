@@ -2913,6 +2913,10 @@ pub enum GmLine {
     Cube,
     /// `/fetch_casket_items` (`do_fetch_casket_items`), a player's line.
     FetchCasket,
+    /// `/break_marriage` (`do_break_marriage`).
+    BreakMarriage,
+    /// `/close_shop` (`do_close_shop`), a player's line.
+    CloseShop,
 }
 
 /// Which restart a dead player asks for.

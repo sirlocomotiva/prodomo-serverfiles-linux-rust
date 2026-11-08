@@ -48371,3 +48371,31 @@ the cast refactor). Doc tests: 1 passed, 0 failed. Clippy (`-D warnings`) clean.
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 458. The divorce and the shop close
+
+`cmd.break_marriage` and `cmd.close_shop` are `ported`, in scenario
+`a_gm_divorces_two_pids_and_a_shop_close_stays_silent`; `cmd.special_item` is `unused`.
+
+- `do_break_marriage` (`G/cmd_gm.cpp:4162-4174`) joins the `GmLine` family: the caller
+  hears `Divorce Player %d and Player %d.` with the words' `strtoul` readings, printed
+  as `%d` prints the `DWORD`s. The DB divorce then removes the pair from the marriage
+  manager, which holds nobody — no character of this build is married (`sys.marriage`
+  is missing) — so nothing is stored.
+- `do_close_shop` (`G/cmd_general.cpp:2004-2012`) is an observer gate over an own shop
+  nobody holds (`GetMyShop` is never set), so the line always stays silent; the arm is
+  a commented `None`, with the arms landing in the shop's slice. The scenario pins the
+  silence observing and not.
+- `do_special_item` only converts `special_item_group.txt` into the local
+  `special_item_group_vnum.txt` file with `sys_err` logs on failure and no `ChatPacket`
+  or record on any path, so no client observes anything: `unused`, per the
+  `cmd.priv_guild` precedent.
+- Mutant killed: the divorce's full stop as a bang fails the scenario. Clippy refused
+  the close arm's bare observer check as a needless return, so the arm inlines.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4970 passed, 0 failed in 44 targets (twice: before and after
+the lint inline). Doc tests: 1 passed, 0 failed. Clippy (`-D warnings`) clean.
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

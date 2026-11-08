@@ -230,7 +230,9 @@ impl CommandEntry {
             | "do_oxevent_show_quiz"
             | "do_gaya_system"
             | "do_cube"
-            | "do_fetch_casket_items" => self.gm_tail_name(),
+            | "do_fetch_casket_items"
+            | "do_break_marriage"
+            | "do_close_shop" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -304,6 +306,8 @@ impl CommandEntry {
             "do_gaya_system" => Command::GmLine(GmLine::GayaSystem),
             "do_cube" => Command::GmLine(GmLine::Cube),
             "do_fetch_casket_items" => Command::GmLine(GmLine::FetchCasket),
+            "do_break_marriage" => Command::GmLine(GmLine::BreakMarriage),
+            "do_close_shop" => Command::GmLine(GmLine::CloseShop),
             _ => Command::NotPorted(self.handler),
         }
     }
