@@ -2078,6 +2078,26 @@ pub enum GameCommand {
         /// Where the game thread reports the line ran.
         reply: oneshot::Sender<()>,
     },
+    /// Run one `/advance_skill_select` line (`do_advance_skill_select`,
+    /// `G/cmd_general.cpp:3982-4002`): the caller's skill group becomes the
+    /// line's, then the skills clear. See `game_state::skill_admin`.
+    AdvanceSkill {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the group with the clear.
+        reply: oneshot::Sender<Option<crate::game_state::SetJobLanded>>,
+    },
+    /// Run one `/do_click_special_inv` line (`do_click_special_inv`,
+    /// `G/cmd_general.cpp:4006-4009`): the `ShowSpecialInventory` command
+    /// line. See `game_state::skill_admin::run_click_special_inv`.
+    ClickSpecialInv {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the line ran.
+        reply: oneshot::Sender<()>,
+    },
     /// Run one `/shutdown` line (`do_shutdown`, `G/cmd_general.cpp:265-275`): the 10's
     /// notice goes out and its countdown starts. See `game_state::shutdown::run_shutdown`.
     Shutdown {
@@ -2709,7 +2729,16 @@ impl GameCommand {
                 | GameCommand::Invisible { .. }
                 | GameCommand::Cooltime { .. }
                 | GameCommand::AffectRemove { .. }
-                | GameCommand::Purge { .. }
+        ) || self.is_chat_line_tail()
+    }
+
+    /// The tail of [`GameCommand::is_chat_line`]: the purge, mob, log, flag,
+    /// letters, stat, PK, walk, master, use and clear lines. Split out so the head
+    /// stays under the line lint.
+    fn is_chat_line_tail(&self) -> bool {
+        matches!(
+            self,
+            GameCommand::Purge { .. }
                 | GameCommand::Respawn { .. }
                 | GameCommand::Mob { .. }
                 | GameCommand::MobLd { .. }
@@ -2759,6 +2788,8 @@ impl GameCommand {
                 | GameCommand::MultiFarm { .. }
                 | GameCommand::Gift { .. }
                 | GameCommand::Hair { .. }
+                | GameCommand::AdvanceSkill { .. }
+                | GameCommand::ClickSpecialInv { .. }
                 | GameCommand::FishSimul { .. }
                 | GameCommand::Shutdown { .. }
                 | GameCommand::DoCmd { .. }
@@ -6780,6 +6811,35 @@ impl GameLoopController {
     pub async fn run_hair(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Hair { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/advance_skill_select` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn advance_skill_command(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Option<crate::game_state::SetJobLanded>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AdvanceSkill { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/do_click_special_inv` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_click_special_inv(&self, vid: common::vid::Vid) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ClickSpecialInv { vid, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)

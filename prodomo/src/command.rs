@@ -334,6 +334,8 @@ impl CommandEntry {
                 | "do_book"
                 | "do_console"
                 | "do_set"
+                | "do_advance_skill_select"
+                | "do_click_special_inv"
         )
     }
 
@@ -363,6 +365,8 @@ impl CommandEntry {
             | "do_inventory" => Self::kit_name(handler),
             "do_slow" | "do_item_purge" | "do_book" | "do_console" => Self::purge_name(handler),
             "do_set" => Command::SetAttr,
+            "do_advance_skill_select" => Command::AdvanceSkill,
+            "do_click_special_inv" => Command::ClickSpecialInv,
             _ => Command::NotPorted(handler),
         }
     }
@@ -915,6 +919,12 @@ pub enum Command {
     Console,
     /// `do_set`: the named PC's field set (`G/cmd_gm.cpp:1862-2074`).
     SetAttr,
+    /// `do_advance_skill_select`: the caller's skill group becomes the line's,
+    /// then the skills clear (`G/cmd_general.cpp:3982-4002`).
+    AdvanceSkill,
+    /// `do_click_special_inv`: the `ShowSpecialInventory` command line
+    /// (`G/cmd_general.cpp:4006-4009`).
+    ClickSpecialInv,
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
 }

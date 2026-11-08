@@ -1,7 +1,9 @@
-//! The skill-admin lines: `/setskill`, `/setskillother`, `/setskillpoint` and
-//! `/setjob` (`ACMD(do_setskill)`, `do_setskillother`, `do_set_skill_point`,
+//! The skill-admin lines: `/setskill`, `/setskillother`, `/setskillpoint`,
+//! `/setjob`, `/advance_skill_select` and `/do_click_special_inv`
+//! (`ACMD(do_setskill)`, `do_setskillother`, `do_set_skill_point`,
 //! `do_set_skill_group`, `G/cmd_gm.cpp:2528-2572`, `:2574-2608`, `:2610-2622`,
-//! `:2624-2637`).
+//! `:2624-2637`, and `do_advance_skill_select`, `do_click_special_inv`,
+//! `G/cmd_general.cpp:3982-4002`, `:4006-4009`).
 //!
 //! `setskill` (`GM_LOW_WIZARD`) answers `Syntax: setskill <name> <lev>` when a
 //! word is missing or the level's first byte is no digit; else the word is a
@@ -27,6 +29,10 @@
 //! narrows the line's number to a byte, 0 when empty; a group past 2 or a
 //! caller below level 5 skips the set and byte 112, and then `ClearSkill` and
 //! `skill group to %d.` with the full number always run.
+//! `advance_skill_select` (`GM_PLAYER`) answers the syntax on an empty line
+//! and `YOU_CAN_NOT_DO_THAT` to a grouped caller or one below level 5; else
+//! the same set and clear run with no confirmation line.
+//! `do_click_special_inv` (`GM_PLAYER`) tells `ShowSpecialInventory`.
 //!
 //! The numbers are `strtoul`/`strtol` ones: the level wraps mod 256, the vnum
 //! mod 2^32, and the group and the counter wrap mod 2^32 (the `(int)` cast of
@@ -285,8 +291,74 @@ impl GameState {
         } else {
             str_to_wrapping_int(&word)
         };
-        let group = value.to_le_bytes()[0];
+        let line = format!("skill group to {value}.");
+        Some(self.set_group_and_clear(vid, mover, value, Some(line.as_bytes())))
+    }
+    /// `ACMD(do_advance_skill_select)`: an empty line answers the syntax, a
+    /// caller already grouped or below level 5 hears
+    /// `YOU_CAN_NOT_DO_THAT`, else the set and the clear run exactly as
+    /// `/setjob` runs them, minus the confirmation line. Answers the same
+    /// landed row `/setjob` answers, or `None` for a line that runs nothing.
+    pub(super) fn run_advance_skill(&mut self, vid: Vid, rest: &[u8]) -> Option<SetJobLanded> {
+        let mover = self.own_mover(vid)?;
+        let (word, _) = crate::command::one_argument(rest);
+        if word.is_empty() {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"@@(cmd_general)tradus:Wrong Syntax",
+                &[],
+            );
+            return None;
+        }
+        let grouped = self
+            .bodies
+            .get(&vid)
+            .is_some_and(|body| body.card.skill_group != 0);
         let level = self.level_of(vid)?;
+        if grouped || level < 5 {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"@@(cmd_general)tradus:YOU_CAN_NOT_DO_THAT",
+                &[],
+            );
+            return None;
+        }
+        let value = str_to_wrapping_int(&word);
+        Some(self.set_group_and_clear(vid, mover, value, None))
+    }
+
+    /// `ACMD(do_click_special_inv)`: the `ShowSpecialInventory` command line.
+    pub(super) fn run_click_special_inv(&self, vid: Vid) {
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        self.tell(
+            vid,
+            mover,
+            protocol::gc_chat::CHAT_TYPE_COMMAND,
+            b"ShowSpecialInventory",
+            &[],
+        );
+    }
+
+    /// `SetSkillGroup` + `ClearSkill`: the group byte sets when it is at most
+    /// 2 and the caller stands past level 4 (then byte 112 goes out), and
+    /// then the clear runs. `confirm` is the line `/setjob` tells with the
+    /// full number; the skill-select tells none. Answers the group, whether
+    /// the set ran, the clear's zeroed skills, and the counter.
+    fn set_group_and_clear(
+        &mut self,
+        vid: Vid,
+        mover: crate::item_move::Mover,
+        value: i32,
+        confirm: Option<&[u8]>,
+    ) -> SetJobLanded {
+        let group = value.to_le_bytes()[0];
+        let level = self.level_of(vid).unwrap_or(0);
         let set = group <= 2 && level >= 5;
         if set {
             if let Some(body) = self.bodies.get_mut(&vid) {
@@ -300,14 +372,15 @@ impl GameState {
         let skill = self
             .pc_points_mut(vid.raw())
             .map_or(0, |points| points.get_point(point::POINT_SKILL));
-        let line = format!("skill group to {value}.");
-        self.tell(vid, mover, CHAT_TYPE_INFO, line.as_bytes(), &[]);
-        Some(SetJobLanded {
+        if let Some(line) = confirm {
+            self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);
+        }
+        SetJobLanded {
             group,
             set,
             cleared_skills,
             skill,
-        })
+        }
     }
 
     /// `CSkillManager::Get`: the vnum when the word starts with a digit

@@ -42761,3 +42761,104 @@ fn an_unlock_knock_spends_keys_and_the_save_keeps_the_rows() {
     );
     drop(server);
 }
+
+/// The skill-select rows: Alpha at level 10 in group 0 with a seeded skill
+/// and sub-skill, and Yankee fresh at level 1. Written before boot.
+fn skill_select_rows(database: &ScratchDatabase) {
+    for login in ["alice", "bob"] {
+        create_account_before_boot(database, login);
+    }
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE player SET level = 10, skill_group = 0 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 16, 5, 0 FROM \
+         player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 121, 3, 0 FROM \
+         player WHERE name = 'Alpha'",
+    );
+}
+
+/// `cmd.advance_skill_select` and `cmd.do_click_special_inv`
+/// (`do_advance_skill_select`, `do_click_special_inv`,
+/// `G/cmd_general.cpp:3982-4002`, `:4006-4009`). An empty select answers its
+/// syntax; a select sets with byte 112, clears with byte 76 (the seeded skill
+/// zeroes, the sub-skill stands), and tells no confirmation; a second select
+/// and a level-1 select hear `YOU_CAN_NOT_DO_THAT`; the click shows the
+/// special window; the group and the cleared counter bank on disconnect.
+#[test]
+fn a_skill_select_sets_and_clears_and_a_click_shows_the_special_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_select_rows(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, GERMAN, None);
+    let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, None);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/advance_skill_select"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"@@(cmd_general)tradus:Wrong Syntax"),
+        "the empty select answers its syntax"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/advance_skill_select 1"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    assert_eq!(wire[0], vec![GC_CHANGE_SKILL_GROUP, 1], "byte 112 leads");
+    assert_eq!(
+        change_record(&wire[1]),
+        (28, 0, 9),
+        "4 + (10 - 5), amount hidden"
+    );
+    let last_76 = wire
+        .iter()
+        .rfind(|record| record[0] == GC_SKILL_LEVEL_NEW)
+        .expect("the clear sends byte 76");
+    assert_eq!(skill_slot(last_76, 16), 0, "the seeded skill zeroes");
+    assert_eq!(skill_slot(last_76, 121), 3, "the sub-skill stands");
+    assert!(
+        wire.iter().all(|record| record[0] != GC_CHAT),
+        "no confirmation line follows"
+    );
+    check(
+        &database,
+        "(SELECT COUNT(*) FROM player_skill WHERE player_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND vnum = 16) = 0",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/advance_skill_select 2"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"@@(cmd_general)tradus:YOU_CAN_NOT_DO_THAT"),
+        "a grouped caller cannot reselect"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/advance_skill_select 1"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"@@(cmd_general)tradus:YOU_CAN_NOT_DO_THAT"),
+        "a level-1 caller cannot select"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/do_click_special_inv"));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"ShowSpecialInventory"),
+        "the click shows the special window"
+    );
+    drop(alice);
+    drop(yankee);
+    wait_for(
+        &database,
+        "(SELECT skill_group FROM player WHERE name = 'Alpha') = 1 AND (SELECT skill_point FROM \
+         player WHERE name = 'Alpha') = 9",
+    );
+}

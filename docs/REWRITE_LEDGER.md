@@ -48292,3 +48292,35 @@ confirm after the fix is 340 passed, 0 failed. `rustfmt` and `cargo-clippy` are 
 `/usr/bin`
 pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No
 ADR changed.
+
+## 455. The skill-select lines
+
+`cmd.advance_skill_select` and `cmd.do_click_special_inv` are `ported`, in scenario
+`a_skill_select_sets_and_clears_and_a_click_shows_the_special_window`.
+
+- `do_advance_skill_select` (`G/cmd_general.cpp:3982-4002`, behind
+  `__ENABLE_ADVANCE_SKILL_SELECT__`, which the owner's build defines): an empty line
+  answers `@@(cmd_general)tradus:Wrong Syntax`, a caller already in a group or below
+  level 5 hears `@@(cmd_general)tradus:YOU_CAN_NOT_DO_THAT` (through the chat tell, so a
+  locale row would translate it as `LC_TEXT` does), else `SetSkillGroup` and `ClearSkill`
+  run exactly as `/setjob` runs them — the group byte at most 2 past level 4 sets with
+  byte 112, the counter tops to `4 + (level - 5)`, every skill but the eleven sub-skills
+  zeroes with byte 76 — minus the confirmation line. `run_setjob` and
+  `run_advance_skill` share the set-and-clear core; the held group and counter follow
+  and the clear's zeroed skills leave the store, as the setjob step does.
+- `do_click_special_inv` (`G/cmd_general.cpp:4006-4009`) tells the `ShowSpecialInventory`
+  command line.
+- The new `GameCommand` arms pushed `is_chat_line` and `run_line_command` past the
+  100-line lint; both split along existing seams (`is_chat_line_tail`, and the
+  skill-admin arms into `run_line_command_tail`).
+- Mutant killed: the reselect gate narrowed to levels only lets the grouped second
+  select through and the scenario fails.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4967 passed, 0 failed in 44 targets. Doc tests: 1 passed, 0
+failed. Clippy (`-D warnings`) clean. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --locked --offline` pass. The suite ran twice at 4967/0 (before and after the
+lint splits), and the new scenario with the setjob pair re-passed after the move.
+`rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

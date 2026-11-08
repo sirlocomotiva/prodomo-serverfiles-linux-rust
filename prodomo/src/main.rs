@@ -10344,13 +10344,6 @@ where
         | LineCommand::SelfGrant) => {
             run_line_spawn(command, session, addr, context, held, rest).await
         }
-        LineCommand::SetSkill => set_skill_step(addr, context, held, rest).await,
-        LineCommand::SetSkillOther => set_skill_other_step(addr, context, held, rest).await,
-        LineCommand::SetSkillPoint => set_skill_point_step(addr, context, held, rest).await,
-        LineCommand::SetJob => set_job_step(addr, context, held, rest).await,
-        LineCommand::Invisible => invisible_step(addr, context, held).await,
-        LineCommand::Cooltime => cooltime_step(addr, context, held).await,
-        LineCommand::AffectRemove => affect_remove_step(addr, context, held, rest).await,
         LineCommand::Purge => purge_step(addr, context, held, rest, false).await,
         LineCommand::Weaken => purge_step(addr, context, held, rest, true).await,
         LineCommand::PrivEmpire => priv_empire_step(addr, context, held, rest).await,
@@ -10409,6 +10402,14 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     match command {
+        LineCommand::SetSkill => set_skill_step(addr, context, held, rest).await,
+        LineCommand::SetSkillOther => set_skill_other_step(addr, context, held, rest).await,
+        LineCommand::SetSkillPoint => set_skill_point_step(addr, context, held, rest).await,
+        LineCommand::SetJob => set_job_step(addr, context, held, rest).await,
+        LineCommand::AdvanceSkill => advance_skill_step(addr, context, held, rest).await,
+        LineCommand::Invisible => invisible_step(addr, context, held).await,
+        LineCommand::Cooltime => cooltime_step(addr, context, held).await,
+        LineCommand::AffectRemove => affect_remove_step(addr, context, held, rest).await,
         command @ (LineCommand::Stat
         | LineCommand::StatMinus
         | LineCommand::StatVal
@@ -10439,6 +10440,7 @@ where
         LineCommand::MultiFarm => multi_farm_step(addr, context, held).await,
         LineCommand::Gift => gift_step(addr, context, held).await,
         LineCommand::Hair => hair_step(addr, context, held).await,
+        LineCommand::ClickSpecialInv => click_special_inv_step(addr, context, held).await,
         LineCommand::FishSimul => fish_simul_step(addr, context, held, rest).await,
         LineCommand::Shutdown => shutdown_step(addr, context, held).await,
         LineCommand::Exit(kind) => do_cmd_step(addr, context, held, kind).await,
@@ -11564,6 +11566,25 @@ async fn hair_step(addr: SocketAddr, context: &ConnectionContext, held: &mut Hel
         return false;
     }
     info!(%addr, "Hair told");
+    true
+}
+/// `do_click_special_inv` (`G/cmd_general.cpp:4006-4009`): the
+/// `ShowSpecialInventory` command line. Nothing rides, nothing is stored:
+/// the world told the line itself.
+async fn click_special_inv_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Special window without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.run_click_special_inv(vid).await {
+        warn!(%addr, %error, "The world could not be asked for a special window; closing");
+        return false;
+    }
+    info!(%addr, "Special window told");
     true
 }
 
@@ -13740,6 +13761,52 @@ async fn set_job_step(
         }
     }
     info!(%addr, "Skill group set");
+    true
+}
+/// `do_advance_skill_select`: the world runs the line; the held group and
+/// counter follow, and the clear's zeroed skills leave the store. As
+/// `/setjob`, minus the confirmation line.
+async fn advance_skill_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Skill-select without a character in the world; ignoring");
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        info!(%addr, "Skill-select without a held character; ignoring");
+        return true;
+    };
+    let player = character.id;
+    let landed = match context.game.advance_skill_command(vid, rest).await {
+        Ok(landed) => landed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a skill-select; closing");
+            return false;
+        }
+    };
+    let Some(landed) = landed else {
+        info!(%addr, "Skill-select refused");
+        return true;
+    };
+    if let Some(character) = held.character.as_mut() {
+        if landed.set {
+            character.skill_group = landed.group;
+        }
+        character.skill_point = i16::try_from(landed.skill).unwrap_or(i16::MAX);
+    }
+    for vnum in &landed.cleared_skills {
+        if let Err(error) =
+            db::player_skills::store_skill(&context.store, player, *vnum, 0, 0).await
+        {
+            warn!(%addr, %error, vnum, "The cleared skill could not be deleted; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Skill group selected");
     true
 }
 /// `do_purge` and `do_weaken`: the world destroys or weakens the NPCs

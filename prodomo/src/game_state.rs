@@ -1543,6 +1543,8 @@ impl GameState {
                 | GameCommand::Dice { .. }
                 | GameCommand::Gift { .. }
                 | GameCommand::Hair { .. }
+                | GameCommand::AdvanceSkill { .. }
+                | GameCommand::ClickSpecialInv { .. }
                 | GameCommand::FishSimul { .. }
                 | GameCommand::Shutdown { .. }
                 | GameCommand::DoCmd { .. }
@@ -1676,6 +1678,8 @@ impl GameState {
             | GameCommand::Dice { .. }
             | GameCommand::Gift { .. }
             | GameCommand::Hair { .. }
+            | GameCommand::AdvanceSkill { .. }
+            | GameCommand::ClickSpecialInv { .. }
             | GameCommand::FishSimul { .. }
             | GameCommand::Shutdown { .. }
             | GameCommand::DoCmd { .. }
@@ -1767,6 +1771,12 @@ impl GameState {
                     debug!(?vid, "nobody was left to hear a setjob's answer");
                 }
             }
+            GameCommand::AdvanceSkill { vid, rest, reply } => {
+                let landed = self.run_advance_skill(vid, &rest);
+                if reply.send(landed).is_err() {
+                    debug!(?vid, "nobody was left to hear a skill-select's answer");
+                }
+            }
             GameCommand::AllSkillMaster { vid, reply } => {
                 let planted = self.run_all_skill_master(vid);
                 if reply.send(planted).is_err() {
@@ -1793,6 +1803,7 @@ impl GameState {
             | GameCommand::Dice { .. }
             | GameCommand::Gift { .. }
             | GameCommand::Hair { .. }
+            | GameCommand::ClickSpecialInv { .. }
             | GameCommand::FishSimul { .. }
             | GameCommand::Shutdown { .. }
             | GameCommand::DoCmd { .. }
@@ -1923,6 +1934,12 @@ impl GameState {
                 self.run_hair(vid);
                 if reply.send(()).is_err() {
                     debug!(?vid, "nobody was left to hear a hair's answer");
+                }
+            }
+            GameCommand::ClickSpecialInv { vid, reply } => {
+                self.run_click_special_inv(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a special window's answer");
                 }
             }
             GameCommand::FishSimul { vid, rest, reply } => {
