@@ -11,6 +11,7 @@
 pub mod banword;
 pub mod battle_pass;
 pub mod belt_inventory;
+pub mod blend;
 pub mod csv_table;
 pub mod cube;
 pub mod daily_gift;
@@ -28,6 +29,7 @@ pub mod item_kind;
 pub mod item_mask;
 pub mod item_proto;
 pub mod item_proto_value;
+pub(crate) mod json;
 pub mod land;
 pub mod locale_string;
 pub mod lzo;

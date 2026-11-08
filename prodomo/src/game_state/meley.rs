@@ -1774,6 +1774,7 @@ impl GameState {
             groups: &groups,
             now_secs,
             count_limit: self.item_count_limit,
+            blend: &self.blend_table,
         };
         let Some(ids) = self.item_ids.as_mut() else {
             tracing::warn!("a meley seal fell; no item ids are installed");

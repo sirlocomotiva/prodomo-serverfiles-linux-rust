@@ -49655,3 +49655,58 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 cargo doc --workspace --no-deps --locked --offline`, the two scenarios, and `legacy/` is
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 478. The blend use
+
+`sys.item.blend`, `data.item.blend` and `event.item.blend_use_expire_event` are `ported`.
+
+The blend table (`locale/europe/blend.json`, `G/blend_item.cpp:48-178`) reads at boot into
+`GameState::blend_table` (production wires it in `prodomo/src/main.rs`; every quest-giver
+path and the drop path thread it through, replacing the default that made blends
+unportable). Creation (`CBlendItem::SetItemValue`, `:180-207`) rolls the level into sockets
+0-2 and 0 into socket 3; a 0 duration reads `INFINITE_AFFECT_DURATION`, and an unlisted
+blend vnum still names the arm. The owner's table lists 24 vnums; the 25th `ITEM_BLEND`
+proto, 71157, is not tabled, so its use is silent.
+
+The use (`case ITEM_BLEND`, `G/char_item.cpp:7064-7118`) runs in
+`prodomo/src/game_state/blend.rs`. An unlisted vnum ends the use as a step never run. A
+plain vnum (the 508xx dews and 51002) refuses with `[LS;99]` past `AFFECT_BLEND` on the
+point or the free-experience row on `POINT_RESIST_MAGIC`, then counts the battle-pass
+mission, lays its `SetBlendAffect` marker and `AFFECT_BLEND` on the socketed point, and
+spends one. An extended vnum (only the 20201-20217 range the `IsExtendedBlend` gate lets
+in; the 508xx cases in `UseExtendedBlendAffect` are dead) refuses past `AFFECT_BLEND`, the
+free-experience row or the mall row on the point, past the potion row for 20202 and the
+speed row for 20201 and 20217, and past a held marker when this copy does not tick; else a
+held marker toggles off, or the marker lays with the socketed point and value (`over`).
+Socket 3 follows the lay, the client's cell updates, and the row saves.
+
+The tick (`blend_use_expire_event`, `G/item.cpp:2090-2115`) runs once a second per ticking
+character from `process_pulse`: socket 2 counts down with its cell updated, and one spends
+at 0. A start past 8640000 or on a real-time item lays no tick. A stored socket 3 of 1
+restarts at admission (`OnAfterCreatedItem`, `G/item.cpp:2759-2767`); the item load's doc
+says so now.
+
+Two things are not ported. The item lock (`Lock(true)` while a blend ticks) has no field:
+a ticking blend can be moved, and the tick follows it by item id. And the GM `/item` grant
+path builds a bare item with zero sockets, where legacy's `do_item` runs the full
+`CreateItem` — the grant gap for every item, not only blends, so the scenario seeds its
+blend through the store instead.
+
+The unit tests lay, refuse, toggle and tick (the lists cover the owner's table whole), and
+the scenario `a_blend_use_lays_its_marker_and_its_echo_takes_it_off` uses a stored 20210
+over the wire twice: the marker lands and socket 3 runs, then the remove names it and the
+socket stops. It passed 8 of 8 parallel runs.
+
+The suite summed 5109 passed, 1 failed in 46 targets; the failure was the known
+`a_gm_flags_a_stray_dog_aggressive_and_coward` load flake, green alone. The parity
+re-run hit the other known flake (`a_gm_aggregates_and_forgets_the_dogs_around`, a read
+timeout), also green alone. The `session_head` refactor this slice needed (the blend
+threading pushed it past the line lint) splits the `Session` literal into
+`session_literal` with a `QuestStepRoster` alias; the quest unit tests still pass.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the scenario's 8x flake check, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
+was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

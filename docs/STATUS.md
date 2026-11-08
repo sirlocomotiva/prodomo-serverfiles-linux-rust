@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 477 (the mislabeled systems).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 478
+Last reviewed: 2026-11-08, after ledger section 478 (the blend use).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 479
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -535,7 +535,7 @@ server-attr cells, which no object writes. Since 477 `sys.char.empire_change` an
 `sys.world.time` is `partial` (the login TIME is ported, the quest time is backed but
 scenario-less, and no day/night driver exists in legacy), and `sys.net.udp_block` is
 `unused` (legacy compiles the UDP socket out); questions 59 and 60 ask about the mall's
-missing website and the UDP row. The next slice is the owner's call: the forest's leader branch is ported,
+missing website and the UDP row. Since 478 `sys.item.blend`, `data.item.blend` and `event.item.blend_use_expire_event` are `ported`: the use lays, refuses and toggles, creation rolls the owner's 24 rows, and the tick spends; the item lock is not ported and the GM grant path rolls no sockets. The next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

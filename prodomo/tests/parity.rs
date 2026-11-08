@@ -44851,3 +44851,57 @@ fn arena_nonmember_login_returns_home(server: &mut Server) {
     drop(visitor);
     server.wait_for(&format!("Client connection closed addr={addr}"));
 }
+
+/// `sys.item.blend` (the blend use, `case ITEM_BLEND`, `G/char_item.cpp:7064-7118`).
+/// A stored extended blend with rolled sockets loads into cell 0; its use lays
+/// `AFFECT_BLEND_POTION_1` (`GC_AFFECT_ADD` 304) and sets the item's socket 3
+/// (`GC_ITEM_UPDATE`), and its second use takes the marker off (`GC_AFFECT_REMOVE`) and
+/// clears the socket. The remove packet names the marker and its point.
+#[test]
+fn a_blend_use_lays_its_marker_and_its_echo_takes_it_off() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    skill_flag_rows(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1, \
+         socket2) SELECT 60, id, 1, 0, 1, 20210, 1, 10, 600 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _listed) = enter_world_as_implementor(&server);
+
+    alice.send_record(&client_item_use(0));
+    let (wire, _) = alice.drain_game(Duration::from_secs(2), game_len);
+    let add = wire
+        .iter()
+        .find(|record| record[0] == GC_AFFECT_ADD)
+        .unwrap_or_else(|| panic!("the marker lands: {wire:02x?}"));
+    assert_eq!(&add[1..5], &304u32.to_le_bytes(), "AFFECT_BLEND_POTION_1");
+    let update = wire
+        .iter()
+        .find(|record| record[0] == ITEM_UPDATE)
+        .unwrap_or_else(|| panic!("the use updates: {wire:02x?}"));
+    let ticking: Vec<i32> = update[14..38]
+        .chunks(4)
+        .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(ticking[3], 1, "socket 3 runs: {ticking:?}");
+
+    alice.send_record(&client_item_use(0));
+    let (wire, _) = alice.drain_game(Duration::from_secs(2), game_len);
+    let remove = wire
+        .iter()
+        .find(|record| record[0] == GC_AFFECT_REMOVE)
+        .unwrap_or_else(|| panic!("the echo takes the marker off: {wire:02x?}"));
+    assert_eq!(&remove[1..5], &304u32.to_le_bytes(), "the marker goes");
+    let update = wire
+        .iter()
+        .find(|record| record[0] == ITEM_UPDATE)
+        .unwrap_or_else(|| panic!("the echo updates: {wire:02x?}"));
+    let stopped: Vec<i32> = update[14..38]
+        .chunks(4)
+        .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(stopped[3], 0, "socket 3 stops: {stopped:?}");
+}

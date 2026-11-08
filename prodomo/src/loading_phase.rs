@@ -129,6 +129,14 @@ pub const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 /// and removes.
 pub const AFFECT_INVISIBILITY: u32 = 203;
 
+/// `AFFECT_MOV_SPEED` (`G/affect.h:23`): the potion affect the 20201/20217
+/// extended uses refuse against.
+pub const AFFECT_MOV_SPEED: u32 = 200;
+
+/// `AFFECT_ATT_SPEED` (`G/affect.h:24`): the potion affect the 20202 extended
+/// use refuses against.
+pub const AFFECT_ATT_SPEED: u32 = 201;
+
 /// The kinds `CHARACTER::RemoveGoodAffect` removes (`G/char_affect.cpp:892-916`): the six
 /// potion affects and `CHINA_FIREWORK`, then the fourteen skill affects.
 pub const GOOD_AFFECT_KINDS: [u32; 21] = [
@@ -212,6 +220,71 @@ pub const AFFECT_PREMIUM_PLAYERS_04: u32 = 552;
 /// `AFFECT_HAIR` (`G/affect.h:78`): the hair affect `affect.add_hair` grants and
 /// `/hair` reads.
 pub const AFFECT_HAIR: u32 = 514;
+
+/// `AFFECT_BLEND` (`G/affect.h:97`): the affect a plain blend use lays.
+pub const AFFECT_BLEND: u32 = 531;
+
+/// `AFFECT_MALL` (`G/affect.h:73`): the mall affect an extended blend use refuses
+/// against.
+pub const AFFECT_MALL: u32 = 510;
+
+/// `AFFECT_EXP_BONUS_EURO_FREE` (`G/affect.h:80`): the free-experience affect a
+/// blend use refuses against.
+pub const AFFECT_EXP_BONUS_EURO_FREE: u32 = 516;
+
+/// `AFFECT_BLEND_POTION_1` (`G/affect.h:125`): the first extended-blend affect,
+/// laid by 50821 and 20210.
+pub const AFFECT_BLEND_POTION_1: u32 = 304;
+
+/// `AFFECT_BLEND_POTION_2` (`G/affect.h:126`): laid by 50822 and 20209.
+pub const AFFECT_BLEND_POTION_2: u32 = 305;
+
+/// `AFFECT_BLEND_POTION_3` (`G/affect.h:127`): laid by 50823, 20214, 50825 and
+/// 20211 (the plain arm reuses 3 for the 50825 pair).
+pub const AFFECT_BLEND_POTION_3: u32 = 306;
+
+/// `AFFECT_BLEND_POTION_4` (`G/affect.h:128`): laid by 50824 and 20213.
+pub const AFFECT_BLEND_POTION_4: u32 = 307;
+
+/// `AFFECT_BLEND_POTION_5` (`G/affect.h:129`): laid by the 50825 pair on the
+/// extended arm only.
+pub const AFFECT_BLEND_POTION_5: u32 = 308;
+
+/// `AFFECT_BLEND_POTION_6` (`G/affect.h:130`): laid by 50826 and 20212.
+pub const AFFECT_BLEND_POTION_6: u32 = 309;
+
+/// `AFFECT_BLEND_POTION_7` (`G/affect.h:131`): laid by 20215.
+pub const AFFECT_BLEND_POTION_7: u32 = 310;
+
+/// `AFFECT_ENERGY` (`G/affect.h:132`): laid by 51002 and 20216.
+pub const AFFECT_ENERGY: u32 = 311;
+
+/// `AFFECT_DRAGON_GOD_1` (`G/affect.h:133`): laid by 20205.
+pub const AFFECT_DRAGON_GOD_1: u32 = 312;
+
+/// `AFFECT_DRAGON_GOD_2` (`G/affect.h:134`): laid by 20206.
+pub const AFFECT_DRAGON_GOD_2: u32 = 313;
+
+/// `AFFECT_DRAGON_GOD_3` (`G/affect.h:135`): laid by 20207.
+pub const AFFECT_DRAGON_GOD_3: u32 = 314;
+
+/// `AFFECT_DRAGON_GOD_4` (`G/affect.h:136`): laid by 20208.
+pub const AFFECT_DRAGON_GOD_4: u32 = 315;
+
+/// `AFFECT_CRITICAL` (`G/affect.h:137`): laid by 20203.
+pub const AFFECT_CRITICAL: u32 = 316;
+
+/// `AFFECT_PENETRATE` (`G/affect.h:138`): laid by 20204.
+pub const AFFECT_PENETRATE: u32 = 317;
+
+/// `AFFECT_ATTACK_SPEED` (`G/affect.h:139`): laid by 20202.
+pub const AFFECT_ATTACK_SPEED: u32 = 318;
+
+/// `AFFECT_MOVE_SPEED` (`G/affect.h:140`): laid by 20201.
+pub const AFFECT_MOVE_SPEED: u32 = 319;
+
+/// `AFFECT_WIND_SHOES` (`G/affect.h:141`): laid by 20217.
+pub const AFFECT_WIND_SHOES: u32 = 320;
 
 /// `AFFECT_HORSE_NAME` (`G/affect.h:99`): the affect `horse.set_name` lays for the name's
 /// month (`G/questlua_horse.cpp:252-256`), which `HorseNameManager::Validate` watches

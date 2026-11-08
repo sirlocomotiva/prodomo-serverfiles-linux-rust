@@ -3,6 +3,7 @@
 mod apply;
 mod auto_give_new;
 mod bait;
+mod blend;
 mod campfire;
 mod combat;
 mod death_penalty;
@@ -47,6 +48,7 @@ pub use apply::{
 };
 pub use auto_give_new::{auto_give_item_new, GivenNew};
 pub use bait::{is_bait, use_bait, Baited, ROD_BAIT_SOCKET, WEAPON_CELL};
+pub use blend::spend_blend;
 pub use campfire::{
     is_campfire, use_campfire, CampfireGround, Fired, CAMPFIRE_BARRED_MAP, CAMPFIRE_COOLDOWN_SECS,
 };

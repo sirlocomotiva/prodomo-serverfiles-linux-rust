@@ -73,8 +73,9 @@
 //!   come back as stored.
 //! - **`OnAfterCreatedItem` is not run, for any window.** It locks a blend item and starts its
 //!   expiry, loads a toggle item, and starts the timer of an item whose real time runs from its
-//!   first use (`G/item.cpp:2757-2784`). None of those systems is ported: a worn item that
-//!   needs one is refused above, and an unworn one keeps its sockets as stored.
+//!   first use (`G/item.cpp:2757-2784`). The blend half restarts at admission instead (a stored
+//!   socket 3 of 1 starts its tick, without the lock, which no item carries); the toggle and
+//!   real-time starts are not ported, and an item that needs one keeps its sockets as stored.
 //! - **Any overlap sets an item aside, not only an occupied anchor.** Legacy tests only the
 //!   exact cell, so an item whose footprint overlaps a neighbour is placed over it and its
 //!   marks overwrite the neighbour's. Here a [`Rejected::GridConflict`](world::character::Rejected::GridConflict) is set aside like an

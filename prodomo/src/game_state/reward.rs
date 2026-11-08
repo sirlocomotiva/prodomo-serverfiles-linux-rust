@@ -1024,6 +1024,7 @@ impl GameState {
         let masks = Arc::clone(&self.item_masks);
         let protos = Arc::clone(&self.protos);
         let groups = Arc::clone(&self.item_groups);
+        let blend = Arc::clone(&self.blend_table);
         let Some(ids) = self.item_ids.as_mut() else {
             tracing::warn!(
                 vnum,
@@ -1038,6 +1039,7 @@ impl GameState {
             groups: &groups,
             now_secs,
             count_limit,
+            blend: &blend,
         };
         match make_drop_item(
             &mut self.dice,

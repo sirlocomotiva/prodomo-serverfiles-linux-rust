@@ -57,7 +57,7 @@ in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that tur
 | `sys.item.extend_inventory` | `ENABLE_EXTEND_INVEN_SYSTEM`, `ENVANTER_BLACK` | Unlocking inventory pages | `sys.item.core` | ported | `an_unlock_knock_spends_keys_and_the_save_keeps_the_rows` | Ledger 449: the price list, the mixed spend, the shortfall chat, the `POINT_INVEN` rise and the save round-trip. |
 | `sys.item.special_inventory` | `ENABLE_CUSTOM_INVENTORY`, `__SORT_INVENTORY_ITEMS__` | Special inventories and sorting | `sys.item.core` | missing | | |
 | `sys.item.protected` | `__ENABLE_INVENTORY_PROTECTED_SYSTEM__` | Inventory protection | `sys.item.core` | ported | `a_lock_is_mistyped_set_used_changed_and_lifted` | Ledger 446: the lock, the twenty gates, the kick's auto-lock and the save round-trip. |
-| `sys.item.blend` | `G/blend_item.cpp` | Blend items (`blend.json`) | `sys.item.core` | missing | | |
+| `sys.item.blend` | `G/blend_item.cpp` | Blend items (`blend.json`) | `sys.item.core` | ported | a_blend_use_lays_its_marker_and_its_echo_takes_it_off | Ledger 467: the use lays and toggles, the tick spends; the lock is not ported and the GM grant rolls no sockets. |
 | `sys.item.addon` | `G/item_addon.cpp` | Addon bonuses for skill items | `sys.item.core` | missing | | |
 | `sys.item.stack_attribute` | `G/item_stack_attribute.cpp` | Stack attribute table | `sys.item.core` | missing | | |
 | `sys.item.casket_preview` | `__CASKET_PREVIEW_ENABLE__` | Chest content preview | `sys.item.core` | missing | | |

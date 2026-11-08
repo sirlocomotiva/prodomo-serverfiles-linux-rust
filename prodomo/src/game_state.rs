@@ -68,6 +68,7 @@ mod attr67;
 mod battle_arena;
 mod battle_pass;
 mod biologist;
+mod blend;
 mod build_lines;
 mod cards;
 mod castle_lines;
@@ -731,6 +732,10 @@ pub struct GameState {
     /// The Pulse each character's horse stamina event fires on (`m_eventStaminaRegen`,
     /// `m_eventStaminaConsume`, `G/horse_rider.h:84-85`); which one runs is the horse's.
     horse_timers: HashMap<common::vid::Vid, u64>,
+    /// Each character's ticking extended blend (`blend_use_expire_event`, `G/item.cpp:2090-2115`):
+    /// one tick per character, as `StartBlendExpireEvent` starts one event per item but a second
+    /// use while another copy holds the marker is refused.
+    blend_ticks: HashMap<common::vid::Vid, blend::BlendTick>,
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
@@ -816,6 +821,9 @@ pub struct GameState {
     /// The forked maps (`ForkedMaps`), which the three-way lines and the death hook
     /// read for the event's SungZi and pass indices.
     forked_maps: Arc<gamedata::forked::ForkedMaps>,
+    /// The blend table (`CBlendItem::blend_`), which the blend use and the
+    /// creation roll read.
+    blend_table: Arc<gamedata::blend::BlendTable>,
     /// The guild lands (`CManager::m_map_pkLand`, `G/building.h:148`).
     guild_lands: Arc<gamedata::land::Lands>,
     /// The building object prototypes (`CManager::m_map_pkObjectProto`).
@@ -1096,6 +1104,13 @@ impl GameState {
     #[must_use]
     pub fn with_forked_maps(mut self, maps: Arc<gamedata::forked::ForkedMaps>) -> Self {
         self.forked_maps = maps;
+        self
+    }
+
+    /// Share the blend table, which the blend use reads its row from.
+    #[must_use]
+    pub fn with_blend_table(mut self, table: Arc<gamedata::blend::BlendTable>) -> Self {
+        self.blend_table = table;
         self
     }
 
@@ -3506,6 +3521,7 @@ impl GameState {
             let _destroyed = self.characters.destroy(vid);
             return Err(refused);
         }
+        self.restart_loaded_blends(vid);
         let _previous = self.outboxes.insert(vid, outbox);
         // `CheckMultiFarmAccount(..., true)` (`G/input_login.cpp:666`): the entrant
         // starts farming, or farm-off when two already farm that address.
@@ -4024,6 +4040,9 @@ impl GameState {
         let potion = self.arena_potion_at(vid, at);
         if self.bait_at(vid, at) {
             return self.use_bait(vid, at, actor);
+        }
+        if self.blend_at(vid, at) {
+            return self.use_blend_item(vid, at, actor);
         }
         if self.campfire_at(vid, at) {
             return self.use_campfire_item(vid, at, actor);
@@ -5787,6 +5806,7 @@ impl PulseProcessor for GameState {
         self.run_mining_events(pulse);
         self.run_horse_timers(pulse);
         self.run_horse_dead_events(pulse);
+        self.run_blend_ticks(pulse);
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_dungeon_ticks(pulse);

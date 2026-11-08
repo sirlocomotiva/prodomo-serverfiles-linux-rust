@@ -9411,6 +9411,8 @@ struct GameData {
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,
     /// The forked maps, which the game thread holds.
     forked_maps: Arc<gamedata::forked::ForkedMaps>,
+    /// The blend table, which the game thread holds.
+    blend_table: Arc<gamedata::blend::BlendTable>,
     /// The guild lands, which the game thread holds.
     lands: Arc<gamedata::land::Lands>,
     /// The building object prototypes, which the game thread holds.
@@ -9463,6 +9465,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let gaya_table = load_gaya_table(config)?;
     let sungzi_maps = load_sungzi_maps(config)?;
     let forked_maps = load_forked_maps(config)?;
+    let blend_table = load_blend_table(config)?;
     let lands = load_lands(config)?;
     let object_protos = load_object_protos(config)?;
     let daily_weeks = load_daily_weeks(config)?;
@@ -9496,6 +9499,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         gaya_table,
         sungzi_maps,
         forked_maps,
+        blend_table,
         lands,
         object_protos,
         daily_weeks,
@@ -9708,6 +9712,18 @@ fn load_sungzi_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::Sungz
     })?;
     info!(maps = maps.indices().len(), "SungZi maps loaded");
     Ok(Arc::new(maps))
+}
+
+fn load_blend_table(config: &ServerConfig) -> Result<Arc<gamedata::blend::BlendTable>, String> {
+    let locale_dir = config.locale_dir();
+    let table = gamedata::blend::load(&locale_dir).map_err(|error| {
+        format!(
+            "Blend table is unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(rows = table.rows.len(), "Blend table loaded");
+    Ok(Arc::new(table))
 }
 
 fn load_forked_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::ForkedMaps>, String> {
@@ -10310,6 +10326,7 @@ fn build_world(
         .with_gaya_table(Arc::clone(&data.gaya_table))
         .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
         .with_forked_maps(Arc::clone(&data.forked_maps))
+        .with_blend_table(Arc::clone(&data.blend_table))
         .with_lands(Arc::clone(&data.lands))
         .with_object_protos(Arc::clone(&data.object_protos))
         .with_daily_weeks(Arc::clone(&data.daily_weeks))

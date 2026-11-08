@@ -1017,6 +1017,8 @@ pub(super) struct Giver<'s> {
     pub(super) masks: &'s [(u32, u32)],
     /// The special item groups, which the creation `SIGVnum` scans read.
     pub(super) groups: &'s gamedata::special_item_group::SpecialItemGroups,
+    /// The blend table, which a given `ITEM_BLEND` rolls its sockets from.
+    pub(super) blend: &'s gamedata::blend::BlendTable,
     /// `GetPlayerID()` of the character, whose rows the gives write.
     pub(super) owner_id: u32,
 }
@@ -1884,6 +1886,7 @@ impl Game for Session<'_> {
             groups: giver.groups,
             now_secs,
             count_limit: giver.rules.count_limit,
+            blend: giver.blend,
         };
         let protos = self.items;
         let dice = &mut *self.dice;
@@ -4182,6 +4185,7 @@ impl GameState {
             recall,
             guild_lands,
             object_protos,
+            blend_table,
             meley,
             ship,
             ..
@@ -4238,6 +4242,7 @@ impl GameState {
                 atlas: recall.atlas(),
                 guild_lands,
                 object_protos,
+                blend_table,
                 giving,
                 rank,
                 meley: meley.clone(),
@@ -5309,6 +5314,7 @@ struct FinishInputs<'s> {
     item_rare_attrs: &'s [gamedata::records::ItemAttrRecord],
     item_masks: &'s gamedata::item_mask::ItemMasks,
     item_groups: &'s gamedata::special_item_group::SpecialItemGroups,
+    blend_table: &'s gamedata::blend::BlendTable,
     quest_targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: &'s crate::select_phase::NameRules,
@@ -5362,6 +5368,7 @@ fn finish_armed_session<'s>(quests: &'s mut Quests, rest: FinishInputs<'s>) -> A
         rest.item_rare_attrs,
         rest.item_masks,
         rest.item_groups,
+        rest.blend_table,
         rest.quest_targets,
         rest.stores,
         rest.name_rules.clone(),
@@ -5411,6 +5418,7 @@ struct SessionInputs<'s> {
     rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
     groups: &'s gamedata::special_item_group::SpecialItemGroups,
+    blend: &'s gamedata::blend::BlendTable,
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
@@ -5677,12 +5685,13 @@ fn quest_step_online(
 /// A step's online roster: every PC's shown name and VID beside every PC's snapshot
 /// by PID. Split out so `session_head` stays under the line lint.
 #[allow(clippy::type_complexity)]
-fn quest_step_roster(
-    characters: &world::character::CharacterManager,
-) -> (
+/// The quest step's roster: the PCs by name and PID, and the online map.
+type QuestStepRoster = (
     Vec<(Vec<u8>, u32)>,
     std::collections::HashMap<u32, BlockedPc>,
-) {
+);
+
+fn quest_step_roster(characters: &world::character::CharacterManager) -> QuestStepRoster {
     (quest_step_pcs(characters), quest_step_online(characters))
 }
 
@@ -5704,6 +5713,7 @@ fn arm_item_giver<'s>(
     item_rare: &'s [gamedata::records::ItemAttrRecord],
     item_masks: &'s gamedata::item_mask::ItemMasks,
     item_groups: &'s gamedata::special_item_group::SpecialItemGroups,
+    blend_table: &'s gamedata::blend::BlendTable,
     stores_items: bool,
     pid: u32,
 ) -> (Option<&'s mut world::character::Points>, Option<Giver<'s>>) {
@@ -5729,6 +5739,7 @@ fn arm_item_giver<'s>(
         rare: item_rare,
         masks: item_masks.pairs(),
         groups: item_groups,
+        blend: blend_table,
         owner_id: pid,
     });
     (points, armed)
@@ -5767,6 +5778,7 @@ fn session_inputs<'s>(
     rare: &'s [gamedata::records::ItemAttrRecord],
     masks: &'s gamedata::item_mask::ItemMasks,
     groups: &'s gamedata::special_item_group::SpecialItemGroups,
+    blend: &'s gamedata::blend::BlendTable,
     targets: &'s mut QuestTargets,
     stores: bool,
     name_rules: crate::select_phase::NameRules,
@@ -5807,6 +5819,7 @@ fn session_inputs<'s>(
         rare,
         masks,
         groups,
+        blend,
         targets,
         stores,
         name_rules,
@@ -5822,92 +5835,15 @@ fn session_inputs<'s>(
 /// A [`Session`] from its packed borrows: the maps, the reader's snapshot, and the
 /// emptied per-step vectors.
 fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
-    let SessionInputs {
-        dungeon_flags,
-        place,
-        mover,
-        level,
-        pid,
-        reader,
-        context,
-        npcs,
-        protos,
-        names,
-        item_names,
-        items,
-        locale,
-        tables,
-        dice,
-        bodies,
-        characters,
-        skills,
-        affects,
-        test_server,
-        pulse,
-        guilds,
-        count_limit,
-        ids,
-        gauss,
-        attrs,
-        rare,
-        masks,
-        groups,
-        targets,
-        stores,
-        name_rules,
-        pre,
-        atlas,
-        lands,
-        object_protos,
-        meley,
-        ship,
-    } = inputs;
-    session_head(
-        dungeon_flags,
-        place,
-        mover,
-        level,
-        pid,
-        reader,
-        context,
-        npcs,
-        protos,
-        names,
-        item_names,
-        items,
-        locale,
-        tables,
-        dice,
-        bodies,
-        characters,
-        skills,
-        affects,
-        test_server,
-        pulse,
-        guilds,
-        count_limit,
-        ids,
-        gauss,
-        attrs,
-        rare,
-        masks,
-        groups,
-        targets,
-        stores,
-        name_rules,
-        pre,
-        atlas,
-        lands,
-        object_protos,
-        meley,
-        ship,
-    )
+    session_head(inputs)
 }
 
 /// The head half of [`build_session`]: the maps, the reader's snapshot, and the armed
 /// item giver, before the literal fills the per-step vectors.
 #[allow(clippy::too_many_arguments)]
-fn session_head<'s>(
+/// The [`session_head`] literal: the [`Session`] from its packed halves and the armed giver.
+#[allow(clippy::too_many_arguments)]
+fn session_literal<'s>(
     dungeon_flags: std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
     place: GroundPlace,
     mover: Mover,
@@ -5924,21 +5860,12 @@ fn session_head<'s>(
     tables: &'s gamedata::pc_skill_data::PcSkills,
     dice: &'s mut Pcg32,
     bodies: &'s std::collections::HashMap<Vid, super::motion::Body>,
-    characters: &'s mut world::character::CharacterManager,
     skills: &'s mut std::collections::HashMap<u32, super::pc_skill::PcSkillState>,
     affects: &'s mut std::collections::HashMap<Vid, super::affect::AffectEvent>,
     test_server: bool,
     pulse: u64,
     guilds: &'s super::guild::Guilds,
-    count_limit: &'s u16,
-    ids: &'s mut Option<world::item::ItemIds>,
-    gauss: &'s mut world::character::Gauss,
-    attrs: &'s [gamedata::records::ItemAttrRecord],
-    rare: &'s [gamedata::records::ItemAttrRecord],
-    masks: &'s gamedata::item_mask::ItemMasks,
-    groups: &'s gamedata::special_item_group::SpecialItemGroups,
     targets: &'s mut QuestTargets,
-    stores: bool,
     name_rules: crate::select_phase::NameRules,
     pre: QuestStepState,
     atlas: Option<&'s gamedata::map_atlas::MapAtlas>,
@@ -5946,21 +5873,10 @@ fn session_head<'s>(
     object_protos: &'s gamedata::object_proto::ObjectProtos,
     meley: super::meley::MeleyRuns,
     ship: super::ship::ShipRuns,
+    roster: QuestStepRoster,
+    points: SessionPoints<'s>,
+    item_giver: SessionGiver<'s>,
 ) -> Session<'s> {
-    let roster = quest_step_roster(characters);
-    let (points, item_giver) = session_armed_giver(session_giver_inputs(
-        characters,
-        count_limit,
-        ids,
-        gauss,
-        attrs,
-        rare,
-        masks,
-        groups,
-        stores,
-        pid,
-        reader,
-    ));
     Session {
         level,
         npcs: map_npcs(npcs, place),
@@ -6049,6 +5965,99 @@ fn session_head<'s>(
     }
 }
 
+fn session_head(packed: SessionInputs<'_>) -> Session<'_> {
+    let SessionInputs {
+        dungeon_flags,
+        place,
+        mover,
+        level,
+        pid,
+        reader,
+        context,
+        npcs,
+        protos,
+        names,
+        item_names,
+        items,
+        locale,
+        tables,
+        dice,
+        bodies,
+        characters,
+        skills,
+        affects,
+        test_server,
+        pulse,
+        guilds,
+        count_limit,
+        ids,
+        gauss,
+        attrs,
+        rare,
+        masks,
+        groups,
+        blend,
+        targets,
+        stores,
+        name_rules,
+        pre,
+        atlas,
+        lands,
+        object_protos,
+        meley,
+        ship,
+    } = packed;
+    let roster = quest_step_roster(characters);
+    let (points, item_giver) = session_armed_giver(session_giver_inputs(
+        characters,
+        count_limit,
+        ids,
+        gauss,
+        attrs,
+        rare,
+        masks,
+        groups,
+        blend,
+        stores,
+        pid,
+        reader,
+    ));
+    session_literal(
+        dungeon_flags,
+        place,
+        mover,
+        level,
+        pid,
+        reader,
+        context,
+        npcs,
+        protos,
+        names,
+        item_names,
+        items,
+        locale,
+        tables,
+        dice,
+        bodies,
+        skills,
+        affects,
+        test_server,
+        pulse,
+        guilds,
+        targets,
+        name_rules,
+        pre,
+        atlas,
+        lands,
+        object_protos,
+        meley,
+        ship,
+        roster,
+        points,
+        item_giver,
+    )
+}
+
 /// The reader's points for a session.
 type SessionPoints<'s> = Option<&'s mut world::character::Points>;
 
@@ -6066,6 +6075,7 @@ struct SessionGiverInputs<'a, 's> {
     rare: &'a [gamedata::records::ItemAttrRecord],
     masks: &'a gamedata::item_mask::ItemMasks,
     groups: &'a gamedata::special_item_group::SpecialItemGroups,
+    blend: &'a gamedata::blend::BlendTable,
     stores: bool,
     pid: u32,
     reader: Vid,
@@ -6083,6 +6093,7 @@ fn session_giver_inputs<'a, 's>(
     rare: &'a [gamedata::records::ItemAttrRecord],
     masks: &'a gamedata::item_mask::ItemMasks,
     groups: &'a gamedata::special_item_group::SpecialItemGroups,
+    blend: &'a gamedata::blend::BlendTable,
     stores: bool,
     pid: u32,
     reader: Vid,
@@ -6096,6 +6107,7 @@ fn session_giver_inputs<'a, 's>(
         rare,
         masks,
         groups,
+        blend,
         stores,
         pid,
         reader,
@@ -6115,6 +6127,7 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
         rare,
         masks,
         groups,
+        blend,
         stores,
         pid,
         reader,
@@ -6129,6 +6142,7 @@ fn session_giver<'s>(inputs: SessionGiverInputs<'s, 's>) -> (SessionPoints<'s>, 
         rare,
         masks,
         groups,
+        blend,
         stores,
         pid,
     )
@@ -6871,6 +6885,7 @@ mod tests {
         ids: &'s mut ItemIds,
         gauss: &'s mut Gauss,
         groups: &'s gamedata::special_item_group::SpecialItemGroups,
+        blend: &'s gamedata::blend::BlendTable,
     ) -> Giver<'s> {
         Giver {
             stores: true,
@@ -6889,6 +6904,7 @@ mod tests {
             rare: &[],
             masks: &[],
             groups,
+            blend,
             owner_id: 42,
         }
     }
@@ -6946,6 +6962,7 @@ mod tests {
         let (mut held, mut quickslots) = (CharacterItems::new(), Quickslots::default());
         let (mut gauss, mut points) = (Gauss::new(), god_points());
         let groups = gamedata::special_item_group::SpecialItemGroups::default();
+        let blend = gamedata::blend::BlendTable::default();
         let mut session = test_session(TestSession {
             protos: &mobs,
             names: &names,
@@ -6965,6 +6982,7 @@ mod tests {
                 &mut ids,
                 &mut gauss,
                 &groups,
+                &blend,
             )),
         });
         f(&mut session)

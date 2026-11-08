@@ -644,6 +644,8 @@ pub struct DropMade<'a> {
     pub now_secs: i64,
     /// `g_bItemCountLimit`: the largest stack.
     pub count_limit: u16,
+    /// The blend table, whose row a new `ITEM_BLEND` rolls its sockets from.
+    pub blend: &'a gamedata::blend::BlendTable,
 }
 
 /// What the drop rows ask `make_drop_item` for: the row's count and rare percent.
@@ -653,6 +655,35 @@ pub struct DropAsk {
     pub count: i32,
     /// The row's rare percent, or `-1` for the proto's `bAlterToMagicItemPct`.
     pub rare_pct: i32,
+}
+
+/// `CBlendItem::SetItemValue` (`G/blend_item.cpp:180-207`) on a new blend item:
+/// the level roll picks the row's value and duration into sockets 1 and 2 (an
+/// infinite duration reads `INFINITE_AFFECT_DURATION`), the apply type into
+/// socket 0, and 0 into socket 3. The count is the asked one, as for any
+/// stackable blend.
+fn make_blend_item(
+    dice: &mut dyn Dice,
+    ids: &mut ItemIds,
+    made: &DropMade<'_>,
+    vnum: u32,
+    proto: &ItemProto,
+) -> Result<Item, DropRefused> {
+    let id: ItemId = ids.allocate().map_err(|_| DropRefused::IdsExhausted)?;
+    let mut item = Item::new(id, vnum);
+    item.sig_vnum = sig_vnum_of(made.groups, proto, vnum);
+    let row = made.blend.rows.get(&vnum).ok_or(DropRefused::SoldOut)?;
+    let level = gamedata::blend::BlendTable::level_of(vnum, number(dice, 1, 100));
+    item.sockets[0] = i32::from(row.apply_type);
+    item.sockets[1] = i32::try_from(row.values[level]).unwrap_or(i32::MAX);
+    let duration = row.durations[level];
+    item.sockets[2] = if duration == 0 {
+        i32::try_from(gamedata::item_proto_value::INFINITE_AFFECT_DURATION).unwrap_or(i32::MAX)
+    } else {
+        i32::try_from(duration).unwrap_or(i32::MAX)
+    };
+    item.sockets[3] = 0;
+    Ok(item)
 }
 
 /// The sockets `CreateItem` fills on a new item of `proto`: the gain-socket loop
@@ -726,6 +757,14 @@ pub fn make_drop_item(
         .find(|&&(new, _)| new == vnum)
         .map_or(0, |&(_, ori)| ori);
     let proto = protos.get(vnum).ok_or(DropRefused::SoldOut)?;
+    // `CreateItem`'s blend arm (`G/item_manager.cpp:327-333`): a listed blend
+    // vnum rolls its sockets and returns, past the addon and the magic.
+    if proto.item_type == ITEM_BLEND {
+        if !made.blend.find(vnum) {
+            return Err(DropRefused::NotPorted(UnportedDrop::Blend));
+        }
+        return make_blend_item(dice, ids, made, vnum, proto);
+    }
     if let Some(path) = unported_drop(vnum, proto) {
         return Err(DropRefused::NotPorted(path));
     }
@@ -829,12 +868,26 @@ mod tests {
         masks: &'a [(u32, u32)],
         groups: &'a SpecialItemGroups,
     ) -> DropMade<'a> {
+        // The table outlives the call: every test blend vnum rolls here.
+        static BLEND: std::sync::OnceLock<gamedata::blend::BlendTable> = std::sync::OnceLock::new();
+        let blend = BLEND.get_or_init(|| {
+            let rows = concat!(
+                "[{\"item_vnum\": 50821, \"apply_type\": \"CRITICAL_PCT\", ",
+                "\"apply_value\": [20, 20, 20, 20, 20], ",
+                "\"apply_duration\": [600, 600, 600, 600, 600]}, ",
+                "{\"item_vnum\": 51002, \"apply_type\": \"ENERGY\", ",
+                "\"apply_value\": [1, 1, 1, 1, 1], ",
+                "\"apply_duration\": [0, 0, 0, 0, 0]}]",
+            );
+            gamedata::blend::read(rows.as_bytes()).expect("the test blend reads")
+        });
         DropMade {
             attrs,
             masks,
             groups,
             now_secs: 1_790_000_000,
             count_limit: 5000,
+            blend,
         }
     }
 
@@ -947,13 +1000,79 @@ mod tests {
         );
     }
 
+    /// A listed blend vnum rolls its row's sockets: 50821's critical 20 for
+    /// 600 s, and the energy crystal's infinite duration.
+    #[test]
+    fn blend_vnums_roll_their_rows() {
+        let blend = ItemProto::for_category_rule(50_821, ITEM_BLEND, 0);
+        let crystal = ItemProto::for_category_rule(51_002, ITEM_BLEND, 0);
+        let protos = table(vec![blend, crystal]);
+        let mut dice = Script::new(vec![50]);
+        let mut gauss = Gauss::new();
+        let item = make_drop_item(
+            &mut dice,
+            &mut gauss,
+            &mut ids(),
+            &protos,
+            &made(&[], &[], &no_groups()),
+            50_821,
+            DropAsk {
+                count: 1,
+                rare_pct: -1,
+            },
+        )
+        .expect("50821 blends");
+        assert_eq!(item.sockets[0], 15, "APPLY_CRITICAL_PCT");
+        assert_eq!(item.sockets[1], 20);
+        assert_eq!(item.sockets[2], 600);
+        assert_eq!(item.sockets[3], 0);
+        let mut dice = Script::new(vec![50]);
+        let item = make_drop_item(
+            &mut dice,
+            &mut gauss,
+            &mut ids(),
+            &protos,
+            &made(&[], &[], &no_groups()),
+            51_002,
+            DropAsk {
+                count: 1,
+                rare_pct: -1,
+            },
+        )
+        .expect("51002 blends");
+        assert_eq!(item.sockets[0], 80, "APPLY_ENERGY");
+        assert_eq!(
+            item.sockets[2],
+            i32::try_from(gamedata::item_proto_value::INFINITE_AFFECT_DURATION).unwrap(),
+            "the 0 duration reads infinite"
+        );
+        // An unlisted blend vnum still names its arm.
+        let stray = ItemProto::for_category_rule(50_000, ITEM_BLEND, 0);
+        let protos = table(vec![stray]);
+        let mut dice = Script::new(vec![50]);
+        assert_eq!(
+            make_drop_item(
+                &mut dice,
+                &mut gauss,
+                &mut ids(),
+                &protos,
+                &made(&[], &[], &no_groups()),
+                50_000,
+                DropAsk {
+                    count: 1,
+                    rare_pct: -1,
+                },
+            ),
+            Err(DropRefused::NotPorted(UnportedDrop::Blend))
+        );
+    }
+
     #[test]
     fn unported_arms_name_themselves() {
         for (vnum, item_type, sub_type, path) in [
             (1, ITEM_ELK, 0, UnportedDrop::Elk),
             (71001, ITEM_UNIQUE, 0, UnportedDrop::Unique),
             (50513, ITEM_DS, 0, UnportedDrop::Soul),
-            (50821, ITEM_BLEND, 0, UnportedDrop::Blend),
             (72501, ITEM_COSTUME, COSTUME_AURA, UnportedDrop::Aura),
             (72723, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(72723)),
             (50300, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(50300)),
