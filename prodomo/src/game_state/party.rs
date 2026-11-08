@@ -8,9 +8,8 @@
 //!   nothing and parties die with the process (ADR-0001: no server-to-server).
 //! - **Always enabled.** `m_bEnablePCParty` starts true and no config key flips it, so
 //!   the `PERR_SERVER` arm is coded and dead.
-//! - **No dungeons, observers or arenas.** Those gates always pass, with a comment at
-//!   each. The empire check, the 30-level window, the partyless check and the 8-member
-//!   cap are live.
+//! - **Arena-bound callers cannot invite, answer, request or remove.** Their command
+//!   and input gates send `[LS;403]`; the other party operations retain their own gates.
 //! - **The block modes.** `BLOCK_PARTY_INVITE` refuses the invite with `[LS;833;%s]`
 //!   naming the guest; `BLOCK_PARTY_REQUEST` refuses the request quietly.
 
@@ -1158,10 +1157,14 @@ impl GameState {
 }
 
 impl GameState {
-    /// `CInputMain::PartyInvite` (`G/input_main.cpp:2476-2499`): the arena gate passes
-    /// (no arenas), unknown or descriptor-less VIDs stay quiet, and `PartyInvite`
-    /// runs. The invite and answer handlers take VIDs, like legacy's `Find`.
+    /// `CInputMain::PartyInvite` (`G/input_main.cpp:2476-2495`): the arena refusal,
+    /// then unknown or descriptor-less VIDs stay quiet and `PartyInvite` runs.
+    /// The invite and answer handlers take VIDs, like legacy's `Find`.
     pub(super) fn party_invite(&mut self, inviter: Vid, guest: Vid) {
+        if self.in_arena(inviter) {
+            self.info_to(inviter, b"[LS;403]", &[]);
+            return;
+        }
         if !self.is_online(inviter) || !self.is_online(guest) {
             return;
         }
@@ -1233,10 +1236,14 @@ impl GameState {
         let _sent = self.write_to_client(guest, record);
     }
 
-    /// `CInputMain::PartyInviteAnswer` (`G/input_main.cpp:2501-2519`): the arena gate
-    /// passes; a gone inviter chats `[LS;668]`; deny runs `PartyInviteDeny`, accept
+    /// `CInputMain::PartyInviteAnswer` (`G/input_main.cpp:2497-2517`): the arena refusal;
+    /// a gone inviter chats `[LS;668]`; deny runs `PartyInviteDeny`, accept
     /// runs `PartyInviteAccept`.
     pub(super) fn party_invite_answer(&mut self, guest: Vid, inviter: Vid, accept: u8) {
+        if self.in_arena(guest) {
+            self.info_to(guest, b"[LS;403]", &[]);
+            return;
+        }
         if !self.is_online(guest) {
             return;
         }
@@ -1342,10 +1349,13 @@ impl GameState {
     /// gates, the missing or garbage VID word, the request's own gates, the 250-Pulse
     /// event on the guest, and the `PartyRequest <guest VID>` command to the leader.
     pub(super) fn party_request(&mut self, guest: Vid, rest: &[u8]) {
+        if self.in_arena(guest) {
+            self.info_to(guest, b"[LS;403]", &[]);
+            return;
+        }
         let Some(guest_pid) = self.pid_of(guest) else {
             return;
         };
-        // `ch->GetArena()`: no arenas, so the gate passes.
         if self.party_leader_of(guest_pid).is_some() {
             self.info_to(guest, b"[LS;549]", &[]);
             return;
@@ -1558,6 +1568,11 @@ impl GameState {
     /// `do_duel` deletes a two-member party, otherwise tells and quits its member
     /// (`G/cmd_gm.cpp:4024-4049`).
     pub(super) fn arena_quit_party(&mut self, vid: Vid) {
+        self.arena_leave_party(vid, true);
+    }
+
+    /// Login's duelist branch quits without the GM command's party notice.
+    pub(super) fn arena_leave_party(&mut self, vid: Vid, tell: bool) {
         let Some(pid) = self.pid_of(vid) else { return };
         let Some(leader) = self.party_leader_of(pid) else {
             return;
@@ -1570,7 +1585,9 @@ impl GameState {
         {
             self.delete_party(leader);
         } else {
-            self.info_to(vid, b"<Party> You left the party.", &[]);
+            if tell {
+                self.info_to(vid, b"<Party> You left the party.", &[]);
+            }
             self.quit_party(pid);
         }
     }
@@ -1599,11 +1616,14 @@ impl GameState {
 }
 
 impl GameState {
-    /// `CInputMain::PartyRemove` (`G/input_main.cpp:2578-2675`): the arena and PC-party
-    /// gates pass (no arenas, always enabled), the dungeon arms pass (no dungeons;
-    /// legacy checks the dungeon twice and the 351 check once — all pass), then the
-    /// leader and member arms run. A gone or partyless sender stays quiet.
+    /// `CInputMain::PartyRemove` (`G/input_main.cpp:2578-2675`): the arena refusal,
+    /// then the PC-party and dungeon gates and the leader/member arms.
+    /// A gone or partyless sender stays quiet.
     pub(super) fn party_remove(&mut self, sender: Vid, pid: CharacterId) {
+        if self.in_arena(sender) {
+            self.info_to(sender, b"[LS;403]", &[]);
+            return;
+        }
         let Some(self_pid) = self.pid_of(sender) else {
             return;
         };

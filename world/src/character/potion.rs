@@ -12,9 +12,9 @@
 //! `USE_POTION` potion's slots follow the next stack of its vnum, and a `USE_POTION_NODELAY`
 //! potion's are deleted.
 //!
-//! Not ported, and each is a later ledger's: the arena and `PvP` potion limits, the dungeon and
-//! guild war hooks, the moon cake timer, and the rest of the affect event (the continuous recovery affects, the automatic potions, the stamina and
-//! the affect timers).
+//! Arena admission and accepted-use counts run in the game state's item dispatch. Not ported:
+//! the `PvP` potion limits, dungeon and guild war hooks, moon cake timer, continuous recovery
+//! affects and automatic potions. The rest of the affect event runs in the game state.
 
 use common::point_slot as point;
 use gamedata::item_kind::{USE_POTION, USE_POTION_NODELAY};

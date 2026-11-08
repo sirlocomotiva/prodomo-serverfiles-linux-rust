@@ -8,8 +8,8 @@
 //! is `ACMD(do_emotion_allow)` (`:112-128`): the arena gate, then the `(VID, number)` consent
 //! insert.
 //!
-//! What legacy reads that this build does not track: the arena (no character is on one)
-//! and marriage (no character is married). The wedding map
+//! What legacy reads that this build does not track: marriage (no character is married).
+//! The wedding map
 //! (81) and the two mask uniques (71011, 71033) are read for real; the owner's config sets
 //! `disable_emotion_mask`, so the mask gate passes by default. `NEED_TARGET` never appears
 //! in the table, the disarm flags are never checked, and the consent set is never cleared:
@@ -141,10 +141,14 @@ impl GameState {
 
     /// `ACMD(do_emotion_allow)`: the arena gate, then the consent insert.
     ///
-    /// No character of this build is on an arena (`sys.event.arena` is missing), so the
-    /// gate always passes; the insert is `(caller's VID, strtoul(first word))`, and an
-    /// empty line inserts nothing.
+    /// The insert is `(caller's VID, strtoul(first word))`; an empty line inserts nothing.
     pub(super) fn allow_emotion(&mut self, vid: Vid, rest: &[u8]) {
+        if self.in_arena(vid) {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;403]", &[]);
+            }
+            return;
+        }
         let (word, _) = crate::command::one_argument(rest);
         if word.is_empty() {
             return;

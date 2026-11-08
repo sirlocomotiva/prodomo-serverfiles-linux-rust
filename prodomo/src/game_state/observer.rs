@@ -16,7 +16,8 @@
 //! cannot fail, so a pure toggle cannot desync), a war map's watch sets both at admission
 //! (the flag rides the enter records), and leaving the world clears both.
 //!
-//! `/observer_exit` has no arena in this build, so it always takes the plain branch:
+//! No owner quest calls `arena.add_observer` (ledger 469), so an arena visitor
+//! never enters the observer roster. Its `/observer_exit` takes the plain branch:
 //! `ExitToSavedLocation` (`G/char.cpp:6685-6692`), which warps to the pending Warp, then
 //! clears the mode. The pending Warp is the descriptor's (`held.warp`), and the warp's own
 //! outcome decides what the clear does: after a refused warp the character still stands, so

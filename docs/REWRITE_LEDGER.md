@@ -49038,3 +49038,97 @@ in 46 targets, up 10 from 5009), `cargo test --workspace --doc --locked --offlin
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 469. The arena's edges
+
+The rest of `CArenaManager` is ported: the login arms, `/pvp`'s gate, the item, potion and
+horse refusals, the potion limit, and the bound-duelist guards. The work was written by the
+delegated agent of ledgers 467-468 and reviewed here; the review fixed the ejection's Channel
+routing, two test fixtures, and the 468 scenario's burst order (below).
+
+**Login** (`G/input_login.cpp:791-839`, `enter_arena`):
+- a member entering its arena map is sent the empty `GC_DUEL_START`, is unhorsed, and leaves
+  its party silently (a party of two is deleted);
+- a GM_PLAYER nonmember is ejected to its empire start (`GoHome`);
+- a GM stays. The observer arm is unreachable (below).
+
+**`/pvp`** (`G/cmd_general.cpp:848-872`): a caller on an arena map, bound or not, hears
+`[LS;403]`; a bound victim's owner hears `[LS;522]`.
+
+**Items** (`G/arena.cpp:1131-1170`, `G/char_item.cpp:2764-2768,3441-3540,5579-5754`): on an
+arena map, a listed potion vnum (50801-50826, 50020-50022, 71044, 71055) is refused with
+`[LS;1205]`; general potions obey the `arena_potion_limit` flag (`[LS;403]`) and the
+`arena_potion_limit_count` count. The count initializes per character from the flag at login
+(`G/char.cpp:389`), resets at ready state 0 and after each scored round (`:272-273`, `:812-814`),
+and decrements on each accepted potion use. Bound duelists also refuse quest seals
+(`:2843-2850`). These gates read the map, not membership: a visitor is restricted too.
+
+**Horse** (`G/char_horse.cpp:50-51`, `G/questlua_horse.cpp:52-80`): riding and the quest ride
+and summon are silently refused on an arena map. The character-level `HorseSummon` has no
+gate, and neither does the Rewrite's.
+
+**Loaded affects** (`G/char_affect.cpp:638-641`): entering an arena map drops the loaded good
+affects before the mounts are restored.
+
+**Bound-duelist guards**: emotion consent (`G/cmd_emotion.cpp:114-118`), messenger and party
+requests (`G/cmd_general.cpp:2274-2278,2430-2434`, `G/input_main.cpp:2478-2503,2580-2584`)
+refuse with `[LS;403]` while bound.
+
+**Observers: unreachable, by evidence.** The only external `AddObserver` caller is
+`arena.add_observer` (`G/questlua_arena.cpp:86`), which no owner quest calls (zero references
+outside the `quest_functions` name list; positive control `arena.add_map` has four at
+`settings.lua:93-96`; a nonexistent probe has zero). `RegisterObserverPtr` requires a
+pre-added PID (`G/arena.cpp:1089-1101`), so plain entry cannot manufacture an observer, and
+both observer senders are commented out (`:981-1026`): observers would hear nothing anyway.
+No roster is invented; `arena.add_observer` and `arena.is_in_arena` stay `unused`. Owner
+question 60 confirms.
+
+**The ejection names a Channel** (Divergence, `docs/STATUS.md`): legacy's `WarpSet` resolves
+the empire start through the P2P map table. The Rewrite sends the ejected character on its
+own Channel when that Channel serves the target, else on the lowest-numbered Channel that
+does; a target no Channel hosts refuses as unserved. In the owner's deployment every Channel
+hosts every empire start, so the ejection stays home. The first version used a plain
+`order_warp`, which the Shared Channel cannot resolve (ledger 228's known gap); the scenario
+caught it.
+
+Review fixes, all in the scenario or the tests:
+- The 468 scenario's geared entry now reads the member's empty duel-start record behind the
+  team list.
+- The visitor and the ejected character spawn on a movable cell: (862000, 15500) is blocked,
+  and the entry search steps one cell over (`GetMovablePosition`).
+- A granted name that never enters keeps every team list non-empty, since an empty team sends
+  no record (`LoadList` early-returns).
+- The scenario drains the duelists' leave with `quiet_allowing_farm`: their departures fan
+  only the multi-farm burst to the visitor. Unread, it reset the visitor's close (RST) instead
+  of logging it. The visitor stands outside the 5,500 view radius of both duelists, so it
+  correctly reads no insert, no duel line and no removal.
+
+Gaps, in `sys.event.arena` (`partial`): the battle arena (`G/BattleArena.cpp`, behind
+`do_weeklyevent`), and the item, marriage-ring, costume-mount and pet/mount guards whose
+systems are not ported (`G/char_item.cpp:3073-3089,3551-3556,3841-3861,5117-5161,5334-5350,
+5862-5878,9922-9932`, `G/char.cpp:11117-11131`, `G/input_login.cpp:925-936`).
+
+During mutant testing the reviewer's `git checkout --` wiped the agent's uncommitted
+`use_to_item.rs` and `duel.rs`; the agent re-applied both files, and every gate below ran on
+the restored tree.
+
+Tests:
+- unit tests pin the login arms, the command guards, the item and potion boundaries and
+  consumption, the bound-only seals, the loaded affects, the horses, and the potion resets;
+- the scenario `an_arena_visitor_hears_no_duel_and_cannot_use_arena_restricted_actions`: a
+  nonmember login is ejected home, a GM visitor stays and is refused the limited item
+  (`[LS;1205]` kept its count), `/pvp` (`[LS;403]`) and the horse (silently), hears no duel
+  INFO, NOTICE or opponent list through a live duel, and is left only the farm burst at its
+  end. It passed 8 of 8 in a parallel flake check.
+
+Mutants, each killed semantically and restored by SHA-256:
+- the limited-item gate forced false, killed by the `use_to_item` suite;
+- `/pvp`'s caller gate narrowed from OR to AND, killed by the `duel::` suite.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5035 passed, 0 failed
+in 46 targets, up 16 from 5019), `cargo test --workspace --doc --locked --offline` (1 passed),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

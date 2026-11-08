@@ -24,8 +24,7 @@
 //! # Not ported
 //!
 //! - The horse names (`CHorseNameManager`): every horse carries its rider's name.
-//! - `IsRidingMount` reads the mount costume's wear cell and `AFFECT_MOUNT`, and no map is
-//!   an arena map (`sys.event.arena`).
+//! - `IsRidingMount` reads the mount costume's wear cell and `AFFECT_MOUNT`.
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::vid::Vid;
@@ -453,14 +452,19 @@ impl GameState {
             match op {
                 HorseOp::Summon { from_far, vnum } => {
                     let map = self.place_of(vid.raw()).map_or(0, |(_, map)| map);
-                    if self.riding_mount(vid) || map == OX_MAP {
+                    if self.riding_mount(vid) || map == OX_MAP || self.is_arena_map(map) {
                         continue;
                     }
                     self.horse_summon(vid, from_far, vnum);
                 }
                 HorseOp::Unsummon => self.horse_unsummon(vid, false),
                 HorseOp::Revive => self.revive_horse(vid),
-                HorseOp::Ride => self.start_riding(vid),
+                HorseOp::Ride => {
+                    let map = self.place_of(vid.raw()).map_or(0, |(_, map)| map);
+                    if !self.riding_mount(vid) && map != OX_MAP && !self.is_arena_map(map) {
+                        self.start_riding(vid);
+                    }
+                }
                 HorseOp::Unride => self.stop_riding(vid),
                 HorseOp::SetName(name) => self.name_horse(vid, &name),
                 HorseOp::Mount { vnum, seconds } => self.quest_mount(vid, vnum, seconds),

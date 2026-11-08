@@ -25005,7 +25005,17 @@ fn enter_world_hearing_team(
     let (mut keyed, character, _quickslots, _items) =
         load_with_quickslots_on(server, channel, login, 0, ENGLISH);
     let entered = enter_game_shown(&mut keyed);
-    assert_eq!(keyed.read_game(), messenger_team_list_many(team), "{what}");
+    let mut team_record = keyed.read_game();
+    if channel == 99 && team_record == [GC_DUEL_START, 3, 0] {
+        team_record = keyed.read_game();
+    }
+    assert_eq!(team_record, messenger_team_list_many(team), "{what}");
+    if channel == 99 {
+        let record = keyed.read_game();
+        if record != [GC_DUEL_START, 3, 0] {
+            keyed.unread(vec![record]);
+        }
+    }
     read_login_event(&mut keyed);
     keyed.still("nothing follows");
     (keyed, character, entered)
@@ -44096,6 +44106,11 @@ fn enter_arena_round_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed
         alice.read_game(),
         messenger_team_list_many(&[(b"Yankee", false)])
     );
+    if channel == 99 {
+        // `enter_arena`'s member branch sends the empty opponent list behind the team
+        // list (ledger 469); the duel is running on this entry.
+        assert_eq!(alice.read_game(), [GC_DUEL_START, 3, 0]);
+    }
     read_login_event(&mut alice);
     alice.still("nothing follows the geared arena entry");
     if channel == 99 {
@@ -44144,4 +44159,176 @@ fn read_arena_pair_until(
         }
     }
     seen
+}
+
+/// Ledger 469: a plain GM visitor is not an observer. Map guards apply, while
+/// the commented observer senders never deliver the live duel's lines to it.
+#[test]
+fn an_arena_visitor_hears_no_duel_and_cannot_use_arena_restricted_actions() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    for login in ["alice", "bob", "carol", "dave"] {
+        create_account_before_boot(&database, login);
+    }
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 862200, y = 15500 WHERE name = 'Alpha'",
+    );
+    for (login, name) in [("bob", "Yankee"), ("carol", "Zulu")] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO player (account_id, slot, name, job, x, y) \
+            SELECT id, 0, '{name}', 1, 470100, 950000 FROM account WHERE login = '{login}'"
+            ),
+        );
+    }
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', \
+        'HIGH_WIZARD' FROM account WHERE login = 'alice'",
+    );
+    // A granted name that never enters: the visitor's team list is never empty, so
+    // `enter_world_hearing_team` keeps its shape. No team login ever fans from it.
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Offlinegm', \
+        'LOW_WIZARD' FROM account WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT \
+        60, id, 1, 0, 2, 71044 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, \
+        'Whiskey', 1, 862200, 15500 FROM account WHERE login = 'dave'",
+    );
+    let mut channels = default_channels();
+    channels
+        .iter_mut()
+        .find(|channel| channel.number == 99)
+        .unwrap()
+        .maps
+        .push(112);
+    let mut server = Server::start_with(binary(), database.url(), &channels);
+    arena_nonmember_login_returns_home(&mut server);
+    let (mut visitor, _, entered) = enter_world_hearing_team(
+        &server,
+        99,
+        b"alice",
+        &[(b"Offlinegm".as_slice(), false)],
+        "visitor team",
+    );
+    // (862000, 15500) is a blocked cell, which the entry search steps one cell over
+    // from (`GetMovablePosition`); the spawn stands on the movable cell it finds.
+    assert_eq!(inserted_at(&entered.add), (862_200, 15_500));
+    visitor.send_record(&client_item_use(0));
+    assert_eq!(visitor.read_game(), an_info_line(b"[LS;1205]"));
+    visitor.send_record(&client_chat(CHAT_TALKING, b"/pvp 12345"));
+    assert_eq!(visitor.read_game(), an_info_line(b"[LS;403]"));
+    visitor.send_record(&client_chat(CHAT_TALKING, b"/horse_ride"));
+    visitor.quiet("arena horse riding refuses silently");
+    arena_visitor_watches_duel(&mut server, &mut visitor);
+    let addr = visitor.client.local_addr();
+    drop(visitor);
+    server.wait_for(&format!("Client connection closed addr={addr}"));
+    wait_for(
+        &database,
+        "(SELECT count FROM item WHERE id = 60) = 2 AND \
+        NOT (SELECT horse_riding FROM player WHERE name = 'Alpha')",
+    );
+}
+
+fn arena_visitor_watches_duel(server: &mut Server, visitor: &mut Keyed) {
+    let team = [
+        (b"Alpha".as_slice(), true),
+        (b"Offlinegm".as_slice(), false),
+    ];
+    let (mut first, _, _) = enter_world_hearing_team(server, 1, b"bob", &team, "Yankee team");
+    let (mut second, _, _) = enter_world_hearing_team(server, 1, b"carol", &team, "Zulu team");
+    visitor.send_record(&client_chat(CHAT_TALKING, b"/duel Yankee Zulu 1 5"));
+    assert_eq!(
+        visitor.read_game(),
+        an_info_line(b"Dalian started successfully.")
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    for (client, at) in [
+        (&mut first, (853_400, 10_100)),
+        (&mut second, (856_400, 10_100)),
+    ] {
+        let warp = a_warp_record(at, server.channel(99).port());
+        assert_eq!(read_until_record(client, &warp, deadline), warp);
+    }
+    close_arena_pair(server, first, second);
+    let (mut first, a, _) =
+        enter_world_hearing_team(server, 99, b"bob", &team, "duelist Yankee entry");
+    let (mut second, b, _) =
+        enter_world_hearing_team(server, 99, b"carol", &team, "duelist Zulu entry");
+    arena_visitor_reads_countdown(visitor, &mut first, a.id, &mut second, b.id);
+    visitor.send_record(&client_chat(CHAT_TALKING, b"/end_all_duel"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let warp = a_warp_record((347_600, 882_700), server.channel(1).port());
+    assert_eq!(read_until_record(&mut first, &warp, deadline), warp);
+    assert_eq!(read_until_record(&mut second, &warp, deadline), warp);
+    // The duelists' leave fans only the multi-farm burst to the visitor: no removal, no
+    // duel line. Draining it also keeps the visitor's close a clean FIN.
+    visitor.quiet_allowing_farm("the duelists leave the visitor nothing but the farm burst");
+}
+
+fn arena_visitor_reads_countdown(
+    visitor: &mut Keyed,
+    first: &mut Keyed,
+    a: u32,
+    second: &mut Keyed,
+    b: u32,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let begun = an_info_line(b"The duel has begun.");
+    let mut opponents = [vec![40, 7, 0], vec![40, 7, 0]];
+    opponents[0].extend_from_slice(&b.to_le_bytes());
+    opponents[1].extend_from_slice(&a.to_le_bytes());
+    let mut starts = [false; 2];
+    let mut lists = [false; 2];
+    while !starts.into_iter().all(|v| v) || !lists.into_iter().all(|v| v) {
+        assert!(std::time::Instant::now() < deadline, "the live duel starts");
+        let beat = std::time::Instant::now() + Duration::from_millis(50);
+        if let Some(record) = visitor.read_game_until(beat) {
+            assert_ne!(record[0], GC_DUEL_START, "visitor has no opponent list");
+            if record[0] == GC_CHAT {
+                assert!(
+                    !matches!(record[3], 1 | 2),
+                    "visitor has no duel INFO/NOTICE: {record:02x?}"
+                );
+            }
+        }
+        for (index, client) in [(0, &mut *first), (1, &mut *second)] {
+            if let Some(record) =
+                client.read_game_until(std::time::Instant::now() + Duration::from_millis(50))
+            {
+                starts[index] |= record == begun;
+                lists[index] |= record == opponents[index];
+            }
+        }
+    }
+}
+
+fn arena_nonmember_login_returns_home(server: &mut Server) {
+    let (mut visitor, _, _, _) = load_with_quickslots_on(server, 99, b"dave", 0, ENGLISH);
+    visitor.send_record(&client_enter_game());
+    let warp = a_warp_record((469_300, 964_200), server.channel(1).port());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (seen, record) = read_until_record_keeping(&mut visitor, &warp, deadline);
+    assert_eq!(record, warp);
+    assert!(
+        seen.iter().all(|record| record[0] != GC_DUEL_START),
+        "a nonmember receives no duel list"
+    );
+    let addr = visitor.client.local_addr();
+    drop(visitor);
+    server.wait_for(&format!("Client connection closed addr={addr}"));
 }

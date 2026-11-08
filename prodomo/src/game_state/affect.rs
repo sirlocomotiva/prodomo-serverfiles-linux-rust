@@ -502,6 +502,27 @@ impl GameState {
         }
     }
 
+    /// `LoadAffect`'s arena cleanup (`G/char_affect.cpp:638-641`), before placement.
+    /// Loaded point contributions have not been computed yet; retract them and return
+    /// the remove frames for the loading burst, after all add frames and before mounts.
+    pub(super) fn remove_loaded_arena_good_affects(&mut self, vid: Vid, map: i32) -> Vec<Vec<u8>> {
+        if !self.is_arena_map(map) {
+            return Vec::new();
+        }
+        let mut removed = Vec::new();
+        if let Some(event) = self.affect_events.get_mut(&vid) {
+            for kind in crate::loading_phase::GOOD_AFFECT_KINDS {
+                removed.extend(take_affects_of_kind(&mut event.affects, kind));
+            }
+        }
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            for affect in &removed {
+                points.affect_point_removed(affect.apply_on, affect.value);
+            }
+        }
+        removed.iter().map(affect_remove_frame).collect()
+    }
+
     /// `CHARACTER::RemoveGoodAffect` (`G/char_affect.cpp:892-916`): every good-affect
     /// row goes, each uncomputed through `RemoveAffect` with its remove packet sent,
     /// the flags updated once at the end.
@@ -1107,6 +1128,59 @@ mod tests {
     use crate::game_state::GameState;
     use crate::loading_phase::AFFECT_REVIVE_INVISIBLE;
     use common::vid::Vid;
+
+    #[test]
+    fn loaded_arena_affects_strip_good_rows_in_kind_order_before_body_placement() {
+        let mut world = a_world(&TestClock::default());
+        let vid = Vid::new(1);
+        let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+        world
+            .enter_world(
+                "",
+                vid,
+                1,
+                "P1",
+                crate::client_registry::ClientOutbox::new(tx),
+            )
+            .unwrap();
+        while inbox.try_recv().is_ok() {}
+        world
+            .characters
+            .find_by_vid_mut(vid)
+            .unwrap()
+            .set_points(Some(crate::game_state::fixtures::points(100)));
+        assert!(world.place_of(vid.raw()).is_none());
+        world.load_arenas(&[quest::host::Arena {
+            map_index: PLACE.1,
+            start_a: (32, 32),
+            start_b: (33, 33),
+        }]);
+        let speed = Affect::buff(200, common::point_slot::POINT_MOV_SPEED, 10, 0, 60, 0);
+        let attack = Affect::buff(201, common::point_slot::POINT_ATT_SPEED, 20, 0, 60, 0);
+        let keep = Affect::revive_invisible();
+        for affect in [attack, keep, speed, speed] {
+            world.add_affect(vid, affect);
+            world
+                .pc_points_mut(vid.raw())
+                .unwrap()
+                .affect_point_added(affect.apply_on, affect.value);
+        }
+        assert!(world.remove_loaded_arena_good_affects(vid, 42).is_empty());
+        assert_eq!(world.affect_events[&vid].affects.len(), 4);
+        assert_eq!(
+            world.remove_loaded_arena_good_affects(vid, PLACE.1),
+            [speed, speed, attack]
+                .iter()
+                .map(super::affect_remove_frame)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(world.affect_events[&vid].affects.len(), 1);
+        assert_eq!(world.affect_events[&vid].affects[0].kind, keep.kind);
+        assert!(
+            inbox.try_recv().is_err(),
+            "the loading burst owns the frames"
+        );
+    }
 
     #[test]
     fn the_revive_invisible_flag_is_bit_twenty_seven_of_word_zero() {

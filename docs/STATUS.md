@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 468 (the arena duel's combat).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 469
+Last reviewed: 2026-11-08, after ledger section 469 (the arena's edges).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 470
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -508,7 +508,10 @@ arms wait on the map folders. Since 467 the GM arena duel on map 112 is live: `/
 `ported` and `sys.event.arena` is `partial`; `CanAttack` and `OnDead` scoring is next, then the
 observers, the login re-register and the `IsArenaMap` hooks. Since 468 duelists can hit each
 other and an arena death scores a round, restarts it or ends the match; the observers, the login
-re-register and the `IsArenaMap` hooks (with `/pvp`'s arena gate) are next. The
+re-register and the `IsArenaMap` hooks (with `/pvp`'s arena gate) are next. Since 469 those
+are live too: the login arms, `/pvp`'s gate, the item, potion and horse refusals and the potion
+limit are `ported`, arena observers are confirmed unreachable (owner question 60), and only the
+battle arena keeps `sys.event.arena` `partial`. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -937,6 +940,7 @@ owner should know about (178.5):
 | The `envanter` column refuses unlocks past 18 at the store (ledger 449): a hand-written row cannot name cells past the base inventory. | Legacy's `player.envanter` is an unchecked `INT` (`player.sql:866`), copied straight into `m_points.envanter` (`G/char.cpp:2346`). |
 | Every `/dungeon_info rank` line reads the store (ledger 463): the 5-minute `m_mapDungeonRank` cache is not ported. | `SendDungeonRank` caches each rank for 5 minutes (`G/char_manager.cpp:1340-1380`). |
 | A duel's players are held by player id across the process, so a Warp to an arena map another Channel hosts keeps the duel, and `EndDuel` sends each duelist back to the Channel it started on, Channel 1 for one that started on the Shared Channel (ledger 467). | The arena manager is per process: a duelist warped to another core leaves the duel's process, and the next arena event ends the duel as "opponent disappeared" (`G/arena.cpp:224-245`). |
+| A nonmember woken on an arena map is ejected to its empire start on its own Channel when that Channel serves the target, else on the lowest-numbered Channel that does (ledger 469, owner question 60). | Legacy's `WarpSet` resolves the target's core through the P2P map table (`G/char.cpp:6694-6795`). |
 ## Legacy defects not to reproduce
 
 - When a character enters the game with no movable point within 1000 of its saved position,

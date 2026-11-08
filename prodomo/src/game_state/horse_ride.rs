@@ -10,8 +10,8 @@
 //! vnum is the summoned horse's race, else the level's (`GetMyHorseVnum`); the horse goes,
 //! the mount lands on the points, `MountVnum`'s insert pair re-shows the rider to itself
 //! and to each entity it sees (no removals, no return inserts), and the full compute and
-//! the update follow. The guild-war guard, the arena silence and the mount costume are
-//! gaps: the Rewrite hosts no war map, no arena and no costume.
+//! the update follow. Riding on an arena map is silently refused after the armour gate.
+//! The guild-war guard and mount costume retain their own rules.
 //!
 //! Stopping a ride runs the horse's stop, and, while alive and unstunned, clears the mount,
 //! re-shows, recomputes, updates and summons the horse back from far with the old vnum;
@@ -99,6 +99,12 @@ impl GameState {
         }
         if self.body_armor_11901_to_11904(vid) {
             self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;883]", &[]);
+            return;
+        }
+        if self
+            .place_of(vid.raw())
+            .is_some_and(|(_, map)| self.is_arena_map(map))
+        {
             return;
         }
         let horse_vnum = self
@@ -506,5 +512,42 @@ mod tests {
         world.bodies.get_mut(&Vid::new(ME)).expect("a body").map = 113;
         assert_eq!(world.ride_toggle(Vid::new(ME)), None);
         assert!(drained(&mut mine).is_empty(), "the OX map is silent");
+    }
+
+    #[test]
+    fn an_unbound_arena_map_refuses_direct_and_quest_horse_actions_silently() {
+        let clock = TestClock::default();
+        let mut world = stand_field(&clock, Vec::new(), open_cells(), true);
+        let mut mine = enter(&mut world, ME, (3200, 3200), 12_345);
+        let rider = Vid::new(ME);
+        world
+            .pc_points_mut(ME)
+            .unwrap()
+            .horse_mut()
+            .set_level(1, GameState::global_time());
+        world.flush_horse(rider);
+        drained(&mut mine);
+        world.load_arenas(&[quest::host::Arena {
+            map_index: super::super::fixtures::PLACE.1,
+            start_a: (32, 32),
+            start_b: (33, 33),
+        }]);
+        assert!(!world.in_arena(rider));
+        world.start_riding(rider);
+        world.apply_horse_ops(
+            rider,
+            vec![
+                super::super::horse_summon::HorseOp::Ride,
+                super::super::horse_summon::HorseOp::Summon {
+                    from_far: false,
+                    vnum: 0,
+                },
+            ],
+        );
+        assert!(!world.is_riding(ME));
+        assert!(!world.points_of(ME).unwrap().horse().summoned());
+        assert!(drained(&mut mine).is_empty());
+        // `CHARACTER::HorseSummon` (`char_horse.cpp:147-160`) itself has no arena gate:
+        // only the quest API does (`questlua_horse.cpp:74-78`).
     }
 }

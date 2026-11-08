@@ -556,3 +556,17 @@ owner answers.
     The potion limit that the countdown announces (`arena_potion_limit_count`) is not yet
     enforced; it comes with the arena's item hooks.
     Waits on it: nothing blocks.
+60. **The arena's observers never exist, and its ejection names a Channel (ledger 469).**
+    Two things to confirm:
+    - No owner quest calls `arena.add_observer` (checked: zero calls outside the
+      `quest_functions` name list; the control `arena.add_map` has four). Legacy admits an
+      observer only through that call (`G/questlua_arena.cpp:86`), and its observer lines
+      are commented out (`G/arena.cpp:981-1026`), so observers would hear nothing anyway.
+      The Rewrite ports no observer roster. `arena.add_observer` and `arena.is_in_arena`
+      stay `unused`.
+    - A plain player who wakes on an arena map is sent to its empire start
+      (`G/input_login.cpp:834-838`). Legacy's `WarpSet` resolves the target through the
+      P2P map table. The Rewrite sends it on its own Channel when that Channel serves the
+      target (your deployment: every Channel hosts every empire start), else on the
+      lowest-numbered Channel that does.
+    Waits on it: nothing blocks.

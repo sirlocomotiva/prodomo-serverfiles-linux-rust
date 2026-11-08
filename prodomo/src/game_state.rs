@@ -574,6 +574,8 @@ pub struct GameState {
     ox_roster: std::collections::HashSet<u32>,
     /// GM arena slots, ordered by map and insertion order (key's first component reserved).
     arenas: std::collections::BTreeMap<(u8, u32), Vec<arena::Arena>>,
+    /// Character-local arena potion count (`G/char.cpp:389`, `G/char.h:1917-1918`).
+    arena_potions: std::collections::HashMap<common::vid::Vid, i32>,
     /// The three-way kill scores (`CThreeWayWar::KillScore_`, `G/threeway_war.h:61`):
     /// one per empire, by empire minus 1. `-1` marks an eliminated empire, which the
     /// death hook skips. `Default` is all zero, as `Initialize` leaves them.
@@ -2715,6 +2717,7 @@ impl GameState {
             // `EnterHorse` (`G/input_login.cpp:647-650`) and the `__FIX_NIVEL_CAL__` horse
             // refresh (`:887-897`), the last `Entergame` lines before the quest login.
             self.enter_horse(vid);
+            self.enter_arena(vid);
             // `RankGlobal_send_players` and `RankGlobal_send_items` close `Entergame`
             // (`G/input_login.cpp:946-949`).
             self.rank_login(vid);
@@ -3244,7 +3247,10 @@ impl GameState {
                     u32::from_ne_bytes(slot.next_read.to_ne_bytes());
             }
         }
-        let silence = self.load_affects(vid, &loaded.affects);
+        let map = loaded.show.as_ref().map_or(0, |show| show.place.map);
+        let silence = self.load_affects(vid, &loaded.affects, map);
+        let count = self.arena_event_flag(b"arena_potion_limit_count");
+        self.set_arena_potion_count(vid, count);
         // `IsPremiumPlayer` (`G/input_login.cpp:717-720`): a flagged entrant's minute
         // sweep picks it up from the outboxes; a lapsed timer ends at the next sweep.
         // The affects check stays commented out, as legacy's does (`:718`).
@@ -3326,6 +3332,7 @@ impl GameState {
         &mut self,
         vid: common::vid::Vid,
         saved_rows: &[db::player_affects::StoredAffect],
+        map: i32,
     ) -> Vec<Vec<u8>> {
         use crate::loading_phase::{AFFECT_MOUNT, AFFECT_MOUNT_BONUS};
         let mut frames = Vec::new();
@@ -3364,6 +3371,7 @@ impl GameState {
                 points.affect_point_added(revived.apply_on, revived.value);
             }
         }
+        frames.extend(self.remove_loaded_arena_good_affects(vid, map));
         for kind in [AFFECT_MOUNT, AFFECT_MOUNT_BONUS] {
             frames.extend(
                 dropped
@@ -3479,6 +3487,7 @@ impl GameState {
         if departure == Departure::Disconnect {
             self.arena_disconnect(vid);
         }
+        self.arena_potions.remove(&vid);
         // `CheckMultiFarmAccount(..., false)` (`G/char.cpp:1791`): the leaver stops
         // farming before its body goes.
         if let Some(addr) = self.multi_addr.remove(&vid) {
@@ -3921,6 +3930,10 @@ impl GameState {
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
         }
+        if !self.arena_item_use_allowed(vid, at) {
+            return self.arena_item_refused(vid, actor);
+        }
+        let potion = self.arena_potion_at(vid, at);
         if self.bait_at(vid, at) {
             return self.use_bait(vid, at, actor);
         }
@@ -3976,6 +3989,9 @@ impl GameState {
             }
             use_item(items, at, rules, gear)
         })?;
+        if let Some((vnum, sub_type)) = potion {
+            self.arena_consumed_potion(vid, vnum, sub_type, &moved);
+        }
         if moved.kind == world::character::MoveKind::QuestUsed {
             let pickup = self
                 .characters

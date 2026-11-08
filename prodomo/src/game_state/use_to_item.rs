@@ -114,6 +114,35 @@ pub fn refine_level(proto: &ItemProto) -> i32 {
     i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
 }
 
+/// `IsLimitedPotion`'s complete list: the range subsumes its duplicated switch cases.
+fn arena_limited_item(vnum: u32) -> bool {
+    (50_801..=50_826).contains(&vnum)
+        || (50_020..=50_022).contains(&vnum)
+        || matches!(vnum, 71_044 | 71_055)
+}
+
+/// Arena potion admission (`G/char_item.cpp:5581-5609`, `:5684-5714`).
+fn arena_potion_refusal(
+    vnum: u32,
+    no_delay: bool,
+    disabled: i32,
+    limit: i32,
+    left: i32,
+) -> Option<&'static [u8]> {
+    let allowed = if no_delay {
+        matches!(vnum, 70_020 | 71_018 | 71_019 | 71_020)
+    } else {
+        (27_001..=27_006).contains(&vnum)
+    };
+    if disabled > 0 || !allowed {
+        Some(b"[LS;403]")
+    } else if limit < 10_000 && left <= 0 {
+        Some(b"[LS;122]")
+    } else {
+        None
+    }
+}
+
 /// The arm of `UseItemEx` an item used on another runs.
 enum Arm {
     /// `ITEM_METIN`.
@@ -132,6 +161,121 @@ enum Arm {
 }
 
 impl GameState {
+    pub(super) fn arena_item_refused(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        self.run_item_step(vid, actor, |_, _, _, _, _| {
+            Ok(MoveDone {
+                kind: MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            })
+        })
+    }
+
+    pub(super) fn arena_potion_at(&self, vid: Vid, at: ItemPos) -> Option<(u32, i32)> {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .filter(|proto| proto.item_type == gamedata::item_kind::ITEM_USE)
+            .map(|proto| (proto.vnum, proto.sub_type))
+    }
+
+    /// The arena gates shared by plain use, use-on-item and quest-use dispatch
+    /// (`G/char_item.cpp:2764-2768`, `G/arena.cpp:1131-1170`). These read the map,
+    /// not arena membership: a visitor is restricted too.
+    pub(super) fn arena_item_use_allowed(&mut self, vid: Vid, at: ItemPos) -> bool {
+        let Some((vnum, item_type, sub_type)) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| {
+                self.protos
+                    .get(item.vnum)
+                    .map(|proto| (item.vnum, proto.item_type, proto.sub_type))
+            })
+        else {
+            return true;
+        };
+        let arena_map = self
+            .place_of(vid.raw())
+            .is_some_and(|(_, map)| self.is_arena_map(map));
+        if arena_map && arena_limited_item(vnum) {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1205]", &[]);
+            }
+            return false;
+        }
+        if item_type == ITEM_USE
+            && matches!(
+                sub_type,
+                gamedata::item_kind::USE_POTION | gamedata::item_kind::USE_POTION_NODELAY
+            )
+        {
+            return self.arena_use_potion_allowed(
+                vid,
+                vnum,
+                sub_type == gamedata::item_kind::USE_POTION_NODELAY,
+            );
+        }
+        true
+    }
+
+    /// Map-based potion limits are independent of duelist binding.
+    pub(super) fn arena_use_potion_allowed(&mut self, vid: Vid, vnum: u32, no_delay: bool) -> bool {
+        if !self
+            .place_of(vid.raw())
+            .is_some_and(|(_, map)| self.is_arena_map(map))
+        {
+            return true;
+        }
+        let refused = arena_potion_refusal(
+            vnum,
+            no_delay,
+            self.arena_event_flag(b"arena_potion_limit"),
+            self.arena_event_flag(b"arena_potion_limit_count"),
+            self.arena_potion_count(vid),
+        );
+        if let Some(line) = refused {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Both accepted potion arms decrement even outside arena maps. A declined standard
+    /// potion may have added SP recovery before refusing HP, but keeps its item and count
+    /// (`G/char_item.cpp:3523-3540`, `:5660-5677`, `:5723-5754`).
+    pub(super) fn arena_consumed_potion(
+        &mut self,
+        vid: Vid,
+        _vnum: u32,
+        sub_type: i32,
+        moved: &MovedItems,
+    ) {
+        if moved.kind == MoveKind::Used
+            && matches!(
+                sub_type,
+                gamedata::item_kind::USE_POTION | gamedata::item_kind::USE_POTION_NODELAY
+            )
+            && moved.changes.iter().any(|change| {
+                matches!(
+                    change,
+                    db::items::RowChange::Destroyed { .. } | db::items::RowChange::Count { .. }
+                )
+            })
+        {
+            self.consume_arena_potion(vid);
+        }
+    }
+
     /// Run one `CG_ITEM_USE_TO_ITEM` for the character online under `vid`: the item at `at`
     /// used on the item at `dest`.
     ///
@@ -156,6 +300,15 @@ impl GameState {
         }
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
+        }
+        if !self.arena_item_use_allowed(vid, at) {
+            return self.run_item_step(vid, actor, |_, _, _, _, _| {
+                Ok(MoveDone {
+                    kind: MoveKind::Used,
+                    records: Vec::new(),
+                    changes: Vec::new(),
+                })
+            });
         }
         // `CanHandleItem()`: the windows this build has, a smith's among them.
         if self.sash_windows.contains_key(&vid)
@@ -608,6 +761,252 @@ mod tests {
         world
             .refine(vid, 0, refine_type, mover())
             .expect("player 1")
+    }
+
+    #[test]
+    fn arena_limited_items_match_the_complete_legacy_list() {
+        for vnum in 50_801..=50_826 {
+            assert!(arena_limited_item(vnum));
+        }
+        for vnum in [50_020, 50_021, 50_022, 71_044, 71_055] {
+            assert!(arena_limited_item(vnum));
+        }
+        for vnum in [
+            50_019, 50_023, 50_800, 50_827, 71_043, 71_045, 71_054, 71_056,
+        ] {
+            assert!(!arena_limited_item(vnum));
+        }
+    }
+
+    #[test]
+    fn arena_potion_rules_pin_flags_whitelists_and_the_unlimited_boundary() {
+        for (no_delay, allowed) in [
+            (false, vec![27_001, 27_002, 27_003, 27_004, 27_005, 27_006]),
+            (true, vec![70_020, 71_018, 71_019, 71_020]),
+        ] {
+            for vnum in allowed {
+                assert_eq!(arena_potion_refusal(vnum, no_delay, 0, 9_999, 1), None);
+                for left in [0, -1] {
+                    assert_eq!(
+                        arena_potion_refusal(vnum, no_delay, 0, 9_999, left),
+                        Some(&b"[LS;122]"[..])
+                    );
+                    for limit in [10_000, 10_001] {
+                        assert_eq!(arena_potion_refusal(vnum, no_delay, 0, limit, left), None);
+                    }
+                }
+                assert_eq!(arena_potion_refusal(vnum, no_delay, -1, 0, 1), None);
+                assert_eq!(
+                    arena_potion_refusal(vnum, no_delay, 1, 10_001, 1),
+                    Some(&b"[LS;403]"[..])
+                );
+            }
+        }
+        for (vnum, no_delay) in [
+            (27_000, false),
+            (27_007, false),
+            (27_001, true),
+            (71_018, false),
+            (70_019, true),
+            (71_021, true),
+        ] {
+            assert_eq!(
+                arena_potion_refusal(vnum, no_delay, 0, 10_001, 1),
+                Some(&b"[LS;403]"[..])
+            );
+        }
+    }
+
+    fn arena_item_world(vnum: u32, item_type: i32, sub_type: i32, values: [i32; 6]) -> GameState {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut proto = ItemProto::for_category_rule(vnum, item_type, sub_type);
+        proto.values = values;
+        world.protos = Arc::new(gamedata::item_proto::ItemProtos::from_rows(vec![proto]));
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut item = Item::new(7, vnum);
+        item.count = 2;
+        let (_inbox, _) = enter_seeing_with(&mut world, PLACE, 1, (5, 5), 10_000, &[(at, item)]);
+        world.set_arena_potion_count(Vid::new(1), 2);
+        world
+    }
+
+    fn mark_arena(world: &mut GameState) {
+        world.load_arenas(&[quest::host::Arena {
+            map_index: PLACE.1,
+            start_a: (1, 1),
+            start_b: (2, 2),
+        }]);
+    }
+
+    #[test]
+    fn shared_gate_covers_quest_items_visitors_empty_cells_and_item_targets() {
+        let mut world = arena_item_world(71_044, gamedata::item_kind::ITEM_QUEST, 0, [0; 6]);
+        let vid = Vid::new(1);
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        assert!(world.arena_item_use_allowed(vid, at));
+        mark_arena(&mut world);
+        assert!(!world.in_arena(vid));
+        assert!(!world.arena_item_use_allowed(vid, at));
+        assert!(world.arena_item_use_allowed(vid, ItemPos::new(EWindows::Inventory as u8, 1)));
+        let step = world
+            .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+            .expect("visitor");
+        assert!(step.changes.is_empty());
+        let mut targeted = arena_item_world(71_044, ITEM_USE, USE_TUNING, [0; 6]);
+        mark_arena(&mut targeted);
+        let step = targeted
+            .use_item_to_item(vid, at, at, mover())
+            .expect("visitor");
+        assert!(step.changes.is_empty());
+        assert!(step.records.is_empty());
+    }
+
+    #[test]
+    fn quest_seals_refuse_bound_duelists_but_not_plain_map_visitors() {
+        let mut world = arena_item_world(50_051, gamedata::item_kind::ITEM_QUEST, 0, [0; 6]);
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let vid = Vid::new(1);
+        mark_arena(&mut world);
+        assert!(!world.in_arena(vid));
+        let other = Vid::new(2);
+        let _other = crate::game_state::fixtures::enter(&mut world, other.raw(), (6, 5), 10_000);
+        world.start_arena(
+            ((0, u32::try_from(PLACE.1).unwrap()), 0),
+            [vid, other],
+            3,
+            5,
+        );
+        world.run_arena_ticks(250);
+        assert!(world.in_arena(vid));
+        let result = world
+            .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+            .expect("seal stays");
+        assert!(result.changes.is_empty());
+        assert_eq!(
+            world
+                .characters
+                .find_by_vid(vid)
+                .unwrap()
+                .items()
+                .item_at(at)
+                .unwrap()
+                .count,
+            2
+        );
+    }
+
+    #[test]
+    fn map_potion_gate_rejects_unlisted_vnums_without_requiring_membership() {
+        let mut world = arena_item_world(
+            27_101,
+            ITEM_USE,
+            gamedata::item_kind::USE_POTION_NODELAY,
+            [100, 0, 0, 0, 0, 0],
+        );
+        let vid = Vid::new(1);
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        assert!(world.arena_item_use_allowed(vid, at));
+        mark_arena(&mut world);
+        assert!(!world.arena_item_use_allowed(vid, at));
+        assert!(world.arena_item_use_allowed(Vid::new(999), at));
+        let mut plain = arena_item_world(11, gamedata::item_kind::ITEM_WEAPON, 0, [0; 6]);
+        mark_arena(&mut plain);
+        assert!(plain.arena_item_use_allowed(vid, at));
+    }
+
+    #[test]
+    fn nonpotion_or_unconsumed_item_steps_do_not_spend_the_potion_count() {
+        let mut world = arena_item_world(27_001, ITEM_USE, gamedata::item_kind::USE_POTION, [0; 6]);
+        let vid = Vid::new(1);
+        let mut moved = MovedItems::new(
+            1,
+            vid.raw(),
+            MoveDone {
+                kind: MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            },
+            mover(),
+            &world.protos,
+            &world.locale,
+        );
+        world.arena_consumed_potion(vid, 27_001, gamedata::item_kind::USE_POTION, &moved);
+        assert_eq!(world.arena_potion_count(vid), 2);
+        moved.changes.push(RowChange::Destroyed { id: 7 });
+        world.arena_consumed_potion(vid, 27_001, USE_TUNING, &moved);
+        assert_eq!(world.arena_potion_count(vid), 2);
+    }
+
+    #[test]
+    fn standard_zero_value_potion_is_consumed_but_instant_zero_value_is_not() {
+        for (sub_type, accepted) in [
+            (gamedata::item_kind::USE_POTION, true),
+            (gamedata::item_kind::USE_POTION_NODELAY, false),
+        ] {
+            let mut world = arena_item_world(27_001, ITEM_USE, sub_type, [0; 6]);
+            let vid = Vid::new(1);
+            let at = ItemPos::new(EWindows::Inventory as u8, 0);
+            let step = world.use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default());
+            assert_eq!(step.is_ok(), accepted);
+            assert_eq!(world.arena_potion_count(vid), if accepted { 1 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn accepted_potions_decrement_and_refused_or_partial_uses_do_not() {
+        for (vnum, sub_type) in [
+            (27_001, gamedata::item_kind::USE_POTION),
+            (71_018, gamedata::item_kind::USE_POTION_NODELAY),
+        ] {
+            for arena in [false, true] {
+                let mut world = arena_item_world(vnum, ITEM_USE, sub_type, [100, 0, 0, 0, 0, 0]);
+                if arena {
+                    mark_arena(&mut world);
+                }
+                let vid = Vid::new(1);
+                let at = ItemPos::new(EWindows::Inventory as u8, 0);
+                assert!(world
+                    .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+                    .is_err());
+                assert_eq!(world.arena_potion_count(vid), 2);
+                world
+                    .pc_points_mut(vid.raw())
+                    .unwrap()
+                    .point_change(common::point_slot::POINT_HP, -300, false, false)
+                    .unwrap();
+                world
+                    .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+                    .expect("accepted");
+                assert_eq!(world.arena_potion_count(vid), 1);
+                world.set_arena_potion_count(vid, 0);
+                let step = world
+                    .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+                    .expect("second");
+                assert_eq!(world.arena_potion_count(vid), if arena { 0 } else { -1 });
+                assert_eq!(step.changes.is_empty(), arena);
+            }
+        }
+        let mut world = arena_item_world(
+            27_001,
+            ITEM_USE,
+            gamedata::item_kind::USE_POTION,
+            [100, 50, 0, 0, 0, 0],
+        );
+        mark_arena(&mut world);
+        let vid = Vid::new(1);
+        world
+            .pc_points_mut(vid.raw())
+            .unwrap()
+            .point_change(common::point_slot::POINT_SP, -100, false, false)
+            .unwrap();
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let step = world
+            .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+            .expect("partial");
+        assert_eq!(step.kind, MoveKind::Declined);
+        assert!(step.changes.is_empty());
+        assert_eq!(world.arena_potion_count(vid), 2);
     }
 
     /// A blessing scroll's failure swaps the sword for the one it was refined from, keeping

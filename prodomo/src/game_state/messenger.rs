@@ -314,8 +314,7 @@ impl Relations {
     ///
     /// `responder` is the character answering, and `requester` the name its
     /// `do_messenger_auth` command named, which is who the request asked. The command's
-    /// own arena gate (`[LS;403]`, `G/cmd_general.cpp:2274-2278`) passes: there are no
-    /// arenas, as `sys.event.arena` is unported.
+    /// arena gate runs before this method and leaves a refused request pending.
     pub(super) fn auth_to_add(
         &mut self,
         state: &mut GameState,
@@ -647,6 +646,13 @@ impl GameState {
         deny: bool,
         reply: oneshot::Sender<bool>,
     ) {
+        if self.in_arena(responder) {
+            if let Some(mover) = self.own_mover(responder) {
+                self.tell(responder, mover, CHAT_TYPE_INFO, b"[LS;403]", &[]);
+            }
+            let _answered = reply.send(false);
+            return;
+        }
         let mut taken = std::mem::take(&mut self.messenger);
         let added = taken.auth_to_add(self, responder, requester, deny);
         self.messenger = taken;

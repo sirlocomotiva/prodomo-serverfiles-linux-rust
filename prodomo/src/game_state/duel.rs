@@ -26,10 +26,6 @@
 //!
 //! # Divergences
 //!
-//! - **The arena gates never fire.** The arenas are their own missing system
-//!   (`sys.event.arena`): no map is an arena map, and no character stands in
-//!   one, so `[LS;403]` and `[LS;522]` wait for it, as the emotion's arena reads
-//!   do.
 //! - **The PK-mode head of `CanAttack` is not this slice.** The duel tail feeds
 //!   the policy's `consensual_fight` flag; the modes stay the port's own.
 //! - **`GiveUp` is not ported.** Legacy calls it from nowhere.
@@ -214,7 +210,15 @@ impl GameState {
     /// (`str_to_number(DWORD)`), silent on a miss or an NPC, and the duel's
     /// challenge or accept. A caller with no body runs nothing.
     pub(super) fn run_pvp(&mut self, vid: Vid, rest: &[u8]) {
-        if self.own_mover(vid).is_none() {
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        if self.in_arena(vid)
+            || self
+                .place_of(vid.raw())
+                .is_some_and(|(_, map)| self.is_arena_map(map))
+        {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;403]", &[]);
             return;
         }
         let (word, _) = crate::command::one_argument(rest);
@@ -223,6 +227,12 @@ impl GameState {
             return;
         };
         if character.kind() != world::character::CharacterKind::Player {
+            return;
+        }
+        if self.in_arena(victim) {
+            if let Some(mover) = self.own_mover(victim) {
+                self.tell(victim, mover, CHAT_TYPE_INFO, b"[LS;522]", &[]);
+            }
             return;
         }
         self.pvp_insert(vid, victim);
@@ -544,6 +554,92 @@ mod tests {
     /// The chat text of one `HEADER_GC_CHAT` frame.
     fn text_of(line: &[u8]) -> Vec<u8> {
         line[10..].to_vec()
+    }
+    fn install_arena(world: &mut GameState) {
+        world.load_arenas(&[quest::host::Arena {
+            map_index: super::super::fixtures::PLACE.1,
+            start_a: (32, 32),
+            start_b: (33, 33),
+        }]);
+    }
+
+    fn refusal(world: &GameState, vid: Vid, text: &[u8]) -> Vec<u8> {
+        crate::chat_line::chat_packet(
+            world.own_mover(vid).unwrap().recipient(&world.locale),
+            protocol::gc_chat::CHAT_TYPE_INFO,
+            text,
+            &[],
+        )
+    }
+
+    #[test]
+    fn arena_map_refuses_pvp_before_binding_but_allows_emotion_consent() {
+        let (mut world, mut alice, mut bob) = a_world_with_two();
+        install_arena(&mut world);
+        let caller = Vid::new(ALICE);
+        assert!(!world.in_arena(caller));
+        world.run_pvp(caller, b"missing");
+        assert_eq!(drain(&mut alice), [refusal(&world, caller, b"[LS;403]")]);
+        assert!(drain(&mut bob).is_empty());
+        assert!(world.duels.pairs.is_empty());
+        world.allow_emotion(caller, b"200");
+        assert!(world.emotion_consents.contains(&(ALICE, BOB)));
+        assert!(drain(&mut alice).is_empty());
+    }
+
+    #[test]
+    fn bound_arena_callers_refuse_emotion_party_and_messenger_without_consuming_requests() {
+        let (mut world, mut alice, mut bob) = a_world_with_two();
+        install_arena(&mut world);
+        let caller = Vid::new(ALICE);
+        let guest = Vid::new(BOB);
+        world.answer_messenger_add_by_vid(guest, caller);
+        assert!(world.messenger.waits(&world, caller, b"P200"));
+        world.start_arena(((0, 41), 0), [caller, guest], 3, 5);
+        world.run_arena_ticks(250);
+        drain(&mut alice);
+        drain(&mut bob);
+        assert!(world.in_arena(caller));
+        world.allow_emotion(caller, b"200");
+        world.party_invite(caller, guest);
+        world.party_invite_answer(caller, Vid::new(999), 0);
+        world.party_request(caller, b"");
+        world.party_remove(caller, BOB);
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        world.answer_messenger_auth(caller, b"P200", false, reply);
+        assert_eq!(answer.try_recv(), Ok(false));
+        assert_eq!(
+            drain(&mut alice),
+            vec![refusal(&world, caller, b"[LS;403]"); 6]
+        );
+        assert!(drain(&mut bob).is_empty());
+        assert!(!world.emotion_consents.contains(&(ALICE, BOB)));
+        assert!(world.party_leader_of(ALICE).is_none());
+        assert!(world.messenger.waits(&world, caller, b"P200"));
+    }
+
+    #[test]
+    fn pvp_arena_victim_is_notified_instead_of_the_nonmember_challenger() {
+        let (mut world, mut alice, mut bob) = a_world_with_two();
+        install_arena(&mut world);
+        world.start_arena(((0, 41), 0), [Vid::new(ALICE), Vid::new(BOB)], 3, 5);
+        world.run_arena_ticks(250);
+        let mut third = enter(&mut world, 300, (3400, 3400), 0);
+        let challenger = Vid::new(300);
+        // The caller gate only reads its arena pointer or map; the victim's map
+        // is not inspected, so a remote VID still reaches the victim-pointer gate.
+        world.bodies.get_mut(&challenger).unwrap().map = 42;
+        drain(&mut alice);
+        drain(&mut bob);
+        drain(&mut third);
+        world.run_pvp(challenger, b"100");
+        assert!(drain(&mut third).is_empty());
+        assert!(drain(&mut bob).is_empty());
+        assert_eq!(
+            drain(&mut alice),
+            [refusal(&world, Vid::new(ALICE), b"[LS;522]")]
+        );
+        assert!(world.duels.pairs.is_empty());
     }
 
     /// The challenge stores the pair with the challenger agreed, fans the agree

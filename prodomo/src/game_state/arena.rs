@@ -1,5 +1,6 @@
 //! GM arena duels (`G/arena.cpp:1-589,951-1055`, `G/cmd_gm.cpp:3957-4060`).
-//! Observers belong to the next slice. Timers use the same per-owner
+//! Observer admission is unreachable on the owner's quests (ledger 469); legacy's
+//! observer packet/chat senders are commented out. Timers use the same per-owner
 //! Pulse countdown pattern as `timed_exit`. Equal-Pulse fires run in arena order,
 //! ready before timeout, unlike legacy's heap-shape-dependent event order.
 //! Timeout sends the empty opponent list to both players: legacy mistakenly sends
@@ -53,6 +54,96 @@ impl Arena {
 }
 
 impl GameState {
+    pub(super) fn is_arena_map(&self, map: i32) -> bool {
+        self.arenas
+            .contains_key(&(0, u32::from_ne_bytes(map.to_ne_bytes())))
+    }
+
+    pub(super) fn in_arena(&self, vid: Vid) -> bool {
+        self.arena_member(vid)
+            .is_some_and(|slot| self.arenas[&slot.0][slot.1].bound)
+    }
+
+    pub(super) fn arena_event_flag(&self, name: &[u8]) -> i32 {
+        self.quests
+            .as_ref()
+            .map_or(0, |quests| quests.manager().event_flag(name))
+    }
+
+    pub(super) fn arena_potion_count(&self, vid: Vid) -> i32 {
+        self.arena_potions
+            .get(&vid)
+            .copied()
+            .unwrap_or_else(|| self.arena_event_flag(b"arena_potion_limit_count"))
+    }
+
+    pub(super) fn set_arena_potion_count(&mut self, vid: Vid, count: i32) {
+        self.arena_potions.insert(vid, count);
+    }
+
+    pub(super) fn consume_arena_potion(&mut self, vid: Vid) {
+        let count = self.arena_potion_count(vid).wrapping_sub(1);
+        self.set_arena_potion_count(vid, count);
+    }
+
+    /// Reachable login arms (`G/input_login.cpp:791-839`). No owner quest adds an
+    /// observer; `RegisterObserverPtr` cannot create one (`G/arena.cpp:1094-1097`).
+    pub(super) fn enter_arena(&mut self, vid: Vid) {
+        let Some((_, map)) = self
+            .place_of(vid.raw())
+            .filter(|(_, map)| self.is_arena_map(*map))
+        else {
+            return;
+        };
+        if self
+            .arena_member(vid)
+            .is_some_and(|slot| slot.0 .1 == u32::from_ne_bytes(map.to_ne_bytes()))
+        {
+            self.arena_packet([Some(vid), None], false);
+            if self.is_horse_riding(vid.raw()) {
+                self.stop_riding(vid);
+                self.horse_unsummon(vid, false);
+            }
+            self.arena_leave_party(vid, false);
+        } else if self
+            .points_of(vid.raw())
+            .is_some_and(|points| points.gm_level() == crate::command::GM_PLAYER)
+        {
+            // `MEMBER_NO`: a GM_PLAYER is sent to its empire start (`:834-838`). Legacy's
+            // `WarpSet` resolves the target's address through the P2P map table, which no
+            // single core here holds. The character's own Channel serves the target in the
+            // owner's deployment (every Channel hosts every empire start), so `None` names
+            // it; otherwise the lowest Channel hosting the target is named, and a target
+            // no Channel hosts refuses as a position no map serves.
+            let body = self
+                .bodies
+                .get(&vid)
+                .map(|body| (body.channel, body.card.empire));
+            if let Some((channel, empire)) = body {
+                if let Some(point) = crate::warp::go_home(empire) {
+                    let index = self.recall.atlas().and_then(|atlas| {
+                        atlas.index_at(point.0, point.1).filter(|&index| index != 0)
+                    });
+                    match index {
+                        Some(index) if self.recall.hosts(channel, index) => {
+                            self.order_warp(vid, point);
+                        }
+                        Some(index) => {
+                            let mut hosts: Vec<u8> = (1..=common::config::SHARED_CHANNEL)
+                                .filter(|&channel| self.recall.hosts(channel, index))
+                                .collect();
+                            hosts.sort_unstable();
+                            if let Some(&channel) = hosts.first() {
+                                self.arena_return_warp(vid, point, channel);
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn load_arenas(&mut self, configs: &[quest::host::Arena]) {
         for config in configs {
             let map = u32::from_ne_bytes(config.map_index.to_ne_bytes());
@@ -211,9 +302,12 @@ impl GameState {
 
     fn arena_member(&self, vid: Vid) -> Option<Slot> {
         let pid = self.characters.find_by_vid(vid).ok()?.player_id();
-        self.arena_slots()
-            .into_iter()
-            .find(|slot| self.arenas[&slot.0][slot.1].pids.contains(&pid))
+        self.arenas.iter().find_map(|(map, slots)| {
+            slots
+                .iter()
+                .position(|arena| arena.pids.contains(&pid))
+                .map(|index| (*map, index))
+        })
     }
 
     fn arena_players(&self, slot: Slot) -> [Option<Vid>; 2] {
@@ -269,12 +363,16 @@ impl GameState {
         true
     }
 
-    /// `CArena::OnDead` (`G/arena.cpp:726-864`). Potion-limit storage remains the
-    /// recorded 467 gap; observers remain empty.
+    /// `CArena::OnDead` (`G/arena.cpp:726-864`); observers remain unreachable.
     fn score_arena(&mut self, slot: Slot, killer_pid: u32) {
         let players = self.arena_players(slot);
         let restart = if players.iter().all(Option::is_some) {
-            self.score_arena_present(slot, players, killer_pid)
+            let restart = self.score_arena_present(slot, players, killer_pid);
+            let count = self.arena_event_flag(b"arena_potion_limit_count");
+            for vid in players.into_iter().flatten() {
+                self.set_arena_potion_count(vid, count);
+            }
+            restart
         } else {
             self.arena_tell(players, CHAT_TYPE_NOTICE, OPPONENT_PROBLEM, &[]);
             false
@@ -509,6 +607,9 @@ impl GameState {
                 if count > 10000 {
                     self.arena_tell(players, CHAT_TYPE_INFO, UNLIMITED, &[]);
                 } else {
+                    for vid in players.into_iter().flatten() {
+                        self.set_arena_potion_count(vid, count);
+                    }
                     self.arena_tell(players, CHAT_TYPE_INFO, POTIONS, &[Arg::Int(count.into())]);
                 }
                 self.arena_tell(players, CHAT_TYPE_INFO, COUNTDOWN, &[]);
@@ -906,5 +1007,34 @@ mod tests {
             assert_eq!(world.arenas[&(0, 41)][0].ready, Some((250, 2)));
             assert_eq!(world.arenas[&(0, 41)][0].set_points, [0, 0]);
         }
+    }
+    #[test]
+    fn arena_login_member_sends_empty_opponent_list_without_binding_or_advancing_timer() {
+        let (mut world, mut inboxes) = active();
+        let vid = Vid::new(0x1234);
+        let map = world.bodies[&vid].map;
+        world.enter_arena(vid);
+        assert_eq!(packets(&mut inboxes[0]), [vec![40, 3, 0]]);
+        assert!(!world.in_arena(vid));
+        assert_eq!(
+            world.arenas[&(0, u32::try_from(map).unwrap())][0].ready,
+            Some((250, 0))
+        );
+        world.fire_arena_ready(((0, 41), 0), 0, 250);
+        assert!(world.in_arena(vid));
+    }
+
+    #[test]
+    fn arena_potion_count_resets_at_ready_and_after_each_scored_round() {
+        let (mut world, _) = active();
+        let vid = Vid::new(0x1234);
+        world.set_arena_potion_count(vid, 0x1234);
+        world.consume_arena_potion(vid);
+        assert_eq!(world.arena_potion_count(vid), 0x1233);
+        world.fire_arena_ready(((0, 41), 0), 0, 250);
+        assert_eq!(world.arena_potion_count(vid), 0);
+        world.set_arena_potion_count(vid, 0x2345);
+        world.arena_on_dead(vid, Vid::new(0x2345));
+        assert_eq!(world.arena_potion_count(vid), 0);
     }
 }

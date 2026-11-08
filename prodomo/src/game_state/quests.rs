@@ -3721,9 +3721,8 @@ impl GameState {
         };
         let (id, vnum, sig) = (item.id, item.vnum, item.sig_vnum);
         // `GetArena() != NULL || IsObserverMode()` on vnums 50051-50053
-        // (`G/char_item.cpp:2843-2850`): no arenas, so the observer arm alone tells
-        // `[LS;1205]` and keeps the item.
-        if matches!(vnum, 50051..=50053) && self.is_observing(vid) {
+        // (`G/char_item.cpp:2843-2850`) tells `[LS;1205]` and keeps the item.
+        if matches!(vnum, 50051..=50053) && (self.in_arena(vid) || self.is_observing(vid)) {
             if let Some(mover) = self.own_mover(vid) {
                 self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1205]", &[]);
             }
