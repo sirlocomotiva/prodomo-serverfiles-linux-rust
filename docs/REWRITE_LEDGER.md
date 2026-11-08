@@ -48232,3 +48232,18 @@ failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --wo
 --no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
 changed.
+
+## 453. The daily-gift arms
+
+The four `sub.DailyGift.*` arms are `ported`. The open, collect and ticket arms already
+rode `daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews`; the slice adds
+`a_daily_gift_close_clears_the_open_week` for the close: the open loads the week, the
+close answers nothing, and the next open reloads the week with the same cash and week.
+Mutant killed: the close that leaves `loaded` set.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4964 passed, 0 failed in 44 targets. Doc tests: 1 passed, 0
+failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
+changed.

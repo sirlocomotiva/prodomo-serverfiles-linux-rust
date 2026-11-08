@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 452 (the attr67 arms).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 453
+Last reviewed: 2026-11-08, after ledger section 453 (the daily-gift arms).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 454
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -472,7 +472,9 @@ chat, the `POINT_INVEN` rise and the save round-trip. Since 450 the element refi
 Since 451 the party roles are `ported`: the leader's set and unset, the `[LS;671]` and
 `[LS;672]` gates, the capped quiet, and the NORMAL and role-8 quiet. Since 452 the
 attr67 arms are `ported`: the open and regist ride the waits-and-collects scenario, and
-the close shuts the window silently. The
+the close shuts the window silently. Since 453 the daily-gift arms are `ported`: the
+open, collect and ticket ride the collects scenario, and the close clears the open week.
+The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

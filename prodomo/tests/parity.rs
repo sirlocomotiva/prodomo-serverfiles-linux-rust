@@ -39108,6 +39108,43 @@ fn run_daily_event(alice: &mut Keyed, args: &[u8], value: u8) {
     );
 }
 
+/// `sub.DailyGift.DAILY_GIFT_CLOSE`: the close clears the open flag, so the next open
+/// reloads the week instead of resending it. The open, collect and ticket arms ride
+/// `daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews`.
+#[test]
+fn a_daily_gift_close_clears_the_open_week() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    stage_daily_gifts(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    run_daily_event(&mut alice, b"1 3 1", 1);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Daily gifts are now available."),
+        "the start is noticed"
+    );
+    // Open: the week loads. Close: silent. Open again: the week reloads, with the
+    // same cash and week.
+    alice.send_record(&client_daily_gift(1, 0));
+    read_test_days(&mut alice);
+    let first = read_gift_week(&mut alice);
+    assert_eq!((first.cash, first.week), (1000, 3), "the loaded week");
+    alice.send_record(&client_daily_gift(0, 0));
+    alice.quiet("the close answers nothing");
+    alice.send_record(&client_daily_gift(1, 0));
+    read_test_days(&mut alice);
+    let second = read_gift_week(&mut alice);
+    assert_eq!(
+        (second.cash, second.week),
+        (1000, 3),
+        "the reopened week reloads"
+    );
+}
+
 /// `cg.game.daily_gift`: the week's gifts collect free, for cash and for the ticket,
 /// a short week renews into the next, and the row and the cash save.
 #[test]
