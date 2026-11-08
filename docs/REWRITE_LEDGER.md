@@ -48156,3 +48156,35 @@ clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 450. `CG_REFINE_ELEMENT` + `GC_REFINE_ELEMENT`
+
+`cg.game.refine_element` and `gc.window.refine_element` are `ported`: the scroll's
+window, the draw, the downgrade and the change, and 255 closes. The `USE_ELEMENT_*`
+scrolls (56002-56009) stand the window through `CG_ITEM_USE_TO_ITEM`; `CG_REFINE_ELEMENT`
+runs it. The busy gates (trade, safebox, cube), the min-+7 and max-+3 gates, the
+element-mismatch gate, the 3,000,000 / 10,000,000 fees and the `number(1,8)` /
+`number(2,12)` raises are legacy's, as is the draw's 100% table (`REFINE_ELEMENT_*_PROBABILITY
+= 100`), so the failed answer is unreachable but sent on the same path. The downgrade at
++1 clears the element to 0. The landed element is stored per row (`RowChange::Elemented`,
+new `ItemChange::Elemented`), and the gold record rides last, after the landed answer.
+
+Scenario `an_element_scroll_upgrades_and_a_hex_scroll_downgrades`: the lightning scroll
+stands the upgrade window on the +7 sword, the answer lands lightning +1 with one scroll
+left and the fee gone, the hex scroll stands the downgrade window and the downgrade clears
+the element with its fee gone, the +6 sword is refused with the min-level line, 255 closes
+silently, and the store holds the landed element and the final gold. Unit tests pin the
+`%d%d%02d%02d%d%02d` packing and the scroll's `VALUE0` element. Mutants killed: both fees,
+the downgrade clear, the +1 step, the landed kind, and the store column (the persist check
+catches a write to the wrong column).
+
+`world::character::MoveKind::Refined` answers it; `GameCommand::RefineElement` and
+`GameState::apply_refine_step` carry it. `gamedata::item_kind` gains the three
+`USE_ELEMENT_*` sub-types.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4961 passed, 0 failed in 44 targets. Doc tests: 1 passed, 0
+failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
+changed.

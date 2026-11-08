@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 449 (the inventory unlocks).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 450
+Last reviewed: 2026-11-08, after ledger section 450 (the element refine).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 451
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -467,7 +467,8 @@ round-trip. Since 447 the premium players are `ported`: the window, the list, th
 activation, the minute sweep and the save round-trip. Since 448 the cube is `ported`:
 the recipes, `/cube open`, the make and the close, and `/reload c`. Since 449 the
 inventory unlocks are `ported`: the knock, the price list, the mixed spend, the shortfall
-chat, the `POINT_INVEN` rise and the save round-trip. The
+chat, the `POINT_INVEN` rise and the save round-trip. Since 450 the element refine is
+`ported`: the scroll's window, the draw, the downgrade and the change, and 255 closes. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
