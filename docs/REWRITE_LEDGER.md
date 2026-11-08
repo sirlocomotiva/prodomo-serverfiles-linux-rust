@@ -48957,3 +48957,84 @@ in 46 targets, up 16 from 4993), `cargo test --workspace --doc --locked --offlin
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 468. The arena duel's combat
+
+The arena's two combat hooks are ported in `prodomo/src/game_state/arena.rs`, `fight.rs` and
+`death.rs`. The arena logic was written by the delegated agent of ledger 467 and reviewed here.
+
+**`CanAttack`** (`G/arena.cpp:646-689`): two registered duelists of one arena, on one map, may
+attack each other in either direction; a character never attacks itself, and the countdown state
+does not restrict it.
+- The override sits where `battle_is_attackable` places it (`G/battle.cpp:99-151`). The
+  dead-victim, BANPK, ice-damage and downed-attacker gates come before it. The ordinary PK-mode
+  policy and the grade-one horse refusal come after it, so it overrides them.
+- The Rewrite also requires one Channel. Legacy's managers are per process, so two Channels'
+  copies of map 112 never shared a duel there. This keeps that isolation inside ADR-0002's
+  single process.
+
+**`OnDead`** (`G/arena.cpp:692-864`): an arena death credits the killer's side. Then:
+- either it tells the round-win line, the score notice in A-then-B order, and the ten-second
+  next-round line, and re-arms the ready event's state 3;
+- or, at the set count, it tells the match-win notice and the ten-second return line, and
+  re-arms state 2.
+
+The time-out event is kept. Every branch for a missing A, a missing B, both missing, a killer
+outside the arena and a zero set count is ported.
+
+**`Dead`** (`G/char_battle.cpp:1280-1309`) asks `OnDead` after the consent-duel bookkeeping and
+before the quest and guild kill hooks. An arena death keeps the victim's items and exp and arms
+no 180-second dead event (`:1333-1345`, `:1461-1470`, `:1553-1594`). It keeps the dead phase, the
+fan, the affect handling, the target clearing, the `m_dwKillerPID = 0` reset and the window
+closes.
+
+**The round restart** (state 3, `G/arena.cpp:325-367`) shows both duelists at their start points
+and sets the GAME phase. It stands them, restarts recovery, refills HP and SP, re-encodes the view
+and sends the opponent records.
+- Legacy calls `StartRecoveryEvent` before `SetPosition(POS_STANDING)`, so for the dead loser it
+  returns early (`G/char.cpp:3292`). The Rewrite stands first.
+- The difference is not observable. The restart refills HP and SP, the next hit restarts
+  recovery in `Damage` (`G/char_battle.cpp:2421`), and `EndDuel`'s Warp restarts it at login
+  (`G/input_login.cpp:657`).
+
+Quirks kept:
+- the duelists can attack each other during the countdown and the pause between rounds;
+- `OnDead` does not check that the killer and the victim differ (`G/arena.cpp:717-719`).
+
+Gaps, in `sys.event.arena` (`partial`):
+- the observers;
+- the login re-register;
+- the `IsArenaMap` hooks in items, the horse, login and `/pvp`. The `cmd.pvp` note records that
+  its arena gate (`G/cmd_general.cpp:850`) is now reachable;
+- the potion limit (`:812-814`).
+
+The ordinary same-empire killer-alignment penalty is not ported, so its arena exemption
+(`G/char_battle.cpp:1412-1442`) needs no path yet.
+
+Tests:
+- unit tests pin:
+  - the attackability truth table and the gate precedence;
+  - both sides' scoring and match wins, with golden lines;
+  - every missing-player branch, the zero set count and the outside killer;
+  - the death lookup;
+  - the item, exp and dead-event exemptions and the killer reset;
+  - an outsider's death and the resumed recovery;
+- the scenario `a_duelist_wins_an_arena_round` kills one duelist through real `CG_ATTACK` frames.
+  Both read the winner, score and next-round lines, then the restart, the positions, the opponent
+  records and the begin line. It passed 8 of 8 in a parallel flake check.
+
+The scenario replaces `a_gm_lists_starts_and_ends_an_arena_duel` as
+`event.arena.ready_to_start_event`'s scenario.
+
+Mutants, each killed semantically and restored by SHA-256:
+- the score threshold `<`→`<=`;
+- the dead-event exemption negated;
+- the arena attack override removed.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5019 passed, 0 failed
+in 46 targets, up 10 from 5009), `cargo test --workspace --doc --locked --offline` (1 passed),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

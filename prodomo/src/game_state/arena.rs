@@ -1,5 +1,5 @@
 //! GM arena duels (`G/arena.cpp:1-589,951-1055`, `G/cmd_gm.cpp:3957-4060`).
-//! Scoring and observers belong to the next slices. Timers use the same per-owner
+//! Observers belong to the next slice. Timers use the same per-owner
 //! Pulse countdown pattern as `timed_exit`. Equal-Pulse fires run in arena order,
 //! ready before timeout, unlike legacy's heap-shape-dependent event order.
 //! Timeout sends the empty opponent list to both players: legacy mistakenly sends
@@ -226,7 +226,110 @@ impl GameState {
         })
     }
 
-    fn start_arena(&mut self, slot: Slot, players: [Vid; 2], sets: u32, minutes: u64) {
+    /// `CArenaManager::CanAttack` (`G/arena.cpp:646-689`): only the registered
+    /// opposing PIDs on the same arena map. Registration, not countdown state,
+    /// controls this override of PK modes and the grade-one horse gate.
+    pub(super) fn arena_can_attack(&self, attacker: Vid, victim: Vid) -> bool {
+        attacker != victim && self.arena_combat_slot(attacker, victim).is_some()
+    }
+
+    fn arena_combat_slot(&self, a: Vid, b: Vid) -> Option<Slot> {
+        let place = self.place_of(a.raw())?;
+        if self.place_of(b.raw())? != place {
+            return None;
+        }
+        let pids = [a, b].map(|vid| {
+            self.characters
+                .find_by_vid(vid)
+                .map_or(0, world::character::Character::player_id)
+        });
+        if pids.contains(&0) {
+            return None;
+        }
+        let key = (0, u32::from_ne_bytes(place.1.to_ne_bytes()));
+        self.arenas
+            .get(&key)?
+            .iter()
+            .position(|arena| arena.pids.contains(&pids[0]) && arena.pids.contains(&pids[1]))
+            .map(|at| (key, at))
+    }
+
+    /// `OnDead`'s map/list lookup (`G/arena.cpp:692-723`). The character's regular
+    /// death still runs; the true result suppresses item drop and its dead event.
+    pub(super) fn arena_on_dead(&mut self, killer: Vid, victim: Vid) -> bool {
+        let Some(slot) = self.arena_combat_slot(killer, victim) else {
+            return false;
+        };
+        let pid = self
+            .characters
+            .find_by_vid(killer)
+            .expect("online killer")
+            .player_id();
+        self.score_arena(slot, pid);
+        true
+    }
+
+    /// `CArena::OnDead` (`G/arena.cpp:726-864`). Potion-limit storage remains the
+    /// recorded 467 gap; observers remain empty.
+    fn score_arena(&mut self, slot: Slot, killer_pid: u32) {
+        let players = self.arena_players(slot);
+        let restart = if players.iter().all(Option::is_some) {
+            self.score_arena_present(slot, players, killer_pid)
+        } else {
+            self.arena_tell(players, CHAT_TYPE_NOTICE, OPPONENT_PROBLEM, &[]);
+            false
+        };
+        self.arena_tell(
+            players,
+            CHAT_TYPE_INFO,
+            if restart { NEXT_ROUND } else { RETURN_TOWN },
+            &[],
+        );
+        self.arenas.get_mut(&slot.0).expect("arena map")[slot.1].ready =
+            Some((self.last_pulse + TEN_SECONDS, if restart { 3 } else { 2 }));
+    }
+
+    fn score_arena_present(&mut self, slot: Slot, players: [Option<Vid>; 2], killer: u32) -> bool {
+        let arena = &mut self.arenas.get_mut(&slot.0).expect("arena map")[slot.1];
+        let Some(side) = arena.pids.iter().position(|pid| *pid == killer) else {
+            return false;
+        };
+        arena.set_points[side] = arena.set_points[side].wrapping_add(1);
+        let points = arena.set_points;
+        let restart = points[side] < arena.set_count;
+        let names = players.map(|vid| {
+            self.bodies[&vid.expect("present duelist")]
+                .card
+                .name
+                .as_bytes()
+        });
+        self.arena_tell(
+            players,
+            if restart {
+                CHAT_TYPE_INFO
+            } else {
+                CHAT_TYPE_NOTICE
+            },
+            if restart { ROUND_WIN } else { DUEL_WIN },
+            &[Arg::Text(names[side])],
+        );
+        if restart {
+            self.arena_tell(
+                players,
+                CHAT_TYPE_NOTICE,
+                b"%s %d : %d %s",
+                &[
+                    Arg::Text(names[0]),
+                    Arg::Int(points[0].into()),
+                    Arg::Int(points[1].into()),
+                    Arg::Text(names[1]),
+                ],
+            );
+        }
+        restart
+    }
+
+    pub(super) fn start_arena(&mut self, slot: Slot, players: [Vid; 2], sets: u32, minutes: u64) {
         let pids = players.map(|vid| {
             self.characters
                 .find_by_vid(vid)
@@ -303,8 +406,8 @@ impl GameState {
                 let flags = self.affect_flags_of(vid);
                 self.send_affect_update(vid, flags);
             }
-            self.start_pc_recovery(vid);
             self.stand(vid);
+            self.start_pc_recovery(vid);
             self.arena_refill(vid);
             if let Some(body) = self.bodies.get(&vid) {
                 let empire = usize::from(body.card.empire);
@@ -422,8 +525,8 @@ impl GameState {
                 for (vid, (x, y)) in players.into_iter().flatten().zip(start) {
                     let _shown = self.show_body(vid.raw(), (x * 100, y * 100, 0), None);
                     self.write_phase(vid, crate::loading_phase::PHASE_GAME);
-                    self.start_pc_recovery(vid);
                     self.stand(vid);
+                    self.start_pc_recovery(vid);
                     self.arena_refill(vid);
                     self.restart_at_same_pos(vid);
                 }
@@ -483,6 +586,12 @@ const TIMEOUT: &[u8] = b"\xb4\xeb\xb7\xc3\x20\xbd\xc3\xb0\xa3\x20\xc3\xca\xb0\xf
 const RETURN: &[u8] = b"\x31\x30\xc3\xca\xb5\xda\x20\xb8\xb6\xc0\xbb\xb7\xce\x20\xc0\xcc\xb5\xbf\xc7\xd5\xb4\xcf\xb4\xd9\x2e";
 const DISCONNECTED: &[u8] = b"\xbb\xf3\xb4\xeb\xb9\xe6\x20\xc4\xb3\xb8\xaf\xc5\xcd\xb0\xa1\x20\xc1\xa2\xbc\xd3\xc0\xbb\x20\xc1\xbe\xb7\xe1\xc7\xcf\xbf\xa9\x20\xb4\xeb\xb7\xc3\xc0\xbb\x20\xc1\xdf\xc1\xf6\xc7\xd5\xb4\xcf\xb4\xd9\x2e";
 
+const OPPONENT_PROBLEM: &[u8] = b"\xbb\xf3\xb4\xeb\xb9\xe6\x20\xc4\xb3\xb8\xaf\xc5\xcd\xc0\xc7\x20\xb9\xae\xc1\xa6\xb7\xce\x20\xc0\xce\xc7\xcf\xbf\xa9\x20\xb4\xeb\xb7\xc3\xc0\xbb\x20\xc1\xbe\xb7\xe1\xc7\xd5\xb4\xcf\xb4\xd9\x2e";
+const ROUND_WIN: &[u8] =
+    b"\x25\x73\x20\xb4\xd4\xc0\xcc\x20\xbd\xc2\xb8\xae\xc7\xcf\xbf\xb4\xbd\xc0\xb4\xcf\xb4\xd9\x2e";
+const DUEL_WIN: &[u8] = b"\x25\x73\x20\xb4\xd4\xc0\xcc\x20\xb4\xeb\xb7\xc3\xbf\xa1\xbc\xad\x20\xbd\xc2\xb8\xae\xc7\xcf\xbf\xb4\xbd\xc0\xb4\xcf\xb4\xd9\x2e";
+const NEXT_ROUND: &[u8] = b"\x31\x30\xc3\xca\xb5\xda\x20\xb4\xd9\xc0\xbd\x20\xc6\xc7\xc0\xbb\x20\xbd\xc3\xc0\xdb\xc7\xd5\xb4\xcf\xb4\xd9\x2e";
+const RETURN_TOWN: &[u8] = b"\x31\x30\xc3\xca\xb5\xda\x20\xb8\xb6\xc0\xbb\xb7\xce\x20\xb5\xc7\xb5\xb9\xbe\xc6\xb0\xa9\xb4\xcf\xb4\xd9\x2e";
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,10 +637,12 @@ mod tests {
         [tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>; 2],
     ) {
         let mut world = a_world(&TestClock::default());
-        let a = enter(&mut world, 0x1234, (3200, 3200), 820);
-        let b = enter(&mut world, 0x2345, (3400, 3200), 820);
+        let mut a = enter(&mut world, 0x1234, (3200, 3200), 820);
+        let mut b = enter(&mut world, 0x2345, (3400, 3200), 820);
         world.load_arenas(&[config(41, (32, 32), (34, 32))]);
         world.start_arena(((0, 41), 0), [Vid::new(0x1234), Vid::new(0x2345)], 3, 5);
+        while a.try_recv().is_ok() {}
+        while b.try_recv().is_ok() {}
         (world, [a, b])
     }
 
@@ -629,5 +740,171 @@ mod tests {
         world.run_arena_ticks(250);
         assert_eq!(world.arenas[&(0, 41)][0].ready, None);
         assert_eq!(world.arenas[&(0, 41)][0].timeout, None);
+    }
+    fn chats(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<(u8, Vec<u8>)> {
+        let mut lines = Vec::new();
+        while let Ok(bytes) = inbox.try_recv() {
+            if bytes.first() == Some(&4) {
+                assert_eq!(
+                    usize::from(u16::from_le_bytes([bytes[1], bytes[2]])),
+                    bytes.len()
+                );
+                lines.push((bytes[3], bytes[10..].to_vec()));
+            }
+        }
+        lines
+    }
+
+    fn english(world: &mut GameState) {
+        let country = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe/country");
+        world.locale =
+            std::sync::Arc::new(gamedata::locale_string::LocaleStrings::load(&country).unwrap());
+        for body in world.bodies.values_mut() {
+            body.card.language = 1;
+        }
+    }
+
+    #[test]
+    fn arena_attackability_truth_table_ignores_countdown_and_pk_policy() {
+        let (mut world, _inboxes) = active();
+        let a = Vid::new(0x1234);
+        let b = Vid::new(0x2345);
+        let _third = enter(&mut world, 0x3456, (3300, 3200), 820);
+        assert!(world.arena_can_attack(a, b));
+        assert!(world.arena_can_attack(b, a));
+        assert!(!world.arena_can_attack(a, a));
+        assert!(!world.arena_can_attack(a, Vid::new(0x3456)));
+        assert!(!world.arena_can_attack(a, Vid::new(0x4567)));
+        world.bodies.get_mut(&b).unwrap().channel = 2;
+        assert!(!world.arena_can_attack(a, b));
+        world.bodies.get_mut(&b).unwrap().channel = 1;
+        world.bodies.get_mut(&b).unwrap().map = 42;
+        assert!(!world.arena_can_attack(a, b));
+        world.bodies.get_mut(&a).unwrap().map = 42;
+        assert!(!world.arena_can_attack(a, b));
+        world.bodies.get_mut(&a).unwrap().map = 41;
+        world.bodies.get_mut(&b).unwrap().map = 41;
+        world.arenas.get_mut(&(0, 41)).unwrap()[0].ready = Some((250, 3));
+        assert!(world.arena_can_attack(a, b));
+        world.end_arena(((0, 41), 0));
+        assert!(!world.arena_can_attack(a, b));
+    }
+
+    #[test]
+    fn arena_death_lookup_refuses_outsiders_and_other_maps_but_keeps_self_membership() {
+        let (mut world, _inboxes) = active();
+        let a = Vid::new(0x1234);
+        let b = Vid::new(0x2345);
+        let _other = enter(&mut world, 0x3456, (3300, 3200), 820);
+        assert!(!world.arena_on_dead(Vid::new(0x3456), a));
+        assert!(!world.arena_on_dead(Vid::new(0x4567), a));
+        world.bodies.get_mut(&b).unwrap().map = 42;
+        assert!(!world.arena_on_dead(a, b));
+        world.bodies.get_mut(&b).unwrap().map = 41;
+        assert!(world.arena_on_dead(a, a));
+        assert_eq!(world.arenas[&(0, 41)][0].set_points, [1, 0]);
+    }
+
+    #[test]
+    fn arena_each_side_scores_rounds_and_wins_with_golden_lines() {
+        for side in 0..2 {
+            let (mut world, mut inboxes) = active();
+            english(&mut world);
+            world.arenas.get_mut(&(0, 41)).unwrap()[0].set_count = 2;
+            let players = [Vid::new(0x1234), Vid::new(0x2345)];
+            assert!(world.arena_on_dead(players[side], players[1 - side]));
+            let winner = if side == 0 { "P4660" } else { "P9029" };
+            let score = if side == 0 {
+                b"P4660 1 : 0 P9029".as_slice()
+            } else {
+                b"P4660 0 : 1 P9029".as_slice()
+            };
+            for inbox in &mut inboxes {
+                assert_eq!(
+                    chats(inbox),
+                    vec![
+                        (1, format!("{winner} has won.").into_bytes()),
+                        (2, score.to_vec()),
+                        (1, b"The next round will begin in 10 seconds.".to_vec())
+                    ]
+                );
+            }
+            assert_eq!(world.arenas[&(0, 41)][0].ready, Some((250, 3)));
+            assert!(world.arena_on_dead(players[side], players[1 - side]));
+            for inbox in &mut inboxes {
+                assert_eq!(
+                    chats(inbox),
+                    vec![
+                        (2, format!("{winner} has won the duel.").into_bytes()),
+                        (
+                            1,
+                            b"You will be teleported into the city in 10 seconds.".to_vec()
+                        )
+                    ]
+                );
+            }
+            assert_eq!(world.arenas[&(0, 41)][0].ready, Some((250, 2)));
+            assert_eq!(world.arenas[&(0, 41)][0].timeout, Some((7500, 0)));
+        }
+    }
+
+    #[test]
+    fn arena_zero_sets_finishes_first_kill_and_foreign_killer_finishes_without_score() {
+        for (sets, killer) in [(0, 0x1234), (3, 0x4567)] {
+            let (mut world, mut inboxes) = active();
+            english(&mut world);
+            world.arenas.get_mut(&(0, 41)).unwrap()[0].set_count = sets;
+            world.score_arena(((0, 41), 0), killer);
+            for inbox in &mut inboxes {
+                let lines = chats(inbox);
+                assert_eq!(
+                    lines.last().unwrap(),
+                    &(
+                        1,
+                        b"You will be teleported into the city in 10 seconds.".to_vec()
+                    )
+                );
+                assert_eq!(lines.len(), if sets == 0 { 2 } else { 1 });
+            }
+            assert_eq!(
+                world.arenas[&(0, 41)][0].set_points,
+                if sets == 0 { [1, 0] } else { [0, 0] }
+            );
+            assert_eq!(world.arenas[&(0, 41)][0].ready, Some((250, 2)));
+        }
+    }
+
+    #[test]
+    fn arena_missing_duelist_branches_notice_survivors_and_schedule_return() {
+        for missing in [vec![0], vec![1], vec![0, 1]] {
+            let (mut world, mut inboxes) = active();
+            english(&mut world);
+            let ids = [Vid::new(0x1234), Vid::new(0x2345)];
+            for side in &missing {
+                world.bodies.remove(&ids[*side]);
+            }
+            world.score_arena(((0, 41), 0), 0x1234);
+            for (side, inbox) in inboxes.iter_mut().enumerate() {
+                let expected = if missing.contains(&side) {
+                    Vec::new()
+                } else {
+                    vec![
+                        (
+                            2,
+                            b"Your combatant has got some problems. The duel is being cancelled."
+                                .to_vec(),
+                        ),
+                        (
+                            1,
+                            b"You will be teleported into the city in 10 seconds.".to_vec(),
+                        ),
+                    ]
+                };
+                assert_eq!(chats(inbox), expected);
+            }
+            assert_eq!(world.arenas[&(0, 41)][0].ready, Some((250, 2)));
+            assert_eq!(world.arenas[&(0, 41)][0].set_points, [0, 0]);
+        }
     }
 }

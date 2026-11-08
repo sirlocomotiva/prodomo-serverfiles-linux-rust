@@ -43883,3 +43883,265 @@ fn check_arena_return(database: &ScratchDatabase) {
          AND x = 347600 AND y = 882700) = 2",
     );
 }
+
+/// Ledger 468: `CanAttack` and `OnDead` (`G/arena.cpp:646-866`) allow the
+/// registered same-empire pair to fight, score a real melee kill, and restart
+/// ready state 3 after ten seconds. English answers come from the owner's
+/// `country/en/locale_string.txt:1585-1592`, not the implementation's strings.
+#[test]
+fn a_duelist_wins_an_arena_round() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = arena_round_server(&database);
+    let (mut alice, _, mut yankee, _) = enter_arena_round_pair(&server, 1);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/duel Alpha Yankee 2 5"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let warp = a_warp_record((853_400, 10_100), server.channel(99).port());
+    let (before, _) = read_until_record_keeping(&mut alice, &warp, deadline);
+    let started = an_info_line(b"Dalian started successfully.");
+    if !before.contains(&started) {
+        assert_eq!(read_until_record(&mut alice, &started, deadline), started);
+    }
+    let warp = a_warp_record((856_400, 10_100), server.channel(99).port());
+    assert_eq!(read_until_record(&mut yankee, &warp, deadline), warp);
+    close_arena_pair(&mut server, alice, yankee);
+    let (mut alice, alpha, mut yankee, opponent) = enter_arena_round_pair(&server, 99);
+    read_arena_countdown(&mut alice, alpha.id, &mut yankee, opponent.id);
+
+    let rounds = win_first_arena_round(&mut alice, &mut yankee, opponent.id);
+
+    let restart_wait = std::time::Instant::now();
+    let begun = an_info_line(b"The duel has begun.");
+    let reset = read_arena_pair_until(
+        &mut alice,
+        &mut yankee,
+        &begun,
+        restart_wait + Duration::from_secs(15),
+    );
+    assert!(
+        restart_wait.elapsed() >= Duration::from_secs(9),
+        "ready state 3 waits ten seconds after death, not immediately"
+    );
+    for (records, own, other, start, hp, sp) in [
+        (
+            &reset[0],
+            alpha.id,
+            opponent.id,
+            (853_400, 10_100),
+            1420,
+            600,
+        ),
+        (
+            &reset[1],
+            opponent.id,
+            alpha.id,
+            (856_400, 10_100),
+            650,
+            200,
+        ),
+    ] {
+        assert!(records.contains(&vec![GC_PHASE, PHASE_GAME]));
+        // A zero HP refill emits nothing for the unwounded winner.
+        if own == opponent.id {
+            assert!(records
+                .iter()
+                .any(|record| point_value(record, own, 5) == Some(hp)));
+        }
+        // Unarmed attacks spend no SP: any packet for this full pool must
+        // retain its maximum, but a zero refill need not emit a packet.
+        assert!(rounds
+            .iter()
+            .flatten()
+            .chain(records.iter())
+            .filter_map(|record| point_value(record, own, 7))
+            .all(|value| value == sp));
+        assert!(records.iter().any(|record| {
+            record[0] == GC_CHARACTER_ADD
+                && record[1..5] == own.to_le_bytes()
+                && inserted_at(record) == start
+        }));
+        let mut duel = vec![40, 7, 0];
+        duel.extend_from_slice(&other.to_le_bytes());
+        assert!(
+            records.contains(&duel),
+            "opponent is restored before the begun line"
+        );
+    }
+    end_named_arena_pair(&server, &mut alice, alpha.id, &mut yankee, opponent.id);
+    check_arena_return(&database);
+    close_arena_pair(&mut server, alice, yankee);
+}
+
+/// Seed a same-empire pair whose unarmed hit can finish an arena round.
+fn arena_round_server(database: &ScratchDatabase) -> Server {
+    for login in ["alice", "bob"] {
+        create_account_before_boot(database, login);
+    }
+    add_characters(database);
+    sql(database, "UPDATE player SET sp = 600 WHERE name = 'Alpha'");
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, stamina, sp, x, y) SELECT id, \
+         0, 'Yankee', 1, 154, 12345, 200, 470100, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Keep stored stats within their BYTE bounds. A worn attack-grade
+    // attribute supplies deterministic fatal damage without a weapon draw;
+    // StartDuel refills the victim, so a wounded HP seed would not suffice.
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, \
+             attrvalue0) SELECT 20, id, 2, 0, 1, {WORN_ARMOUR}, 53, 3000 FROM player \
+             WHERE name = 'Alpha'"
+        ),
+    );
+    for (login, name) in [("alice", "Alpha"), ("bob", "Yankee")] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO gm_grant (account_id, name, authority) SELECT id, '{name}', \
+                 'HIGH_WIZARD' FROM account WHERE login = '{login}'"
+            ),
+        );
+    }
+    let mut channels = default_channels();
+    channels
+        .iter_mut()
+        .find(|channel| channel.number == 99)
+        .expect("the Shared Channel")
+        .maps
+        .push(112);
+    Server::start_with(binary(), database.url(), &channels)
+}
+
+/// Kill through attack frames, retaining the real damage/death and score lines.
+fn win_first_arena_round(alice: &mut Keyed, yankee: &mut Keyed, victim: u32) -> [Vec<Vec<u8>>; 2] {
+    // Player-versus-player melee has no reach gate (`G/battle.cpp:180-184`).
+    alice.send_record(&client_attack(victim));
+    let next = an_info_line(b"The next round will begin in 10 seconds.");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut rounds = read_arena_pair_until(alice, yankee, &next, deadline);
+    for (client, records) in [alice, yankee].into_iter().zip(rounds.iter_mut()) {
+        assert!(records.contains(&an_info_line(b"Alpha has won.")));
+        assert!(records.contains(&a_notice_line(b"Alpha 1 : 0 Yankee")));
+        assert!(!records.contains(&a_notice_line(b"Alpha has won the duel.")));
+        let damage = records
+            .iter()
+            .find(|record| record[0] == GC_DAMAGE_INFO)
+            .expect("the real attack shows damage to both duelists");
+        assert_eq!(&damage[1..5], &victim.to_le_bytes());
+        assert!(i32::from_le_bytes(damage[6..10].try_into().expect("damage DWORD")) >= 650);
+        assert!(records.contains(&stun_of(victim)));
+        let dead = dead_of(victim);
+        if !records.contains(&dead) {
+            let (tail, landed) = read_until_record_keeping(client, &dead, deadline);
+            records.extend(tail);
+            records.push(landed);
+        }
+        assert!(records.contains(&dead), "the attack actually kills Yankee");
+    }
+    rounds
+}
+
+/// Arena entry with Alpha's single worn attack-grade armour, including the
+/// post-equipment points record that the plain pair's loader cannot accept.
+fn enter_arena_round_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
+    let (mut alice, _, list) = select_screen_on(server, channel, b"alice", ENGLISH);
+    let alpha = listed(&list, 0);
+    alice.send_record(&client_select(0));
+    alice.send_record(&client_version(DEFAULT_CLIENT_VERSION));
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(alice.read_game(), [GC_ENTITY, 3, 0]);
+    assert_eq!(alice.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let gold = alice.read_game();
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    let loaded = alice.read_game();
+    assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    alice.loaded(&loaded);
+    assert_eq!(points_slot(&loaded, 7), 600);
+    assert_eq!(points_slot(&loaded, 8), 600);
+    assert_eq!(alice.read_game()[0], GC_SKILL_LEVEL_NEW);
+    let protos = owners_protos();
+    let armour = protos.get(WORN_ARMOUR).expect("the owner's worn armour");
+    assert_eq!((armour.values[1], armour.values[5]), (21, 0));
+    let fields = RelayedFields {
+        refine_element: 0,
+        transmutation: 0,
+        sockets: [0; 6],
+        attributes: [(53, 3000), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
+    };
+    assert_eq!(alice.read_game(), fields.item_set(armour, 180, 1));
+    let mut tail = alice.read_game();
+    while tail != gold {
+        assert_eq!(tail[0], GC_POINT_CHANGE);
+        tail = alice.read_game();
+    }
+    let mut worn = loaded.clone();
+    for (slot, delta) in [
+        (18, 3000),
+        (16, 21),
+        (19, -2),
+        (20, 21),
+        (23, 10),
+        (95, 3000),
+    ] {
+        worn = with_point_slot(&worn, slot, points_slot(&loaded, slot) + delta);
+    }
+    worn = with_point_slot(&worn, 7, 600);
+    assert_eq!(alice.read_game(), worn, "the exact worn points");
+    let entered = enter_game_shown(&mut alice);
+    assert_eq!(
+        alice.read_game(),
+        messenger_team_list_many(&[(b"Yankee", false)])
+    );
+    read_login_event(&mut alice);
+    alice.still("nothing follows the geared arena entry");
+    if channel == 99 {
+        assert_eq!(inserted_at(&entered.add), (853_400, 10_100));
+    }
+    let (yankee, opponent, entered) = enter_world_hearing_team(
+        server,
+        channel,
+        b"bob",
+        &[(b"Alpha".as_slice(), true)],
+        "Yankee hears the online GM",
+    );
+    if channel == 99 {
+        assert_eq!(inserted_at(&entered.add), (856_400, 10_100));
+    }
+    assert_eq!(alice.read_game(), messenger_login(1, b"Yankee"));
+    alice.sees_enter(opponent.id, yankee.walking, None);
+    (alice, alpha, yankee, opponent)
+}
+
+/// Keep both connections answering pings while retaining every record before
+/// each client's wanted line, including the ready state's phase and refill.
+fn read_arena_pair_until(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    wanted: &[u8],
+    deadline: std::time::Instant,
+) -> [Vec<Vec<u8>>; 2] {
+    let mut seen: [Vec<Vec<u8>>; 2] = [Vec::new(), Vec::new()];
+    let mut done = [false; 2];
+    while !done.iter().all(|finished| *finished) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both arena clients hear the line"
+        );
+        for (index, client) in [(0, &mut *alice), (1, &mut *yankee)] {
+            if done[index] {
+                continue;
+            }
+            if let Some(record) =
+                client.read_game_raw_until(std::time::Instant::now() + Duration::from_millis(50))
+            {
+                done[index] = record == wanted;
+                seen[index].push(record);
+            }
+        }
+    }
+    seen
+}

@@ -17,7 +17,8 @@
 //! 3. `ClearSync` tells the view the player has no owner, and releases what it owns;
 //! 4. the session enters `PHASE_DEAD` (`GC_PHASE` 6), `GC_DEAD` goes to the view, and the running
 //!    affects are sent again;
-//! 5. `dead_event` is due 180 seconds later, and the trade, the shop and the safebox close.
+//! 5. outside an arena duel, `dead_event` is due 180 seconds later; the trade, shop and safebox
+//!    close in either case. Arena scoring runs before the quest kill and owns its round restart.
 //!
 //! While dead, the hit points, spell points and stamina do not change, a move shows the body
 //! back where it lies, and a newcomer sees it lying dead. The player leaves the state by a
@@ -46,8 +47,8 @@
 //!
 //! # Not yet
 //!
-//! - The quest `die` trigger, `ItemDropPenalty`, the player-against-player, guild war, duel, arena
-//!   and siege hooks, the party, the horse and the mount.
+//! - The quest `die` trigger, siege hooks, the mount, and the same-empire player-killer
+//!   alignment penalty (`G/char_battle.cpp:1412-1442`).
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
@@ -748,26 +749,7 @@ impl GameState {
                 pc: true,
             })
         });
-        // A player killer drops its target when it is this player (`:1275-1276`). The
-        // battle-pass step waits for its system; the quest-kill and guild steps run.
-        // `isAgreedPVP` (`:1280`): the duel's death, won for the killer when they fight.
-        let mut agreed_pvp = false;
-        if let Some(killer) = killer.filter(|killer| killer.pc) {
-            if self.targets.of(killer.vid.raw()) == Some(raw) {
-                self.target(killer.vid, 0);
-            }
-            agreed_pvp = self.pvp_dead(vid, self.pvp_pid_of(killer.vid));
-            // `SetQuestNPCID(GetVID())` and `CQuestManager::Kill(pkKiller->GetPlayerID(),
-            // quest::QUEST_NO_NPC)` (`G/char_battle.cpp:1308-1309`): the killer's `kill`
-            // scripts run, and the no-NPC map's are the ones that run — the victim's
-            // race never reaches the map index here.
-            self.raise_quest_kill(raw, killer.vid, 0);
-            // `CGuildManager::Kill` (`:1310-1311`): the war score, when the two guilds
-            // fight. The alignment skip (`isUnderGuildWar`, `:1413`) waits with the PvP
-            // slice's killer-alignment arm — the port's alignment runs only on monster
-            // kills (`raise_alignment`), where legacy never checks the war.
-            self.guild_war_kill(killer.vid, vid);
-        }
+        let (agreed_pvp, arena_duel) = self.pc_death_killer_hooks(vid, killer);
         // `isForked` (`:1325-1331`): a player that dies on a forked map skips the
         // penalty and runs the three-way hook (`:1359-1362`).
         let forked = self
@@ -776,8 +758,10 @@ impl GameState {
             .is_some_and(|body| self.forked_maps.is_forked(body.map));
         // `ItemDropPenalty` (`:1338-1346`): the victim loses the items its own alignment
         // and the draws choose. The call is outside the player-killer arm, because legacy's
-        // is: a monster's kill reaches it too, and only the war and the agreed duel skip it.
-        self.item_drop_penalty(vid, killer, agreed_pvp);
+        // is: a monster's kill reaches it too; arena deaths skip it (`!isDuel`, :1337).
+        if !arena_duel {
+            self.item_drop_penalty(vid, killer, agreed_pvp);
+        }
         if forked {
             self.threeway_dead(vid, killer);
         }
@@ -821,11 +805,37 @@ impl GameState {
         for affect in self.running_affects(vid) {
             let _sent = self.write_to_client(vid, affect_add_frame(&affect));
         }
-        let when = self.last_pulse.saturating_add(pulses(DEAD_SECONDS));
-        let combat = self.pc_combat.entry(raw).or_default();
-        self.regens.cancel(&mut combat.dead_due, Due::PcDead(raw));
-        self.regens
-            .schedule(&mut combat.dead_due, when, Due::PcDead(raw));
+        // Arena rounds own the restart, not the 180-second dead event (`:1571-1594`).
+        if !arena_duel {
+            let when = self.last_pulse.saturating_add(pulses(DEAD_SECONDS));
+            let combat = self.pc_combat.entry(raw).or_default();
+            self.regens.cancel(&mut combat.dead_due, Due::PcDead(raw));
+            self.regens
+                .schedule(&mut combat.dead_due, when, Due::PcDead(raw));
+        }
+        self.close_pc_death_windows(vid);
+    }
+
+    /// Killer bookkeeping precedes arena scoring and the quest/guild kill hooks
+    /// (`G/char_battle.cpp:1268-1310`). Returns the agreed-PvP and arena-duel exemptions.
+    fn pc_death_killer_hooks(&mut self, vid: Vid, killer: Option<Attacker>) -> (bool, bool) {
+        let Some(killer) = killer.filter(|killer| killer.pc) else {
+            return (false, false);
+        };
+        if self.targets.of(killer.vid.raw()) == Some(vid.raw()) {
+            self.target(killer.vid, 0);
+        }
+        let agreed_pvp = self.pvp_dead(vid, self.pvp_pid_of(killer.vid));
+        let arena_duel = self.arena_on_dead(killer.vid, vid);
+        // The killer's no-NPC `kill` scripts still run during an arena death.
+        self.raise_quest_kill(vid.raw(), killer.vid, 0);
+        self.guild_war_kill(killer.vid, vid);
+        // The same-empire killer-alignment path (:1412-1442), including its arena
+        // exemption, is not ported; monster-kill alignment is a separate path.
+        (agreed_pvp, arena_duel)
+    }
+
+    fn close_pc_death_windows(&mut self, vid: Vid) {
         // The closes (`:1614-1648`). The cube, aura and premium-shop windows and the
         // private shop are not ported; the mall stays open, as legacy closes only the
         // safebox. The sash and changelook closes answer their records, as `CloseSash` and
@@ -3646,5 +3656,163 @@ mod tests {
             .pc_combat
             .get(&ALPHA.raw())
             .is_some_and(|combat| combat.poison_due.is_none()));
+    }
+
+    fn start_death_test_arena(field: &mut Field, sets: u32) {
+        field.world.load_arenas(&[quest::host::Arena {
+            map_index: PLACE.1,
+            start_a: (HERE.0 / 100, HERE.1 / 100),
+            start_b: (BESIDE.0 / 100, BESIDE.1 / 100),
+        }]);
+        let map = u32::try_from(PLACE.1).unwrap();
+        field
+            .world
+            .start_arena(((0, map), 0), [ALPHA, BRAVO], sets, 5);
+        field.pulse(P0 + 250);
+        field.pulse(P0 + 500);
+        // Starting a duel orders the warp; the fixture already stands at its starts.
+        let _alpha = field.ordered(ALPHA);
+        let _bravo = field.ordered(BRAVO);
+        field.quiet();
+    }
+
+    /// The arena item/dead-event exemptions (`G/char_battle.cpp:1337,1571`) leave
+    /// the ordinary dead phase, dead fan and surviving affects intact.
+    #[test]
+    fn an_arena_death_keeps_items_and_exp_without_a_dead_event_or_stale_killer() {
+        let mut field = a_field(true);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let _alpha = field.join_with(ALPHA, (PLACE.1, HERE), 60, &[(cell, Item::new(11, 19))]);
+        let _bravo = field.join(BRAVO, BESIDE);
+        start_death_test_arena(&mut field, 3);
+        field.world.bodies.get_mut(&ALPHA).unwrap().card.alignment = -130_000;
+        field
+            .world
+            .add_pc_affect(ALPHA, Affect::revive_invisible(), true);
+        field.world.target(BRAVO, ALPHA.raw());
+        field
+            .world
+            .pc_combat
+            .get_mut(&ALPHA.raw())
+            .unwrap()
+            .death_penalty = true;
+        let hp = field.points(ALPHA).hp();
+        let killer = Attacker {
+            vid: BRAVO,
+            pc: true,
+        };
+        assert!(!field.world.damage_pc(Some(killer), ALPHA, hp, None));
+        assert_eq!(field.combat(ALPHA).killer_pid, BRAVO.raw());
+        let dice = field.world.dice.clone();
+        field.quiet();
+
+        // The stun event resolves the remembered killer, not an explicit hitter.
+        field.pulse(P0 + 575);
+        let combat = field.combat(ALPHA);
+        assert!(combat.dead && !combat.stunned && !combat.death_penalty);
+        assert_eq!(combat.killer_pid, 0);
+        assert_eq!((combat.stun_due, combat.dead_due), (None, None));
+        assert!(!field.world.regens.holds(Due::PcDead(ALPHA.raw())));
+        assert!(!field.world.regens.holds(Due::PcStun(ALPHA.raw())));
+        assert_eq!(field.world.targets.of(BRAVO.raw()), None);
+        assert!(field.character(ALPHA).items().item_at(cell).is_some());
+        assert!(field.world.ground.is_empty());
+        assert_eq!(field.points(ALPHA).exp(), EXP);
+        assert_eq!(
+            field.world.dice, dice,
+            "no item or experience penalty draws"
+        );
+        assert!(field.ordered(ALPHA).is_empty(), "no item rows or town warp");
+        let heard = field.heard(ALPHA);
+        assert!(heard.contains(&phase(PHASE_DEAD)));
+        assert!(heard.contains(&dead(ALPHA)));
+        assert!(heard
+            .iter()
+            .any(|record| GcAffectAdd::decode(record).is_ok()));
+        assert!(field.heard(BRAVO).contains(&dead(ALPHA)));
+    }
+
+    /// Arena scoring schedules its own ten-second reset (`G/arena.cpp:842-861`),
+    /// restores both fighters, and a second win completes the two-set match.
+    #[test]
+    fn arena_round_reset_revives_and_refills_both_players_without_exp_loss() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        start_death_test_arena(&mut field, 2);
+        let killer = Attacker {
+            vid: BRAVO,
+            pc: true,
+        };
+        field.set_hp_sp(BRAVO, 100, 1);
+        let hp = field.points(ALPHA).hp();
+        assert!(!field.world.damage_pc(Some(killer), ALPHA, hp, None));
+        assert!(field.world.damage_pc(Some(killer), ALPHA, 1, None));
+        let died = field.world.last_pulse;
+        field.quiet();
+        field.pulse(died + 249);
+        assert!(field.world.is_dead(ALPHA.raw()));
+        field.pulse(died + 250);
+
+        for vid in [ALPHA, BRAVO] {
+            let points = field.points(vid);
+            assert!(!field.world.is_dead(vid.raw()));
+            assert_eq!(
+                (points.hp(), points.sp()),
+                (points.max_hp(), points.max_sp())
+            );
+            assert_eq!(points.exp(), EXP);
+            assert_eq!(field.combat(vid).dead_due, None);
+            assert!(field.combat(vid).recovery_due.is_some());
+            assert!(
+                field.ordered(vid).is_empty(),
+                "round reset does not warp to town"
+            );
+            assert!(field.heard(vid).contains(&phase(PHASE_GAME)));
+        }
+        for (vid, at) in [(ALPHA, HERE), (BRAVO, BESIDE)] {
+            let spot = field.world.spot_of(vid.raw()).expect("duelist stands");
+            assert_eq!((spot.x, spot.y, spot.z), (at.0, at.1, 0));
+        }
+
+        // The first death scored for Bravo: its next win ends, rather than resets.
+        let hp = field.points(ALPHA).hp();
+        assert!(!field.world.damage_pc(Some(killer), ALPHA, hp, None));
+        assert!(field.world.damage_pc(Some(killer), ALPHA, 1, None));
+        let won = field.world.last_pulse;
+        field.pulse(won + 250);
+        assert!(!field.world.arena_can_attack(ALPHA, BRAVO));
+        assert!(!field.world.is_dead(ALPHA.raw()));
+        assert_eq!(field.points(ALPHA).exp(), EXP);
+        for vid in [ALPHA, BRAVO] {
+            assert!(field
+                .ordered(vid)
+                .iter()
+                .any(|order| matches!(order, ClientOrder::Warp { .. })));
+        }
+    }
+
+    /// Sharing the arena map is not membership (`G/arena.cpp:717`): an outsider's
+    /// kill still installs the regular 180-second restart event.
+    #[test]
+    fn an_outsider_kill_on_an_arena_map_keeps_the_regular_dead_event() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        let _charlie = field.join(CHARLIE, (HERE.0, HERE.1 + 100));
+        start_death_test_arena(&mut field, 3);
+        field.world.dead_pc(
+            ALPHA,
+            Some(Attacker {
+                vid: CHARLIE,
+                pc: true,
+            }),
+        );
+        assert_eq!(
+            field.combat(ALPHA).dead_due,
+            Some(field.world.last_pulse + 4_500)
+        );
+        assert!(field.world.regens.holds(Due::PcDead(ALPHA.raw())));
+        assert!(!field.combat(ALPHA).death_penalty);
     }
 }

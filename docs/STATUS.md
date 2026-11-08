@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 467 (the GM arena duel).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 468
+Last reviewed: 2026-11-08, after ledger section 468 (the arena duel's combat).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 469
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -506,7 +506,9 @@ runs on the owner's data, the two timers are `unused` again (owner question 58),
 arms wait on the map folders. Since 467 the GM arena duel on map 112 is live: `/show_arena_list`,
 `/duel`, `/end_duel`, `/end_all_duel`, the ready countdown, `GC_DUEL_START` and the time-out are
 `ported` and `sys.event.arena` is `partial`; `CanAttack` and `OnDead` scoring is next, then the
-observers, the login re-register and the `IsArenaMap` hooks. The
+observers, the login re-register and the `IsArenaMap` hooks. Since 468 duelists can hit each
+other and an arena death scores a round, restarts it or ends the match; the observers, the login
+re-register and the `IsArenaMap` hooks (with `/pvp`'s arena gate) are next. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

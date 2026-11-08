@@ -714,8 +714,8 @@ impl GameState {
     /// `battle_is_attackable` of the player `attacker` standing at `(map, x, y)` on `npc`
     /// (`G/battle.cpp:99-152`): the victim is alive, neither cell is `ATTR_BANPK`, the
     /// icedamage holds (`:117-119`), the attacker is neither stunned nor dead (`:122`),
-    /// and the victim is no fake hydra. No castle, arena or ship-defence map is hosted,
-    /// and `CPVPManager::CanAttack` lets a player hit every non-player that reaches here
+    /// and the victim is no fake hydra. The arena override names only two PCs,
+    /// so `CPVPManager::CanAttack` lets a player hit every non-player that reaches here
     /// unless it rides a grade-1 horse (`G/pvp.cpp:394-398`).
     pub(super) fn is_attackable(
         &self,
@@ -832,12 +832,13 @@ impl GameState {
         else {
             return AttackAnswer::default();
         };
-        if victim_place.1 != place.1 {
+        if victim_place != place {
             return AttackAnswer::default();
         }
         // `battle_is_attackable` (`G/battle.cpp:99-153`): the dead, the `ATTR_BANPK` cells,
         // the icedamage (`:117-119`, before the war arm's accept) and the PK policy.
         if self.is_down(vid.raw())
+            || self.is_dead(target)
             || self.is_banpk(place.1, spot.x, spot.y)
             || self.is_banpk(victim_place.1, victim_spot.x, victim_spot.y)
         {
@@ -856,7 +857,7 @@ impl GameState {
         // The war arm (`G/battle.cpp:125-138`): two players whose guilds are under a war
         // may fight whatever the PK policy says, and the arm answers before the castle,
         // the arena and the policy do.
-        if !self.guild_war_allows(vid, victim) {
+        if !self.guild_war_allows(vid, victim) && !self.arena_can_attack(vid, victim) {
             // `CanAttack`'s duel tail (`G/pvp.cpp:508-528`): the live fight of the two
             // PIDs, with its fresh fight touch.
             // `CanAttack`'s horse gate (`G/pvp.cpp:394-398`): a grade-1 rider hits no one.
@@ -2312,6 +2313,46 @@ mod tests {
         let before = world.pc_points_mut(102).unwrap().hp();
         hit(&mut world, 101, 102);
         assert_eq!(world.pc_points_mut(102).unwrap().hp(), before);
+    }
+
+    #[test]
+    fn arena_attack_overrides_protect_and_horse_but_not_dead_stun_or_ice() {
+        for gate in 0..4 {
+            let (_clock, mut world, _inbox) = a_fight(a_monster(100), (0, 0));
+            let _attacker = a_player(&mut world, 101, (0, 0));
+            let _victim = a_player(&mut world, 102, (1, 0));
+            world.load_arenas(&[quest::host::Arena {
+                map_index: PLACE.1,
+                start_a: (0, 0),
+                start_b: (0, 0),
+            }]);
+            world.start_arena(
+                ((0, u32::try_from(PLACE.1).unwrap()), 0),
+                [Vid::new(101), Vid::new(102)],
+                3,
+                5,
+            );
+            world.start_pc_recovery(Vid::new(101));
+            world.start_pc_recovery(Vid::new(102));
+            ride_at(&mut world, 101, 1);
+            match gate {
+                1 => world.pc_combat.entry(102).or_default().dead = true,
+                2 => {
+                    let hp = world.pc_points_mut(101).unwrap().hp();
+                    let _dead = world.damage_pc(None, Vid::new(101), hp, None);
+                }
+                3 => world.dungeon_set_damage_race(0, 102),
+                _ => {}
+            }
+            let before = world.pc_points_mut(102).unwrap().hp();
+            hit(&mut world, 101, 102);
+            let after = world.pc_points_mut(102).unwrap().hp();
+            if gate == 0 {
+                assert!(after < before);
+            } else {
+                assert_eq!(after, before);
+            }
+        }
     }
 
     /// `npc` on open cells, entered and pulsed as [`a_fight`], with the monster's experience
