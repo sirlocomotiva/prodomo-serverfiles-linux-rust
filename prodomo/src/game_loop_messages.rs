@@ -3004,6 +3004,14 @@ pub enum GmLine {
     ThreewayInfo,
     /// `/threeway_myinfo` (`do_threeway_war_myinfo`), a GM's line.
     ThreewayMyinfo,
+    /// The GM arena list and duel lines (`G/cmd_gm.cpp:3957-4060`).
+    ShowArenaList,
+    /// Start a GM arena duel.
+    ArenaDuel,
+    /// End one GM arena duel.
+    EndArenaDuel,
+    /// End every GM arena duel.
+    EndAllArenaDuel,
 }
 
 /// Which restart a dead player asks for.

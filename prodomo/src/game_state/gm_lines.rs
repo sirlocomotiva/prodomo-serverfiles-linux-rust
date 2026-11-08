@@ -268,9 +268,26 @@ impl GameState {
                 None
             }
             GmLine::LogOxevent | GmLine::GetOxeventAtt => self.run_ox_line(vid, line, mover),
+            _ => self.run_misc_gm_line(vid, line, rest, mover),
+        }
+    }
+
+    fn run_misc_gm_line(
+        &mut self,
+        vid: Vid,
+        line: GmLine,
+        rest: &[u8],
+        mover: Mover,
+    ) -> Option<GmRows> {
+        match line {
             GmLine::ThreewayInfo | GmLine::ThreewayMyinfo => {
                 self.run_threeway_line(vid, line, mover)
             }
+            GmLine::ShowArenaList
+            | GmLine::ArenaDuel
+            | GmLine::EndArenaDuel
+            | GmLine::EndAllArenaDuel => self.run_arena_line(vid, line, rest, mover),
+            _ => None,
         }
     }
 

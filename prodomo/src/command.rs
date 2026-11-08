@@ -245,6 +245,10 @@ impl CommandEntry {
             | "do_oxevent_log"
             | "do_oxevent_get_attender"
             | "do_threeway_war_info"
+            | "do_show_arena_list"
+            | "do_duel"
+            | "do_end_duel"
+            | "do_end_all_duel"
             | "do_threeway_war_myinfo" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
@@ -334,6 +338,10 @@ impl CommandEntry {
             "do_oxevent_get_attender" => Command::GmLine(GmLine::GetOxeventAtt),
             "do_threeway_war_info" => Command::GmLine(GmLine::ThreewayInfo),
             "do_threeway_war_myinfo" => Command::GmLine(GmLine::ThreewayMyinfo),
+            "do_show_arena_list" => Command::GmLine(GmLine::ShowArenaList),
+            "do_duel" => Command::GmLine(GmLine::ArenaDuel),
+            "do_end_duel" => Command::GmLine(GmLine::EndArenaDuel),
+            "do_end_all_duel" => Command::GmLine(GmLine::EndAllArenaDuel),
             _ => Command::NotPorted(self.handler),
         }
     }

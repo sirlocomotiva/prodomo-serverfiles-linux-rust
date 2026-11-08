@@ -1419,6 +1419,7 @@ fn dynamic_len(header: u8) -> usize {
         | GC_GUILD
         | GC_WHISPER
         | GC_MESSENGER
+        | GC_DUEL_START
         | GC_QUEST_INFO => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
@@ -1439,6 +1440,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
             | GC_WHISPER
             | GC_MESSENGER
             | GC_QUEST_INFO
+            | GC_DUEL_START
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1560,7 +1562,7 @@ fn game_len(header: u8) -> usize {
         // GC_MESSENGER rides the same `size`-word framing as the other dynamic records
         // (`TPacketGCMessenger`, `G/packet.h:1896-1901`).
         GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER
-        | GC_MESSENGER | GC_QUEST_INFO => dynamic_len(header),
+        | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -5265,6 +5267,8 @@ const GC_REQUEST_CHANGE_LANGUAGE: u8 = 245;
 /// record, `WORD index`, `WORD c_index` and the `flag` byte, eight bytes measured for i686,
 /// then one part per flag bit (`quest::PC::SendQuestInfoPakcet`, `G/questpc.cpp:231-308`).
 const GC_QUEST_INFO: u8 = 81;
+/// `TPacketGCDuelStart`: header, WORD whole-record size and DWORD opponent VIDs.
+const GC_DUEL_START: u8 = 40;
 /// `QUEST_SEND_TITLE`, the flag bit of the 31-byte `title` part (`G/questpc.h:37-44`).
 const QUEST_SEND_TITLE: u8 = 1 << 1;
 /// `QUEST_SEND_CLOCK_NAME` and `QUEST_SEND_CLOCK_VALUE`, the flag bits of the 17-byte
@@ -43652,5 +43656,230 @@ fn a_dungeon_info_rank_cooldown_and_update_fan_their_lines() {
         read_chat_past_ambient(&mut alpha),
         stamped,
         "update fans the full line again"
+    );
+}
+
+/// Ledger 467: the GM arena commands (`G/cmd_gm.cpp:3957-4064`) list the four
+/// owner's `settings.lua:93-96` arenas, refuse missing players, and start the first
+/// free pair. Both players follow `StartDuel`'s Warps onto map 112 (`G/arena.cpp:466-495`)
+/// on the Shared Channel. The ready event tells its potion limit and countdown,
+/// then sends each opponent's VID in the seven-byte duel-start record
+/// (`G/arena.cpp:258-312`). `/end_duel` returns both to their empire's arena return
+/// point (`G/arena.cpp:533-568`, `G/start_position.cpp:34-40`), not their saved exits.
+#[test]
+fn a_gm_lists_starts_and_ends_an_arena_duel() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    for login in ["alice", "bob"] {
+        create_account_before_boot(&database, login);
+    }
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950000 FROM account WHERE login = 'bob'",
+    );
+    for (login, name) in [("alice", "Alpha"), ("bob", "Yankee")] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO gm_grant (account_id, name, authority) SELECT id, '{name}', \
+                 'HIGH_WIZARD' FROM account WHERE login = '{login}'"
+            ),
+        );
+    }
+    let mut channels = default_channels();
+    channels
+        .iter_mut()
+        .find(|channel| channel.number == 99)
+        .expect("the Shared Channel")
+        .maps
+        .push(112);
+    let mut server = Server::start_with(binary(), database.url(), &channels);
+    let (mut alice, alpha, mut yankee, yankee_listed) = enter_arena_pair(&server, 1);
+    arena_list_and_refusals(&mut alice, &mut yankee);
+    start_arena_pair(&server, &mut alice, alpha.id, &mut yankee, yankee_listed.id);
+    close_arena_pair(&mut server, alice, yankee);
+    let (mut alice, alpha, mut yankee, yankee_listed) = enter_arena_pair(&server, 99);
+    read_arena_countdown(&mut alice, alpha.id, &mut yankee, yankee_listed.id);
+    end_named_arena_pair(&server, &mut alice, alpha.id, &mut yankee, yankee_listed.id);
+    check_arena_return(&database);
+    close_arena_pair(&mut server, alice, yankee);
+    end_all_reused_arena_pair(&mut server);
+    check_arena_return(&database);
+}
+
+/// Enter the two GMs, checking the first arena's starts on the Shared Channel.
+fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
+    let (mut alice, alpha, entered) = enter_world_hearing_team(
+        server,
+        channel,
+        b"alice",
+        &[(b"Yankee".as_slice(), false)],
+        "Alpha hears the offline GM",
+    );
+    if channel == 99 {
+        assert_eq!(inserted_at(&entered.add), (853_400, 10_100));
+    }
+    let (yankee, yankee_listed, entered) = enter_world_hearing_team(
+        server,
+        channel,
+        b"bob",
+        &[(b"Alpha".as_slice(), true)],
+        "Yankee hears the online GM",
+    );
+    if channel == 99 {
+        assert_eq!(inserted_at(&entered.add), (856_400, 10_100));
+    }
+    assert_eq!(alice.read_game(), messenger_login(1, b"Yankee"));
+    alice.sees_enter(yankee_listed.id, yankee.walking, None);
+    (alice, alpha, yankee, yankee_listed)
+}
+
+/// The configured list, the named refusals, and the silent empty end-all.
+fn arena_list_and_refusals(alice: &mut Keyed, yankee: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/show_arena_list"));
+    for text in [
+        b"ArenaMapInfo Map: 112 stA(8534, 101) stB(8564, 101)".as_slice(),
+        b"ArenaMapInfo Map: 112 stA(8584, 101) stB(8614, 101)",
+        b"ArenaMapInfo Map: 112 stA(8534, 155) stB(8564, 155)",
+        b"ArenaMapInfo Map: 112 stA(8584, 155) stB(8614, 155)",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(text));
+    }
+    for (command, answer) in [
+        (
+            b"/duel Alpha Nobody 1 5".as_slice(),
+            b"There are no sparrers.".as_slice(),
+        ),
+        (b"/end_duel Nobody", b"This character does not exist."),
+        (b"/end_duel Yankee", b"Dalian Force Shutdown Failed"),
+    ] {
+        alice.send_record(&client_chat(CHAT_TALKING, command));
+        assert_eq!(alice.read_game(), an_info_line(answer));
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/end_all_duel"));
+    alice.quiet("ending an empty arena roster is silent");
+    yankee.quiet("the GM's list and refusals reach only the caller");
+}
+
+/// Start the first free arena and read both departures and the GM's success line.
+fn start_arena_pair(
+    server: &Server,
+    alice: &mut Keyed,
+    alpha_id: u32,
+    yankee: &mut Keyed,
+    yankee_id: u32,
+) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/duel Alpha Yankee 1 5"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let start = an_info_line(b"Dalian started successfully.");
+    let warp = a_warp_record((853_400, 10_100), server.channel(99).port());
+    let (before, landed) = read_until_record_keeping(alice, &warp, deadline);
+    assert_eq!(landed, warp);
+    assert!(
+        before.contains(&removal_of(alpha_id)),
+        "Alpha leaves its own view"
+    );
+    if !before.contains(&start) {
+        assert_eq!(read_until_record(alice, &start, deadline), start);
+    }
+    let warp = a_warp_record((856_400, 10_100), server.channel(99).port());
+    let (before, landed) = read_until_record_keeping(yankee, &warp, deadline);
+    assert_eq!(landed, warp);
+    assert!(
+        before.contains(&removal_of(yankee_id)),
+        "Yankee leaves its own view"
+    );
+}
+
+/// Wait for both old descriptors to close before either player reconnects.
+fn close_arena_pair(server: &mut Server, alice: Keyed, yankee: Keyed) {
+    let old_alice = alice.client.local_addr();
+    let old_yankee = yankee.client.local_addr();
+    drop(alice);
+    drop(yankee);
+    server.wait_for(&format!("Client connection closed addr={old_alice}"));
+    server.wait_for(&format!("Client connection closed addr={old_yankee}"));
+}
+
+/// Pump the other descriptor during the countdown so its ping is answered.
+fn read_arena_countdown(alice: &mut Keyed, alpha_id: u32, yankee: &mut Keyed, yankee_id: u32) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    for text in [
+        b"You can use up to 0 potions.".as_slice(),
+        b"The fight will start in 10 seconds.",
+        b"The duel has begun.",
+    ] {
+        let wanted = an_info_line(text);
+        assert_eq!(
+            read_until_record_pumping(alice, yankee, &wanted, deadline),
+            wanted
+        );
+        assert_eq!(read_until_record(yankee, &wanted, deadline), wanted);
+    }
+    // Independent golden field order: header 40, total size 7, one DWORD VID.
+    for (client, opponent) in [(alice, yankee_id), (yankee, alpha_id)] {
+        let mut wanted = vec![40, 7, 0];
+        wanted.extend_from_slice(&opponent.to_le_bytes());
+        assert_eq!(read_until_record(client, &wanted, deadline), wanted);
+    }
+}
+
+/// The named end's success line and both empire return Warps.
+fn end_named_arena_pair(
+    server: &Server,
+    alice: &mut Keyed,
+    alpha_id: u32,
+    yankee: &mut Keyed,
+    yankee_id: u32,
+) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/end_duel Alpha"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let ended = an_info_line(b"Dalian forced shutdown successful");
+    let warp = a_warp_record((347_600, 882_700), server.channel(1).port());
+    let (before, landed) = read_until_record_keeping(alice, &warp, deadline);
+    assert_eq!(landed, warp);
+    assert!(
+        before.contains(&removal_of(alpha_id)),
+        "Alpha leaves the arena"
+    );
+    if !before.contains(&ended) {
+        assert_eq!(read_until_record(alice, &ended, deadline), ended);
+    }
+    let (before, landed) = read_until_record_keeping(yankee, &warp, deadline);
+    assert_eq!(landed, warp);
+    assert!(
+        before.contains(&removal_of(yankee_id)),
+        "Yankee leaves the arena"
+    );
+}
+
+/// Reuse the freed first slot, then end an active roster without a confirmation.
+fn end_all_reused_arena_pair(server: &mut Server) {
+    let (mut alice, alpha, mut yankee, yankee_listed) = enter_arena_pair(server, 1);
+    start_arena_pair(server, &mut alice, alpha.id, &mut yankee, yankee_listed.id);
+    close_arena_pair(server, alice, yankee);
+    let (mut alice, _, mut yankee, _) = enter_arena_pair(server, 99);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/end_all_duel"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let warp = a_warp_record((347_600, 882_700), server.channel(1).port());
+    let (before, _) = read_until_record_keeping(&mut alice, &warp, deadline);
+    assert!(
+        !before.contains(&an_info_line(b"Dalian forced shutdown successful")),
+        "end-all sends no named-end confirmation"
+    );
+    assert_eq!(read_until_record(&mut yankee, &warp, deadline), warp);
+    alice.quiet("no end-all confirmation follows the Warp");
+}
+
+/// Both return Warps commit the empire's arena coordinates to the store.
+fn check_arena_return(database: &ScratchDatabase) {
+    check(
+        database,
+        "(SELECT count(*) FROM player WHERE name IN ('Alpha', 'Yankee') \
+         AND x = 347600 AND y = 882700) = 2",
     );
 }

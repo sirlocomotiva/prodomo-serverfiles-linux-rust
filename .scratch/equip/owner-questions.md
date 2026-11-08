@@ -543,3 +543,16 @@ owner answers.
     idle war. The war's elimination and victory arms wait on the SungZi and pass map folders.
     Waits on it: whether you plan to add those map folders. If you do, the arms are the next
     port; if not, confirm the two rows `unused`.
+59. **The GM arena duel is live (ledger 467; replaces the arena half of question 52).**
+    `settings.lua:93-96` adds four arenas on map 112 (`metin2_map_duel`), which your map
+    index loads. `/duel`, `/end_duel`, `/end_all_duel` and `/show_arena_list` now run, and
+    `ready_to_start_event` and `duel_time_out` are `ported` rather than `unused`. Two
+    choices to confirm:
+    - The Rewrite keeps a duel when its players warp to an arena map another Channel hosts,
+      and sends them back to the Channel they started on. Legacy, with one arena manager
+      per core, ends such a duel as "opponent disappeared".
+    - The Rewrite refuses a duel of a character with itself, or with one already in
+      another arena. Legacy accepts both and lets two arenas claim one player.
+    The potion limit that the countdown announces (`arena_potion_limit_count`) is not yet
+    enforced; it comes with the arena's item hooks.
+    Waits on it: nothing blocks.

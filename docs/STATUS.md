@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 466 (the three-way war's reach, corrected).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 467
+Last reviewed: 2026-11-08, after ledger section 467 (the GM arena duel).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 468
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -503,7 +503,10 @@ the score notice, and the forked-map penalty skip; the elimination and victory a
 next, with the two timers ledger 465 moved back to `missing`. Since 466 that is
 corrected: the owner's map index loads none of the forked maps 114-128, so the hook never
 runs on the owner's data, the two timers are `unused` again (owner question 58), and the
-arms wait on the map folders. The
+arms wait on the map folders. Since 467 the GM arena duel on map 112 is live: `/show_arena_list`,
+`/duel`, `/end_duel`, `/end_all_duel`, the ready countdown, `GC_DUEL_START` and the time-out are
+`ported` and `sys.event.arena` is `partial`; `CanAttack` and `OnDead` scoring is next, then the
+observers, the login re-register and the `IsArenaMap` hooks. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -931,6 +934,7 @@ owner should know about (178.5):
 
 | The `envanter` column refuses unlocks past 18 at the store (ledger 449): a hand-written row cannot name cells past the base inventory. | Legacy's `player.envanter` is an unchecked `INT` (`player.sql:866`), copied straight into `m_points.envanter` (`G/char.cpp:2346`). |
 | Every `/dungeon_info rank` line reads the store (ledger 463): the 5-minute `m_mapDungeonRank` cache is not ported. | `SendDungeonRank` caches each rank for 5 minutes (`G/char_manager.cpp:1340-1380`). |
+| A duel's players are held by player id across the process, so a Warp to an arena map another Channel hosts keeps the duel, and `EndDuel` sends each duelist back to the Channel it started on, Channel 1 for one that started on the Shared Channel (ledger 467). | The arena manager is per process: a duelist warped to another core leaves the duel's process, and the next arena event ends the duel as "opponent disappeared" (`G/arena.cpp:224-245`). |
 ## Legacy defects not to reproduce
 
 - When a character enters the game with no movable point within 1000 of its saved position,
@@ -1504,6 +1508,12 @@ owner should know about (178.5):
 - `GetEventSungZiMapInfo` and `GetEventPassMapInfo` index their vectors with the
   `threeway_war_*_idx` flags unchecked (`G/threeway_war.cpp:201-213`), so a negative or
   too-large flag reads past the list. The Rewrite reads map 0 there (ledger 465).
+- `duel_time_out` sends its empty duel-start record twice to player A and never to B
+  (`G/arena.cpp:447-448`), so B's client keeps its opponent list. The Rewrite clears both,
+  once each (ledger 467).
+- `do_duel` and `CArena::StartDuel` accept one character as both duelists and a character
+  already in another arena (`G/cmd_gm.cpp:4013-4052`, `G/arena.cpp:466-495`), so two arenas
+  claim one player. The Rewrite refuses both with the start-failure line (ledger 467).
 
 ## Environment
 

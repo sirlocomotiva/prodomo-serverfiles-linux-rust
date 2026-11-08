@@ -3429,6 +3429,7 @@ impl GameState {
     /// Share the quests boot loaded. Without them no NPC has a quest.
     #[must_use]
     pub fn with_quests(mut self, quests: Quests) -> Self {
+        self.load_arenas(&quests.manager().host().settings().arenas);
         self.quests = Some(quests);
         self
     }

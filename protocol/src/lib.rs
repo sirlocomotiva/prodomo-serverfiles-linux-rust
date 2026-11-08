@@ -72,6 +72,7 @@ pub mod gc_aura;
 pub mod gc_changelook;
 pub mod gc_channel_status;
 pub mod gc_chat;
+pub mod gc_duel_start;
 pub mod gc_entity;
 pub mod gc_event;
 pub mod gc_exchange;

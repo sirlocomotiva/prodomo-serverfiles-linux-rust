@@ -48854,3 +48854,106 @@ the inventory tests (`cargo test -p parity --locked --offline -- inventory`), `c
 inventory notes, owner questions and the status changed since ledger 465's 4993-test run.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards
 no `prodomo\_%` database remained. No ADR changed.
+
+## 467. The GM arena duel
+
+`CArenaManager`'s duel core (`G/arena.cpp:1-589`, `:951-1055`) and its four GM commands
+(`G/cmd_gm.cpp:3957-4064`) are ported, in the new `prodomo/src/game_state/arena.rs`. The system
+is reachable: `settings.lua:93-96` adds four arenas on map 112 (`metin2_map_duel`), which the
+owner's map index loads.
+
+What the Rewrite does now:
+- **The table.** The arenas the quest host records from `settings.lua` (`quest::host::Arena`)
+  become the arena table: WORD coordinates, map-key then insertion order, and `CheckArea`'s
+  exact-pair duplicate refusal (`:53-95`, `:128-133`).
+- **`/show_arena_list`.** One `ArenaMapInfo Map: %d stA(%d, %d) stB(%d, %d)` line per arena
+  (`:136-158`).
+- **`/duel <a> <b> [set] [minutes]`.** The arguments are parsed as `do_duel` parses them: the set
+  clamps to at most 5, a negative set becomes 1, and the minutes default and clamp to 5. Then:
+  - both characters lose their good and bad affects;
+  - each leaves its party, deleting a party of two or quitting with the `<Party>` line;
+  - `StartDuel` takes the first empty arena, records the PIDs and the set count, warps both to
+    their start points, refills HP and SP, and arms both events (`:161-193`, `:466-505`).
+  - The GM hears the success or the failure line.
+- **`ready_to_start_event`** (`:207-383`):
+  - state 0 binds the arena and tells the `arena_potion_limit_count` notice (or the "no potion
+    limit" line past 10000) and the ten-second countdown;
+  - state 1 tells the start line and sends each player `GC_DUEL_START` with the opponent's VID;
+  - the return and restart states 2 and 3 are also ported;
+  - a missing player ends the duel with the "opponent disappeared" line.
+- **`duel_time_out`** (`:386-463`): the two notices, an empty `GC_DUEL_START`, then after ten
+  seconds `EndDuel`.
+- **`EndDuel`** (`:533-587`): it sets peace mode, restarts recovery, stands both players up,
+  refills them, unbinds the arena, and warps each to its empire's arena return point
+  (`G/start_position.cpp:34-40`).
+- **The end commands.** `/end_duel <name>` (`:1028-1053`) and `/end_all_duel` (`:507-531`)
+  answer with the legacy lines.
+- **`OnDisconnect`** (`:951-968`) tells the other player and ends the duel.
+
+The new codec `protocol::gc_duel_start` (header 40, a WORD size and up to eight VIDs) has golden
+bytes. Its `gc_inventory` row is implemented.
+
+The arena logic was written by a delegated agent and reviewed against `G/arena.cpp` here.
+
+Defects not reproduced (`docs/STATUS.md`):
+- `duel_time_out` sends its empty record twice to A and never to B (`:447-448`). The Rewrite
+  clears both clients once each.
+- A self-duel, and a character already in another arena, are refused with the start-failure
+  line. Legacy accepts both (`G/cmd_gm.cpp:4013-4052`, `:466-495`), and two arenas then claim one
+  player.
+
+Divergences:
+- **The duel crosses Channels.** The duel is held by player id across the one process, so a
+  duelist warped to an arena map another Channel hosts keeps the duel. `EndDuel` sends each
+  duelist back to the Channel it started on, or to Channel 1 for one that started on the Shared
+  Channel, following the Shared-Channel row of the Divergence table. Legacy's arena manager is
+  per core, so such a duel ends as "opponent disappeared" (`:224-245`).
+  - In the owner's deployment, Channel 1 hosts map 112 and the duel stays on one Channel.
+  - The scenario hosts 112 on the Shared Channel instead, so that it covers the crossing and the
+    return.
+- **Event order.** Arena events due on the same Pulse run in map and list order, the ready event
+  before the time-out. Legacy runs them in its heap's order.
+- **An early disconnect.** A disconnect ends a duel still in its first ten seconds. Legacy's hook
+  needs `GetArena()`, which state 0 sets (`G/char.cpp:1737-1740`), so it would wait for the ready
+  event's "opponent disappeared".
+
+Gaps, in `sys.event.arena` (`partial`):
+- `CanAttack` and `OnDead` (sets and score);
+- the observers (the observer set stays empty, as legacy starts it);
+- the login re-register;
+- the `IsArenaMap` hooks in items, horse and login;
+- the potion limit that state 0 announces, which the item hooks will enforce.
+
+Inventory changes:
+- `cmd.show_arena_list`, `cmd.duel`, `cmd.end_duel`, `cmd.end_all_duel`, `gc.duel_start` and
+  `event.arena.ready_to_start_event` are `ported`, with scenario
+  `a_gm_lists_starts_and_ends_an_arena_duel`.
+- `event.arena.duel_time_out` is `ported` on the unit test
+  `arena_timeout_clears_both_opponents_then_ends_after_ten_seconds`: a scenario would wait at
+  least five minutes (spec, 2026-10-14).
+- `sys.event.arena` is `partial`.
+- Owner question 59 replaces the arena half of question 52.
+
+Tests:
+- unit tests in `arena.rs`, which pin:
+  - table order and duplicates;
+  - argument bounds;
+  - the countdown's golden VIDs;
+  - the time-out's clearing and delay;
+  - the self and duplicate refusals;
+  - the restart, end, disconnect and missing-player clearing;
+- the `gc_duel_start` codec tests and the inventory wiring test;
+- the scenario `a_gm_lists_starts_and_ends_an_arena_duel`, which passed 8 of 8 in a parallel
+  flake check.
+
+Mutants, each killed semantically and restored by checksum:
+- `to_le_bytes`→`to_be_bytes` on the codec size;
+- the time-out's empty list→opponent list.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5009 passed, 0 failed
+in 46 targets, up 16 from 4993), `cargo test --workspace --doc --locked --offline` (1 passed),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -63,6 +63,7 @@ use world::character::{add_from_client, sync_quickslots};
 
 mod affect;
 mod alignment;
+mod arena;
 mod attr67;
 mod biologist;
 mod cards;
@@ -571,6 +572,8 @@ pub struct GameState {
     /// event took, attenders and audience alike, which `CloseEvent`'s warp names.
     /// `Default` is empty, and both paths' leave drops it with the rest.
     ox_roster: std::collections::HashSet<u32>,
+    /// GM arena slots, ordered by map and insertion order (key's first component reserved).
+    arenas: std::collections::BTreeMap<(u8, u32), Vec<arena::Arena>>,
     /// The three-way kill scores (`CThreeWayWar::KillScore_`, `G/threeway_war.h:61`):
     /// one per empire, by empire minus 1. `-1` marks an eliminated empire, which the
     /// death hook skips. `Default` is all zero, as `Initialize` leaves them.
@@ -3473,6 +3476,9 @@ impl GameState {
     /// stunned or dead stands first with 50 hit points (B5), and its fight's events end; a
     /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
     pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
+        if departure == Departure::Disconnect {
+            self.arena_disconnect(vid);
+        }
         // `CheckMultiFarmAccount(..., false)` (`G/char.cpp:1791`): the leaver stops
         // farming before its body goes.
         if let Some(addr) = self.multi_addr.remove(&vid) {
@@ -5644,6 +5650,7 @@ impl PulseProcessor for GameState {
         self.run_guild_ticks(pulse);
         self.run_shutdown_tick(pulse);
         self.run_timed_exits(pulse);
+        self.run_arena_ticks(pulse);
         self.run_confirm_timeouts(pulse);
         self.run_fishing_events(pulse);
         self.run_mining_events(pulse);

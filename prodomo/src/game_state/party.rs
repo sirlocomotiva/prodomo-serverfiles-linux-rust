@@ -1555,6 +1555,26 @@ impl GameState {
         self.link_party(guest);
     }
 
+    /// `do_duel` deletes a two-member party, otherwise tells and quits its member
+    /// (`G/cmd_gm.cpp:4024-4049`).
+    pub(super) fn arena_quit_party(&mut self, vid: Vid) {
+        let Some(pid) = self.pid_of(vid) else { return };
+        let Some(leader) = self.party_leader_of(pid) else {
+            return;
+        };
+        if self
+            .parties
+            .by_leader
+            .get(&leader)
+            .is_some_and(|party| party.members.len() == 2)
+        {
+            self.delete_party(leader);
+        } else {
+            self.info_to(vid, b"<Party> You left the party.", &[]);
+            self.quit_party(pid);
+        }
+    }
+
     /// The PID online under `vid`, if any.
     fn pid_of(&self, vid: Vid) -> Option<CharacterId> {
         self.characters
@@ -1688,7 +1708,7 @@ impl GameState {
     /// own link ends. The `M2_DELETE` still runs `Destroy`'s `RemoveBonus`
     /// (`G/party.cpp:1043-1059`): every online member's six role points zero through
     /// `ComputePoints`. Ported as-is: zero, unindex every member, drop the party.
-    fn delete_party(&mut self, leader: CharacterId) {
+    pub(super) fn delete_party(&mut self, leader: CharacterId) {
         let members: Vec<CharacterId> = self
             .parties
             .by_leader

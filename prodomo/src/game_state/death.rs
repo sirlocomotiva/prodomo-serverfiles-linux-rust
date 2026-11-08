@@ -528,7 +528,7 @@ impl GameState {
 
     /// `GetDesc()->SetPhase(phase)`: the `GC_PHASE` record, which the descriptor turns into its
     /// phase change where it reads it.
-    fn write_phase(&self, vid: Vid, phase: u8) {
+    pub(super) fn write_phase(&self, vid: Vid, phase: u8) {
         let mut record = Vec::new();
         GcHeaderAndByte::new(HEADER_GC_PHASE.value(), phase).encode_into(&mut record);
         let _sent = self.write_to_client(vid, record);
@@ -1022,7 +1022,7 @@ impl GameState {
     /// `SetPosition(POS_STANDING)` of a player (`G/char.cpp:1436-1444`): not stunned and not
     /// dead, its dead and stun events end, and its pools unlock. The PID of a killer it kept is
     /// dropped too, so a stale one blames no one at a later death (D6).
-    fn stand(&mut self, vid: Vid) {
+    pub(super) fn stand(&mut self, vid: Vid) {
         let raw = vid.raw();
         let combat = self.pc_combat.entry(raw).or_default();
         combat.stunned = false;

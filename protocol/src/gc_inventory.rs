@@ -626,7 +626,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_DUEL_START"),
         cpp_type: "TPacketGCDuelStart",
         framing: GcFraming::DynamicSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_PVP,
@@ -1570,8 +1570,8 @@ mod tests {
             .filter(|entry| entry.implemented_in_rust)
             .map(|entry| entry.client_name)
             .collect();
-        assert_eq!(done.len(), 120);
-        assert_eq!(gc_missing_codec_count(), 14);
+        assert_eq!(done.len(), 121);
+        assert_eq!(gc_missing_codec_count(), 13);
         for name in [
             "HEADER_GC_AFFECT_ADD",
             "HEADER_GC_PLAYER_POINT_CHANGE",
@@ -1615,6 +1615,7 @@ mod tests {
             "HEADER_GC_SCRIPT",
             "HEADER_GC_QUEST_INFO",
             "HEADER_GC_VIEW_EQUIP",
+            "HEADER_GC_DUEL_START",
         ] {
             assert!(done.contains(&name), "expected {name} to be implemented");
         }
@@ -1677,6 +1678,6 @@ mod tests {
             !six.implemented_in_rust,
             "byte 6 has no server producer and must not claim a codec"
         );
-        assert_eq!(gc_missing_codec_count(), 14);
+        assert_eq!(gc_missing_codec_count(), 13);
     }
 }
