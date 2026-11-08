@@ -34429,6 +34429,48 @@ fn an_element_scroll_upgrades_and_a_hex_scroll_downgrades() {
     );
 }
 
+/// `sub.Attr67Add.SUBHEADER_CG_ATTR67_ADD_CLOSE` (`G/input_main.cpp:3495-3497`): a
+/// regist with no window stays quiet; the open stands the window silently; the close
+/// shuts it and a regist past it stays quiet. The open and regist arms ride
+/// `an_attr67_regist_waits_and_collects`.
+#[test]
+fn an_attr67_close_shuts_the_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, cell, count, vnum) in [(41, 0, 1, 10), (42, 2, 5, 39_070)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id,                  1, {cell}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    // A regist with no window stays quiet.
+    alpha.send_record(&client_attr67(2, 0, 5, 0, 0));
+    alpha.quiet("the windowless regist stays quiet");
+    // The open stands the window, silently.
+    alpha.send_record(&client_attr67(1, 0, 0, 0, 0));
+    alpha.quiet("the open answers nothing");
+    // The close shuts the window; a regist past it stays quiet, and the sword and
+    // the fragments never moved.
+    alpha.send_record(&client_attr67(0, 0, 0, 0, 0));
+    alpha.quiet("the close answers nothing");
+    alpha.send_record(&client_attr67(2, 0, 5, 0, 0));
+    alpha.quiet("the closed regist stays quiet");
+    check(
+        &database,
+        "SELECT window_type = 1 AND pos = 0 FROM item WHERE id = 41",
+    );
+    check(&database, "SELECT count = 5 FROM item WHERE id = 42");
+}
+
 /// `HEADER_CG_REQUEST_EVENT_DATA` (0x75).
 const CG_REQUEST_EVENT_DATA: u8 = 0x75;
 /// `HEADER_GC_EVENT_INFO` (0x9b).

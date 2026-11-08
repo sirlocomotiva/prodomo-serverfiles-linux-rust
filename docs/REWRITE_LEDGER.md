@@ -48217,3 +48217,18 @@ failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --wo
 --no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
 changed.
+
+## 452. The attr67 arms
+
+The three `sub.Attr67Add.*` arms are `ported`. The open and regist arms already rode
+`an_attr67_regist_waits_and_collects`; the slice adds `an_attr67_close_shuts_the_window`
+for the close: a regist with no window stays quiet, the open stands the window silently,
+the close shuts it, and a regist past it stays quiet with the sword and the fragments
+unmoved. Mutant killed: the close that clears nothing.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4963 passed, 0 failed in 44 targets. Doc tests: 1 passed, 0
+failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
+changed.
