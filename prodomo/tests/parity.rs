@@ -12937,6 +12937,8 @@ const TARGET_LEN: usize = 32;
 /// walk records (`G/party.cpp` sends).
 const CG_PARTY_INVITE: u8 = 0x48;
 const CG_PARTY_INVITE_ANSWER: u8 = 0x49;
+/// `HEADER_CG_PARTY_SET_STATE` (75): the PID, the role byte and the flag byte.
+const CG_PARTY_SET_STATE: u8 = 75;
 const GC_PARTY_INVITE: u8 = 0x4d;
 const GC_PARTY_ADD: u8 = 0x4e;
 const GC_PARTY_UPDATE: u8 = 0x4f;
@@ -23830,6 +23832,220 @@ fn a_party_skill_heals_quiet_and_warns_its_gates() {
         "the outsider is refused"
     );
     carol.quiet("the outsider hears nothing");
+}
+
+/// Form a party: `leader` invites `guest`'s VID, the guest answers yes to the leader's
+/// VID, and both drain the walk. Answers the guest's PID, read from the walk's ADDs.
+fn form_party(leader: &mut Keyed, guest: &mut Keyed, invited: u32, head: u32) -> u32 {
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&invited.to_le_bytes());
+    leader.send_record(&invite);
+    let asked = guest.read_game();
+    assert_eq!(asked[0], GC_PARTY_INVITE);
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&head.to_le_bytes());
+    answer.push(1);
+    guest.send_record(&answer);
+    // The walk's ADDs carry `pid + name`; the guest's PID is the one named "Yankee".
+    let mut found = 0;
+    let mut headers = Vec::new();
+    for _ in 0..24 {
+        let record = guest.read_game();
+        headers.push(record[0]);
+        if record[0] == GC_PARTY_ADD && record[5..11] == *b"Yankee" {
+            found = u32::from_le_bytes(record[1..5].try_into().expect("a PID"));
+        }
+        if headers.contains(&GC_PARTY_PARAMETER) && found != 0 {
+            break;
+        }
+    }
+    assert_ne!(found, 0, "the walk names Yankee: {headers:02x?}");
+    drain_party_walk(leader, "the leader", 4, 2, true);
+    found
+}
+
+/// Drain the leader's relog on the guest: the drop's unlink, the re-enter's point
+/// changes and arrive, and the re-link may ride anywhere in the walk.
+fn drain_leader_relog(guest: &mut Keyed) {
+    let unlink = guest.read_game();
+    assert_eq!(unlink[0], GC_PARTY_UNLINK, "the drop unlinks");
+    // The re-enter rides its point recomputes, the unlink's ownership and delete, and
+    // the party's re-walk first, then the plain arrive (no walk mode: the leader
+    // never stopped walking).
+    let mut add = Vec::new();
+    for _ in 0..32 {
+        let record = guest.read_game();
+        if record[0] == GC_CHARACTER_ADD {
+            add = record;
+            break;
+        }
+        assert!(
+            matches!(
+                record[0],
+                GC_POINT_CHANGE
+                    | GC_OWNERSHIP
+                    | GC_CHARACTER_DEL
+                    | GC_PARTY_ADD
+                    | GC_PARTY_LINK
+                    | GC_PARTY_UPDATE
+                    | GC_PARTY_PARAMETER
+            ),
+            "ahead of the arrive: {record:02x?}"
+        );
+    }
+    assert_eq!(add[0], GC_CHARACTER_ADD, "the leader re-enters");
+    let info = guest.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+    let entry = guest.read_game_raw();
+    assert!(
+        guest.timer_record(&entry),
+        "the entrant's entry is the timer's: {entry:02x?}"
+    );
+    let restate = guest.read_game_raw();
+    assert!(
+        guest.timer_restate(&restate),
+        "the entrant's login update restates its entry: {restate:02x?}"
+    );
+}
+
+/// A `CG_PARTY_SET_STATE` naming `pid` with `role` and `flag`.
+fn client_party_set_state(pid: u32, role: u8, flag: u8) -> Vec<u8> {
+    let mut record = vec![CG_PARTY_SET_STATE];
+    record.extend_from_slice(&pid.to_le_bytes());
+    record.push(role);
+    record.push(flag);
+    record
+}
+
+/// Read until a `GC_PARTY_UPDATE` for `pid` naming `role`, allowing the party walk's
+/// other records and stale updates ahead of it.
+fn read_update_role(who: &mut Keyed, pid: u32, role: u8, note: &str) {
+    for _ in 0..32 {
+        let record = who.read_game();
+        if record[0] == GC_PARTY_UPDATE
+            && u32::from_le_bytes(record[1..5].try_into().expect("a PID")) == pid
+            && record[5] == role
+        {
+            return;
+        }
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD
+                    | GC_PARTY_LINK
+                    | GC_PARTY_UPDATE
+                    | GC_PARTY_PARAMETER
+                    | GC_PARTY_UNLINK
+                    | GC_PARTY_REMOVE
+                    | GC_POINT_CHANGE
+            ),
+            "{note}: a non-party record ahead of the update: {record:02x?}"
+        );
+    }
+    panic!("{note}: no update naming {role} within 32 records");
+}
+
+/// Read until quiet, allowing only party walk records, and refuse any UPDATE that
+/// names `role` for `pid`: the Update the set sends every member is the walk's own,
+/// so a refused set answers nothing at all.
+fn quiet_past_party_walk_denying(who: &mut Keyed, pid: u32, role: u8, note: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let Some(record) = who.read_game_until(deadline) else {
+            break;
+        };
+        assert!(
+            !(record[0] == GC_PARTY_UPDATE
+                && u32::from_le_bytes(record[1..5].try_into().expect("a PID")) == pid
+                && record[5] == role),
+            "{note}: the refused set landed: {record:02x?}"
+        );
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD
+                    | GC_PARTY_LINK
+                    | GC_PARTY_UPDATE
+                    | GC_PARTY_PARAMETER
+                    | GC_PARTY_UNLINK
+                    | GC_PARTY_REMOVE
+            ),
+            "{note}: a record nobody accounted for: {record:02x?}"
+        );
+    }
+}
+
+/// Read until quiet, allowing only party walk records: the Update the set sends every
+/// member is the walk's own, so a refused set answers nothing at all.
+fn quiet_past_party_walk(who: &mut Keyed, note: &str) {
+    quiet_past_party_walk_denying(who, u32::MAX, u8::MAX, note);
+}
+
+/// `sub.PartySetState.*` (`G/input_main.cpp:2522-2575`): a non-leader's set is told
+/// `[LS;671]`; a set for a non-member PID is told `[LS;672]`; with leadership 0 the
+/// caps are all 0 so the leader's ATTACKER set stays quiet; with leadership 10 the set
+/// lands, both members read an UPDATE naming role 2, and the unset lands role 0; a NORMAL
+/// set and a role-8 set stay quiet.
+#[test]
+fn a_party_leader_sets_and_unsets_a_role() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1,          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let invited = u32::from_le_bytes(yankee_listed.id.to_le_bytes());
+    let head = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let guest_pid = form_party(&mut alice, &mut yankee, invited, head);
+    // A member's set is told to ask the leader.
+    yankee.send_record(&client_party_set_state(guest_pid, 2, 1));
+    assert_eq!(
+        read_told_line(&mut yankee, "the member"),
+        info_to_alpha(b"[LS;671]"),
+        "the non-leader is told"
+    );
+    // A set for a non-member PID is told it is no member.
+    alice.send_record(&client_party_set_state(999_999, 2, 1));
+    assert_eq!(
+        read_told_line(&mut alice, "the leader"),
+        info_to_alpha(b"[LS;672]"),
+        "the outsider PID is told"
+    );
+    // Leadership 0: the caps are all 0, so the set stays quiet and lands nowhere.
+    alice.send_record(&client_party_set_state(guest_pid, 2, 1));
+    quiet_past_party_walk_denying(&mut alice, guest_pid, 2, "the capped leader");
+    quiet_past_party_walk_denying(&mut yankee, guest_pid, 2, "the capped guest");
+    // Leadership 10: the set lands on both members, and the unset lands too. A relog
+    // with the skill row stored teaches the leader; the 3 s Update then opens the caps.
+    drop(alice);
+    wait_for(&database, "SELECT TRUE FROM player WHERE name = 'Alpha'");
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 121, 10, 0 FROM          player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
+    drain_leader_relog(&mut yankee);
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    alice.send_record(&client_party_set_state(guest_pid, 2, 1));
+    read_update_role(&mut yankee, guest_pid, 2, "the guest reads the role");
+    read_update_role(&mut alice, guest_pid, 2, "the leader reads the role");
+    alice.send_record(&client_party_set_state(guest_pid, 2, 0));
+    read_update_role(&mut yankee, guest_pid, 0, "the unset lands");
+    read_update_role(&mut alice, guest_pid, 0, "the leader reads the unset");
+    // NORMAL and role 8 stay quiet.
+    alice.send_record(&client_party_set_state(guest_pid, 0, 1));
+    alice.send_record(&client_party_set_state(guest_pid, 8, 1));
+    quiet_past_party_walk(&mut alice, "the quiet roles");
+    quiet_past_party_walk(&mut yankee, "the quiet guest");
 }
 
 /// `cg.game.pong`, `cg.game.time_sync` (`G/input_main.cpp:3661-3666`): in the game

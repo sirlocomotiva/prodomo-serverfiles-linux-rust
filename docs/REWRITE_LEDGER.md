@@ -48188,3 +48188,32 @@ failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --wo
 --no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
 changed.
+
+## 451. The party roles
+
+The seven `sub.PartySetState.*` arms are `ported`. The implementation existed
+(`party_set_state`, `set_party_role`, `unset_party_role`, `apply_role_caps`); what was
+missing was the scenario. Mid-slice a duplicate cap writer was added and then removed
+when the probe found the real one: `apply_role_caps` already runs in the Update, so
+the slice is scenario plus helpers, no game code.
+
+Scenario `a_party_leader_sets_and_unsets_a_role`: a member's set is told `[LS;671]`, a
+set for a non-member PID is told `[LS;672]`, with leadership 0 the set stays quiet and
+lands nowhere, with leadership 10 (a stored skill-121 row plus a relog, then the 3 s
+Update) the ATTACKER set lands an UPDATE naming role 2 on both members and the unset
+lands role 0, and NORMAL and role-8 sets stay quiet. Helpers `form_party`,
+`drain_leader_relog`, `client_party_set_state`, `read_update_role` and
+`quiet_past_party_walk_denying` carry the party form, the relog drain and the
+role-waiting reads.
+
+Mutants killed: the ATTACKER cap threshold (unit), and the NORMAL early-return plus
+the range gate gutted together (scenario). Each gate alone is an equivalent mutant:
+the NORMAL return and the range gate overlap on role 0, and role 8 is refused again
+by `set_party_role`'s own bound.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean. Suite: 4962 passed, 0 failed in 44 targets. Doc tests: 1 passed, 0
+failed. Clippy (`-D warnings`) clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps` clean. Afterwards no `prodomo\_%` database remained; `legacy/` is clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR
+changed.
