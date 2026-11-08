@@ -850,7 +850,12 @@ mod tests {
         assert!(!world.arena_item_use_allowed(vid, at));
         assert!(world.arena_item_use_allowed(vid, ItemPos::new(EWindows::Inventory as u8, 1)));
         let step = world
-            .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+            .use_item(
+                vid,
+                at,
+                mover(),
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("visitor");
         assert!(step.changes.is_empty());
         let mut targeted = arena_item_world(71_044, ITEM_USE, USE_TUNING, [0; 6]);
@@ -880,7 +885,12 @@ mod tests {
         world.run_arena_ticks(250);
         assert!(world.in_arena(vid));
         let result = world
-            .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+            .use_item(
+                vid,
+                at,
+                mover(),
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("seal stays");
         assert!(result.changes.is_empty());
         assert_eq!(
@@ -947,7 +957,12 @@ mod tests {
             let mut world = arena_item_world(27_001, ITEM_USE, sub_type, [0; 6]);
             let vid = Vid::new(1);
             let at = ItemPos::new(EWindows::Inventory as u8, 0);
-            let step = world.use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default());
+            let step = world.use_item(
+                vid,
+                at,
+                mover(),
+                &crate::game_loop_messages::QuestAccount::default(),
+            );
             assert_eq!(step.is_ok(), accepted);
             assert_eq!(world.arena_potion_count(vid), if accepted { 1 } else { 2 });
         }
@@ -967,7 +982,12 @@ mod tests {
                 let vid = Vid::new(1);
                 let at = ItemPos::new(EWindows::Inventory as u8, 0);
                 assert!(world
-                    .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+                    .use_item(
+                        vid,
+                        at,
+                        mover(),
+                        &crate::game_loop_messages::QuestAccount::default()
+                    )
                     .is_err());
                 assert_eq!(world.arena_potion_count(vid), 2);
                 world
@@ -976,12 +996,22 @@ mod tests {
                     .point_change(common::point_slot::POINT_HP, -300, false, false)
                     .unwrap();
                 world
-                    .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+                    .use_item(
+                        vid,
+                        at,
+                        mover(),
+                        &crate::game_loop_messages::QuestAccount::default(),
+                    )
                     .expect("accepted");
                 assert_eq!(world.arena_potion_count(vid), 1);
                 world.set_arena_potion_count(vid, 0);
                 let step = world
-                    .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+                    .use_item(
+                        vid,
+                        at,
+                        mover(),
+                        &crate::game_loop_messages::QuestAccount::default(),
+                    )
                     .expect("second");
                 assert_eq!(world.arena_potion_count(vid), if arena { 0 } else { -1 });
                 assert_eq!(step.changes.is_empty(), arena);
@@ -1002,7 +1032,12 @@ mod tests {
             .unwrap();
         let at = ItemPos::new(EWindows::Inventory as u8, 0);
         let step = world
-            .use_item(vid, at, mover(), &crate::game_loop_messages::QuestAccount::default())
+            .use_item(
+                vid,
+                at,
+                mover(),
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
             .expect("partial");
         assert_eq!(step.kind, MoveKind::Declined);
         assert!(step.changes.is_empty());

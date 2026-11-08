@@ -182,6 +182,9 @@ impl CommandEntry {
         if Self::is_tail_line(self.handler) {
             return Self::tail_name(self.handler);
         }
+        if Self::is_gm_tail_line(self.handler) {
+            return self.gm_tail_name();
+        }
         match self.handler {
             "do_view_equip" => Command::ViewEquip,
             "do_warp" => Command::Warp,
@@ -208,48 +211,6 @@ impl CommandEntry {
             "do_polymorph_item" => Command::Polyitem,
             "do_socket_item" => Command::SocketItem,
             "do_save_attribute_to_image" => Command::SaveAti,
-            "do_get_item_id_list"
-            | "do_get_mob_count"
-            | "do_effect"
-            | "do_add_socket"
-            | "do_set_socket"
-            | "do_change_attr"
-            | "do_add_attr"
-            | "do_change_rare_attr"
-            | "do_add_rare_attr"
-            | "do_force_logout"
-            | "do_reset_subskill"
-            | "do_conqueror_level"
-            | "do_conqueror_point"
-            | "do_sort_inventory"
-            | "do_pickup_affect"
-            | "do_move_channel"
-            | "do_flush"
-            | "do_observer"
-            | "do_user_horse_feed"
-            | "do_oxevent_show_quiz"
-            | "do_gaya_system"
-            | "do_cube"
-            | "do_fetch_casket_items"
-            | "do_break_marriage"
-            | "do_close_shop"
-            | "do_check_monarch_money"
-            | "do_monarch_warpto"
-            | "do_monarch_transfer"
-            | "do_monarch_info"
-            | "do_monarch_tax"
-            | "do_monarch_mob"
-            | "do_monarch_notice"
-            | "do_reward_system"
-            | "do_dungeon_info"
-            | "do_oxevent_log"
-            | "do_oxevent_get_attender"
-            | "do_threeway_war_info"
-            | "do_show_arena_list"
-            | "do_duel"
-            | "do_end_duel"
-            | "do_end_all_duel"
-            | "do_threeway_war_myinfo" => self.gm_tail_name(),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,
@@ -297,6 +258,55 @@ impl CommandEntry {
         }
     }
 
+    /// Whether `handler` is one of the tail GM lines `gm_tail_name` dispatches.
+    fn is_gm_tail_line(handler: &str) -> bool {
+        matches!(
+            handler,
+            "do_get_item_id_list"
+                | "do_get_mob_count"
+                | "do_effect"
+                | "do_add_socket"
+                | "do_set_socket"
+                | "do_change_attr"
+                | "do_add_attr"
+                | "do_change_rare_attr"
+                | "do_add_rare_attr"
+                | "do_force_logout"
+                | "do_reset_subskill"
+                | "do_conqueror_level"
+                | "do_conqueror_point"
+                | "do_sort_inventory"
+                | "do_pickup_affect"
+                | "do_move_channel"
+                | "do_flush"
+                | "do_observer"
+                | "do_user_horse_feed"
+                | "do_oxevent_show_quiz"
+                | "do_gaya_system"
+                | "do_cube"
+                | "do_fetch_casket_items"
+                | "do_break_marriage"
+                | "do_close_shop"
+                | "do_check_monarch_money"
+                | "do_monarch_warpto"
+                | "do_monarch_transfer"
+                | "do_monarch_info"
+                | "do_monarch_tax"
+                | "do_monarch_mob"
+                | "do_monarch_notice"
+                | "do_reward_system"
+                | "do_dungeon_info"
+                | "do_oxevent_log"
+                | "do_oxevent_get_attender"
+                | "do_threeway_war_info"
+                | "do_show_arena_list"
+                | "do_duel"
+                | "do_end_duel"
+                | "do_end_all_duel"
+                | "do_threeway_war_myinfo"
+                | "do_weeklyevent"
+        )
+    }
     /// The tail GM lines: split out so `mid_name` stays under the line lint.
     fn gm_tail_name(&self) -> Command {
         match self.handler {
@@ -342,6 +352,7 @@ impl CommandEntry {
             "do_duel" => Command::GmLine(GmLine::ArenaDuel),
             "do_end_duel" => Command::GmLine(GmLine::EndArenaDuel),
             "do_end_all_duel" => Command::GmLine(GmLine::EndAllArenaDuel),
+            "do_weeklyevent" => Command::GmLine(GmLine::WeeklyEvent),
             _ => Command::NotPorted(self.handler),
         }
     }

@@ -19693,6 +19693,59 @@ fn a_gm_reads_the_threeway_progress_and_its_dead_count() {
     alice.quiet("the two lines say no more");
 }
 
+/// `cmd.weeklyevent` (`do_weeklyevent`, `G/cmd_gm.cpp:4475-4501`) with the battle
+/// arena (`CBattleArena`, `G/BattleArena.cpp`): a `LOW_WIZARD` starts the event
+/// for empire 1 and force-ends it. On the owner data maps 190-192 load nowhere,
+/// so the event runs degenerately: the start notices and the flag land, and every
+/// map operation (regen, count, purge, warp, spawns) no-ops. The start speaks the
+/// CP949 empire line and the ten-minute line, sets `battle_arena` to 190, and
+/// answers `Weekly Event Start`; the force-end re-arms state 3 and answers
+/// `Weekly Event End`.
+#[test]
+fn a_gm_starts_and_force_ends_the_weekly_event() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/weeklyevent 1"));
+    let mut start = Vec::new();
+    start.extend_from_slice(b"\xbd\xc5\xbc\xf6\xb1\xb9");
+    start.extend_from_slice(
+        b"\xc0\xc7 \xbc\xba\xc0\xb8\xb7\xce \xb8\xf3\xbd\xba\xc5\xcd\xb5\xe9\xc0\xcc \xc1\xf8\xb1\xba\xc7\xcf\xb0\xed \xc0\xd6\xbd\xc0\xb4\xcf\xb4\xd9.",
+    );
+    assert_eq!(alice.read_game(), a_notice_line(&start));
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(
+            b"10\xba\xd0 \xb5\xda \xbc\xba\xc0\xbb \xb0\xf8\xb0\xdd\xc7\xd2 \xbf\xb9\xc1\xa4\xc0\xd4\xb4\xcf\xb4\xd9."
+        ),
+    );
+    assert_eq!(alice.read_game(), an_info_line(b"Weekly Event Start"));
+
+    // `/geteventflag` ignores its word and lists every flag in name order.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/geteventflag battle_arena"));
+    for expected in [
+        b"battle_arena 190".as_slice(),
+        b"guild_disband_delay 1",
+        b"guild_withdraw_delay 1",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(expected));
+    }
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/weeklyevent"));
+    assert_eq!(alice.read_game(), an_info_line(b"Weekly Event End"));
+    alice.quiet_allowing_farm("the force-end re-arms silently");
+}
+
 /// `cmd.block_chat` (`do_block_chat`, `G/cmd_gm.cpp:3364-3433`): a `HIGH_WIZARD`
 /// silences a character for a parsed time and the silence answers every chat arm.
 /// Alice silences Yankee for `1m30s`, and Yankee hears the `[LS;852]` first and

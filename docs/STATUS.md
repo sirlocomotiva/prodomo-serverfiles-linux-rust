@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 469 (the arena's edges).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 470
+Last reviewed: 2026-11-08, after ledger section 470 (the weekly battle arena).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 471
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -511,7 +511,9 @@ other and an arena death scores a round, restarts it or ends the match; the obse
 re-register and the `IsArenaMap` hooks (with `/pvp`'s arena gate) are next. Since 469 those
 are live too: the login arms, `/pvp`'s gate, the item, potion and horse refusals and the potion
 limit are `ported`, arena observers are confirmed unreachable (owner question 60), and only the
-battle arena keeps `sys.event.arena` `partial`. The
+battle arena keeps `sys.event.arena` `partial`. Since 470 the battle arena is live too:
+`/weeklyevent`, its eight states, the stone and boss spawns and the home warp are `ported`, and
+`sys.event.arena` stays `partial` only on the guards that wait for other systems. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

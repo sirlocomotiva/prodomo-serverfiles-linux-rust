@@ -49132,3 +49132,92 @@ in 46 targets, up 16 from 5019), `cargo test --workspace --doc --locked --offlin
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 470. The weekly battle arena
+
+`CBattleArena` (`G/BattleArena.h`, `G/BattleArena.cpp:12-333`) and `do_weeklyevent`
+(`G/cmd_gm.cpp:4475-4501`) are ported, in the new `prodomo/src/game_state/battle_arena.rs`.
+The logic was written by a delegated agent and reviewed here; the review found real breakage
+(below).
+
+Reachability: maps 190-192 are not in the owner's map index and no Channel hosts them, but
+the event still runs degenerately — the notices, the `battle_arena` flag and the GM lines
+fire, while every map operation finds no map or NPCs and no-ops. That degenerate behaviour is
+the port, and the scenario proves it. Nothing gates on the maps existing: `Start` checks only
+`STATUS_CLOSE` and the empire.
+
+What the Rewrite does now:
+- **`/weeklyevent [empire]`.** At rest the word's empire (1-3) starts, else a drawn 1-3
+  starts, and the caller hears `Weekly Event Start`. While running the event force-ends and
+  the caller hears `Weekly Event End`.
+- **`Start`**: the CLOSE and 1-3 gates, the map table, the CP949 empire and ten-minute
+  notices, the first arm (60 seconds on a test server, 300 otherwise), `STATUS_BATTLE`, and
+  the `battle_arena` flag set to the map index. The nation name reuses the three-way war's
+  raw CP949 table.
+- **The eight states**, with every notice in golden CP949 bytes and every map op: the
+  five-minute and one-minute warnings, the entry line with the flag cleared to 0 and the
+  regen arm, the gather-or-stones state (five stones, then the falls line), the purge and
+  return state, the home warp with `End`, the boss states (the last-boss lines, the felled
+  or escapes lines, the purges). The `test_server` waits are kept.
+- **`End`** (cancel, clear, flag 0) and **`ForceEnd`** (the `m_bForceEnd` latch, cancel,
+  re-arm at state 3 after 5 seconds).
+- **`SpawnRandomStone`** (the 7 vnums, the 3 regions, the `idx` latch) and **`SpawnLastBoss`**
+  (vnum 8616, the 3 positions, the latch) on every Channel's copy of the map.
+- **`FWarpToHome`**: every PC on the map warps to its empire start; a GM is skipped unless
+  the server is a test server. The plain home order goes out, which resolves on the owner's
+  topology (every Channel hosts every empire start).
+
+`STATUS_END` stays unassigned, as legacy leaves it. No second map table: the port reuses the
+existing 190-192 constants.
+
+Divergence: at an equal Pulse the battle-arena state sorts after Santa's return. Legacy's
+heap order at equal priority is heap-shape dependent, as the other arms note.
+
+Gaps:
+- `ba.start` stays `unused` (ledger 401): no quest names it.
+- `battle_regen` does not run the empire's regen file: the game thread reads no regen files
+  at runtime (they load at boot in `main.rs`). On the owner's data the files do not ship and
+  no copy of the maps hosts anything, so the arm is empty either way; if the maps ever load,
+  it needs the boot-time entries.
+- `sys.event.arena` stays `partial` on the guards that wait for other systems (fish, potion,
+  talisman items, the marriage ring, costume mounts, pet and mount login).
+
+Review fixes (the agent's verification did not catch these):
+- The agent's wiring replaced the `do_end_all_duel` dispatch arm with `do_weeklyevent` and
+  dropped `do_threeway_war_myinfo` from the routing list, unporting both lines, and never
+  added `do_weeklyevent` to the routing list, so the new line itself reached `NotPorted`.
+  All three are restored; the weeklyevent scenario passes only with the routing.
+- State 7 was ported as a redundant double-gated arm with a dead branch; it is now legacy's
+  shape (increment, `>= 6` escapes, else spawn).
+- `battle_notice`'s doc claimed a caller-Channel-only scope the code did not implement. The
+  code is right: legacy walks its whole process's client set filtered by map only
+  (`G/cmd_gm.cpp:1453-1489`).
+- The new routing line pushed `mid_name` to 101/100 lines; the 43 GM-tail routes moved to
+  `is_gm_tail_line`, beside the existing `is_tail_line` split.
+- The scenario reads the whole `/geteventflag` list: the line ignores its word and lists
+  every flag in name order.
+
+Tests:
+- 6 unit tests pin the Start gates, notices and flag, the empire draw, the first three
+  states, the degenerate gather-and-boss path, the ForceEnd latch and `End`, and the spawn
+  and warp latches.
+- The scenario `a_gm_starts_and_force_ends_the_weekly_event`: a LOW_WIZARD starts empire 1,
+  reads the CP949 start line, the ten-minute line and `Weekly Event Start`, reads
+  `battle_arena 190` in the flag list, force-ends and reads `Weekly Event End`. It passed 8
+  of 8 in a parallel flake check. The long waits are unit-proven (spec, 2026-10-14).
+
+Mutants, each killed semantically and restored by checksum:
+- state 2's flag clear dropped;
+- the force-end re-arm moved to state 4.
+
+Inventory: `cmd.weeklyevent` and `event.BattleArena.battle_arena_event` are `ported`;
+`sys.event.arena` stays `partial` with the remaining list. Owner question 52's battle-arena
+third is answered by the port.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5042 passed, 0 failed
+in 46 targets, up 7 from 5035), `cargo test --workspace --doc --locked --offline` (1 passed),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` passed, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

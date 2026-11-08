@@ -3012,6 +3012,8 @@ pub enum GmLine {
     EndArenaDuel,
     /// End every GM arena duel.
     EndAllArenaDuel,
+    /// `/weeklyevent` (`do_weeklyevent`, `G/cmd_gm.cpp:4475-4501`): the battle arena.
+    WeeklyEvent,
 }
 
 /// Which restart a dead player asks for.

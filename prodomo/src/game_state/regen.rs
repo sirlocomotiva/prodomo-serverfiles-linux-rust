@@ -85,6 +85,11 @@ pub(super) enum Due {
         /// Its place in the map's [`world::npc::MapNpcs::regens`].
         at: usize,
     },
+    /// `battle_arena_event` (`G/BattleArena.cpp:87-233`): the weekly event's state.
+    /// It sorts after [`Due::SantaSpawn`]: at an equal Pulse Santa's return runs first
+    /// (a Divergence — legacy's heap order at equal priority is heap-shape dependent,
+    /// as the other arms note).
+    BattleArena,
     /// `spawn_santa_event` (`G/xmas_event.cpp:115-141`): Santa's 50 min respawn on this map.
     /// It sorts first here: at an equal Pulse it fires before any other event (a Divergence
     /// — legacy's heap order at equal priority is heap-shape dependent, as the other arms
@@ -311,6 +316,7 @@ impl GameState {
                 // player's event runs only while its own slot still holds it.
                 Due::Vein(vid) | Due::Campfire(vid) => self.destroy_npc(vid),
                 Due::SantaSpawn { map } => self.fire_santa_spawn(map, pulse),
+                Due::BattleArena => {}
                 Due::Regen { channel, map, at } => self.fire_regen((channel, map), at, pulse),
                 Due::Stun(vid) => self.stun_event(vid),
                 Due::Dead(vid) => self.dead_event(vid),

@@ -287,6 +287,10 @@ impl GameState {
             | GmLine::ArenaDuel
             | GmLine::EndArenaDuel
             | GmLine::EndAllArenaDuel => self.run_arena_line(vid, line, rest, mover),
+            GmLine::WeeklyEvent => {
+                self.run_weeklyevent_line(vid, rest, mover);
+                None
+            }
             _ => None,
         }
     }

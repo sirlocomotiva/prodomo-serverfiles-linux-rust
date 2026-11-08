@@ -65,6 +65,7 @@ mod affect;
 mod alignment;
 mod arena;
 mod attr67;
+mod battle_arena;
 mod biologist;
 mod cards;
 mod changelook;
@@ -576,6 +577,17 @@ pub struct GameState {
     arenas: std::collections::BTreeMap<(u8, u32), Vec<arena::Arena>>,
     /// Character-local arena potion count (`G/char.cpp:389`, `G/char.h:1917-1918`).
     arena_potions: std::collections::HashMap<common::vid::Vid, i32>,
+    /// The battle arena (`CBattleArena`, `G/BattleArena.h:11-41`): `m_nMapIndex` and
+    /// `m_nEmpire` while it runs, and the `battle_arena_event` state and wait count on
+    /// its due Pulse. `m_pEvent`'s cancel is the armed slot clearing; `m_status` is
+    /// whether the index is set (`STATUS_BATTLE`) — `STATUS_END` is never assigned
+    /// (`G/BattleArena.cpp` names it but no arm sets it).
+    battle_map: i32,
+    battle_empire: i32,
+    battle_latch: battle_arena::BattleLatch,
+    battle_due: Option<u64>,
+    battle_state: u8,
+    battle_wait: u8,
     /// The three-way kill scores (`CThreeWayWar::KillScore_`, `G/threeway_war.h:61`):
     /// one per empire, by empire minus 1. `-1` marks an eliminated empire, which the
     /// death hook skips. `Default` is all zero, as `Initialize` leaves them.
@@ -5667,6 +5679,7 @@ impl PulseProcessor for GameState {
         self.run_shutdown_tick(pulse);
         self.run_timed_exits(pulse);
         self.run_arena_ticks(pulse);
+        self.run_battle_arena_tick(pulse);
         self.run_confirm_timeouts(pulse);
         self.run_fishing_events(pulse);
         self.run_mining_events(pulse);
