@@ -49486,3 +49486,52 @@ test --workspace --doc --locked --offline`, `cargo clippy --workspace
 cargo doc --workspace --no-deps --locked --offline`, the 238 scenario 8x, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 474. The guild's buildings
+
+`/build` and `/clear_land` are `ported` (`cmd.build`, `cmd.clear_land`), leaving
+`cmd.in_game_mall` the last missing command. The six `do_build` arms run on the first word's
+lowercased byte behind the land gates (on a land, the master or a GM), and `do_clear_land`
+wipes the land behind the table's `GM_HIGH_WIZARD`.
+
+`prodomo/src/game_state/build_lines.rs` (new) holds the lines. `build_create` runs the proto
+gates (unknown, group conflict, missing dependency), the spend gate (test-server mode or a
+player caller: price cap, gold, materials in proto order) and `RequestCreateObject`'s bounds
+and occupancy gates, then stands the object and spends. `build_delete` knocks by building
+VID. `build_walls` stands the four single walls facing the direction word. `build_wall_blocks`
+parses the set id as `int`, the size as `char` (the low byte, wrapping, then clamped 0..3)
+and the doors west/north/east/south, and runs the four side runs. The `e`/`E` arms knock the
+single walls and the set's blocks. `clear_build_land` knocks every object in id order, drops
+the owner, halves the clear and stands the claim stone (20040) at the land center.
+
+The parses match `common/utils.h`: `dword` is `strtoul`, which matters because NPC VIDs live
+past `i32::MAX` (the first delete test's VID is 2^31+100) and the earlier `int_word` wrap
+saturated them into a miss. The set id is `str_to_number(int)` and the size
+`str_to_number(char)`, which matters because 1000 wraps to -24 and clamps to 0. Rotations are
+compared as the integer degrees the lines parse, never as floats.
+
+The halves drain through the new `GmRows.buildings` field and `store_quest_land_store`
+(`prodomo/src/main.rs`), which stores the create, delete and clear halves beside the quest
+steps' land halves. `db/src/guild_land.rs` gains the object-row write, delete and
+land-clear.
+
+Reachability, with ledger 466's lesson: the owner's 41 object protos name no single-wall
+vnum (14201-14204) and no block vnum for any of the three sets, so on the owner's data the
+wall arms parse and run but stand nothing — exactly as legacy would against the same table.
+The create, delete and clear arms are live, and the scenario builds 14300 (no group gates)
+for gold and materials.
+
+Evidence: ten unit tests (the player-master create and spend, the stranger's silence, the
+refusals, the delete, the four walls and their spots, the clear, the block stand and erase,
+the char wrap, the door split, the west word's side) and the scenario
+`a_master_builds_on_its_land_and_clears_it`, which builds, spends, knocks nothing by an
+unknown VID and clears. Five mutants killed: the `dword` saturation, the size wrap, the door
+order (which caught a missing test — the all-doors test could not see a swap), the spend
+gate, and the group gate.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the 238 scenario 8x, and `legacy/` is
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

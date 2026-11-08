@@ -792,6 +792,7 @@ fn empty_pass_rows(pid: u32, points: Option<world::character::Points>) -> GmRows
         monarch: None,
         points,
         quickslots: None,
+        buildings: Vec::new(),
     }
 }
 

@@ -103,6 +103,7 @@ impl GameState {
             monarch: None,
             points: None,
             quickslots: None,
+            buildings: Vec::new(),
         })
     }
 

@@ -313,6 +313,7 @@ impl GameState {
             monarch: Some((empire, money)),
             points: None,
             quickslots: None,
+            buildings: Vec::new(),
         })
     }
     /// The price a warp or a summon charges before it fires.

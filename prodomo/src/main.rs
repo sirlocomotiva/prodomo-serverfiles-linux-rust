@@ -5953,30 +5953,8 @@ where
                     return false;
                 }
             }
-            GuildQuestStore::Offer {
-                pid,
-                floored,
-                offer,
-                guild_id,
-                exp,
-                level,
-                ladder,
-            } => {
-                if let Err(error) = db::guilds::add_offer(
-                    &context.store,
-                    db::guilds::GuildOffer {
-                        guild_id: *guild_id,
-                        pid: *pid,
-                        floored: *floored,
-                        offer: *offer,
-                        level: *level,
-                        exp: *exp,
-                        ladder: *ladder,
-                    },
-                )
-                .await
-                {
-                    warn!(%addr, %error, "A quest offer could not be stored; closing");
+            offer @ GuildQuestStore::Offer { .. } => {
+                if !store_quest_guild_offer(addr, context, offer).await {
                     return false;
                 }
             }
@@ -6003,12 +5981,55 @@ where
                     return false;
                 }
             }
-            GuildQuestStore::Land { .. } | GuildQuestStore::Reconstruct { .. } => {
-                if !store_quest_land_store(addr, context, store).await {
+            land @ (GuildQuestStore::Land { .. }
+            | GuildQuestStore::Reconstruct { .. }
+            | GuildQuestStore::Create { .. }
+            | GuildQuestStore::Delete { .. }
+            | GuildQuestStore::Clear { .. }) => {
+                if !store_quest_land_store(addr, context, land).await {
                     return false;
                 }
             }
         }
+    }
+    true
+}
+
+/// Store one quest offer: the offer's row (the world already fanned the commit).
+/// Split out so `store_quest_guild_stores` stays under the line lint.
+async fn store_quest_guild_offer(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    store: &GuildQuestStore,
+) -> bool {
+    let GuildQuestStore::Offer {
+        pid,
+        floored,
+        offer,
+        guild_id,
+        exp,
+        level,
+        ladder,
+    } = store
+    else {
+        return true;
+    };
+    if let Err(error) = db::guilds::add_offer(
+        &context.store,
+        db::guilds::GuildOffer {
+            guild_id: *guild_id,
+            pid: *pid,
+            floored: *floored,
+            offer: *offer,
+            level: *level,
+            exp: *exp,
+            ladder: *ladder,
+        },
+    )
+    .await
+    {
+        warn!(%addr, %error, "A quest offer could not be stored; closing");
+        return false;
     }
     true
 }
@@ -6033,7 +6054,72 @@ async fn store_quest_land_store(
                 return false;
             }
         }
+        GuildQuestStore::Create { .. } => {
+            if !store_quest_create(addr, context, store).await {
+                return false;
+            }
+        }
+        GuildQuestStore::Delete { id } => {
+            if let Err(error) = db::guild_land::delete_object(&context.store, *id).await {
+                warn!(%addr, %error, "A knocked-down object could not be stored; closing");
+                return false;
+            }
+        }
+        GuildQuestStore::Clear { land_id } => {
+            if let Err(error) = db::guild_land::delete_land_objects(&context.store, *land_id).await
+            {
+                warn!(%addr, %error, "A cleared land's objects could not be stored; closing");
+                return false;
+            }
+            if let Err(error) = db::guild_land::drop_owner(&context.store, *land_id).await {
+                warn!(%addr, %error, "A cleared land's owner could not be stored; closing");
+                return false;
+            }
+        }
         _ => {}
+    }
+    true
+}
+
+/// Store one stood object: the create row lands with the world's judged id.
+/// Answers whether the step may be sent.
+async fn store_quest_create(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    store: &GuildQuestStore,
+) -> bool {
+    let GuildQuestStore::Create {
+        id,
+        land_id,
+        vnum,
+        map,
+        x,
+        y,
+        rot,
+        life,
+    } = store
+    else {
+        return true;
+    };
+    if let Err(error) = db::guild_land::create_object(
+        &context.store,
+        *id,
+        *land_id,
+        *vnum,
+        *map,
+        *x,
+        *y,
+        (
+            f32::from_bits(rot.0),
+            f32::from_bits(rot.1),
+            f32::from_bits(rot.2),
+        ),
+        *life,
+    )
+    .await
+    {
+        warn!(%addr, %error, "A stood object could not be stored; closing");
+        return false;
     }
     true
 }
@@ -13556,6 +13642,11 @@ async fn gm_line_step(
         }
         if let Some(quickslots) = rows.quickslots {
             held.quickslots = quickslots;
+        }
+        for store in &rows.buildings {
+            if !store_quest_land_store(addr, context, store).await {
+                return false;
+            }
         }
         for vnum in &rows.cleared_skills {
             if let Err(error) =

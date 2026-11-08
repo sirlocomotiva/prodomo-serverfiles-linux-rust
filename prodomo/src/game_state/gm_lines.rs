@@ -89,6 +89,9 @@ pub struct GmRows {
     pub points: Option<world::character::Points>,
     /// The mover's quickslots after the line's syncs, which the descriptor holds.
     pub quickslots: Option<world::character::Quickslots>,
+    /// The building halves the line judged, in order, which the descriptor
+    /// drains through the land drain. Empty for a line that built nothing.
+    pub buildings: Vec<super::guild::GuildQuestStore>,
 }
 
 /// What one attribute line rolled on the worn weapon, for
@@ -305,6 +308,8 @@ impl GameState {
             }
             GmLine::BattlePass => self.run_battle_pass_gm_line(vid, rest, mover),
             GmLine::BattlePassAdmin => self.run_battle_pass_admin_gm_line(vid, rest, mover),
+            GmLine::Build => self.run_build_line(vid, rest, mover),
+            GmLine::ClearLand => self.run_clear_land_line(vid, mover),
             _ => None,
         }
     }
@@ -445,6 +450,7 @@ impl GameState {
             monarch: None,
             points: outcome.points,
             quickslots: outcome.quickslots,
+            buildings: Vec::new(),
         })
     }
 
@@ -508,6 +514,7 @@ impl GameState {
             monarch: None,
             points: None,
             quickslots: None,
+            buildings: Vec::new(),
         })
     }
 
@@ -729,6 +736,7 @@ impl GameState {
             monarch: None,
             points: None,
             quickslots: None,
+            buildings: Vec::new(),
         })
     }
 
@@ -849,6 +857,7 @@ impl GameState {
             monarch: None,
             points: None,
             quickslots: None,
+            buildings: Vec::new(),
         })
     }
 }

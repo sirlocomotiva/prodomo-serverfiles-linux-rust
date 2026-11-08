@@ -130,6 +130,88 @@ pub async fn load_objects(store: &Store) -> Result<StoredObjects, AccountError> 
     Ok(objects)
 }
 
+/// Stand one object: `RequestCreateObject`'s store half
+/// (`HEADER_GD_CREATE_OBJECT`, `G/building.cpp:565-573`): the create row lands with
+/// the world's judged id.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`].
+#[allow(clippy::too_many_arguments)]
+pub async fn create_object(
+    store: &Store,
+    id: u32,
+    land_id: u32,
+    vnum: u32,
+    map: i32,
+    x: i32,
+    y: i32,
+    rot: (f32, f32, f32),
+    life: i32,
+) -> Result<(), AccountError> {
+    sqlx::query(
+        "INSERT INTO building_object (id, land_id, vnum, map_index, x, y, x_rot, y_rot, z_rot, \
+         life) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(i64::from(id))
+    .bind(i64::from(land_id))
+    .bind(i64::from(vnum))
+    .bind(map)
+    .bind(x)
+    .bind(y)
+    .bind(rot.0)
+    .bind(rot.1)
+    .bind(rot.2)
+    .bind(life)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// Knock one object down: `RequestDeleteObject`'s store half
+/// (`HEADER_GD_DELETE_OBJECT`, `G/building.cpp:578-588`). Quiet for an id no row
+/// holds, as the delete names it.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`].
+pub async fn delete_object(store: &Store, id: u32) -> Result<(), AccountError> {
+    sqlx::query("DELETE FROM building_object WHERE id = $1")
+        .bind(i64::from(id))
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Knock a land's objects down: `CLand::ClearLand`'s delete halves
+/// (`G/building.cpp:1021-1030`), in one transaction. The owner reset is
+/// `set_owner`'s half, which the land half carries separately.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`].
+pub async fn delete_land_objects(store: &Store, land_id: u32) -> Result<(), AccountError> {
+    sqlx::query("DELETE FROM building_object WHERE land_id = $1")
+        .bind(i64::from(land_id))
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Drop a land's owner: `CLand::SetOwner(0)`'s store half (`G/building.cpp:605-612`).
+/// The row goes, as a `guild_id` of 0 does.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Database`].
+pub async fn drop_owner(store: &Store, land: u32) -> Result<(), AccountError> {
+    sqlx::query("DELETE FROM guild_land WHERE land_id = $1")
+        .bind(i64::from(land))
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
 /// Rebuild one object: `CObject::Reconstruct`'s store halves
 /// (`G/building.cpp:80-89`): the delete row goes, then the create row lands, in one
 /// transaction.

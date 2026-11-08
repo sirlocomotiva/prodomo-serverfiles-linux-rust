@@ -17305,6 +17305,87 @@ fn seed_war_pair(database: &ScratchDatabase) {
     );
 }
 
+/// A guild master builds on its land and clears it: `/build c` stands the object and
+/// spends the price (with the claim-half stored), an unknown VID knocks nothing, and
+/// `/clear_land` wipes the land and stones the center.
+#[test]
+fn a_master_builds_on_its_land_and_clears_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // Before the boot: the stored guild installs once, while the gate is closed.
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO guild (id, name, master_pid, ladder_point) SELECT 1, 'MyGuild', id, 1000          FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN          grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 15) grade",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 1, 1 FROM player WHERE name          = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (1, 1)",
+    );
+    // Alpha stands aside on land 1 — map 1's base is (409600, 896000) and the land
+    // sits at local (20200, 10000) 3000 square — so its own body does not block
+    // the footprint it builds on.
+    sql(
+        &database,
+        "UPDATE player SET x = 432600, y = 908500, gold = 1000000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 5,          90010 FROM player WHERE name = 'Alpha'",
+    );
+    // The master's GM grant: `/clear_land` sits behind `GM_HIGH_WIZARD` in the table.
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD'          FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _, _) = enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    // Fewer than six words tells `Invalid syntax`.
+    alice.send_record(&slash(b"/build c 14043"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Invalid syntax"),
+        "the short line tells"
+    );
+    // The create stands and spends (14300: no group gates, 300000 gold, five 90010s):
+    // the gold record lands and the claim half is stored.
+    alice.send_record(&slash(b"/build c 14300 21200 11000 0 0 0"));
+    let gold = alice.read_game();
+    assert_eq!(gold[0], GC_POINT_CHANGE, "the spend record: {gold:02x?}");
+    let spent = alice.read_game();
+    assert_eq!(spent[0], ITEM_SET, "the spent stack's record: {spent:02x?}");
+    assert_eq!(set_fields(&spent), (1, 0, 0, 0), "the used-up cell clears");
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM building_object WHERE land_id = 1 AND vnum = 14300) = 1",
+    );
+    // An unknown VID knocks nothing and tells nothing.
+    alice.send_record(&slash(b"/build d 1"));
+    alice.still("the unknown VID is quiet");
+    // The clear wipes the land: the notice tells, the row goes, the owner drops.
+    alice.send_record(&slash(b"/clear_land"));
+    let cleared = alice.read_game();
+    assert_eq!(
+        cleared,
+        an_info_line(b"Guild Land(1) Cleared"),
+        "the cleared notice"
+    );
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM building_object WHERE land_id = 1) = 0 AND (SELECT count(*) FROM          guild_land WHERE land_id = 1) = 0",
+    );
+}
+
 /// A `CHAT_TYPE_NOTICE` line to a character of empire 1.
 fn a_notice_line(text: &[u8]) -> Vec<u8> {
     let size = u8::try_from(10 + text.len()).expect("a short line");

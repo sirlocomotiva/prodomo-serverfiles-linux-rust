@@ -68,6 +68,7 @@ mod attr67;
 mod battle_arena;
 mod battle_pass;
 mod biologist;
+mod build_lines;
 mod cards;
 mod castle_lines;
 mod changelook;
@@ -825,6 +826,10 @@ pub struct GameState {
     /// The next building object id (`CObject::m_dwID`, from the `object` table's
     /// auto-increment).
     next_object_id: u32,
+    /// The building halves a `/build` or `/clear_land` line judged, in order,
+    /// which the line's `GmRows` carries to the drain. A line takes what it
+    /// judged and leaves the rest.
+    build_halves: Vec<guild::GuildQuestStore>,
     browsing: HashMap<common::vid::Vid, shop::Browsing>,
     /// The open trades, keyed by the VID of the character that started each.
     trades: BTreeMap<u32, trade::Deal>,

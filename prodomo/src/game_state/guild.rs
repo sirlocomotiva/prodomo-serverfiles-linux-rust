@@ -880,6 +880,40 @@ pub enum GuildQuestStore {
         /// The owning guild.
         guild_id: u32,
     },
+    /// A stood object: `RequestCreateObject`'s create half
+    /// (`HEADER_GD_CREATE_OBJECT`, `G/building.cpp:565-573`). The world already
+    /// stands the row.
+    Create {
+        /// The judged object id.
+        id: u32,
+        /// The land id.
+        land_id: u32,
+        /// The prototype vnum.
+        vnum: u32,
+        /// The map index.
+        map: i32,
+        /// The absolute x and y.
+        x: i32,
+        /// The absolute y.
+        y: i32,
+        /// The rotations as IEEE-754 bits, because an `f32` would break `Eq`.
+        rot: (u32, u32, u32),
+        /// The life.
+        life: i32,
+    },
+    /// A knocked-down object: `RequestDeleteObject`'s delete half
+    /// (`HEADER_GD_DELETE_OBJECT`, `G/building.cpp:578-588`). The world already
+    /// dropped the row.
+    Delete {
+        /// The deleted object's id.
+        id: u32,
+    },
+    /// A cleared land: `CLand::ClearLand` (`G/building.cpp:1021-1037`): every
+    /// object goes and the owner drops.
+    Clear {
+        /// The cleared land id.
+        land_id: u32,
+    },
     /// An object rebuild: `CObject::Reconstruct`'s delete and create halves
     /// (`G/building.cpp:80-89`). The world already swapped the row.
     Reconstruct {
@@ -1343,7 +1377,7 @@ impl GameState {
     }
 
     /// The next non-player VID, or `None` once the pool is exhausted.
-    fn take_npc_vid(&mut self) -> Option<u32> {
+    pub(super) fn take_npc_vid(&mut self) -> Option<u32> {
         self.regens.respawner_mut()?.take_vid().ok()
     }
 
@@ -1351,7 +1385,7 @@ impl GameState {
     /// the rotated offset with the land's guild, and its VID answers. Quiet — no
     /// NPC — with no NPC vnum, a land no guild owns, an unknown guild, or a point
     /// no sectree holds.
-    fn regen_building_npc(
+    pub(super) fn regen_building_npc(
         &mut self,
         place: (u8, i32),
         object: &db::guild_land::StoredObject,
@@ -7671,6 +7705,28 @@ impl Guilds {
     /// guild arm reads of the account's characters.
     pub(super) fn shadow_guild_of(&self, pid: u32) -> Option<u32> {
         self.of.get(&pid).copied()
+    }
+
+    /// The master's PID of `guild` (`CGuild::GetMasterPID`), if the guild stands.
+    pub(super) fn master_of(&self, guild: u32) -> Option<u32> {
+        self.by_id.get(&guild).map(|guild| guild.master_pid)
+    }
+
+    /// Set the member-count bonus of `guild` (`CGuild::SetMemberCountBonus`).
+    pub(super) fn set_member_bonus(&mut self, guild: u32, bonus: i32) {
+        if let Some(guild) = self.by_id.get_mut(&guild) {
+            guild.member_count_bonus = bonus;
+        }
+    }
+
+    /// The guild owning `land` (`CLand::GetOwner`), if one does.
+    pub(super) fn land_owner(&self, land: u32) -> Option<u32> {
+        self.land_owners.get(&land).copied()
+    }
+
+    /// Drop the owner of `land` (`CLand::SetOwner(0)`).
+    pub(super) fn drop_land_owner(&mut self, land: u32) {
+        self.land_owners.remove(&land);
     }
 
     /// The shadow guild `id`'s master, level, ladder and dungeon triple, if any:

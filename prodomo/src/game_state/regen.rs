@@ -270,6 +270,33 @@ impl GameState {
         self.is_attr(map, (x, y), ATTR_BANPK)
     }
 
+    /// Whether any cell in the rect sets any of `flags`, walking the cells the rect
+    /// covers (`ForAttrRegion` in `ATTR_REGION_MODE_CHECK`, `G/sectree_manager.cpp`),
+    /// on the cells boot handed over: false on a map it handed none of.
+    pub(super) fn attr_in_rect(
+        &self,
+        map: i32,
+        footprint: (i32, i32, i32, i32),
+        flags: u32,
+    ) -> bool {
+        use gamedata::server_attr::CELL_SIZE;
+        let Some(cells) = self.regens.cells.get(map) else {
+            return false;
+        };
+        let mut y = footprint.1 - footprint.1 % CELL_SIZE;
+        while y <= footprint.3 {
+            let mut x = footprint.0 - footprint.0 % CELL_SIZE;
+            while x <= footprint.2 {
+                if cells.is_attr(x, y, flags) {
+                    return true;
+                }
+                x = x.saturating_add(CELL_SIZE);
+            }
+            y = y.saturating_add(CELL_SIZE);
+        }
+        false
+    }
+
     /// `SECTREE::IsAttr(x, y, flags)` on the cells boot handed over: false on a map it handed
     /// none of, and where the map has no sectree.
     pub(super) fn is_attr(&self, map: i32, (x, y): (i32, i32), flags: u32) -> bool {

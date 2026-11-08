@@ -3038,6 +3038,10 @@ pub enum GmLine {
     /// `/battle_pass_admin` (`do_battle_pass_admin`, `G/cmd_general.cpp:4232-4294`), an
     /// implementor's line.
     BattlePassAdmin,
+    /// `/build` (`do_build`, `G/cmd_gm.cpp:3435-3731`): the guild land's buildings.
+    Build,
+    /// `/clear_land` (`do_clear_land`, `G/cmd_gm.cpp:4556-4571`): the land's wipe.
+    ClearLand,
 }
 
 /// Which restart a dead player asks for.

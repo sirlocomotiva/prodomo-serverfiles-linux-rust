@@ -310,6 +310,8 @@ impl CommandEntry {
                 | "do_worldboss"
                 | "do_battle_pass"
                 | "do_battle_pass_admin"
+                | "do_build"
+                | "do_clear_land"
         )
     }
     /// The tail GM lines: split out so `mid_name` stays under the line lint.
@@ -363,6 +365,8 @@ impl CommandEntry {
             "do_worldboss" => Command::GmLine(GmLine::Worldboss),
             "do_battle_pass" => Command::GmLine(GmLine::BattlePass),
             "do_battle_pass_admin" => Command::GmLine(GmLine::BattlePassAdmin),
+            "do_build" => Command::GmLine(GmLine::Build),
+            "do_clear_land" => Command::GmLine(GmLine::ClearLand),
             _ => Command::NotPorted(self.handler),
         }
     }

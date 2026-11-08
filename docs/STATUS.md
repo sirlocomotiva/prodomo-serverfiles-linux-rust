@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 473 (the battle pass).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 474
+Last reviewed: 2026-11-08, after ledger section 474 (the guild's buildings).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 475
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -522,7 +522,10 @@ boot table are `ported`, with the season bank dropped as website-only. Since 473
 pass is live: `/battle_pass` and `/battle_pass_admin`, the 158-mission boot table, the mission
 buckets, the kill/use/sell/craft/drop hooks and the 238 record are `ported`; 238 is
 client-unhandled, so the send is wire-only, and the MESSAGES/CHEST_OPEN/PLAYTIME arms wait on
-their unwired paths. The
+their unwired paths. Since 474 `/build` and `/clear_land` are `ported`: the six arms, the
+land gates, the proto gates, the spend and the drain, with the wipe, the owner drop and the
+claim stone; the single and block walls parse and run but the owner's 41 object protos name
+no wall vnum, so like legacy they stand nothing there. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
