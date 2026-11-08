@@ -731,6 +731,7 @@ fn whole_save() -> PlayerSave {
         secured_password: 123_456,
         premium: 1,
         premium_time: 1_700_000_000,
+        envanter: 7,
         horse: db::players::PlayerHorse {
             level: 23,
             riding: true,
@@ -843,6 +844,10 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         read.premium_time, save.premium_time,
         "the premium timer rides with the save"
     );
+    assert_eq!(
+        read.envanter, save.envanter,
+        "the unlocks ride with the save"
+    );
     assert_eq!(read.horse, save.horse, "the horse rides with the save");
 }
 
@@ -907,6 +912,7 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         secured_password: 999_999,
         premium: 0,
         premium_time: 0,
+        envanter: 0,
         horse: db::players::PlayerHorse::default(),
     };
     // Bob's account naming Alice's character is a miss, not a write.

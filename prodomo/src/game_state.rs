@@ -81,6 +81,7 @@ mod emotion;
 mod empire_priv;
 mod event_calendar;
 mod event_flag;
+mod extend_inven;
 mod fight;
 mod fish_event;
 mod fish_simul;
@@ -161,6 +162,7 @@ pub use daily_gift::{
     DailyGiftState, DailyGiftStep, DAILY_GIFT_CLOSE, DAILY_GIFT_COLLECT,
     DAILY_GIFT_COLLECT_USE_TICKET, DAILY_GIFT_OPEN,
 };
+pub use extend_inven::unlock_price;
 pub use fish_event::{FishBoard, FishCell, FishEventStep, FISH_EVENT_SLOTS};
 pub use gaya_system::{GAYA_CRAFT, GAYA_MARKET, GAYA_REFRESH};
 pub use gm_lines::GmRows;
@@ -2384,6 +2386,7 @@ impl GameState {
             | GameCommand::Biologist { .. }
             | GameCommand::Premium { .. }
             | GameCommand::Protected { .. }
+            | GameCommand::ExtendInven { .. }
             | GameCommand::NpcsOn { .. }) => {
                 self.apply_ground(command);
                 None
@@ -3044,6 +3047,14 @@ impl GameState {
             character.set_points(loaded.points);
             character.set_quickslots(loaded.quickslots);
             character.set_gold(loaded.gold);
+            // The model's `Inven_Point` follows the loaded unlocks, as `m_points.envanter`
+            // is the one number both reads share (`G/char.cpp:2346`); the clamp is
+            // Divergence 202.1, which `set_inven_point` keeps.
+            if let Some(points) = character.points() {
+                let inven = points.inven_point();
+                let rise = u16::try_from(inven).unwrap_or(u16::MAX);
+                character.set_inven_point(rise);
+            }
         }
         // The five `costume_option.hide_*` flags the enter-game hide restore reads
         // (`G/input_login.cpp:612-638`), before the move below takes the flags.
@@ -4446,6 +4457,7 @@ impl GameState {
             | GameCommand::Biologist { .. }
             | GameCommand::Premium { .. }
             | GameCommand::Protected { .. }
+            | GameCommand::ExtendInven { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_event_step(command),
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
         }
@@ -4533,6 +4545,9 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.protected(vid, step, mover)),
+            GameCommand::ExtendInven { vid, mover, reply } => {
+                answer_item_step(vid, reply, self.extend_inven(vid, mover));
+            }
             GameCommand::NpcsOn {
                 channel,
                 map,

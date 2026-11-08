@@ -608,6 +608,18 @@ pub enum GameCommand {
         /// Where the game thread reports the rows the step changed.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `ENVANTER_BLACK` for the character online under `vid`: the next
+    /// inventory row unlocked for its price in keys, or the shortfall chatted. The
+    /// records reach the client through the answer; the reply carries the rows to
+    /// store.
+    ExtendInven {
+        /// The VID of the character whose client sent the record.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the rows the step changed.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_INVENTORY_PROTECTED` for the character online under `vid`: the lock
     /// or the unlock, or the password change. The records reach the client through the
     /// answer; the reply carries the rows to store.
@@ -4140,6 +4152,23 @@ impl GameLoopController {
         })
         .await
         .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one inventory unlock, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn extend_inven(
+        &self,
+        vid: common::vid::Vid,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ExtendInven { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

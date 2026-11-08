@@ -291,6 +291,28 @@ pub const fn usable_inventory_cells(inven_point: u16) -> u16 {
 pub const INVENTORY_MAX_EXTENDED: u16 =
     (INVENTORY_MAX_NUM - INVENTORY_OPEN_PAGE_SIZE) / INVENTORY_WIDTH;
 
+/// `INVENTORY_LOCK_COVER_COUNT` = 18 = `INVENTORY_LOCKED_PAGE_COUNT *
+/// INVENTORY_HEIGHT` (`length.h:291`): the stat at which `Update_Inven` stops
+/// (`char.cpp:11765`) and above which `PointChange(POINT_INVEN)` refuses
+/// (`:4356-4366`). It happens to equal [`INVENTORY_MAX_EXTENDED`], but the two
+/// come from different expressions (rows unlocked versus cells fittable), so
+/// this keeps legacy's own.
+pub const INVENTORY_LOCK_COVER_COUNT: i32 =
+    (INVENTORY_PAGE_COUNT - INVENTORY_OPEN_PAGE_COUNT) as i32 * INVENTORY_HEIGHT as i32;
+
+/// `INVENTORY_OPEN_KEY_VNUM` = 72319 (`length.h:279`): the tradeable inventory key.
+pub const INVENTORY_OPEN_KEY_VNUM: u32 = 72319;
+/// `INVENTORY_OPEN_KEY_VNUM2` = 72320 (`length.h:280`): the bound inventory key.
+pub const INVENTORY_OPEN_KEY_VNUM2: u32 = 72320;
+/// `INVENTORY_START_DELETE_VNUM` = the tradeable key (`length.h:281`): the spend starts
+/// from it.
+pub const INVENTORY_START_DELETE_VNUM: u32 = INVENTORY_OPEN_KEY_VNUM;
+/// `INVENTORY_NEED_KEY_START` = 2 (`length.h:282`): the price of the first unlock.
+pub const INVENTORY_NEED_KEY_START: u32 = 2;
+/// `INVENTORY_NEED_KEY_INCREASE` = 3 (`length.h:283`): the price rises by one every three
+/// rows.
+pub const INVENTORY_NEED_KEY_INCREASE: u8 = 3;
+
 /// `WEAR_MAX_NUM` = 64 (`length.h:89`). The equipment window. The comment at
 /// `length.h:917` says 32 and is stale.
 pub const WEAR_MAX_NUM: u16 = 64;

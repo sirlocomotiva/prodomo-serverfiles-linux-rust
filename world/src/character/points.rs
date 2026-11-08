@@ -60,7 +60,8 @@
 //!   `POINT_CONQUEROR_EXP` and `POINT_CONQUEROR_LEVEL_STEP` through this entry point: the
 //!   level-up chains run through [`Points::gain_exp`] and [`Points::gain_conqueror_exp`],
 //!   whose callers own the quest trigger, guild and party updates, and save.
-//! - `POINT_GOLD`, `POINT_GAYA` and `POINT_INVEN`: the currencies and the inventory unlocks.
+//! - `POINT_GOLD` and `POINT_GAYA`: the currencies. `POINT_INVEN` is ported: the rise
+//!   refuses above `INVENTORY_LOCK_COVER_COUNT` (18) and keeps `m_points.envanter`.
 //! - `POINT_POLYMORPH`, `POINT_ENERGY` and `POINT_COSTUME_ATTR_BONUS`: each drives its
 //!   own system. The three biologist arms are ported: the mission, the taken and the
 //!   completed, kept beside the arrays as legacy's `DWORD`s are, the state clamped to
@@ -491,14 +492,13 @@ const COUNTERS: [usize; 5] = [
 ];
 
 /// The arms whose side effects are not ported. See the module note.
-const NOT_PORTED: [usize; 11] = [
+const NOT_PORTED: [usize; 10] = [
     point::POINT_CONQUEROR_LEVEL,
     point::POINT_CONQUEROR_EXP,
     point::POINT_CONQUEROR_LEVEL_STEP,
     point::POINT_LEVEL,
     point::POINT_EXP,
     point::POINT_LEVEL_STEP,
-    point::POINT_INVEN,
     point::POINT_GOLD,
     point::POINT_POLYMORPH,
     point::POINT_ENERGY,
@@ -1916,18 +1916,10 @@ impl Points {
                 self.real[kind] = value;
                 i64::from(value)
             }
-            // `POINT_GAYA` (`char.cpp:4371-4403`): the total refuses at `GAYA_MAX`; the
-            // CIBN overtime halves and zeroes never run, because the Rewrite is the
-            // `europe` locale, where `LC_IsNewCIBN` is false.
-            point::POINT_GAYA => {
-                let total = i64::from(self.gaya) + i64::from(amount);
-                if total >= i64::from(crate::character::GAYA_MAX) {
-                    return Applied::Silent;
-                }
-                self.gaya = self.gaya.saturating_add(amount);
-                self.instant[kind] = self.gaya;
-                i64::from(self.gaya)
-            }
+            // `POINT_GAYA` (`char.cpp:4371-4403`), and `POINT_INVEN` (`:4356-4366`) with
+            // it: the two currency-like fields beside the array (the `europe` locale never
+            // runs the CIBN overtime halves and zeroes, where `LC_IsNewCIBN` is false).
+            point::POINT_GAYA | point::POINT_INVEN => return self.apply_kept(kind, amount),
             // `POINT_BIOLOGIST_STATE` (`char.cpp:4731-4740`): the rise clamps to
             // `MAX_MISSION_STATE` (9); a fall below 0 wraps, as the legacy `DWORD` does.
             point::POINT_BIOLOGIST_STATE => {
@@ -2006,6 +1998,35 @@ impl Points {
             _ => return Applied::NotPool,
         };
         Applied::Changed { amount, value }
+    }
+
+    /// The two currency-like fields beside the array: `POINT_GAYA` refuses at `GAYA_MAX`
+    /// (`char.cpp:4371-4403`) and `POINT_INVEN` refuses above
+    /// `INVENTORY_LOCK_COVER_COUNT` (18) (`:4356-4366`); the rise keeps the field with no
+    /// clamp, and the slot follows it.
+    fn apply_kept(&mut self, kind: usize, amount: i32) -> Applied {
+        if kind == point::POINT_GAYA {
+            let total = i64::from(self.gaya) + i64::from(amount);
+            if total >= i64::from(crate::character::GAYA_MAX) {
+                return Applied::Silent;
+            }
+            self.gaya = self.gaya.saturating_add(amount);
+            self.instant[kind] = self.gaya;
+            return Applied::Changed {
+                amount,
+                value: i64::from(self.gaya),
+            };
+        }
+        let total = i64::from(self.inven_point) + i64::from(amount);
+        if total > i64::from(common::item_slots::INVENTORY_LOCK_COVER_COUNT) {
+            return Applied::Silent;
+        }
+        self.inven_point = self.inven_point.saturating_add(amount);
+        self.instant[kind] = self.inven_point;
+        Applied::Changed {
+            amount,
+            value: i64::from(self.inven_point),
+        }
     }
 
     /// The slots the recompute keeps from the fields legacy holds outside the array: the
@@ -3365,6 +3386,30 @@ mod tests {
             );
             assert_eq!(points, before);
         }
+    }
+
+    #[test]
+    fn the_inventory_unlock_rises_and_refuses_above_the_cover() {
+        let mut points = warrior();
+        let records = points
+            .point_change(point::POINT_INVEN, 1, false, false)
+            .unwrap();
+        assert_eq!(records, [record(point::POINT_INVEN, 0, 1)]);
+        assert_eq!(points.inven_point(), 1);
+        assert_eq!(points.get_point(point::POINT_INVEN), 1);
+        // 1 + 18 names 19, past the cover: silent, the unlock kept.
+        let before = points.clone();
+        let records = points
+            .point_change(point::POINT_INVEN, 18, false, false)
+            .unwrap();
+        assert!(records.is_empty());
+        assert_eq!(points, before);
+        // 1 + 17 lands exactly on the cover.
+        let records = points
+            .point_change(point::POINT_INVEN, 17, false, false)
+            .unwrap();
+        assert_eq!(records, [record(point::POINT_INVEN, 0, 18)]);
+        assert_eq!(points.inven_point(), 18);
     }
 
     #[test]

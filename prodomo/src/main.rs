@@ -126,8 +126,9 @@ use protocol::cg_fish_event::CgFishEvent;
 use protocol::cg_fly_target::CgFlyTarget;
 use protocol::cg_gaya_system::CgGayaSystem;
 use protocol::cg_guild_answer::CgAnswerMakeGuild;
+use protocol::cg_header_only::CgEnvanterBlack;
 use protocol::cg_inventory::{
-    HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
+    ENVANTER_BLACK, HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
     HEADER_CG_ATTR67_ADD, HEADER_CG_BIOLOGIST, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
     HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
     HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CL, HEADER_CG_CLIENT_VERSION,
@@ -1101,6 +1102,8 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
         // the timer an `int`.
         held_character.premium = i16::from(points.premium());
         held_character.premium_time = points.premium_time();
+        // The unlocks ride the points' field beside the slots (`m_points.envanter`).
+        held_character.envanter = points.inven_point();
         held_character.level_step =
             i16::try_from(points.get_point(point_slot::POINT_LEVEL_STEP)).unwrap_or(i16::MAX);
         held_character.stat_reset_count =
@@ -1329,6 +1332,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_BIOLOGIST.value()
         || header == HEADER_CG_PREMIUM_PLAYERS.value()
         || header == HEADER_CG_INVENTORY_PROTECTED.value()
+        || header == ENVANTER_BLACK.value()
         || is_ground_step(header)
         || is_quickslot_step(header)
 }
@@ -1352,6 +1356,9 @@ fn is_belongings_step(header: u8) -> bool {
 ///   character is not an observer (`G/input_main.cpp:3693-3717`).
 /// - `CG_ITEM_USE_TO_ITEM` (60): `CInputMain::ItemToItem` (`G/input_main.cpp:1006-1022`),
 ///   reached when the character is not an observer (`:3719-3722`).
+/// - `ENVANTER_BLACK` (226): `CInputMain::InventoryExpansion`
+///   (`G/input_main.cpp:1069-1075`), reached when the character is not an observer
+///   (`:3711-3714`).
 /// - `CG_QUICKSLOT_ADD` (16), `CG_QUICKSLOT_DEL` (17) and `CG_QUICKSLOT_SWAP` (18), which no
 ///   observer check guards (`G/input_main.cpp:3742-3755`).
 async fn belongings_step<S>(
@@ -1400,6 +1407,8 @@ where
         premium_players(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_INVENTORY_PROTECTED.value() {
         protected(session, addr, context, held, frame).await
+    } else if frame.header == ENVANTER_BLACK.value() {
+        extend_inven(session, addr, context, held, frame).await
     } else {
         drop_an_item(session, addr, context, held, frame).await
     }
@@ -1681,6 +1690,32 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.protected(vid, step, actor).await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `ENVANTER_BLACK` (226) in the game phase: `CInputMain::InventoryExpansion`
+/// (`G/input_main.cpp:1069-1075`). The world unlocks the next row or chats the shortfall;
+/// the rows it changed (the spent keys) are stored here.
+async fn extend_inven<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if CgEnvanterBlack::decode_frame(frame).is_err() {
+        warn!(%addr, "Client sent a malformed ENVANTER_BLACK; closing");
+        return false;
+    }
+    let Some(vid) = held.world else {
+        info!(%addr, "ENVANTER_BLACK without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.extend_inven(vid, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -5414,11 +5449,10 @@ fn is_dead_refused(phase: ClientPhase, header: u8) -> bool {
 /// Whether an observer's record of `header` is refused: the item, exchange, attack and skill
 /// records `CInputMain::Analyze` guards (`G/input_main.cpp:3690-3740`). Moves, targets, the
 /// fly records, quickslots, shops, clicks, scripts, messenger and party records pass.
-/// `ENVANTER_BLACK` is guarded in legacy too, but the Rewrite has no analyzer for it yet, so
-/// the unknown-record close refuses it first.
 fn is_observer_refused(observer: bool, header: u8) -> bool {
     observer
-        && (header == HEADER_CG_ITEM_USE.value()
+        && (header == ENVANTER_BLACK.value()
+            || header == HEADER_CG_ITEM_USE.value()
             || header == HEADER_CG_ITEM_USE_TO_ITEM.value()
             || header == HEADER_CG_ITEM_DESTROY.value()
             || header == HEADER_CG_ITEM_GIVE.value()
@@ -7062,9 +7096,16 @@ where
             return None;
         }
     };
-    // `Inven_Point` is 0: the store keeps no value for it yet, and the world's character
-    // starts at 0, so a set-aside item and a later grant search the same cells.
-    let load = plan_item_load(&rows, &context.protos, &context.groups, 0, character.level);
+    // The search runs with the row's own unlocks, as the world's character does after
+    // the admission, so a set-aside item and a later grant search the same cells.
+    let unlocks = u16::try_from(character.envanter).unwrap_or(u16::MAX);
+    let load = plan_item_load(
+        &rows,
+        &context.protos,
+        &context.groups,
+        unlocks,
+        character.level,
+    );
     for refusal in &load.refused {
         warn!(
             %addr,
@@ -15221,6 +15262,7 @@ mod tests {
             secured_password: 999_999,
             premium: 0,
             premium_time: 0,
+            envanter: 0,
             conqueror_exp: 0,
             conqueror_level_step: 0,
             conqueror_point: 0,

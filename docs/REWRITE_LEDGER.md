@@ -48120,3 +48120,39 @@ Gates (2026-11-07): `cargo fmt --all -- --check` clean, `cargo build --workspace
 --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR
 changed.
+
+## 449. The inventory unlocks
+
+`cg.game.envanter_black` and `sys.item.extend_inventory` are `ported`, both behind
+`an_unlock_knock_spends_keys_and_the_save_keeps_the_rows`.
+
+`CInputMain::InventoryExpansion` (`G/input_main.cpp:1069-1075`) is a 1-byte knock the
+dispatch refuses to observers (`:3711-3714`); the codec (`CgEnvanterBlack`) already
+existed. The world step is `GameState::extend_inven` (`prodomo/src/game_state/extend_inven.rs`),
+reached through a `GameCommand::ExtendInven` kit entry and a `belongings_step` arm:
+`CHARACTER::Update_Inven` (`G/char.cpp:11763-11788`) with its price list as
+`unlock_price` (`INVENTORY_NEED_KEY_START + Inven_Point() / 3`, the triples made explicit),
+the two key vnums counted together (72319 and 72320), the spend one at a time from
+`INVENTORY_START_DELETE_VNUM`, the `ExInvenItemUseMsg` shortfall chat, and the full-row
+silence. The key constants live in `common::item_slots` with `INVENTORY_LOCK_COVER_COUNT`
+(18), written in legacy's own expression rather than the equal `INVENTORY_MAX_EXTENDED`.
+
+`POINT_INVEN` leaves `NOT_PORTED`: its arm (`char.cpp:4356-4366`, beside `POINT_GAYA` in a
+new `apply_kept`) refuses a total above the cover, keeps `m_points.envanter`, and sends
+the change. The model's `Inven_Point` follows the points' after the rise and at the
+admission, so the scans, the grants and the save read one number. The store gains
+`player.envanter` (migration 0036, 0 to 18); the load seeds the points with it, the item
+load searches with it, `hold_points` carries it, and `PointsPacket` sends it. The full
+suite stays green.
+
+Divergence: the column's check refuses unlocks past 18, where legacy copies an unchecked
+`INT` (`STATUS.md`). No Defect: the spend loop cannot spin — the counted keys cover the
+price, so a zero count on the current vnum always finds the other one.
+
+Gates (2026-11-08): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+4957 passed 0 failed in 44 targets; `cargo test --workspace --doc --locked --offline`
+clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean;
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

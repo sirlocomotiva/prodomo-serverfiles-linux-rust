@@ -273,6 +273,7 @@ pub fn player_save(
         secured_password: character.secured_password,
         premium: character.premium,
         premium_time: character.premium_time,
+        envanter: character.envanter,
         horse: character.horse.clone(),
     }
 }
@@ -322,6 +323,7 @@ mod tests {
             secured_password: 123_456,
             premium: 1,
             premium_time: 1_700_000_000,
+            envanter: 3,
             voice: 47,
             part_base: 2,
             main_part: 1001,

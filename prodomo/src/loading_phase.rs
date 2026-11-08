@@ -686,9 +686,8 @@ pub fn npc_position(position: &NpcPosition) -> GcNpcPositionEntry {
 /// fills it (`G/char.cpp:2233-2420`).
 ///
 /// `map_index` is the atlas index of the saved position, which is `GetMapIndex()` for the
-/// loaded character and which decides the conqueror will of the map. The store keeps no
-/// inventory unlock count, so `POINT_INVEN` starts at 0, the same value the item load searches
-/// with.
+/// loaded character and which decides the conqueror will of the map. The unlock count rides
+/// the row (`envanter`), as `CHARACTER::Load` copies `m_points.envanter` (`G/char.cpp:2346`).
 #[must_use]
 pub fn load_points(character: &Character, map_index: i32) -> Points {
     let mut points = Points::load(&PointsRow {
@@ -709,7 +708,7 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
         hp: character.hp,
         sp: character.sp,
         stamina: character.stamina,
-        inven_point: 0,
+        inven_point: u16::try_from(character.envanter).unwrap_or(0),
         random_hp: i32::from(character.random_hp),
         random_sp: i32::from(character.random_sp),
         stat_point: i32::from(character.stat_point),
@@ -769,7 +768,7 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
 ///
 /// `POINT_GAYA` sits above `POINT_ST`, so the loop writes it from the gaya the load seeded.
 /// `POINT_INVEN` is written before the loop and then overwritten by it for the same reason.
-/// The biologist and protected-inventory slots are written
+/// The biologist slots are written
 /// after the loop from state the Rewrite does not store, so they stay at what `GetPoint`
 /// answers, which is 0.
 ///
@@ -1570,6 +1569,7 @@ mod tests {
             secured_password: 999_999,
             premium: 0,
             premium_time: 0,
+            envanter: 5,
             conqueror_exp: 0x00fe_dcba,
             conqueror_level_step: 0,
             conqueror_point: 0,
@@ -1985,9 +1985,8 @@ mod tests {
         assert_eq!(points(&hero, &state)[point::POINT_PLAYTIME], 0);
     }
 
-    /// The slots whose state the Rewrite does not store are what `GetPoint` answers for them,
-    /// which is 0: the inventory unlocks and the protected inventory. Gaya is stored since
-    /// ledger 352 and the biologist since 445, so they read the hero's own.
+    /// The unlocks are stored since ledger 449, so the burst reads the hero's own, as it
+    /// reads the gaya, the biologist and the lock.
     #[test]
     fn the_slots_of_unstored_state_are_zero() {
         let slots = points(&hero(), &hero_points());
@@ -2021,7 +2020,11 @@ mod tests {
             999_999,
             "the lock's password is the row's own"
         );
-        assert_eq!(slots[point::POINT_INVEN], 0, "the inven slot stays zero");
+        assert_eq!(
+            slots[point::POINT_INVEN],
+            5,
+            "the unlocks are the row's own"
+        );
     }
 
     /// The maxima are the engine's, from the assassin row: 650 + 13 x 40 hit points,

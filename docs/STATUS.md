@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-07, after ledger section 448 (the cube).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 449
+Last reviewed: 2026-11-08, after ledger section 449 (the inventory unlocks).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 450
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -465,7 +465,9 @@ its group's `sig_use`. Since 446 the protected inventory is `ported`: the lock a
 unlock, the password change, the twenty gates, the kick's auto-lock and the save
 round-trip. Since 447 the premium players are `ported`: the window, the list, the
 activation, the minute sweep and the save round-trip. Since 448 the cube is `ported`:
-the recipes, `/cube open`, the make and the close, and `/reload c`. The
+the recipes, `/cube open`, the make and the close, and `/reload c`. Since 449 the
+inventory unlocks are `ported`: the knock, the price list, the mixed spend, the shortfall
+chat, the `POINT_INVEN` rise and the save round-trip. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -891,6 +893,7 @@ owner should know about (178.5):
 | The Gaya shelf and slot unlocks live in memory per login: the unlocks are kept (ledger 444). | `<Name>_gaya_system.txt` per character (`G/char_gaya.cpp:175-273`); the path is `GetName` unsanitised, and `fopen` failures NULL-deref. |
 | A cube category past 100 bytes is truncated to the wire, and `/reload c` reads before it swaps (ledger 448): a bad or missing file keeps the live recipes, silently. | `memcpy` of the whole string into `char[100]` (`G/cuberenewal.cpp:559`); `Cube_init` destroys the proto first, so a miss leaves no recipes (`G/cmd_gm.cpp:2716-2719`). |
 
+| The `envanter` column refuses unlocks past 18 at the store (ledger 449): a hand-written row cannot name cells past the base inventory. | Legacy's `player.envanter` is an unchecked `INT` (`player.sql:866`), copied straight into `m_points.envanter` (`G/char.cpp:2346`). |
 ## Legacy defects not to reproduce
 
 - When a character enters the game with no movable point within 1000 of its saved position,

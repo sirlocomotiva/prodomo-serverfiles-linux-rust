@@ -42115,6 +42115,13 @@ fn a_cube_opens_crafts_and_closes() {
         &database,
         "(SELECT gold = 0 FROM player WHERE name = 'Alpha')",
     );
+    cube_short_and_silent(&mut alice);
+    drop(alice);
+    drop(server);
+}
+
+/// The cube's short make: nothing is left, and one craft is short.
+fn cube_short_and_silent(alice: &mut Keyed) {
     // The make held exactly 50 for 50, so the boundary is pinned; now nothing is
     // left, and one craft is short.
     alice.send_record(&client_cube(4, 0, 1, u32::MAX));
@@ -42123,6 +42130,12 @@ fn a_cube_opens_crafts_and_closes() {
         an_info_line(b"You don't have the necessary materials"),
         "short materials"
     );
+    cube_misses_and_close(alice);
+}
+
+/// The cube's silent arms: a make past the list, the close, a make without the
+/// window, and an unknown sub-header.
+fn cube_misses_and_close(alice: &mut Keyed) {
     // A miss past the list is silent.
     alice.send_record(&client_cube(4, 1, 1, u32::MAX));
     alice.quiet("an index past the list is silent");
@@ -42136,6 +42149,92 @@ fn a_cube_opens_crafts_and_closes() {
     );
     alice.send_record(&client_cube(9, 0, 0, 0));
     alice.quiet("an unknown sub-header is absorbed");
+}
+
+/// `ENVANTER_BLACK` (0xe2): the 1-byte unlock knock.
+fn client_envanter() -> Vec<u8> {
+    vec![0xe2]
+}
+
+/// The unlock knock spends one key of each kind for the first row, chats the missing
+/// two when nothing is held, and the save round-trips the unlocks: a relog's fresh
+/// bound pair buys the second row from the restored count.
+#[test]
+fn an_unlock_knock_spends_keys_and_the_save_keeps_the_rows() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // One tradeable key at cell 0, one bound at cell 1: the first knock spends both
+    // for row one, the second is two short, and the relog plants the forge pair.
+    for (id, pos, count, vnum) in [(40, 0, 1, 72319), (41, 1, 1, 72320)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alice, alpha, _items) = load_character(&server, b"alice", 0);
+    let vid = alpha.id;
+    let _entered = enter_game_shown(&mut alice);
+    // The first knock at 0 unlocks costs 2 and holds exactly 2, one of each: both
+    // stacks are gone, and the mixed spend is pinned.
+    alice.send_record(&client_envanter());
+    let first = read_up_to(&mut alice, &point_change(vid, 145, 0, 1));
+    assert!(
+        first.iter().all(|record| record[0] != GC_POINT_CHANGE),
+        "the point change is the unlock, nothing before it"
+    );
+    wait_for(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id IN (40, 41))",
+    );
+    // The second knock at 1 unlock costs 2 and holds nothing: the missing two are
+    // chatted.
+    alice.send_record(&client_envanter());
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"ExInvenItemUseMsg 2"),
+        "two keys short of the second row"
+    );
+    alice.still("a shortfall spends nothing");
     drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+    wait_for(
+        &database,
+        "(SELECT envanter FROM player WHERE name = 'Alpha') = 1",
+    );
+    // The relog restores the unlock: the burst's slot 145 carries 1, so a fresh
+    // bound pair buys row two from the restored count.
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 42, id,          1, 2, 2, 72320 FROM player WHERE name = 'Alpha'",
+    );
+    let mut server = Server::start(binary(), database.url());
+    let (mut alice, _listed, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items.len(), 1, "the planted pair loads");
+    let _entered = enter_game_shown(&mut alice);
+    read_login_lines(&mut alice, 0, None);
+    let _marks = read_login_letters(&mut alice, true);
+    read_login_update(&mut alice);
+    alice.still("nothing follows the burst");
+    alice.send_record(&client_envanter());
+    let second = read_up_to(&mut alice, &point_change(vid, 145, 0, 2));
+    assert!(
+        second.iter().all(|record| record[0] != GC_POINT_CHANGE),
+        "the point change is the unlock, nothing before it"
+    );
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id = 42) \
+         AND (SELECT envanter FROM player WHERE name = 'Alpha') = 2",
+    );
     drop(server);
 }
