@@ -49710,3 +49710,66 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 cargo doc --workspace --no-deps --locked --offline`, the scenario's 8x flake check, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
 was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 479. The empire rates
+
+`sys.gm.priv` was `missing`, and eight quest rows sat `unused` behind the ledger-401
+token sweep (owner question 37): the three priv grants, the four priv getters, and the
+guild id lookup. The GM `/priv_empire` line already ran — the scenario
+`a_gm_grants_an_empire_rate_and_every_client_hears_it` exercises it — but `GetPriv`
+read only its empire arm, and the quest calls had no bridge. This slice ports the
+system whole: the world holds all three stores, the quest gives queue and land, and
+the getters read the step's shadow. The rows move to `ported`: `sys.gm.priv` with the
+scenario, the eight quest calls with world tests by path (no quest calls them, so no
+binary scenario can reach them).
+
+Legacy keeps the grants in the DB process (`D/PrivManager.cpp`) and fans them to every
+game process; the one process holds them in the world (`GameState::guild_privs`,
+`GameState::character_privs`, beside the existing empire rows). `GetPriv`
+(`G/priv_manager.cpp:221-244`) reads whole now: the character row first — a negative
+one wins unless the 70052 unique (`UNIQUE_ITEM_NO_BAD_LUCK_EFFECT`) is worn — else
+the max of the positive character row, the all-empires row, the character's own row,
+and its guild's row. Expired grants read 0 before the Pulse step clears them, as the
+empire arm already did. The character and guild grants arrive only through the quest
+calls; the GM `priv_guild` line still dead-ends in its empty Lua buffer, unported, as
+before.
+
+The bridge follows the quiet-call pattern. `quest::manager` routes the eight globals
+through a new `priv_api` (`is_priv_name` keeps `api` under the line lint): the gives
+stage into the `Fake` in tests and into the session queues live
+(`give_guild_priv`, `give_character_priv`, `give_empire_priv_quest`, with the
+reader behind the character call), and the getters push the shadow's answer, 0 for a
+non-number pair. `apply_quiet_calls` lands the queued gives after the step
+(`grant_guild_priv`, `grant_character_priv`, `grant_empire_priv_quest`), each with
+its legacy clamp and notice: the guild grant's byte-exact format to every client when
+the guild stands, silence when it does not; the empire grant's `[LS;724]` line; the
+character grant's quiet 2-hour good or 1-hour bad lay, refusing a second grant while
+one stands and a zero. The getters shadow the step's stores (`PrivShadow`: the empire
+and guild snapshots and the Pulse), including the guild id lookup by byte-equal name
+(`FindGuildByName`, `G/guild_manager.cpp:198-207`, now `Guilds::named_id`, which the
+GM line also uses) and the two `name : value% (hours hours)` string builders, whose
+hours helper (`priv_hours`) keeps the seconds-to-float conversion exact. The character
+store is deliberately not shadowed: legacy has no quest getter for it
+(`GetPrivByCharacter` serves only `GetPriv`).
+
+Two refactors came with the threading. `arm_quest_session` passed the line lint, so
+its head triple moved into `armed_head`, its context arm into `armed_context`, and
+the 40-line destructure gave way to direct `self` paths. `quest::manager`'s `api`
+and `quiet_api` each passed it too, so the priv arms live in `priv_api`.
+
+The unit tests pin the new arms: the character loss wins over a 200 empire gain until
+the unique is worn, the second and zero grants refuse, and the Pulse step clears; the
+guild grant clamps 500 to 50, notices with the guild's name, joins the member's max,
+and stays silent for no guild; the shadows read the stored value, the `None!` line,
+and the named id. The quest bridge test stages the three gives and pushes the five
+getters' answers. The existing scenario still passes, unchanged. The suite summed 5113 passed, 1 failed
+in 46 targets; the failure was the inventory rule, which the first draft broke by
+leaving the eight quest rows scenario-less — fixed by naming the world tests, and the
+rule passes now.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, and `legacy/` is clean. `rustfmt`
+and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards
+no `prodomo\_%` database remained. No ADR changed.

@@ -605,6 +605,40 @@ pub trait Game {
     /// `G/OXEvent.cpp:175-186`). The world judges after the step.
     fn add_ox_quiz(&mut self, level: u8, question: Vec<u8>, answer: bool);
 
+    /// `_give_guild_privilege` (`G/questlua_global.cpp:530-546`): guild `guild` takes
+    /// the type's rate bonus `value` for `time` seconds. The world judges after the
+    /// step.
+    fn give_guild_priv(&mut self, guild: u32, priv_type: u32, value: i32, time: i32);
+
+    /// `_give_char_privilege` (`G/questlua_global.cpp:482-497`): the reader takes the
+    /// type's rate bonus `value`. The world judges after the step.
+    fn give_character_priv(&mut self, priv_type: u32, value: i32);
+
+    /// `_give_empire_privilege` (`G/questlua_global.cpp:499-528`): empire `empire`
+    /// takes the type's rate bonus `value` for `time` seconds. The world judges after
+    /// the step.
+    fn give_empire_priv_quest(&mut self, empire: u32, priv_type: u32, value: i32, time: i32);
+
+    /// `_get_empire_privilege` (`G/questlua_global.cpp:573-585`): the empire's stored
+    /// value of the type, 0 past the table or for a non-number argument. Answers now.
+    fn empire_priv(&self, empire: i32, priv_type: i32) -> i32;
+
+    /// `_get_guild_privilege` (`G/questlua_global.cpp:631-643`): the guild's stored
+    /// value of the type, 0 past the table or for a non-number argument. Answers now.
+    fn guild_priv(&self, guild: i32, priv_type: i32) -> i32;
+
+    /// `_get_empire_privilege_string` (`G/questlua_global.cpp:547-571`): the empire's
+    /// live bonuses as `name : value% (hours hours)` lines, or `None!`. Answers now.
+    fn empire_priv_string(&self, empire: i32) -> Vec<u8>;
+
+    /// `_get_guild_privilege_string` (`G/questlua_global.cpp:587-613`): the guild's
+    /// live bonuses as `name : value% (hours hours)` lines, or `None!`. Answers now.
+    fn guild_priv_string(&self, guild: i32) -> Vec<u8>;
+
+    /// `_get_guildid_byname` (`G/questlua_global.cpp:615-629`): the id of the guild
+    /// named `name`, 0 with none or for a non-string argument. Answers now.
+    fn guild_id_by_name(&self, name: Option<Vec<u8>>) -> u32;
+
     /// `game_open_gaya_c` (`G/questlua_game.cpp:95-101`): the client opens the Gaya
     /// window. The world judges after the step.
     fn open_gaya(&mut self);
@@ -5604,6 +5638,9 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if window_api(lua, cx, name, last.clone())? {
         return Ok(MultiValue::new());
     }
+    if is_priv_name(name) {
+        return priv_api(lua, cx, name, args, first);
+    }
     let result = match name {
         b"getnpcid" => number(npc_id_of(lua, cx, last)?),
         b"number" => Some(Value::Number(f64::from(drawn_number(
@@ -5704,6 +5741,138 @@ fn locale_code(language: u8) -> &'static [u8] {
     }
 }
 
+/// Whether `name` is one of the eight priv quest globals (see `priv_api`).
+fn is_priv_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"__give_guild_priv"
+            | b"__give_char_priv"
+            | b"__give_empire_priv"
+            | b"__get_empire_priv"
+            | b"__get_empire_priv_string"
+            | b"__get_guild_priv_string"
+            | b"__get_guildid_byname"
+            | b"__get_guild_priv"
+    )
+}
+
+/// The priv globals (`G/questlua_global.cpp:482-497`, `:499-528`, `:530-546`,
+/// `:547-613`, `:615-643`): the three grant calls stage and push nothing, the getters
+/// push the shadow's answer. Split out so `quiet_api` stays under the line lint.
+fn priv_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+    first: Value,
+) -> mlua::Result<MultiValue> {
+    let result = match name {
+        b"__give_guild_priv" => {
+            let guild = host::c_int(lua, first)?;
+            let priv_type = host::c_int(lua, args.get(1).cloned().unwrap_or(Value::Nil))?;
+            let value = host::c_int(lua, args.get(2).cloned().unwrap_or(Value::Nil))?;
+            let time = host::c_int(lua, args.get(3).cloned().unwrap_or(Value::Nil))?;
+            cx.game.give_guild_priv(
+                u32::from_le_bytes(guild.to_le_bytes()),
+                u32::from_le_bytes(priv_type.to_le_bytes()),
+                value,
+                time,
+            );
+            None
+        }
+        // `_give_char_privilege` (`G/questlua_global.cpp:482-497`): `(int)` of the
+        // two arguments is the type and the value; the reader takes it. Pushes
+        // nothing.
+        b"__give_char_priv" => {
+            let priv_type = host::c_int(lua, first)?;
+            let value = host::c_int(lua, args.get(1).cloned().unwrap_or(Value::Nil))?;
+            cx.game
+                .give_character_priv(u32::from_le_bytes(priv_type.to_le_bytes()), value);
+            None
+        }
+        // `_give_empire_privilege` (`G/questlua_global.cpp:499-528`): `(int)` of the
+        // four arguments is the empire, the type, the value and the seconds. Pushes
+        // nothing.
+        b"__give_empire_priv" => {
+            let empire = host::c_int(lua, first)?;
+            let priv_type = host::c_int(lua, args.get(1).cloned().unwrap_or(Value::Nil))?;
+            let value = host::c_int(lua, args.get(2).cloned().unwrap_or(Value::Nil))?;
+            let time = host::c_int(lua, args.get(3).cloned().unwrap_or(Value::Nil))?;
+            cx.game.give_empire_priv_quest(
+                u32::from_le_bytes(empire.to_le_bytes()),
+                u32::from_le_bytes(priv_type.to_le_bytes()),
+                value,
+                time,
+            );
+            None
+        }
+        // `_get_empire_privilege` (`G/questlua_global.cpp:573-585`): `lua_isnumber`
+        // of the two arguments names the empire and the type; anything else pushes
+        // 0.
+        b"__get_empire_priv" => {
+            let empire = lua.coerce_number(first)?;
+            let priv_type = lua.coerce_number(args.get(1).cloned().unwrap_or(Value::Nil))?;
+            let value = match (empire, priv_type) {
+                (Some(empire), Some(priv_type)) => cx.game.empire_priv(
+                    host::c_int(lua, Value::Number(empire))?,
+                    host::c_int(lua, Value::Number(priv_type))?,
+                ),
+                _ => 0,
+            };
+            Some(Value::Number(f64::from(value)))
+        }
+        // `_get_empire_privilege_string` (`G/questlua_global.cpp:547-571`): `(int)`
+        // of the first argument names the empire. Pushes the line.
+        b"__get_empire_priv_string" => {
+            let empire = host::c_int(lua, first)?;
+            let line = cx.game.empire_priv_string(empire);
+            Some(Value::String(lua.create_string(line)?))
+        }
+        // `_get_guild_privilege_string` (`G/questlua_global.cpp:587-613`): `(int)`
+        // of the first argument names the guild. Pushes the line.
+        b"__get_guild_priv_string" => {
+            let guild = host::c_int(lua, first)?;
+            let line = cx.game.guild_priv_string(guild);
+            Some(Value::String(lua.create_string(line)?))
+        }
+        // `_get_guildid_byname` (`G/questlua_global.cpp:615-629`): a string names
+        // the guild; anything else pushes 0.
+        b"__get_guildid_byname" => {
+            let name = match &first {
+                Value::String(_) => host::c_string(lua, first)?,
+                _ => None,
+            };
+            Some(Value::Number(f64::from(cx.game.guild_id_by_name(name))))
+        }
+        // `_get_guild_privilege` (`G/questlua_global.cpp:631-643`): `lua_isnumber`
+        // of the two arguments names the guild and the type; anything else pushes
+        // 0.
+        b"__get_guild_priv" => {
+            let guild = lua.coerce_number(first)?;
+            let priv_type = lua.coerce_number(args.get(1).cloned().unwrap_or(Value::Nil))?;
+            let value = match (guild, priv_type) {
+                (Some(guild), Some(priv_type)) => cx.game.guild_priv(
+                    host::c_int(lua, Value::Number(guild))?,
+                    host::c_int(lua, Value::Number(priv_type))?,
+                ),
+                _ => 0,
+            };
+            Some(Value::Number(f64::from(value)))
+        }
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "not ported: {}",
+                String::from_utf8_lossy(name)
+            )));
+        }
+    };
+    let mut pushed = MultiValue::new();
+    if let Some(value) = result {
+        pushed.push_back(value);
+    }
+    Ok(pushed)
+}
+
 /// The quiet globals: `LC` (`G/questlua_global.cpp:44-54`), `_notice_all`
 /// (`:944-991`), `_set_quest_state` (`:828-862`), `_do_command` (`:730-741`),
 /// `_add_ox_quiz` (`:1144-1156`), `_start_event` (`:1636-1665`), `_end_event`
@@ -5779,6 +5948,20 @@ fn quiet_api(
                 cx.game.add_ox_quiz(level, question, answer);
             }
             Some(Value::Number(f64::from(level)))
+        }
+        // `_give_guild_privilege` (`G/questlua_global.cpp:530-546`): `(int)` of the
+        // four arguments is the guild, the type, the value and the seconds. Pushes
+        // nothing; a past-the-table type only logs, as the world's does.
+        // The priv globals (see `priv_api`).
+        b"__give_guild_priv"
+        | b"__give_char_priv"
+        | b"__give_empire_priv"
+        | b"__get_empire_priv"
+        | b"__get_empire_priv_string"
+        | b"__get_guild_priv_string"
+        | b"__get_guildid_byname"
+        | b"__get_guild_priv" => {
+            return priv_api(lua, cx, name, args, first);
         }
         // `_start_event` (`G/questlua_global.cpp:1636-1665`): a number-like first
         // argument names the event, number-like second and third its two values
@@ -6517,6 +6700,12 @@ mod tests {
         ds_refines: u32,
         /// Every `open_ds_attr_change` call.
         ds_attrs: u32,
+        /// Every priv grant call, in order each.
+        guild_privs: Vec<(u32, u32, i32, i32)>,
+        /// Every `__give_char_priv` call's type and value.
+        character_privs: Vec<(u32, i32)>,
+        /// Every `__give_empire_priv` call's empire, type, value and seconds.
+        empire_privs: Vec<(u32, u32, i32, i32)>,
     }
 
     impl Fake {
@@ -6974,6 +7163,38 @@ mod tests {
 
         fn add_ox_quiz(&mut self, level: u8, question: Vec<u8>, answer: bool) {
             self.ox_quizzes.push((level, question, answer));
+        }
+
+        fn give_guild_priv(&mut self, guild: u32, priv_type: u32, value: i32, time: i32) {
+            self.guild_privs.push((guild, priv_type, value, time));
+        }
+
+        fn give_character_priv(&mut self, priv_type: u32, value: i32) {
+            self.character_privs.push((priv_type, value));
+        }
+
+        fn give_empire_priv_quest(&mut self, empire: u32, priv_type: u32, value: i32, time: i32) {
+            self.empire_privs.push((empire, priv_type, value, time));
+        }
+
+        fn empire_priv(&self, _empire: i32, _priv_type: i32) -> i32 {
+            41
+        }
+
+        fn guild_priv(&self, _guild: i32, _priv_type: i32) -> i32 {
+            42
+        }
+
+        fn empire_priv_string(&self, _empire: i32) -> Vec<u8> {
+            b"empire line".to_vec()
+        }
+
+        fn guild_priv_string(&self, _guild: i32) -> Vec<u8> {
+            b"guild line".to_vec()
+        }
+
+        fn guild_id_by_name(&self, _name: Option<Vec<u8>>) -> u32 {
+            7
         }
 
         fn open_gaya(&mut self) {
@@ -8856,6 +9077,74 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(probe.game.aura_opens, [(0, VID), (1, VID), (2, VID)]);
+    }
+
+    /// The priv calls stage their grants and push nothing; the getters push the
+    /// shadow's answer, and 0 for a non-number pair.
+    #[test]
+    fn the_priv_calls_stage_and_the_getters_push() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let number = |value: f64| Value::Number(value);
+        assert!(probe
+            .call(
+                "__give_guild_priv",
+                &[number(7.0), number(4.0), number(50.0), number(60.0)]
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.guild_privs, [(7, 4, 50, 60)]);
+        assert!(probe
+            .call("__give_char_priv", &[number(4.0), number(-20.0)])
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.character_privs, [(4, -20)]);
+        assert!(probe
+            .call(
+                "__give_empire_priv",
+                &[number(1.0), number(4.0), number(200.0), number(3600.0)]
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.empire_privs, [(1, 4, 200, 3600)]);
+        let pushed = probe
+            .call("__get_empire_priv", &[number(1.0), number(4.0)])
+            .unwrap();
+        assert!(matches!(pushed[..], [Value::Number(41.0)]));
+        let pushed = probe
+            .call("__get_empire_priv", &[string(b"bogus"), number(4.0)])
+            .unwrap();
+        assert!(matches!(pushed[..], [Value::Number(zero)] if zero.to_bits() == 0.0_f64.to_bits()));
+        let pushed = probe
+            .call("__get_guild_priv", &[number(7.0), number(4.0)])
+            .unwrap();
+        assert!(matches!(pushed[..], [Value::Number(42.0)]));
+        let pushed = probe
+            .call("__get_empire_priv_string", &[number(1.0)])
+            .unwrap();
+        assert!(
+            matches!(pushed[..], [Value::String(ref line)] if line.as_bytes() == b"empire line")
+        );
+        let pushed = probe
+            .call("__get_guild_priv_string", &[number(7.0)])
+            .unwrap();
+        assert!(
+            matches!(pushed[..], [Value::String(ref line)] if line.as_bytes() == b"guild line")
+        );
+        let pushed = probe
+            .call("__get_guildid_byname", &[string(b"Knights")])
+            .unwrap();
+        assert!(matches!(pushed[..], [Value::Number(7.0)]));
     }
 
     /// `start_event` stages the index and its two values (a numeric string counts, a

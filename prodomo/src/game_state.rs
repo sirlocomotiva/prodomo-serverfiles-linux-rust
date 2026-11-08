@@ -766,6 +766,12 @@ pub struct GameState {
     /// `m_aakPrivEmpireData`: the empire rate grants, `[type][empire]`, each with its end
     /// Pulse. Legacy holds them in the DB process; the one process holds them here.
     empire_privs: empire_priv::EmpirePrivs,
+    /// `m_aPrivGuild` and `m_aPrivChar`: the guild and character rate grants, by type.
+    /// Legacy holds them in the DB process; the one process holds them here.
+    guild_privs:
+        [std::collections::HashMap<u32, empire_priv::EmpirePriv>; empire_priv::MAX_PRIV_NUM],
+    character_privs:
+        [std::collections::HashMap<u32, empire_priv::CharacterPriv>; empire_priv::MAX_PRIV_NUM],
     /// `CHARACTER_MANAGER`'s rates, which the rate event flags set.
     mob_rates: event_flag::MobRates,
     /// `test_server` (`G/config.cpp:72`): the test-server mode, on unless the

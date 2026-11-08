@@ -449,6 +449,12 @@ struct WorldMoves {
     /// Every `add_ox_quiz` call's level, question and answer, in order, for the
     /// OX list after the step.
     ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
+    /// Every priv grant call, in call order each, for the grants after the step.
+    guild_privs: Vec<(u32, u32, i32, i32)>,
+    /// Every `__give_char_priv` call's type and value, in order.
+    character_privs: Vec<(u32, i32)>,
+    /// Every `__give_empire_priv` call's empire, type, value and seconds, in order.
+    empire_privs: Vec<(u32, u32, i32, i32)>,
     /// The window and event queues, in call order each.
     quiet: super::quest_quiet::QuietOwned,
 }
@@ -498,6 +504,9 @@ impl WorldMoves {
                 .unwrap_or(usize::MAX),
             quest_commands: std::mem::take(&mut session.queues.quest_commands),
             ox_quizzes: std::mem::take(&mut session.queues.ox_quizzes),
+            guild_privs: std::mem::take(&mut session.queues.guild_privs),
+            character_privs: std::mem::take(&mut session.queues.character_privs),
+            empire_privs: std::mem::take(&mut session.queues.empire_privs),
             quiet: super::quest_quiet::QuietOwned {
                 gaya_opens: std::mem::take(&mut session.queues.gaya_opens),
                 gaya_market_opens: std::mem::take(&mut session.queues.gaya_market_opens),
@@ -520,6 +529,9 @@ impl ReaderGains {
             temple_prepares: std::mem::take(&mut queued.temple_prepares),
             quest_commands: std::mem::take(&mut queued.quest_commands),
             ox_quizzes: std::mem::take(&mut queued.ox_quizzes),
+            guild_privs: std::mem::take(&mut queued.guild_privs),
+            character_privs: std::mem::take(&mut queued.character_privs),
+            empire_privs: std::mem::take(&mut queued.empire_privs),
             quiet: std::mem::take(&mut queued.quiet),
             exp2: std::mem::take(&mut queued.exp2),
             skill_groups: std::mem::take(&mut queued.skill_groups),
@@ -603,6 +615,15 @@ pub(super) struct SessionQueues {
     /// Every `add_ox_quiz` call's level, question and answer, in order, for the
     /// OX list after the step (legacy lands in the call).
     pub(super) ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
+    /// Every `__give_guild_priv` call's guild, type, value and seconds, in order,
+    /// for the grants after the step (legacy grants in the call).
+    pub(super) guild_privs: Vec<(u32, u32, i32, i32)>,
+    /// Every `__give_char_priv` call's type and value, in order, for the grants
+    /// after the step (legacy grants in the call).
+    pub(super) character_privs: Vec<(u32, i32)>,
+    /// Every `__give_empire_priv` call's empire, type, value and seconds, in order,
+    /// for the grants after the step (legacy grants in the call).
+    pub(super) empire_privs: Vec<(u32, u32, i32, i32)>,
     /// The `game.open_gaya` calls, for the window after the step.
     pub(super) gaya_opens: u32,
     /// The `game.open_gaya_market` calls, for the market after the step.
@@ -725,6 +746,10 @@ pub(super) struct Session<'s> {
     /// The shadow the `guild.*` calls read: the guilds as the world holds them at the
     /// step's start, so a call answers the same rows the world would judge.
     pub(super) guilds: super::guild::GuildShadow,
+    /// The shadow the priv readers read: the empire, guild and character grants as the
+    /// world holds them at the step's start, and the Pulse they are read on, so a call
+    /// answers what the world would judge.
+    pub(super) privs: super::empire_priv::PrivShadow,
     /// The reader's party leader PID, read at the step's start (`None` with no
     /// party): what `party.get_leader_pid` answers, -1 with none.
     pub(super) party_leader: Option<u32>,
@@ -1338,6 +1363,123 @@ fn skill_can_up(vnum: u32, level: impl Fn(u32) -> u8) -> bool {
 }
 
 impl Session<'_> {
+    /// The shadow of `GetPrivByEmpire` (`G/priv_manager.cpp:246-255`): the stored
+    /// value, 0 past the table. An expired grant reads 0, as the world's does.
+    fn shadow_empire_priv(&self, empire: i32, priv_type: i32) -> i32 {
+        let (Ok(empire), Ok(priv_type)) = (usize::try_from(empire), usize::try_from(priv_type))
+        else {
+            return 0;
+        };
+        if priv_type >= super::empire_priv::MAX_PRIV_NUM
+            || empire >= super::empire_priv::EMPIRE_MAX_NUM
+        {
+            return 0;
+        }
+        let grant = self.privs.empire[priv_type][empire];
+        if self.privs.pulse >= grant.ends {
+            0
+        } else {
+            grant.value
+        }
+    }
+
+    /// The shadow of `GetPrivByGuild` (`G/priv_manager.cpp:272-283`): the stored
+    /// value, 0 past the table or with no row.
+    fn shadow_guild_priv(&self, guild: i32, priv_type: i32) -> i32 {
+        let (Ok(guild), Ok(priv_type)) = (u32::try_from(guild), usize::try_from(priv_type)) else {
+            return 0;
+        };
+        self.privs
+            .guild
+            .get(priv_type)
+            .and_then(|row| row.get(&guild))
+            .map_or(0, |grant| {
+                if self.privs.pulse >= grant.ends {
+                    0
+                } else {
+                    grant.value
+                }
+            })
+    }
+
+    /// The shadow of `_get_empire_privilege_string` (`G/questlua_global.cpp:547-571`):
+    /// the live types' `name : value% (hours hours)` lines joined with `, `, or
+    /// `None!`. The name is the priv word in the reader's language; the hours are
+    /// [`super::empire_priv::priv_hours`].
+    fn shadow_empire_priv_string(&self, empire: i32) -> Vec<u8> {
+        let Ok(empire) = usize::try_from(empire) else {
+            return b"None!\n".to_vec();
+        };
+        if empire >= super::empire_priv::EMPIRE_MAX_NUM {
+            return b"None!\n".to_vec();
+        }
+        let mut parts = Vec::new();
+        for priv_type in 1..super::empire_priv::MAX_PRIV_NUM {
+            let grant = self.privs.empire[priv_type][empire];
+            if grant.value != 0 && self.privs.pulse < grant.ends {
+                let name = super::empire_priv::priv_word(priv_type);
+                let name = self.locale.find(name, self.mover.language);
+                let hours = super::empire_priv::priv_hours(grant.ends, self.privs.pulse);
+                parts.push(format!(
+                    "{} : {}% ({hours} hours)",
+                    String::from_utf8_lossy(name),
+                    grant.value
+                ));
+            }
+        }
+        if parts.is_empty() {
+            b"None!\n".to_vec()
+        } else {
+            let mut line = parts.join(", ").into_bytes();
+            line.push(b'\n');
+            line
+        }
+    }
+
+    /// The shadow of `_get_guild_privilege_string` (`G/questlua_global.cpp:587-613`).
+    fn shadow_guild_priv_string(&self, guild: i32) -> Vec<u8> {
+        let Ok(guild) = u32::try_from(guild) else {
+            return b"None!\n".to_vec();
+        };
+        let mut parts = Vec::new();
+        for priv_type in 1..super::empire_priv::MAX_PRIV_NUM {
+            let grant = self
+                .privs
+                .guild
+                .get(priv_type)
+                .and_then(|row| row.get(&guild))
+                .copied();
+            if let Some(grant) = grant {
+                if grant.value != 0 && self.privs.pulse < grant.ends {
+                    let name = super::empire_priv::priv_word(priv_type);
+                    let name = self.locale.find(name, self.mover.language);
+                    let hours = super::empire_priv::priv_hours(grant.ends, self.privs.pulse);
+                    parts.push(format!(
+                        "{} : {}% ({hours} hours)",
+                        String::from_utf8_lossy(name),
+                        grant.value
+                    ));
+                }
+            }
+        }
+        if parts.is_empty() {
+            b"None!\n".to_vec()
+        } else {
+            let mut line = parts.join(", ").into_bytes();
+            line.push(b'\n');
+            line
+        }
+    }
+
+    /// The shadow of `_get_guildid_byname` (`G/questlua_global.cpp:615-629`): the
+    /// first id in id order whose name compares equal, 0 with none or no string.
+    fn shadow_guild_id_by_name(&self, name: Option<Vec<u8>>) -> u32 {
+        let Some(name) = name else {
+            return 0;
+        };
+        self.guilds.named_id(&name).unwrap_or(0)
+    }
+
     /// The shadow's leader PID behind the caller: its party's leader, or its own
     /// PID with no party (`GetLeaderPID(c_lpChar, false)`,
     /// `G/ShipDefense.cpp:1652-1674`).
@@ -3127,6 +3269,42 @@ impl Game for Session<'_> {
         self.queues.ox_quizzes.push((level, question, answer));
     }
 
+    fn give_guild_priv(&mut self, guild: u32, priv_type: u32, value: i32, time: i32) {
+        self.queues
+            .guild_privs
+            .push((guild, priv_type, value, time));
+    }
+
+    fn give_character_priv(&mut self, priv_type: u32, value: i32) {
+        self.queues.character_privs.push((priv_type, value));
+    }
+
+    fn give_empire_priv_quest(&mut self, empire: u32, priv_type: u32, value: i32, time: i32) {
+        self.queues
+            .empire_privs
+            .push((empire, priv_type, value, time));
+    }
+
+    fn empire_priv(&self, empire: i32, priv_type: i32) -> i32 {
+        self.shadow_empire_priv(empire, priv_type)
+    }
+
+    fn guild_priv(&self, guild: i32, priv_type: i32) -> i32 {
+        self.shadow_guild_priv(guild, priv_type)
+    }
+
+    fn empire_priv_string(&self, empire: i32) -> Vec<u8> {
+        self.shadow_empire_priv_string(empire)
+    }
+
+    fn guild_priv_string(&self, guild: i32) -> Vec<u8> {
+        self.shadow_guild_priv_string(guild)
+    }
+
+    fn guild_id_by_name(&self, name: Option<Vec<u8>>) -> u32 {
+        self.shadow_guild_id_by_name(name)
+    }
+
     fn open_gaya(&mut self) {
         self.queues.gaya_opens += 1;
     }
@@ -4142,6 +4320,15 @@ impl GameState {
     /// head of [`Self::run_quests_giving_raw`] arms one so neither function trips the line
     /// lint.
     #[allow(clippy::type_complexity)]
+    /// The arm's head triple: the reader's VID, whether it is hacked, and the world's
+    /// snapshot before the step. One call so [`GameState::arm_quest_session`] stays under
+    /// the line lint.
+    fn armed_head(&self, pid: u32, mover: Mover) -> (Vid, bool, QuestStepState) {
+        let reader = self.reader_vid(pid);
+        let hacked = self.is_hack(reader, mover).is_some();
+        (reader, hacked, self.quest_step_state(reader))
+    }
+
     fn arm_quest_session(
         &mut self,
         place: GroundPlace,
@@ -4149,104 +4336,71 @@ impl GameState {
         giving: Giving,
         account: &crate::game_loop_messages::QuestAccount,
     ) -> Option<ArmedSession<'_>> {
-        let reader = self.reader_vid(pid);
-        let hacked = self.is_hack(reader, mover).is_some();
-        let pre = self.quest_step_state(reader);
-        let GameState {
-            characters,
-            npcs,
-            quests,
-            protos: items,
-            locale,
-            dice,
-            bodies,
-            war_maps,
-            dungeons,
-            maps,
-            pc_skills,
-            affect_events,
-            pc_skill_tables,
-            guilds,
-            parties,
-            test_server,
-            quest_targets,
-            last_pulse,
-            item_ids,
-            item_count_limit,
-            item_attrs,
-            item_rare_attrs,
-            item_masks,
-            item_groups,
-            gauss,
-            horse_names,
-            name_rules,
-            rank,
-            card_tables,
-            recall,
-            guild_lands,
-            object_protos,
-            blend_table,
-            meley,
-            ship,
-            ..
-        } = self;
-        let quests = quests.as_mut()?;
-        let mut context = arm_context(
-            characters,
-            horse_names,
-            bodies,
-            war_maps,
-            dungeons,
-            maps,
-            pc_skills,
-            guilds,
-            parties,
+        let (reader, hacked, pre) = self.armed_head(pid, mover);
+        let context = armed_context(
+            &self.characters,
+            &self.horse_names,
+            &self.bodies,
+            &self.war_maps,
+            &self.dungeons,
+            &self.maps,
+            &self.pc_skills,
+            &self.guilds,
+            &self.parties,
             reader,
             hacked,
             account,
+            &self.card_tables,
         );
-        finish_context(&mut context, card_tables);
+        let flags = self.dungeons.flags_snapshot();
+        let atlas = self.recall.atlas();
+        let stores = giving != Giving::Nothing;
+        let test_server = self.test_server;
+        let last_pulse = self.last_pulse;
+        let quests = self.quests.as_mut()?;
         Some(finish_armed_session(
             quests,
             FinishInputs {
-                flags: dungeons.flags_snapshot(),
+                flags,
                 place,
                 mover,
                 level,
                 pid,
                 reader,
                 context,
-                npcs,
-                items,
-                locale,
-                pc_skill_tables,
-                dice,
-                bodies,
-                characters,
-                pc_skills,
-                affect_events,
-                test_server: *test_server,
-                last_pulse: *last_pulse,
-                guilds,
-                item_count_limit,
-                item_ids,
-                gauss,
-                item_attrs,
-                item_rare_attrs,
-                item_masks,
-                item_groups,
-                quest_targets,
-                stores: giving != Giving::Nothing,
-                name_rules,
+                npcs: &self.npcs,
+                items: &self.protos,
+                locale: &self.locale,
+                pc_skill_tables: &self.pc_skill_tables,
+                dice: &mut self.dice,
+                bodies: &self.bodies,
+                characters: &mut self.characters,
+                pc_skills: &mut self.pc_skills,
+                affect_events: &mut self.affect_events,
+                test_server,
+                last_pulse,
+                guilds: &self.guilds,
+                empire_privs: &self.empire_privs,
+                guild_privs: &self.guild_privs,
+                item_count_limit: &self.item_count_limit,
+                item_ids: &mut self.item_ids,
+                gauss: &mut self.gauss,
+                item_attrs: &self.item_attrs,
+                item_rare_attrs: &self.item_rare_attrs,
+                item_masks: &self.item_masks,
+                item_groups: &self.item_groups,
+                quest_targets: &mut self.quest_targets,
+                stores,
+                name_rules: &self.name_rules,
                 pre,
-                atlas: recall.atlas(),
-                guild_lands,
-                object_protos,
-                blend_table,
+                atlas,
+                guild_lands: &self.guild_lands,
+                object_protos: &self.object_protos,
+                blend_table: &self.blend_table,
                 giving,
-                rank,
-                meley: meley.clone(),
-                ship: ship.clone(),
+                rank: &self.rank,
+                meley: self.meley.clone(),
+                ship: self.ship.clone(),
             },
         ))
     }
@@ -4678,6 +4832,9 @@ struct ReaderGains {
     temple_prepares: usize,
     quest_commands: Vec<Vec<u8>>,
     ox_quizzes: Vec<(u8, Vec<u8>, bool)>,
+    guild_privs: Vec<(u32, u32, i32, i32)>,
+    character_privs: Vec<(u32, i32)>,
+    empire_privs: Vec<(u32, u32, i32, i32)>,
     quiet: super::quest_quiet::QuietOwned,
     exp2: Vec<i64>,
     skill_groups: Vec<u8>,
@@ -4724,6 +4881,9 @@ impl GameState {
             temple_prepares,
             quest_commands,
             ox_quizzes,
+            guild_privs,
+            character_privs,
+            empire_privs,
             quiet,
             exp2,
             skill_groups,
@@ -4742,6 +4902,9 @@ impl GameState {
                 aura_opens: &quiet.aura_opens,
                 event_starts: &quiet.event_starts,
                 event_ends: &quiet.event_ends,
+                guild_privs: &guild_privs,
+                character_privs: &character_privs,
+                empire_privs: &empire_privs,
             },
         );
         for grant in exp2 {
@@ -5307,6 +5470,8 @@ struct FinishInputs<'s> {
     test_server: bool,
     last_pulse: u64,
     guilds: &'s super::guild::Guilds,
+    empire_privs: &'s super::empire_priv::EmpirePrivs,
+    guild_privs: &'s PrivGrantMaps,
     item_count_limit: &'s u16,
     item_ids: &'s mut Option<world::item::ItemIds>,
     gauss: &'s mut world::character::Gauss,
@@ -5326,6 +5491,43 @@ struct FinishInputs<'s> {
     rank: &'s super::rank_global::RankBoard,
     meley: super::meley::MeleyRuns,
     ship: super::ship::ShipRuns,
+}
+
+/// Build the reader's context and finish it with the Okey tables: the head half of
+/// [`GameState::arm_quest_session`]'s context arm, split out so the arm stays under
+/// the line lint.
+#[allow(clippy::too_many_arguments)]
+fn armed_context<'s>(
+    characters: &'s world::character::CharacterManager,
+    horse_names: &'s std::collections::HashMap<u32, Vec<u8>>,
+    bodies: &'s std::collections::HashMap<Vid, super::motion::Body>,
+    war_maps: &'s BTreeMap<i32, super::war_map::WarMap>,
+    dungeons: &'s super::dungeons::Dungeons,
+    maps: &'s BTreeMap<(u8, i32), super::view::MapIndex>,
+    pc_skills: &'s std::collections::HashMap<u32, super::pc_skill::PcSkillState>,
+    guilds: &'s super::guild::Guilds,
+    parties: &'s super::party::Parties,
+    reader: Vid,
+    hacked: bool,
+    account: &'s crate::game_loop_messages::QuestAccount,
+    card_tables: &'s super::cards::CardTables,
+) -> ReaderContext {
+    let mut context = arm_context(
+        characters,
+        horse_names,
+        bodies,
+        war_maps,
+        dungeons,
+        maps,
+        pc_skills,
+        guilds,
+        parties,
+        reader,
+        hacked,
+        account,
+    );
+    finish_context(&mut context, card_tables);
+    context
 }
 
 /// Build the [`Session`] and open its rank prizes: the tail half of
@@ -5361,6 +5563,8 @@ fn finish_armed_session<'s>(quests: &'s mut Quests, rest: FinishInputs<'s>) -> A
         rest.test_server,
         rest.last_pulse,
         rest.guilds,
+        rest.empire_privs,
+        rest.guild_privs,
         rest.item_count_limit,
         rest.item_ids,
         rest.gauss,
@@ -5387,6 +5591,16 @@ fn finish_armed_session<'s>(quests: &'s mut Quests, rest: FinishInputs<'s>) -> A
     }
 }
 
+/// The guild grants by type, as the world holds them.
+type PrivGrantMaps = [std::collections::HashMap<u32, super::empire_priv::EmpirePriv>;
+    super::empire_priv::MAX_PRIV_NUM];
+
+/// The empty priv shadow, for test sessions, which grant no privs.
+#[cfg(test)]
+pub(super) fn priv_shadow_default() -> super::empire_priv::PrivShadow {
+    super::empire_priv::PrivShadow::default()
+}
+
 struct SessionInputs<'s> {
     /// The living dungeons' flags at the step's start, by private index.
     dungeon_flags: std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
@@ -5411,6 +5625,8 @@ struct SessionInputs<'s> {
     test_server: bool,
     pulse: u64,
     guilds: &'s super::guild::Guilds,
+    empire_privs: &'s super::empire_priv::EmpirePrivs,
+    guild_privs: &'s PrivGrantMaps,
     count_limit: &'s u16,
     ids: &'s mut Option<world::item::ItemIds>,
     gauss: &'s mut world::character::Gauss,
@@ -5771,6 +5987,8 @@ fn session_inputs<'s>(
     test_server: bool,
     pulse: u64,
     guilds: &'s super::guild::Guilds,
+    empire_privs: &'s super::empire_priv::EmpirePrivs,
+    guild_privs: &'s PrivGrantMaps,
     count_limit: &'s u16,
     ids: &'s mut Option<world::item::ItemIds>,
     gauss: &'s mut world::character::Gauss,
@@ -5812,6 +6030,8 @@ fn session_inputs<'s>(
         test_server,
         pulse,
         guilds,
+        empire_privs,
+        guild_privs,
         count_limit,
         ids,
         gauss,
@@ -5865,6 +6085,8 @@ fn session_literal<'s>(
     test_server: bool,
     pulse: u64,
     guilds: &'s super::guild::Guilds,
+    empire_privs: &'s super::empire_priv::EmpirePrivs,
+    guild_privs: &'s PrivGrantMaps,
     targets: &'s mut QuestTargets,
     name_rules: crate::select_phase::NameRules,
     pre: QuestStepState,
@@ -5921,6 +6143,11 @@ fn session_literal<'s>(
         observes: Vec::new(),
         block_mode: None,
         guilds: guilds.clone(),
+        privs: super::empire_priv::PrivShadow {
+            empire: *empire_privs,
+            guild: guild_privs.clone(),
+            pulse,
+        },
         party_leader: context.party_leader,
         party_member_pids: context.party_member_pids,
         party_near_count: context.party_near_count,
@@ -5989,6 +6216,8 @@ fn session_head(packed: SessionInputs<'_>) -> Session<'_> {
         test_server,
         pulse,
         guilds,
+        empire_privs,
+        guild_privs,
         count_limit,
         ids,
         gauss,
@@ -6044,6 +6273,8 @@ fn session_head(packed: SessionInputs<'_>) -> Session<'_> {
         test_server,
         pulse,
         guilds,
+        empire_privs,
+        guild_privs,
         targets,
         name_rules,
         pre,
@@ -6220,6 +6451,7 @@ mod tests {
     /// five call sites stay under the line lint.
     fn test_session(params: TestSession<'_>) -> Session<'_> {
         Session {
+            privs: super::super::empire_priv::PrivShadow::default(),
             map_index: 0,
             war_map: 0,
             dungeon: 0,
@@ -6390,6 +6622,40 @@ mod tests {
             assert!(session.tail.meley.of(7).is_some());
             assert_eq!(session.meley_is_registered(), (false, 0));
             assert_eq!(session.meley_enter(), (true, 0));
+        });
+    }
+
+    /// The priv shadows read the step's grants: the stored value, the `None!` line,
+    /// and the named id.
+    #[test]
+    fn the_priv_shadows_read_the_steps_grants() {
+        use super::super::empire_priv::{CharacterPriv, EmpirePriv, MAX_PRIV_NUM};
+        let protos = MobProtos::default();
+        let names = MobNamesByLanguage::default();
+        let items = ItemProtos::default();
+        let item_names = ItemNamesByLanguage::default();
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            session.privs.empire[usize::from(super::super::empire_priv::PRIV_EXP_PCT)][1] =
+                EmpirePriv {
+                    value: 50,
+                    ends: 100,
+                };
+            session.privs.pulse = 10;
+            assert_eq!(session.empire_priv(1, 4), 50);
+            assert_eq!(session.empire_priv(1, 9), 0);
+            assert_eq!(session.guild_priv(7, 4), 0);
+            assert!(session
+                .empire_priv_string(1)
+                .starts_with(b"[LS;1040] : 50%"));
+            assert_eq!(session.empire_priv_string(2), b"None!\n");
+            assert_eq!(session.guild_priv_string(7), b"None!\n");
+            assert_eq!(session.guild_id_by_name(Some(b"Knights".to_vec())), 0);
+            session
+                .guilds
+                .install_named_test_guild(7, 100, 1, 0, b"Knights".to_vec());
+            assert_eq!(session.guild_id_by_name(Some(b"Knights".to_vec())), 7);
+            assert_eq!(session.guild_id_by_name(None), 0);
+            let _ = (MAX_PRIV_NUM, CharacterPriv::default());
         });
     }
 

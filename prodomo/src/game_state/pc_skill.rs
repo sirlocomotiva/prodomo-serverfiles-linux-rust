@@ -4991,6 +4991,7 @@ mod tests {
         let (characters, locale, dice, pc_skills, affect_events, pc_skill_tables, bodies) =
             grand_parts(world);
         let session = super::super::quests::Session {
+            privs: super::super::quests::priv_shadow_default(),
             map_index: 0,
             war_map: 0,
             dungeon: 0,

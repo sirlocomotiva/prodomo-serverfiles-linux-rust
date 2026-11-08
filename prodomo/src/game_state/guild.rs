@@ -1165,6 +1165,12 @@ impl GameState {
     pub(super) fn guild_of(&self, pid: u32) -> Option<u32> {
         self.guilds.of.get(&pid).copied()
     }
+
+    /// The 12 legacy bytes of guild `id`'s name (`CGuild::GetName`), `None` with no
+    /// such guild, as the priv notice's silence is.
+    pub(super) fn guild_name(&self, id: u32) -> Option<Vec<u8>> {
+        self.guilds.by_id.get(&id).map(|guild| guild.name.clone())
+    }
     /// `CGuild::LevelChange` (`G/guild.cpp:1672-1690`): the member row of `pid`
     /// carries `level`. The DB packet is the retired peer's; the save writes the
     /// member rows from the world, as it writes everything else. Quiet with no
@@ -3703,11 +3709,7 @@ impl GameState {
     /// `G/guild_manager.cpp:198-207`): the first in id order whose name compares equal,
     /// byte for byte — `std::string ==` folds no case, so neither does this.
     fn guild_named_id(&self, name: &[u8]) -> Option<u32> {
-        self.guilds
-            .by_id
-            .iter()
-            .find(|(_, guild)| guild.name == name)
-            .map(|(id, _)| *id)
+        self.guilds.named_id(name)
     }
 
     /// `id`'s war state against `opp` (`CGuild::GetGuildWarState`,
@@ -7832,6 +7834,16 @@ impl Guilds {
         self.by_id.get(&guild).map(|guild| guild.master_pid)
     }
 
+    /// The id of the guild named `name` (`CGuildManager::FindGuildByName`,
+    /// `G/guild_manager.cpp:198-207`): the first in id order whose name compares equal,
+    /// byte for byte.
+    pub(super) fn named_id(&self, name: &[u8]) -> Option<u32> {
+        self.by_id
+            .iter()
+            .find(|(_, guild)| guild.name == name)
+            .map(|(id, _)| *id)
+    }
+
     /// Set the member-count bonus of `guild` (`CGuild::SetMemberCountBonus`).
     pub(super) fn set_member_bonus(&mut self, guild: u32, bonus: i32) {
         if let Some(guild) = self.by_id.get_mut(&guild) {
@@ -7883,6 +7895,19 @@ impl Guilds {
         level: u8,
         ladder: i32,
     ) {
+        self.install_named_test_guild(id, master, level, ladder, Vec::new());
+    }
+
+    /// [`install_meley_test_guild`] with `name`: the shadow id lookup's fixture.
+    #[cfg(test)]
+    pub(super) fn install_named_test_guild(
+        &mut self,
+        id: u32,
+        master: u32,
+        level: u8,
+        ladder: i32,
+        name: Vec<u8>,
+    ) {
         self.by_id.insert(
             id,
             Guild {
@@ -7890,7 +7915,7 @@ impl Guilds {
                 master_pid: master,
                 exp: 0,
                 level,
-                name: Vec::new(),
+                name,
                 grades: std::array::from_fn(|_| (Vec::new(), 0)),
                 skill_point: 0,
                 skills: [0; GUILD_SKILL_COUNT],

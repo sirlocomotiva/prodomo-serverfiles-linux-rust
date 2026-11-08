@@ -68,6 +68,12 @@ pub(super) struct QuietCalls<'a> {
     pub(super) event_starts: &'a [(i32, i32, i32)],
     /// The `end_event` calls: the index.
     pub(super) event_ends: &'a [i32],
+    /// The `__give_guild_priv` calls: guild, type, value, seconds.
+    pub(super) guild_privs: &'a [(u32, u32, i32, i32)],
+    /// The `__give_char_priv` calls: type, value.
+    pub(super) character_privs: &'a [(u32, i32)],
+    /// The `__give_empire_priv` calls: empire, type, value, seconds.
+    pub(super) empire_privs: &'a [(u32, u32, i32, i32)],
 }
 
 /// One `tag_Quiz` (`G/OXEvent.h:4-9`): the level, the question as `strlcpy` keeps it
@@ -577,6 +583,15 @@ impl GameState {
         }
         for (level, question, answer) in calls.quizzes {
             self.land_ox_quiz(*level, question, *answer);
+        }
+        for (guild, priv_type, value, time) in calls.guild_privs {
+            self.grant_guild_priv(*guild, *priv_type, *value, *time);
+        }
+        for (priv_type, value) in calls.character_privs {
+            self.grant_character_priv(reader, *priv_type, *value);
+        }
+        for (empire, priv_type, value, time) in calls.empire_privs {
+            self.grant_empire_priv_quest(*empire, *priv_type, *value, *time);
         }
     }
 
