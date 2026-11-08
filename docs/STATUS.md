@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-08, after ledger section 459 (the monarch treasuries).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 460
+Last reviewed: 2026-11-08, after ledger section 460 (the monarch powers).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 461
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -484,7 +484,9 @@ mounts through the ported `MountVnum`. Since 457 `cmd.fetch_casket_items` is `po
 the group's rows and the sort. Since 458 `cmd.break_marriage` and `cmd.close_shop` are
 `ported` and `cmd.special_item` is `unused` (a local file conversion no client observes).
 Since 459 `cmd.temp` and `cmd.check_mmoney` are `ported`: the test-server gate, the
-guards, and the store install. The
+guards, and the store install. Since 460 `cmd.mto`, `cmd.mtr`, `cmd.mtax` and
+`cmd.mmob` are `ported`: the monarch, cooldown and money gates, the warps, the
+two tax broadcasts, and the summon list. The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1478,6 +1480,9 @@ owner should know about (178.5):
 - `/temp`'s send guard takes the empire as a `BYTE` but passes the full `int` on
   (`G/monarch.cpp:118-132`), and the DB server indexes `m_MonarchInfo.money` with it
   unchecked (`D/Monarch.cpp:124`). The Rewrite refuses an empire past 3 (ledger 459).
+- `do_monarch_warpto` stamps `MI_WARP` again when its 60-second `FuncCheckWarp` fires
+  (`G/cmd_general.cpp:672-682`), so an offline target re-arms the cooldown, but no
+  client observes the second stamp. The Rewrite stamps once (ledger 460).
 
 ## Environment
 

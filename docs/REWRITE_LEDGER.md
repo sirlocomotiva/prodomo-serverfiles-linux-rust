@@ -48445,3 +48445,53 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
 and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
 No ADR changed.
+
+## 460. The monarch powers
+
+`cmd.mto`, `cmd.mtr`, `cmd.mtax` and `cmd.mmob`.
+
+- The world (`game_state::monarch`): the shared monarch, cooldown and money
+  gates (`monarch_power_gates`: `[LS;1007]`, `[LS;551;%d]`, `[LS;552;%u;%u]`,
+  `G/cmd_general.cpp:2489-2600`, `:2602-2720`); the warp's zone and empire
+  gates (`[LS;553]`, `[LS;554]`, `IsMonarchWarpZone`, `G/monarch.cpp:255-272`)
+  and its removal-and-`GC_WARP` pair; the summon's name gate (`[LS;1006]`)
+  and its subject move; the tax's commoner telling (`[LS;564]`), its
+  `Usage: monarch_tax <1-50]`, its wild-tax telling (`[LS;565]`) that lands
+  anyway, and its answer (`[LS;375;%d]`) with the two `tax_notice` and
+  `tax_message` empire broadcasts; and the summon's word gate
+  (`Usage: mmob <mob name]`), its vnum/name list (the 30-entry
+  `MONARCH_MOB_VNUMS`/`MONARCH_MOB_NAMES`, `:2862-2960`), its strange-vnum
+  telling (`[LS;567]`), and its stand at the monarch's side through the
+  respawner.
+- The cooldowns: a per-VID five-slot set on the world (`GetMCLTime`'s
+  seconds, `SetMC`'s stamp), seeded like `InitMC` (`G/char.cpp:8331-8345`)
+  and counted with wrapping pulse arithmetic as legacy's `DWORD` math does.
+- The store: a successful power moves the cell through `store_money` in the
+  same step that lands it (ADR-0003's Transfer rule).
+- One legacy timeout is not reproduced: `do_monarch_warpto` stamps `MI_WARP`
+  again when its 60-second `FuncCheckWarp` fires (`:672-682`) so an offline
+  target re-arms the cooldown, but no client observes the second stamp; the
+  Rewrite stamps once (recorded in `docs/STATUS.md`).
+
+Inventory: `cmd.mto`, `cmd.mtr`, `cmd.mtax` and `cmd.mmob` are `ported`
+(commands 239 ported / 25 missing).
+
+Tests: the scenario `a_monarch_warps_summons_and_taxes` (the refusals, the
+empty words, the strange vnum, the poor treasuries, the exact-price summon
+and transfer, the tax pair, the wild tax, and the hour wait), the helpers
+`read_info_past_ambient`, `is_ambient` and `read_summon_past_ambient`
+(the summoned mob's monster-typed insert reads raw past
+`Keyed::monster_record`), and five mutants: the warp price, the mob price,
+the shared money gate (`<` vs `<=`), the summon limit, and the summon's
+cooldown telling — all killed. The wait names 3600 or 3599 (one tick may
+pass on a loaded machine). 8 parallel runs stayed green.
+
+Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` (4975 passed, 0 failed in 45 targets), `cargo test --workspace
+--doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline`, no `prodomo\_%` database remained
+and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained.
+No ADR changed.
