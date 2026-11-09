@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 482 (the world boss's sub-headers).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 483
+Last reviewed: 2026-11-09, after ledger section 483 (three dead server bytes).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 484
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -541,9 +541,10 @@ waits silent, since `HEADER_GD_LOGIN` has no DB-side handler. Since 481 `gc.logi
 is `ported` and `sys.login.by_key` lost a `Left`: with `user_limit = 1`, one character in
 game fills the server and the second `LOGIN2` hears `FULL` under the handshake key. Since
 482 the three world-boss sub-headers are `ported`: they were live since 472 with the event
-system, and the scenario sends all three arms (`INFO`, `REWARD`, `RANKING`). The
-next slice is the owner's call: the forest's leader branch is ported,
-the sash
+system, and the scenario sends all three arms (`INFO`, `REWARD`, `RANKING`). Since 483
+`gc.item_use`, `gc.mount` and `gc.character_add2` are `unused`: the first two have an
+encoder and a struct no sender calls, the third is named nowhere in the checked-in trees. The
+next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
 

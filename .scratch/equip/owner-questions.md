@@ -580,3 +580,8 @@ owner answers.
 60. **`sys.net.udp_block` is `unused` (ledger 477).** Legacy defines `__UDP_BLOCK__`
  (`C/prodomodefines.h:195`), so the UDP bind and watch in `G/main.cpp:678-694` never
  compile and no UDP socket is bound. Waits on it: confirm the row `unused`.
+61. **Three dead server bytes are `unused` (ledger 483).** `gc.item_use` (22): its
+ encoder `CItem::UsePacketEncode` has no caller. `gc.mount` (61): the enumerator
+ and `struct packet_mount` have no sender. `gc.character_add2` (120): no
+ `server/` or `legacy/` line names it in any case, and no server enumerator is
+ 120. Waits on it: confirm the three rows `unused`.

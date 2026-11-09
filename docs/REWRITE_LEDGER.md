@@ -49863,3 +49863,34 @@ Gates (2026-11-09): the scenario run, `cargo fmt --all -- --check`, `cargo build
 --locked --offline`, the inventory test, the doc build, and `legacy/` is clean. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 483. Three dead server bytes
+
+Six server-record rows stood `missing` after ledger 482, and three of them are bytes the
+checked-in server never sends.
+
+`gc.item_use` (22): `CItem::UsePacketEncode` fills the record (`G/item.cpp:227-237`), but no
+line in `server/` calls it. The only `UsePacketEncode` lines are the declaration
+(`item.h:142`) and the definition, and the only `HEADER_GC_ITEM_USE` lines are the enumerator
+(`packet.h:123`) and the one inside that dead function. The controls are live: `UpdatePacket`
+and `EncodeAddPacket` have 14 hits in `item.cpp`, and `ITEM_USE` arms exist in
+`char_item.cpp`.
+
+`gc.mount` (61): the enumerator (`packet.h:150`) and `struct packet_mount` (`packet.h:1692`)
+stand alone. The only `GC_MOUNT` line and the only `packet_mount` lines in `server/` are
+those two; there is no sender. The controls are the live add: `HEADER_GC_CHARACTER_ADD`
+sends from `building.cpp:106` and `char.cpp:1075`. The mount-costume system
+(`sys.char.mount`) is separate missing work; this row is only the dead byte.
+
+`gc.character_add2` (120): no line in `server/` or `legacy/` names `GC_CHARACTER_ADD2`,
+`TPacketGCCharacterAdd2` or `CharacterAdd2` in any case, and no `packet.h` enumerator is
+120. The control is `HEADER_GC_CHARACTER_ADD` itself: byte 1, with its struct and its send
+sites. A client-only byte.
+
+All three rows move to `unused`, pending the owner's confirmation (question 61). No code
+changed.
+
+Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the inventory test, `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
