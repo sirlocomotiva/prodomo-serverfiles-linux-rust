@@ -219,6 +219,13 @@ pub enum ShopStep {
     },
     /// `SUBHEADER_CG_PRIVATE_SHOP_WARP_REQUEST`: warp to the stand.
     PrivateWarpRequest,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_SEARCH_CLOSE`: close the search window.
+    PrivateSearchClose,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_SEARCH`: search every standing shop.
+    PrivateSearch {
+        /// The decoded filter and flag.
+        search: protocol::cg_private_shop::CgPrivateShopSearch,
+    },
 }
 
 impl ShopStep {
@@ -567,6 +574,13 @@ impl GameState {
                 Some(warped) => Ok(ShopAnswer::Sent(warped.records)),
                 None => Ok(ShopAnswer::Sent(Vec::new())),
             },
+            ShopStep::PrivateSearchClose => {
+                self.private_search_close(vid);
+                Ok(ShopAnswer::Sent(Vec::new()))
+            }
+            ShopStep::PrivateSearch { search } => Ok(ShopAnswer::Sent(
+                self.private_search(vid, &search, mover)?.records,
+            )),
         }
     }
 

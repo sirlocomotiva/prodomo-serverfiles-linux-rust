@@ -35,10 +35,16 @@
 //! `PrivateShopBuild` (`server/server/game/input_main.cpp:4136-4149`) before a
 //! single field is read.
 //!
-//! The build, `START`, `BUY`, price-change, move, checkin, checkout, title-change and
-//! slot-unlock subheaders are decoded here; the other twelve are later slices. The
+//! The build, `START`, `BUY`, price-change, move, checkin, checkout, title-change,
+//! slot-unlock and search subheaders are decoded here; the other eleven are later slices. The
 //! subheader byte is validated by the dispatch, not by this codec: a wrong subheader
 //! through any decoder is a header error, as a wrong header is.
+//!
+//! The search body is `TPacketCGPrivateShopSearch` (`packet.h:1303-1307`): the
+//! 84-byte `TPrivateShopSearchFilter` (`packet.h:1276-1301`) and the `bool`, all
+//! packed: 4 (vnum) + 25 (owner) + 4 + 4 (type, subtype) + 4 + 4 (job, gender) +
+//! 2 + 2 (stack) + 1 + 1 (refine) + 4 + 4 (level) + 21 (seven attrs) + 2 (sash) +
+//! 1 + 1 (alchemy) + 1 (use-filter) = 85.
 //!
 //! # What this codec deliberately does not do
 //!
@@ -51,8 +57,9 @@ use crate::cg_inventory::{CgHeader, HEADER_CG_PRIVATE_SHOP};
 use crate::cg_variable::{
     PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_ITEM_CHECKIN,
     PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
-    PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST,
-    PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
+    PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_SEARCH,
+    PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, PRIVATE_SHOP_SUBHEADER_START,
+    PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
 };
 use crate::cg_wire::ClientFrame;
 use crate::item_pos::ItemPos;
@@ -375,6 +382,113 @@ impl CgPrivateShopTitleChange {
         let mut title = [0u8; CG_PRIVATE_SHOP_TITLE_FIELD_SIZE];
         title.copy_from_slice(&bytes[1..=CG_PRIVATE_SHOP_TITLE_FIELD_SIZE]);
         Ok(Self { title })
+    }
+}
+
+/// One decoded `SEARCH`: the filter and whether it applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgPrivateShopSearch {
+    /// The searched vnum, or 0 for any.
+    pub vnum: u32,
+    /// The raw `char[CHARACTER_NAME_MAX_LEN + 1]` owner field.
+    pub owner: [u8; CG_PRIVATE_SHOP_SEARCH_OWNER_FIELD_SIZE],
+    /// The item type, or a negative pick for any.
+    pub item_type: i32,
+    /// The item subtype, or a negative pick for any.
+    pub item_subtype: i32,
+    /// The job, or a negative pick for any.
+    pub job: i32,
+    /// The gender, or a negative pick for any.
+    pub gender: i32,
+    /// The smallest stack, or 0 for any.
+    pub min_stack: u16,
+    /// The largest stack, or 0 for any.
+    pub max_stack: u16,
+    /// The smallest refine, or 0 for any.
+    pub min_refine: u8,
+    /// The largest refine, or 0 for any.
+    pub max_refine: u8,
+    /// The smallest level, or 0 for any.
+    pub min_level: u32,
+    /// The largest level, or 0 for any.
+    pub max_level: u32,
+    /// The seven attributes, where a zero type asks for nothing.
+    pub attrs: [(u8, i16); CG_PRIVATE_SHOP_SEARCH_ATTRS],
+    /// The sash absorption.
+    pub sash_absorption: u16,
+    /// The alchemy level.
+    pub alchemy_level: u8,
+    /// The alchemy clarity.
+    pub alchemy_clarity: u8,
+    /// Whether the filter applies.
+    pub use_filter: bool,
+}
+
+/// Width of the search's owner field: `CHARACTER_NAME_MAX_LEN + 1`.
+pub const CG_PRIVATE_SHOP_SEARCH_OWNER_FIELD_SIZE: usize = 25;
+
+/// The search filter's attributes: `ITEM_ATTRIBUTE_MAX_NUM`.
+pub const CG_PRIVATE_SHOP_SEARCH_ATTRS: usize = 7;
+
+/// Width of the search body after the prefix: the filter and the flag.
+pub const CG_PRIVATE_SHOP_SEARCH_WIRE_SIZE: usize = 85;
+
+impl CgPrivateShopSearch {
+    /// Decode the subheader, the filter and the flag (`PrivateShopSearch`,
+    /// `G/input_main.cpp:5140-5176`).
+    ///
+    /// # Errors
+    ///
+    /// As [`CgPrivateShopBuildError`]: a wrong header or subheader, or a frame
+    /// short of the filter and the flag.
+    ///
+    /// # Panics
+    ///
+    /// Never: the slice is length-checked first.
+    pub fn decode_search(frame: &ClientFrame) -> Result<Self, CgPrivateShopBuildError> {
+        let bytes = &frame.payload;
+        let subheader = bytes.first().copied().unwrap_or(0);
+        if frame.header != HEADER_CG_PRIVATE_SHOP.value()
+            || subheader != PRIVATE_SHOP_SUBHEADER_SEARCH
+        {
+            return Err(CgPrivateShopBuildError::Header {
+                header: frame.header,
+                subheader,
+            });
+        }
+        if bytes.len() < 1 + CG_PRIVATE_SHOP_SEARCH_WIRE_SIZE {
+            return Err(CgPrivateShopBuildError::Truncated {
+                needed: 1 + CG_PRIVATE_SHOP_SEARCH_WIRE_SIZE,
+                available: bytes.len(),
+            });
+        }
+        let mut owner = [0u8; CG_PRIVATE_SHOP_SEARCH_OWNER_FIELD_SIZE];
+        owner.copy_from_slice(&bytes[5..30]);
+        let mut attrs = [(0u8, 0i16); CG_PRIVATE_SHOP_SEARCH_ATTRS];
+        for (index, attr) in attrs.iter_mut().enumerate() {
+            let at = 60 + index * 3;
+            let value = i16::from_le_bytes(bytes[at + 1..at + 3].try_into().expect("two bytes"));
+            *attr = (bytes[at], value);
+        }
+        Ok(Self {
+            vnum: u32::from_le_bytes(bytes[1..5].try_into().expect("four bytes")),
+            owner,
+            item_type: i32::from_le_bytes(bytes[30..34].try_into().expect("four bytes")),
+            item_subtype: i32::from_le_bytes(bytes[34..38].try_into().expect("four bytes")),
+            job: i32::from_le_bytes(bytes[38..42].try_into().expect("four bytes")),
+            gender: i32::from_le_bytes(bytes[42..46].try_into().expect("four bytes")),
+            min_stack: u16::from_le_bytes(bytes[46..48].try_into().expect("two bytes")),
+            max_stack: u16::from_le_bytes(bytes[48..50].try_into().expect("two bytes")),
+            min_refine: bytes[50],
+            max_refine: bytes[51],
+            min_level: u32::from_le_bytes(bytes[52..56].try_into().expect("four bytes")),
+            max_level: u32::from_le_bytes(bytes[56..60].try_into().expect("four bytes")),
+            attrs,
+            sash_absorption: u16::from_le_bytes(bytes[81..83].try_into().expect("two bytes")),
+            alchemy_level: bytes[83],
+            alchemy_clarity: bytes[84],
+            use_filter: bytes[85] != 0,
+        })
     }
 }
 
@@ -799,6 +913,79 @@ mod tests {
             short,
             Err(CgPrivateShopBuildError::Truncated {
                 needed: 34,
+                available: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn the_search_decodes_in_field_order() {
+        let mut payload = vec![PRIVATE_SHOP_SUBHEADER_SEARCH];
+        payload.extend_from_slice(&0x7531u32.to_le_bytes());
+        let mut owner = [0u8; CG_PRIVATE_SHOP_SEARCH_OWNER_FIELD_SIZE];
+        owner[..6].copy_from_slice(b"Seller");
+        payload.extend_from_slice(&owner);
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        payload.extend_from_slice(&(-1i32).to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes());
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        payload.extend_from_slice(&0x0203u16.to_le_bytes());
+        payload.extend_from_slice(&0x0405u16.to_le_bytes());
+        payload.push(3);
+        payload.push(9);
+        payload.extend_from_slice(&0x0a0bu32.to_le_bytes());
+        payload.extend_from_slice(&0x0c0du32.to_le_bytes());
+        payload.push(17);
+        payload.extend_from_slice(&0x090ai16.to_le_bytes());
+        payload.extend_from_slice(&[0u8; 18]);
+        payload.extend_from_slice(&0x0e0fu16.to_le_bytes());
+        payload.push(4);
+        payload.push(5);
+        payload.push(1);
+        assert_eq!(payload.len(), 1 + CG_PRIVATE_SHOP_SEARCH_WIRE_SIZE);
+        let search = CgPrivateShopSearch::decode_search(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: payload.clone(),
+        })
+        .expect("decoded");
+        assert_eq!(search.vnum, 0x7531);
+        assert_eq!(&search.owner[..6], b"Seller");
+        assert_eq!(search.owner[6], 0);
+        assert_eq!(search.item_type, 1);
+        assert_eq!(search.item_subtype, -1);
+        assert_eq!(search.job, 0);
+        assert_eq!(search.gender, 1);
+        assert_eq!(search.min_stack, 0x0203);
+        assert_eq!(search.max_stack, 0x0405);
+        assert_eq!(search.min_refine, 3);
+        assert_eq!(search.max_refine, 9);
+        assert_eq!(search.min_level, 0x0a0b);
+        assert_eq!(search.max_level, 0x0c0d);
+        assert_eq!(search.attrs[0], (17, 0x090a));
+        assert_eq!(search.attrs[1], (0, 0));
+        assert_eq!(search.sash_absorption, 0x0e0f);
+        assert_eq!(search.alchemy_level, 4);
+        assert_eq!(search.alchemy_clarity, 5);
+        assert!(search.use_filter);
+        let crossed = CgPrivateShopSearch::decode_search(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_BUY, 0x13, 0x12],
+        });
+        assert_eq!(
+            crossed,
+            Err(CgPrivateShopBuildError::Header {
+                header: HEADER_CG_PRIVATE_SHOP.value(),
+                subheader: PRIVATE_SHOP_SUBHEADER_BUY,
+            })
+        );
+        let short = CgPrivateShopSearch::decode_search(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_SEARCH, 0x31],
+        });
+        assert_eq!(
+            short,
+            Err(CgPrivateShopBuildError::Truncated {
+                needed: 86,
                 available: 2,
             })
         );

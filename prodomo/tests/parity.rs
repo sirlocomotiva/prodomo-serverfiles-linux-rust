@@ -44464,11 +44464,44 @@ fn a_dungeon_info_rank_cooldown_and_update_fan_their_lines() {
         "1093's counts are empty: {text:?}"
     );
     alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info update"));
-    assert_eq!(
-        read_chat_past_ambient(&mut alpha),
-        stamped,
-        "update fans the full line again"
-    );
+    // The update fans the full line again, but its `cooldown-now` cells tick on the
+    // wall clock: a second straddling the two commands moves both by one, so the
+    // bytes are compared cell by cell, with the two `left` cells allowed a tick.
+    let updated = read_chat_past_ambient(&mut alpha);
+    let cells_of = |line: &[u8]| {
+        line.split(|byte| *byte == b'#')
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>()
+    };
+    let (before, after) = (cells_of(&stamped), cells_of(&updated));
+    assert_eq!(before.len(), after.len(), "the same cells: {updated:?}");
+    for (old, new) in before.iter().zip(after.iter()) {
+        let (old, new) = (
+            old.split(|byte| *byte == b'|').collect::<Vec<_>>(),
+            new.split(|byte| *byte == b'|').collect::<Vec<_>>(),
+        );
+        assert_eq!(old.len(), new.len(), "the same fields: {updated:?}");
+        for (index, (old, new)) in old.iter().zip(new.iter()).enumerate() {
+            if index == 1 && old != new {
+                let (old, new): (i64, i64) = (
+                    std::str::from_utf8(old)
+                        .expect("digits")
+                        .parse()
+                        .expect("digits"),
+                    std::str::from_utf8(new)
+                        .expect("digits")
+                        .parse()
+                        .expect("digits"),
+                );
+                assert!(
+                    (0..=1).contains(&(old - new)),
+                    "at most a one-second tick: {updated:?}"
+                );
+            } else {
+                assert_eq!(old, new, "the same field: {updated:?}");
+            }
+        }
+    }
 }
 
 /// Ledger 467: the GM arena commands (`G/cmd_gm.cpp:3957-4064`) list the four
@@ -46653,4 +46686,154 @@ fn a_private_shop_warp_request_counts_down_and_returns_to_the_stand() {
     alice.send_record(&slash(b"/move_channel 1"));
     let answer = an_info_line(b"You are already on channel 1");
     while read_chat_line(&mut alice) != answer {}
+}
+
+/// A `CG_PRIVATE_SHOP` search naming vnum `vnum` and nothing else: the filter's
+/// picks are all negative or zero, and the flag is off.
+fn client_shop_search(vnum: u32) -> Vec<u8> {
+    let mut search = vec![CG_PRIVATE_SHOP, 18];
+    search.extend_from_slice(&vnum.to_le_bytes());
+    search.extend_from_slice(&[0u8; 25]);
+    for _ in 0..4 {
+        search.extend_from_slice(&(-1i32).to_le_bytes());
+    }
+    search.extend_from_slice(&0u16.to_le_bytes());
+    search.extend_from_slice(&0u16.to_le_bytes());
+    search.push(0);
+    search.push(0);
+    search.extend_from_slice(&0u32.to_le_bytes());
+    search.extend_from_slice(&0u32.to_le_bytes());
+    search.extend_from_slice(&[0u8; 21]);
+    search.extend_from_slice(&0u16.to_le_bytes());
+    search.push(0);
+    search.push(0);
+    search.push(0);
+    search
+}
+
+/// Yankee holding the looking glass, beside the sword seller: the glass's expiry
+/// socket is live, because a zero socket expires at the first pulse.
+fn enter_seller_and_searcher(
+    server: &Server,
+    database: &ScratchDatabase,
+) -> (Keyed, Listed, Keyed, Listed) {
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE player SET gold = 10000 WHERE name = 'Yankee'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 61, \
+         id, 1, 0, 1, 60004, 2000000000 FROM player WHERE name = 'Yankee'",
+    );
+    let (mut alice, alice_listed, _entered) = enter_equipped_world_with(server, b"alice", 1);
+    let (mut yankee, yankee_listed, _yankee_entered) =
+        enter_equipped_world_on(server, b"bob", 0, 1);
+    alice.sees_enter(yankee_listed.id, true, None);
+    alice.quiet("caught up");
+    yankee.quiet("caught up");
+    (alice, alice_listed, yankee, yankee_listed)
+}
+
+/// Ledger 499: a glass opens the shop search, a vnum search finds the standing
+/// ware, and its sale tells the searchers the shop, the slot and the removal.
+#[test]
+fn a_glass_opens_the_search_and_a_sale_tells_the_searchers() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    let (mut alice, alice_listed, mut yankee, yankee_listed) =
+        enter_seller_and_searcher(&server, &database);
+    let entity = build_axes_shop(&mut alice, &mut yankee);
+    let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
+    // Yankee drinks the looking glass: the bare open answers.
+    yankee.send_record(&client_item_use(0));
+    let opened = yankee.read_game();
+    assert_eq!(
+        &opened[..4],
+        &[GC_PRIVATE_SHOP, 4, 0, 21],
+        "OPEN_LOOK: {opened:02x?}"
+    );
+    // The vnum search finds the sword's row.
+    yankee.send_record(&client_shop_search(19));
+    let result = yankee.read_game();
+    assert_eq!(
+        &result[..4],
+        &[GC_PRIVATE_SHOP, 105, 0, 23],
+        "RESULT: {result:02x?}"
+    );
+    assert_eq!(&result[8..14], b"Alpha\0", "the owner names the row");
+    assert_eq!(
+        u32::from_le_bytes(result[33..37].try_into().expect("four")),
+        19,
+        "the sword's vnum"
+    );
+    assert_eq!(
+        i64::from_le_bytes(result[37..45].try_into().expect("eight")),
+        500,
+        "the asking price"
+    );
+    // Yankee browses the stand and buys the sword.
+    let mut start = vec![CG_PRIVATE_SHOP, 4];
+    start.extend_from_slice(&owner_vid.to_le_bytes());
+    yankee.send_record(&start);
+    let window = yankee.read_game();
+    assert_eq!(
+        &window[..4],
+        &[GC_PRIVATE_SHOP, 0xad, 0x23, 11],
+        "START: {window:02x?}"
+    );
+    yankee.send_record(&[CG_PRIVATE_SHOP, 6, 3, 0]);
+    assert_eq!(
+        yankee.read_game(),
+        gold_change(yankee_listed.id, 0, 9500),
+        "the buyer pays the full price"
+    );
+    let set = yankee.read_game();
+    assert_eq!(set[0], ITEM_SET, "the ware's set: {set:02x?}");
+    let remove = yankee.read_game();
+    assert_eq!(
+        &remove[..4],
+        &[GC_PRIVATE_SHOP, 6, 0, 13],
+        "REMOVE_ITEM: {remove:02x?}"
+    );
+    // The searchers hear the ware go before the bought line, as `RemoveItem` runs
+    // before the bought chat (`G/private_shop_manager.cpp:628-643`).
+    let update = yankee.read_game();
+    assert_eq!(
+        &update[..4],
+        &[GC_PRIVATE_SHOP, 13, 0, 24],
+        "SEARCH_UPDATE: {update:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(update[4..8].try_into().expect("four")),
+        alice_listed.id,
+        "the shop's id"
+    );
+    assert_eq!(
+        i32::from_le_bytes(update[8..12].try_into().expect("four")),
+        3,
+        "the sold slot"
+    );
+    assert_eq!(update[12], 1, "the removal");
+    let bought = yankee.read_game();
+    assert_eq!(bought[0], GC_CHAT, "the bought line: {bought:02x?}");
 }

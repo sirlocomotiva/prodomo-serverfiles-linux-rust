@@ -846,6 +846,7 @@ impl GameState {
         self.cancel_trade(vid);
         self.end_browsing(vid);
         self.close_my_shop(vid);
+        self.private_search_close(vid);
         if self.aura_windows.remove(&vid).is_some() {
             self.aura_held.remove(&vid);
             let _sent = self.write_to_client(vid, protocol::gc_aura::GcAuraClose.encode().to_vec());

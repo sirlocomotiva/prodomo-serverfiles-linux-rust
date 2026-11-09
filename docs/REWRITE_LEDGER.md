@@ -50639,3 +50639,71 @@ suite 5206 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 scenario passed 5 sequential and 4 parallel runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 499. The private-shop search
+
+The search window opens, searches and hears its wares change. Legacy's search is three
+client records and one fan-out: `OpenShopSearch` sets the mode behind `USE_SPECIAL` 60004
+and 60005 (`G/char_item.cpp:4391-4399`, `G/char.cpp:12669-12689`), `PrivateShopSearchClose`
+drops it (`G/input_main.cpp:5132-5138`), `PrivateShopSearch` answers the matching wares
+(`:5140-5176`, `G/private_shop_manager.cpp:940-1094`), and `SendShopSearchUpdate` tells
+every searching character (`:713-749`). `PrivateShopSearchBuy` is the next slice.
+
+The world keeps the searchers and their glass (`private_searching`, mode 1 looking or 2
+trading) and the search throttle (`private_search_at`). Using a glass runs
+`OpenShopSearch` in legacy order: the trade windows refuse with their line, else the mode
+sets, the bare open answers (`SEARCH_OPEN_LOOK_MODE` 21 or `SEARCH_OPEN_TRADE_MODE` 22),
+and the glass is kept, as the `USE_SPECIAL` arm consumes nothing. The close drops the
+mode with no answer, as `CloseShopSearch` answers nothing. The search refuses stunned or
+dead in silence and a search within two seconds of the last with the wait line, then
+answers `SEARCH_RESULT`, or nothing when nothing matches, as legacy's empty answer sends
+nothing (`:1080-1093`).
+
+The scan follows `SearchItem`'s three arms: a named vnum rewrites the type and subtype
+from its proto (an unknown vnum finds nothing), else a named owner scans that shop alone
+(`strlen` on the field, `GetPrivateShopByOwnerName`), else a non-negative type scans
+every shop. `FilterItem` runs under the flag: the vnum, the refine band on weapons and
+armours, the alchemy band on dragon souls (grade and strength from the vnum's digits, as
+`DSManager` decodes them), the job and gender against the antiflags, the stack, the
+level band against `GetLevelLimit`, and the seven attributes on weapons and armours,
+where each asked type needs a ware attribute of its own type at its value or better.
+The sash absorption is read and never judged, as legacy reads it. The rows stop when the
+next would overflow the 8192 safe bytes, and run in owner-VID and slot order; legacy's
+`unordered_set` order is unobservable by an honest client. Legacy fans the search out to
+every core over P2P and merges the answers; one process holds every Channel (ADR-0002),
+so the scan already sees them all.
+
+The updates ride the two `SetState` and `RemoveItem` call sites: a flip tells the whole
+shop (`pos` -1) with its new state, and a buy and a checkout tell the gone ware with
+`STATE_REMOVED`. The buy's update lands before the bought line, as `RemoveItem` runs
+before the bought chat (`:628-643`). A close sends no update: legacy's delete path
+removes the shop without telling the searchers (`:261-310`, `:76-87`). The mode closes on
+death (`G/char_battle.cpp:1635`) and on departure, and refuses the shop warp
+(`G/char.cpp:8809`).
+
+The codecs are `CgPrivateShopSearch` (the 84-byte filter and the flag, 85 body bytes) and
+`GcPrivateShopSearchData` (the 101-byte row: shop, owner, vnum, price, count, slot,
+sockets, attrs, checkin, state), `GcPrivateShopSearchResult` and
+`GcPrivateShopSearchUpdate`, with the two open-mode subheader consts. The framer's
+`SEARCH => 85` arm already covered the frame.
+
+The scenario `a_glass_opens_the_search_and_a_sale_tells_the_searchers` grants Yankee the
+looking glass by seeding her row with a live expiry socket (a zero socket expires at the
+first pulse, so the console grant and a bare seed both lose the glass before the use),
+builds the one-sword shop, drinks the glass, searches vnum 19, browses and buys: the
+open, the one-row result naming Alpha and the 500 price, and the update naming the shop,
+slot 3 and the removal ahead of the bought line. Unit tests pin the blank search's
+silence, the wait line, and the flip's whole-shop update.
+
+Drive-by: `a_dungeon_info_rank_cooldown_and_update_fan_their_lines` compared the
+`test_cooldown` and `update` lines byte for byte, but the `cooldown-now` cells tick on
+the wall clock, so a straddling second failed the run (the suite's one failure at
+first, and 1 of 4 alone). The compare is now cell by cell, with the two `left` cells
+allowed a one-second tick; 6 of 6 since.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5212 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The
+scenario passed 4 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

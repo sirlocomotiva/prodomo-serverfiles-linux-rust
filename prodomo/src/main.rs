@@ -5920,6 +5920,7 @@ where
         PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
         PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_MODIFY,
         PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
+        PRIVATE_SHOP_SUBHEADER_SEARCH, PRIVATE_SHOP_SUBHEADER_SEARCH_CLOSE,
         PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, PRIVATE_SHOP_SUBHEADER_START,
         PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE, PRIVATE_SHOP_SUBHEADER_WARP_REQUEST,
         PRIVATE_SHOP_SUBHEADER_WITHDRAW,
@@ -6037,6 +6038,16 @@ where
             }
         }
         PRIVATE_SHOP_SUBHEADER_WARP_REQUEST => ShopStep::PrivateWarpRequest,
+        PRIVATE_SHOP_SUBHEADER_SEARCH_CLOSE => ShopStep::PrivateSearchClose,
+        PRIVATE_SHOP_SUBHEADER_SEARCH => {
+            match protocol::cg_private_shop::CgPrivateShopSearch::decode_search(frame) {
+                Ok(search) => ShopStep::PrivateSearch { search },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed shop search; closing");
+                    return false;
+                }
+            }
+        }
         _ => {
             info!(%addr, subheader, "Client sent an unported private-shop subheader; ignoring");
             return true;

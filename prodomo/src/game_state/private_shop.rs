@@ -69,18 +69,23 @@
 
 use common::item_slots::{usable_inventory_cells, EWindows};
 use common::vid::Vid;
-use protocol::cg_private_shop::{CgPrivateShopItem, CG_PRIVATE_SHOP_TITLE_FIELD_SIZE};
+use protocol::cg_private_shop::{
+    CgPrivateShopItem, CgPrivateShopSearch, CG_PRIVATE_SHOP_TITLE_FIELD_SIZE,
+};
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_private_shop::{
     GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopItemData,
     GcPrivateShopLoad, GcPrivateShopMove, GcPrivateShopPriceChange, GcPrivateShopRemove,
-    GcPrivateShopSale, GcPrivateShopSetItem, GcPrivateShopStart, GcPrivateShopState,
+    GcPrivateShopSale, GcPrivateShopSearchData, GcPrivateShopSearchResult,
+    GcPrivateShopSearchUpdate, GcPrivateShopSetItem, GcPrivateShopStart, GcPrivateShopState,
     GcPrivateShopTitle, GcPrivateShopTitleChange, GcPrivateShopUnlocked,
-    PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN, SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM,
-    SUBHEADER_GC_PRIVATE_SHOP_CLOSE, SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL,
-    SUBHEADER_GC_PRIVATE_SHOP_END, SUBHEADER_GC_PRIVATE_SHOP_OPEN_PANEL,
-    SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM, SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM,
-    SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM, SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW,
+    GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE, PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN,
+    SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM, SUBHEADER_GC_PRIVATE_SHOP_CLOSE,
+    SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL, SUBHEADER_GC_PRIVATE_SHOP_END,
+    SUBHEADER_GC_PRIVATE_SHOP_OPEN_PANEL, SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM,
+    SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM, SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_LOOK_MODE,
+    SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE, SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM,
+    SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW,
 };
 use protocol::gc_whisper::{GcWhisper, WHISPER_TYPE_SYSTEM};
 use world::item::{ItemId, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_MYSHOP};
@@ -125,6 +130,28 @@ pub const PRIVATE_SHOP_CLOSE_WAIT_PULSES: u64 = 250;
 
 /// The one second between two state flips, in Pulses.
 pub const PRIVATE_SHOP_STATE_WAIT_PULSES: u64 = 25;
+
+/// The two seconds between two searches, in Pulses (`PASSES_PER_SEC(2)`).
+pub const PRIVATE_SHOP_SEARCH_WAIT_PULSES: u64 = 50;
+
+/// `MODE_LOOKING` (1): the search window shows wares (`C/length.h:153`).
+pub const PRIVATE_SHOP_SEARCH_LOOKING: u8 = 1;
+
+/// `MODE_TRADING` (2): the search window buys wares.
+pub const PRIVATE_SHOP_SEARCH_TRADING: u8 = 2;
+
+/// The looking glass, which opens the search to look (`G/char_item.cpp:4391-4394`).
+pub const PRIVATE_SHOP_LOOKING_GLASS: u32 = 60004;
+
+/// The trading glass, which opens the search to trade (`:4396-4399`).
+pub const PRIVATE_SHOP_TRADING_GLASS: u32 = 60005;
+
+/// `SAFE_RECV_BUFSIZE` (8192): the rows stop when the next would overflow it
+/// (`G/private_shop_manager.cpp:943`).
+pub const PRIVATE_SHOP_SEARCH_SAFE_BYTES: usize = 8192;
+
+/// `STATE_REMOVED` (1): the update names a gone ware (`C/length.h:168`).
+pub const PRIVATE_SHOP_SEARCH_REMOVED: u8 = 1;
 
 /// `STATE_MODIFY` (3): the shop takes no customers.
 pub const PRIVATE_SHOP_STATE_MODIFY: u8 = 3;
@@ -361,6 +388,59 @@ impl GameState {
     /// Whether the character under `vid` edits its panel.
     fn edits_private_shop(&self, vid: Vid) -> bool {
         self.private_panels.contains(&vid)
+    }
+
+    /// Whether the character under `vid` browses the shop search.
+    pub(super) fn searches_private_shop(&self, vid: Vid) -> bool {
+        self.private_searching.contains_key(&vid)
+    }
+
+    /// The glass at `at` of the character under `vid`, or `None` when the step is no
+    /// search open: no item, or neither glass (`G/char_item.cpp:4391-4399`).
+    pub(super) fn search_glass_at(&self, vid: Vid, at: protocol::item_pos::ItemPos) -> Option<u32> {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map(|item| item.vnum)
+            .filter(|vnum| {
+                *vnum == PRIVATE_SHOP_LOOKING_GLASS || *vnum == PRIVATE_SHOP_TRADING_GLASS
+            })
+    }
+
+    /// `CHARACTER::OpenShopSearch` (`G/char.cpp:12669-12689`): the trade windows
+    /// refuse with their line, else the mode sets and the bare open answers. The
+    /// glass is kept, as the `USE_SPECIAL` arm consumes nothing.
+    pub(super) fn open_shop_search(
+        &mut self,
+        vid: Vid,
+        vnum: u32,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if !self.private_trade_windows_clear(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot trade while another window is open.",
+                &[],
+            );
+            return self.nothing_used(vid, actor);
+        }
+        let mode = if vnum == PRIVATE_SHOP_LOOKING_GLASS {
+            PRIVATE_SHOP_SEARCH_LOOKING
+        } else {
+            PRIVATE_SHOP_SEARCH_TRADING
+        };
+        let subheader = if mode == PRIVATE_SHOP_SEARCH_LOOKING {
+            SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_LOOK_MODE
+        } else {
+            SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE
+        };
+        self.private_searching.insert(vid, mode);
+        let mut moved = self.nothing_used(vid, actor)?;
+        moved.records.push(GcPrivateShop::new(subheader).encode());
+        Ok(moved)
     }
 
     /// `CInputMain::PrivateShopPanelOpen` for the character under `vid`
@@ -971,6 +1051,328 @@ impl GameState {
         vec![GcPrivateShop::new(SUBHEADER_GC_PRIVATE_SHOP_END).encode()]
     }
 
+    /// `CInputMain::PrivateShopSearchClose` for the character under `vid`
+    /// (`G/input_main.cpp:5132-5138`): the window closes, with no answer.
+    pub fn private_search_close(&mut self, vid: Vid) {
+        let _closed = self.private_searching.remove(&vid);
+    }
+
+    /// `CInputMain::PrivateShopSearch` for the character under `vid`
+    /// (`G/input_main.cpp:5140-5176`): stunned or dead is silent, a search within two
+    /// seconds of the last refuses with the wait line, and the matching wares answer
+    /// as `SEARCH_RESULT`. Nothing matches and nothing is sent, as legacy's empty
+    /// answer sends nothing (`G/private_shop_manager.cpp:1080-1093`).
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_search(
+        &mut self,
+        vid: Vid,
+        search: &CgPrivateShopSearch,
+        actor: Mover,
+    ) -> Result<PrivateShopPanel, MoveItemRefused> {
+        self.characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(PrivateShopPanel {
+                records: Vec::new(),
+            });
+        }
+        let last = self.private_search_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_SEARCH_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a moment before searching other personal shops again.",
+                &[],
+            );
+            return Ok(PrivateShopPanel {
+                records: Vec::new(),
+            });
+        }
+        self.private_search_at.insert(vid, self.last_pulse);
+        let rows = self.private_search_rows(search);
+        if rows.is_empty() {
+            return Ok(PrivateShopPanel {
+                records: Vec::new(),
+            });
+        }
+        Ok(PrivateShopPanel {
+            records: vec![GcPrivateShopSearchResult { rows }.encode()],
+        })
+    }
+
+    /// `CPrivateShopManager::SearchItem` (`G/private_shop_manager.cpp:940-1094`): the
+    /// matching wares of every standing shop, in owner-VID and slot order. The rows
+    /// stop when the next would overflow the safe bytes, as legacy's break does.
+    /// Legacy fans the search out to every core over P2P and merges the answers; one
+    /// process holds every Channel (ADR-0002), so the scan already sees them all.
+    fn private_search_rows(&self, search: &CgPrivateShopSearch) -> Vec<GcPrivateShopSearchData> {
+        let mut owners: Vec<Vid> = self.private_shops.keys().copied().collect();
+        owners.sort_by_key(|owner| owner.raw());
+        let mut rows = Vec::new();
+        let mut bytes = 0;
+        if search.vnum != 0 {
+            let Some(table) = self.protos.get(search.vnum) else {
+                return rows;
+            };
+            let (item_type, item_subtype) = (table.item_type, table.sub_type);
+            for owner in owners {
+                for (slot, ware) in self.private_shop_wares(owner) {
+                    if bytes + GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE
+                        > PRIVATE_SHOP_SEARCH_SAFE_BYTES
+                    {
+                        return rows;
+                    }
+                    let Some(row) = self.private_search_row(
+                        search,
+                        owner,
+                        slot,
+                        &ware,
+                        item_type,
+                        item_subtype,
+                    ) else {
+                        continue;
+                    };
+                    bytes += GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE;
+                    rows.push(row);
+                }
+            }
+            return rows;
+        }
+        if search.owner.iter().any(|byte| *byte != 0) {
+            let Some(owner) = self.private_shop_of_owner(&search.owner) else {
+                return rows;
+            };
+            for (slot, ware) in self.private_shop_wares(owner) {
+                if bytes + GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE > PRIVATE_SHOP_SEARCH_SAFE_BYTES {
+                    return rows;
+                }
+                let Some(row) = self.private_search_row(
+                    search,
+                    owner,
+                    slot,
+                    &ware,
+                    search.item_type,
+                    search.item_subtype,
+                ) else {
+                    continue;
+                };
+                bytes += GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE;
+                rows.push(row);
+            }
+            return rows;
+        }
+        if search.item_type >= 0 {
+            for owner in owners {
+                for (slot, ware) in self.private_shop_wares(owner) {
+                    if bytes + GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE
+                        > PRIVATE_SHOP_SEARCH_SAFE_BYTES
+                    {
+                        return rows;
+                    }
+                    let Some(row) = self.private_search_row(
+                        search,
+                        owner,
+                        slot,
+                        &ware,
+                        search.item_type,
+                        search.item_subtype,
+                    ) else {
+                        continue;
+                    };
+                    bytes += GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE;
+                    rows.push(row);
+                }
+            }
+        }
+        rows
+    }
+
+    /// The wares of `owner`'s shop by slot, cloned for the scan.
+    fn private_shop_wares(&self, owner: Vid) -> Vec<(u16, PrivateShopWare)> {
+        self.private_shops.get(&owner).map_or(Vec::new(), |shop| {
+            shop.wares
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, ware)| {
+                    ware.clone()
+                        .map(|ware| (u16::try_from(slot).unwrap_or(u16::MAX), ware))
+                })
+                .collect()
+        })
+    }
+
+    /// The shop whose owner's name the search field names, as
+    /// `GetPrivateShopByOwnerName` finds it (`G/private_shop_manager.cpp:54-65`):
+    /// the field's bytes up to the first NUL. Later shops win on a repeated name,
+    /// as the map walk passes the earlier one.
+    fn private_shop_of_owner(&self, field: &[u8; 25]) -> Option<Vid> {
+        let end = field
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(field.len());
+        let mut owners: Vec<Vid> = self.private_shops.keys().copied().collect();
+        owners.sort_by_key(|owner| owner.raw());
+        let mut found = None;
+        for owner in owners {
+            let name = self
+                .characters
+                .find_by_vid(owner)
+                .map_or(String::new(), |character| character.name().to_owned());
+            if name.as_bytes() == &field[..end] {
+                found = Some(owner);
+            }
+        }
+        found
+    }
+
+    /// One ware as the search shows it, or `None` when the filter refuses it
+    /// (`FilterItem` and `CopyItemData`, `G/private_shop_manager.cpp:789-938` and
+    /// `G/private_shop_util.cpp:223-246`). The type and subtype are the vnum's when
+    /// the search names a vnum, and the filter's else, as legacy overwrites them.
+    #[allow(clippy::too_many_arguments)]
+    fn private_search_row(
+        &self,
+        search: &CgPrivateShopSearch,
+        owner: Vid,
+        slot: u16,
+        ware: &PrivateShopWare,
+        item_type: i32,
+        item_subtype: i32,
+    ) -> Option<GcPrivateShopSearchData> {
+        let item = &ware.item;
+        let table = self.protos.get(item.vnum)?;
+        if item_type >= 0 && table.item_type != item_type {
+            return None;
+        }
+        if item_subtype >= 0 && table.sub_type != item_subtype {
+            return None;
+        }
+        if search.use_filter && !Self::private_search_filter(search, item, table, item_type) {
+            return None;
+        }
+        let (shop, state) = self
+            .private_shops
+            .get(&owner)
+            .and_then(|shop| {
+                self.characters
+                    .find_by_vid(owner)
+                    .ok()
+                    .map(|character| (character.player_id(), shop.state))
+            })
+            .unwrap_or((0, PRIVATE_SHOP_STATE_OPEN));
+        let name = self
+            .characters
+            .find_by_vid(owner)
+            .map_or(String::new(), |character| character.name().to_owned());
+        Some(GcPrivateShopSearchData {
+            shop,
+            owner: private_owner_field(&name),
+            vnum: item.vnum,
+            gold: ware.gold,
+            cheque: ware.cheque,
+            count: u32::from(item.count),
+            pos: slot,
+            sockets: item.sockets,
+            attrs: item.attributes.map(|attr| (attr.b_type, attr.s_value)),
+            checkin: i32::try_from(ware.checkin).unwrap_or(0),
+            state,
+        })
+    }
+
+    /// `FilterItem` under the flag (`G/private_shop_manager.cpp:806-937`): the vnum,
+    /// the refine band on weapons and armours, the alchemy band on dragon souls, the
+    /// job and gender, the stack, the level band, and the attributes on weapons and
+    /// armours. The sash absorption is read and never judged, as legacy reads it.
+    fn private_search_filter(
+        search: &CgPrivateShopSearch,
+        item: &world::item::Item,
+        table: &gamedata::item_proto::ItemProto,
+        item_type: i32,
+    ) -> bool {
+        if search.vnum != 0 && item.vnum != search.vnum {
+            return false;
+        }
+        if item_type == gamedata::item_kind::ITEM_WEAPON
+            || item_type == gamedata::item_kind::ITEM_ARMOR
+        {
+            let refine = item.vnum % 10;
+            if search.min_refine > 0 && refine < u32::from(search.min_refine) {
+                return false;
+            }
+            if search.max_refine > 0 && refine > u32::from(search.max_refine) {
+                return false;
+            }
+        }
+        if table.item_type == gamedata::item_kind::ITEM_DS {
+            let grade = (item.vnum / 1000) % 10;
+            let strength = (item.vnum / 10) % 10;
+            if u32::from(search.alchemy_clarity) > grade {
+                return false;
+            }
+            if u32::from(search.alchemy_level) > strength {
+                return false;
+            }
+        }
+        if !private_search_job_ok(search.job, table.anti_flags) {
+            return false;
+        }
+        if !private_search_gender_ok(search.gender, table.anti_flags) {
+            return false;
+        }
+        if search.min_stack > 0 && item.count < search.min_stack {
+            return false;
+        }
+        if search.max_stack > 0 && item.count > search.max_stack {
+            return false;
+        }
+        let level = private_search_level(table);
+        if search.min_level > 0 && level < search.min_level {
+            return false;
+        }
+        if search.max_level > 0 && level > search.max_level {
+            return false;
+        }
+        if item_type != gamedata::item_kind::ITEM_WEAPON
+            && item_type != gamedata::item_kind::ITEM_ARMOR
+        {
+            return true;
+        }
+        for asked in search.attrs {
+            if asked.0 == 0 {
+                continue;
+            }
+            let mut found = false;
+            for attr in item.attributes {
+                if attr.b_type == asked.0 {
+                    found = attr.s_value >= asked.1;
+                    break;
+                }
+            }
+            if !found {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `CPrivateShopManager::SendShopSearchUpdate`
+    /// (`G/private_shop_manager.cpp:713-749`): every searching character hears the
+    /// changed shop, its slot and its state. Legacy fans the update out to every core
+    /// over P2P; one process holds every Channel (ADR-0002), so the walk already
+    /// reaches them all.
+    fn private_search_update(&self, shop: u32, pos: i32, state: u8) {
+        let record = GcPrivateShopSearchUpdate { shop, pos, state }.encode();
+        let searching: Vec<Vid> = self.private_searching.keys().copied().collect();
+        for searcher in searching {
+            let _sent = self.write_to_client(searcher, record.clone());
+        }
+    }
+
     /// `CInputMain::PrivateShopBuy` for the character under `vid` naming shop slot
     /// `pos` (`G/input_main.cpp:4332-4395`), settled at once with the DB checks
     /// (`D/ClientManagerPrivateShop.cpp:1520-1650`), the game transaction
@@ -1162,6 +1564,13 @@ impl GameState {
         }
         .encode();
         let _sent = self.write_to_client(owner, owner_remove);
+        // The searchers hear the ware go, as `RemoveItem` tells them
+        // (`G/private_shop.cpp:556`).
+        let owner_pid = self
+            .characters
+            .find_by_vid(owner)
+            .map_or(0, world::character::Character::player_id);
+        self.private_search_update(owner_pid, i32::from(pos), PRIVATE_SHOP_SEARCH_REMOVED);
         self.private_tell_sale(owner, vid, pos, ware, &item);
         // The buyer hears the bought line, as `ItemTransaction` chats it (`:640-643`).
         if let Some(proto) = self.protos.get(item.vnum) {
@@ -1199,10 +1608,6 @@ impl GameState {
         done.records
             .push(MoveRecord::Item(ItemRecord::Set(item.gc_item_set(at, 1))));
         done.changes.push(ItemChange::Created(item));
-        let owner_pid = self
-            .characters
-            .find_by_vid(owner)
-            .map_or(0, world::character::Character::player_id);
         let mut bought = MovedItems::new(pid, vid.raw(), done, actor, &self.protos, &self.locale);
         bought.gold = Some(gold_delta(gold, left));
         PrivateShopBought {
@@ -1703,6 +2108,9 @@ impl GameState {
         }
         let update = GcPrivateShopState { state, own: true }.encode();
         let _sent = self.write_to_client(vid, update);
+        // The searchers hear the whole shop change, as `SetState` tells them
+        // (`G/private_shop.cpp:696-698`).
+        self.private_search_update(pid, -1, state);
         Ok(Ok(PrivateShopFlipped { owner: pid, state }))
     }
 
@@ -2367,6 +2775,9 @@ impl GameState {
         }
         .encode();
         self.private_tell_viewers(vid, &remove);
+        // The searchers hear the ware go, as the store's `RemoveItem` tells them
+        // (`D/ClientManagerPrivateShop.cpp:1395`).
+        self.private_search_update(pid, i32::from(src_pos), PRIVATE_SHOP_SEARCH_REMOVED);
         let mut done = world::character::MoveDone {
             kind: world::character::MoveKind::Moved,
             records: Vec::new(),
@@ -2842,12 +3253,12 @@ impl GameState {
     }
 
     /// `CanWarp` for the shop's owner (`G/char.cpp:8788-8814`): past `IsHack`, neither
-    /// a viewed shop nor an open panel warps. The search window has no state in this
-    /// build (the search is unported), so it never refuses.
+    /// a viewed shop, an open panel nor a browsing search warps.
     fn private_shop_can_warp(&self, vid: Vid, mover: Mover) -> bool {
         self.is_hack(vid, mover).is_none()
             && !self.private_viewing.contains_key(&vid)
             && !self.edits_private_shop(vid)
+            && !self.searches_private_shop(vid)
     }
 
     /// The unlocked count the next key grows: the standing shop's count, else the
@@ -2956,6 +3367,49 @@ fn private_owner_field(name: &str) -> [u8; PRIVATE_SHOP_OWNER_FIELD_SIZE] {
     let shown = name_bytes.len().min(owner.len() - 1);
     owner[..shown].copy_from_slice(&name_bytes[..shown]);
     owner
+}
+
+/// The job arm of `FilterItem` (`G/private_shop_manager.cpp:842-868`): the picked job
+/// wears the ware when no antiflag refuses it. An unpicked job, or a pick outside the
+/// four arms, refuses nothing, as the empty `switch` arm does.
+fn private_search_job_ok(job: i32, anti_flags: u32) -> bool {
+    use gamedata::item_kind::{
+        ITEM_ANTIFLAG_ASSASSIN, ITEM_ANTIFLAG_SHAMAN, ITEM_ANTIFLAG_SURA, ITEM_ANTIFLAG_WARRIOR,
+    };
+    if job < 0 {
+        return true;
+    }
+    match u32::try_from(job) {
+        Ok(0) => anti_flags & ITEM_ANTIFLAG_WARRIOR == 0,
+        Ok(1) => anti_flags & ITEM_ANTIFLAG_ASSASSIN == 0,
+        Ok(2) => anti_flags & ITEM_ANTIFLAG_SURA == 0,
+        Ok(3) => anti_flags & ITEM_ANTIFLAG_SHAMAN == 0,
+        _ => true,
+    }
+}
+
+/// The gender arm (`:870-884`): the picked gender wears the ware when no antiflag
+/// refuses it. An unpicked gender, or a pick outside the two arms, refuses nothing.
+fn private_search_gender_ok(gender: i32, anti_flags: u32) -> bool {
+    use gamedata::item_kind::{ITEM_ANTIFLAG_FEMALE, ITEM_ANTIFLAG_MALE};
+    if gender < 0 {
+        return true;
+    }
+    match u32::try_from(gender) {
+        Ok(0) => anti_flags & ITEM_ANTIFLAG_MALE == 0,
+        Ok(1) => anti_flags & ITEM_ANTIFLAG_FEMALE == 0,
+        _ => true,
+    }
+}
+
+/// `CItem::GetLevelLimit` (`G/item.cpp:2732-2742`): the `LIMIT_LEVEL` row's value, or
+/// 0 when the proto names none.
+fn private_search_level(table: &gamedata::item_proto::ItemProto) -> u32 {
+    table
+        .limits
+        .iter()
+        .find(|limit| limit.kind == gamedata::item_kind::LIMIT_LEVEL)
+        .map_or(0, |limit| u32::try_from(limit.value).unwrap_or(0))
 }
 
 /// One ware's item as a store row, owned by `pid` at its old cell.
@@ -3966,5 +4420,115 @@ mod tests {
         assert!(!world.has_private_shop(SELLER));
         let told = drained(&mut inbox);
         assert_eq!(told.len(), 1, "the wrong-map refusal chats");
+    }
+    /// A blank search with no vnum, owner or type finds nothing and sends nothing,
+    /// and the wait line refuses a second search within two seconds.
+    #[test]
+    fn a_blank_search_sends_nothing_and_the_wait_refuses() {
+        use protocol::cg_private_shop::CgPrivateShopSearch;
+        use protocol::gc_private_shop::SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT;
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        drained(&mut inbox);
+        let _built = state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 1,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        let blank = CgPrivateShopSearch {
+            vnum: 0,
+            owner: [0; 25],
+            item_type: -1,
+            item_subtype: -1,
+            job: -1,
+            gender: -1,
+            min_stack: 0,
+            max_stack: 0,
+            min_refine: 0,
+            max_refine: 0,
+            min_level: 0,
+            max_level: 0,
+            attrs: [(0, 0); 7],
+            sash_absorption: 0,
+            alchemy_level: 0,
+            alchemy_clarity: 0,
+            use_filter: false,
+        };
+        state.last_pulse = super::PRIVATE_SHOP_SEARCH_WAIT_PULSES + 1;
+        let nothing = state.private_search(SELLER, &blank, mover()).unwrap();
+        assert!(nothing.records.is_empty());
+        assert!(drained(&mut inbox).is_empty());
+        // The second search lands inside the wait: the line tells, not the rows.
+        let by_vnum = CgPrivateShopSearch { vnum: 19, ..blank };
+        let waited = state.private_search(SELLER, &by_vnum, mover()).unwrap();
+        assert!(waited.records.is_empty());
+        let told = drained(&mut inbox);
+        assert_eq!(told.len(), 1);
+        assert_eq!(
+            chat_text(&told[0]),
+            b"Please wait a moment before searching other personal shops again."
+        );
+        // Past the wait the vnum finds the ware's row.
+        state.last_pulse += super::PRIVATE_SHOP_SEARCH_WAIT_PULSES;
+        let found = state.private_search(SELLER, &by_vnum, mover()).unwrap();
+        assert_eq!(found.records.len(), 1);
+        assert_eq!(found.records[0][3], SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT);
+        let _ = PID;
+    }
+
+    /// A sold ware tells the searchers its shop, slot and removal, and a flip tells
+    /// them the whole shop and its state.
+    #[test]
+    fn a_sale_and_a_flip_tell_the_searchers() {
+        use protocol::gc_private_shop::{
+            GC_PRIVATE_SHOP_WIRE_SIZE, SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE,
+        };
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        drained(&mut inbox);
+        let _built = state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 1,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .private_searching
+            .insert(SELLER, super::PRIVATE_SHOP_SEARCH_LOOKING);
+        // A flip tells the shop and its state with the whole-shop slot.
+        let flipped = state.private_modify(SELLER, mover()).unwrap().unwrap();
+        assert_eq!(flipped.state, super::PRIVATE_SHOP_STATE_MODIFY);
+        let told = drained(&mut inbox);
+        let update = told
+            .iter()
+            .find(|record| {
+                record.len() > GC_PRIVATE_SHOP_WIRE_SIZE
+                    && record[3] == SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE
+            })
+            .expect("the flip tells the searchers");
+        assert_eq!(
+            u32::from_le_bytes(update[4..8].try_into().expect("four")),
+            PID
+        );
+        assert_eq!(
+            i32::from_le_bytes(update[8..12].try_into().expect("four")),
+            -1
+        );
+        assert_eq!(update[12], super::PRIVATE_SHOP_STATE_MODIFY);
     }
 }

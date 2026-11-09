@@ -769,6 +769,11 @@ pub struct GameState {
     private_viewing: HashMap<common::vid::Vid, common::vid::Vid>,
     /// Each shop's viewers (`m_set_shopViewer`), by the owner's VID.
     private_viewers: HashMap<common::vid::Vid, Vec<common::vid::Vid>>,
+    /// The characters browsing the shop search (`m_bShopSearchMode != MODE_NONE`),
+    /// with the mode the glass opened: looking (1) or trading (2).
+    private_searching: HashMap<common::vid::Vid, u8>,
+    /// The Pulse each character last searched at (`m_tLastPrivateShopSearch`).
+    private_search_at: HashMap<common::vid::Vid, u64>,
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
@@ -3691,6 +3696,7 @@ impl GameState {
         // `m_sortInventoryPulse` is the `CHARACTER`'s: the next login starts at 0.
         let _sorted = self.sort_inventory_until.remove(&vid);
         self.stop_browsing(vid);
+        self.private_search_close(vid);
         self.close_storage(vid);
         // `MessengerManager::instance().Logout(GetName())` (`G/char.cpp:1817`): the
         // disconnect's own step, after `DisconnectPC`, `CloseSafebox` and `CloseMall`
@@ -4134,6 +4140,9 @@ impl GameState {
         }
         if multi_farm::premium_at(self, vid, at) {
             return multi_farm::use_premium(self, vid, at, actor);
+        }
+        if let Some(glass) = self.search_glass_at(vid, at) {
+            return self.open_shop_search(vid, glass, actor);
         }
         // The book the read passed, and the slot it climbed, for the store: `None` while
         // the step is no read.

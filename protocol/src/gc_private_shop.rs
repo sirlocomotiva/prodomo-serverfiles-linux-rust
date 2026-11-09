@@ -60,6 +60,16 @@
 //! name, the sale time (4), and one item row (71): 100 bytes. `BALANCE_UPDATE`'s body
 //! (`packet.h:1375-1378`) is the price (12). `REMOVE_ITEM` and `REMOVE_MY_ITEM` carry one
 //! word each.
+//!
+//! `SEARCH_RESULT`'s body is `dwCount` `TPrivateShopSearchData` rows
+//! (`packet.h:1200-1224`): the shop id (4), the 25-byte owner name, the vnum (4),
+//! the price (8 + 4), the count (4), the slot (2), six sockets (24,
+//! `ENABLE_EXTENDED_SOCKETS` is on), seven attributes (7 x (1 + 2) = 21), the
+//! checkin (4, `time_t` is a `long`) and the state byte: 101 packed bytes. The
+//! three `#ifdef` tails (`ENABLE_PRIVATE_SHOP_CHANGE_LOOK`, `_REFINE_ELEMENT`,
+//! `_APPLY_RANDOM`) are all off (`prodomodefines.h:186-188`), and the pet tail is
+//! commented out. `SEARCH_UPDATE`'s body (`packet.h:1316-1321`) is the shop id, the
+//! specific slot (`int`, -1 for the whole shop) and the state byte: 9 bytes.
 
 use crate::gc_inventory::HEADER_GC_PRIVATE_SHOP;
 
@@ -97,6 +107,13 @@ pub const GC_PRIVATE_SHOP_TITLE_WIRE_SIZE: usize = 4 + 33 + 1;
 
 /// `sizeof(WORD)`: what `REMOVE_ITEM` and `REMOVE_MY_ITEM` carry.
 pub const GC_PRIVATE_SHOP_REMOVE_WIRE_SIZE: usize = 2;
+
+/// `sizeof(TPrivateShopSearchData)`: shop, owner, vnum, price, count, slot,
+/// sockets, attrs, checkin, state.
+pub const GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE: usize = 101;
+
+/// `sizeof(TPacketGCPrivateShopSearchUpdate)`: shop, slot and state.
+pub const GC_PRIVATE_SHOP_SEARCH_UPDATE_WIRE_SIZE: usize = 9;
 
 /// The whole `LOAD` record: the header and the load body.
 pub const GC_PRIVATE_SHOP_LOAD_RECORD_SIZE: usize =
@@ -185,6 +202,14 @@ pub const SUBHEADER_GC_PRIVATE_SHOP_END: u8 = 12;
 pub const SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM: u8 = 13;
 /// `SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM` (14): the slot clears for the owner.
 pub const SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM: u8 = 14;
+/// `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_LOOK_MODE` (21): the window opens to look.
+pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_LOOK_MODE: u8 = 21;
+/// `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE` (22): the window opens to buy.
+pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE: u8 = 22;
+/// `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT` (23): the matching wares.
+pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT: u8 = 23;
+/// `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE` (24): a ware or shop changed.
+pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE: u8 = 24;
 
 /// `STATE_OPEN` (2): the shop takes customers.
 pub const PRIVATE_SHOP_STATE_OPEN: u8 = 2;
@@ -639,6 +664,105 @@ impl GcPrivateShopUnlocked {
     }
 }
 
+/// One `TPrivateShopSearchData` row: the ware as the search shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopSearchData {
+    /// The owning shop's id.
+    pub shop: u32,
+    /// The owner's name, NUL-padded.
+    pub owner: [u8; PRIVATE_SHOP_OWNER_FIELD_SIZE],
+    /// The ware's vnum.
+    pub vnum: u32,
+    /// The asking price in yang.
+    pub gold: i64,
+    /// The asking price in cheques.
+    pub cheque: u32,
+    /// The stack size.
+    pub count: u32,
+    /// The shop slot.
+    pub pos: u16,
+    /// The six sockets.
+    pub sockets: [i32; 6],
+    /// The seven attributes.
+    pub attrs: [(u8, i16); 7],
+    /// The checkin time.
+    pub checkin: i32,
+    /// The shop's state.
+    pub state: u8,
+}
+
+impl GcPrivateShopSearchData {
+    /// Append the 101 packed bytes in field order.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.shop.to_le_bytes());
+        out.extend_from_slice(&self.owner);
+        out.extend_from_slice(&self.vnum.to_le_bytes());
+        out.extend_from_slice(&self.gold.to_le_bytes());
+        out.extend_from_slice(&self.cheque.to_le_bytes());
+        out.extend_from_slice(&self.count.to_le_bytes());
+        out.extend_from_slice(&self.pos.to_le_bytes());
+        for socket in self.sockets {
+            out.extend_from_slice(&socket.to_le_bytes());
+        }
+        for (kind, value) in self.attrs {
+            out.push(kind);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&self.checkin.to_le_bytes());
+        out.push(self.state);
+    }
+}
+
+/// `SEARCH_RESULT`: the header and the matching rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcPrivateShopSearchResult {
+    /// The matching rows, in shop and slot order.
+    pub rows: Vec<GcPrivateShopSearchData>,
+}
+
+impl GcPrivateShopSearchResult {
+    /// Encode the record: the header sizes the rows that follow.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let size =
+            GC_PRIVATE_SHOP_WIRE_SIZE + self.rows.len() * GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE;
+        push_header(&mut out, size, SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT);
+        for row in &self.rows {
+            row.encode_into(&mut out);
+        }
+        out
+    }
+}
+
+/// `SEARCH_UPDATE`: the changed shop, slot and state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopSearchUpdate {
+    /// The owning shop's id.
+    pub shop: u32,
+    /// The ware's slot, or -1 for the whole shop.
+    pub pos: i32,
+    /// The search state.
+    pub state: u8,
+}
+
+impl GcPrivateShopSearchUpdate {
+    /// Encode the 13-byte record.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_SEARCH_UPDATE_WIRE_SIZE,
+            SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE,
+        );
+        out.extend_from_slice(&self.shop.to_le_bytes());
+        out.extend_from_slice(&self.pos.to_le_bytes());
+        out.push(self.state);
+        out
+    }
+}
+
 /// Push the four header bytes: the header, the size word, and the subheader.
 fn push_header(out: &mut Vec<u8>, size: usize, subheader: u8) {
     let size = u16::try_from(size).unwrap_or(u16::MAX);
@@ -973,6 +1097,116 @@ mod tests {
         }
         .encode();
         assert_eq!(record, vec![HEADER_GC_PRIVATE_SHOP.value(), 6, 0, 15, 3, 1]);
+    }
+
+    #[test]
+    fn a_search_row_and_result_encode_in_field_order() {
+        let mut owner = [0u8; PRIVATE_SHOP_OWNER_FIELD_SIZE];
+        owner[..6].copy_from_slice(b"Seller");
+        let row = GcPrivateShopSearchData {
+            shop: 0x7531,
+            owner,
+            vnum: 19,
+            gold: 0x0102_0304_0506_0708,
+            cheque: 0x090a_0b0c,
+            count: 0x1112_1314,
+            pos: 0x1516,
+            sockets: [0x0102, 0x0304, 0x0506, 0x0708, 0x090a, 0x0b0c],
+            attrs: [
+                (1, 0x0203),
+                (4, 0x0506),
+                (12, 0x0708),
+                (17, 0x090a),
+                (71, 0x0b0c),
+                (72, 0x0d0e),
+                (0, 0),
+            ],
+            checkin: 0x0d0e_0f10,
+            state: PRIVATE_SHOP_STATE_OPEN,
+        };
+        let mut body = Vec::new();
+        row.encode_into(&mut body);
+        assert_eq!(body.len(), GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE);
+        assert_eq!(
+            u32::from_le_bytes(body[0..4].try_into().expect("four")),
+            0x7531
+        );
+        assert_eq!(&body[4..10], b"Seller");
+        assert_eq!(
+            u32::from_le_bytes(body[29..33].try_into().expect("four")),
+            19
+        );
+        assert_eq!(
+            i64::from_le_bytes(body[33..41].try_into().expect("eight")),
+            0x0102_0304_0506_0708
+        );
+        assert_eq!(
+            u32::from_le_bytes(body[41..45].try_into().expect("four")),
+            0x090a_0b0c
+        );
+        assert_eq!(
+            u32::from_le_bytes(body[45..49].try_into().expect("four")),
+            0x1112_1314
+        );
+        assert_eq!(
+            u16::from_le_bytes(body[49..51].try_into().expect("two")),
+            0x1516
+        );
+        assert_eq!(
+            i32::from_le_bytes(body[51..55].try_into().expect("four")),
+            0x0102
+        );
+        assert_eq!(body[75], 1);
+        assert_eq!(
+            i16::from_le_bytes(body[76..78].try_into().expect("two")),
+            0x0203
+        );
+        assert_eq!(
+            i32::from_le_bytes(body[96..100].try_into().expect("four")),
+            0x0d0e_0f10
+        );
+        assert_eq!(body[100], PRIVATE_SHOP_STATE_OPEN);
+        let result = GcPrivateShopSearchResult { rows: vec![row] }.encode();
+        assert_eq!(
+            result.len(),
+            GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE
+        );
+        assert_eq!(result[0], HEADER_GC_PRIVATE_SHOP.value());
+        assert_eq!(
+            u16::from_le_bytes([result[1], result[2]]),
+            u16::try_from(GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE)
+                .expect("fits")
+        );
+        assert_eq!(result[3], SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT);
+        assert_eq!(&result[4..], &body);
+    }
+
+    #[test]
+    fn a_search_update_encodes_shop_slot_and_state() {
+        let update = GcPrivateShopSearchUpdate {
+            shop: 0x7531,
+            pos: -1,
+            state: 3,
+        }
+        .encode();
+        assert_eq!(
+            update,
+            vec![
+                HEADER_GC_PRIVATE_SHOP.value(),
+                13,
+                0,
+                SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE,
+                0x31,
+                0x75,
+                0,
+                0,
+                0xff,
+                0xff,
+                0xff,
+                0xff,
+                3
+            ]
+        );
     }
 
     #[test]
