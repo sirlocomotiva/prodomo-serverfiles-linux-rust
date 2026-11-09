@@ -1171,6 +1171,10 @@ impl GameState {
     pub(super) fn guild_name(&self, id: u32) -> Option<Vec<u8>> {
         self.guilds.by_id.get(&id).map(|guild| guild.name.clone())
     }
+    /// The level of guild `id` (`CGuild::GetLevel`), `None` with no such guild.
+    pub(super) fn guild_level(&self, id: u32) -> Option<u8> {
+        self.guilds.by_id.get(&id).map(|guild| guild.level)
+    }
     /// `CGuild::LevelChange` (`G/guild.cpp:1672-1690`): the member row of `pid`
     /// carries `level`. The DB packet is the retired peer's; the save writes the
     /// member rows from the world, as it writes everything else. Quiet with no
@@ -1868,6 +1872,9 @@ impl GameState {
     /// (`CGuild::LogoutMember`, `G/guild.cpp:316-334`): the LOGOUT packet to every member
     /// still online.
     pub(super) fn unlink_guild(&mut self, vid: Vid) {
+        // `GuildRemoveAffect` in `LogoutMember` (`G/guild.cpp:325`): the first bonus
+        // kind found comes off before the link goes.
+        self.guild_bonus_remove(vid);
         let linked_pid = self.characters.find_by_vid(vid).ok().and_then(|character| {
             let pid = character.player_id();
             self.guild_of(pid).map(|id| (pid, id))
@@ -2214,6 +2221,11 @@ impl GameState {
             own.push(guild_login_record(*other_pid));
         }
         own.push(guild_skill_info_record(&guild.skill_info()));
+        // `GuildUpdateAffect` in `LoginMember` (`G/guild.cpp:294`), which `AddMember`
+        // runs (`:190`): the bonus collects into the self packets, after them.
+        if let Some(vid) = join_vid {
+            own.extend(self.guild_bonus_update_collected(vid));
+        }
         GuildJoinAnswer::Committed { own }
     }
 
@@ -2460,6 +2472,11 @@ impl GameState {
                 }
                 self.order_meley_out(vid);
             }
+        }
+        // `GuildRemoveAffect` in `RemoveMember` (`G/guild.cpp:241`): the removed
+        // member's first bonus kind comes off.
+        if let Ok(character) = self.characters.find_by_pid(pid) {
+            self.guild_bonus_remove(character.vid());
         }
         let post = if online {
             None
@@ -3311,7 +3328,7 @@ impl GameState {
     ) -> GuildGradeAnswer {
         let empty = GuildGradeAnswer::Committed { post: None };
         let old_level = self.guilds.by_id.get(&id).map_or(0, |guild| guild.level);
-        let Some((one, info, members, levels)) = self.guilds.by_id.get_mut(&id).and_then(|guild| {
+        let Some((one, info, members)) = self.guilds.by_id.get_mut(&id).and_then(|guild| {
             let row = guild.members.get_mut(&pid)?;
             row.offer = row.offer.saturating_add(offer);
             let one = GcGuildMember {
@@ -3333,20 +3350,18 @@ impl GameState {
                 .values()
                 .filter_map(|member| member.vid)
                 .collect();
-            Some((
-                one,
-                info,
-                members,
-                usize::from(level.saturating_sub(old_level)),
-            ))
+            Some((one, info, members))
         }) else {
             return empty;
         };
         for member in &members {
             let _sent = self.write_to_client(*member, guild_list_one_record(&one));
             let _sent = self.write_to_client(*member, guild_change_exp_record(level, exp));
-            for _ in 0..levels {
+            for at in old_level + 1..=level {
                 let _sent = self.write_to_client(*member, guild_info_record(&info));
+                // `GuildUpdateAffect` in `GuildPointChange`'s level-up (`G/guild.cpp:1618`):
+                // each level's INFO carries its bonus update, as the loop nests them.
+                self.guild_bonus_update_at(*member, at);
             }
         }
         empty
@@ -6750,6 +6765,8 @@ impl GameState {
         for (pid, member) in &online {
             // `Disband`'s online loop (`G/guild.cpp:1015-1023`): the victim unlinks, every
             // member's REMOVE fans to it, and the disband stamp lands.
+            // `GuildRemoveAffect` runs first (`:1019`).
+            self.guild_bonus_remove(*member);
             self.guilds.of.remove(pid);
             for record in &fan {
                 let _sent = self.write_to_client(*member, record.clone());

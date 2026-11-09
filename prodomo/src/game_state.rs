@@ -101,6 +101,7 @@ mod full_set;
 mod gaya_system;
 mod gm_lines;
 mod guild;
+mod guild_bonus;
 mod guild_mark;
 mod horse;
 mod horse_ride;
@@ -3409,6 +3410,11 @@ impl GameState {
         }
         let map = loaded.show.as_ref().map_or(0, |show| show.place.map);
         let silence = self.load_affects(vid, &loaded.affects, map);
+        // `GuildUpdateAffect` in `LoginMember` (`G/guild.cpp:294`): the saved rows
+        // landed first, as `LoadAffect` runs at the select and the login at
+        // `Entergame`, so the update clears the stale bonus rows and lands the
+        // guild level's.
+        self.guild_bonus_update(vid);
         let count = self.arena_event_flag(b"arena_potion_limit_count");
         self.set_arena_potion_count(vid, count);
         // `IsPremiumPlayer` (`G/input_login.cpp:717-720`): a flagged entrant's minute

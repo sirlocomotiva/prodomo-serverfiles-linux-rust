@@ -1984,7 +1984,7 @@ fn enter_world_on_with_team_guilded(
 ) -> (Keyed, Listed) {
     let (mut keyed, character, _quickslots, _items) =
         load_with_quickslots_on(server, channel, login, slot, language);
-    let _entered = enter_game_guilded(&mut keyed, 2);
+    let _entered = enter_game_guilded(&mut keyed, 2, None);
     if let Some(name) = team {
         assert_eq!(
             keyed.read_game(),
@@ -2023,11 +2023,12 @@ fn enter_world_seeing_guilded(
     login: &[u8],
     slot: u8,
     members: usize,
+    bonus: Option<&[(u32, u8, i32)]>,
 ) -> (Keyed, Listed, Entered) {
     let (mut keyed, character, quickslots, _items) =
         load_with_quickslots_on(server, 1, login, slot, ENGLISH);
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
-    let entered = enter_game_view_guilded(&mut keyed, members);
+    let entered = enter_game_view_guilded(&mut keyed, members, bonus);
     (keyed, character, entered)
 }
 
@@ -2043,7 +2044,7 @@ fn enter_world_seeing_guilded_with_team(
     let (mut keyed, character, quickslots, _items) =
         load_with_quickslots_on(server, 1, login, slot, ENGLISH);
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
-    let entered = enter_game_guilded(&mut keyed, members);
+    let entered = enter_game_guilded(&mut keyed, members, None);
     if let Some(name) = team {
         assert_eq!(
             keyed.read_game(),
@@ -2069,7 +2070,7 @@ fn enter_world_seeing_guilded_on_war_map(
     let (mut keyed, character, quickslots, _items) =
         load_with_quickslots_on(server, 1, login, slot, ENGLISH);
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
-    let entered = enter_game_guilded(&mut keyed, members);
+    let entered = enter_game_guilded(&mut keyed, members, None);
     read_war_map_join(&mut keyed, join);
     read_login_event(&mut keyed);
     keyed.still("nothing follows");
@@ -2210,8 +2211,12 @@ fn enter_game_view(keyed: &mut Keyed) -> Entered {
 
 /// [`enter_game_view`] for a master whose login walk carries `members` member LOGINs
 /// before its own view pair.
-fn enter_game_view_guilded(keyed: &mut Keyed, members: usize) -> Entered {
-    let entered = enter_game_guilded(keyed, members);
+fn enter_game_view_guilded(
+    keyed: &mut Keyed,
+    members: usize,
+    bonus: Option<&[(u32, u8, i32)]>,
+) -> Entered {
+    let entered = enter_game_guilded(keyed, members, bonus);
     read_login_event(keyed);
     keyed.still("nothing follows");
     entered
@@ -2761,7 +2766,11 @@ fn enter_game_shown(keyed: &mut Keyed) -> Entered {
 /// the walk (GRADE, INFO, LIST, one LOGIN per online member including itself, the
 /// skills) lands through the outbox behind the burst's own pair; the pair is read
 /// first, the walk's records in order around the view records `read_shown` keeps.
-fn enter_game_guilded(keyed: &mut Keyed, members: usize) -> Entered {
+fn enter_game_guilded(
+    keyed: &mut Keyed,
+    members: usize,
+    bonus: Option<&[(u32, u8, i32)]>,
+) -> Entered {
     keyed.send_record(&client_enter_game());
     // The NAME leads (the Show's own insert names the guild, through the view's
     // `SendGuildName`), then the burst's own pair, and the link's walk lands
@@ -2806,7 +2815,68 @@ fn enter_game_guilded(keyed: &mut Keyed, members: usize) -> Entered {
     // The enter walk's WAR_LIST (`SendGuildWar`): with no wars it is the bare envelope,
     // read here so the burst below sees only what it knows.
     keyed.unread(kept);
-    finish_enter_game(keyed, add, info)
+    let entered = finish_enter_game(keyed, add, info);
+    // The login's guild-bonus update (`GuildUpdateAffect` in `LoginMember`): the point
+    // move and the add ride the burst behind the walk, pushed back by the readers
+    // above, and are pulled here before the login lines that follow.
+    if let Some(rows) = bonus {
+        // The update queues through the outbox, so each pair lands behind the burst's
+        // direct records — still on the wire here, or pushed back by a reader above.
+        // Either way it is pulled, and anything read past it is pushed back in order.
+        let vid = u32::from_le_bytes(entered.add[1..5].try_into().unwrap());
+        for (kind, on, value) in rows {
+            let want = point_change(vid, *on, 0, i64::from(*value));
+            assert_eq!(
+                pull_guild_bonus(keyed, &want),
+                want,
+                "the bonus points ride the enter burst"
+            );
+            let add = pull_guild_bonus_add(keyed, *kind);
+            check_guild_bonus_add(&add, *kind, *on, *value);
+        }
+    }
+    entered
+}
+
+/// Pull the pushed-back or wired record equal to `want`: anything read past it is
+/// pushed back in order. Answers the record pulled.
+fn pull_guild_bonus(keyed: &mut Keyed, want: &[u8]) -> Vec<u8> {
+    if let Some(at) = keyed.pushed.iter().position(|record| record == want) {
+        return keyed.pushed.remove(at);
+    }
+    let mut past = Vec::new();
+    loop {
+        let record = keyed.read_game_raw();
+        if record == want {
+            keyed.unread(past);
+            return record;
+        }
+        past.push(record);
+    }
+}
+
+/// Pull the pushed-back or wired `GC_AFFECT_ADD` of `kind`: anything read past it is
+/// pushed back in order. Answers the record pulled.
+fn pull_guild_bonus_add(keyed: &mut Keyed, kind: u32) -> Vec<u8> {
+    if let Some(at) = keyed.pushed.iter().position(|record| {
+        record.len() == AFFECT_ADD_LEN
+            && record[0] == GC_AFFECT_ADD
+            && u32::from_le_bytes(record[1..5].try_into().unwrap()) == kind
+    }) {
+        return keyed.pushed.remove(at);
+    }
+    let mut past = Vec::new();
+    loop {
+        let record = keyed.read_game_raw();
+        if record.len() == AFFECT_ADD_LEN
+            && record[0] == GC_AFFECT_ADD
+            && u32::from_le_bytes(record[1..5].try_into().unwrap()) == kind
+        {
+            keyed.unread(past);
+            return record;
+        }
+        past.push(record);
+    }
 }
 
 /// The enter-game burst after its own pair: the walk mode, the shown, the update,
@@ -16909,6 +16979,405 @@ fn a_guild_offers_charges_posts_and_deletes() {
     assert_eq!(comments[0][0], 0, "the delete lands");
 }
 
+/// One guild-bonus `GC_AFFECT_ADD`: the 22-byte header and element, the kind, the
+/// point slot, the value, no flag, the infinite duration, and no SP cost.
+fn check_guild_bonus_add(frame: &[u8], kind: u32, on: u8, value: i32) {
+    assert_eq!(frame.len(), AFFECT_ADD_LEN, "header and one element");
+    assert_eq!(frame[0], GC_AFFECT_ADD);
+    assert_eq!(
+        u32::from_le_bytes(frame[1..5].try_into().unwrap()),
+        kind,
+        "the kind"
+    );
+    assert_eq!(frame[5], on, "the point slot");
+    assert_eq!(
+        i32::from_le_bytes(frame[6..10].try_into().unwrap()),
+        value,
+        "the value"
+    );
+    assert_eq!(
+        u32::from_le_bytes(frame[10..14].try_into().unwrap()),
+        0,
+        "no flag"
+    );
+    assert_eq!(
+        i32::from_le_bytes(frame[14..18].try_into().unwrap()),
+        1_471_228_928,
+        "the infinite duration"
+    );
+    assert_eq!(
+        i32::from_le_bytes(frame[18..22].try_into().unwrap()),
+        0,
+        "no SP cost"
+    );
+}
+
+/// One guild-bonus `GC_AFFECT_REMOVE`: the 6-byte header, kind and point slot.
+fn check_guild_bonus_remove(frame: &[u8], kind: u32, on: u8) {
+    assert_eq!(frame.len(), AFFECT_REMOVE_LEN, "header, kind and slot");
+    assert_eq!(frame[0], GC_AFFECT_REMOVE);
+    assert_eq!(
+        u32::from_le_bytes(frame[1..5].try_into().unwrap()),
+        kind,
+        "the kind"
+    );
+    assert_eq!(frame[5], on, "the point slot");
+}
+
+/// `sys.guild.bonuses`: Alpha founds a guild, Yankee joins at level 1 with no bonus,
+/// and an offer to level 2 lands the devil bonus on both members, each level's INFO
+/// carrying its own update. A second offer climbs to level 6, where the crossing
+/// from the 2-5 row to the 5-8 row takes the devil kind off and lands the undead
+/// one. A third offer reaches level 8 without crossing — the 5-8 window still
+/// matches first — and a fourth climbs to level 9, landing the boss, metin and
+/// monster rows. Alpha kicks Yankee, whose first bonus kind comes off while the
+/// other two stay — the wire proves it by staying quiet; the master's REMOVE fans
+/// to Alpha alone. Zulu joins at level 9 and walks the three pairs behind the
+/// self packets.
+/// One bonus pair: the affect kind, the point slot, and the value.
+type BonusGive = (u32, u8, i32);
+
+/// One climbing step: the reached level, the take-back when the crossing leaves a
+/// row, and the pairs the level lands.
+type BonusStep<'a> = (u8, Option<(u32, u8)>, &'a [BonusGive]);
+
+/// One member's level of a bonus climb: the INFO, the take-back of `take` when the
+/// crossing leaves a row, and the `gives` pairs the level lands.
+fn check_guild_bonus_step(
+    member: &mut Keyed,
+    vid: u32,
+    who: &str,
+    level: u8,
+    take: Option<(u32, u8)>,
+    gives: &[BonusGive],
+) {
+    let info = member.read_game();
+    assert_eq!(
+        guild_subheader(&info),
+        GUILD_SUBHEADER_GC_INFO,
+        "{who} hears level {level}'s INFO"
+    );
+    if let Some((kind, on)) = take {
+        assert_eq!(
+            member.read_game(),
+            point_change(vid, on, 0, 0),
+            "{who} gives the {kind} points back at {level}"
+        );
+        let removed = member.read_game();
+        check_guild_bonus_remove(&removed, kind, on);
+    }
+    for (kind, on, value) in gives {
+        assert_eq!(
+            member.read_game(),
+            point_change(vid, *on, 0, i64::from(*value)),
+            "{who} takes the {kind} points"
+        );
+        let add = member.read_game();
+        check_guild_bonus_add(&add, *kind, *on, *value);
+    }
+}
+
+/// The climb's three sessions: Alice, Yankee and Zulu on one empire, Alpha funded
+/// for the four offers, the guild made and Yankee joined at level 1. Answers the
+/// sessions, the three VIDs, Yankee's PID, and the guild id.
+fn enter_bonus_climb(
+    server: &Server,
+    database: &ScratchDatabase,
+) -> (Keyed, Keyed, Keyed, u32, u32, u32, u32, u32) {
+    create_account(server, "alice");
+    create_account(server, "bob");
+    create_account(server, "carol");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Zulu', 1, \
+          154, 470000, 950000 FROM account WHERE login = 'carol'",
+    );
+    // The four offers' exp: 90 000 000 covers 610 000, 21 200 000, 30 200 000 and
+    // 22 000 000.
+    sql(
+        database,
+        "UPDATE player SET exp = 90000000 WHERE name = 'Alpha'",
+    );
+    give_guild_purse(database);
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let (mut zulu, zulu_listed, _) = enter_world_seeing(server, b"carol", 0);
+    alice.sees_enter(zulu_listed.id, true, None);
+    yankee.sees_enter(zulu_listed.id, true, None);
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let yankee_vid = yankee_listed.id;
+    let zulu_vid = zulu_listed.id;
+    let yankee_player = {
+        let rows = support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Yankee'",
+            1,
+        );
+        u32::try_from(rows[0][0]).unwrap()
+    };
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    assert_eq!(zulu.read_game(), named, "the outsider hears the name too");
+    join_guild(&mut alice, &mut yankee, yankee_vid, id);
+    (
+        alice,
+        yankee,
+        zulu,
+        alpha_vid,
+        yankee_vid,
+        zulu_vid,
+        yankee_player,
+        id,
+    )
+}
+
+/// One bonus offer to both members: the send, the speaker's debit, each member's
+/// tail, and the settle. `ask` is the offered amount, the speaker's remainder, the
+/// reached level, and the guild's remainder.
+fn check_guild_bonus_offer(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    vids: (u32, u32),
+    ask: (u32, i64, u8, u32),
+    steps: &[BonusStep<'_>],
+    note: &str,
+) {
+    let (offered, left, level, exp) = ask;
+    alice.send_record(&client_guild_offer(offered));
+    assert_eq!(
+        alice.read_game(),
+        point_change(vids.0, POINT_EXP, -i64::from(offered), left),
+        "{note} debits the speaker"
+    );
+    check_guild_bonus_offer_tail(&mut *alice, vids.0, "Alpha", level, exp, steps);
+    check_guild_bonus_offer_tail(&mut *yankee, vids.1, "Yankee", level, exp, steps);
+    alice.quiet(note);
+    yankee.quiet(note);
+}
+
+/// One member's tail of a bonus offer: the `LIST`-one, the `CHANGE_EXP` at `level`
+/// and `exp`, and each climbing step's update.
+fn check_guild_bonus_offer_tail(
+    member: &mut Keyed,
+    vid: u32,
+    who: &str,
+    level: u8,
+    exp: u32,
+    steps: &[BonusStep<'_>],
+) {
+    let one = member.read_game();
+    assert_eq!(
+        guild_subheader(&one),
+        GUILD_SUBHEADER_GC_LIST,
+        "{who} hears the one"
+    );
+    let changed = member.read_game();
+    assert_eq!(
+        guild_subheader(&changed),
+        GUILD_SUBHEADER_GC_CHANGE_EXP,
+        "{who} hears the change"
+    );
+    assert_eq!(changed[4], level, "level {level}");
+    assert_eq!(
+        u32::from_le_bytes(changed[5..9].try_into().unwrap()),
+        exp,
+        "{exp} exp"
+    );
+    for (at, take, gives) in steps {
+        check_guild_bonus_step(member, vid, who, *at, *take, gives);
+    }
+}
+
+/// The kick's bonus take: the master sends the removal, the REMOVE fans to it, and
+/// the victim's first bonus kind comes off — the wire stays quiet behind it.
+fn check_guild_bonus_kick(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    yankee_vid: u32,
+    yankee_player: u32,
+    kind: u32,
+    on: u8,
+) {
+    alice.send_record(&client_guild_remove_member(yankee_player));
+    let removed = alice.read_game();
+    assert_eq!(guild_subheader(&removed), GUILD_SUBHEADER_GC_REMOVE);
+    assert_eq!(
+        u32::from_le_bytes(removed[4..8].try_into().unwrap()),
+        yankee_player,
+        "the REMOVE names the victim"
+    );
+    alice.quiet("the removal settled");
+    assert_eq!(
+        yankee.read_game(),
+        point_change(yankee_vid, on, 0, 0),
+        "the victim gives the {kind} points back"
+    );
+    let removed = yankee.read_game();
+    check_guild_bonus_remove(&removed, kind, on);
+    yankee.quiet("the victim keeps the other rows");
+}
+
+/// The late join's bonus walk: the invite, the self packets, and the `gives` pairs
+/// behind the skills.
+fn check_guild_bonus_join(
+    alice: &mut Keyed,
+    zulu: &mut Keyed,
+    zulu_vid: u32,
+    id: u32,
+    gives: &[BonusGive],
+) {
+    zulu.quiet("the outsider heard nothing so far");
+    alice.send_record(&client_guild_add_member(zulu_vid));
+    let invited = zulu.read_game();
+    assert_eq!(guild_subheader(&invited), GUILD_SUBHEADER_GC_GUILD_INVITE);
+    zulu.send_record(&client_guild_invite_answer(id, 1));
+    assert_eq!(
+        guild_subheader(&zulu.read_game()),
+        GUILD_SUBHEADER_GC_GRADE,
+        "the joiner walks the grades"
+    );
+    assert_eq!(
+        guild_subheader(&zulu.read_game()),
+        GUILD_SUBHEADER_GC_INFO,
+        "the joiner walks the INFO"
+    );
+    assert_eq!(
+        guild_subheader(&zulu.read_game()),
+        GUILD_SUBHEADER_GC_LIST,
+        "the joiner walks the LIST"
+    );
+    assert_eq!(
+        guild_subheader(&zulu.read_game()),
+        GUILD_SUBHEADER_GC_LOGIN,
+        "the joiner walks the LOGINs"
+    );
+    assert_eq!(
+        guild_subheader(&zulu.read_game()),
+        GUILD_SUBHEADER_GC_LOGIN,
+        "the joiner walks the LOGINs"
+    );
+    assert_eq!(
+        guild_subheader(&zulu.read_game()),
+        GUILD_SUBHEADER_GC_SKILL_INFO,
+        "the joiner walks the skills"
+    );
+    for (kind, on, value) in gives {
+        assert_eq!(
+            zulu.read_game(),
+            point_change(zulu_vid, *on, 0, i64::from(*value)),
+            "the joiner takes the {kind} points"
+        );
+        let add = zulu.read_game();
+        check_guild_bonus_add(&add, *kind, *on, *value);
+    }
+    zulu.quiet("the join settled");
+}
+
+#[test]
+fn a_guild_level_up_lands_its_bonus_and_a_kick_takes_the_first_kind() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let (mut alice, mut yankee, mut zulu, alpha_vid, yankee_vid, zulu_vid, yankee_player, id) =
+        enter_bonus_climb(&server, &database);
+    // The first offer: 610 000 offers 6 100, and the guild takes level 2 with 100
+    // exp. Level 2 sits in the 2-5 row, so both members take the devil bonus after
+    // the level's INFO.
+    let devil = [(801_u32, 48_u8, 5_i32)];
+    let steps = [(2, None, &devil[..])];
+    check_guild_bonus_offer(
+        &mut alice,
+        &mut yankee,
+        (alpha_vid, yankee_vid),
+        (610_000, 89_390_000, 2, 100),
+        &steps,
+        "the level settled",
+    );
+    // The second offer: 21 200 000 offers 212 000, climbing 2-3-4-5-6 with 100
+    // left. The first three levels re-land the devil row; the crossing to 6 takes
+    // it off and lands the undead row.
+    let devil = [(801_u32, 48_u8, 5_i32)];
+    let undead = [(802_u32, 47_u8, 5_i32)];
+    let steps = [
+        (3, Some((801_u32, 48_u8)), &devil[..]),
+        (4, Some((801, 48)), &devil[..]),
+        (5, Some((801, 48)), &devil[..]),
+        (6, Some((801, 48)), &undead[..]),
+    ];
+    check_guild_bonus_offer(
+        &mut alice,
+        &mut yankee,
+        (alpha_vid, yankee_vid),
+        (21_200_000, 68_190_000, 6, 100),
+        &steps,
+        "the climb settled",
+    );
+    // The third offer: 30 200 000 offers 302 000, climbing 6-7-8 with 100 left.
+    // Both levels re-land the undead row: level 8 still matches the 5-8 window
+    // first, as legacy's loop breaks on its first match.
+    let undead = [(802_u32, 47_u8, 5_i32)];
+    let steps = [
+        (7, Some((802_u32, 47_u8)), &undead[..]),
+        (8, Some((802, 47)), &undead[..]),
+    ];
+    check_guild_bonus_offer(
+        &mut alice,
+        &mut yankee,
+        (alpha_vid, yankee_vid),
+        (30_200_000, 37_990_000, 8, 100),
+        &steps,
+        "the third climb settled",
+    );
+    // The fourth offer: 22 000 000 offers 220 000, reaching level 9 with 100 left.
+    // The crossing takes the undead kind off and lands the boss, metin and
+    // monster rows.
+    let mid = [(803_u32, 147_u8, 8_i32), (804, 146, 8), (805, 53, 10)];
+    let steps = [(9, Some((802_u32, 47_u8)), &mid[..])];
+    check_guild_bonus_offer(
+        &mut alice,
+        &mut yankee,
+        (alpha_vid, yankee_vid),
+        (22_000_000, 15_990_000, 9, 100),
+        &steps,
+        "the last climb settled",
+    );
+    // The kick: the REMOVE fans to the master, and the victim's first bonus kind
+    // comes off — the other two stay, and the wire proves it by staying quiet.
+    check_guild_bonus_kick(&mut alice, &mut yankee, yankee_vid, yankee_player, 803, 147);
+    // The late join: Zulu accepts at level 9, and the three pairs ride the self
+    // packets behind the skills.
+    let mid = [(803_u32, 147_u8, 8_i32), (804, 146, 8), (805, 53, 10)];
+    check_guild_bonus_join(&mut alice, &mut zulu, zulu_vid, id, &mid);
+    // Every row lands: the level, the exp, and the member's summed offer.
+    let guild = support::rows(
+        database.url(),
+        "SELECT exp, level FROM guild WHERE id = 1",
+        2,
+    );
+    assert_eq!(guild[0][0], 100, "the offers land");
+    assert_eq!(guild[0][1], 9, "level 9");
+    let member = support::rows(
+        database.url(),
+        "SELECT offer FROM guild_member WHERE guild_id = 1 AND pid = (SELECT id FROM player           WHERE name = 'Alpha')",
+        1,
+    );
+    assert_eq!(member[0][0], 740_100, "the member's offers land");
+}
+
 /// A `CG_GUILD` `USE_SKILL`: the header, the subheader 9, the vnum DWORD and the target
 /// PID DWORD (`TPacketCGGuildUseSkill`, `G/packet.h`).
 fn client_guild_use_skill(vnum: u32, pid: u32) -> Vec<u8> {
@@ -16966,23 +17435,26 @@ fn guild_info_level(info: &[u8]) -> u8 {
 }
 
 /// Offer `offered` exp and check the one-level outcome: the speaker's debit, the
-/// `LIST`-one, the `CHANGE_EXP` at `level` and `exp`, and one `INFO`, to both members.
+/// `LIST`-one, the `CHANGE_EXP` at `level` and `exp`, and one `INFO` carrying the
+/// level's bonus update, to both members. Level 2 lands the devil row; level 3
+/// clears and re-lands it.
 fn check_guild_offer_level(
     alice: &mut Keyed,
     yankee: &mut Keyed,
-    speaker_vid: u32,
+    vids: (u32, u32),
     offered: u32,
     left: i64,
     level: u8,
     exp: u32,
 ) {
+    let (speaker_vid, guest_vid) = vids;
     alice.send_record(&client_guild_offer(offered));
     assert_eq!(
         alice.read_game(),
         point_change(speaker_vid, POINT_EXP, -i64::from(offered), left),
         "the offer debits the speaker"
     );
-    let check = |member: &mut Keyed| {
+    let check = |member: &mut Keyed, vid: u32| {
         let one = member.read_game();
         assert_eq!(guild_subheader(&one), GUILD_SUBHEADER_GC_LIST);
         let changed = member.read_game();
@@ -16998,9 +17470,25 @@ fn check_guild_offer_level(
             level,
             "the INFO names level {level}"
         );
+        if level > 2 {
+            assert_eq!(
+                member.read_game(),
+                point_change(vid, 48, 0, 0),
+                "the devil points come off first"
+            );
+            let removed = member.read_game();
+            check_guild_bonus_remove(&removed, 801, 48);
+        }
+        assert_eq!(
+            member.read_game(),
+            point_change(vid, 48, 0, 5),
+            "the devil points land"
+        );
+        let add = member.read_game();
+        check_guild_bonus_add(&add, 801, 48, 5);
     };
-    check(alice);
-    check(yankee);
+    check(alice, speaker_vid);
+    check(yankee, guest_vid);
     alice.quiet("the offer settled");
     yankee.quiet("the offer settled");
 }
@@ -17193,12 +17681,28 @@ fn a_guild_ups_and_casts_its_skills() {
     assert_eq!(yankee.read_game(), named, "the other PC hears the name");
     join_guild(&mut alice, &mut yankee, yankee_vid, id);
     // Level 2: 6 000 of the 6 000 steps, nothing left, one point, the max at 500.
-    check_guild_offer_level(&mut alice, &mut yankee, alpha_vid, 600_000, 2_400_000, 2, 0);
+    check_guild_offer_level(
+        &mut alice,
+        &mut yankee,
+        (alpha_vid, yankee_vid),
+        600_000,
+        2_400_000,
+        2,
+        0,
+    );
     // `/gskillup 152`: the point is spent, 152 climbs to 1, and the fan names both.
     let mut levels = [0u8; 12];
     check_guild_up_and_cast_152(&mut alice, &mut yankee, &mut levels);
     // Level 3: 18 000 of the 18 000 steps, nothing left, one more point, the max at 600.
-    check_guild_offer_level(&mut alice, &mut yankee, alpha_vid, 1_800_000, 600_000, 3, 0);
+    check_guild_offer_level(
+        &mut alice,
+        &mut yankee,
+        (alpha_vid, yankee_vid),
+        1_800_000,
+        600_000,
+        3,
+        0,
+    );
     check_guild_up_and_cast_teleport(
         &mut alice,
         &mut yankee,
@@ -17694,9 +18198,10 @@ fn a_guild_war_is_declared_refused_and_fanned() {
     // Before the boot: the stored guilds install once, while the gate is closed.
     seed_war_pair(&database);
     let server = Server::start(binary(), database.url());
-    let (mut alice, _alpha, alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut alice, _alpha, alice_entered) =
+        enter_world_seeing_guilded(&server, b"alice", 0, 1, None);
     let (mut yankee, yankee_listed, yankee_entered) =
-        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+        enter_world_seeing_guilded(&server, b"bob", 0, 1, None);
     let _alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
     alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
     // Yankee's burst already showed Alpha — its insert, its summary and MyGuild's
@@ -17807,9 +18312,10 @@ fn a_guild_war_is_accepted_and_every_pc_hears_the_list() {
     // Before the boot: the stored guilds install once, while the gate is closed.
     seed_war_pair(&database);
     let server = Server::start(binary(), database.url());
-    let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut alice, _alpha, _alice_entered) =
+        enter_world_seeing_guilded(&server, b"alice", 0, 1, None);
     let (mut yankee, yankee_listed, _yankee_entered) =
-        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+        enter_world_seeing_guilded(&server, b"bob", 0, 1, None);
     alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
     // The declare, as in the refused scenario: Alpha's WAR fan, then Yankee's.
     alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves"));
@@ -17894,9 +18400,10 @@ fn a_battle_war_is_declared_and_accepted() {
     // Before the boot: the stored guilds install once, while the gate is closed.
     seed_war_pair(&database);
     let server = Server::start(binary(), database.url());
-    let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut alice, _alpha, _alice_entered) =
+        enter_world_seeing_guilded(&server, b"alice", 0, 1, None);
     let (mut yankee, yankee_listed, _yankee_entered) =
-        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+        enter_world_seeing_guilded(&server, b"bob", 0, 1, None);
     alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
     // The declare: the battle war lands, because the map index holds map 110.
     alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves 1"));
@@ -18989,7 +19496,7 @@ fn the_wars_map_goes_with_the_war_and_its_member_comes_back() {
     // the warp wrote names the place the member came from, so the member comes back to
     // the town.
     drop(alice);
-    let (mut alice, _alpha, _entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut alice, _alpha, _entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1, None);
     alice.quiet("the member is back in the town");
 }
 
@@ -23059,7 +23566,7 @@ fn the_guild_mans_score_chat_names_the_rank_and_ladder() {
     );
     let server = Server::start(binary(), database.url());
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
-    let entered = enter_game_guilded(&mut alice, 1);
+    let entered = enter_game_guilded(&mut alice, 1, None);
     let men: Vec<u32> = entered
         .shown
         .inserts()
@@ -27119,7 +27626,7 @@ fn a_gm_gresets_and_the_guild_faith_refills_quietly() {
     let server = Server::start(binary(), database.url());
     let (mut alice, _listed, _quickslots, _items) =
         load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
-    let _entered = enter_game_guilded(&mut alice, 1);
+    let _entered = enter_game_guilded(&mut alice, 1, None);
     read_login_event(&mut alice);
     alice.still("nothing follows");
     let (mut yankee, yankee_listed) =
@@ -39280,7 +39787,13 @@ fn a_guild_master_claims_land_and_rebuilds_its_refinery() {
         &default_channels(),
         "no_wander = true",
     );
-    let (mut alice, _alpha, entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut alice, _alpha, entered) = enter_world_seeing_guilded(
+        &server,
+        b"alice",
+        0,
+        1,
+        Some(&[(803, 147, 8), (804, 146, 8), (805, 53, 10)]),
+    );
     let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
     alice.send_record(&client_click(teacher));
     let paid = alice.read_game();
@@ -39476,7 +39989,8 @@ fn a_guild_registers_enters_and_leaves_meleys_lair() {
         &meley_channels(),
         "no_wander = true",
     );
-    let (mut alice, listed, entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut alice, listed, entered) =
+        enter_world_seeing_guilded(&server, b"alice", 0, 1, Some(&[(801, 48, 5)]));
     let npc = shown_vid(&entered, 20_419, "the sub map shows 20419");
     alice.send_record(&client_click(npc));
     let menu = alice.read_game();
@@ -39542,7 +40056,7 @@ fn a_guild_registers_enters_and_leaves_meleys_lair() {
     let (keyed, character, _quickslots, _items) =
         load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
     let mut alice = keyed;
-    let entered = enter_game_guilded(&mut alice, 1);
+    let entered = enter_game_guilded(&mut alice, 1, Some(&[(801, 48, 5)]));
     assert_eq!((character.x, character.y), (320_000, 1_529_000));
     let _ = entered;
     read_login_lines(&mut alice, 0, None);
@@ -39792,7 +40306,8 @@ fn a_guild_starts_meleys_fight_and_the_reward_refuses() {
 /// The fight's first half: the probe register passes, guild PK mode lands, and
 /// the probe enter warps Alpha to the recall spot on the run.
 fn meley_fight_registers_and_enters(server: &Server, database: &ScratchDatabase) {
-    let (mut alice, listed, entered) = enter_world_seeing_guilded(server, b"alice", 0, 1);
+    let (mut alice, listed, entered) =
+        enter_world_seeing_guilded(server, b"alice", 0, 1, Some(&[(801, 48, 5)]));
     let npc = shown_vid(&entered, 20_419, "the sub map shows 20419");
     alice.send_record(&client_click(npc));
     assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu");
@@ -39847,7 +40362,7 @@ fn meley_fight_clicks_the_gate(server: &Server) {
     let (keyed, character, _quickslots, _items) =
         load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
     let mut alice = keyed;
-    let entered = enter_game_guilded(&mut alice, 1);
+    let entered = enter_game_guilded(&mut alice, 1, Some(&[(801, 48, 5)]));
     assert_eq!((character.x, character.y), (320_000, 1_529_000));
     let gate = shown_vid(&entered, 20_388, "the run shows the gate");
     read_login_lines(&mut alice, 0, None);

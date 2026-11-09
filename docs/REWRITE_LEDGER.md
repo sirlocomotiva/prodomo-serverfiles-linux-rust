@@ -50982,3 +50982,56 @@ suite 5228 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 --all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 510. The guild bonuses
+
+`sys.guild.bonuses` is `ported`: `CGuild::GuildUpdateAffect` and
+`CGuild::GuildRemoveAffect` (`G/guild.cpp:1456-1549`), behind `__GUILD_BONUSES__`.
+
+The table is four level windows with first-match overlap: 2-5 lands kind 801
+(devil +5), 5-8 lands 802 (undead +5), 8-15 lands 803/804/805 (boss +8, metin +8,
+monster +10), 15-20 lands 806/807/807 (skill damage +8, normal hit +8, human
++10). Level 5 takes the 801 row, level 8 the 802 row, level 15 the 803 row — the
+windows' shared edges resolve to the earlier row, as legacy's loop breaks on its
+first match. Two legacy shapes are kept: `AFFECT_GUILD_BONUS_8` is 807, the same
+value as `AFFECT_GUILD_BONUS_7` (`G/affect.h:200-201`), so the top row lands two
+rows of one kind; and the removal's `break` takes the first kind found and stops,
+so a kicked member of a level-9 guild keeps 804 and 805. The keep survives more
+than the session: bonus rows are not in the no-save list (`G/char_affect.cpp:43`),
+so the save keeps them, and no later login clears them while the character stays
+guildless, as no login runs then. That is legacy's shape, reproduced literally;
+the owner may name it a Defect (remove the `break`) or a Quirk (keep it).
+
+The six seams are legacy's call sites: the update runs at login after the saved
+rows land (`LoginMember`, `G/guild.cpp:294`), at join through the same login
+send, and once per level an offer gains (`GuildPointChange`, `:1618`); the
+removal runs at logout (`:325`), at removal (`:241`), and at disband for each
+member online (`:1019`). Three orderings needed care. The join's self packets
+leave the descriptor after the commit returns, so the bonus collects its frames
+— point moves included, self-only — and appends them to `own` behind the skills
+(the outbox/direct split would otherwise invert them). The offer commit writes
+the final level before its fan loop, while legacy's level-up loop climbs one
+level per iteration, so each level's update takes the climbing level. And
+legacy's loop nests each level's INFO with its bonus update, so the port
+interleaves them the same way.
+
+Proof is `a_guild_level_up_lands_its_bonus_and_a_kick_takes_the_first_kind`: a
+join at level 1 with no bonus, four offers climbing to level 9 with every
+level's INFO carrying its own update (including the level-8 non-crossing), a
+kick whose wire carries the 803 take-back and then stays quiet, and Zulu's join
+at level 9 walking the three pairs behind the skills. Unit tests pin the windows
+and the removal order. Four existing tests moved with the new wire: the offer
+helper reads each level's bonus, and the guilded-enter helper pulls the login's
+pairs — one for the Meley lobby's level-3 guild, three for the land test's
+level-10 guild.
+
+Mutants (all semantic kills): row 1 ending at 4, the removal without its stop,
+and the devil value at 6. Row 2's minimum is unconstrainable either way — the
+overlap shadows it in 4-6, so both mutants were equivalent and the live boundary
+(row 1's maximum) was tested instead.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5231 passed, 1 failed in 46 targets, the failure `a_gm_flags_a_stray_dog_aggressive_and_coward` passing alone (a fight-timing flake, unrelated to this slice); doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
