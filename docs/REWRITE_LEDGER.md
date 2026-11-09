@@ -49812,3 +49812,32 @@ Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 cargo doc --workspace --no-deps --locked --offline`, the scenario's 8x flake check, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
 was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 481. The full server
+
+`gc.login_failure` sat `partial` since ledger 185: every status was sent but `FULL`,
+which "waits for an online count (`sys.login.enter`)". The count existed all along —
+`context.clients.len()`, the registry of clients past the select, which the `len`
+doc already ties to legacy's `GetUserCount` — and both login paths already refused
+through `admit`. What was missing was the proof. This slice is the scenario
+`a_full_server_refuses_login2_and_names_version_first`, and the row moves to `ported`.
+
+With `user_limit = 1`, Alice enters the world and Bob's `LOGIN2` hears `FULL`. The
+refusal arrives under the handshake key — the client key installs only after the
+checks — so the scenario reads it through a new `Keyed::login_refusal`, which switches
+the pair `send_login2` installed back to the setup key before the read. (The first
+draft read on the pair and saw byte 220, which is the `FULL` record mis-decrypted, not
+a server record at all.) The refused wire then sends a password `LOGIN` and hears
+`VERSION`, proving both that the gate order holds on a live server and that a `FULL`
+refusal leaves the connection open. `sys.login.by_key` stays `partial` but loses the
+`FULL` item from its `Left`. The suite summed 5116 passed, 1 failed in 46 targets; the
+failure was `boot_hands_the_regens_their_spawner_and_the_vids_it_left`, off by one VID
+under load and green alone — a new flake, unrelated to this slice (no world code
+changed).
+
+Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the scenario's 8x flake check, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
+was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

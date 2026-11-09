@@ -972,6 +972,15 @@ impl Keyed {
         self.output = keys.encryption_key();
     }
 
+    /// Read a shutdown or user-limit refusal: `SHUTDOWN` and `FULL` answer under the
+    /// handshake key, because the client key installs only after the checks, so the pair
+    /// `send_login2` installed is switched back before the read.
+    fn login_refusal(&mut self) -> Result<(u8, Vec<u8>), String> {
+        self.input = SETUP_KEY;
+        self.output = SETUP_KEY;
+        login_by_key_rest(self)
+    }
+
     /// Read one record sealed on `key`, sized by its first TEA unit.
     fn read_on(&mut self, key: &TeaKey, len_of: impl Fn(u8) -> usize) -> Vec<u8> {
         let mut wire = self.client.expect_bytes(8);
@@ -1281,6 +1290,54 @@ fn a_channel_password_login_is_refused_version_or_waits_silent() {
     let mut silent = Keyed::channel(configured.channel(1));
     silent.send_record(&client_login(b"alice", b"whatever"));
     silent.quiet("a test server answers a password login with nothing");
+}
+
+/// `cg.login.login2`, `gc.login_failure`: with `user_limit = 1`, one character in game
+/// fills the server: a second account's `LOGIN2` is refused `FULL` under the handshake key.
+/// The refused wire then sends a password `LOGIN`, which is refused `VERSION`: the live
+/// gate stands before the count, and both refusals leave the connection open.
+#[test]
+fn a_full_server_refuses_login2_and_names_version_first() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nuser_limit = 1",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1,          470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    let (_bob_auth, bob_key) = login_key(&server, b"bob");
+
+    let (alpha, _) = enter_world(&server, b"alice", 0);
+    let mut keyed = Keyed::channel(server.channel(1));
+    keyed.send_login2(b"bob", bob_key, CLIENT_KEY);
+    assert_eq!(
+        keyed.login_refusal(),
+        Err("FULL".to_owned()),
+        "one in game fills a limit of one"
+    );
+    // The FULL refusal leaves the connection open: a password LOGIN on the same wire is
+    // refused VERSION, naming the earlier gate.
+    keyed.send_record(&client_login(b"bob", b"whatever"));
+    let version = keyed.read(|header| {
+        assert_eq!(header, GC_LOGIN_FAILURE);
+        LOGIN_FAILURE_LEN
+    });
+    assert_eq!(failure_status(&version), "VERSION");
+    drop(alpha);
+    drop(server);
 }
 
 /// `cg.login.login2`, `sys.login.by_key`, `gc.empire`, `gc.login_success`: a Channel `LOGIN2`

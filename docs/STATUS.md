@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 480 (the channel password login).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 481
+Last reviewed: 2026-11-09, after ledger section 481 (the full server).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 482
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -537,8 +537,10 @@ scenario-less, and no day/night driver exists in legacy), and `sys.net.udp_block
 `unused` (legacy compiles the UDP socket out); questions 59 and 60 ask about the mall's
 missing website and the UDP row. Since 478 `sys.item.blend`, `data.item.blend` and `event.item.blend_use_expire_event` are `ported`: the use lays, refuses and toggles, creation rolls the owner's 24 rows, and the tick spends; the item lock is not ported and the GM grant path rolls no sockets. Since 479 `sys.gm.priv` and its eight quest calls are `ported`: `GetPriv` whole (the character loss, the empire and guild max), the quest gives queue, and the getters shadow the step; no quest calls them. Since 480 `cg.login.login` is `ported`: the live server refuses
 `VERSION` under the handshake key and the wire stays open, and past the gate the record
-waits silent, since `HEADER_GD_LOGIN` has no DB-side handler. The next slice is the
-owner's call: the forest's leader branch is ported,
+waits silent, since `HEADER_GD_LOGIN` has no DB-side handler. Since 481 `gc.login_failure`
+is `ported` and `sys.login.by_key` lost a `Left`: with `user_limit = 1`, one character in
+game fills the server and the second `LOGIN2` hears `FULL` under the handshake key. The
+next slice is the owner's call: the forest's leader branch is ported,
 the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
