@@ -74,11 +74,11 @@ use protocol::cg_private_shop::{
 };
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_private_shop::{
-    GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopItemData,
-    GcPrivateShopLoad, GcPrivateShopMarketPrice, GcPrivateShopMove, GcPrivateShopPriceChange,
-    GcPrivateShopRemove, GcPrivateShopSale, GcPrivateShopSearchData, GcPrivateShopSearchResult,
-    GcPrivateShopSearchUpdate, GcPrivateShopSetItem, GcPrivateShopStart, GcPrivateShopState,
-    GcPrivateShopTitle, GcPrivateShopTitleChange, GcPrivateShopUnlocked,
+    GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopDelEntity,
+    GcPrivateShopItemData, GcPrivateShopLoad, GcPrivateShopMarketPrice, GcPrivateShopMove,
+    GcPrivateShopPriceChange, GcPrivateShopRemove, GcPrivateShopSale, GcPrivateShopSearchData,
+    GcPrivateShopSearchResult, GcPrivateShopSearchUpdate, GcPrivateShopSetItem, GcPrivateShopStart,
+    GcPrivateShopState, GcPrivateShopTitle, GcPrivateShopTitleChange, GcPrivateShopUnlocked,
     GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE, PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN,
     SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM, SUBHEADER_GC_PRIVATE_SHOP_CLOSE,
     SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL, SUBHEADER_GC_PRIVATE_SHOP_END,
@@ -378,6 +378,8 @@ pub struct PrivateShopClosed {
     pub owner: u32,
     /// The wares' item ids, leaving `private_shop_item` for `item`.
     pub wares: Vec<ItemId>,
+    /// The stand's `DEL_ENTITY`, for the viewers around it.
+    pub entity: Vec<u8>,
 }
 
 /// What a build did: the stored shop and wares, and the records for the owner
@@ -2234,6 +2236,10 @@ impl GameState {
             closed,
             owner: pid,
             wares: placed.iter().map(|(_, item)| item.id).collect(),
+            entity: GcPrivateShopDelEntity {
+                vid: Self::private_vid(vid),
+            }
+            .encode(),
         })
     }
 
@@ -4178,7 +4184,7 @@ mod tests {
         assert!(
             owner_heard
                 .iter()
-                .any(|record| record.len() == 6 && record[3] == 14),
+                .any(|record| record.len() == 6 && record[3] == 13),
             "REMOVE_MY_ITEM: {owner_heard:02x?}"
         );
         assert!(
@@ -4197,7 +4203,7 @@ mod tests {
         assert!(
             viewer_heard
                 .iter()
-                .any(|record| record.len() == 6 && record[3] == 13),
+                .any(|record| record.len() == 6 && record[3] == 12),
             "REMOVE_ITEM: {viewer_heard:02x?}"
         );
     }
@@ -4342,7 +4348,7 @@ mod tests {
         }
         let viewer_heard = drained(&mut viewer_inbox);
         assert_eq!(viewer_heard.len(), 1, "the END: {viewer_heard:02x?}");
-        assert_eq!(&viewer_heard[0], &[175, 4, 0, 12]);
+        assert_eq!(&viewer_heard[0], &[175, 4, 0, 11]);
         let owner_heard = drained(&mut inbox);
         assert_eq!(owner_heard.len(), 1, "the closed line: {owner_heard:02x?}");
     }
@@ -4478,7 +4484,7 @@ mod tests {
             .moved
             .records
             .first()
-            .is_some_and(|record| record.len() == 6 && record[3] == 14));
+            .is_some_and(|record| record.len() == 6 && record[3] == 13));
         let owner_heard = drained(&mut inbox);
         assert!(
             owner_heard.is_empty(),

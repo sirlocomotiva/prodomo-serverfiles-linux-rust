@@ -50835,3 +50835,26 @@ the inventory tests 6 passed; `cargo clippy --workspace --all-targets -- -D warn
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. No suite run: no code changed.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 504. The stand's removal
+
+The close leaves the stand on the map no more: `DEL_ENTITY` (1) is encoded
+(`EncodeRemovePacket`, `G/private_shop.cpp:882-900`) and relayed to the viewers around
+the stand when the close settles, as the build relays `ADD_ENTITY`. The close scenario
+now reads it on the buyer's wire with the stand's VID.
+
+The slice also fixes a real wire bug the const sweep caught: ledger 494 numbered
+`START` through `REMOVE_MY_ITEM` as 11-14, but legacy's enum numbers them 10-13
+(`packet.h:1111-1114`), and `REMOVE_MY_ITEM` collided with `ADD_ITEM` at 14. Every
+subheader from `STATE_UPDATE` (15) up already matched. The four consts move down one,
+with their docs; the world code follows through the consts, and the four raw-byte
+asserts in the scenarios and three in the unit tests move with them. The client
+dispatches on the subheader, so the old bytes opened the wrong windows. `gc.private_shop`
+flips to `ported`: all 25 sent subheaders are live.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5220 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The
+close scenario passed 4 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

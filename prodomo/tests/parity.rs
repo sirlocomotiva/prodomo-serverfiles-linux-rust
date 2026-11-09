@@ -46262,7 +46262,7 @@ fn a_private_shop_browse_opens_and_a_buy_settles() {
     let window = yankee.read_game();
     assert_eq!(
         &window[..4],
-        &[GC_PRIVATE_SHOP, 0xad, 0x23, 11],
+        &[GC_PRIVATE_SHOP, 0xad, 0x23, 10],
         "START: {window:02x?}"
     );
     assert_eq!(&window[4..8], b"Axes");
@@ -46296,7 +46296,7 @@ fn a_private_shop_browse_opens_and_a_buy_settles() {
     let remove = yankee.read_game();
     assert_eq!(
         &remove[..4],
-        &[GC_PRIVATE_SHOP, 6, 0, 13],
+        &[GC_PRIVATE_SHOP, 6, 0, 12],
         "REMOVE_ITEM: {remove:02x?}"
     );
     let bought = yankee.read_game();
@@ -46305,7 +46305,7 @@ fn a_private_shop_browse_opens_and_a_buy_settles() {
     let owner_remove = alice.read_game();
     assert_eq!(
         &owner_remove[..4],
-        &[GC_PRIVATE_SHOP, 6, 0, 14],
+        &[GC_PRIVATE_SHOP, 6, 0, 13],
         "REMOVE_MY_ITEM: {owner_remove:02x?}"
     );
     let sale = alice.read_game();
@@ -46345,7 +46345,7 @@ fn a_private_shop_flips_withdraws_and_closes() {
         enter_seller_and_buyer(&server, &database);
     let entity = build_axes_shop(&mut alice, &mut yankee);
     let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
-    let _ = (owner_vid, yankee_listed);
+    let _ = yankee_listed;
     // The flip to modify, with its `STATE_UPDATE`.
     alice.send_record(&[CG_PRIVATE_SHOP, 8]);
     let flipped = alice.read_game();
@@ -46382,6 +46382,19 @@ fn a_private_shop_flips_withdraws_and_closes() {
     );
     let closed = alice.read_game();
     assert_eq!(closed[0], GC_CHAT, "the closed line: {closed:02x?}");
+    // The stand goes for the viewers around it: Yankee hears `DEL_ENTITY` with
+    // the stand's VID.
+    let gone = yankee.read_game();
+    assert_eq!(
+        &gone[..4],
+        &[GC_PRIVATE_SHOP, 8, 0, 1],
+        "DEL_ENTITY: {gone:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(gone[4..8].try_into().expect("four bytes")),
+        owner_vid,
+        "the stand's VID"
+    );
 }
 
 /// Enter Alice holding two swords (and the key at cell 2 when `with_key`) and
@@ -46514,7 +46527,7 @@ fn a_private_shop_reprices_moves_checks_in_and_out() {
     let clear = alice.read_game();
     assert_eq!(
         &clear[..4],
-        &[GC_PRIVATE_SHOP, 6, 0, 14],
+        &[GC_PRIVATE_SHOP, 6, 0, 13],
         "REMOVE_MY_ITEM: {clear:02x?}"
     );
     let landed = alice.read_game();
@@ -46810,7 +46823,7 @@ fn a_glass_opens_the_search_and_a_sale_tells_the_searchers() {
     let window = yankee.read_game();
     assert_eq!(
         &window[..4],
-        &[GC_PRIVATE_SHOP, 0xad, 0x23, 11],
+        &[GC_PRIVATE_SHOP, 0xad, 0x23, 10],
         "START: {window:02x?}"
     );
     yankee.send_record(&[CG_PRIVATE_SHOP, 6, 3, 0]);
@@ -46824,7 +46837,7 @@ fn a_glass_opens_the_search_and_a_sale_tells_the_searchers() {
     let remove = yankee.read_game();
     assert_eq!(
         &remove[..4],
-        &[GC_PRIVATE_SHOP, 6, 0, 13],
+        &[GC_PRIVATE_SHOP, 6, 0, 12],
         "REMOVE_ITEM: {remove:02x?}"
     );
     // The searchers hear the ware go before the bought line, as `RemoveItem` runs

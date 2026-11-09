@@ -6331,6 +6331,7 @@ where
         mut closed,
         owner,
         wares,
+        entity,
     } = closed;
     let mut placed = Vec::with_capacity(wares.len());
     for ware in &wares {
@@ -6357,7 +6358,26 @@ where
     // The wares' rows are written: the item step sends the records and stores nothing.
     closed.changes.clear();
     let moved = Ok(Ok(closed));
-    finish_item_step(session, addr, context, held, actor, moved).await
+    if !finish_item_step(session, addr, context, held, actor, moved).await {
+        return false;
+    }
+    // The stand goes for the viewers around it, as `EncodeRemovePacket` removes
+    // it (`G/private_shop.cpp:882-900`).
+    let Some(vid) = held.world else {
+        return true;
+    };
+    match context
+        .game
+        .relay(vid, vec![(RelayScope::ViewAndSelf, entity)])
+        .await
+    {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not relay the shop close; closing");
+            return false;
+        }
+    }
+    true
 }
 
 /// Withdraw a personal shop's stash: empty it, destroy the shop when no wares are

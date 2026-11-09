@@ -23,9 +23,9 @@
 //! `CPrivateShop::EncodeInsertPacket` (`server/server/game/private_shop.cpp:853-880`) sends to
 //! each viewer around the stand; the bare-header `OPEN_PANEL` (7) and `CLOSE` (9), which
 //! `OpenPrivateShopPanel`, `ClosePrivateShopPanel` and `ClosePrivateShop`
-//! (`char.cpp:12182-12219`) send; `START` (11) and `END` (12), which `AddShopViewer` and
-//! `RemoveShopViewer` (`private_shop.cpp:739-811`) send to the viewer; `REMOVE_ITEM` (13) and
-//! `REMOVE_MY_ITEM` (14); `SET_SALE` (5), which `SetPrivateShopSale` (`char.cpp:12295-12311`)
+//! (`char.cpp:12182-12219`) send; `START` (10) and `END` (11), which `AddShopViewer` and
+//! `RemoveShopViewer` (`private_shop.cpp:739-811`) send to the viewer; `REMOVE_ITEM` (12) and
+//! `REMOVE_MY_ITEM` (13); `SET_SALE` (5), which `SetPrivateShopSale` (`char.cpp:12295-12311`)
 //! sends to the owner; and `BALANCE_UPDATE` (6), which `SaleUpdate` (`char.cpp:12524-12534`)
 //! sends with it. The edit records are encoded here: `SET_ITEM` (4), which
 //! `SetPrivateShopItem` (`char.cpp:12242-12257`) sends to the owner at checkin;
@@ -168,6 +168,8 @@ pub const PRIVATE_SHOP_OWNER_FIELD_SIZE: usize = 25;
 
 /// `SUBHEADER_GC_PRIVATE_SHOP_ADD_ENTITY` (0): the stand appears.
 pub const SUBHEADER_GC_PRIVATE_SHOP_ADD_ENTITY: u8 = 0;
+/// `SUBHEADER_GC_PRIVATE_SHOP_DEL_ENTITY` (1): the stand goes.
+pub const SUBHEADER_GC_PRIVATE_SHOP_DEL_ENTITY: u8 = 1;
 /// `SUBHEADER_GC_PRIVATE_SHOP_LOAD` (3): the build is stored.
 pub const SUBHEADER_GC_PRIVATE_SHOP_LOAD: u8 = 3;
 /// `SUBHEADER_GC_PRIVATE_SHOP_OPEN_PANEL` (7): the panel opens.
@@ -198,14 +200,14 @@ pub const SUBHEADER_GC_PRIVATE_SHOP_TITLE: u8 = 2;
 pub const SUBHEADER_GC_PRIVATE_SHOP_TITLE_CHANGE: u8 = 19;
 /// `SUBHEADER_GC_PRIVATE_SHOP_UNLOCKED_SLOTS_CHANGE` (20): the unlocked count.
 pub const SUBHEADER_GC_PRIVATE_SHOP_UNLOCKED_SLOTS_CHANGE: u8 = 20;
-/// `SUBHEADER_GC_PRIVATE_SHOP_START` (11): the window opens for the viewer.
-pub const SUBHEADER_GC_PRIVATE_SHOP_START: u8 = 11;
-/// `SUBHEADER_GC_PRIVATE_SHOP_END` (12): the window closes for the viewer.
-pub const SUBHEADER_GC_PRIVATE_SHOP_END: u8 = 12;
-/// `SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM` (13): the slot clears for the viewers.
-pub const SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM: u8 = 13;
-/// `SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM` (14): the slot clears for the owner.
-pub const SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM: u8 = 14;
+/// `SUBHEADER_GC_PRIVATE_SHOP_START` (10): the window opens for the viewer.
+pub const SUBHEADER_GC_PRIVATE_SHOP_START: u8 = 10;
+/// `SUBHEADER_GC_PRIVATE_SHOP_END` (11): the window closes for the viewer.
+pub const SUBHEADER_GC_PRIVATE_SHOP_END: u8 = 11;
+/// `SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM` (12): the slot clears for the viewers.
+pub const SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM: u8 = 12;
+/// `SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM` (13): the slot clears for the owner.
+pub const SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM: u8 = 13;
 /// `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_LOOK_MODE` (21): the window opens to look.
 pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_LOOK_MODE: u8 = 21;
 /// `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE` (22): the window opens to buy.
@@ -308,6 +310,32 @@ pub struct GcPrivateShopAddEntity {
     pub title_type: u8,
     /// The raw 33-byte title field.
     pub title: [u8; PRIVATE_SHOP_TITLE_FIELD_SIZE],
+}
+
+/// `DEL_ENTITY`: the stand's VID as the viewers around it hear it go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopDelEntity {
+    /// The stand's VID.
+    pub vid: u32,
+}
+
+/// Width of the whole `DEL_ENTITY` record: the header and the VID.
+pub const GC_PRIVATE_SHOP_DEL_ENTITY_RECORD_SIZE: usize = GC_PRIVATE_SHOP_WIRE_SIZE + 4;
+
+impl GcPrivateShopDelEntity {
+    /// Encode the header (`size` 8) and the VID
+    /// (`EncodeRemovePacket`, `G/private_shop.cpp:882-900`).
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_DEL_ENTITY_RECORD_SIZE);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_DEL_ENTITY_RECORD_SIZE,
+            SUBHEADER_GC_PRIVATE_SHOP_DEL_ENTITY,
+        );
+        out.extend_from_slice(&self.vid.to_le_bytes());
+        out
+    }
 }
 
 impl GcPrivateShopAddEntity {
@@ -1053,6 +1081,23 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_stand_encodes_its_vid() {
+        assert_eq!(
+            GcPrivateShopDelEntity { vid: 0x090a_0b0c }.encode(),
+            vec![
+                HEADER_GC_PRIVATE_SHOP.value(),
+                8,
+                0,
+                SUBHEADER_GC_PRIVATE_SHOP_DEL_ENTITY,
+                0x0c,
+                0x0b,
+                0x0a,
+                0x09
+            ]
+        );
+    }
+
+    #[test]
     fn a_window_and_a_sale_encode_in_field_order() {
         let mut items = [GcPrivateShopItemData::empty(); 128];
         items[3] = GcPrivateShopItemData {
@@ -1153,7 +1198,7 @@ mod tests {
         .encode();
         assert_eq!(
             removed,
-            vec![HEADER_GC_PRIVATE_SHOP.value(), 6, 0, 13, 3, 0]
+            vec![HEADER_GC_PRIVATE_SHOP.value(), 6, 0, 12, 3, 0]
         );
     }
 
