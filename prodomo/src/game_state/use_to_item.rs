@@ -313,6 +313,7 @@ impl GameState {
         // `CanHandleItem()`: the windows this build has, a smith's among them.
         if self.sash_windows.contains_key(&vid)
             || self.changelook_windows.contains(&vid)
+            || self.aura_windows.contains_key(&vid)
             || self.under_refine(vid)
         {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));

@@ -441,7 +441,9 @@ impl GameState {
     /// `:7964`): the observer is skipped, the shop/refine/cube/dragon-soul/warp/aura arms are
     /// not ported, so the sash and the changelook decide. Silent, as legacy is.
     fn warp_can_handle(&self, vid: Vid) -> bool {
-        !self.sash_windows.contains_key(&vid) && !self.changelook_windows.contains(&vid)
+        !self.sash_windows.contains_key(&vid)
+            && !self.changelook_windows.contains(&vid)
+            && !self.aura_windows.contains_key(&vid)
     }
 
     /// The warp and goto NPCs standing on one map of one Channel, with their orders.

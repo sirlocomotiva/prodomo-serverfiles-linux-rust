@@ -449,7 +449,10 @@ impl GameState {
     /// `update_refine_time` event flag holds every refine (`G/char_item.cpp:1440-1447`,
     /// `:1613-1621`).
     pub(super) fn may_refine(&self, vid: Vid, pid: u32) -> bool {
-        if self.sash_windows.contains_key(&vid) || self.changelook_windows.contains(&vid) {
+        if self.sash_windows.contains_key(&vid)
+            || self.changelook_windows.contains(&vid)
+            || self.aura_windows.contains_key(&vid)
+        {
             return false;
         }
         let held = self.quests.as_ref().map_or(0, |quests| {

@@ -1712,7 +1712,8 @@ fn game_len(header: u8) -> usize {
         GC_MOVE => GC_MOVE_LEN,
         GC_PVP => 1 + 4 + 4 + 1,
         GC_CHARACTER_POSITION => CHARACTER_POSITION_LEN,
-        GC_SYNC_POSITION | GC_EVENT_INFO => usize::MAX,
+        // `GC_AURA` sizes from its own `WORD wSize` too (`TPacketGCAura`).
+        GC_SYNC_POSITION | GC_EVENT_INFO | GC_AURA => usize::MAX,
         GC_OWNERSHIP => OWNERSHIP_LEN,
         ITEM_SET | GC_SAFEBOX_SET | GC_MALL_SET => ITEM_SET_LEN,
         ITEM_UPDATE => ITEM_UPDATE_LEN,
@@ -1765,7 +1766,7 @@ fn game_len(header: u8) -> usize {
         | GC_REQUEST_MAKE_GUILD
         | GC_DS_PLUS_CHANGE_ATTR_OPEN => 1,
         GC_SASH => SASH_LEN,
-        GC_AURA => AURA_OPEN_LEN,
+
         GC_CL => CL_LEN,
         GC_DRAGON_SOUL_REFINE => DS_REFINE_LEN,
         GC_VIEW_EQUIP => VIEW_EQUIP_LEN,
@@ -6510,8 +6511,8 @@ const SASH_LEN: usize = 23;
 
 /// `HEADER_GC_AURA` (`G/packet.h:2981-3055`): the aura refine window's answers.
 const GC_AURA: u8 = 214;
-/// The aura open: the head and the one window-type byte.
-const AURA_OPEN_LEN: usize = 5;
+/// The aura check-in: the head, the two cells, and the item copy.
+const AURA_SET_LEN: usize = 77;
 
 /// `HEADER_GC_CL` (`G/packet.h:2836-2853`): the changelook window's answers.
 const GC_CL: u8 = 234;
@@ -40290,6 +40291,47 @@ fn renew_the_week(server: &Server, database: &ScratchDatabase, alice: Keyed) {
     alice.quiet("every answer was read");
 }
 
+/// `HEADER_CG_AURA` (172): the client-to-server aura request.
+const CG_AURA: u8 = 0xac;
+
+/// One `CG_AURA` check-in: the dead size word stays zero, then the item cell, the
+/// aura slot, and the window.
+fn client_aura_checkin(window: u8, cell: u16, slot: u16) -> Vec<u8> {
+    let mut record = vec![CG_AURA, 0, 0, 0, 1];
+    record.extend_from_slice(&cell.to_le_bytes());
+    record.push(7);
+    record.extend_from_slice(&slot.to_le_bytes());
+    record.push(window);
+    record
+}
+
+/// One `CG_AURA` accept: the window alone.
+fn client_aura_accept(window: u8) -> Vec<u8> {
+    vec![CG_AURA, 0, 0, 2, window]
+}
+
+/// One `GC_AURA` check-in, parsed off the client's socket: the subheader, the
+/// material's cell, the aura slot, the vnum, the drain socket, and the first
+/// attribute.
+fn read_aura_set(record: &[u8]) -> (u8, u16, u16, u32, i32, (u8, i16)) {
+    assert_eq!(record.len(), AURA_SET_LEN, "the check-in's width");
+    assert_eq!(record[0], GC_AURA);
+    let vnum = u32::from_le_bytes(record[10..14].try_into().expect("four bytes"));
+    let sockets = i32::from_le_bytes(record[32..36].try_into().expect("four bytes"));
+    let attr = (
+        record[56],
+        i16::from_le_bytes(record[57..59].try_into().expect("two bytes")),
+    );
+    (
+        record[3],
+        u16::from_le_bytes(record[5..7].try_into().expect("two bytes")),
+        u16::from_le_bytes(record[8..10].try_into().expect("two bytes")),
+        vnum,
+        sockets,
+        attr,
+    )
+}
+
 /// `HEADER_CG_CL` (233): the client-to-server changelook request.
 const CG_CL: u8 = 0xe9;
 
@@ -45230,4 +45272,216 @@ fn a_kill_feeds_the_worn_skin_and_the_flood_refuses_a_use() {
         "the drink lands a second out: {wire:02x?}"
     );
     drop(server);
+}
+
+/// Seed the aura scenario and boot the server: Alpha beside Theowahdan with an aura
+/// costume (49011) at cell 0 and a shield (13000) at cell 1 carrying one attribute.
+fn aura_seed_costume() -> Option<(ScratchDatabase, Server)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, \
+         'sash_mission.__status'::bytea, 557528158 FROM player WHERE player.name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let costume = protos.get(49_011).expect("the owner's data has it");
+    assert_eq!(
+        (costume.item_type, costume.sub_type),
+        (
+            gamedata::item_kind::ITEM_COSTUME,
+            gamedata::item_kind::COSTUME_AURA
+        ),
+        "cell 0 is an aura costume"
+    );
+    let shield = protos.get(13_000).expect("the owner's data has it");
+    assert_eq!(
+        (shield.item_type, shield.sub_type),
+        (
+            gamedata::item_kind::ITEM_ARMOR,
+            gamedata::item_kind::ARMOR_SHIELD
+        ),
+        "cell 1 is a shield"
+    );
+    for (id, pos, vnum) in [(40, 0, 49_011), (41, 1, 13_000)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    sql(
+        &database,
+        "UPDATE item SET attrtype0 = 7, attrvalue0 = 26 WHERE id = 41",
+    );
+    Some((database, server))
+}
+
+/// The first login and the "Bonus absorption" chat, which opens the absorb window;
+/// answers the open connection.
+fn aura_open_absorb(server: &Server) -> Keyed {
+    let (mut keyed, _alpha, _items) = load_character(server, b"alice", 0);
+    let theowahdan = enter_beside(&mut keyed, THEOWAHDAN_VNUM);
+    read_login_lines(&mut keyed, 0, None);
+    read_letter(
+        &mut keyed,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_letter(
+        &mut keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's change",
+    );
+    let _reward = read_quest_target_create(&mut keyed, 1, b"Theowahdan");
+    read_letter(
+        &mut keyed,
+        QUEST_SASH,
+        b"A special cloth",
+        "the sash's letter",
+    );
+    read_letter(
+        &mut keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    read_login_update(&mut keyed);
+    keyed.still("nothing follows");
+    keyed.send_record(&client_click(theowahdan));
+    assert_eq!(
+        keyed.read_game_marked(),
+        server_quest_target_delete(1),
+        "the target click deletes the reward mark"
+    );
+    let first = titled_page(b"teowahdan", &SASH_REWARD_FIRST, b"[NEXT]");
+    assert_eq!(keyed.read_game_marked(), server_script(1, &first));
+    keyed.send_record(&client_script_answer(254));
+    let second = titled_page(b"teowahdan", &SASH_REWARD_SHORT, b"[DONE]");
+    assert_eq!(keyed.read_game_marked(), server_script(1, &second));
+    assert_ne!(
+        read_quest_target_create(&mut keyed, 2, b"Captain"),
+        theowahdan
+    );
+    read_letter(
+        &mut keyed,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    keyed.send_record(&client_click(theowahdan));
+    assert_eq!(
+        keyed.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: \
+              Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of \
+              bonuses|9;Inchide]"
+        ),
+        "his eight chats, and the close"
+    );
+    keyed.send_record(&client_script_answer(1));
+    let ask = titled_page(
+        b"teowahdan:",
+        &[b"Would you like to absorb bonuses?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(keyed.read_game(), server_script(1, &ask));
+    keyed.send_record(&client_script_answer(0));
+    assert_eq!(keyed.read_game(), server_script(0, b"[DONE]"));
+    assert_eq!(
+        keyed.read_game(),
+        vec![GC_AURA, 5, 0, 0, 0],
+        "the absorb window opens"
+    );
+    keyed
+}
+
+/// The shield refuses the main, the pair lands with the preview, a held move stays
+/// silent, and the accept updates the costume, destroys the shield, chats and
+/// clears; the disconnect banks every row.
+fn aura_absorb_and_bank(mut keyed: Keyed, database: &ScratchDatabase) {
+    // The shield is no aura costume: the main takes nothing but the chat.
+    keyed.send_record(&client_aura_checkin(0, 1, 0));
+    assert_eq!(keyed.read_game(), an_info_line(b"[LS;1472]"));
+    // The costume lands in the main; the shield lands as the sub, and the preview
+    // copies the main with the sub's attribute and the drain.
+    keyed.send_record(&client_aura_checkin(0, 0, 0));
+    let set = read_aura_set(&keyed.read_game());
+    assert_eq!(
+        set,
+        (2, 0, 0, 49_011, 0, (0, 0)),
+        "the costume lands in the main"
+    );
+    keyed.send_record(&client_aura_checkin(0, 1, 1));
+    let set = read_aura_set(&keyed.read_game());
+    assert_eq!(
+        set,
+        (2, 1, 1, 13_000, 0, (7, 26)),
+        "the shield lands in the sub"
+    );
+    let preview = read_aura_set(&keyed.read_game());
+    assert_eq!(
+        preview,
+        (2, 0, 2, 49_011, 13_000, (7, 26)),
+        "the preview copies the main, drained"
+    );
+    // A held move is silent: the costume stays held while the window stands.
+    keyed.send_record(&client_item_move(0, 5, 1));
+    keyed.still("a held move is silent");
+    keyed.send_record(&client_aura_accept(0));
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[LS;1481]"),
+        "the absorb chats first"
+    );
+    let update = keyed.read_game();
+    assert_eq!(update[0], ITEM_UPDATE, "the costume's row updates");
+    assert_eq!(update_sockets(&update)[0], 13_000, "the drain stamps");
+    assert_eq!(
+        update_attributes(&update)[0],
+        (7, 26),
+        "the shield's attribute copies"
+    );
+    let cleared = keyed.read_game();
+    assert_eq!(cleared[0], ITEM_SET, "the shield's cell clears");
+    assert_eq!(set_fields(&cleared).2, 0, "the shield is destroyed");
+    assert_eq!(
+        keyed.read_game(),
+        vec![GC_AURA, 4, 0, 4],
+        "the accept clears all"
+    );
+    keyed.still("nothing follows");
+    drop(keyed);
+    wait_for(
+        database,
+        "SELECT count(*) = 1 FROM item WHERE vnum = 49011 AND attrtype0 = 7 AND attrvalue0 = 26 \
+         AND socket0 = 13000",
+    );
+    wait_for(database, "SELECT count(*) = 0 FROM item WHERE id = 41");
+}
+
+/// `cg.game.aura`, `gc.aura`, `sys.custom.aura`: the "Aura: Bonus absorption" chat
+/// opens the absorb window; the shield refuses the main (`[LS;1472]`), the costume
+/// lands there, the shield lands as the sub with the result preview copying the
+/// main's vnum, draining 13000 and carrying the shield's attribute; a held move is
+/// silent; the accept chats `[LS;1481]` first, updates the costume (attributes, drain
+/// socket), destroys the shield and clears; the disconnect banks every row.
+#[test]
+fn an_aura_absorbs_a_shield_and_banks_the_drain() {
+    let Some((database, server)) = aura_seed_costume() else {
+        return;
+    };
+    let keyed = aura_open_absorb(&server);
+    aura_absorb_and_bank(keyed, &database);
 }

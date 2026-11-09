@@ -321,6 +321,7 @@ impl GameState {
         // `CanHandleItem`, the windows this build has, as `destroy_item` gates it.
         if self.sash_windows.contains_key(&vid)
             || self.changelook_windows.contains(&vid)
+            || self.aura_windows.contains_key(&vid)
             || self.under_refine(vid)
         {
             return None;

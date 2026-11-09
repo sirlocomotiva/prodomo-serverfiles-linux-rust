@@ -22,11 +22,16 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::cg_aura::{
+    AURA_ACCEPT_EXTRA_WIRE_SIZE, AURA_CHECKIN_EXTRA_WIRE_SIZE, AURA_CHECKOUT_EXTRA_WIRE_SIZE,
+    AURA_SUBHEADER_CG_REFINE_ACCEPT, AURA_SUBHEADER_CG_REFINE_CHECKIN,
+    AURA_SUBHEADER_CG_REFINE_CHECKOUT,
+};
 use crate::cg_guild::{sub_packet_size, GUILD_SUBHEADER_CG_POST_COMMENT};
 use crate::cg_inventory::{
-    HEADER_CG_CHAT, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD,
-    HEADER_CG_MESSENGER, HEADER_CG_MYSHOP, HEADER_CG_PRIVATE_SHOP, HEADER_CG_SHOP,
-    HEADER_CG_SYNC_POSITION, HEADER_CG_WHISPER,
+    HEADER_CG_AURA, HEADER_CG_CHAT, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_GUILD,
+    HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MYSHOP, HEADER_CG_PRIVATE_SHOP,
+    HEADER_CG_SHOP, HEADER_CG_SYNC_POSITION, HEADER_CG_WHISPER,
 };
 use crate::cg_wire::{
     resolve_client_frame_size, ClientFrame, ClientFrameError, ClientFrameSize,
@@ -102,6 +107,10 @@ pub const FISH_EVENT_SUBHEADER_BOX_USE: u8 = 0;
 /// Legacy fish-event subheader for adding a shape.
 pub const FISH_EVENT_SUBHEADER_SHAPE_ADD: u8 = 1;
 
+/// Active x86 `TPacketCGAura` prefix: header, the dead size word, and the
+/// subheader (`packet.h:3056-3063`).
+pub const AURA_BASE_WIRE_SIZE: usize = 4;
+
 /// Variable client headers covered by this source-verified resolver.
 pub const RESOLVABLE_VARIABLE_CLIENT_HEADERS: &[u8] = &[
     HEADER_CG_CHAT.value(),
@@ -114,6 +123,7 @@ pub const RESOLVABLE_VARIABLE_CLIENT_HEADERS: &[u8] = &[
     HEADER_CG_FISH_EVENT_SEND.value(),
     HEADER_CG_MESSENGER.value(),
     HEADER_CG_PRIVATE_SHOP.value(),
+    HEADER_CG_AURA.value(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1006,37 @@ fn messenger_counted_size(
         .ok_or(ClientFrameError::SizeOverflow)
 }
 
+/// The aura arm of [`resolve_variable_client_frame_size`]:
+/// `GetAuraSubPacketLength` (`input_main.cpp:5277-5292`) as a table. The sub-header
+/// sits at offset 3, past the dead size word.
+///
+/// # Errors
+///
+/// Returns a typed error for a wrong prefix size or a checked-size overflow.
+fn aura_subheader_extra(
+    header: u8,
+    base_size: usize,
+    prefix: &[u8],
+) -> Result<usize, ClientFrameError> {
+    if base_size != AURA_BASE_WIRE_SIZE {
+        return Err(ClientFrameError::InvalidInventorySize {
+            header,
+            size: base_size,
+        });
+    }
+    let extra = match prefix[3] {
+        AURA_SUBHEADER_CG_REFINE_CHECKIN => AURA_CHECKIN_EXTRA_WIRE_SIZE,
+        AURA_SUBHEADER_CG_REFINE_CHECKOUT => AURA_CHECKOUT_EXTRA_WIRE_SIZE,
+        AURA_SUBHEADER_CG_REFINE_ACCEPT => AURA_ACCEPT_EXTRA_WIRE_SIZE,
+        // `CANCEL` takes no sub-record, and an unknown sub-header falls through
+        // the switch and consumes the prefix alone (`:5312-5337`).
+        _ => 0,
+    };
+    base_size
+        .checked_add(extra)
+        .ok_or(ClientFrameError::SizeOverflow)
+}
+
 /// The fish-event arm of [`resolve_variable_client_frame_size`]: `BOX_USE` appends
 /// 3, `SHAPE_ADD` 1, unknown subheaders none.
 ///
@@ -1085,6 +1126,9 @@ pub fn resolve_variable_client_frame_size(
         }
         value if value == HEADER_CG_FISH_EVENT_SEND.value() => {
             fish_event_counted_size(header, base_size, prefix)?
+        }
+        value if value == HEADER_CG_AURA.value() => {
+            aura_subheader_extra(header, base_size, prefix)?
         }
         _ => {
             return Err(ClientFrameError::VariableLengthUnsupported { header, base_size });
@@ -2327,13 +2371,40 @@ mod tests {
 
     #[test]
     fn variable_headers_without_a_resolver_remain_explicitly_unsupported() {
-        use crate::cg_inventory::HEADER_CG_AURA;
+        use crate::cg_inventory::HEADER_CG_SWITCHBOT;
         let mut decoder = VariableClientFrameDecoder::new();
-        decoder.feed(&[HEADER_CG_AURA.value(), 0]).unwrap();
+        decoder.feed(&[HEADER_CG_SWITCHBOT.value(), 0]).unwrap();
         assert!(matches!(
             decoder.try_decode(),
             Err(ClientFrameError::VariableLengthUnsupported { .. })
         ));
+    }
+
+    #[test]
+    fn aura_frames_size_by_subheader_past_the_dead_word() {
+        use crate::cg_aura::{
+            AURA_SUBHEADER_CG_REFINE_ACCEPT, AURA_SUBHEADER_CG_REFINE_CANCEL,
+            AURA_SUBHEADER_CG_REFINE_CHECKIN, AURA_SUBHEADER_CG_REFINE_CHECKOUT,
+        };
+        use crate::cg_inventory::HEADER_CG_AURA;
+        // In `EPacketCGAuraSubHeader` order (`packet.h:3026-3032`), with the
+        // `GetAuraSubPacketLength` arm beside each (`G/input_main.cpp:5281-5288`).
+        let header = HEADER_CG_AURA.value();
+        for (subheader, extra) in [
+            (AURA_SUBHEADER_CG_REFINE_CHECKIN, 7),
+            (AURA_SUBHEADER_CG_REFINE_CHECKOUT, 4),
+            (AURA_SUBHEADER_CG_REFINE_ACCEPT, 1),
+            (AURA_SUBHEADER_CG_REFINE_CANCEL, 0),
+            (9, 0),
+        ] {
+            let mut decoder = VariableClientFrameDecoder::new();
+            let prefix = [header, 0x34, 0x12, subheader];
+            decoder.feed(&prefix).unwrap();
+            decoder.feed(&vec![0; extra]).unwrap();
+            let frame = decoder.try_decode().unwrap().expect("a frame");
+            assert_eq!(frame.header, header);
+            assert_eq!(frame.payload.len(), 3 + extra, "subheader {subheader}");
+        }
     }
 
     #[test]

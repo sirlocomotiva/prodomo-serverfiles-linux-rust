@@ -15,6 +15,7 @@ use std::io;
 pub mod cg_account;
 pub mod cg_arg_u8;
 pub mod cg_attack;
+pub mod cg_aura;
 pub mod cg_biologist;
 pub mod cg_change_look;
 pub mod cg_chat;

@@ -50041,3 +50041,51 @@ Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 --offline`, the inventory test, `cargo clippy --workspace --all-targets --locked --offline --
 -D warnings`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 488. The aura absorb window
+
+`cg.game.aura`, `gc.aura` and `sys.custom.aura` are `ported`. The quest opener has stood
+since ledger 415; this slice is the request it opens onto: `CInputMain::Aura`
+(`G/input_main.cpp:5294-5340`) and the absorb arms of `CHARACTER::AuraRefineWindow*`
+(`G/char_aura.cpp:64-871`).
+
+`protocol::cg_aura` decodes the dead-word prefix and the three sub-records, and the
+frame resolver sizes by sub-header past the dead word. `protocol::gc_aura` gains the
+77-byte `SET_ITEM`: the two cells and the `TItemData` field order. The absorb guards run
+in legacy's order, then the item locks, the `SET_ITEM` answers, and the result preview
+copies the main with the sub's attributes and the sub's vnum in the drain socket when
+both slots fill. The check-out answers `CLEAR_SLOT`, or `CLEAR_ALL` when the main leaves
+with the sub filled; the accept moves the attributes, stamps the drain socket, updates
+the main, destroys the sub, and clears. The cancel answers the close only when the window
+stands. Growth and evolve run their shared guards and then nothing: their systems own
+their arms, and `REFINE_INFO` waits for them. `CLEAR_RIGHT` has no send site, only the
+enum.
+
+Two legacy readings are worth recording. The preview's fullness check reads the main
+slot twice (`m_pAuraRefineWindowItemSlot[AURA_SLOT_MAIN]` at `:374`, a Defect the Rewrite
+does not reproduce: the sub read two lines down assumes both slots, so the Rewrite checks
+both). `IsAuraRefineWindowCanRefine`'s `CanHandleItem` always fails while the window stands
+(the aura's own `CanHandleItem` arm refuses it), so only the standing window and the
+opener within 1000 count.
+
+The locks ride with the sash and changelook: a held item refuses the move, destroy, gift,
+shop, safebox and scroll-refine paths silently, and the open window refuses the destroy.
+Death closes the window with its record (`G/char_battle.cpp:1629-1631`); a disconnect
+forgets it silently — its `AuraRefineWindowClose` sends to a closing descriptor — and a
+warp keeps nothing either, the client rebuilding its windows on the new view.
+
+`an_aura_absorbs_a_shield_and_banks_the_drain`: the "Bonus absorption" chat opens the
+absorb window, the shield refuses the main (`[LS;1472]`), the costume lands, the shield
+lands as the sub with the preview (main's vnum, 13000 drained, attribute (7, 26)), a held
+move stays silent, and the accept chats `[LS;1481]` first, updates the costume, destroys
+the shield and clears; the disconnect banks the drained row. Three unit tests cover the
+no-window lines, the check-out pair, the cancel, the growth guard, and the locks. The
+accept's clippy split moved the chat ahead of the update, which is legacy's own order
+(`:845` before `:851`).
+
+Gates (2026-11-09): 5136 passed, 0 failed in 46 targets, `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, the scenario run, the inventory test, `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D
+warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

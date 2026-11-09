@@ -836,12 +836,17 @@ impl GameState {
     }
 
     fn close_pc_death_windows(&mut self, vid: Vid) {
-        // The closes (`:1614-1648`). The cube, aura and premium-shop windows and the
+        // The closes (`:1614-1648`). The cube and premium-shop windows and the
         // private shop are not ported; the mall stays open, as legacy closes only the
-        // safebox. The sash and changelook closes answer their records, as `CloseSash` and
-        // `ChangeLookWindow(false, true)` send them.
+        // safebox. The sash, changelook and aura closes answer their records, as
+        // `CloseSash`, `ChangeLookWindow(false, true)` and `AuraRefineWindowClose`
+        // send them.
         self.cancel_trade(vid);
         self.end_browsing(vid);
+        if self.aura_windows.remove(&vid).is_some() {
+            self.aura_held.remove(&vid);
+            let _sent = self.write_to_client(vid, protocol::gc_aura::GcAuraClose.encode().to_vec());
+        }
         if let Some(combination) = self.sash_windows.remove(&vid) {
             self.sash_held.remove(&vid);
             let close = protocol::gc_sash::GcSash::new(

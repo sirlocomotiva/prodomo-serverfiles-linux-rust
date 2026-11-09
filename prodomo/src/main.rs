@@ -116,6 +116,7 @@ use protocol::cg_arg_u8::CgRequestEventData;
 use protocol::cg_arg_u8::CgWorldBoss;
 use protocol::cg_arg_u8::{CgPremiumPlayers, CgRefineElement};
 use protocol::cg_attack::CgAttack;
+use protocol::cg_aura::{CgAura, CgAuraAccept, CgAuraCheckIn, CgAuraCheckOut};
 use protocol::cg_biologist::CgBiologist;
 use protocol::cg_change_look::CgChangeLook;
 use protocol::cg_chat::CgChat;
@@ -130,23 +131,24 @@ use protocol::cg_guild_answer::CgAnswerMakeGuild;
 use protocol::cg_header_only::CgEnvanterBlack;
 use protocol::cg_inventory::{
     ENVANTER_BLACK, HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
-    HEADER_CG_ATTR67_ADD, HEADER_CG_BIOLOGIST, HEADER_CG_CHANGE_LANGUAGE, HEADER_CG_CHANGE_NAME,
-    HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
-    HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CL, HEADER_CG_CLIENT_VERSION,
-    HEADER_CG_CLIENT_VERSION2, HEADER_CG_CUBE_RENEWAL, HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND,
-    HEADER_CG_FLY_TARGETING, HEADER_CG_GAYA_SYSTEM, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD,
-    HEADER_CG_HACK, HEADER_CG_INVENTORY_PROTECTED, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
-    HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
-    HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN, HEADER_CG_LOGIN2,
-    HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN,
-    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK,
-    HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER,
-    HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
-    HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING,
-    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
-    HEADER_CG_REFINE_ELEMENT, HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST,
-    HEADER_CG_SASH, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
+    HEADER_CG_ATTR67_ADD, HEADER_CG_AURA, HEADER_CG_BIOLOGIST, HEADER_CG_CHANGE_LANGUAGE,
+    HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
+    HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CL,
+    HEADER_CG_CLIENT_VERSION, HEADER_CG_CLIENT_VERSION2, HEADER_CG_CUBE_RENEWAL,
+    HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE,
+    HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING, HEADER_CG_GAYA_SYSTEM,
+    HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_INVENTORY_PROTECTED,
+    HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE,
+    HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM,
+    HEADER_CG_LOGIN, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST,
+    HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER,
+    HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
+    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
+    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM,
+    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
+    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REFINE_ELEMENT,
+    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
+    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
     HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
     HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
     HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS, HEADER_CG_WORLD_BOSS,
@@ -1329,6 +1331,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_REFINE.value()
         || header == HEADER_CG_REFINE_ELEMENT.value()
         || header == HEADER_CG_ATTR67_ADD.value()
+        || header == HEADER_CG_AURA.value()
         || header == HEADER_CG_SASH.value()
         || header == HEADER_CG_CL.value()
         || header == HEADER_CG_CUBE_RENEWAL.value()
@@ -1398,6 +1401,8 @@ where
         refine_an_element(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ATTR67_ADD.value() {
         attr67_step(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_AURA.value() {
+        aura_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_SASH.value() {
         sash_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_CL.value() {
@@ -2130,6 +2135,94 @@ where
         .game
         .attr67(vid, record.by_sub_header, regist, actor)
         .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_AURA` (172) in the game phase: `CInputMain::Aura`
+/// (`G/input_main.cpp:5294-5340`), with no observer gate (`:3865-3868`). The world's rows
+/// are stored as a move's are.
+///
+/// A malformed record closes the connection; an unknown sub-header is absorbed.
+async fn aura_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use protocol::cg_aura::{
+        AURA_SUBHEADER_CG_REFINE_ACCEPT, AURA_SUBHEADER_CG_REFINE_CANCEL,
+        AURA_SUBHEADER_CG_REFINE_CHECKIN, AURA_SUBHEADER_CG_REFINE_CHECKOUT,
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "AURA without a character in the world; ignoring");
+        return true;
+    };
+    let prefix_len = CgAura::PAYLOAD_SIZE;
+    if frame.payload.len() < prefix_len {
+        warn!(%addr, "Client sent a malformed AURA; closing");
+        return false;
+    }
+    let prefix = CgAura {
+        w_size: u16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+        subheader: frame.payload[2],
+    };
+    let rest = &frame.payload[prefix_len..];
+    let cells = match prefix.subheader {
+        AURA_SUBHEADER_CG_REFINE_CHECKIN => match CgAuraCheckIn::decode(rest) {
+            Ok(checkin) => (
+                protocol::item_pos::ItemPos::new(
+                    checkin.item_cell.window_type,
+                    checkin.item_cell.cell,
+                ),
+                protocol::item_pos::ItemPos::new(
+                    checkin.aura_cell.window_type,
+                    checkin.aura_cell.cell,
+                ),
+                checkin.window,
+            ),
+            Err(error) => {
+                warn!(%addr, ?error, "Client sent a malformed AURA; closing");
+                return false;
+            }
+        },
+        AURA_SUBHEADER_CG_REFINE_CHECKOUT => match CgAuraCheckOut::decode(rest) {
+            Ok(checkout) => (
+                protocol::item_pos::ItemPos::new(0, 0),
+                protocol::item_pos::ItemPos::new(
+                    checkout.aura_cell.window_type,
+                    checkout.aura_cell.cell,
+                ),
+                checkout.window,
+            ),
+            Err(error) => {
+                warn!(%addr, ?error, "Client sent a malformed AURA; closing");
+                return false;
+            }
+        },
+        AURA_SUBHEADER_CG_REFINE_ACCEPT => match CgAuraAccept::decode(rest) {
+            Ok(accept) => (
+                protocol::item_pos::ItemPos::new(0, 0),
+                protocol::item_pos::ItemPos::new(0, 0),
+                accept.window,
+            ),
+            Err(error) => {
+                warn!(%addr, ?error, "Client sent a malformed AURA; closing");
+                return false;
+            }
+        },
+        // The cancel and an unknown sub-header carry no sub-record.
+        AURA_SUBHEADER_CG_REFINE_CANCEL | 4..=u8::MAX => (
+            protocol::item_pos::ItemPos::new(0, 0),
+            protocol::item_pos::ItemPos::new(0, 0),
+            0,
+        ),
+    };
+    let actor = item_actor(held);
+    let answer = context.game.aura(vid, prefix.subheader, cells, actor).await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 

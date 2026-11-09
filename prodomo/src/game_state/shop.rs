@@ -557,6 +557,7 @@ impl GameState {
         }
         if self.sash_item_at(vid, protocol::item_pos::ItemPos::new(1, cell))
             || self.changelook_item_at(vid, protocol::item_pos::ItemPos::new(1, cell))
+            || self.aura_item_at(vid, protocol::item_pos::ItemPos::new(1, cell))
         {
             // `CItem::isLocked` (`G/shop_manager.cpp:519-522`): a sash or changelook material
             // cannot be sold. Silent, as legacy is.

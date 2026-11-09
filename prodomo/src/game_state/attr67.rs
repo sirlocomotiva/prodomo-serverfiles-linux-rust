@@ -185,6 +185,7 @@ impl GameState {
             || self.browsing.contains_key(&vid)
             || self.safebox_open(vid)
             || self.changelook_windows.contains(&vid)
+            || self.aura_windows.contains_key(&vid)
         {
             return;
         }

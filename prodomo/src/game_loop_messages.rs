@@ -548,6 +548,19 @@ pub enum GameCommand {
         /// Where the game thread reports what the regist did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_AURA` for the character online under `vid`, answered as a move is.
+    Aura {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The sub-header: check in, check out, accept, or cancel.
+        sub_header: u8,
+        /// The item position, the aura slot, and the window the client named.
+        cells: (protocol::item_pos::ItemPos, protocol::item_pos::ItemPos, u8),
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the aura step did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_SASH` for the character online under `vid`, answered as a move is.
     Sash {
         /// The VID of the character whose client sent the request.
@@ -4218,6 +4231,31 @@ impl GameLoopController {
             vid,
             sub_header,
             regist,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run an aura request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn aura(
+        &self,
+        vid: common::vid::Vid,
+        sub_header: u8,
+        cells: (protocol::item_pos::ItemPos, protocol::item_pos::ItemPos, u8),
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Aura {
+            vid,
+            sub_header,
+            cells,
             mover,
             reply,
         })

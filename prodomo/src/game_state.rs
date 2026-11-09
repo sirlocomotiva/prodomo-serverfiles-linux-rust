@@ -65,6 +65,7 @@ mod affect;
 mod alignment;
 mod arena;
 mod attr67;
+mod aura;
 mod battle_arena;
 mod battle_pass;
 mod biologist;
@@ -896,6 +897,10 @@ pub struct GameState {
     /// `m_bAuraRefineWindowType` and `m_pAuraRefineWindowOpener`
     /// (`G/char_aura.cpp:14-71`). Absent when no window stands.
     aura_windows: HashMap<common::vid::Vid, (u8, u32)>,
+    /// The materials the aura window of each character holds, slot by slot, keyed by
+    /// its VID: `m_pAuraRefineWindowItemSlot` (`G/char.h:2469`), as the held item ids
+    /// (absent when the window stands empty or no window stands).
+    aura_held: HashMap<common::vid::Vid, [Option<world::item::ItemId>; 2]>,
     /// The Gaya market shelf of each character that has one, keyed by its VID:
     /// the nine items and the six slot unlocks (`<Name>_gaya_system.txt`,
     /// `G/char_gaya.cpp:175-273`). Absent until the market opens.
@@ -2641,6 +2646,7 @@ impl GameState {
             | GameCommand::Refine { .. }
             | GameCommand::RefineElement { .. }
             | GameCommand::Attr67 { .. }
+            | GameCommand::Aura { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
             | GameCommand::CubeRenewal { .. }
@@ -3706,6 +3712,12 @@ impl GameState {
         // client rebuilds its windows on the new view.
         self.changelook_windows.remove(&vid);
         self.changelook_held.remove(&vid);
+        // A warp and a disconnect forget the aura window silently too: the disconnect
+        // path's `AuraRefineWindowClose` (`G/char.cpp:1809-1810`) sends its record to a
+        // closing descriptor, and no warp path closes it, so the client rebuilds its
+        // windows on the new view.
+        self.aura_windows.remove(&vid);
+        self.aura_held.remove(&vid);
         self.forget_whisper_session(vid);
         // `COXEventManager::RemoveFromAttenderList` on the disconnect path only
         // (`G/char.cpp:1827-1830`): a character that leaves map 113 drops its attender
@@ -3798,6 +3810,8 @@ impl GameState {
             || self.sash_item_at(vid, request.to)
             || self.changelook_item_at(vid, request.from)
             || self.changelook_item_at(vid, request.to)
+            || self.aura_item_at(vid, request.from)
+            || self.aura_item_at(vid, request.to)
         {
             // `CItem::isLocked` (`G/char_item.cpp:7636-7637`): a sash or changelook material
             // cannot be moved, and nothing lands on one. Silent, as legacy's source check is; the
@@ -4763,7 +4777,8 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
             }
-            command @ (GameCommand::Sash { .. }
+            command @ (GameCommand::Aura { .. }
+            | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
             | GameCommand::CubeRenewal { .. }) => self.apply_window_step(command),
             GameCommand::GayaSystem {
@@ -4854,9 +4869,18 @@ impl GameState {
     }
 
     /// The window steps of [`GameState::apply_ground`], split out so neither trips the
-    /// line lint: the sash, the changelook and the cube.
+    /// line lint: the aura, the sash, the changelook and the cube.
     fn apply_window_step(&mut self, command: GameCommand) {
         match command {
+            GameCommand::Aura {
+                vid,
+                sub_header,
+                cells,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.aura(vid, sub_header, cells, mover));
+            }
             GameCommand::Sash {
                 vid,
                 sub_header,
@@ -4972,7 +4996,10 @@ impl GameState {
         if self.is_dead(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::DroppedWhileDead));
         }
-        if self.sash_item_at(vid, at) || self.changelook_item_at(vid, at) {
+        if self.sash_item_at(vid, at)
+            || self.changelook_item_at(vid, at)
+            || self.aura_item_at(vid, at)
+        {
             // `CItem::isLocked` (`G/char_item.cpp:7476-7477`): a sash or changelook
             // material cannot be dropped. Silent, as legacy is.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
@@ -5148,11 +5175,15 @@ impl GameState {
     ) -> Result<MovedItems, MoveItemRefused> {
         if self.sash_windows.contains_key(&vid)
             || self.changelook_windows.contains(&vid)
+            || self.aura_windows.contains_key(&vid)
             || self.under_refine(vid)
         {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
         }
-        if self.sash_item_at(vid, at) || self.changelook_item_at(vid, at) {
+        if self.sash_item_at(vid, at)
+            || self.changelook_item_at(vid, at)
+            || self.aura_item_at(vid, at)
+        {
             // `CItem::isLocked` (`G/char_item.cpp:7422-7423`): a sash or changelook
             // material cannot be destroyed. Silent, as legacy is.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
@@ -5229,7 +5260,10 @@ impl GameState {
         if self.give_blocked(vid) {
             return Err(MoveItemRefused::Refused(MoveRefused::WindowOpen));
         }
-        if self.sash_item_at(vid, at) || self.changelook_item_at(vid, at) {
+        if self.sash_item_at(vid, at)
+            || self.changelook_item_at(vid, at)
+            || self.aura_item_at(vid, at)
+        {
             // A sash or changelook material cannot be given: the window holds it. Legacy's `GiveItem`
             // runs no `isLocked` check (a Defect, fixed by the window the gift would have
             // to cross); the Rewrite refuses rather than lose the material, and records
@@ -5365,6 +5399,7 @@ impl GameState {
     fn give_blocked(&self, vid: common::vid::Vid) -> bool {
         self.sash_windows.contains_key(&vid)
             || self.changelook_windows.contains(&vid)
+            || self.aura_windows.contains_key(&vid)
             || self.under_refine(vid)
     }
 

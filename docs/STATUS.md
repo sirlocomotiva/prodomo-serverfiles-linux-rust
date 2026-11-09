@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 487 (six stale data rows).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 488
+Last reviewed: 2026-11-09, after ledger section 488 (the aura absorb window).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 489
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -553,7 +553,9 @@ feeds the worn skin's row and the flood refuses a use within the second, and a p
 item leaves held, worn or stored. Since 487 six `gamedata.md` rows are `ported` without new
 code: the stack table (486's reader, unmarked), the skill power (whose file no legacy path
 opens — the rows live in `common.sql`), the dragon soul table, the battle pass, the exp
-tables and the locale table, each live since its system's ledger. The
+tables and the locale table, each live since its system's ledger. Since 488 `cg.game.aura`,
+`gc.aura` and `sys.custom.aura` are `ported`: the absorb window checks in, previews, checks out,
+accepts and cancels, with the locks and the death close; growth and evolve wait for their systems. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
