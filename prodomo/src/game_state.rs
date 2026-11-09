@@ -204,7 +204,10 @@ pub use premium::{
     PremiumStep, PREMIUM_ACTIVATE, PREMIUM_AFFECTS, PREMIUM_AFFECT_DURATION, PREMIUM_DURATION,
     PREMIUM_GC_LIST, PREMIUM_GC_OPEN, PREMIUM_LIST, PREMIUM_OPEN, PREMIUM_VOUCHER,
 };
-pub use private_shop::{PrivateShopBought, PrivateShopBuilt};
+pub use private_shop::{
+    PrivateShopBought, PrivateShopBuilt, PrivateShopClosed, PrivateShopFlipped,
+    PrivateShopWithdrawn,
+};
 pub use protected::{
     ProtectedStep, PROTECTED_ACTIVATE, PROTECTED_FRESH_PASSWORD, PROTECTED_PASSWORD_CHANGE,
     PROTECTED_PASSWORD_MAX_LEN,
@@ -756,6 +759,11 @@ pub struct GameState {
     private_build_at: HashMap<common::vid::Vid, u64>,
     /// The Pulse each character last bought at (`m_tLastPrivateShopBuy`).
     private_buy_at: HashMap<common::vid::Vid, u64>,
+    /// The Pulse each owner last closed or withdrew at (`m_tLastPrivateShopClose`,
+    /// `m_tLastPrivateShopWithdraw`).
+    private_close_at: HashMap<common::vid::Vid, u64>,
+    /// The Pulse each owner last flipped at (`m_tLastPrivateShopStateChange`).
+    private_state_at: HashMap<common::vid::Vid, u64>,
     /// The shop each character views (`m_pPrivateShop`), by the owner's VID.
     private_viewing: HashMap<common::vid::Vid, common::vid::Vid>,
     /// Each shop's viewers (`m_set_shopViewer`), by the owner's VID.

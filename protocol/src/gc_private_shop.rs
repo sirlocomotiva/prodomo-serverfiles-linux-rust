@@ -120,6 +120,10 @@ pub const SUBHEADER_GC_PRIVATE_SHOP_OPEN_PANEL: u8 = 7;
 pub const SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL: u8 = 8;
 /// `SUBHEADER_GC_PRIVATE_SHOP_CLOSE` (9): the shop closed.
 pub const SUBHEADER_GC_PRIVATE_SHOP_CLOSE: u8 = 9;
+/// `SUBHEADER_GC_PRIVATE_SHOP_STATE_UPDATE` (15): the state flipped.
+pub const SUBHEADER_GC_PRIVATE_SHOP_STATE_UPDATE: u8 = 15;
+/// `SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW` (16): the stash emptied.
+pub const SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW: u8 = 16;
 /// `SUBHEADER_GC_PRIVATE_SHOP_SET_SALE` (5): the owner hears the sale.
 pub const SUBHEADER_GC_PRIVATE_SHOP_SET_SALE: u8 = 5;
 /// `SUBHEADER_GC_PRIVATE_SHOP_BALANCE_UPDATE` (6): the stash grew.
@@ -392,6 +396,31 @@ impl GcPrivateShopBalance {
     }
 }
 
+/// `STATE_UPDATE`: the flipped state, and whether it is the viewer's own shop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopState {
+    /// The shop's new state.
+    pub state: u8,
+    /// Whether the shop is the viewer's own.
+    pub own: bool,
+}
+
+impl GcPrivateShopState {
+    /// Encode the header (`size` 6) and the two bytes in field order.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_WIRE_SIZE + 2);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_WIRE_SIZE + 2,
+            SUBHEADER_GC_PRIVATE_SHOP_STATE_UPDATE,
+        );
+        out.push(self.state);
+        out.push(u8::from(self.own));
+        out
+    }
+}
+
 /// `REMOVE_ITEM` / `REMOVE_MY_ITEM`: the cleared slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcPrivateShopRemove {
@@ -611,6 +640,16 @@ mod tests {
             removed,
             vec![HEADER_GC_PRIVATE_SHOP.value(), 6, 0, 13, 3, 0]
         );
+    }
+
+    #[test]
+    fn a_state_update_encodes_its_two_bytes() {
+        let record = GcPrivateShopState {
+            state: 3,
+            own: true,
+        }
+        .encode();
+        assert_eq!(record, vec![HEADER_GC_PRIVATE_SHOP.value(), 6, 0, 15, 3, 1]);
     }
 
     #[test]

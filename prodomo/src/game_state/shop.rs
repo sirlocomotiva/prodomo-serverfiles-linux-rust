@@ -166,6 +166,12 @@ pub enum ShopStep {
         /// The shop slot.
         pos: u16,
     },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_CLOSE`: close the own shop.
+    PrivateClose,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_WITHDRAW`: withdraw the stash.
+    PrivateWithdraw,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_MODIFY`: flip the state.
+    PrivateModify,
 }
 
 impl ShopStep {
@@ -268,6 +274,13 @@ pub enum ShopAnswer {
     /// A personal-shop buy: the buyer's move, for the store to write with the
     /// ware's move and the stash in one transaction.
     PrivateBought(Box<super::private_shop::PrivateShopBought>),
+    /// A personal-shop close: the owner's move, for the store to write with the
+    /// wares' return and the shop's deletion in one transaction.
+    PrivateClosed(Box<super::private_shop::PrivateShopClosed>),
+    /// A personal-shop withdraw: the owner's move, for the store to empty the stash.
+    PrivateWithdrawn(Box<super::private_shop::PrivateShopWithdrawn>),
+    /// A personal-shop flip: the owner's new state, for the store.
+    PrivateFlipped(super::private_shop::PrivateShopFlipped),
     /// A quest took the click: the records its scripts sent, the GRAND climbs
     /// its reads landed (each for the store's `store_skill`), and the `guild.*`
     /// calls the scripts made (each for the world's judge), in order.
@@ -311,6 +324,9 @@ impl PartialEq for ShopAnswer {
             | (Self::Settled(_), Self::Settled(_))
             | (Self::PrivateBuilt(_), Self::PrivateBuilt(_))
             | (Self::PrivateBought(_), Self::PrivateBought(_))
+            | (Self::PrivateClosed(_), Self::PrivateClosed(_))
+            | (Self::PrivateWithdrawn(_), Self::PrivateWithdrawn(_))
+            | (Self::PrivateFlipped(_), Self::PrivateFlipped(_))
             | (Self::Quest { .. }, Self::Quest { .. }) => true,
             _ => false,
         }
@@ -435,6 +451,18 @@ impl GameState {
             )),
             ShopStep::PrivateEnd => Ok(ShopAnswer::Sent(self.private_end(vid).records)),
             ShopStep::PrivateBuy { pos } => self.private_buy_step(vid, pos, mover),
+            ShopStep::PrivateClose => match self.private_close(vid, mover)? {
+                Ok(closed) => Ok(ShopAnswer::PrivateClosed(Box::new(closed))),
+                Err(refused) => Ok(ShopAnswer::Moved(refused)),
+            },
+            ShopStep::PrivateWithdraw => match self.private_withdraw(vid, mover)? {
+                Ok(withdrawn) => Ok(ShopAnswer::PrivateWithdrawn(Box::new(withdrawn))),
+                Err(refused) => Ok(ShopAnswer::Moved(refused)),
+            },
+            ShopStep::PrivateModify => match self.private_modify(vid, mover)? {
+                Ok(flipped) => Ok(ShopAnswer::PrivateFlipped(flipped)),
+                Err(refused) => Ok(ShopAnswer::Moved(refused)),
+            },
         }
     }
 
@@ -560,6 +588,9 @@ impl GameState {
             settled @ ShopAnswer::Settled(_) => settled,
             built @ ShopAnswer::PrivateBuilt(_) => built,
             bought @ ShopAnswer::PrivateBought(_) => bought,
+            closed @ ShopAnswer::PrivateClosed(_) => closed,
+            withdrawn @ ShopAnswer::PrivateWithdrawn(_) => withdrawn,
+            flipped @ ShopAnswer::PrivateFlipped(_) => flipped,
             ShopAnswer::Quest { .. } => {
                 debug_assert!(false, "the window opens no quest");
                 ShopAnswer::Sent(records)

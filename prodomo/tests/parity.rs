@@ -46296,3 +46296,57 @@ fn a_private_shop_browse_opens_and_a_buy_settles() {
         "the stash's growth"
     );
 }
+
+/// The modify flips the state, the withdraw empties the stash, and the close
+/// returns the ware and deletes the shop.
+#[test]
+fn a_private_shop_flips_withdraws_and_closes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    let (mut alice, _alice_listed, mut yankee, yankee_listed) =
+        enter_seller_and_buyer(&server, &database);
+    let entity = build_axes_shop(&mut alice, &mut yankee);
+    let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
+    let _ = (owner_vid, yankee_listed);
+    // The flip to modify, with its `STATE_UPDATE`.
+    alice.send_record(&[CG_PRIVATE_SHOP, 8]);
+    let flipped = alice.read_game();
+    assert_eq!(
+        &flipped[..4],
+        &[GC_PRIVATE_SHOP, 6, 0, 15],
+        "STATE_UPDATE: {flipped:02x?}"
+    );
+    assert_eq!(&flipped[4..], &[3, 1], "modify, own");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM private_shop WHERE owner_id = (SELECT id FROM player WHERE \
+         name = 'Alpha') AND state = 3)",
+    );
+    // The withdraw with an empty stash is silent.
+    alice.send_record(&[CG_PRIVATE_SHOP, 7]);
+    alice.quiet("an empty stash is silent");
+    // The close returns the ware and deletes the shop.
+    alice.send_record(&[CG_PRIVATE_SHOP, 1]);
+    let close = alice.read_game();
+    assert_eq!(
+        &close[..4],
+        &[GC_PRIVATE_SHOP, 4, 0, 9],
+        "CLOSE: {close:02x?}"
+    );
+    let set = alice.read_game();
+    assert_eq!(set[0], ITEM_SET, "the ware's set: {set:02x?}");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 60 AND vnum = 19 AND owner_id = (SELECT id \
+         FROM player WHERE name = 'Alpha')) AND NOT EXISTS (SELECT 1 FROM private_shop \
+         WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha')) AND NOT EXISTS \
+         (SELECT 1 FROM private_shop_item WHERE id = 60)",
+    );
+    let closed = alice.read_game();
+    assert_eq!(closed[0], GC_CHAT, "the closed line: {closed:02x?}");
+}

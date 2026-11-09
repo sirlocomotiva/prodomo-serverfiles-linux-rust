@@ -59,6 +59,13 @@
 //! Legacy forwards the game copy's price and re-checks it against the DB copy; with
 //! one world the two are one, so the price check compares the shop's own price with
 //! itself and always holds. The search and market updates are later slices.
+//!
+//! The close, the withdraw and the modify flip are the owner's own steps. The close
+//! refuses on another map or from more than 3000 away, moves the wares back to the
+//! owner's window biggest-first, cleans the viewers, deletes the rows, and answers
+//! `CLOSE` with the closed line. The withdraw moves the stash to the gold under the
+//! gold cap and answers the bare `WITHDRAW`. The modify flips the state between
+//! open and modify and answers `STATE_UPDATE`.
 
 use common::item_slots::{usable_inventory_cells, EWindows};
 use common::vid::Vid;
@@ -67,9 +74,11 @@ use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_private_shop::{
     GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopItemData,
     GcPrivateShopLoad, GcPrivateShopRemove, GcPrivateShopSale, GcPrivateShopStart,
-    PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN, SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL,
+    GcPrivateShopState, PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN,
+    SUBHEADER_GC_PRIVATE_SHOP_CLOSE, SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL,
     SUBHEADER_GC_PRIVATE_SHOP_END, SUBHEADER_GC_PRIVATE_SHOP_OPEN_PANEL,
     SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM, SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM,
+    SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW,
 };
 use protocol::gc_whisper::{GcWhisper, WHISPER_TYPE_SYSTEM};
 use world::item::{ItemId, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_MYSHOP};
@@ -108,6 +117,19 @@ pub const PRIVATE_SHOP_BUILD_WAIT_PULSES: u64 = 250;
 /// The one second between two buys, in Pulses (`PASSES_PER_SEC(1)`).
 pub const PRIVATE_SHOP_BUY_WAIT_PULSES: u64 = 25;
 
+/// The ten seconds between two closes or two withdraws, in Pulses.
+pub const PRIVATE_SHOP_CLOSE_WAIT_PULSES: u64 = 250;
+
+/// The one second between two state flips, in Pulses.
+pub const PRIVATE_SHOP_STATE_WAIT_PULSES: u64 = 25;
+
+/// `STATE_MODIFY` (3): the shop takes no customers.
+pub const PRIVATE_SHOP_STATE_MODIFY: u8 = 3;
+
+/// The 3000 units past which a close refuses (`ClosePrivateShop`,
+/// `G/private_shop_manager.cpp:278-284`).
+pub const PRIVATE_SHOP_CLOSE_DISTANCE: i32 = 3000;
+
 /// One ware of a built shop: the instance, its slot and its price. The instance rides
 /// along because the window's rows show the sockets and attrs (`AddShopViewer` reads
 /// them off the shop's items, `G/private_shop.cpp:775-786`), and the buy hands the same
@@ -137,6 +159,12 @@ pub struct PrivateShop {
     pub page_count: u8,
     /// The wares by shop slot.
     pub wares: [Option<PrivateShopWare>; PRIVATE_SHOP_WINDOW_SLOTS],
+    /// The stash in yang (`TPrivateShop::llGold`).
+    pub gold: i64,
+    /// The shop's state: open (2) or modify (3).
+    pub state: u8,
+    /// Where the stand stands: the map and the spot.
+    pub at: (i32, i32, i32),
 }
 
 /// A build's decoration: the title, the stand, and the pages.
@@ -171,6 +199,40 @@ pub struct PrivateShopBought {
     pub owner: u32,
     /// The price in yang, joining the shop's stash.
     pub price: i64,
+}
+
+/// What a withdraw did: the owner's move, and the shop's owner, for the store to
+/// empty the stash in one transaction. `destroy` names an empty shop the withdraw
+/// destroys with it.
+#[derive(Debug, Clone)]
+pub struct PrivateShopWithdrawn {
+    /// The owner's move: `WITHDRAW` first, then the gold.
+    pub withdrawn: MovedItems,
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// Whether the shop held no wares and is destroyed with the withdraw.
+    pub destroy: bool,
+}
+
+/// What a modify did: the owner's flip, for the store.
+#[derive(Debug, Clone, Copy)]
+pub struct PrivateShopFlipped {
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// The shop's new state.
+    pub state: u8,
+}
+
+/// What a close did: the owner's move, and the shop's owner and wares, for the
+/// store to write in one transaction.
+#[derive(Debug, Clone)]
+pub struct PrivateShopClosed {
+    /// The owner's move: `CLOSE` first, then the wares' sets.
+    pub closed: MovedItems,
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// The wares' item ids, leaving `private_shop_item` for `item`.
+    pub wares: Vec<ItemId>,
 }
 
 /// What a build did: the stored shop and wares, and the records for the owner
@@ -617,9 +679,12 @@ impl GameState {
                 title_type: stood.title_type,
                 page_count: stood.page_count,
                 wares: slots,
+                gold: 0,
+                state: PRIVATE_SHOP_STATE_OPEN,
+                at: (map, spot.0, spot.1),
             },
         );
-        self.private_panels.remove(&vid);
+        self.private_panels.insert(vid);
         self.private_build_at.insert(vid, self.last_pulse);
         let owner = private_owner_field(&name);
         let shop = db::private_shop::ShopRow {
@@ -965,11 +1030,13 @@ impl GameState {
             let _placed = buyer.items_mut().set(at, &item);
             buyer.set_gold(left);
         }
-        // The ware leaves the shop, and the viewers and the owner hear the slot
-        // clear (`RemoveItem` and `RemovePrivateShopItem`, `G/private_shop.cpp:524-551`
-        // and `G/char.cpp:12257-12280`).
+        // The ware leaves the shop, the stash takes the price, and the viewers and
+        // the owner hear the slot clear (`RemoveItem` and `RemovePrivateShopItem`,
+        // `G/private_shop.cpp:524-551` and `G/char.cpp:12257-12280`, and
+        // `UpdateBalance`, `D/ClientManagerPrivateShop.cpp:2144`).
         if let Some(shop) = self.private_shops.get_mut(&owner) {
             shop.wares[usize::from(pos)] = None;
+            shop.gold += ware.gold;
         }
         let viewers = self
             .private_viewers
@@ -1104,6 +1171,436 @@ impl GameState {
         let _sent = self.write_to_client(owner, balance);
     }
 
+    /// `CInputMain::PrivateShopClose` for the character under `vid`
+    /// (`G/input_main.cpp:4189-4220`), settled at once with the DB close and the game
+    /// close (`D/ClientManagerPrivateShop.cpp:1205-1233` and
+    /// `G/private_shop_manager.cpp:261-310`): the logout cancel, the stun, the trade
+    /// windows, the owner with its panel open, the ten-second wait, the empty stash,
+    /// the same map, and the 3000 range. Then the wares move back to the owner's
+    /// window biggest-first, the viewers are cleaned, and the owner hears `CLOSE`
+    /// with the closed line. Answers the close for the store, or the refusal's chats
+    /// as a move.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_close(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+    ) -> Result<Result<PrivateShopClosed, MovedItems>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        if self.timed_events.remove(&vid).is_some() {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Your logout has been canceled.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if !self.private_trade_windows_clear(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot close a personal shop while another window is open.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if !self.has_private_shop(vid) || !self.edits_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You do not have an open personal shop.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        let last = self.private_close_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_CLOSE_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a few moments before closing your personal shop again.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        let stash = self.private_shops.get(&vid).map_or(0, |shop| shop.gold);
+        if stash != 0 {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You must withdraw your earnings before you can close your personal shop.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if !self.private_stand_near(vid, actor) {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        self.private_close_at.insert(vid, self.last_pulse);
+        Ok(self.private_close_shop(vid, pid, actor))
+    }
+
+    /// Whether the owner stands by its stand: the same map and within 3000, telling
+    /// the refusal (`ClosePrivateShop`, `G/private_shop_manager.cpp:272-284`).
+    fn private_stand_near(&mut self, vid: Vid, actor: Mover) -> bool {
+        let Some(shop) = self.private_shops.get(&vid) else {
+            return false;
+        };
+        let (map, x, y) = shop.at;
+        let Some(place) = self.place_of(vid.raw()) else {
+            return false;
+        };
+        if place.1 != map {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot close a personal shop from a different location.",
+                &[],
+            );
+            return false;
+        }
+        let here = self
+            .spot_of(vid.raw())
+            .map_or((0, 0), |spot| (spot.x, spot.y));
+        if crate::sync_position::distance_approx(x - here.0, y - here.1)
+            > PRIVATE_SHOP_CLOSE_DISTANCE
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You are too far away from your personal shop.",
+                &[],
+            );
+            return false;
+        }
+        true
+    }
+
+    /// Close the shop: the wares move back to the owner's window, the viewers are
+    /// cleaned, and the owner hears `CLOSE` with the closed line.
+    fn private_close_shop(
+        &mut self,
+        vid: Vid,
+        pid: u32,
+        actor: Mover,
+    ) -> Result<PrivateShopClosed, MovedItems> {
+        use world::character::{ItemChange, ItemRecord, MoveRecord};
+        let Some(shop) = self.private_shops.get(&vid) else {
+            return Err(self.private_refused(vid, pid, actor));
+        };
+        // Biggest first, as `TransferItems` sorts them (`G/private_shop.cpp:218-222`).
+        let mut wares: Vec<(u16, PrivateShopWare)> = shop
+            .wares
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, ware)| {
+                ware.as_ref()
+                    .map(|ware| (u16::try_from(slot).unwrap_or(u16::MAX), ware.clone()))
+            })
+            .collect();
+        wares.sort_by_key(|(_, ware)| core::cmp::Reverse(ware.item.size));
+        let mut done = world::character::MoveDone {
+            kind: world::character::MoveKind::Moved,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        let mut placed = Vec::with_capacity(wares.len());
+        for (slot, ware) in &wares {
+            let Some(at) = self.private_buy_cell(vid, &ware.item) else {
+                self.tell(
+                    vid,
+                    actor,
+                    CHAT_TYPE_INFO,
+                    b"You don't have enough space in your inventory.",
+                    &[],
+                );
+                return Err(self.private_refused(vid, pid, actor));
+            };
+            let mut item = ware.item.clone();
+            item.pos = at;
+            if self
+                .characters
+                .find_by_vid_mut(vid)
+                .expect("the owner is online")
+                .items_mut()
+                .set(at, &item)
+                .is_err()
+            {
+                self.tell(
+                    vid,
+                    actor,
+                    CHAT_TYPE_INFO,
+                    b"You don't have enough space in your inventory.",
+                    &[],
+                );
+                return Err(self.private_refused(vid, pid, actor));
+            }
+            done.records
+                .push(MoveRecord::Item(ItemRecord::Set(item.gc_item_set(at, 0))));
+            done.changes.push(ItemChange::Created(item.clone()));
+            placed.push((*slot, item));
+        }
+        // The shop is gone: the viewers hear `END`, the panel closes, and the owner
+        // hears `CLOSE` with the closed line (`ClosePrivateShop`,
+        // `G/char.cpp:12135-12158`).
+        let viewers = self.private_viewers.remove(&vid).unwrap_or_default();
+        let end = GcPrivateShop::new(SUBHEADER_GC_PRIVATE_SHOP_END).encode();
+        for viewer in viewers {
+            self.private_viewing.remove(&viewer);
+            let _sent = self.write_to_client(viewer, end.clone());
+        }
+        self.private_shops.remove(&vid);
+        self.private_panels.remove(&vid);
+        let mut records = vec![GcPrivateShop::new(SUBHEADER_GC_PRIVATE_SHOP_CLOSE).encode()];
+        let mut closed = MovedItems::new(pid, vid.raw(), done, actor, &self.protos, &self.locale);
+        records.append(&mut closed.records);
+        closed.records = records;
+        self.tell(
+            vid,
+            actor,
+            CHAT_TYPE_INFO,
+            b"Your personal shop has been closed.",
+            &[],
+        );
+        Ok(PrivateShopClosed {
+            closed,
+            owner: pid,
+            wares: placed.iter().map(|(_, item)| item.id).collect(),
+        })
+    }
+
+    /// `CInputMain::PrivateShopWithdraw` for the character under `vid`
+    /// (`G/input_main.cpp:4398-4450`), settled at once with the DB request and the
+    /// game completion (`D/ClientManagerPrivateShop.cpp:1289-1320` and
+    /// `G/char.cpp:12598-12671`): the logout cancel, the stun, the owner with its
+    /// panel open, the ten-second wait, the gold cap, and the stash. The stash moves
+    /// to the gold, the owner hears the withdrawn line and the bare `WITHDRAW`, and
+    /// an empty shop is destroyed with it. Answers the withdraw for the store, or
+    /// the refusal's chats as a move.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_withdraw(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+    ) -> Result<Result<PrivateShopWithdrawn, MovedItems>, MoveItemRefused> {
+        use world::character::MoveRecord;
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        let gold = character.gold();
+        let Some(stash) = self.private_withdraw_gates(vid, pid, gold, actor) else {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        };
+        self.private_close_at.insert(vid, self.last_pulse);
+        let held = gold + u64::try_from(stash).unwrap_or(0);
+        if let Ok(owner) = self.characters.find_by_vid_mut(vid) {
+            owner.set_gold(held);
+        }
+        if let Some(shop) = self.private_shops.get_mut(&vid) {
+            shop.gold = 0;
+        }
+        self.tell(
+            vid,
+            actor,
+            CHAT_TYPE_INFO,
+            b"You have withdrawn %lld Yang from your personal shop earnings.",
+            &[crate::chat_line::Arg::Int(stash)],
+        );
+        let mut done = world::character::MoveDone {
+            kind: world::character::MoveKind::Moved,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        done.records.push(MoveRecord::Gold {
+            amount: stash,
+            value: held,
+        });
+        let mut withdrawn =
+            MovedItems::new(pid, vid.raw(), done, actor, &self.protos, &self.locale);
+        withdrawn.gold = Some(gold_delta(gold, held));
+        // The bare `WITHDRAW` goes out with the gold.
+        let mut records = vec![GcPrivateShop::new(SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW).encode()];
+        records.append(&mut withdrawn.records);
+        withdrawn.records = records;
+        // No wares left: the shop is destroyed with the withdraw
+        // (`PrivateShopWithdraw`, `D/ClientManagerPrivateShop.cpp:1435-1456`).
+        let empty = self
+            .private_shops
+            .get(&vid)
+            .is_some_and(|shop| shop.wares.iter().all(Option::is_none));
+        Ok(Ok(PrivateShopWithdrawn {
+            withdrawn,
+            owner: pid,
+            destroy: empty,
+        }))
+    }
+
+    /// The withdraw's gates in legacy order, answering the stash: the logout cancel,
+    /// the stun, the owner with its panel open, the ten-second wait, the gold cap with
+    /// the input line, the stash, and the cap again with the completion's line.
+    /// `None` after telling the refusal.
+    fn private_withdraw_gates(
+        &mut self,
+        vid: Vid,
+        pid: u32,
+        gold: u64,
+        actor: Mover,
+    ) -> Option<i64> {
+        if self.timed_events.remove(&vid).is_some() {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Your logout has been canceled.",
+                &[],
+            );
+            return None;
+        }
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return None;
+        }
+        if !self.has_private_shop(vid) || !self.edits_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You do not have an open personal shop.",
+                &[],
+            );
+            return None;
+        }
+        let last = self.private_close_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_CLOSE_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a few moments before withdrawing your personal shop again.",
+                &[],
+            );
+            return None;
+        }
+        let stash = self.private_shops.get(&vid).map_or(0, |shop| shop.gold);
+        if gold.saturating_add(u64::try_from(stash).unwrap_or(u64::MAX))
+            >= common::constants::GOLD_MAX_MAX
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot exchange as you would exceed the maximum amount of Yang.",
+                &[],
+            );
+            return None;
+        }
+        if stash == 0 {
+            return None;
+        }
+        // The completion re-checks the cap with its own line (`WithdrawPrivateShop`,
+        // `G/char.cpp:12606-12613`); with one world the two checks read the same gold,
+        // so this arm never fires, but it is the completion's own words.
+        if gold.saturating_add(u64::try_from(stash).unwrap_or(u64::MAX))
+            >= common::constants::GOLD_MAX_MAX
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot collect the money, because you would then have more than 2 billion Yang.",
+                &[],
+            );
+            return None;
+        }
+        let _ = pid;
+        Some(stash)
+    }
+
+    /// `CInputMain::PrivateShopModify` for the character under `vid`
+    /// (`G/input_main.cpp:4452-4480`), settled at once with the DB flip and the state
+    /// update (`D/ClientManagerPrivateShop.cpp:1457-1515` and
+    /// `G/char.cpp:12577-12596`): the stun, the owner with its panel open, and the
+    /// one-second wait. The state flips between open and modify, and the owner hears
+    /// `STATE_UPDATE` as its own. Answers the flip for the store.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_modify(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+    ) -> Result<Result<PrivateShopFlipped, MovedItems>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if !self.has_private_shop(vid) || !self.edits_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You do not have an open private shop.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        let last = self.private_state_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_STATE_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a moment before changing state of your personal shop again.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        self.private_state_at.insert(vid, self.last_pulse);
+        let state = self
+            .private_shops
+            .get(&vid)
+            .map_or(PRIVATE_SHOP_STATE_OPEN, |shop| {
+                if shop.state == PRIVATE_SHOP_STATE_OPEN {
+                    PRIVATE_SHOP_STATE_MODIFY
+                } else {
+                    PRIVATE_SHOP_STATE_OPEN
+                }
+            });
+        if let Some(shop) = self.private_shops.get_mut(&vid) {
+            shop.state = state;
+        }
+        let update = GcPrivateShopState { state, own: true }.encode();
+        let _sent = self.write_to_client(vid, update);
+        Ok(Ok(PrivateShopFlipped { owner: pid, state }))
+    }
+
     /// The owner whose stand carries `target`, or `None` when no stand does.
     fn private_owner_of_stand(&self, target: u32) -> Option<Vid> {
         self.private_shops
@@ -1134,7 +1631,7 @@ impl GameState {
         }
         GcPrivateShopStart {
             title: shop.title,
-            state: PRIVATE_SHOP_STATE_OPEN,
+            state: shop.state,
             page_count: shop.page_count,
             unlocked_slots: 0,
             vid: Self::private_vid(owner),
@@ -1626,6 +2123,151 @@ mod tests {
                 .any(|record| record.len() == 6 && record[3] == 13),
             "REMOVE_ITEM: {viewer_heard:02x?}"
         );
+    }
+
+    /// The modify flips the state and answers `STATE_UPDATE` as the owner's own.
+    #[test]
+    fn a_modify_flips_the_state() {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        drained(&mut inbox);
+        state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 0,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        state.private_panels.insert(SELLER);
+        let flipped = state.private_modify(SELLER, mover()).unwrap().unwrap();
+        assert_eq!(flipped.state, super::PRIVATE_SHOP_STATE_MODIFY);
+        assert_eq!(
+            state.private_shops[&SELLER].state,
+            super::PRIVATE_SHOP_STATE_MODIFY
+        );
+        let heard = drained(&mut inbox);
+        assert_eq!(heard.len(), 1, "STATE_UPDATE: {heard:02x?}");
+        assert_eq!(&heard[0][..4], &[175, 6, 0, 15]);
+        assert_eq!(&heard[0][4..], &[3, 1]);
+    }
+
+    /// The withdraw moves the stash to the gold, answers the bare `WITHDRAW` with
+    /// it, and destroys the shop when no wares are left.
+    #[test]
+    fn a_withdraw_empties_the_stash() {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        let buyer = held(7, 19, 1);
+        let (mut viewer_inbox, _) = enter_seeing_with(
+            &mut state,
+            (1, 1),
+            12,
+            (5, 6),
+            10_000,
+            &[(inventory(0), buyer)],
+        );
+        drained(&mut inbox);
+        drained(&mut viewer_inbox);
+        state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 0,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        state.private_panels.insert(SELLER);
+        let viewer = Vid::new(12);
+        state
+            .characters
+            .find_by_vid_mut(viewer)
+            .expect("the buyer is in the world")
+            .set_gold(10_000);
+        state.private_start(viewer, SELLER.raw(), mover());
+        state.private_buy(viewer, 3, mover()).unwrap().unwrap();
+        assert_eq!(state.private_shops[&SELLER].gold, 500);
+        drained(&mut inbox);
+        state
+            .characters
+            .find_by_vid_mut(SELLER)
+            .expect("the seller is in the world")
+            .set_gold(1000);
+        let withdrawn = state.private_withdraw(SELLER, mover()).unwrap().unwrap();
+        assert!(withdrawn.destroy, "no wares are left");
+        assert_eq!(
+            withdrawn.withdrawn.records.len(),
+            2,
+            "WITHDRAW and the gold"
+        );
+        assert_eq!(&withdrawn.withdrawn.records[0], &[175, 4, 0, 16]);
+        assert_eq!(state.characters.find_by_vid(SELLER).unwrap().gold(), 1500);
+        assert_eq!(state.private_shops[&SELLER].gold, 0);
+        let heard = drained(&mut inbox);
+        assert_eq!(heard.len(), 1, "the withdrawn line: {heard:02x?}");
+    }
+
+    /// The close moves the ware back to the window, cleans the viewers, and answers
+    /// `CLOSE` first.
+    #[test]
+    fn a_close_returns_the_wares_and_cleans_the_viewers() {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        let buyer = held(7, 19, 1);
+        let (mut viewer_inbox, _) = enter_seeing_with(
+            &mut state,
+            (1, 1),
+            12,
+            (5, 6),
+            10_000,
+            &[(inventory(0), buyer)],
+        );
+        drained(&mut inbox);
+        drained(&mut viewer_inbox);
+        state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 0,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        state.private_panels.insert(SELLER);
+        let viewer = Vid::new(12);
+        state.private_start(viewer, SELLER.raw(), mover());
+        drained(&mut viewer_inbox);
+        let closed = state.private_close(SELLER, mover()).unwrap().unwrap();
+        assert_eq!(closed.wares, vec![5]);
+        assert!(
+            !state.private_shops.contains_key(&SELLER),
+            "the shop is gone"
+        );
+        assert_eq!(&closed.closed.records[0], &[175, 4, 0, 9], "CLOSE first");
+        assert_eq!(closed.closed.records.len(), 2, "CLOSE and the ware's set");
+        {
+            let owner = state.characters.find_by_vid(SELLER).unwrap();
+            assert!(owner.items().item(5).is_some(), "the ware came home");
+        }
+        let viewer_heard = drained(&mut viewer_inbox);
+        assert_eq!(viewer_heard.len(), 1, "the END: {viewer_heard:02x?}");
+        assert_eq!(&viewer_heard[0], &[175, 4, 0, 12]);
+        let owner_heard = drained(&mut inbox);
+        assert_eq!(owner_heard.len(), 1, "the closed line: {owner_heard:02x?}");
     }
 
     /// A build on map 41 refuses for empire 1, whose market is map 1.

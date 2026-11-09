@@ -50423,3 +50423,52 @@ clean. No mutants were run: the slice's two failures were the suite's own double
 of the ware's row and the scenario's gold header, both fixed by the change itself.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 495. The private close, withdraw and modify
+
+The shop's state flips between open and modify, the stash empties into the
+gold, and the close returns the wares to the owner's window, cleans the
+viewers, and deletes the rows.
+
+Legacy (`CInputMain::PrivateShopClose`, `PrivateShopWithdraw` and
+`PrivateShopModify`, `G/input_main.cpp:4189-4220,4398-4480`, the DB close,
+withdraw and flip, `D/ClientManagerPrivateShop.cpp:1205-1233,1289-1320,1435-1456,
+1457-1515`, the game close with `TransferItems`, `G/private_shop_manager.cpp:
+261-310` and `G/private_shop.cpp:174-496`, the game completion,
+`G/char.cpp:12577-12596,12598-12671`, and the owner's close,
+`G/char.cpp:12135-12158`). The close runs the logout cancel, the stun, the trade
+windows, the owner with its panel open, the ten-second wait, the empty stash,
+the same map, and the 3000 range; the wares move back biggest-first, the viewers
+hear `END`, and the owner hears `CLOSE` with the closed line. The withdraw runs
+the logout cancel, the stun, the owner with its panel open, the ten-second wait,
+the gold cap under `GOLD_MAX_MAX` twice with two lines, and the stash; the gold
+lands, the owner hears the withdrawn line and the bare `WITHDRAW`, and an empty
+shop is destroyed with it. The modify runs the stun, the owner with its panel
+open, and the one-second wait; the state flips and the owner hears `STATE_UPDATE`
+as its own.
+
+The Rewrite (`prodomo/src/game_state/private_shop.rs`, `db::private_shop`). The
+shop keeps its stash and state in the world, and the build opens the panel the
+three gates read. The close is one transaction — the wares leaving
+`private_shop_item` for `item` at the placed cells, and the shop row gone — and
+the records go out after. The cheque arms are compiled out, and the special
+inventories with them (`ENABLE_PRIVATE_SHOP_SPECIAL_INV` is off), so a dragon
+soul closes through its box and anything else through the base inventory.
+
+Scenario `a_private_shop_flips_withdraws_and_closes`: the flip to modify answers
+`STATE_UPDATE` and stores state 3, the withdraw on an empty stash is silent, and
+the close answers `CLOSE` with the ware's set, the ware home in `item` with both
+shop tables empty of it, and the closed line. Units cover the flip, the stash's
+emptying with the empty shop's destruction, and the wares' return with the
+viewers' `END`. Three `private_shop` units, one codec test and one scenario join
+the counts below.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+5192 passed, 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after
+splitting the withdraw's gates; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+--locked --offline` clean. No mutants were run: the slice's failure was the scenario's
+own wait assert on a first flip the throttle never refuses, fixed by the change itself.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -78,8 +78,9 @@ use prodomo::game_loop_messages::{
     RestartKind, Settled, Shown, WhisperOutcome,
 };
 use prodomo::game_state::{
-    world_item_id_range, GameState, PrivateShopBought, PrivateShopBuilt, ShopAnswer, ShopStep,
-    TradeAnswer, TradeSettled, TradeStep,
+    world_item_id_range, GameState, PrivateShopBought, PrivateShopBuilt, PrivateShopClosed,
+    PrivateShopFlipped, PrivateShopWithdrawn, ShopAnswer, ShopStep, TradeAnswer, TradeSettled,
+    TradeStep,
 };
 use prodomo::game_state::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -5907,9 +5908,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     use protocol::cg_variable::{
-        PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_END,
+        PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_CLOSE,
+        PRIVATE_SHOP_SUBHEADER_END, PRIVATE_SHOP_SUBHEADER_MODIFY,
         PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
-        PRIVATE_SHOP_SUBHEADER_START,
+        PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_WITHDRAW,
     };
     let subheader = frame.payload.first().copied().unwrap_or(u8::MAX);
     let step = match subheader {
@@ -5940,6 +5942,9 @@ where
             }
         }
         PRIVATE_SHOP_SUBHEADER_END => ShopStep::PrivateEnd,
+        PRIVATE_SHOP_SUBHEADER_CLOSE => ShopStep::PrivateClose,
+        PRIVATE_SHOP_SUBHEADER_WITHDRAW => ShopStep::PrivateWithdraw,
+        PRIVATE_SHOP_SUBHEADER_MODIFY => ShopStep::PrivateModify,
         PRIVATE_SHOP_SUBHEADER_BUY => {
             match protocol::cg_private_shop::CgPrivateShopBuy::decode_buy(frame) {
                 Ok(buy) => ShopStep::PrivateBuy { pos: buy.pos },
@@ -5968,6 +5973,18 @@ where
         Ok(Ok(ShopAnswer::PrivateBought(bought))) => {
             info!(%addr, "Private shop buy settled");
             return finish_private_buy(session, addr, context, held, actor, *bought).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateClosed(closed))) => {
+            info!(%addr, "Private shop closed");
+            return finish_private_close(session, addr, context, held, actor, *closed).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateWithdrawn(withdrawn))) => {
+            info!(%addr, "Private shop withdrawn");
+            return finish_private_withdraw(session, addr, context, held, actor, *withdrawn).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateFlipped(flipped))) => {
+            info!(%addr, "Private shop flipped");
+            return finish_private_flip(session, addr, context, flipped).await;
         }
         Ok(Ok(ShopAnswer::Sent(records))) => {
             info!(%addr, subheader, "Private-shop step answered");
@@ -6081,6 +6098,109 @@ where
     finish_item_step(session, addr, context, held, actor, moved).await
 }
 
+/// Close a personal shop: the wares' return and the shop's deletion in one
+/// transaction, then the owner's records, as `ClosePrivateShop` closes it
+/// (`G/private_shop_manager.cpp:261-310`).
+async fn finish_private_close<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    actor: Mover,
+    closed: PrivateShopClosed,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let PrivateShopClosed {
+        mut closed,
+        owner,
+        wares,
+    } = closed;
+    let mut placed = Vec::with_capacity(wares.len());
+    for ware in &wares {
+        let Some(found) = closed.changes.iter().find_map(|change| match change {
+            db::items::RowChange::Created(row) if row.id == *ware => {
+                Some((row.window_type, row.pos, row.count))
+            }
+            _ => None,
+        }) else {
+            warn!(%addr, "A private-shop close returned no ware; closing");
+            return false;
+        };
+        placed.push((
+            *ware,
+            found.0,
+            u16::try_from(found.1).unwrap_or(u16::MAX),
+            found.2,
+        ));
+    }
+    if let Err(error) = db::private_shop::close_shop(&context.store, owner, &placed).await {
+        warn!(%addr, %error, "The private-shop close could not be stored; closing");
+        return false;
+    }
+    // The wares' rows are written: the item step sends the records and stores nothing.
+    closed.changes.clear();
+    let moved = Ok(Ok(closed));
+    finish_item_step(session, addr, context, held, actor, moved).await
+}
+
+/// Withdraw a personal shop's stash: empty it, destroy the shop when no wares are
+/// left, then the owner's records, as `WithdrawPrivateShop` withdraws it
+/// (`G/char.cpp:12598-12671`).
+async fn finish_private_withdraw<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    actor: Mover,
+    withdrawn: PrivateShopWithdrawn,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let PrivateShopWithdrawn {
+        withdrawn,
+        owner,
+        destroy,
+    } = withdrawn;
+    if let Err(error) = db::private_shop::withdraw_gold(&context.store, owner).await {
+        warn!(%addr, %error, "The private-shop withdraw could not be stored; closing");
+        return false;
+    }
+    if destroy {
+        if let Err(error) = db::private_shop::destroy_shop(&context.store, owner).await {
+            warn!(%addr, %error, "The empty shop could not be destroyed; closing");
+            return false;
+        }
+    }
+    let moved = Ok(Ok(withdrawn));
+    finish_item_step(session, addr, context, held, actor, moved).await
+}
+
+/// Flip a personal shop's state: store it, as `PrivateShopModifyRequest` flips it
+/// (`D/ClientManagerPrivateShop.cpp:1457-1515`). The `STATE_UPDATE` went out on the
+/// game thread.
+async fn finish_private_flip<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    flipped: PrivateShopFlipped,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) =
+        db::private_shop::set_shop_state(&context.store, flipped.owner, flipped.state).await
+    {
+        warn!(%addr, %error, "The private-shop flip could not be stored; closing");
+        return false;
+    }
+    let _ = session;
+    info!(%addr, state = flipped.state, "Private shop flipped");
+    true
+}
+
 /// `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase: `CInputMain::OnClick` and
 /// `CInputMain::Shop` (`G/input_main.cpp:1241-1316`), which no observer check guards
 /// (`:3756-3771`).
@@ -6133,7 +6253,13 @@ where
             info!(%addr, "Shop buy settled");
             return finish_trade(session, addr, context, held, *settled).await;
         }
-        Ok(Ok(ShopAnswer::PrivateBuilt(_) | ShopAnswer::PrivateBought(_))) => {
+        Ok(Ok(
+            ShopAnswer::PrivateBuilt(_)
+            | ShopAnswer::PrivateBought(_)
+            | ShopAnswer::PrivateClosed(_)
+            | ShopAnswer::PrivateWithdrawn(_)
+            | ShopAnswer::PrivateFlipped(_),
+        )) => {
             warn!(%addr, "An NPC step ran a private shop; closing");
             return false;
         }

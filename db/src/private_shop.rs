@@ -246,6 +246,121 @@ pub async fn buy_ware(store: &Store, bought: BoughtWare) -> Result<(), ItemError
     Ok(())
 }
 
+/// Empty one shop's stash: the yang the owner withdrew.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Database`].
+pub async fn withdraw_gold(store: &Store, owner_id: u32) -> Result<(), ItemError> {
+    sqlx::query("UPDATE private_shop SET gold = 0 WHERE owner_id = $1")
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Destroy one empty shop: its wares are gone, so only the shop row goes.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Database`].
+pub async fn destroy_shop(store: &Store, owner_id: u32) -> Result<(), ItemError> {
+    sqlx::query("DELETE FROM private_shop WHERE owner_id = $1")
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Flip one shop's state between open and modify.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Database`].
+pub async fn set_shop_state(store: &Store, owner_id: u32, state: u8) -> Result<(), ItemError> {
+    sqlx::query("UPDATE private_shop SET state = $1 WHERE owner_id = $2")
+        .bind(i16::from(state))
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Close one shop: the wares leave `private_shop_item` for `item` under the owner at
+/// the windows and cells the world placed them at, and the shop row goes, all in one
+/// transaction.
+///
+/// # Errors
+///
+/// Returns [`ItemError::NoSuchItem`] when a ware is gone, or [`ItemError::Database`].
+pub async fn close_shop(
+    store: &Store,
+    owner_id: u32,
+    placed: &[(u32, u8, u16, u16)],
+) -> Result<(), ItemError> {
+    let mut tx = store.pool().begin().await?;
+    for (ware_id, window_type, pos, count) in placed {
+        let rows = sqlx::query(
+            "SELECT id, owner_id, pos, count, vnum, gold, cheque, checkin, socket0, socket1, \
+             socket2, socket3, socket4, socket5, attrtype0, attrvalue0, attrtype1,              attrvalue1, attrtype2, attrvalue2, attrtype3, attrvalue3, attrtype4,              attrvalue4, attrtype5, attrvalue5, attrtype6, attrvalue6 FROM              private_shop_item WHERE id = $1 AND owner_id = $2",
+        )
+        .bind(i64::from(*ware_id))
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .fetch_all(&mut *tx)
+        .await?;
+        let [row] = rows.as_slice() else {
+            return Err(ItemError::NoSuchItem(*ware_id));
+        };
+        let ware = ware_from(row)?;
+        sqlx::query("DELETE FROM private_shop_item WHERE id = $1")
+            .bind(i64::from(*ware_id))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO item (id, owner_id, window_type, pos, vnum, count, socket0, socket1, \
+             socket2, socket3, socket4, socket5, attrtype0, attrvalue0, attrtype1, \
+             attrvalue1, attrtype2, attrvalue2, attrtype3, attrvalue3, attrtype4, \
+             attrvalue4, attrtype5, attrvalue5, attrtype6, attrvalue6) VALUES ($1, $2, $3, \
+             $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, \
+             $21, $22, $23, $24, $25, $26)",
+        )
+        .bind(i64::from(*ware_id))
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .bind(i16::from(*window_type))
+        .bind(i32::from(*pos))
+        .bind(i64::from(ware.item.vnum))
+        .bind(i16::try_from(*count).map_err(|_| corrupt("count", *count))?)
+        .bind(ware.item.sockets[0])
+        .bind(ware.item.sockets[1])
+        .bind(ware.item.sockets[2])
+        .bind(ware.item.sockets[3])
+        .bind(ware.item.sockets[4])
+        .bind(ware.item.sockets[5])
+        .bind(i16::from(ware.item.attributes[0].b_type))
+        .bind(ware.item.attributes[0].s_value)
+        .bind(i16::from(ware.item.attributes[1].b_type))
+        .bind(ware.item.attributes[1].s_value)
+        .bind(i16::from(ware.item.attributes[2].b_type))
+        .bind(ware.item.attributes[2].s_value)
+        .bind(i16::from(ware.item.attributes[3].b_type))
+        .bind(ware.item.attributes[3].s_value)
+        .bind(i16::from(ware.item.attributes[4].b_type))
+        .bind(ware.item.attributes[4].s_value)
+        .bind(i16::from(ware.item.attributes[5].b_type))
+        .bind(ware.item.attributes[5].s_value)
+        .bind(i16::from(ware.item.attributes[6].b_type))
+        .bind(ware.item.attributes[6].s_value)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("DELETE FROM private_shop WHERE owner_id = $1")
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Load one character's shop row, or `None` when it has no shop.
 ///
 /// # Errors
