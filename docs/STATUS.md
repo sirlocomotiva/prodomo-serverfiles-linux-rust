@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 486 (the stacking skin).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 487
+Last reviewed: 2026-11-09, after ledger section 487 (six stale data rows).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 488
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -550,7 +550,10 @@ snapshot lacks, and byte 6's send writes byte 32 instead. Since 485 `data.item.o
 is `ported`: the target window shows the mask's vnum for a drop that names the new one. Since 486
 `sys.item.stack_attribute` is `ported` and `event.item.real_time_expire_event` is `ported`: a kill
 feeds the worn skin's row and the flood refuses a use within the second, and a passed real-time
-item leaves held, worn or stored. The
+item leaves held, worn or stored. Since 487 six `gamedata.md` rows are `ported` without new
+code: the stack table (486's reader, unmarked), the skill power (whose file no legacy path
+opens — the rows live in `common.sql`), the dragon soul table, the battle pass, the exp
+tables and the locale table, each live since its system's ledger. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

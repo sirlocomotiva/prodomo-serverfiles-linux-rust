@@ -50011,3 +50011,33 @@ Gates (2026-11-09): 5126 passed, 0 failed in 46 targets, `cargo fmt --all -- --c
 warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 --offline`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 487. Six stale data rows
+
+Six `gamedata.md` rows sat `missing` while their systems were live. No code changed;
+each row now names the ledger that ported it and the scenario that proves it.
+
+`data.item.stack_attribute` is 486's own reader, unmarked: `gamedata::stack_attribute`
+boots the table and `a_kill_feeds_the_worn_skin_and_the_flood_refuses_a_use` feeds the
+owner's one group.
+
+`data.skill.power` is the interesting one. The row names `skill_power.txt`, but no
+legacy path opens that file: the only feeders of `CTableBySkill` are `config.cpp`'s
+`locale`-table queries (`SKILL_POWER_BY_LEVEL` and the eight `TYPE` rows,
+`G/config.cpp:648-727`). The rows live in the owner's `common.sql` and have been read
+since the skill ports (`gamedata::pc_skill_data`, `gamedata::mob_skill_data`,
+`G/skill_power.cpp:32-43`). The row names the file; the file is dead. The scenario is
+`a_skill_up_spends_and_a_cast_heals_over_the_wire`, whose cast runs on the power row.
+
+The other four are straight reconciliations: `data.dragon_soul`
+(`gamedata::dragon_soul_table`, `/ds_change_attr`,
+`a_funded_redraw_lands_and_spends_and_short_gold_refuses`), `data.battle_pass`
+(`gamedata::battle_pass` since ledger 473, `a_player_opens_the_battle_pass_and_the_admin_lists_it`),
+`table.exp_table` (`common::levels::EXP_TABLE` and `CONQUEROR_EXP_TABLE`,
+`a_gm_sets_its_champion_level_spends_a_point_and_earns_champion_experience`) and
+`table.locale` (`LocaleStrings`, `a_line_legacy_answers_itself_comes_back_to_the_sender_alone`).
+
+Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the inventory test, `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
