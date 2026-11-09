@@ -317,6 +317,24 @@ fn an_unregistered_header_closes_the_connection() {
     }
 }
 
+/// `cg.any.analyzer_refusal`: a variable header whose declared size is below its own base
+/// prefix closes the descriptor. Legacy's analyzer returns -1, consumes nothing and leaves
+/// the descriptor open for the ping cycle to drop; the Rewrite closes at once (ledger
+/// 188.3). Alice sends `CG_CHAT` with a declared size of 0 and hears nothing more.
+#[test]
+fn an_undersized_variable_frame_closes_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    alice.send_record(&[CG_CHAT, 0, 0]);
+    alice.closes("a variable declaration below its base prefix");
+    drop(server);
+}
+
 /// `cg.handshake.handshake`, `cg.handshake.pong`, `gc.phase`, `gc.handshake`: on accept the server sends
 /// `GC_PHASE(PHASE_HANDSHAKE)` and a zero-delta handshake in plaintext; the echoed token moves auth
 /// to `PHASE_AUTH` and a Channel to `PHASE_LOGIN`, and the phase record itself is still plaintext.

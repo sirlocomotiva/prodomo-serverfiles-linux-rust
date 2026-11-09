@@ -50945,3 +50945,20 @@ suite 5227 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 scenario passed 2 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 508. The undersized frame
+
+`cg.any.analyzer_refusal` was `partial` on a technicality: the refusal was detected
+and the Rewrite closed, but only a session-level unit test covered it. The game-phase
+path runs the same variable decoder (`VariableClientFrameDecoder` in the live
+session), and its `InvalidVariableSize` becomes a `LiveStep::Failed`, which closes.
+No code changed: the scenario enters the world as Alice, sends `CG_CHAT` with a
+declared size of 0 against the base prefix of 4, and observes the close having
+heard nothing but what an NPC says on its own.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5228 passed, 0 failed in 46 targets (the first run showed 5227 passed with `a_gm_flags_a_stray_dog_aggressive_and_coward` failing on its escape-distance bound at 5169 against 5100; the parity target reran green at 380, and the single test passed alone too — a pre-existing flake in untouched NPC movement, this slice being test-only plus docs); doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The
+scenario passed 2 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
