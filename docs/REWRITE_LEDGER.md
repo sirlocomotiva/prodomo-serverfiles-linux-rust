@@ -49841,3 +49841,25 @@ Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 cargo doc --workspace --no-deps --locked --offline`, the scenario's 8x flake check, and
 `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
 was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 482. The world boss's sub-headers
+
+Three rows sat `missing` that were never missing. `sub.WorldBoss.WORLD_BOSS_SUBHEADER_CG_INFO`,
+`_REWARD` and `_RANKING` (`game/input_main.cpp:3557-3565`) moved with the event system in
+ledger 472: `CgWorldBoss` decodes the byte (`prodomo/src/main.rs:1518`), the dispatch maps 0,
+1, 2 onto `WorldBossStep::{Info, Reward, Ranking}` (`:1529-1533`), and the world answers
+through `world_boss_step` (`game_state/world_boss.rs:205`), with unknown sub-headers consumed
+and ignored as legacy's `default`-less switch does. The scenario
+`a_gm_runs_the_world_boss_event` sends all three arms in one run: the `INFO` record with
+the boss spawned and the 250000 minimum, the empty `RANKING`, and the `REWARD` refusal
+while the boss stands (`prodomo/tests/parity.rs:20153-20177`), and it ran green here. All
+three rows are `ported` with that scenario. No code changed.
+
+An unfinished `CG_AURA` codec draft (`protocol/src/cg_aura.rs`, uncommitted) was moved aside
+to `/tmp/cg_aura_482_draft.rs`; the aura window's four sub-headers stay `missing` for the
+next slice.
+
+Gates (2026-11-09): the scenario run, `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, the inventory test, the doc build, and `legacy/` is clean. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
