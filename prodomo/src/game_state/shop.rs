@@ -115,7 +115,7 @@ pub(super) enum ShopKeeper {
 }
 
 /// One shop request of a client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShopStep {
     /// `CG_ON_CLICK` on `target`, which opens a keeper's shop.
     Click {
@@ -137,6 +137,23 @@ pub enum ShopStep {
     },
     /// `SHOP_SUBHEADER_CG_END`: close the window.
     End,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_PANEL_OPEN`: open the personal panel.
+    PrivatePanelOpen,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_PANEL_CLOSE`: close the personal panel.
+    PrivatePanelClose,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_BUILD`: build the stand with these tables.
+    PrivateBuild {
+        /// The raw title field.
+        title: [u8; protocol::cg_private_shop::CG_PRIVATE_SHOP_TITLE_FIELD_SIZE],
+        /// The polymorph vnum the shop stands as.
+        poly_vnum: u32,
+        /// The title's type byte.
+        title_type: u8,
+        /// The page count.
+        page_count: u8,
+        /// The priced tables, in wire order.
+        tables: Vec<protocol::cg_private_shop::CgPrivateShopItem>,
+    },
 }
 
 impl ShopStep {
@@ -233,6 +250,9 @@ pub enum ShopAnswer {
     /// A buy from a player's shop: both sides, for the store to write in one
     /// transaction, as a trade's settling is.
     Settled(Box<super::trade::TradeSettled>),
+    /// A personal-shop build: the shop and wares, for the store to write in one
+    /// transaction, and the records for after.
+    PrivateBuilt(Box<super::private_shop::PrivateShopBuilt>),
     /// A quest took the click: the records its scripts sent, the GRAND climbs
     /// its reads landed (each for the store's `store_skill`), and the `guild.*`
     /// calls the scripts made (each for the world's judge), in order.
@@ -274,6 +294,7 @@ impl PartialEq for ShopAnswer {
             ) => left == right && left_records == right_records,
             (Self::Moved(_), Self::Moved(_))
             | (Self::Settled(_), Self::Settled(_))
+            | (Self::PrivateBuilt(_), Self::PrivateBuilt(_))
             | (Self::Quest { .. }, Self::Quest { .. }) => true,
             _ => false,
         }
@@ -370,6 +391,44 @@ impl GameState {
             ShopStep::Buy { pos } => self.buy(vid, pos, place, mover),
             ShopStep::Sell { cell, count } => self.sell(vid, cell, count, place, mover),
             ShopStep::End => Ok(self.close_shop(vid)),
+            ShopStep::PrivatePanelOpen => Ok(ShopAnswer::Sent(
+                self.private_panel_open(vid, mover).records,
+            )),
+            ShopStep::PrivatePanelClose => {
+                Ok(ShopAnswer::Sent(self.private_panel_close(vid).records))
+            }
+            ShopStep::PrivateBuild {
+                title,
+                poly_vnum,
+                title_type,
+                page_count,
+                tables,
+            } => self.private_build_step(
+                vid,
+                super::private_shop::PrivateBuild {
+                    title,
+                    poly_vnum,
+                    title_type,
+                    page_count,
+                },
+                &tables,
+                mover,
+            ),
+        }
+    }
+
+    /// Run one personal-shop build, answering `PrivateBuilt` for the store or the
+    /// refusal's chats as a move.
+    fn private_build_step(
+        &mut self,
+        vid: Vid,
+        build: super::private_shop::PrivateBuild,
+        tables: &[protocol::cg_private_shop::CgPrivateShopItem],
+        mover: Mover,
+    ) -> Result<ShopAnswer, MoveItemRefused> {
+        match self.private_build(vid, build, tables, mover)? {
+            Ok(standing) => Ok(ShopAnswer::PrivateBuilt(Box::new(standing))),
+            Err(refused) => Ok(ShopAnswer::Moved(refused)),
         }
     }
 
@@ -464,6 +523,7 @@ impl GameState {
             }
             sold @ ShopAnswer::Moved(_) => sold,
             settled @ ShopAnswer::Settled(_) => settled,
+            built @ ShopAnswer::PrivateBuilt(_) => built,
             ShopAnswer::Quest { .. } => {
                 debug_assert!(false, "the window opens no quest");
                 ShopAnswer::Sent(records)

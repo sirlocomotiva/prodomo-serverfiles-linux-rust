@@ -50315,3 +50315,59 @@ mutation helper truncated `myshop.rs` to zero bytes mid-slice (no backup; the fi
 reconstructed from HEAD and the applied edits, and the scenario re-verified). `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 493. The private build
+
+A personal panel opens and closes, and a build stands the shop on the empire's
+market map, stores the shop row and the wares in one transaction, and sends
+`LOAD` to the owner and the stand's `ADD_ENTITY` around it.
+
+Legacy (`CInputMain::PrivateShopBuild`, `G/input_main.cpp:4136-4185`,
+`CHARACTER::BuildPrivateShop`, `G/char.cpp:11989-12127`, and
+`CPrivateShopManager::BuildPrivateShop`, `G/private_shop_manager.cpp:80-184`).
+The order is the logout cancel, the stun, the ten-second wait, the trade
+windows (a trade, an open safebox, an open own bundle shop, a browsed shop, an
+open cube, or a smith's window), the handle check, the open shop, the dungeon,
+the empire's market map (1, 21, 41 by empire, anything else anywhere), the
+trade cancel, the running quest, the empty build, the banword, the three-byte
+title floor, and then each table: a repeated cell, a missing item or proto, and
+a negative price are logged and silent, a bundle refuses with its line, an
+item-shop item with its, a worn one with its, and a locked one with its. The
+stand's polymorph clamps to the bundle row (30000-30008, else 30000), each page
+grids 8-by-8 with each ware one wide and its size tall, and the store answers
+before `SetPrivateShopTable` and `Show` send `LOAD` and `ADD_ENTITY`
+(`G/char.cpp:12160-12178`, `G/private_shop.cpp:58-92`).
+
+The Rewrite (`prodomo/src/game_state/private_shop.rs`, `protocol::cg_private_shop`,
+`protocol::gc_private_shop`, `db::private_shop`, migration 41). The build stores
+as one transaction — the shop row, the wares leaving `item`, the wares entering
+`private_shop_item` — and the records go out after, through `ShopStep::PrivateBuild`
+and `ShopAnswer::PrivateBuilt`. The stand's VID is the owner's (legacy allocates
+a fresh VID per shop; the entity table is a later slice). Shop rows reference the
+character, so a departure's cascade takes them; the stand's despawn is a later
+slice with the close.
+
+Ledger 492 filed the bundle buy under `sys.trade.private_shop`, whose scope the
+inventory gives as the offline shops. That was the wrong row: the bundle is
+`CShop`'s PC arm, so its note moved to `sys.npc.shop`, and this slice gives the
+private row its own scope back.
+
+Scenario `a_private_shop_builds_and_its_stand_appears`: Alpha opens and closes
+its panel with the bare headers, builds under `Axes` selling the sword for 500
+in slot 3, hears `LOAD`, the shop and ware store with the ware gone from `item`,
+and Yankee hears the stand. Units cover the panel, the stand, the short title,
+the bundle and the repeated cell, and the wrong map. Five `private_shop` units,
+six codec tests and one scenario join the counts below; the GC implemented count
+moves 124 to 125 and the missing 10 to 9.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+5182 passed, 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after
+bundling the build's decoration, splitting the gates and the stand, and cloning two test
+steps; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+The suite needed three runs: the first pinned the old GC counts, the second raced the
+scenario's store check before its first record read. No mutants were run: the suite's two
+failures were the count pins and the race, both fixed by the change itself. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

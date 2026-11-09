@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 492 (the bundle buy).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 493
+Last reviewed: 2026-11-09, after ledger section 493 (the private build).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 494
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -561,6 +561,7 @@ alternatives, and the 2-pulse dice spends a switcher per miss, changes the attri
 flushes the spend and the item copy; the finish whispers, the empty bot stops, and a warp stills
 the register. Since 491 `cg.game.myshop`, `gc.shop_sign`, the two Switchbot sub-headers and the armed `cmd.close_shop` are `ported`: a sword and a paper bundle open a bundle shop for 500 yang under the sign `Swords`, the sign reaches a witness, and `/close_shop` clears it and shows the job again; the two Switchbot arms were live since 490. The
 Since 492 `sys.trade.private_shop` is `partial`: a click on the seller opens its bundle window, and a buy of slot 3 moves the sword by id, charges the full 500, pays the seller whole without the flag, trails the sold update on both settled sides, and settles both sides in one transaction; a rebuy answers sold out, and the tax, the treasury and the refusals are unit-tested. The
+Since 493 `sys.trade.private_shop` is `partial`, with its own scope back: the panel opens and closes, and a build stands the shop on the empire's market map, stores the shop row and the wares in one transaction, and sends `LOAD` and the stand's `ADD_ENTITY`; the bundle buy ledger 492 filed there is `sys.npc.shop`'s PC arm instead. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

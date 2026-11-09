@@ -21,6 +21,7 @@ pub mod player_affects;
 pub mod player_skills;
 pub mod player_top;
 pub mod players;
+pub mod private_shop;
 pub mod quest_flags;
 pub mod quickslots;
 pub mod rank_global;

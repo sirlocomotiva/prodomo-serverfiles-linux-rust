@@ -78,7 +78,8 @@ use prodomo::game_loop_messages::{
     RestartKind, Settled, Shown, WhisperOutcome,
 };
 use prodomo::game_state::{
-    world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
+    world_item_id_range, GameState, PrivateShopBuilt, ShopAnswer, ShopStep, TradeAnswer,
+    TradeSettled, TradeStep,
 };
 use prodomo::game_state::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -146,9 +147,9 @@ use protocol::cg_inventory::{
     HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_MYSHOP,
     HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
     HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
-    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM,
-    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
-    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REFINE_ELEMENT,
+    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_PRIVATE_SHOP,
+    HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REFINE_ELEMENT,
     HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
     HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
     HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SWITCHBOT,
@@ -5830,12 +5831,13 @@ fn is_npc_step(header: u8) -> bool {
     is_shop_step(header) || is_quest_step(header)
 }
 
-/// Whether `header` is `CG_ON_CLICK`, `CG_SHOP` or `CG_MYSHOP`, the records a shop is
-/// used or built through.
+/// Whether `header` is `CG_ON_CLICK`, `CG_SHOP`, `CG_MYSHOP` or `CG_PRIVATE_SHOP`, the
+/// records a shop is used or built through.
 fn is_shop_step(header: u8) -> bool {
     header == HEADER_CG_ON_CLICK.value()
         || header == HEADER_CG_SHOP.value()
         || header == HEADER_CG_MYSHOP.value()
+        || header == HEADER_CG_PRIVATE_SHOP.value()
 }
 
 /// Run a shop step or a quest step.
@@ -5853,6 +5855,8 @@ where
         quest_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_MYSHOP.value() {
         myshop_step(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PRIVATE_SHOP.value() {
+        private_shop_step(session, addr, context, held, frame).await
     } else {
         shop_step(session, addr, context, held, frame).await
     }
@@ -5885,6 +5889,118 @@ where
         .myshop(vid, build.sign, build.tables, actor)
         .await;
     finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_PRIVATE_SHOP` (236) in the game phase: the panel and the build
+/// (`CInputMain::Analyze`'s `HEADER_CG_PRIVATE_SHOP` arm, `G/input_main.cpp:3954-4085`).
+/// Only the panel and the build subheaders are ported; the rest are later slices, and an
+/// unported subheader is ignored, as legacy's `default:` logs and ignores it (`:4078-4080`).
+/// A malformed build closes the connection.
+async fn private_shop_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use protocol::cg_variable::{
+        PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE,
+        PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
+    };
+    let subheader = frame.payload.first().copied().unwrap_or(u8::MAX);
+    let step = match subheader {
+        PRIVATE_SHOP_SUBHEADER_PANEL_OPEN => ShopStep::PrivatePanelOpen,
+        PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE => ShopStep::PrivatePanelClose,
+        PRIVATE_SHOP_SUBHEADER_BUILD => {
+            match protocol::cg_private_shop::CgPrivateShopBuild::decode_build(frame) {
+                Ok(build) => ShopStep::PrivateBuild {
+                    title: build.title,
+                    poly_vnum: build.poly_vnum,
+                    title_type: build.title_type,
+                    page_count: build.page_count,
+                    tables: build.tables,
+                },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed private-shop build; closing");
+                    return false;
+                }
+            }
+        }
+        _ => {
+            info!(%addr, subheader, "Client sent an unported private-shop subheader; ignoring");
+            return true;
+        }
+    };
+    let (Some(vid), Some(place)) = (held.world, ground_place(held)) else {
+        info!(%addr, subheader, "Private-shop step without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let account = quest_account(context, addr, held).await.unwrap_or_default();
+    let answer = match context.game.shop(vid, step, place, actor, account).await {
+        Ok(Ok(ShopAnswer::PrivateBuilt(built))) => {
+            info!(%addr, "Private shop built");
+            return finish_private_shop(session, addr, context, held, *built).await;
+        }
+        Ok(Ok(ShopAnswer::Sent(records))) => {
+            info!(%addr, subheader, "Private-shop step answered");
+            return send_shop_records(session, addr, &records).await;
+        }
+        Ok(Ok(ShopAnswer::Declined { reason, records })) => {
+            info!(%addr, subheader, ?reason, "Private-shop step declined");
+            return send_shop_records(session, addr, &records).await;
+        }
+        Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(moved)),
+        Ok(Ok(unexpected)) => {
+            warn!(%addr, ?unexpected, "A private-shop step answered what it cannot; closing");
+            return false;
+        }
+        Ok(Err(refused)) => Ok(Err(refused)),
+        Err(error) => Err(error),
+    };
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// Store a personal-shop build: the shop row and the wares in one transaction, then
+/// the owner's `LOAD` and the stand's `ADD_ENTITY` around it.
+async fn finish_private_shop<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    built: PrivateShopBuilt,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) =
+        db::private_shop::build_shop(&context.store, &built.shop, &built.wares).await
+    {
+        warn!(%addr, %error, "The private shop could not be stored; closing");
+        return false;
+    }
+    if let Err(error) = send_all(session, &[built.load]).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    let Some(vid) = held.world else {
+        return true;
+    };
+    match context
+        .game
+        .relay(vid, vec![(RelayScope::ViewAndSelf, built.entity)])
+        .await
+    {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not relay the private shop; closing");
+            return false;
+        }
+    }
+    true
 }
 
 /// `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase: `CInputMain::OnClick` and
@@ -5936,15 +6052,19 @@ where
     let answer = match context.game.shop(vid, step, place, actor, account).await {
         Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(moved)),
         Ok(Ok(ShopAnswer::Settled(settled))) => {
-            info!(%addr, ?step, "Shop buy settled");
+            info!(%addr, "Shop buy settled");
             return finish_trade(session, addr, context, held, *settled).await;
         }
+        Ok(Ok(ShopAnswer::PrivateBuilt(_))) => {
+            warn!(%addr, "An NPC step built a private shop; closing");
+            return false;
+        }
         Ok(Ok(ShopAnswer::Sent(records))) => {
-            info!(%addr, ?step, "Shop step answered");
+            info!(%addr, "Shop step answered");
             return send_shop_records(session, addr, &records).await;
         }
         Ok(Ok(ShopAnswer::Declined { reason, records })) => {
-            info!(%addr, ?step, ?reason, "Shop step declined");
+            info!(%addr, ?reason, "Shop step declined");
             return send_shop_records(session, addr, &records).await;
         }
         Ok(Ok(ShopAnswer::Quest {
@@ -5957,7 +6077,7 @@ where
             takes,
             empire,
         })) => {
-            info!(%addr, ?step, "A quest took the click");
+            info!(%addr, "A quest took the click");
             if !store_quest_items(addr, context, held, &items, &takes, (gold, claimed)).await {
                 return false;
             }
@@ -16022,6 +16142,7 @@ mod tests {
             (HEADER_CG_CL, MainRecord::Belongings),
             (HEADER_CG_SHOP, MainRecord::Npc),
             (HEADER_CG_MYSHOP, MainRecord::Npc),
+            (HEADER_CG_PRIVATE_SHOP, MainRecord::Npc),
             (HEADER_CG_QUEST_CONFIRM, MainRecord::Npc),
             (HEADER_CG_SCRIPT_SELECT_ITEM, MainRecord::Npc),
             (HEADER_CG_CHAT, MainRecord::Chat),

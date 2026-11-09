@@ -2022,7 +2022,7 @@ mod tests {
             .state
             .shop(
                 ZULU,
-                click,
+                click.clone(),
                 stale,
                 of(1),
                 &crate::game_loop_messages::QuestAccount::default(),
@@ -2449,7 +2449,7 @@ mod tests {
             .state
             .shop(
                 ALPHA,
-                buy,
+                buy.clone(),
                 at(2100),
                 of(1),
                 &crate::game_loop_messages::QuestAccount::default(),

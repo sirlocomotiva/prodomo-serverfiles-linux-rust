@@ -130,6 +130,7 @@ mod pickup;
 mod pk_mode;
 mod polymorph;
 mod premium;
+mod private_shop;
 mod protected;
 mod pvp;
 mod quest_quiet;
@@ -203,6 +204,7 @@ pub use premium::{
     PremiumStep, PREMIUM_ACTIVATE, PREMIUM_AFFECTS, PREMIUM_AFFECT_DURATION, PREMIUM_DURATION,
     PREMIUM_GC_LIST, PREMIUM_GC_OPEN, PREMIUM_LIST, PREMIUM_OPEN, PREMIUM_VOUCHER,
 };
+pub use private_shop::PrivateShopBuilt;
 pub use protected::{
     ProtectedStep, PROTECTED_ACTIVATE, PROTECTED_FRESH_PASSWORD, PROTECTED_PASSWORD_CHANGE,
     PROTECTED_PASSWORD_MAX_LEN,
@@ -745,6 +747,17 @@ pub struct GameState {
     switchbots: HashMap<u32, switchbot::Switchbot>,
     /// Each seller's open bundle shop, by its VID (`CShopManager::m_map_pkShopByPC`).
     my_shops: HashMap<common::vid::Vid, myshop::MyShop>,
+    /// Each owner's built personal shop, by its VID (`CPrivateShopManager::m_map_privateShop`,
+    /// keyed by VID here because the owner is online while the shop stands).
+    private_shops: HashMap<common::vid::Vid, private_shop::PrivateShop>,
+    /// The characters editing their panel (`m_bIsEditingPrivateShop`).
+    private_panels: std::collections::HashSet<common::vid::Vid>,
+    /// The Pulse each character last built at (`m_tLastPrivateShopBuild`).
+    private_build_at: HashMap<common::vid::Vid, u64>,
+    /// The shop each character views (`m_pPrivateShop`), by the owner's VID.
+    private_viewing: HashMap<common::vid::Vid, common::vid::Vid>,
+    /// Each shop's viewers (`m_set_shopViewer`), by the owner's VID.
+    private_viewers: HashMap<common::vid::Vid, Vec<common::vid::Vid>>,
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
@@ -4605,15 +4618,9 @@ impl GameState {
             } => {
                 // As with a move, a dropped answer leaves the world ahead of the store.
                 let place = self.live_place(vid, place);
-                if reply
-                    .send(self.shop(vid, step, place, mover, &account))
-                    .is_err()
-                {
-                    warn!(
-                        ?vid,
-                        ?step,
-                        "a shop step ran and nobody was left to store it"
-                    );
+                let answer = self.shop(vid, step, place, mover, &account);
+                if reply.send(answer).is_err() {
+                    warn!(?vid, "a shop step ran and nobody was left to store it");
                 }
             }
             GameCommand::Trade {

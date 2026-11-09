@@ -1545,6 +1545,7 @@ fn dynamic_len(header: u8) -> usize {
         | GC_WORLD_BOSS
         | GC_BATTLE_PASS
         | GC_LAND_LIST
+        | GC_PRIVATE_SHOP
         | GC_QUEST_INFO => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
@@ -1568,6 +1569,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
             | GC_DUEL_START
             | GC_WORLD_BOSS
             | GC_LAND_LIST
+            | GC_PRIVATE_SHOP
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1701,7 +1703,7 @@ fn game_len(header: u8) -> usize {
         // (`TPacketGCMessenger`, `G/packet.h:1896-1901`).
         GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER
         | GC_MESSENGER | GC_QUEST_INFO | GC_DUEL_START | GC_WORLD_BOSS | GC_BATTLE_PASS
-        | GC_LAND_LIST => dynamic_len(header),
+        | GC_LAND_LIST | GC_PRIVATE_SHOP => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -35363,6 +35365,11 @@ const GC_SWITCHBOT: u8 = 171;
 const CG_SWITCHBOT: u8 = 171;
 /// `HEADER_CG_MYSHOP` (55).
 const CG_MYSHOP: u8 = 55;
+/// `HEADER_CG_PRIVATE_SHOP` (236).
+const CG_PRIVATE_SHOP: u8 = 236;
+/// `HEADER_GC_PRIVATE_SHOP` (175): the header, the size word and the subheader, so it
+/// sizes from its own `WORD wSize`, like the other dynamic records.
+const GC_PRIVATE_SHOP: u8 = 175;
 /// `HEADER_GC_SHOP_SIGN` (39).
 const GC_SHOP_SIGN: u8 = 39;
 /// `TPacketGCShopSign`: the header, the VID, and the 33-byte sign.
@@ -46050,4 +46057,96 @@ fn a_bundle_shop_buy_settles_both_sides() {
         "(SELECT gold FROM player WHERE name = 'Yankee') = 500 AND (SELECT gold FROM player \
          WHERE name = 'Alpha') = 500",
     );
+}
+
+/// `sys.trade.private_shop`'s build: Alpha opens its panel, closes it, opens it again, and
+/// builds under the title `Axes` selling the sword for 500 yang in slot 3. The shop row and
+/// the ware store before the records arrive, the owner hears `LOAD`, and the witness hears
+/// the stand's `ADD_ENTITY`.
+#[test]
+fn a_private_shop_builds_and_its_stand_appears() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alice_listed, _entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    // The panel opens and closes with its bare headers.
+    alice.send_record(&[CG_PRIVATE_SHOP, 2]);
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_PRIVATE_SHOP, 4, 0, 7],
+        "OPEN_PANEL"
+    );
+    alice.send_record(&[CG_PRIVATE_SHOP, 3]);
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_PRIVATE_SHOP, 4, 0, 8],
+        "CLOSE_PANEL"
+    );
+    alice.quiet("the panel is over");
+    yankee.quiet("the witness is caught up");
+    // When: the build under `Axes`, selling the sword for 500 in slot 3.
+    let mut build = vec![CG_PRIVATE_SHOP, 0];
+    let mut title = [0u8; 33];
+    title[..4].copy_from_slice(b"Axes");
+    build.extend_from_slice(&title);
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.push(0);
+    build.push(1);
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&0u16.to_le_bytes());
+    build.extend_from_slice(&500i64.to_le_bytes());
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.extend_from_slice(&3u16.to_le_bytes());
+    alice.send_record(&build);
+    // Then: the owner hears `LOAD`, which the store's write orders first.
+    let load = alice.read_game();
+    assert_eq!(
+        &load[..4],
+        &[GC_PRIVATE_SHOP, 60, 0, 3],
+        "LOAD: {load:02x?}"
+    );
+    assert_eq!(&load[4..8], b"Axes");
+    assert_eq!(load[8], 0);
+    assert_eq!(load[57], 1, "Channel 1");
+    assert_eq!(load[58], 2, "STATE_OPEN");
+    assert_eq!(load[59], 1, "one page");
+    // And: the shop and the ware stored, and the ware left `item`.
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM private_shop WHERE owner_id = (SELECT id FROM player WHERE \
+         name = 'Alpha') AND state = 2 AND vnum = 30000 AND page_count = 1) AND EXISTS \
+         (SELECT 1 FROM private_shop_item WHERE id = 60 AND vnum = 19 AND pos = 3 AND gold \
+         = 500 AND owner_id = (SELECT id FROM player WHERE name = 'Alpha')) AND NOT \
+         EXISTS (SELECT 1 FROM item WHERE id = 60)",
+    );
+    let entity = yankee.read_game();
+    assert_eq!(
+        &entity[..4],
+        &[GC_PRIVATE_SHOP, 83, 0, 0],
+        "ADD_ENTITY: {entity:02x?}"
+    );
+    assert_eq!(&entity[24..29], b"Alpha", "the owner's name");
+    assert_eq!(entity[49], 0, "the title type");
+    assert_eq!(&entity[50..54], b"Axes");
 }
