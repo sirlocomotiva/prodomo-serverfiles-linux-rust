@@ -143,13 +143,14 @@ use protocol::cg_inventory::{
     HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
     HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN, HEADER_CG_LOGIN2,
     HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN,
-    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK,
-    HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER,
-    HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
-    HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING,
-    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
-    HEADER_CG_REFINE_ELEMENT, HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST,
-    HEADER_CG_SASH, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
+    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_MYSHOP,
+    HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
+    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
+    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM,
+    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
+    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REFINE_ELEMENT,
+    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
+    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
     HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SWITCHBOT,
     HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD,
     HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
@@ -5829,9 +5830,12 @@ fn is_npc_step(header: u8) -> bool {
     is_shop_step(header) || is_quest_step(header)
 }
 
-/// Whether `header` is `CG_ON_CLICK` or `CG_SHOP`, the two records a shop is used through.
+/// Whether `header` is `CG_ON_CLICK`, `CG_SHOP` or `CG_MYSHOP`, the records a shop is
+/// used or built through.
 fn is_shop_step(header: u8) -> bool {
-    header == HEADER_CG_ON_CLICK.value() || header == HEADER_CG_SHOP.value()
+    header == HEADER_CG_ON_CLICK.value()
+        || header == HEADER_CG_SHOP.value()
+        || header == HEADER_CG_MYSHOP.value()
 }
 
 /// Run a shop step or a quest step.
@@ -5847,9 +5851,40 @@ where
 {
     if is_quest_step(frame.header) {
         quest_step(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_MYSHOP.value() {
+        myshop_step(session, addr, context, held, frame).await
     } else {
         shop_step(session, addr, context, held, frame).await
     }
+}
+
+/// `CG_MYSHOP` (55) in the game phase: `CInputMain::MyShop`
+/// (`G/input_main.cpp:3255-3314`). The build is stored and sent as a move is.
+/// A malformed record closes the connection.
+async fn myshop_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Ok(build) = protocol::cg_myshop::CgMyShop::decode(frame) else {
+        warn!(%addr, "Client sent a malformed bundle build; closing");
+        return false;
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "Bundle build without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .myshop(vid, build.sign, build.tables, actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
 }
 
 /// `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase: `CInputMain::OnClick` and
@@ -15975,6 +16010,7 @@ mod tests {
             (HEADER_CG_SASH, MainRecord::Belongings),
             (HEADER_CG_CL, MainRecord::Belongings),
             (HEADER_CG_SHOP, MainRecord::Npc),
+            (HEADER_CG_MYSHOP, MainRecord::Npc),
             (HEADER_CG_QUEST_CONFIRM, MainRecord::Npc),
             (HEADER_CG_SCRIPT_SELECT_ITEM, MainRecord::Npc),
             (HEADER_CG_CHAT, MainRecord::Chat),

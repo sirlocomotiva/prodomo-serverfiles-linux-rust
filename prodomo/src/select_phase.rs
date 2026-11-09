@@ -175,6 +175,14 @@ impl NameRules {
     pub fn guild_name_ok(&self, name: &[u8]) -> bool {
         !holds_banword(&self.banwords, name) && !self.mobs.refuses(name)
     }
+
+    /// Whether `text` holds a banned word (`CBanwordManager::CheckString`,
+    /// `G/banword.cpp:34-70`): the word check without the mob-name check, for texts a
+    /// mob may name, like a shop sign (`G/char.cpp:864-868`).
+    #[must_use]
+    pub fn holds_word(&self, text: &[u8]) -> bool {
+        holds_banword(&self.banwords, text)
+    }
 }
 
 /// When each account last created a character: the DB server's `s_createTimeByAccountID`,

@@ -698,6 +698,8 @@ impl GameState {
         let combat = self.pc_combat.entry(raw).or_default();
         self.regens
             .cancel(&mut combat.recovery_due, Due::PcRecovery(raw));
+        // `CloseMyShop` (`:440`): the window drops before the stun packet goes.
+        self.close_my_shop(vid);
         self.packet_around(
             EntityKey::Character(raw),
             &header_and_vid(protocol::gc_inventory::HEADER_GC_STUN.value(), raw),
@@ -843,6 +845,7 @@ impl GameState {
         // send them.
         self.cancel_trade(vid);
         self.end_browsing(vid);
+        self.close_my_shop(vid);
         if self.aura_windows.remove(&vid).is_some() {
             self.aura_held.remove(&vid);
             let _sent = self.write_to_client(vid, protocol::gc_aura::GcAuraClose.encode().to_vec());
@@ -2258,6 +2261,53 @@ mod tests {
         assert!(
             matches!(&mall, Ok(SafeboxAnswer::Sent(records)) if *records == vec![closed]),
             "the mall stayed open: {mall:?}"
+        );
+    }
+
+    /// A dying seller's window drops and its sign clears, before the stun packet's
+    /// siblings: the death closes run `CloseMyShop` after `end_browsing`.
+    #[test]
+    fn a_dying_seller_closes_its_shop() {
+        use super::super::myshop::MYSHOP_PAPER_BUNDLE;
+        let mut field = a_field(true);
+        let mut sword = Item::new(5, 19);
+        sword.set_size(1).unwrap();
+        let mut paper = Item::new(6, MYSHOP_PAPER_BUNDLE);
+        paper.set_size(1).unwrap();
+        let at = |cell: u16| ItemPos::new(EWindows::Inventory as u8, cell);
+        field.join_with(
+            ALPHA,
+            (PLACE.1, HERE),
+            10,
+            &[(at(0), sword), (at(1), paper)],
+        );
+        field.join(BRAVO, BESIDE);
+        field.quiet();
+        let mut sign = [0u8; protocol::cg_myshop::CG_MYSHOP_SIGN_FIELD_SIZE];
+        sign[..6].copy_from_slice(b"Swords");
+        let table = protocol::cg_myshop::CgMyShopTable {
+            vnum: 19,
+            count: 1,
+            pos: at(0),
+            price: 500,
+            display_pos: 3,
+            tail: [0u8; protocol::cg_myshop::CG_MYSHOP_TABLE_TAIL_SIZE],
+        };
+        field
+            .world
+            .myshop(ALPHA, sign, std::slice::from_ref(&table), mover())
+            .unwrap();
+        assert!(field.world.has_my_shop(ALPHA));
+        field.quiet();
+        // The stunning blow closes the shop first, through the stun hook.
+        field.struck_down(ALPHA);
+        assert!(!field.world.has_my_shop(ALPHA));
+        let cleared = field.heard(BRAVO);
+        assert!(
+            cleared.iter().any(|record| record.first()
+                == Some(&protocol::gc_fields::HEADER_GC_SHOP_SIGN)
+                && record[5] == 0),
+            "the witness hears the clear: {cleared:02x?}"
         );
     }
 

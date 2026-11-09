@@ -578,6 +578,20 @@ pub enum GameCommand {
         /// Where the game thread reports what the switchbot step did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_MYSHOP` for the character online under `vid`, answered as a
+    /// move is.
+    MyShop {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The raw sign field.
+        sign: [u8; protocol::cg_myshop::CG_MYSHOP_SIGN_FIELD_SIZE],
+        /// The tables, in wire order.
+        tables: Vec<protocol::cg_myshop::CgMyShopTable>,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the build did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_AURA` for the character online under `vid`, answered as a move is.
     Aura {
         /// The VID of the character whose client sent the request.
@@ -4318,6 +4332,31 @@ impl GameLoopController {
             sub_header,
             slot,
             bodies,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a bundle build, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn myshop(
+        &self,
+        vid: common::vid::Vid,
+        sign: [u8; protocol::cg_myshop::CG_MYSHOP_SIGN_FIELD_SIZE],
+        tables: Vec<protocol::cg_myshop::CgMyShopTable>,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MyShop {
+            vid,
+            sign,
+            tables,
             mover,
             reply,
         })

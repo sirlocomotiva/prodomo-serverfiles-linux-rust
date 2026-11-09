@@ -121,6 +121,7 @@ mod monarch;
 mod motion;
 mod move_channel;
 mod multi_farm;
+mod myshop;
 mod observer;
 mod party;
 mod pc_heal;
@@ -742,6 +743,8 @@ pub struct GameState {
     /// use while another copy holds the marker is refused.
     blend_ticks: HashMap<common::vid::Vid, blend::BlendTick>,
     switchbots: HashMap<u32, switchbot::Switchbot>,
+    /// Each seller's open bundle shop, by its VID (`CShopManager::m_map_pkShopByPC`).
+    my_shops: HashMap<common::vid::Vid, myshop::MyShop>,
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
@@ -2654,6 +2657,7 @@ impl GameState {
             | GameCommand::DragonSoulRefine { .. }
             | GameCommand::RefineElement { .. }
             | GameCommand::Attr67 { .. }
+            | GameCommand::MyShop { .. }
             | GameCommand::Switchbot { .. }
             | GameCommand::Aura { .. }
             | GameCommand::Sash { .. }
@@ -3626,6 +3630,9 @@ impl GameState {
     /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
     pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
         self.leave_world_departure_gates(vid, departure);
+        // `CloseMyShop` in `CHARACTER::Destroy` (`G/char.cpp:570`): the window drops
+        // before the body goes, so the viewers see the sign clear.
+        self.close_my_shop(vid);
         self.arena_potions.remove(&vid);
         // `CheckMultiFarmAccount(..., false)` (`G/char.cpp:1791`): the leaver stops
         // farming before its body goes.
@@ -4804,7 +4811,8 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
             }
-            command @ (GameCommand::Switchbot { .. }
+            command @ (GameCommand::MyShop { .. }
+            | GameCommand::Switchbot { .. }
             | GameCommand::Aura { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
@@ -4913,6 +4921,15 @@ impl GameState {
     /// line lint: the switchbot, the aura, the sash, the changelook and the cube.
     fn apply_window_step(&mut self, command: GameCommand) {
         match command {
+            GameCommand::MyShop {
+                vid,
+                sign,
+                tables,
+                mover,
+                reply,
+            } => {
+                answer_item_step(vid, reply, self.myshop(vid, sign, &tables, mover));
+            }
             GameCommand::Switchbot {
                 vid,
                 sub_header,

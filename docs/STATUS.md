@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 490 (the switchbot).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 491
+Last reviewed: 2026-11-09, after ledger section 491 (the bundle build).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 492
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -559,7 +559,7 @@ accepts and cancels, with the locks and the death close; growth and evolve wait 
 `gc.switchbot` and `sys.custom.switchbot` are `ported`: a sword registers on a slot, starts with
 alternatives, and the 2-pulse dice spends a switcher per miss, changes the attributes, and always
 flushes the spend and the item copy; the finish whispers, the empty bot stops, and a warp stills
-the register. The
+the register. Since 491 `cg.game.myshop`, `gc.shop_sign`, the two Switchbot sub-headers and the armed `cmd.close_shop` are `ported`: a sword and a paper bundle open a bundle shop for 500 yang under the sign `Swords`, the sign reaches a witness, and `/close_shop` clears it and shows the job again; the two Switchbot arms were live since 490. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
@@ -990,6 +990,7 @@ owner should know about (178.5):
 | A nonmember woken on an arena map is ejected to its empire start on its own Channel when that Channel serves the target, else on the lowest-numbered Channel that does (ledger 469, owner question 60). | Legacy's `WarpSet` resolves the target's core through the P2P map table (`G/char.cpp:6694-6795`). |
 ## Legacy defects not to reproduce
 
+- `CShop::SetShopItems` checks the display slot against the 45-cell grid but writes it into the 40-entry window vector, so a `display_pos` of 40-44 writes past `m_itemVector` (`G/shop.cpp:139-161`). The Rewrite refuses the table, as the slot has no window cell (`myshop_slots`, ledger 491).
 - When a character enters the game with no movable point within 1000 of its saved position,
   legacy calls `Show` at its empire's recall position without testing that the map has a
   sectree there, and at an uninitialised `PIXEL_POSITION` when the map has no recall position,

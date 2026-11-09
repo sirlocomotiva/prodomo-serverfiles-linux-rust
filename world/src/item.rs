@@ -103,6 +103,10 @@ pub const ITEM_ANTIFLAG_GIVE: u32 = 1 << 13;
 /// penalty (`char_battle.cpp:1098` and `:1142`).
 pub const ITEM_ANTIFLAG_PKDROP: u32 = 1 << 14;
 
+/// `ITEM_ANTIFLAG_MYSHOP` (`item_length.h:394`): the item may not be sold in a bundle
+/// shop (`char.cpp:888`).
+pub const ITEM_ANTIFLAG_MYSHOP: u32 = 1 << 16;
+
 /// `ITEM_ANTIFLAG_SAFEBOX` (`item_length.h:395`): the item may not go in a safebox
 /// (`input_main.cpp:2322`).
 pub const ITEM_ANTIFLAG_SAFEBOX: u32 = 1 << 17;
@@ -976,6 +980,7 @@ mod tests {
             (ITEM_ANTIFLAG_GIVE, "ANTI_GIVE"),
             (ITEM_ANTIFLAG_PKDROP, "ANTI_PKDROP"),
             (ITEM_ANTIFLAG_STACK, "ANTI_STACK"),
+            (ITEM_ANTIFLAG_MYSHOP, "ANTI_MYSHOP"),
             (ITEM_ANTIFLAG_SAFEBOX, "ANTI_SAFEBOX"),
         ] {
             let at = ANTI_FLAG.iter().position(|known| *known == name);

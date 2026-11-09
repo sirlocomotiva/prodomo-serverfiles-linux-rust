@@ -50204,3 +50204,56 @@ clearing the cast, similar-name and unused-import findings by refactoring;
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 491. The bundle build
+
+`cg.game.myshop` is `ported`: `CInputMain::MyShop` (`G/input_main.cpp:3255-3314`) and
+`CHARACTER::OpenMyShop` (`G/char.cpp:805-975`). The gates run in legacy order: at the yang cap
+the line refuses with the plain text itself, stunned or dead is silent, and a trade, an open
+safebox, a browsed shop, an open cube or an open aura window refuses with `[LS;1014]`. Then
+`CanHandleItem` refuses with `[LS;841]` (an observer, an open own shop, a smith's window, a
+cube, a dragon soul window, a sash, an aura window or a changelook window); a warp cannot run a
+command, so its arm is vacuous. A running quest and an empty build are silent. A total at the
+yang cap refuses with the Romanian line, an empty sign is silent, and a banned word refuses
+with `[LS;812]` (the word check without the mob-name check, since a mob may name its sign).
+Each table is then checked: a repeated cell is silent, an ungiveable or unsellable-in-a-shop
+item refuses with `[LS;813]`, a worn one with `[LS;1060]`, and a window-locked one with
+`[LS;1133]`. Without a silk bundle (71049) the build spends one paper bundle (50200), and
+without either it is silent. Then the sign goes around, the window stands, the polymorph
+affect goes, a summoned horse is dismissed (or else a mount is unlaid), and the seller shows
+as the bundle mob, 30000.
+
+The wire order is spend, sign, polymorph: the spend's records and the sign go out immediately
+rather than riding the relay, because `set_polymorph` emits immediately too and a relayed sign
+would reach a witness after the polymorph's view. A re-open refuses with `[LS;841]`:
+`CanHandleItem` sees the open shop before `OpenMyShop` reaches its close-and-return, so the
+legacy toggle is dead code and stays dead. `CloseMyShop` (`G/char.cpp:978-1007`) runs on
+`/close_shop` (which this arms; its scenario moves from ledger 458's silence to the armed
+path), on death and stun, and on leaving the world: the sign clears around and the seller shows
+as its job again. `gc.shop_sign` is `ported` with it. The two Switchbot sub-header arms were
+live since ledger 490 and are marked now. Buying from the window is next; the silk price list
+is a DB packet with no client record.
+
+Two bounds differ from legacy. A `bItemCount` past `SHOP_HOST_ITEM_MAX_NUM` (40) stands an
+empty window, as `SetShopItems` returns after `Clear` but before the `resize`
+(`G/shop.cpp:92-93`); kept. A `display_pos` of 40-44 passes the 45-cell grid check but writes
+past the 40-entry window vector (`G/shop.cpp:139-161`): an honest client triggers it, so it is
+a Defect (STATUS), and the Rewrite refuses the table, as the slot has no window cell.
+
+Scenario `a_bundle_shop_opens_signs_and_closes`: Alpha carries a sword and a paper bundle,
+opens under the sign `Swords` selling the sword for 500 yang in slot 3, the sign reaches
+Yankee beside it, and `/close_shop` clears it on both wires, each polymorph reencode resending
+the witness and map 1's NPCs in key order. Units cover the armed open, the dead toggle, the
+silk keep, the silent cases, and the close. Five `myshop` units and one codec test join the
+counts below.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+5165 passed, 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after
+naming the mover `actor` (the aura convention), extracting `myshop_stand`, and taking its
+slots by reference; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline` clean. Mutants: dropping `has_my_shop` from the re-open gate is killed by the
+dead-toggle test; clamping the display bound survives as an equivalent mutant, the grid check
+refusing the class anyway. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
+width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

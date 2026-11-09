@@ -1783,6 +1783,7 @@ fn game_len(header: u8) -> usize {
         GC_DIG_MOTION => DIG_MOTION_LEN,
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
         GC_CUBE_RENEWAL => CUBE_LEN,
+        GC_SHOP_SIGN => SHOP_SIGN_LEN,
         // `TPacketGCSwitchbot` sizes from its own DWORD `size` (`G/packet.h:3415-3421`).
         GC_SWITCHBOT => u32::MAX as usize,
         other => panic!("unexpected game header {other}"),
@@ -35360,6 +35361,12 @@ const GC_FISH_EVENT_INFO: u8 = 0xdf;
 const GC_SWITCHBOT: u8 = 171;
 /// `HEADER_CG_SWITCHBOT` (171).
 const CG_SWITCHBOT: u8 = 171;
+/// `HEADER_CG_MYSHOP` (55).
+const CG_MYSHOP: u8 = 55;
+/// `HEADER_GC_SHOP_SIGN` (39).
+const GC_SHOP_SIGN: u8 = 39;
+/// `TPacketGCShopSign`: the header, the VID, and the 33-byte sign.
+const SHOP_SIGN_LEN: usize = 38;
 /// `TPacketGCFishEventInfo` (`G/packet.h:2876-2881`): the header, the sub-header and two
 /// `DWORD`s.
 const FISH_EVENT_INFO_LEN: usize = 10;
@@ -45731,4 +45738,118 @@ fn a_switchbot_slot_registers_starts_and_runs() {
         saw_copy || saw_whisper,
         "a copy or a finish whisper follows the start"
     );
+}
+
+/// `cg.game.myshop` and `cmd.close_shop`: Alpha carries a sword and a paper bundle, builds a
+/// bundle shop selling the sword for 500 yang under the sign `Swords`, and the sign reaches
+/// Yankee, who stands beside it; `/close_shop` clears the sign on both wires.
+#[test]
+fn a_bundle_shop_opens_signs_and_closes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 50200 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, alice_listed, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    // Map 1's NPCs around Alpha, in the re-encode's key order.
+    let mut npcs: Vec<u32> = entered
+        .shown
+        .inserts()
+        .iter()
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    npcs.sort_unstable();
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    // The build: sign `Swords`, one table for the sword at 500 yang in slot 3.
+    let mut build = vec![CG_MYSHOP];
+    let mut sign = [0u8; 33];
+    sign[..6].copy_from_slice(b"Swords");
+    build.extend_from_slice(&sign);
+    build.push(1);
+    build.extend_from_slice(&19u32.to_le_bytes());
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&0u16.to_le_bytes());
+    build.extend_from_slice(&500u64.to_le_bytes());
+    build.push(3);
+    build.extend_from_slice(&[0u8; 50]);
+    alice.send_record(&build);
+    // The spend's clear and the seller's own sign; the witness hears the sign.
+    let spent = alice.read_game();
+    assert_eq!(spent[0], ITEM_SET, "the bundle's cell clears: {spent:02x?}");
+    let own = alice.read_game();
+    assert_eq!(
+        own[0], GC_SHOP_SIGN,
+        "the seller hears its sign: {own:02x?}"
+    );
+    assert_eq!(&own[5..11], b"Swords");
+    let seen = yankee.read_game();
+    assert_eq!(seen, own, "the witness hears the same sign");
+    // The seller's polymorph reencodes its view on both wires, and the reencode
+    // resends the witness to the seller.
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_DEL);
+    alice.sees_arrive(alice_listed.id, false, None);
+    assert_eq!(
+        alice.read_game(),
+        walk_mode_of(&yankee_listed.id.to_le_bytes())
+    );
+    alice.sees_arrive(yankee_listed.id, false, None);
+    assert_eq!(yankee.read_game()[0], GC_CHARACTER_DEL);
+    yankee.sees_arrive(alice_listed.id, false, None);
+    for npc in &npcs {
+        let (_, insert, _) = alice.sees_arrive(*npc, false, None);
+        assert_eq!(insert[21], 1, "CHAR_TYPE_NPC");
+    }
+    // The polymorph's battle compute trails the reencode on the seller's wire.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/close_shop"));
+    loop {
+        let cleared = alice.read_game();
+        if cleared[0] == GC_SHOP_SIGN {
+            assert_eq!(cleared[5], 0, "the sign clears: {cleared:02x?}");
+            break;
+        }
+        assert_eq!(
+            cleared[0], GC_POINT_CHANGE,
+            "only points trail: {cleared:02x?}"
+        );
+    }
+    let witnessed = yankee.read_game();
+    assert_eq!(witnessed[0], GC_SHOP_SIGN, "the witness hears the clear");
+    assert_eq!(witnessed[5], 0);
+    // `/close_shop` cleared the sign on both wires, read above.
+    // The job restore reencodes the view on both wires, resending the witness.
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_DEL);
+    alice.sees_arrive(alice_listed.id, false, None);
+    assert_eq!(
+        alice.read_game(),
+        walk_mode_of(&yankee_listed.id.to_le_bytes())
+    );
+    alice.sees_arrive(yankee_listed.id, false, None);
+    assert_eq!(yankee.read_game()[0], GC_CHARACTER_DEL);
+    yankee.sees_arrive(alice_listed.id, false, None);
+    for npc in &npcs {
+        alice.sees_arrive(*npc, false, None);
+    }
 }

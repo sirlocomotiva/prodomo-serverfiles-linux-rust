@@ -242,10 +242,12 @@ impl GameState {
                 None
             }
             // `do_close_shop` (`G/cmd_general.cpp:2004-2012`): an observer is silent, and a
-            // caller with no own shop is silent. No caller of this build holds one
-            // (`GetMyShop` is never set, `sys.trade.private_shop` is missing), so the line
-            // always stays silent; the arms land with the shop's slice.
-            GmLine::CloseShop => None,
+            // caller with no own shop is silent; else the window drops, the sign
+            // clears around, and the seller shows as its job again.
+            GmLine::CloseShop => {
+                self.close_shop_line(vid);
+                None
+            }
             GmLine::CheckMmoney => {
                 self.run_check_mmoney(vid, rest, mover);
                 None

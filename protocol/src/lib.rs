@@ -47,6 +47,7 @@ pub mod cg_mark;
 pub mod cg_messenger;
 pub mod cg_micro;
 pub mod cg_move;
+pub mod cg_myshop;
 pub mod cg_name;
 pub mod cg_party;
 pub mod cg_party_skill;
