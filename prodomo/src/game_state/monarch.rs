@@ -314,6 +314,7 @@ impl GameState {
             points: None,
             quickslots: None,
             buildings: Vec::new(),
+            account: None,
         })
     }
     /// The price a warp or a summon charges before it fires.

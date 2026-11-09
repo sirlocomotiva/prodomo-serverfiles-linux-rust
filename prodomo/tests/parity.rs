@@ -32442,6 +32442,11 @@ fn a_gm_lists_counts_flashes_and_writes_sockets() {
         "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 21, id, 1, 3, 1, \
          10 FROM player WHERE name = 'Yankee'",
     );
+    sql(
+        &database,
+        "INSERT INTO item (id, account_id, window_type, pos, count, vnum) SELECT 22, id, 3, 0, \
+         1, 10 FROM account WHERE login = 'alice'",
+    );
     let server = Server::start(binary(), database.url());
     let (mut alice, listed) = enter_world_as_implementor(&server);
     let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
@@ -32524,9 +32529,40 @@ fn a_gm_lists_counts_flashes_and_writes_sockets() {
         vec![(20, 110), (21, 77)],
         "the rows hold the writes"
     );
+
+    stored_socket_write(&mut alice, &database);
     drop(alice);
     drop(yankee);
     drop(server);
+}
+
+/// `/set_socket` on a stored sword: Alice opens her safebox, the write's update names the
+/// safebox window, and the account row holds it.
+fn stored_socket_write(alice: &mut Keyed, database: &ScratchDatabase) {
+    alice.send_record(&slash(b"/click_safebox"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(prodomo::chat::CHAT_COMMAND, 1, b"ShowMeSafeboxPassword")
+    );
+    alice.send_record(&slash(b"/safebox_password 000000"));
+    assert_eq!(alice.read_game(), [GC_SAFEBOX_SIZE, 9]);
+    let _set = alice.read_game();
+    alice.send_record(&client_chat(CHAT_TALKING, b"/set_socket 22 1 55"));
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    let update = wire
+        .iter()
+        .find(|record| record[0] == ITEM_UPDATE)
+        .unwrap_or_else(|| panic!("the stored sword's update: {wire:02x?}"));
+    assert_eq!(
+        update[1], SAFEBOX_WINDOW,
+        "the safebox window: {update:02x?}"
+    );
+    assert_eq!(update_sockets(update)[1], 55);
+    assert_eq!(
+        rows_of(database, "SELECT id, socket1 FROM item WHERE id = 22"),
+        vec![(22, 55)],
+        "the account row holds the write"
+    );
 }
 
 /// `cmd.add_attr` and `cmd.change_attr` (`do_add_attr`, `G/cmd_gm.cpp:3927-3932`;

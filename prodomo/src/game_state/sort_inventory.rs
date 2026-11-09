@@ -104,6 +104,7 @@ impl GameState {
             points: None,
             quickslots: None,
             buildings: Vec::new(),
+            account: None,
         })
     }
 

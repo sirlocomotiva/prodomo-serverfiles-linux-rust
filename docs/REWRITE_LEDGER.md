@@ -50894,3 +50894,22 @@ suite 5223 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 scenario passed 4 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 506. The stored socket
+
+`/set_socket` knew the items a character in the world holds and the items lying on the
+ground, but not the items in an open safebox or mall, which legacy's `ITEM_MANAGER::Find`
+holds like every created item. Now it does: the line searches the open windows after the
+world holders, the opener hears the item's update (`UpdatePacket` with the safebox or
+mall window), and the account row is stored through a new `AccountChange::Sockets` (the
+sockets statement generalized over the holder column), carried by a new `account` field
+on `GmRows` that the descriptor drains through the account drain. The socket scenario
+opens Alice's safebox and writes socket 1 of the stored sword to 55 on the wire and in
+the row. The mall shares the window lookup, so it is covered by the same arm.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5224 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The
+scenario passed 2 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

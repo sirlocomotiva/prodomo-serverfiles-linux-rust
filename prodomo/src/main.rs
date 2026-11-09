@@ -14702,6 +14702,14 @@ async fn gm_line_step(
                 return false;
             }
         }
+        if let Some((account, changes)) = rows.account {
+            if let Err(error) =
+                db::items::apply_account_changes(&context.store, account, &changes).await
+            {
+                warn!(%addr, %error, ?line, "The GM line's account row could not be stored; closing");
+                return false;
+            }
+        }
         if let Some((empire, money)) = rows.monarch {
             if let Err(error) = db::monarch::store_money(&context.store, empire, money).await {
                 warn!(%addr, %error, ?line, "The monarch spend could not be stored; closing");

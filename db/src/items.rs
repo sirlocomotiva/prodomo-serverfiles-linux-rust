@@ -1034,6 +1034,13 @@ pub enum AccountChange {
         /// The item.
         id: u32,
     },
+    /// The item's sockets changed (`CItem::SetSocket` on a stored item).
+    Sockets {
+        /// The item.
+        id: u32,
+        /// All of its sockets, as they are now.
+        sockets: [i32; SOCKETS],
+    },
 }
 
 /// Whose rows a statement names: a character's, or an account's safebox and mall.
@@ -1364,13 +1371,14 @@ pub async fn apply_account_changes(
                 }
             }
             AccountChange::Count { count, .. } => check_count(*count)?,
-            AccountChange::Destroyed { .. } => {}
+            AccountChange::Destroyed { .. } | AccountChange::Sockets { .. } => {}
         }
     }
     if changes.is_empty() {
         return Ok(());
     }
     let holder = Holder::Account(account_id);
+    let set_sockets = set_sockets_statement_holder(holder);
     let mut transaction = store.pool().begin().await?;
     sqlx::query(DEFER_CELL_KEYS)
         .execute(&mut *transaction)
@@ -1391,6 +1399,15 @@ pub async fn apply_account_changes(
             AccountChange::Destroyed { id } => {
                 (id, destroy_row(&mut transaction, holder, id).await?)
             }
+            AccountChange::Sockets { id, sockets } => {
+                let mut query = sqlx::query(&set_sockets)
+                    .bind(i64::from(id))
+                    .bind(i64::from(holder.id()));
+                for socket in sockets {
+                    query = query.bind(socket);
+                }
+                (id, query.execute(&mut *transaction).await?.rows_affected())
+            }
         };
         if touched == 0 {
             transaction.rollback().await?;
@@ -1408,7 +1425,9 @@ pub async fn apply_account_changes(
                     window_type,
                     pos,
                 } => Some((account_id, id, window_type, pos)),
-                AccountChange::Count { .. } | AccountChange::Destroyed { .. } => None,
+                AccountChange::Count { .. }
+                | AccountChange::Destroyed { .. }
+                | AccountChange::Sockets { .. } => None,
             })
             .collect();
         return Err(taken_account_cell(account_id, &landed, &shared));
@@ -1665,14 +1684,21 @@ async fn write_holder_change(
 /// The statement a [`RowChange::Sockets`] runs: every socket column of one owned row, bound
 /// from `$3` on.
 fn set_sockets_statement() -> String {
+    set_sockets_statement_holder(Holder::Character(0))
+}
+
+/// The statement an account or character sockets write runs: every socket column of one
+/// row of the holder, bound from `$3` on.
+fn set_sockets_statement_holder(holder: Holder) -> String {
     format!(
-        "UPDATE item SET {} WHERE id = $1 AND owner_id = $2",
+        "UPDATE item SET {} WHERE id = $1 AND {} = $2",
         SOCKET_COLUMNS
             .iter()
             .zip(3..)
             .map(|(name, index)| format!("{name} = ${index}"))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        holder.column()
     )
 }
 

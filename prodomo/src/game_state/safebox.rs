@@ -80,6 +80,25 @@ impl Storage {
         self.mall.as_ref()
     }
 
+    /// The open window holding item `id`, if one is open.
+    pub(super) fn window_of(&mut self, id: u32) -> Option<&mut Safebox> {
+        if self
+            .safebox
+            .as_ref()
+            .is_some_and(|safebox| safebox.find(id).is_some())
+        {
+            self.safebox.as_mut()
+        } else if self
+            .mall
+            .as_ref()
+            .is_some_and(|mall| mall.find(id).is_some())
+        {
+            self.mall.as_mut()
+        } else {
+            None
+        }
+    }
+
     /// The open window `mall` names.
     pub(super) fn window_mut(&mut self, mall: bool) -> &mut Option<Safebox> {
         if mall {

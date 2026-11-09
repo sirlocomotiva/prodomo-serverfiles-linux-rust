@@ -73,7 +73,9 @@ use super::item_move::{
 };
 use super::items::{CharacterItems, Rejected};
 use super::quickslot::{QuickslotSync, SyncTo};
-use crate::item::{gc_item_clear, Item, ItemId, ITEM_ANTIFLAG_SAFEBOX, ITEM_FLAG_IRREMOVABLE};
+use crate::item::{
+    gc_item_clear, Item, ItemId, ITEM_ANTIFLAG_SAFEBOX, ITEM_FLAG_IRREMOVABLE, SOCKETS,
+};
 
 /// The width of a safebox: `CGrid(5, rows)` (`G/safebox.cpp:18`).
 pub const SAFEBOX_WIDTH: u32 = 5;
@@ -343,6 +345,24 @@ impl Safebox {
     /// The items in cell order.
     pub fn items(&self) -> impl Iterator<Item = &Item> + '_ {
         self.held.values().map(|held| &held.item)
+    }
+
+    /// `CItem::SetSocket` on the stored item `id` (`G/item.cpp:1643-1648`): the socket takes
+    /// the value and the new sockets are answered, for the caller to send (`UpdatePacket`)
+    /// and store (`Save`). An item the window does not hold answers nothing.
+    pub fn set_socket(&mut self, id: u32, index: usize, value: i32) -> Option<[i32; SOCKETS]> {
+        let held = self.held.values_mut().find(|held| held.item.id == id)?;
+        held.item.set_socket(index, value).ok()?;
+        Some(held.item.sockets)
+    }
+
+    /// The stored item `id`, for the update its socket write sends.
+    #[must_use]
+    pub fn find(&self, id: u32) -> Option<&Item> {
+        self.held
+            .values()
+            .map(|held| &held.item)
+            .find(|item| item.id == id)
     }
 
     /// The set records of every item, in cell order: what opening the window sends.
@@ -823,6 +843,17 @@ mod tests {
             window: StoreWindow::Safebox,
             pos,
         })
+    }
+
+    #[test]
+    fn a_socket_write_lands_on_the_stored_item_and_answers_it() {
+        let mut safebox = safebox(vec![stored(item(1, SWORD, 1), 0)]);
+        assert_eq!(safebox.find(2), None);
+        let sockets = safebox.set_socket(1, 1, 55).expect("the stored sword");
+        assert_eq!(sockets[1], 55);
+        assert_eq!(safebox.find(1).expect("found").sockets[1], 55);
+        assert_eq!(safebox.set_socket(1, 6, 5), None, "past the six");
+        assert_eq!(safebox.set_socket(2, 0, 5), None, "no such item");
     }
 
     #[test]

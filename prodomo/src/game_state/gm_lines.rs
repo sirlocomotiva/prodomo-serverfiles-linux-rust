@@ -92,6 +92,9 @@ pub struct GmRows {
     /// The building halves the line judged, in order, which the descriptor
     /// drains through the land drain. Empty for a line that built nothing.
     pub buildings: Vec<super::guild::GuildQuestStore>,
+    /// The account whose safebox or mall rows changed, with the changes, stored through
+    /// the account drain. `None` for a line that touched no account row.
+    pub account: Option<(u32, Vec<db::items::AccountChange>)>,
 }
 
 /// What one attribute line rolled on the worn weapon, for
@@ -453,6 +456,7 @@ impl GameState {
             points: outcome.points,
             quickslots: outcome.quickslots,
             buildings: Vec::new(),
+            account: None,
         })
     }
 
@@ -517,6 +521,7 @@ impl GameState {
             points: None,
             quickslots: None,
             buildings: Vec::new(),
+            account: None,
         })
     }
 
@@ -697,6 +702,28 @@ impl GameState {
         if let Some(holder) = holder {
             return self.write_socket(holder, id, (index, value));
         }
+        // An item in an open safebox or mall (`ITEM_MANAGER::Find` holds every created
+        // item): its opener hears the update and its account row is stored.
+        if let Some(opener) = self
+            .storages
+            .iter()
+            .filter_map(|(vid, storage)| {
+                storage
+                    .safebox()
+                    .filter(|safebox| safebox.find(id).is_some())
+                    .map(|safebox| (*vid, safebox.account()))
+                    .or_else(|| {
+                        storage
+                            .mall()
+                            .filter(|mall| mall.find(id).is_some())
+                            .map(|mall| (*vid, mall.account()))
+                    })
+            })
+            .map(|(vid, _)| vid)
+            .next()
+        {
+            return self.write_stored_socket(opener, id, (index, value));
+        }
         // A ground item has no owner: `UpdatePacket` sends nothing, and it has no row.
         if let Some(lying) = self
             .ground
@@ -739,6 +766,41 @@ impl GameState {
             points: None,
             quickslots: None,
             buildings: Vec::new(),
+            account: None,
+        })
+    }
+
+    /// `SetSocket(index, value)` on the item `id` in the safebox or mall `opener` has
+    /// open: the update reaches the opener, and the account row is answered for storing.
+    fn write_stored_socket(
+        &mut self,
+        opener: Vid,
+        id: ItemId,
+        (index, value): (usize, i32),
+    ) -> Option<GmRows> {
+        let storage = self.storages.get_mut(&opener)?;
+        let (account, sockets, update) = storage.window_of(id).and_then(|safebox| {
+            let sockets = safebox.set_socket(id, index, value)?;
+            let item = safebox.find(id)?;
+            let mut frame = Vec::new();
+            world::character::ItemRecord::Update(item.gc_item_update()).encode_into(&mut frame);
+            Some((safebox.account(), sockets, frame))
+        })?;
+        let _sent = self.write_to_client(opener, update);
+        let pid = self.characters.find_by_vid(opener).ok()?.player_id();
+        Some(GmRows {
+            pid,
+            changes: Vec::new(),
+            cleared_skills: Vec::new(),
+            gold: 0,
+            monarch: None,
+            points: None,
+            quickslots: None,
+            buildings: Vec::new(),
+            account: Some((
+                account,
+                vec![db::items::AccountChange::Sockets { id, sockets }],
+            )),
         })
     }
 
@@ -860,6 +922,7 @@ impl GameState {
             points: None,
             quickslots: None,
             buildings: Vec::new(),
+            account: None,
         })
     }
 }

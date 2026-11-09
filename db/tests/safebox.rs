@@ -719,6 +719,19 @@ async fn a_move_inside_the_safebox_is_one_transaction_under_the_account() {
         (None, Some(account), SAFEBOX, 0)
     );
 
+    // A socket write: every socket column of the account's row.
+    let sockets = [AccountChange::Sockets {
+        id: 1_000_380,
+        sockets: [0, 55, 0, 0, 0, 0],
+    }];
+    apply_account_changes(store, account, &sockets)
+        .await
+        .unwrap();
+    assert_eq!(
+        load_item(store, 1_000_380).await.unwrap().unwrap().sockets,
+        [0, 55, 0, 0, 0, 0]
+    );
+
     // A whole merge: the source is used up and the stack grows.
     let merge = [
         AccountChange::Count {

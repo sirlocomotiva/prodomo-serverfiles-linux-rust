@@ -111,6 +111,7 @@ impl GameState {
             points: character.points().cloned(),
             quickslots: None,
             buildings: halves,
+            account: None,
         })
     }
 
@@ -185,6 +186,7 @@ impl GameState {
             points: character.points().cloned(),
             quickslots: None,
             buildings: halves,
+            account: None,
         })
     }
 
@@ -460,6 +462,7 @@ impl GameState {
             points: character.points().cloned(),
             quickslots: None,
             buildings: Vec::new(),
+            account: None,
         })
     }
 }
