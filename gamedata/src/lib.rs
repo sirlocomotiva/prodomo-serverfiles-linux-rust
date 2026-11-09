@@ -56,5 +56,6 @@ pub mod shop;
 pub mod skill;
 pub mod special_item_group;
 pub mod sql_dump;
+pub mod stack_attribute;
 pub mod text_file;
 pub mod world_boss;

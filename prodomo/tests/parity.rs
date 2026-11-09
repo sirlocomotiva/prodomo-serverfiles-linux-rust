@@ -12401,14 +12401,31 @@ fn enter_equipped_world(server: &Server, login: &[u8]) -> (Keyed, Listed, Entere
 /// `a_relogged_character_wears_its_equipment_and_its_points_count_it`), and a worn weapon's attack
 /// speed changes the points after the items, which the shared loader does not allow for; this
 /// reads the load through to its final points record, then enters.
+/// [`enter_equipped_world_with`] for a character in another slot.
+fn enter_equipped_world_on(
+    server: &Server,
+    login: &[u8],
+    slot: u8,
+    item_count: usize,
+) -> (Keyed, Listed, Entered) {
+    let (mut keyed, _empire, list) = select_screen(server, login);
+    let character = listed(&list, usize::from(slot));
+    keyed.send_record(&client_select(slot));
+    select_equipped_enter(&mut keyed, item_count);
+    let entered = enter_game_view(&mut keyed);
+    (keyed, character, entered)
+}
+
 fn enter_equipped_world_with(
     server: &Server,
     login: &[u8],
     item_count: usize,
 ) -> (Keyed, Listed, Entered) {
-    let (mut keyed, _empire, list) = select_screen(server, login);
-    let character = listed(&list, 0);
-    keyed.send_record(&client_select(0));
+    enter_equipped_world_on(server, login, 0, item_count)
+}
+
+/// The select and load burst [`enter_equipped_world_on`] reads before entering.
+fn select_equipped_enter(keyed: &mut Keyed, item_count: usize) {
     // The client reports its version once a character is selected, so the enter-game check
     // passes; the record is answered with nothing.
     keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
@@ -12433,8 +12450,6 @@ fn enter_equipped_world_with(
         record = keyed.read_game();
     }
     assert_eq!(keyed.read_game()[0], GC_PLAYER_POINTS);
-    let entered = enter_game_view(&mut keyed);
-    (keyed, character, entered)
 }
 
 #[test]
@@ -33110,6 +33125,34 @@ fn punch_until(alpha: &mut Keyed, dog: u32, line: &[u8]) -> Vec<Vec<u8>> {
     panic!("the dog's drop never came: {seen:02x?}");
 }
 
+/// Beta, just entered, targets `dog` and punches it until the stack feed's two item
+/// updates (counter, then bonus) land: every record read on the way.
+fn punch_until_fed(beta: &mut Keyed, dog: u32) -> Vec<Vec<u8>> {
+    beta.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    beta.send_record(&client_target(dog));
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        beta.send_record(&client_attack(dog));
+        let (wire, _) = beta.drain_game(Duration::from_millis(300), game_len);
+        seen.extend(wire);
+        let updates = seen
+            .iter()
+            .filter(|record| record[0] == ITEM_UPDATE && record.len() == ITEM_UPDATE_LEN)
+            .count();
+        if updates >= 2 {
+            return seen;
+        }
+    }
+    panic!("the feed never came: {seen:02x?}");
+}
+
 /// `/pickup_affect` while `held` is the pick-up row: its remove record, and the add of `to`
 /// with the seconds left.
 fn switch_pickup(alpha: &mut Keyed, held: u32, to: u32) {
@@ -37516,8 +37559,9 @@ fn a_rider_neither_emotes_nor_changes_its_body_and_a_morph_wears_nothing() {
         sql(
             &database,
             &format!(
-                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
-                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT \
+                 {id}, id, 1, {cell}, 1, {vnum}, extract(epoch from now() + interval '1 day')::int \
+                 FROM player WHERE name = 'Alpha'"
             ),
         );
     }
@@ -43105,8 +43149,9 @@ fn a_premium_opens_lists_activates_and_banks() {
     );
     sql(
         &database,
-        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 40, id, 1, 0, \
-         1, 80015 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 40, id, \
+         1, 0, 1, 80015, extract(epoch from now() + interval '1 day')::int FROM player WHERE \
+         name = 'Alpha'",
     );
     let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut keyed);
@@ -43118,8 +43163,9 @@ fn a_premium_opens_lists_activates_and_banks() {
     drop(keyed);
     sql(
         &database,
-        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 41, id, 1, 1, \
-         1, 80015 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 41, id, \
+         1, 1, 1, 80015, extract(epoch from now() + interval '1 day')::int FROM player WHERE \
+         name = 'Alpha'",
     );
     let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut keyed);
@@ -45074,4 +45120,114 @@ fn a_blend_use_lays_its_marker_and_its_echo_takes_it_off() {
         .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
         .collect();
     assert_eq!(stopped[3], 0, "socket 3 stops: {stopped:?}");
+}
+
+/// `sys.item.stack_attribute` (`ITEM_STACK_ATTRIBUTE`, `G/item_stack_attribute.cpp`):
+/// Beta, the assassin, lowered to level 9, carries a plain dagger in cell 1, the
+/// Aquarian skin (40130) in cell 2 with its monster counter at 24, its day of
+/// `LIMIT_REAL_TIME` ahead of it, and red potions in cell 0. Beta puts the dagger
+/// on, then the skin on the costume weapon cell. Beta kills the stray dog: the kill
+/// feeds the monster row at the dog's race, slot 1 counts to 25, slot 0 grants
+/// apply 63 at 1, and the point moves — each `SetForceAttribute` sends its
+/// update, so the two updates arrive in legacy's order. The feed stamps the flood,
+/// so drinking the potion at once is refused with legacy's line; a second later the
+/// drink lands.
+#[test]
+fn a_kill_feeds_the_worn_skin_and_the_flood_refuses_a_use() {
+    use protocol::gc_item_window::GcItemUpdate;
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        DOG_AT_ALPHA,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 9, hp = 1920, sp = 70000, x = 470000, y = 950000 WHERE name = 'Beta'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 29, id, 1, 1, \
+         1, 1000 FROM player WHERE name = 'Beta'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 30, id, \
+         1, 2, 1, 40130, extract(epoch from now() + interval '1 day')::int FROM player WHERE \
+         name = 'Beta'",
+    );
+    sql(&database, "UPDATE item SET attrvalue1 = 24 WHERE id = 30");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 31, id, 1, 0, \
+         3, 27001 FROM player WHERE name = 'Beta'",
+    );
+    let (mut beta, _listed, entered) = enter_equipped_world_on(&server, b"alice", 1, 3);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+
+    // Given: Beta puts the dagger on, then the skin on the costume weapon cell. The
+    // select counts as a fight for 1.5 s, which legacy refuses with `[LS;451]`; the
+    // wait sits it out.
+    std::thread::sleep(Duration::from_millis(1600));
+    for cell in [1, 2] {
+        beta.send_record(&client_item_use(cell));
+        let (wire, _) = beta.drain_game(Duration::from_secs(1), game_len);
+        assert!(
+            wire.iter().any(|record| record[0] == ITEM_SET),
+            "cell {cell} is worn: {wire:02x?}"
+        );
+    }
+
+    // When: Beta kills the dog. Then: the feed's two updates, the counter's then the
+    // bonus's, and the monster-bonus point.
+    // The dog drops nothing of its own: the kill is done when the feed's two item
+    // updates land.
+    let seen = punch_until_fed(&mut beta, dog);
+    let updates: Vec<Vec<(u8, i16)>> = seen
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE && record.len() == ITEM_UPDATE_LEN)
+        .map(|record| GcItemUpdate::decode(record).expect("an item update"))
+        .filter(|update| update.cell.cell == 180 + 22)
+        .map(|update| {
+            update
+                .attributes
+                .iter()
+                .map(|attr| (attr.b_type, attr.s_value))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        updates.len(),
+        2,
+        "the counter's, then the bonus's: {seen:02x?}"
+    );
+    assert_eq!(updates[0][1], (0, 25), "slot 1 counts to 25 first");
+    assert_eq!(updates[1][0], (63, 1), "slot 0 grants apply 63 at 1 after");
+    wait_for(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 30 AND attrvalue1 = 25 AND attrtype0 = 63 \
+         AND attrvalue0 = 1)",
+    );
+
+    // And: a drink at once is refused with the flood's line; a second later it lands.
+    beta.send_record(&client_item_use(0));
+    let (wire, _) = beta.drain_game(Duration::from_secs(1), game_len);
+    assert!(wire.contains(&an_info_line(b"You need to wait 1 second to do that.")));
+    std::thread::sleep(Duration::from_millis(1100));
+    beta.send_record(&client_item_use(0));
+    let (wire, _) = beta.drain_game(Duration::from_secs(1), game_len);
+    assert!(
+        wire.iter().any(|record| record[0] == ITEM_UPDATE),
+        "the drink lands a second out: {wire:02x?}"
+    );
+    drop(server);
 }

@@ -44,11 +44,10 @@ use gamedata::item_kind::{
     ITEM_ANTIFLAG_SHAMAN, ITEM_ANTIFLAG_SURA, ITEM_ANTIFLAG_WARRIOR, ITEM_ARMOR, ITEM_BELT,
     ITEM_COSTUME, ITEM_DS, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_SKILLBOOK, ITEM_SPECIAL_DS,
     ITEM_TALISMAN, ITEM_TOTEM, ITEM_UNIQUE, ITEM_USE, ITEM_WEAPON, LIMIT_CHAMPION, LIMIT_CON,
-    LIMIT_DEX, LIMIT_INT, LIMIT_LEVEL, LIMIT_REAL_TIME, LIMIT_REAL_TIME_START_FIRST_USE, LIMIT_STR,
-    USE_SPECIAL, WEARABLE_ABILITY, WEARABLE_ARROW, WEARABLE_BODY, WEARABLE_DARK, WEARABLE_EAR,
-    WEARABLE_EARTH, WEARABLE_ELEC, WEARABLE_FIRE, WEARABLE_FOOTS, WEARABLE_GLOVE, WEARABLE_HEAD,
-    WEARABLE_ICE, WEARABLE_NECK, WEARABLE_SHIELD, WEARABLE_UNIQUE, WEARABLE_WEAPON, WEARABLE_WIND,
-    WEARABLE_WRIST,
+    LIMIT_DEX, LIMIT_INT, LIMIT_LEVEL, LIMIT_STR, USE_SPECIAL, WEARABLE_ABILITY, WEARABLE_ARROW,
+    WEARABLE_BODY, WEARABLE_DARK, WEARABLE_EAR, WEARABLE_EARTH, WEARABLE_ELEC, WEARABLE_FIRE,
+    WEARABLE_FOOTS, WEARABLE_GLOVE, WEARABLE_HEAD, WEARABLE_ICE, WEARABLE_NECK, WEARABLE_SHIELD,
+    WEARABLE_UNIQUE, WEARABLE_WEAPON, WEARABLE_WIND, WEARABLE_WRIST,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use protocol::item_pos::ItemPos;
@@ -90,6 +89,10 @@ pub struct Gear<'a> {
     /// Whether the character attacked or used a skill in the last 1.5 s
     /// (`G/char_item.cpp:8471-8477`).
     pub recently_fought: bool,
+    /// The `get_global_time()` second a first-use item's clock starts from when used
+    /// (`G/char_item.cpp:2815`): `None` keeps the old refusal, so a caller without a clock
+    /// stamps nothing.
+    pub first_use_now: Option<u32>,
 }
 
 /// The sash half of `CItem::AddToCharacter` (`G/item.cpp:487-516`): a sash whose absorption
@@ -136,6 +139,7 @@ impl core::fmt::Debug for Gear<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Gear")
             .field("recently_fought", &self.recently_fought)
+            .field("first_use_now", &self.first_use_now)
             .finish_non_exhaustive()
     }
 }
@@ -211,6 +215,12 @@ impl core::fmt::Display for WornSystem {
 /// costume (`G/item.cpp:1458-1487`); `OnAfterCreatedItem` starts the real-time timer
 /// (`:2775-2781`). `BuffOnAttr_AddBuffsFromItem` does nothing, because only the two bonus types
 /// this build refuses fill its table.
+///
+/// A plain `LIMIT_REAL_TIME` item starts no equip timer (`G/item.cpp:1458-1487` names only the
+/// unique, wear, accessory and booster starts, and `IsRealTimeItem` exempts the wear one):
+/// its clock runs from creation whether worn or not, and the world's expiry tick removes it.
+/// Only a first-use clock (which the use stamps, not the wear), a wear timer (all owner's
+/// rows are dragon soul, which never reaches here) and the accessory stones refuse.
 #[must_use]
 pub fn worn_system_not_ported(
     item: &Item,
@@ -229,11 +239,8 @@ pub fn worn_system_not_ported(
     if proto.item_type == ITEM_UNIQUE {
         return Some(WornSystem::Unique);
     }
-    let timed = proto
-        .limits
-        .iter()
-        .any(|limit| [LIMIT_REAL_TIME, LIMIT_REAL_TIME_START_FIRST_USE].contains(&limit.kind));
-    if timed || proto.timer_based_on_wear.is_some() {
+    let clocked = proto.real_time_first_use.is_some() || proto.timer_based_on_wear.is_some();
+    if clocked {
         return Some(WornSystem::Timer);
     }
     if accessory_socket_grade(item, proto) > 0 {
@@ -1052,19 +1059,19 @@ pub const PICKUP_AFFECT_ITEM: u32 = 70_002;
 /// The checks run in legacy's order: an item offered in a trade (`IsExchanging`, refused
 /// silently), the job (`CanUsedBy`), the sex, a script of the character that waits for its
 /// client (`@fixme150`, `G/char_item.cpp:7350`), the level and conqueror level limits, and the
-/// belt cell the item is used from. Then `EquipItem` or `UnequipItem` run their own checks as
-/// a move's do. An `ITEM_QUEST` stops after the checks with `MoveKind::QuestUsed` and changes
-/// nothing; the caller runs its quest. Legacy's checks for states this build does not have (a shop, a cube, a stun,
-/// the secured account, the stack attribute flood, whose file the owner's data lacks) never
-/// refuse here.
-///
+/// belt cell the item is used from. A first-use item's clock stamps next, before the belt
+/// arms and the type switch (`G/char_item.cpp:2804-2820`); a later refusal then lands as
+/// `Declined`, with the stamps leading. Then `EquipItem` or `UnequipItem` run their own
+/// checks as a move's do. An `ITEM_QUEST` stops after the checks with `MoveKind::QuestUsed`
+/// and changes nothing; the caller runs its quest. Legacy's checks for states this build
+/// does not have (a shop, a cube, a stun, the secured account) never refuse here; the
+/// stack flood gates above, in the game state.
 /// # Errors
 ///
 /// [`MoveRefused::NotPorted`] for an item of a type whose use arm is not ported
 /// ([`Unported::Use`], among them `ITEM_UNIQUE` and the dragon soul stones), for an item in a
-/// window other than the inventory and the equipment, for a timed item before its first use
-/// sets its clock, and without `gear`. Otherwise any refusal of the checks, which changes
-/// nothing, as [`move_item`](super::move_item)'s do.
+/// window other than the inventory and the equipment, and without `gear`. Otherwise any
+/// refusal of the checks, which changes nothing, as [`move_item`](super::move_item)'s do.
 pub fn use_item(
     items: &mut CharacterItems,
     at: ItemPos,
@@ -1089,13 +1096,39 @@ pub fn use_item(
         return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
     use_checks(&item, proto, rules, gear.points)?;
+    // `UseItemEx`'s first-use starts (`G/char_item.cpp:2804-2820`): the clock stamps after
+    // the checks, before the belt arms and the type switch. Without a clock base the use
+    // is refused, as before; with one the stamps lead the answer, in legacy's order.
+    let mut stamped = super::item_move::MoveDone {
+        kind: MoveKind::Used,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    if proto.real_time_first_use.is_some() {
+        let Some(now) = gear.first_use_now else {
+            return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)));
+        };
+        let value = proto
+            .limits
+            .iter()
+            .find(|limit| limit.kind == gamedata::item_kind::LIMIT_REAL_TIME_START_FIRST_USE)
+            .map_or(0, |limit| limit.value);
+        stamped = stamp_first_use_clock(items, &item, value, now);
+    }
     if quest {
         // `case ITEM_QUEST` changes nothing here: the caller runs the item's quest, or the
         // pick-up arm `RENEWAL_PICKUP_AFFECT` gives 70002 (`G/char_item.cpp:2852-2872`).
         return Ok(done(MoveKind::QuestUsed, Trail::default()));
     }
     if potion {
-        return super::potion::use_potion(items, &item, proto, &mut *gear.points);
+        let mut used = super::potion::use_potion(items, &item, proto, &mut *gear.points)?;
+        let mut records = core::mem::take(&mut stamped.records);
+        records.append(&mut used.records);
+        used.records = records;
+        let mut changes = core::mem::take(&mut stamped.changes);
+        changes.append(&mut used.changes);
+        used.changes = changes;
+        return Ok(used);
     }
     if book {
         let mut trail = Trail::default();
@@ -1105,6 +1138,8 @@ pub fn use_item(
             super::quickslot::chains_when_used_up(proto),
             &mut trail,
         )?;
+        trail.records.splice(0..0, stamped.records.drain(..));
+        trail.changes.splice(0..0, stamped.changes.drain(..));
         return Ok(done(MoveKind::Used, trail));
     }
     let mut equipper = Equipper::new(items, gear, rules.usable_cells);
@@ -1119,11 +1154,68 @@ pub fn use_item(
             }
         })
     };
-    let trail = equipper.into_trail();
+    let mut trail = equipper.into_trail();
+    trail.records.splice(0..0, stamped.records.drain(..));
+    trail.changes.splice(0..0, stamped.changes.drain(..));
+    if outcome.is_err() && trail.records.is_empty() && trail.changes.is_empty() {
+        let Err(refused) = outcome else {
+            unreachable!()
+        };
+        return Err(refused);
+    }
     match outcome {
         Ok(kind) => Ok(done(kind, trail)),
         Err(refused) => declined(refused, trail),
     }
+}
+const EXPIRY_SOCKET: usize = 0;
+
+/// The use counter (`UseItemEx`'s socket 1, `G/char_item.cpp:2809-2819`).
+const USE_SOCKET: usize = 1;
+
+/// A missing duration defaults to a week (`G/char_item.cpp:2816`).
+const DEFAULT_FIRST_USE_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// The first-use stamp (`G/char_item.cpp:2809-2819`) of `item` at `now`: socket 0 when
+/// socket 1 is 0, then socket 1 when the item is not worn. Each set sends and saves.
+fn stamp_first_use_clock(
+    items: &mut CharacterItems,
+    item: &crate::item::Item,
+    limit_value: i32,
+    now: u32,
+) -> super::item_move::MoveDone {
+    use super::item_move::MoveKind;
+
+    let mut done = super::item_move::MoveDone {
+        kind: MoveKind::Used,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    if item.sockets[USE_SOCKET] == 0 {
+        let span = i64::from(item.sockets[EXPIRY_SOCKET]).max(0);
+        let span = if span == 0 {
+            i64::from(limit_value).max(0)
+        } else {
+            span
+        };
+        let span = if span == 0 {
+            DEFAULT_FIRST_USE_SECS
+        } else {
+            span
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let at = i64::from(now).saturating_add(span) as i32;
+        let step = super::specify_item::set_item_socket(items, item.id, (EXPIRY_SOCKET, at));
+        done.records.extend(step.records);
+        done.changes.extend(step.changes);
+    }
+    if wear_of(item.pos).is_none() {
+        let uses = item.sockets[USE_SOCKET].saturating_add(1);
+        let step = super::specify_item::set_item_socket(items, item.id, (USE_SOCKET, uses));
+        done.records.extend(step.records);
+        done.changes.extend(step.changes);
+    }
+    done
 }
 
 /// `UseItem`'s source checks (`G/char_item.cpp:7177-7190`): a valid cell of a window this
@@ -1152,8 +1244,8 @@ pub fn use_source(items: &CharacterItems, at: ItemPos) -> Result<Item, MoveRefus
 /// `UseItem`'s and `UseItemEx`'s checks of the item used, in legacy's order, after the
 /// source cell, the trade and the proto: the job (`CanUsedBy`), the sex, a waiting script
 /// (`@fixme150`), the level and conqueror level limits, and the belt cell
-/// (`G/char_item.cpp:7168-7400`, `:2718-2800`). A `REAL_TIME_FIRST_USE` item is refused as
-/// not ported, before its clock would start.
+/// (`G/char_item.cpp:7168-7400`, `:2718-2800`). A first-use item passes here; the caller
+/// stamps its clock after these checks, as `UseItemEx` does (`:2804-2820`).
 ///
 /// # Errors
 ///
@@ -1192,13 +1284,6 @@ pub fn use_checks(
         if !super::items::belt_cell_is_available(item.pos.cell - BELT_INVENTORY_SLOT_START, grade) {
             return Err(MoveRefused::BeltCellLocked);
         }
-    }
-    if proto
-        .limits
-        .iter()
-        .any(|limit| limit.kind == LIMIT_REAL_TIME_START_FIRST_USE)
-    {
-        return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)));
     }
     Ok(())
 }
@@ -1309,6 +1394,7 @@ mod tests {
             kind: gamedata::item_kind::LIMIT_REAL_TIME_START_FIRST_USE,
             value: 0,
         };
+        timed.real_time_first_use = Some(0);
         let mut male_only = proto(MALE_ONLY, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY);
         male_only.anti_flags = ITEM_ANTIFLAG_MALE;
         let mut male_only_high = proto(MALE_ONLY_HIGH, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY);
@@ -1454,6 +1540,7 @@ mod tests {
                 groups: &GROUPS,
                 dice: &mut dice,
                 recently_fought: self.recently_fought,
+                first_use_now: Some(1_700_000_000),
             };
             let request = MoveRequest { from, to, count: 0 };
             let facts = MoveFacts {
@@ -1486,6 +1573,7 @@ mod tests {
                 groups: &GROUPS,
                 dice: &mut dice,
                 recently_fought: self.recently_fought,
+                first_use_now: Some(1_700_000_000),
             };
             use_item(&mut self.items, at, rules, Some(&mut gear))
         }
@@ -1709,6 +1797,7 @@ mod tests {
             groups: &GROUPS,
             dice: &mut dice,
             recently_fought: false,
+            first_use_now: None,
         };
         let mut equipper = Equipper::new(&mut case.items, &mut gear, 90);
         let sash = Item::new(4, SASH_GRADE_4);
@@ -1725,6 +1814,7 @@ mod tests {
             groups: &GROUPS,
             dice: &mut dice,
             recently_fought: false,
+            first_use_now: None,
         };
         let mut equipper = Equipper::new(&mut case.items, &mut gear, 90);
         let sash = equipper
@@ -1764,6 +1854,7 @@ mod tests {
                 groups: &GROUPS,
                 dice: &mut dice,
                 recently_fought: false,
+                first_use_now: None,
             };
             let mut equipper = Equipper::new(&mut case.items, &mut gear, 90);
             let worn = equipper
@@ -2091,14 +2182,13 @@ mod tests {
         );
         let mut case = Case::new(&[(inv(3), Item::new(7, CHAMPION_SWORD))]);
         assert_eq!(case.use_refused(inv(3)), MoveRefused::ChampionTooLow);
-        // A timed item would start its clock here, before `EquipItem`'s fight rule, and timers
-        // are not ported.
+        // A first-use item stamps its clock after the checks, so a later refusal lands
+        // as `Declined` with the stamps leading, in legacy's order — the stamps stay.
         let mut case = Case::new(&[(inv(3), Item::new(7, TIMED_SWORD))]);
         case.recently_fought = true;
-        assert_eq!(
-            case.use_refused(inv(3)),
-            MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer))
-        );
+        let stamped = case.use_at(inv(3)).expect("the stamps land, declined");
+        assert_eq!(stamped.kind, MoveKind::Declined);
+        assert_eq!(stamped.changes.len(), 2, "socket 0, then socket 1");
         // `EquipItem`'s own checks still run after these.
         let mut case = Case::new(&[(inv(3), Item::new(7, SWORD))]);
         case.recently_fought = true;
@@ -2253,6 +2343,7 @@ mod tests {
             groups: &GROUPS,
             dice: &mut dice,
             recently_fought: false,
+            first_use_now: None,
         };
         let mut next = 10;
         let done = wear_full_set(&mut items, &mut gear, 90, &[ARMOUR, SWORD, 999], |vnum| {
@@ -2315,6 +2406,7 @@ mod tests {
                 groups,
                 dice: &mut dice,
                 recently_fought: false,
+                first_use_now: None,
             };
             let mut equipper = Equipper::new(&mut case.items, &mut gear, 90);
             let item = equipper.items().item(7).cloned().expect("held");

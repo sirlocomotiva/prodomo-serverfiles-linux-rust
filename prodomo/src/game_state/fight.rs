@@ -1720,6 +1720,9 @@ impl GameState {
         if let Some(killer) = killer {
             self.reward_kill(vid, killer);
         }
+        // The kill's stack feed (`G/char_battle.cpp:1524-1549`): after the boss-kill log
+        // and before `GC_DEAD`, the killer feeds its worn skins at the race.
+        self.stack_on_kill(vid, killer);
         self.packet_around(
             EntityKey::Npc(vid),
             &header_and_vid(HEADER_GC_DEAD.value(), vid),

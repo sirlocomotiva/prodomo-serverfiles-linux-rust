@@ -399,6 +399,23 @@ impl Safebox {
         Some(held)
     }
 
+    /// Remove the expired item anchored at `pos` (`RemoveItem`'s safebox arm,
+    /// `G/item_manager.cpp:574-585`): the take, the DEL record, and the destroy row.
+    pub fn remove_expired(&mut self, pos: u32) -> Option<StoreMove> {
+        let held = self.take(pos)?;
+        let records = vec![MoveRecord::Store(StoreRecord::Del {
+            window: self.window,
+            pos,
+        })];
+        Some(StoreMove {
+            done: MoveDone {
+                kind: MoveKind::Removed,
+                records,
+                changes: Vec::new(),
+            },
+            changes: vec![StoreChange::Destroyed { id: held.item.id }],
+        })
+    }
     /// `CSafebox::ChangeSize` (`G/safebox.cpp:148-163`): grow to `rows` rows. A size at
     /// or below the held one leaves the grid alone; a grow keeps every covered cell.
     pub fn change_size(&mut self, rows: u8) {

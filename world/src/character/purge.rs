@@ -386,6 +386,7 @@ mod tests {
             groups: &groups,
             dice: &mut dice,
             recently_fought: false,
+            first_use_now: None,
         };
         let done = purge_all(&mut items, &mut gear);
         assert_eq!(done.kind, MoveKind::Removed);

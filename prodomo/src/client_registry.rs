@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use db::items::RowChange;
+use db::items::{AccountChange, RowChange};
 use tokio::sync::mpsc;
 
 use crate::item_move::StoreOrder;
@@ -106,6 +106,15 @@ pub enum ClientOrder {
         changes: Vec<RowChange>,
         /// The order the pick-ups of the dropped items wait on.
         order: StoreOrder,
+    },
+    /// The account rows a stored expiry took (`RemoveItem`'s safebox arm,
+    /// `G/item_manager.cpp:574-585`): a real-time item whose socket 0 passed in an open
+    /// safebox or mall is destroyed, and the descriptor writes the rows.
+    AccountRows {
+        /// The account that held them.
+        account: u32,
+        /// The rows to write.
+        changes: Vec<AccountChange>,
     },
     /// The connection closes.
     ///

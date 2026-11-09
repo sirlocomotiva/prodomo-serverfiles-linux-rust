@@ -70,6 +70,25 @@ pub(super) struct Storage {
 }
 
 impl Storage {
+    /// The open safebox, when one is open.
+    pub(super) fn safebox(&self) -> Option<&Safebox> {
+        self.safebox.as_ref()
+    }
+
+    /// The open mall, when one is open.
+    pub(super) fn mall(&self) -> Option<&Safebox> {
+        self.mall.as_ref()
+    }
+
+    /// The open window `mall` names.
+    pub(super) fn window_mut(&mut self, mall: bool) -> &mut Option<Safebox> {
+        if mall {
+            &mut self.mall
+        } else {
+            &mut self.safebox
+        }
+    }
+
     /// Hold `safebox` open, for a test's busy gate.
     #[cfg(test)]
     pub(super) fn set_safebox_for_test(&mut self, safebox: Safebox) {

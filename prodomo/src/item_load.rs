@@ -996,6 +996,12 @@ mod tests {
         immune.immune_flags = 1;
         let mut timer = limited(shaped(107, ITEM_ARMOR, 0), LIMIT_TIMER_BASED_ON_WEAR, 60);
         timer.timer_based_on_wear = Some(0);
+        let mut first_use = limited(
+            shaped(106, ITEM_ARMOR, 0),
+            LIMIT_REAL_TIME_START_FIRST_USE,
+            60,
+        );
+        first_use.real_time_first_use = Some(0);
         let mut energy = shaped(109, ITEM_ARMOR, 0);
         energy.applies[0] = ItemValue {
             kind: i32::from(APPLY_ENERGY),
@@ -1006,12 +1012,7 @@ mod tests {
             shaped(102, ITEM_COSTUME, COSTUME_MOUNT),
             shaped(103, ITEM_COSTUME, COSTUME_PET),
             shaped(104, ITEM_UNIQUE, 0),
-            limited(shaped(105, ITEM_ARMOR, 0), LIMIT_REAL_TIME, 60),
-            limited(
-                shaped(106, ITEM_ARMOR, 0),
-                LIMIT_REAL_TIME_START_FIRST_USE,
-                60,
-            ),
+            first_use,
             timer,
             immune,
             energy,
@@ -1019,10 +1020,19 @@ mod tests {
         ]);
         let mut accessory = row(10, EQUIPMENT, 10, 110);
         accessory.sockets = [1, 3, 0, 0, 0, 0];
-        let rows: Vec<ItemRow> = (0..9)
-            .map(|index| row(index + 1, EQUIPMENT, index + 1, 101 + index))
-            .chain([accessory])
-            .collect();
+        let rows: Vec<ItemRow> = [
+            row(1, EQUIPMENT, 1, 101),
+            row(2, EQUIPMENT, 2, 102),
+            row(3, EQUIPMENT, 3, 103),
+            row(4, EQUIPMENT, 4, 104),
+            row(5, EQUIPMENT, 5, 106),
+            row(6, EQUIPMENT, 6, 107),
+            row(7, EQUIPMENT, 7, 108),
+            row(8, EQUIPMENT, 8, 109),
+            accessory,
+        ]
+        .into_iter()
+        .collect();
         let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert!(load.placed.is_empty(), "{:?}", load.placed);
         let refused: Vec<(u32, Refused)> = load
@@ -1031,19 +1041,18 @@ mod tests {
             .map(|refusal| (refusal.id, refusal.why.clone()))
             .collect();
         let expected = [
-            WornSystem::Aura,
-            WornSystem::Mount,
-            WornSystem::Pet,
-            WornSystem::Unique,
-            WornSystem::Timer,
-            WornSystem::Timer,
-            WornSystem::Timer,
-            WornSystem::Immunity,
-            WornSystem::Apply(APPLY_ENERGY),
-            WornSystem::AccessoryTimer,
+            (1, WornSystem::Aura),
+            (2, WornSystem::Mount),
+            (3, WornSystem::Pet),
+            (4, WornSystem::Unique),
+            (5, WornSystem::Timer),
+            (6, WornSystem::Timer),
+            (7, WornSystem::Immunity),
+            (8, WornSystem::Apply(APPLY_ENERGY)),
+            (10, WornSystem::AccessoryTimer),
         ];
-        let expected: Vec<(u32, Refused)> = (1..)
-            .zip(expected)
+        let expected: Vec<(u32, Refused)> = expected
+            .into_iter()
             .map(|(id, system)| (id, Refused::WornNotPorted(system)))
             .collect();
         assert_eq!(refused, expected);
@@ -1056,25 +1065,28 @@ mod tests {
     #[test]
     fn a_worn_item_whose_systems_are_ported_loads() {
         // The near neighbours of every refusal: an ordinary costume, a special dragon soul
-        // item (a normal item to `EquipTo`), a level limit, and an accessory with no stone.
+        // item (a normal item to `EquipTo`), a level limit, a plain real-time limit (whose
+        // clock runs from creation, not from the wear), and an accessory with no stone.
         let protos = ItemProtos::from_rows(vec![
             shaped(100, ITEM_COSTUME, COSTUME_BODY),
             shaped(101, ITEM_SPECIAL_DS, 0),
             limited(shaped(102, ITEM_ARMOR, 0), LIMIT_LEVEL, 1),
+            limited(shaped(104, ITEM_ARMOR, 0), LIMIT_REAL_TIME, 60),
             shaped(103, ITEM_ARMOR, ARMOR_NECK),
         ]);
-        let mut accessory = row(4, EQUIPMENT, 4, 103);
+        let mut accessory = row(5, EQUIPMENT, 5, 103);
         accessory.sockets = [0, 3, 0, 0, 0, 0];
         let rows = [
             row(1, EQUIPMENT, 1, 100),
             row(2, EQUIPMENT, 2, 101),
             row(3, EQUIPMENT, 3, 102),
+            row(4, EQUIPMENT, 4, 104),
             accessory,
         ];
         let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
         assert!(load.refused.is_empty(), "{:?}", load.refused);
         let cells: Vec<u16> = load.placed.iter().map(|placed| placed.pos.cell).collect();
-        assert_eq!(cells, [181, 182, 183, 184]);
+        assert_eq!(cells, [181, 182, 183, 184, 185]);
     }
 
     #[test]

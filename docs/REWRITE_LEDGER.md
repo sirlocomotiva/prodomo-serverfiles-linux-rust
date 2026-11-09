@@ -49950,3 +49950,64 @@ Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 --no-deps --locked --offline`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+
+## 486. The stacking skin
+
+`sys.item.stack_attribute` was `missing` while the owner's file sat in the snapshot all
+along: `locale/europe/item_stack_attribute.txt` holds one group, `Skin-Aquarian-Pumnal`
+(40130), with a monster row (any race, apply 63, 25 per, ceiling 2500), a stone row
+(apply 61, 20 per, ceiling 2000) and a boss row at vnum 591 (apply 63, 15 per, ceiling
+1500). This slice ports it whole, and the real-time expiry it stands on.
+
+`gamedata::stack_attribute` reads the table as `ReadItemStackAttrFile` does
+(`G/item_stack_attribute.cpp:27-107`): groups of a `vnum` and up to three numbered rows
+of five `str_to_number` ints, the first missing number ending the scan, no `vnum` refusing
+the file, first group winning a repeat. Legacy reads it from a hardcoded
+`locale/germany/` path (`:25`); the Rewrite reads it from the Locale folder. Boot holds
+the table on the game thread (`main.rs`, `game_state.rs`).
+
+`game_state::stack_attr` runs the feeds. The kill (`G/char_battle.cpp:1524-1549`) feeds
+monster, stone or boss at the race when the killer is a PC near the victim's level,
+after the boss-kill log and before `GC_DEAD`; the two `UseItem` tails
+(`G/char_item.cpp:7375,7398`) feed the used vnum as an item feed after a `UseItemEx`
+that returned true. Each worn costume weapon, then costume pet, is fed row by row
+(`AddStackAttribute`, `:126-155`): a row whose feed vnum is 0 or the fed vnum runs
+`SetStackAttributeIndex` (`:156-205`), which stamps the flood, then adds one to the
+row's odd slot (1, 3, 5), recomputes the even slot (0, 2, 4) as the odd over the
+progress with the row's apply, and `ApplyPoint`s the apply by 1 when the even slot
+changed — while the odd slot sits below the ceiling. Each `SetForceAttribute` sends
+its update and saves, in legacy's order. The flood gate (`G/char_item.cpp:7180-7185`)
+refuses a use within a second of a feed with legacy's line; the stamp lives on the
+body, as `m_dwUseItemStackAttrFlood` does (`G/char.h:2415`). The fish type has no call
+site in the checked-in server, so no row of it ever feeds.
+
+The skin is `LIMIT_REAL_TIME` 86400, so wearing it needed the expiry:
+`game_state::real_time` runs `real_time_expire_event` (`G/item.cpp:2027-2087`) every
+second from the game loop. A held, worn or stored real-time item whose socket 0 passed
+is removed as `RemoveItem` with the owner on (`G/item_manager.cpp:566-595`): the
+quickslot sync, the wear-cell points, the clear, the recompute, the destroy row. A
+stored one takes the DEL record and a new `AccountRows` descriptor order; an unstamped
+first-use item waits, as the load arm does (`G/item.cpp:2775-2780`). `world`'s use
+stamps the first-use starts (`G/char_item.cpp:2804-2820`) after the checks, with the
+live clock passed through `Gear`, so a later refusal lands as `Declined` with the
+stamps leading. `worn_system_not_ported` and the load no longer refuse a plain
+`LIMIT_REAL_TIME`: its clock runs from creation, not from the wear. An expiry while
+the item is offered in a trade waits, because legacy's only caller is the character's
+own event and a dying trade item would strand the trade window.
+
+The scenario is `a_kill_feeds_the_worn_skin_and_the_flood_refuses_a_use`: Beta, lowered
+to level 9, wears a dagger and the skin with its monster counter at 24, kills the stray
+dog, and the feed's two updates land in legacy's order — (0, 25), then (63, 1) — with
+the point move and the stored row; a drink at once is refused with the flood's line,
+and a second later it lands. The skin is seeded with a day of clock ahead of it, as a
+stored creation-stamped item is. The expiry's proof is the unit test
+`a_passed_skin_leaves_and_a_live_one_stays` (and `a_passed_stored_skin_leaves`): a
+passed skin leaves, a live one stays, an unstamped first-use item waits — a binary
+scenario would wait on a live clock (owner decision, 2026-10-14).
+
+Gates (2026-11-09): 5126 passed, 0 failed in 46 targets, `cargo fmt --all -- --check`, `cargo build --workspace
+--locked --offline`, the scenario run, the inventory test, `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D
+warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

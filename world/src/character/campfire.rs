@@ -205,6 +205,7 @@ mod tests {
                 groups: &groups,
                 dice: &mut dice,
                 recently_fought: false,
+                first_use_now: None,
             };
             let (done, got) = use_campfire(
                 &mut items,

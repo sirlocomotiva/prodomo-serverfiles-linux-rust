@@ -133,6 +133,7 @@ mod quest_quiet;
 mod quest_target;
 mod quests;
 mod rank_global;
+mod real_time;
 mod refine_element;
 mod regen;
 mod reload;
@@ -148,6 +149,7 @@ mod skill_admin;
 mod smith_refine;
 mod socket_item;
 mod sort_inventory;
+mod stack_attr;
 mod stat;
 mod state;
 mod sync;
@@ -754,6 +756,8 @@ pub struct GameState {
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
     /// The Gaya `ITEM` roll list, which a fresh market shelf rolls its nine from.
     gaya_table: Arc<gamedata::gaya::GayaTable>,
+    /// The stack-attribute table, which a kill or a use feeds on a worn skin.
+    stack_attributes: Arc<gamedata::stack_attribute::StackAttributes>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
     gauss: world::character::Gauss,
     /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
@@ -4040,6 +4044,11 @@ impl GameState {
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
         }
+        // The stack flood, then the arena's own gate: each refuses with legacy's line.
+        if !self.stack_use_allowed(vid) {
+            self.tell_stack_flood(vid, actor);
+            return self.arena_item_refused(vid, actor);
+        }
         if !self.arena_item_use_allowed(vid, at) {
             return self.arena_item_refused(vid, actor);
         }
@@ -4124,19 +4133,7 @@ impl GameState {
         if let Some((vnum, sub_type)) = potion {
             self.arena_consumed_potion(vid, vnum, sub_type, &moved);
         }
-        if moved.kind == world::character::MoveKind::QuestUsed {
-            let pickup = self
-                .characters
-                .find_by_vid(vid)
-                .ok()
-                .and_then(|character| character.items().item_at(at))
-                .is_some_and(|item| item.vnum == world::character::PICKUP_AFFECT_ITEM);
-            if pickup {
-                self.use_pickup_item(vid, actor);
-            } else {
-                self.use_quest_item(vid, at, actor, account, &mut moved);
-            }
-        }
+        self.run_quest_used(vid, at, actor, account, &mut moved);
         // `StartAffectEvent`: a potion that left recovery starts the event, one second out,
         // unless it already runs.
         if moved
@@ -4146,8 +4143,38 @@ impl GameState {
         {
             self.start_affect_event(vid);
         }
+        // The `UseItem` tail (`G/char_item.cpp:7375,7398`): a `UseItemEx` that returned
+        // true feeds the used vnum as an item feed. The book path above returns early,
+        // as the premium arm does, so only a run step reaches here.
+        self.stack_on_use(vid, actor, used_vnum, &mut moved);
         moved.climbed = climbed;
         Ok(moved)
+    }
+
+    /// The `QuestUsed` tail: the pick-up ticket starts the pick-up, another quest item
+    /// runs its quest.
+    fn run_quest_used(
+        &mut self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        actor: Mover,
+        account: &crate::game_loop_messages::QuestAccount,
+        moved: &mut MovedItems,
+    ) {
+        if moved.kind != world::character::MoveKind::QuestUsed {
+            return;
+        }
+        let pickup = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == world::character::PICKUP_AFFECT_ITEM);
+        if pickup {
+            self.use_pickup_item(vid, actor);
+        } else {
+            self.use_quest_item(vid, at, actor, account, moved);
+        }
     }
 
     /// The skill book at `at` for the character online under `vid`, or `None` when the
@@ -5673,6 +5700,7 @@ impl GameState {
             groups: &self.item_groups,
             dice: &mut self.dice,
             recently_fought: actor.recently_fought,
+            first_use_now: Some(Self::global_time()),
         });
         let mut done = step(items, self.item_ids.as_mut(), &rules, gear.as_mut(), protos)
             .map_err(MoveItemRefused::Refused)?;
@@ -5813,6 +5841,7 @@ impl PulseProcessor for GameState {
         self.run_horse_timers(pulse);
         self.run_horse_dead_events(pulse);
         self.run_blend_ticks(pulse);
+        self.run_real_time_expiry(pulse);
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_dungeon_ticks(pulse);

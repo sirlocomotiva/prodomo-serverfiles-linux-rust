@@ -174,6 +174,9 @@ pub(super) struct Body {
     /// (`G/char.cpp:7701`), which nothing resets (D5).
     /// [`GameState::affect_flags_of`](super::GameState::affect_flags_of) ORs the timed bits in.
     pub(super) base_affect_flags: [u32; 2],
+    /// `m_dwUseItemStackAttrFlood` (`G/char.h:2415`): the Pulse of the last stack feed,
+    /// which refuses a use within a second (`G/char_item.cpp:7180-7185`).
+    pub(super) stack_flood: Option<u64>,
     /// `m_bAddChrState`'s `ADD_CHARACTER_STATE_SPAWN`, held only while `SetPolymorph`
     /// reencodes (`G/char.cpp:7700-7705`), so only that reencode's inserts carry it.
     pub(super) add_spawn: bool,
@@ -208,6 +211,7 @@ impl Body {
             stop_pulse,
             active_deck: -1,
             base_affect_flags: [0; 2],
+            stack_flood: None,
             add_spawn: false,
         }
     }

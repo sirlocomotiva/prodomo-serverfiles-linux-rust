@@ -2553,6 +2553,15 @@ where
         ClientOrder::ItemRows { changes, order } => {
             write_item_rows(addr, context, held, changes, order).await
         }
+        ClientOrder::AccountRows { account, changes } => {
+            if let Err(error) =
+                db::items::apply_account_changes(&context.store, account, &changes).await
+            {
+                warn!(%addr, %error, "The stored expiry could not be written; closing");
+                return false;
+            }
+            true
+        }
         ClientOrder::Close => {
             // `SECTREE_MANAGER::DestroyPrivateMap` (`G/sectree_manager.cpp:1035-1039`):
             // the descriptor of every player on the private map is destroyed with it.
@@ -9454,6 +9463,8 @@ struct GameData {
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
     /// The Gaya table, which the game thread holds.
     gaya_table: Arc<gamedata::gaya::GayaTable>,
+    /// The stack-attribute table, which the game thread holds.
+    stack_attributes: Arc<gamedata::stack_attribute::StackAttributes>,
     /// The SungZi map indices, which the game thread holds.
     sungzi_maps: Arc<gamedata::forked::SungziMaps>,
     /// The forked maps, which the game thread holds.
@@ -9510,6 +9521,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let fishing = load_fishing(config)?;
     let dragon_soul_table = load_dragon_soul_table(config)?;
     let gaya_table = load_gaya_table(config)?;
+    let stack_attributes = load_stack_attributes(config)?;
     let sungzi_maps = load_sungzi_maps(config)?;
     let forked_maps = load_forked_maps(config)?;
     let blend_table = load_blend_table(config)?;
@@ -9544,6 +9556,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         fishing,
         dragon_soul_table,
         gaya_table,
+        stack_attributes,
         sungzi_maps,
         forked_maps,
         blend_table,
@@ -9741,6 +9754,25 @@ fn load_gaya_table(config: &ServerConfig) -> Result<Arc<gamedata::gaya::GayaTabl
         .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
     let table = gamedata::gaya::GayaTable::load(&text);
     info!(items = table.items.len(), "Gaya table loaded");
+    Ok(Arc::new(table))
+}
+
+/// Load the stack-attribute table (`ReadItemStackAttrFile`,
+/// `G/item_stack_attribute.cpp:27-107`).
+///
+/// A file that cannot be read stops the server, as every Game data read the world needs
+/// does, so a client is never accepted into a world whose skins cannot stack.
+fn load_stack_attributes(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::stack_attribute::StackAttributes>, String> {
+    let locale_dir = config.locale_dir();
+    let table = gamedata::stack_attribute::StackAttributes::load(&locale_dir).map_err(|error| {
+        format!(
+            "Stack attributes are unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(entries = table.entries().count(), "Stack attributes loaded");
     Ok(Arc::new(table))
 }
 
@@ -10371,6 +10403,7 @@ fn build_world(
         .with_fishing(Arc::clone(&data.fishing))
         .with_dragon_soul_table(Arc::clone(&data.dragon_soul_table))
         .with_gaya_table(Arc::clone(&data.gaya_table))
+        .with_stack_attributes(Arc::clone(&data.stack_attributes))
         .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
         .with_forked_maps(Arc::clone(&data.forked_maps))
         .with_blend_table(Arc::clone(&data.blend_table))
