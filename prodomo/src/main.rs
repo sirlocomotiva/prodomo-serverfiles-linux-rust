@@ -78,8 +78,9 @@ use prodomo::game_loop_messages::{
     RestartKind, Settled, Shown, WhisperOutcome,
 };
 use prodomo::game_state::{
-    world_item_id_range, GameState, PrivateShopBought, PrivateShopBuilt, PrivateShopClosed,
-    PrivateShopFlipped, PrivateShopWithdrawn, ShopAnswer, ShopStep, TradeAnswer, TradeSettled,
+    world_item_id_range, GameState, PrivateShopBought, PrivateShopBuilt, PrivateShopCheckedIn,
+    PrivateShopCheckedOut, PrivateShopClosed, PrivateShopFlipped, PrivateShopMoved,
+    PrivateShopPriceChanged, PrivateShopWithdrawn, ShopAnswer, ShopStep, TradeAnswer, TradeSettled,
     TradeStep,
 };
 use prodomo::game_state::{
@@ -5892,11 +5893,13 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// `CG_PRIVATE_SHOP` (236) in the game phase: the panel, the build, the browse and the
-/// buy (`CInputMain::Analyze`'s `HEADER_CG_PRIVATE_SHOP` arm, `G/input_main.cpp:3954-4085`).
+/// `CG_PRIVATE_SHOP` (236) in the game phase: the panel, the build, the browse, the
+/// buy, the close, the withdraw, the modify and the four edits
+/// (`CInputMain::Analyze`'s `HEADER_CG_PRIVATE_SHOP` arm, `G/input_main.cpp:3954-4085`).
 /// Only those subheaders are ported; the rest are later slices, and an unported subheader
 /// is ignored, as legacy's `default:` logs and ignores it (`:4078-4080`). A malformed
-/// build, browse or buy closes the connection.
+/// record closes the connection.
+#[allow(clippy::too_many_lines)]
 async fn private_shop_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -5909,7 +5912,9 @@ where
 {
     use protocol::cg_variable::{
         PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_CLOSE,
-        PRIVATE_SHOP_SUBHEADER_END, PRIVATE_SHOP_SUBHEADER_MODIFY,
+        PRIVATE_SHOP_SUBHEADER_END, PRIVATE_SHOP_SUBHEADER_ITEM_CHECKIN,
+        PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
+        PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_MODIFY,
         PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
         PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_WITHDRAW,
     };
@@ -5954,6 +5959,57 @@ where
                 }
             }
         }
+        PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE => {
+            match protocol::cg_private_shop::CgPrivateShopPriceChange::decode_price_change(frame) {
+                Ok(price) => ShopStep::PrivatePriceChange {
+                    pos: price.pos,
+                    gold: price.gold,
+                    cheque: price.cheque,
+                },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed price change; closing");
+                    return false;
+                }
+            }
+        }
+        PRIVATE_SHOP_SUBHEADER_ITEM_MOVE => {
+            match protocol::cg_private_shop::CgPrivateShopMove::decode_move(frame) {
+                Ok(moved) => ShopStep::PrivateMove {
+                    pos: moved.pos,
+                    change_pos: moved.change_pos,
+                },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed shop move; closing");
+                    return false;
+                }
+            }
+        }
+        PRIVATE_SHOP_SUBHEADER_ITEM_CHECKIN => {
+            match protocol::cg_private_shop::CgPrivateShopCheckin::decode_checkin(frame) {
+                Ok(checkin) => ShopStep::PrivateCheckin {
+                    src: checkin.src,
+                    gold: checkin.gold,
+                    cheque: checkin.cheque,
+                    dst_pos: checkin.dst_pos,
+                },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed shop checkin; closing");
+                    return false;
+                }
+            }
+        }
+        PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT => {
+            match protocol::cg_private_shop::CgPrivateShopCheckout::decode_checkout(frame) {
+                Ok(checkout) => ShopStep::PrivateCheckout {
+                    src_pos: checkout.src_pos,
+                    dst_pos: checkout.dst_pos,
+                },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed shop checkout; closing");
+                    return false;
+                }
+            }
+        }
         _ => {
             info!(%addr, subheader, "Client sent an unported private-shop subheader; ignoring");
             return true;
@@ -5985,6 +6041,25 @@ where
         Ok(Ok(ShopAnswer::PrivateFlipped(flipped))) => {
             info!(%addr, "Private shop flipped");
             return finish_private_flip(session, addr, context, flipped).await;
+        }
+        Ok(Ok(ShopAnswer::PrivatePriceChanged(changed))) => {
+            info!(%addr, "Private shop price changed");
+            return finish_private_price(session, addr, context, held, changed).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateMoved(moved))) => {
+            info!(%addr, "Private shop ware moved");
+            return finish_private_move(session, addr, context, held, moved).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateCheckedIn(checked))) => {
+            info!(%addr, "Private shop ware checked in");
+            return finish_private_checkin(session, addr, context, held, *checked).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateCheckedOut(checked))) => {
+            info!(%addr, "Private shop ware checked out");
+            return Box::pin(finish_private_checkout(
+                session, addr, context, held, actor, *checked,
+            ))
+            .await;
         }
         Ok(Ok(ShopAnswer::Sent(records))) => {
             info!(%addr, subheader, "Private-shop step answered");
@@ -6178,6 +6253,138 @@ where
     finish_item_step(session, addr, context, held, actor, moved).await
 }
 
+/// Change a ware's price: store it, as `ChangeItemPrice` writes it
+/// (`D/PrivateShop.cpp:339-364`). The price went out on the game thread.
+async fn finish_private_price<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    changed: PrivateShopPriceChanged,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) = db::private_shop::change_ware_price(
+        &context.store,
+        changed.owner,
+        changed.pos,
+        changed.gold,
+        changed.cheque,
+    )
+    .await
+    {
+        warn!(%addr, %error, "The ware's price could not be stored; closing");
+        return false;
+    }
+    let _ = (session, held);
+    info!(%addr, pos = changed.pos, "Ware repriced");
+    true
+}
+
+/// Move a ware to its new slot: store it, as `MoveItem` writes it
+/// (`D/PrivateShop.cpp:366-418`). The move went out on the game thread.
+async fn finish_private_move<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    moved: PrivateShopMoved,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) =
+        db::private_shop::move_ware(&context.store, moved.owner, moved.pos, moved.change_pos).await
+    {
+        warn!(%addr, %error, "The ware's move could not be stored; closing");
+        return false;
+    }
+    let _ = (session, held);
+    info!(%addr, pos = moved.pos, "Ware moved");
+    true
+}
+
+/// Check a ware in: the ware leaves `item` for `private_shop_item` in one
+/// transaction, as the checkin update writes it
+/// (`D/ClientManagerPrivateShop.cpp:1325-1379`). The `SET_ITEM` and `ADD_ITEM` went
+/// out on the game thread.
+async fn finish_private_checkin<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    checked: PrivateShopCheckedIn,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) =
+        db::private_shop::checkin_ware(&context.store, checked.owner, &checked.ware).await
+    {
+        warn!(%addr, %error, "The ware's checkin could not be stored; closing");
+        return false;
+    }
+    let _ = (session, held);
+    info!(%addr, pos = checked.ware.pos, "Ware checked in");
+    true
+}
+
+/// Check a ware out: the ware leaves `private_shop_item` for `item` in one
+/// transaction, and the empty shop's row goes with it, as the checkout update
+/// writes them (`D/ClientManagerPrivateShop.cpp:1380-1434`). The viewers' clear went
+/// out on the game thread; the owner's move carries its clear and the set.
+async fn finish_private_checkout<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    actor: Mover,
+    checked: PrivateShopCheckedOut,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let PrivateShopCheckedOut {
+        moved,
+        owner,
+        ware,
+        window_type,
+        pos,
+        destroy,
+    } = checked;
+    let landed = moved.changes.iter().find_map(|change| match change {
+        db::items::RowChange::Created(row) if row.id == ware => Some(row.count),
+        _ => None,
+    });
+    let Some(count) = landed else {
+        warn!(%addr, "A private-shop checkout settled no ware; closing");
+        return false;
+    };
+    if let Err(error) = db::private_shop::checkout_ware(
+        &context.store,
+        db::private_shop::CheckedOutWare {
+            owner_id: owner,
+            ware_id: ware,
+            window_type,
+            pos,
+            count,
+            destroy,
+        },
+    )
+    .await
+    {
+        warn!(%addr, %error, "The ware's checkout could not be stored; closing");
+        return false;
+    }
+    // The ware's row is written: only the owner's records are left for the item
+    // step, which would otherwise insert the same row a second time.
+    let mut moved = moved;
+    moved.changes.clear();
+    let answer = Ok(Ok(moved));
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
 /// Flip a personal shop's state: store it, as `PrivateShopModifyRequest` flips it
 /// (`D/ClientManagerPrivateShop.cpp:1457-1515`). The `STATE_UPDATE` went out on the
 /// game thread.
@@ -6258,7 +6465,11 @@ where
             | ShopAnswer::PrivateBought(_)
             | ShopAnswer::PrivateClosed(_)
             | ShopAnswer::PrivateWithdrawn(_)
-            | ShopAnswer::PrivateFlipped(_),
+            | ShopAnswer::PrivateFlipped(_)
+            | ShopAnswer::PrivatePriceChanged(_)
+            | ShopAnswer::PrivateMoved(_)
+            | ShopAnswer::PrivateCheckedIn(_)
+            | ShopAnswer::PrivateCheckedOut(_),
         )) => {
             warn!(%addr, "An NPC step ran a private shop; closing");
             return false;

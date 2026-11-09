@@ -205,7 +205,8 @@ pub use premium::{
     PREMIUM_GC_LIST, PREMIUM_GC_OPEN, PREMIUM_LIST, PREMIUM_OPEN, PREMIUM_VOUCHER,
 };
 pub use private_shop::{
-    PrivateShopBought, PrivateShopBuilt, PrivateShopClosed, PrivateShopFlipped,
+    PrivateShopBought, PrivateShopBuilt, PrivateShopCheckedIn, PrivateShopCheckedOut,
+    PrivateShopClosed, PrivateShopFlipped, PrivateShopMoved, PrivateShopPriceChanged,
     PrivateShopWithdrawn,
 };
 pub use protected::{

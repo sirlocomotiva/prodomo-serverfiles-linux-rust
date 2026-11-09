@@ -272,6 +272,214 @@ pub async fn destroy_shop(store: &Store, owner_id: u32) -> Result<(), ItemError>
     Ok(())
 }
 
+/// Change one ware's price: the gold and the cheque at its shop slot.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Database`].
+pub async fn change_ware_price(
+    store: &Store,
+    owner_id: u32,
+    pos: u16,
+    gold: i64,
+    cheque: u32,
+) -> Result<(), ItemError> {
+    sqlx::query(
+        "UPDATE private_shop_item SET gold = $1, cheque = $2 WHERE owner_id = $3 AND pos = $4",
+    )
+    .bind(gold)
+    .bind(i64::from(cheque))
+    .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+    .bind(i16::try_from(pos).map_err(|_| corrupt("pos", pos))?)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// Move one ware to its new shop slot.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Database`].
+pub async fn move_ware(
+    store: &Store,
+    owner_id: u32,
+    pos: u16,
+    change_pos: u16,
+) -> Result<(), ItemError> {
+    sqlx::query("UPDATE private_shop_item SET pos = $1 WHERE owner_id = $2 AND pos = $3")
+        .bind(i16::try_from(change_pos).map_err(|_| corrupt("change_pos", change_pos))?)
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .bind(i16::try_from(pos).map_err(|_| corrupt("pos", pos))?)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Check one ware in: delete it from `item` and insert it into `private_shop_item`
+/// with its price and checkin time, in one transaction.
+///
+/// # Errors
+///
+/// Returns [`ItemError::NoSuchItem`] when the ware left the owner's window, or
+/// [`ItemError::Database`].
+pub async fn checkin_ware(
+    store: &Store,
+    owner_id: u32,
+    ware: &ShopItemRow,
+) -> Result<(), ItemError> {
+    let mut tx = store.pool().begin().await?;
+    let deleted: u64 = sqlx::query("DELETE FROM item WHERE id = $1 AND owner_id = $2")
+        .bind(i64::from(ware.item.id))
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Err(ItemError::NoSuchItem(ware.item.id));
+    }
+    sqlx::query(
+        "INSERT INTO private_shop_item (id, owner_id, pos, count, vnum, gold, cheque, \
+         checkin, socket0, socket1, socket2, socket3, socket4, socket5, attrtype0, \
+         attrvalue0, attrtype1, attrvalue1, attrtype2, attrvalue2, attrtype3, \
+         attrvalue3, attrtype4, attrvalue4, attrtype5, attrvalue5, attrtype6, \
+         attrvalue6) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
+         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)",
+    )
+    .bind(i64::from(ware.item.id))
+    .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+    .bind(i16::try_from(ware.pos).map_err(|_| corrupt("pos", ware.pos))?)
+    .bind(i16::try_from(ware.item.count).map_err(|_| corrupt("count", ware.item.count))?)
+    .bind(i64::from(ware.item.vnum))
+    .bind(ware.gold)
+    .bind(i64::from(ware.cheque))
+    .bind(ware.checkin)
+    .bind(ware.item.sockets[0])
+    .bind(ware.item.sockets[1])
+    .bind(ware.item.sockets[2])
+    .bind(ware.item.sockets[3])
+    .bind(ware.item.sockets[4])
+    .bind(ware.item.sockets[5])
+    .bind(i16::from(ware.item.attributes[0].b_type))
+    .bind(ware.item.attributes[0].s_value)
+    .bind(i16::from(ware.item.attributes[1].b_type))
+    .bind(ware.item.attributes[1].s_value)
+    .bind(i16::from(ware.item.attributes[2].b_type))
+    .bind(ware.item.attributes[2].s_value)
+    .bind(i16::from(ware.item.attributes[3].b_type))
+    .bind(ware.item.attributes[3].s_value)
+    .bind(i16::from(ware.item.attributes[4].b_type))
+    .bind(ware.item.attributes[4].s_value)
+    .bind(i16::from(ware.item.attributes[5].b_type))
+    .bind(ware.item.attributes[5].s_value)
+    .bind(i16::from(ware.item.attributes[6].b_type))
+    .bind(ware.item.attributes[6].s_value)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// One settled personal-shop checkout: the ware, where it lands, and whether the
+/// empty shop goes with it.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckedOutWare {
+    /// The shop owner's player id.
+    pub owner_id: u32,
+    /// The ware's item id, leaving `private_shop_item` for `item`.
+    pub ware_id: u32,
+    /// The window the world placed the ware at.
+    pub window_type: u8,
+    /// The cell the world placed the ware at.
+    pub pos: u16,
+    /// The ware's count.
+    pub count: u16,
+    /// Whether no wares are left and the shop row goes with the checkout.
+    pub destroy: bool,
+}
+
+/// Check one ware out: it leaves `private_shop_item` for `item` under the owner at
+/// the window and cell the world placed it at, and the empty shop's row goes with
+/// it, all in one transaction.
+///
+/// # Errors
+///
+/// Returns [`ItemError::NoSuchItem`] when the ware is gone, or [`ItemError::Database`].
+pub async fn checkout_ware(store: &Store, checked: CheckedOutWare) -> Result<(), ItemError> {
+    let CheckedOutWare {
+        owner_id,
+        ware_id,
+        window_type,
+        pos,
+        count,
+        destroy,
+    } = checked;
+    let mut tx = store.pool().begin().await?;
+    let rows = sqlx::query(
+        "SELECT id, owner_id, pos, count, vnum, gold, cheque, checkin, socket0, socket1, \
+         socket2, socket3, socket4, socket5, attrtype0, attrvalue0, attrtype1, \
+         attrvalue1, attrtype2, attrvalue2, attrtype3, attrvalue3, attrtype4, \
+         attrvalue4, attrtype5, attrvalue5, attrtype6, attrvalue6 FROM private_shop_item \
+         WHERE id = $1 AND owner_id = $2",
+    )
+    .bind(i64::from(ware_id))
+    .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+    .fetch_all(&mut *tx)
+    .await?;
+    let [row] = rows.as_slice() else {
+        return Err(ItemError::NoSuchItem(ware_id));
+    };
+    let ware = ware_from(row)?;
+    sqlx::query("DELETE FROM private_shop_item WHERE id = $1")
+        .bind(i64::from(ware_id))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO item (id, owner_id, window_type, pos, vnum, count, socket0, socket1, \
+         socket2, socket3, socket4, socket5, attrtype0, attrvalue0, attrtype1, \
+         attrvalue1, attrtype2, attrvalue2, attrtype3, attrvalue3, attrtype4, \
+         attrvalue4, attrtype5, attrvalue5, attrtype6, attrvalue6) VALUES ($1, $2, $3, \
+         $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, \
+         $21, $22, $23, $24, $25, $26)",
+    )
+    .bind(i64::from(ware_id))
+    .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+    .bind(i16::from(window_type))
+    .bind(i32::from(pos))
+    .bind(i64::from(ware.item.vnum))
+    .bind(i16::try_from(count).map_err(|_| corrupt("count", count))?)
+    .bind(ware.item.sockets[0])
+    .bind(ware.item.sockets[1])
+    .bind(ware.item.sockets[2])
+    .bind(ware.item.sockets[3])
+    .bind(ware.item.sockets[4])
+    .bind(ware.item.sockets[5])
+    .bind(i16::from(ware.item.attributes[0].b_type))
+    .bind(ware.item.attributes[0].s_value)
+    .bind(i16::from(ware.item.attributes[1].b_type))
+    .bind(ware.item.attributes[1].s_value)
+    .bind(i16::from(ware.item.attributes[2].b_type))
+    .bind(ware.item.attributes[2].s_value)
+    .bind(i16::from(ware.item.attributes[3].b_type))
+    .bind(ware.item.attributes[3].s_value)
+    .bind(i16::from(ware.item.attributes[4].b_type))
+    .bind(ware.item.attributes[4].s_value)
+    .bind(i16::from(ware.item.attributes[5].b_type))
+    .bind(ware.item.attributes[5].s_value)
+    .bind(i16::from(ware.item.attributes[6].b_type))
+    .bind(ware.item.attributes[6].s_value)
+    .execute(&mut *tx)
+    .await?;
+    if destroy {
+        sqlx::query("DELETE FROM private_shop WHERE owner_id = $1")
+            .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Flip one shop's state between open and modify.
 ///
 /// # Errors

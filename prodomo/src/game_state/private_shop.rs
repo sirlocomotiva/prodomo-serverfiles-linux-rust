@@ -73,12 +73,13 @@ use protocol::cg_private_shop::{CgPrivateShopItem, CG_PRIVATE_SHOP_TITLE_FIELD_S
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_private_shop::{
     GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopItemData,
-    GcPrivateShopLoad, GcPrivateShopRemove, GcPrivateShopSale, GcPrivateShopStart,
-    GcPrivateShopState, PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN,
+    GcPrivateShopLoad, GcPrivateShopMove, GcPrivateShopPriceChange, GcPrivateShopRemove,
+    GcPrivateShopSale, GcPrivateShopSetItem, GcPrivateShopStart, GcPrivateShopState,
+    PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN, SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM,
     SUBHEADER_GC_PRIVATE_SHOP_CLOSE, SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL,
     SUBHEADER_GC_PRIVATE_SHOP_END, SUBHEADER_GC_PRIVATE_SHOP_OPEN_PANEL,
     SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM, SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM,
-    SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW,
+    SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM, SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW,
 };
 use protocol::gc_whisper::{GcWhisper, WHISPER_TYPE_SYSTEM};
 use world::item::{ItemId, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_MYSHOP};
@@ -211,6 +212,61 @@ pub struct PrivateShopWithdrawn {
     /// The shop owner's player id.
     pub owner: u32,
     /// Whether the shop held no wares and is destroyed with the withdraw.
+    pub destroy: bool,
+}
+
+/// What a price change did: the shop's owner, the ware's slot and its new price,
+/// for the store. The owner and the viewers around the stand hear the price.
+#[derive(Debug, Clone, Copy)]
+pub struct PrivateShopPriceChanged {
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// The ware's shop slot.
+    pub pos: u16,
+    /// The new price in yang.
+    pub gold: i64,
+    /// The new price in cheques.
+    pub cheque: u32,
+}
+
+/// What a move did: the shop's owner and the ware's old and new slots, for the
+/// store. The owner and the viewers around the stand hear the move.
+#[derive(Debug, Clone, Copy)]
+pub struct PrivateShopMoved {
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// The ware's old shop slot.
+    pub pos: u16,
+    /// The ware's new shop slot.
+    pub change_pos: u16,
+}
+
+/// What a checkin did: the shop's owner and the ware's row, for the store to
+/// write in one transaction. The owner hears `SET_ITEM`, the viewers `ADD_ITEM`.
+#[derive(Debug, Clone)]
+pub struct PrivateShopCheckedIn {
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// The ware's row, leaving `item` for `private_shop_item`.
+    pub ware: db::private_shop::ShopItemRow,
+}
+
+/// What a checkout did: the shop's owner, the ware's id, and where it lands, for
+/// the store to write in one transaction. The owner's move carries the set; the
+/// viewers around the stand hear the slot's clear.
+#[derive(Debug, Clone)]
+pub struct PrivateShopCheckedOut {
+    /// The owner's move: the clear first, then the ware's set.
+    pub moved: MovedItems,
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// The ware's item id, leaving `private_shop_item` for `item`.
+    pub ware: ItemId,
+    /// The window it lands in.
+    pub window_type: u8,
+    /// The cell it lands in.
+    pub pos: u16,
+    /// Whether no wares are left and the shop is destroyed with the checkout.
     pub destroy: bool,
 }
 
@@ -1640,6 +1696,707 @@ impl GameState {
         .encode()
     }
 
+    /// The total in yang a price change or checkin must stay under
+    /// (`GetPrivateShopTotalGold`, `G/char.cpp:12222-12230`): the stash plus every
+    /// ware's price. The store's stash and the world's read the same row, so the
+    /// world answers it.
+    fn private_total_gold(&self, who: Vid) -> i64 {
+        self.private_shops.get(&who).map_or(0, |shop| {
+            shop.wares
+                .iter()
+                .flatten()
+                .fold(shop.gold, |total, ware| total.saturating_add(ware.gold))
+        })
+    }
+
+    /// `CanHandleItem` (`G/char_item.cpp:213-247`) for a move, checkin or checkout:
+    /// an open own bundle shop, a refine, an open cube, or this build's open sash,
+    /// changelook or aura window refuses silently, as legacy returns without a line.
+    /// The observer, dragon-soul refine and warp arms have no state in this build
+    /// (the Rewrite warps synchronously), so they never refuse.
+    fn private_can_handle_item(&self, vid: Vid) -> bool {
+        !(self.sash_windows.contains_key(&vid)
+            || self.changelook_windows.contains(&vid)
+            || self.aura_windows.contains_key(&vid)
+            || self.under_refine(vid)
+            || self.has_my_shop(vid)
+            || self.cubes.contains_key(&vid))
+    }
+
+    /// The shared gates of the four edits in legacy order: the logout cancel, the
+    /// trade windows with the modify line, the owner with its panel open, the
+    /// modify state, and the one-second wait. `None` after telling the refusal, or
+    /// for the silent stun. The caller's own gates (the stun or `CanHandleItem`,
+    /// the cap and the ware) sit before or after, as legacy orders them.
+    fn private_edit_gates(&mut self, vid: Vid, actor: Mover, pid: u32) -> Option<()> {
+        if self.timed_events.remove(&vid).is_some() {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Your logout has been canceled.",
+                &[],
+            );
+            return None;
+        }
+        if !self.private_trade_windows_clear(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot modify a personal shop while having other trading windows open.",
+                &[],
+            );
+            return None;
+        }
+        if !self.has_private_shop(vid) || !self.edits_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You do not have an open personal shop.",
+                &[],
+            );
+            return None;
+        }
+        if self
+            .private_shops
+            .get(&vid)
+            .is_none_or(|shop| shop.state != PRIVATE_SHOP_STATE_MODIFY)
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot manage personal shop's content while it is not in a modifying state.",
+                &[],
+            );
+            return None;
+        }
+        let last = self.private_state_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_STATE_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a moment before editing your personal shop's content again.",
+                &[],
+            );
+            return None;
+        }
+        let _ = pid;
+        Some(())
+    }
+
+    /// Tell the viewers around the owner's stand one record.
+    fn private_tell_viewers(&mut self, owner: Vid, record: &[u8]) {
+        let viewers = self
+            .private_viewers
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
+        for viewer in viewers {
+            let _sent = self.write_to_client(viewer, record.to_vec());
+        }
+    }
+
+    /// `CInputMain::PrivateShopItemPriceChange` for the character under `vid`
+    /// (`G/input_main.cpp:4481-4569`), settled at once with the DB price and the
+    /// two syncs (`D/ClientManagerPrivateShop.cpp:1653-1715` and the game price,
+    /// `G/char.cpp:12317-12346` with `G/private_shop.cpp:597-631`): the stun, the
+    /// edit's gates, the ware, the cap, and the negative price's silent drop. The
+    /// owner and the viewers around the stand hear the price. Answers the change
+    /// for the store, or `None` after telling the refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_price_change(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        pos: u16,
+        gold: i64,
+        cheque: u32,
+    ) -> Result<Option<PrivateShopPriceChanged>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        let held = character.gold();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(None);
+        }
+        if self.private_edit_gates(vid, actor, pid).is_none() {
+            return Ok(None);
+        }
+        let Some(ware) = self
+            .private_shops
+            .get(&vid)
+            .and_then(|shop| shop.wares.get(usize::from(pos)))
+            .and_then(|ware| ware.as_ref())
+        else {
+            return Ok(None);
+        };
+        let old = ware.gold;
+        // The cap reads the stash, every ware's price, and the held gold, with the
+        // old price out and the new one in (`:4524-4528`).
+        let total = self
+            .private_total_gold(vid)
+            .saturating_sub(old)
+            .saturating_add(gold)
+            .saturating_add(i64::try_from(held).unwrap_or(i64::MAX));
+        if total >= i64::try_from(common::constants::GOLD_MAX_MAX).unwrap_or(i64::MAX) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"The items you put up for sale must not exceed the permitted total value.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if gold < 0 {
+            return Ok(None);
+        }
+        if let Some(shop) = self.private_shops.get_mut(&vid) {
+            if let Some(ware) = shop
+                .wares
+                .get_mut(usize::from(pos))
+                .and_then(|ware| ware.as_mut())
+            {
+                ware.gold = gold;
+                ware.cheque = cheque;
+            }
+        }
+        self.private_state_at.insert(vid, self.last_pulse);
+        let record = GcPrivateShopPriceChange { pos, gold, cheque }.encode();
+        let _sent = self.write_to_client(vid, record.clone());
+        self.private_tell_viewers(vid, &record);
+        Ok(Some(PrivateShopPriceChanged {
+            owner: pid,
+            pos,
+            gold,
+            cheque,
+        }))
+    }
+
+    /// `CInputMain::PrivateShopItemMove` for the character under `vid`
+    /// (`G/input_main.cpp:4570-4649`), settled at once with the DB move and the two
+    /// syncs (`D/ClientManagerPrivateShop.cpp:1716-1778` and the game move,
+    /// `G/char.cpp:12347-12373` with `G/private_shop.cpp:634-671`): the stun,
+    /// `CanHandleItem`, the edit's gates, the ware, and the grid's answer. A move
+    /// past the window or onto a taken cell tells the cannot-move line, as the DB's
+    /// `nullptr` chats it (`G/input_db.cpp:2734-2740`). Otherwise the owner and the
+    /// viewers around the stand hear the move. Answers the move for the store, or
+    /// `None` after telling the refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_move(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        pos: u16,
+        change_pos: u16,
+    ) -> Result<Option<PrivateShopMoved>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(None);
+        }
+        if !self.private_can_handle_item(vid) {
+            return Ok(None);
+        }
+        if self.private_edit_gates(vid, actor, pid).is_none() {
+            return Ok(None);
+        }
+        let at = usize::from(pos);
+        let to = usize::from(change_pos);
+        let Some(ware) = self
+            .private_shops
+            .get(&vid)
+            .and_then(|shop| shop.wares.get(at))
+            .and_then(Clone::clone)
+        else {
+            return Ok(None);
+        };
+        let size = self
+            .protos
+            .get(ware.item.vnum)
+            .map_or(0, |proto| proto.size);
+        // The DB lifts the ware out of its old cell before trying the new one
+        // (`D/PrivateShop.cpp:377-385`); the cells the others hold grid the answer.
+        let placed: Vec<(usize, i32)> = self
+            .private_shops
+            .get(&vid)
+            .map(|shop| {
+                shop.wares
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, ware)| {
+                        let ware = ware.as_ref()?;
+                        (slot != at).then(|| {
+                            (
+                                slot,
+                                self.protos
+                                    .get(ware.item.vnum)
+                                    .map_or(0, |proto| proto.size),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if to >= PRIVATE_SHOP_WINDOW_SLOTS || !Self::private_cell_free(&placed, to, size) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"@@(input_db)tradus:You cannot move the item to that position.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if let Some(shop) = self.private_shops.get_mut(&vid) {
+            shop.wares[at] = None;
+            shop.wares[to] = Some(ware);
+        }
+        self.private_state_at.insert(vid, self.last_pulse);
+        let record = GcPrivateShopMove { pos, change_pos }.encode();
+        let _sent = self.write_to_client(vid, record.clone());
+        self.private_tell_viewers(vid, &record);
+        Ok(Some(PrivateShopMoved {
+            owner: pid,
+            pos,
+            change_pos,
+        }))
+    }
+
+    /// `CInputMain::PrivateShopItemCheckin` for the character under `vid`
+    /// (`G/input_main.cpp:4651-4779`), settled at once with the DB placement and
+    /// the two syncs (`D/ClientManagerPrivateShop.cpp:1780-1886` with the game
+    /// checkin, `G/private_shop_manager.cpp:405-447`, and the shop-side checkin,
+    /// `G/private_shop.cpp:559-595`): the stun, `CanHandleItem`, the edit's gates,
+    /// the cap, the negative price's silent drop, the held item, its owner, its
+    /// proto, the item-shop, worn and locked refusals, and the grid's answer. The
+    /// picked slot stands when it is free, else the first free one across the two
+    /// pages, else the no-space line. The ware leaves the window, the owner hears
+    /// `SET_ITEM` and the viewers around the stand `ADD_ITEM`. Answers the checkin
+    /// for the store, or `None` after telling the refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    ///
+    /// # Panics
+    ///
+    /// When the shop the gates proved standing is gone; the caller runs the gates
+    /// first, so the shop is there.
+    #[allow(clippy::too_many_lines)]
+    pub fn private_checkin(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        src: protocol::item_pos::ItemPos,
+        gold: i64,
+        cheque: u32,
+        dst_pos: i32,
+    ) -> Result<Option<PrivateShopCheckedIn>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        let held = character.gold();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(None);
+        }
+        if !self.private_can_handle_item(vid) {
+            return Ok(None);
+        }
+        if self.private_edit_gates(vid, actor, pid).is_none() {
+            return Ok(None);
+        }
+        let total = self
+            .private_total_gold(vid)
+            .saturating_add(i64::try_from(held).unwrap_or(i64::MAX))
+            .saturating_add(gold);
+        if total >= i64::try_from(common::constants::GOLD_MAX_MAX).unwrap_or(i64::MAX) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"The items you put up for sale must not exceed the permitted total value.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if gold < 0 {
+            return Ok(None);
+        }
+        let Some(item) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(src).cloned())
+        else {
+            return Ok(None);
+        };
+        let proto = self.protos.get(item.vnum);
+        let Some(proto) = proto else {
+            return Ok(None);
+        };
+        if proto.anti_flags & (ITEM_ANTIFLAG_GIVE | ITEM_ANTIFLAG_MYSHOP) != 0 {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot sell Item-Shop items in a personal shop.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if src.window_type == EWindows::Equipment as u8 {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot sell equipped items in a personal shop.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if self.sash_item_at(vid, src)
+            || self.changelook_item_at(vid, src)
+            || self.aura_item_at(vid, src)
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot sell locked items in a personal shop.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let shop = self.private_shops.get(&vid).expect("the shop stands");
+        let placed: Vec<(usize, i32)> = shop
+            .wares
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, ware)| {
+                let ware = ware.as_ref()?;
+                Some((
+                    slot,
+                    self.protos
+                        .get(ware.item.vnum)
+                        .map_or(0, |proto| proto.size),
+                ))
+            })
+            .collect();
+        // The picked slot stands when it names a free one, else the first free one
+        // across the two pages (`D/ClientManagerPrivateShop.cpp:1841-1876`).
+        let pick = usize::try_from(dst_pos).unwrap_or(usize::MAX);
+        let mut found = (pick < PRIVATE_SHOP_WINDOW_SLOTS
+            && Self::private_cell_free(&placed, pick, proto.size))
+        .then_some(pick);
+        if found.is_none() {
+            found = (0..PRIVATE_SHOP_WINDOW_SLOTS)
+                .find(|&slot| Self::private_cell_free(&placed, slot, proto.size));
+        }
+        let Some(at) = found else {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"No available space in your personal shop.",
+                &[],
+            );
+            return Ok(None);
+        };
+        let pos = u16::try_from(at).unwrap_or(u16::MAX);
+        let now = Self::private_now();
+        let ware = PrivateShopWare {
+            item: item.clone(),
+            gold,
+            cheque,
+            checkin: now,
+        };
+        if let Some(shop) = self.private_shops.get_mut(&vid) {
+            shop.wares[at] = Some(ware.clone());
+        }
+        // The ware leaves the owner's window, as the game checkin removes it
+        // (`G/private_shop_manager.cpp:444-446`).
+        if let Ok(character) = self.characters.find_by_vid_mut(vid) {
+            let _taken = character.items_mut().release(item.id);
+        }
+        self.private_state_at.insert(vid, self.last_pulse);
+        let row = GcPrivateShopItemData {
+            vnum: item.vnum,
+            gold,
+            cheque,
+            checkin: i32::try_from(now).unwrap_or(0),
+            count: u32::from(item.count),
+            pos,
+            sockets: item.sockets,
+            attrs: item.attributes.map(|attr| (attr.b_type, attr.s_value)),
+        };
+        let set = GcPrivateShopSetItem {
+            subheader: SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM,
+            item: row,
+        }
+        .encode();
+        let _sent = self.write_to_client(vid, set);
+        let add = GcPrivateShopSetItem {
+            subheader: SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM,
+            item: row,
+        }
+        .encode();
+        self.private_tell_viewers(vid, &add);
+        Ok(Some(PrivateShopCheckedIn {
+            owner: pid,
+            ware: db::private_shop::ShopItemRow {
+                item: db_item_row(pid, &item),
+                pos,
+                gold,
+                cheque,
+                checkin: now,
+            },
+        }))
+    }
+
+    /// `CInputMain::PrivateShopItemCheckout` for the character under `vid`
+    /// (`G/input_main.cpp:4781-4961`), settled at once with the DB handoff and
+    /// the two syncs (`D/ClientManagerPrivateShop.cpp:1887-1955` with the game
+    /// checkout, `G/private_shop_manager.cpp:449-520`, and the shop-side remove,
+    /// `G/private_shop.cpp:524-551`): `CanHandleItem`, the trade windows, the
+    /// logout cancel, the owner with its panel open, the modify state, the
+    /// one-second wait, the ware, and the landing cell. The picked cell stands
+    /// when it names a free one, else the first free one, else the no-space line;
+    /// a dragon soul stone lands in its box, anything else in the base inventory.
+    /// The ware lands in the window, the viewers around the stand hear the slot's
+    /// clear, and the owner's move carries the clear and the set. An empty shop
+    /// with no stash is destroyed with the checkout. Answers the checkout for the
+    /// store, or `None` after telling the refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    ///
+    /// # Panics
+    ///
+    /// When the owner the gates proved online is gone; the caller runs the gates
+    /// first, so the owner is there.
+    #[allow(clippy::too_many_lines)]
+    pub fn private_checkout(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        src_pos: u16,
+        dst_pos: i32,
+    ) -> Result<Result<PrivateShopCheckedOut, MovedItems>, MoveItemRefused> {
+        use world::character::{ItemChange, ItemRecord, MoveRecord};
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if !self.private_can_handle_item(vid) {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        // The checkout orders the trade windows before the logout cancel
+        // (`:4797-4816`), unlike its three siblings.
+        if !self.private_trade_windows_clear(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot modify a personal shop while having other trading windows open.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if self.timed_events.remove(&vid).is_some() {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Your logout has been canceled.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if !self.has_private_shop(vid) || !self.edits_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You do not have an open personal shop.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if self
+            .private_shops
+            .get(&vid)
+            .is_none_or(|shop| shop.state != PRIVATE_SHOP_STATE_MODIFY)
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot manage personal shop's content while it is not in a modifying state.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        let last = self.private_state_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_STATE_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a moment before editing your personal shop's content again.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        let at = usize::from(src_pos);
+        let Some(ware) = self
+            .private_shops
+            .get(&vid)
+            .and_then(|shop| shop.wares.get(at))
+            .and_then(Clone::clone)
+        else {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        };
+        let proto = self.protos.get(ware.item.vnum);
+        if proto.is_none() {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        let is_soul = proto.is_some_and(|proto| proto.item_type == gamedata::item_kind::ITEM_DS);
+        let Some(land) = self.private_checkout_cell(vid, &ware.item, is_soul, dst_pos) else {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You don't have enough space in your inventory.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        };
+        // The ware lands in the window with its price cleared, as the game
+        // checkout binds it back (`G/private_shop_manager.cpp:478-498`).
+        let mut item = ware.item.clone();
+        item.pos = land;
+        let placed_id = item.id;
+        let window_type = land.window_type;
+        let cell = land.cell;
+        {
+            let owner = self
+                .characters
+                .find_by_vid_mut(vid)
+                .expect("the owner is online");
+            let _placed = owner.items_mut().set(land, &item);
+        }
+        if let Some(shop) = self.private_shops.get_mut(&vid) {
+            shop.wares[at] = None;
+        }
+        self.private_state_at.insert(vid, self.last_pulse);
+        let remove = GcPrivateShopRemove {
+            subheader: SUBHEADER_GC_PRIVATE_SHOP_REMOVE_ITEM,
+            pos: src_pos,
+        }
+        .encode();
+        self.private_tell_viewers(vid, &remove);
+        let mut done = world::character::MoveDone {
+            kind: world::character::MoveKind::Moved,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        done.records
+            .push(MoveRecord::Item(ItemRecord::Set(item.gc_item_set(land, 1))));
+        done.changes.push(ItemChange::Created(item));
+        let mut moved = MovedItems::new(pid, vid.raw(), done, actor, &self.protos, &self.locale);
+        // The owner's clear goes out first, as `RemovePrivateShopItem` syncs it
+        // (`G/char.cpp:12257-12280`).
+        let mut records = vec![GcPrivateShopRemove {
+            subheader: SUBHEADER_GC_PRIVATE_SHOP_REMOVE_MY_ITEM,
+            pos: src_pos,
+        }
+        .encode()];
+        records.append(&mut moved.records);
+        moved.records = records;
+        // No wares and no stash: the shop is destroyed with the checkout
+        // (`D/ClientManagerPrivateShop.cpp:1420-1430`).
+        let empty = self
+            .private_shops
+            .get(&vid)
+            .is_some_and(|shop| shop.gold == 0 && shop.wares.iter().all(Option::is_none));
+        Ok(Ok(PrivateShopCheckedOut {
+            moved,
+            owner: pid,
+            ware: placed_id,
+            window_type,
+            pos: cell,
+            destroy: empty,
+        }))
+    }
+
+    /// The checkout's landing cell: the picked cell when it names a free one, else
+    /// the first free one (`G/input_main.cpp:4859-4937`, with the special windows
+    /// compiled out). A dragon soul stone lands in its box, anything else in the
+    /// base inventory. `None` when neither holds the ware.
+    fn private_checkout_cell(
+        &self,
+        vid: Vid,
+        item: &world::item::Item,
+        is_soul: bool,
+        dst_pos: i32,
+    ) -> Option<protocol::item_pos::ItemPos> {
+        let owner = self.characters.find_by_vid(vid).ok()?;
+        let window = if is_soul {
+            EWindows::DragonSoulInventory as u8
+        } else {
+            EWindows::Inventory as u8
+        };
+        let pick = u16::try_from(dst_pos)
+            .ok()
+            .map(|cell| protocol::item_pos::ItemPos::new(window, cell));
+        if let Some(pick) = pick {
+            let free = if is_soul {
+                owner.items().item_at(pick).is_none()
+            } else {
+                let usable = usable_inventory_cells(owner.inven_point());
+                owner
+                    .items()
+                    .is_empty_item_grid(pick, item.size, None, usable, None)
+            };
+            if dst_pos >= 0 && free {
+                return Some(pick);
+            }
+        }
+        if is_soul {
+            let qualified = self.ds_qualified(vid);
+            let graded = self.protos.get(item.vnum).map_or(0, |proto| proto.sub_type);
+            return world::character::dragon_soul_buy_cell(owner.items(), item, graded, qualified);
+        }
+        let usable = usable_inventory_cells(owner.inven_point());
+        owner
+            .items()
+            .find_free_inventory_cell(usable, item.size)
+            .map(|cell| protocol::item_pos::ItemPos::new(EWindows::Inventory as u8, cell))
+    }
+
     /// `time(0)`, which the checkin times and the premium expiry are.
     fn private_now() -> i64 {
         std::time::SystemTime::now()
@@ -2268,6 +3025,145 @@ mod tests {
         assert_eq!(&viewer_heard[0], &[175, 4, 0, 12]);
         let owner_heard = drained(&mut inbox);
         assert_eq!(owner_heard.len(), 1, "the closed line: {owner_heard:02x?}");
+    }
+
+    /// A standing shop, its panel open: the four edits flip it to modify first.
+    fn a_standing_shop() -> (GameState, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        drained(&mut inbox);
+        state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 0,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        state.private_panels.insert(SELLER);
+        (state, inbox)
+    }
+
+    #[test]
+    fn the_price_and_the_move_sync_to_owner_and_viewers() {
+        let (mut state, mut inbox) = a_standing_shop();
+        let buyer = held(7, 19, 1);
+        let (mut viewer_inbox, _) = enter_seeing_with(
+            &mut state,
+            (1, 1),
+            12,
+            (5, 6),
+            10_000,
+            &[(inventory(0), buyer)],
+        );
+        drained(&mut inbox);
+        drained(&mut viewer_inbox);
+        // Before the flip the modify-state line refuses.
+        let refused = state
+            .private_price_change(SELLER, mover(), 3, 700, 0)
+            .unwrap();
+        assert!(refused.is_none());
+        let told = drained(&mut inbox);
+        assert_eq!(told.len(), 1, "the modify-state refusal chats");
+        state.private_modify(SELLER, mover()).unwrap().unwrap();
+        state.last_pulse += super::PRIVATE_SHOP_STATE_WAIT_PULSES;
+        drained(&mut inbox);
+        let changed = state
+            .private_price_change(SELLER, mover(), 3, 700, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.gold, 700);
+        assert_eq!(
+            state.private_shops[&SELLER].wares[3].as_ref().unwrap().gold,
+            700
+        );
+        let owner_heard = drained(&mut inbox);
+        assert!(
+            owner_heard
+                .iter()
+                .any(|record| record.len() == 18 && record[3] == 17),
+            "PRICE_CHANGE: {owner_heard:02x?}"
+        );
+        state.last_pulse += super::PRIVATE_SHOP_STATE_WAIT_PULSES;
+        state.private_start(Vid::new(12), SELLER.raw(), mover());
+        drained(&mut viewer_inbox);
+        drained(&mut inbox);
+        let moved = state.private_move(SELLER, mover(), 3, 5).unwrap().unwrap();
+        assert_eq!(moved.change_pos, 5);
+        assert!(state.private_shops[&SELLER].wares[3].is_none());
+        assert!(state.private_shops[&SELLER].wares[5].is_some());
+        let owner_heard = drained(&mut inbox);
+        assert!(
+            owner_heard
+                .iter()
+                .any(|record| record.len() == 8 && record[3] == 18),
+            "MOVE: {owner_heard:02x?}"
+        );
+        let viewer_heard = drained(&mut viewer_inbox);
+        assert!(
+            viewer_heard
+                .iter()
+                .any(|record| record.len() == 8 && record[3] == 18),
+            "MOVE: {viewer_heard:02x?}"
+        );
+    }
+
+    #[test]
+    fn the_checkin_shelves_and_the_checkout_unshelves() {
+        let (mut state, mut inbox) = a_standing_shop();
+        state.private_modify(SELLER, mover()).unwrap().unwrap();
+        state.last_pulse += super::PRIVATE_SHOP_STATE_WAIT_PULSES;
+        drained(&mut inbox);
+        // Cell 1 still holds the extra sword; it shelves at the picked slot.
+        let checked = state
+            .private_checkin(SELLER, mover(), inventory(1), 900, 0, 7)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checked.ware.pos, 7);
+        assert_eq!(
+            state.private_shops[&SELLER].wares[7].as_ref().unwrap().gold,
+            900
+        );
+        let owner = state.characters.find_by_vid(SELLER).unwrap();
+        assert!(
+            owner.items().item_at(inventory(1)).is_none(),
+            "the ware left the window"
+        );
+        let owner_heard = drained(&mut inbox);
+        assert!(
+            owner_heard
+                .iter()
+                .any(|record| record.len() == 75 && record[3] == 4),
+            "SET_ITEM: {owner_heard:02x?}"
+        );
+        state.last_pulse += super::PRIVATE_SHOP_STATE_WAIT_PULSES;
+        let out = state
+            .private_checkout(SELLER, mover(), 7, -1)
+            .unwrap()
+            .unwrap();
+        assert!(!out.destroy, "the first ware still stands");
+        let owner = state.characters.find_by_vid(SELLER).unwrap();
+        assert!(
+            owner.items().item_at(inventory(0)).is_some(),
+            "the ware lands in the first free cell"
+        );
+        assert_eq!(out.window_type, EWindows::Inventory as u8);
+        assert_eq!(out.pos, 0);
+        assert!(out
+            .moved
+            .records
+            .first()
+            .is_some_and(|record| record.len() == 6 && record[3] == 14));
+        let owner_heard = drained(&mut inbox);
+        assert!(
+            owner_heard.is_empty(),
+            "the clear rides the move: {owner_heard:02x?}"
+        );
     }
 
     /// A build on map 41 refuses for empire 1, whose market is map 1.

@@ -50472,3 +50472,66 @@ splitting the withdraw's gates; `RUSTDOCFLAGS="-D warnings" cargo doc --workspac
 own wait assert on a first flip the throttle never refuses, fixed by the change itself.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 496. The private price, move, checkin and checkout
+
+The four edits run on the modify state: the price reprices the ware, the move
+re-slots it, the checkin shelves a held item, and the checkout unshelves it back
+to the window.
+
+Legacy (`CInputMain::PrivateShopItemPriceChange`, `PrivateShopItemMove`,
+`PrivateShopItemCheckin` and `PrivateShopItemCheckout`,
+`G/input_main.cpp:4481-4961`, the DB price, move, checkin and checkout,
+`D/ClientManagerPrivateShop.cpp:1325-1434,1653-1955` with
+`D/PrivateShop.cpp:339-418`, the game checkin and checkout,
+`G/private_shop_manager.cpp:405-520`, and the owner- and shop-side syncs,
+`G/char.cpp:12242-12373` with `G/private_shop.cpp:524-671`). The four share the
+logout cancel, the trade windows with the modify line, the owner with its panel
+open, the modify state, and the one-second wait, in that order — except the
+checkout, which orders the trade windows before the logout cancel. The price runs
+the stun, the ware, the cap with the old price out and the new one in, and the
+silent negative. The move runs the stun, `CanHandleItem`, the ware, and the grid
+with the ware lifted out; a move past the window or onto a taken cell tells the
+cannot-move line. The checkin runs the stun, `CanHandleItem`, the cap, the silent
+negative, the held item with its owner and proto, the item-shop, worn and locked
+refusals, and the picked slot when it is free, else the first free one, else the
+no-space line. The checkout runs `CanHandleItem` before the windows, the ware
+with its proto, and the picked cell when it names a free one, else the first
+free one, else the no-space line; a dragon soul stone lands in its box, anything
+else in the base inventory. The cheque arms and the special-inventory cells are
+compiled out, as before.
+
+The Rewrite (`prodomo/src/game_state/private_shop.rs`, `protocol::cg_private_shop`,
+`protocol::gc_private_shop`, `db::private_shop`, and the private dispatch). The
+four hops settle as one: the price and the move update the row, the checkin moves
+the ware from `item` to `private_shop_item` in one transaction, and the checkout
+moves it back with the empty shop's row when no wares and no stash are left. The
+price and the move go to the owner and the viewers around the stand; the checkin
+sends `SET_ITEM` to the owner and `ADD_ITEM` to the viewers; the checkout sends
+the viewers' clear on the game thread and the owner's clear with the set on the
+move. `CanHandleItem` covers this build's windows; the observer, dragon-soul
+refine and warp arms have no state here.
+
+Scenario `a_private_shop_reprices_moves_checks_in_and_out`: the price reprices
+slot 3 to 700, the move re-slots the ware to 5, the checkin shelves the second
+sword from cell 1 at slot 7 with `SET_ITEM`, and the checkout unshelves it with
+the clear and the set, with each store write checked. Units cover the
+modify-state refusal, the two syncs to owner and viewers, and the shelve and
+unshelve with the ware's window round-trip. Two `private_shop` units, two codec
+tests and one scenario join the counts below.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+5196 passed, 1 failed in 46 targets, the failure being the dragon-soul refine scenario on
+a DB check under load — green alone, green 4 of 4 in a parallel flake check, and green in a
+full parity re-run (372 passed), while no world code this slice touched enters the refine
+path; the scenario's 8x flake check passed 8 of 8, and the re-run sums 5197 passed, 0
+failed; `cargo test --workspace --doc --locked --offline` 1 passed; `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings` clean after pinning the
+checkout's future and splitting the scenario's setup; `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps --locked --offline` clean. No mutants were run: the slice's failures
+were the suite's own assumption that the ware lands back in its old cell (the first free
+cell is 0, not 1), the GC test's pos offset, and the scenario's load count for two held
+swords, each fixed by the change itself.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

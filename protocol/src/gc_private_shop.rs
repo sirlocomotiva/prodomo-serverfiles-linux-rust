@@ -27,7 +27,12 @@
 //! `RemoveShopViewer` (`private_shop.cpp:739-811`) send to the viewer; `REMOVE_ITEM` (13) and
 //! `REMOVE_MY_ITEM` (14); `SET_SALE` (5), which `SetPrivateShopSale` (`char.cpp:12295-12311`)
 //! sends to the owner; and `BALANCE_UPDATE` (6), which `SaleUpdate` (`char.cpp:12524-12534`)
-//! sends with it. The rest are later slices.
+//! sends with it. The edit records are encoded here: `SET_ITEM` (4), which
+//! `SetPrivateShopItem` (`char.cpp:12242-12257`) sends to the owner at checkin;
+//! `ADD_ITEM` (14), which `CPrivateShop::ItemCheckin` (`private_shop.cpp:559-595`)
+//! broadcasts to the viewers; and the price and the move, which both the owner
+//! and the stand send (`char.cpp:12317-12373`, `private_shop.cpp:597-671`). The
+//! rest are later slices.
 //!
 //! # Width
 //!
@@ -76,6 +81,12 @@ pub const GC_PRIVATE_SHOP_SALE_WIRE_SIZE: usize =
 /// `sizeof(TPacketGCPrivateShopBalanceUpdate)`: one `TItemPrice`.
 pub const GC_PRIVATE_SHOP_BALANCE_WIRE_SIZE: usize = 12;
 
+/// `sizeof(TPacketGCPrivateShopItemPriceChange)`: the word and the price.
+pub const GC_PRIVATE_SHOP_PRICE_CHANGE_WIRE_SIZE: usize = 14;
+
+/// `sizeof(TPacketGCPrivateShopItemMove)`: the two words.
+pub const GC_PRIVATE_SHOP_MOVE_WIRE_SIZE: usize = 4;
+
 /// `sizeof(WORD)`: what `REMOVE_ITEM` and `REMOVE_MY_ITEM` carry.
 pub const GC_PRIVATE_SHOP_REMOVE_WIRE_SIZE: usize = 2;
 
@@ -103,6 +114,18 @@ pub const GC_PRIVATE_SHOP_BALANCE_RECORD_SIZE: usize =
 pub const GC_PRIVATE_SHOP_REMOVE_RECORD_SIZE: usize =
     GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_REMOVE_WIRE_SIZE;
 
+/// The whole `SET_ITEM` / `ADD_ITEM` record: the header and the item row.
+pub const GC_PRIVATE_SHOP_SET_ITEM_RECORD_SIZE: usize =
+    GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_ITEM_DATA_WIRE_SIZE;
+
+/// The whole `ITEM_PRICE_CHANGE` record: the header, the word and the price.
+pub const GC_PRIVATE_SHOP_PRICE_CHANGE_RECORD_SIZE: usize =
+    GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_PRICE_CHANGE_WIRE_SIZE;
+
+/// The whole `ITEM_MOVE` record: the header and the two words.
+pub const GC_PRIVATE_SHOP_MOVE_RECORD_SIZE: usize =
+    GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_MOVE_WIRE_SIZE;
+
 /// The title field both bodies carry: `TITLE_MAX_LEN + 1` and `SHOP_SIGN_MAX_LEN + 1`
 /// are both 33.
 pub const PRIVATE_SHOP_TITLE_FIELD_SIZE: usize = 33;
@@ -128,6 +151,14 @@ pub const SUBHEADER_GC_PRIVATE_SHOP_WITHDRAW: u8 = 16;
 pub const SUBHEADER_GC_PRIVATE_SHOP_SET_SALE: u8 = 5;
 /// `SUBHEADER_GC_PRIVATE_SHOP_BALANCE_UPDATE` (6): the stash grew.
 pub const SUBHEADER_GC_PRIVATE_SHOP_BALANCE_UPDATE: u8 = 6;
+/// `SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM` (4): the ware lands, as the owner hears it.
+pub const SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM: u8 = 4;
+/// `SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM` (14): the ware lands, as the viewers hear it.
+pub const SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM: u8 = 14;
+/// `SUBHEADER_GC_PRIVATE_SHOP_ITEM_PRICE_CHANGE` (17): the new price.
+pub const SUBHEADER_GC_PRIVATE_SHOP_ITEM_PRICE_CHANGE: u8 = 17;
+/// `SUBHEADER_GC_PRIVATE_SHOP_ITEM_MOVE` (18): the ware's new slot.
+pub const SUBHEADER_GC_PRIVATE_SHOP_ITEM_MOVE: u8 = 18;
 /// `SUBHEADER_GC_PRIVATE_SHOP_START` (11): the window opens for the viewer.
 pub const SUBHEADER_GC_PRIVATE_SHOP_START: u8 = 11;
 /// `SUBHEADER_GC_PRIVATE_SHOP_END` (12): the window closes for the viewer.
@@ -441,6 +472,83 @@ impl GcPrivateShopRemove {
     }
 }
 
+/// `SET_ITEM` / `ADD_ITEM`: the checked-in ware's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopSetItem {
+    /// The subheader: 4 for the owner, 14 for the viewers.
+    pub subheader: u8,
+    /// The checked-in ware's row.
+    pub item: GcPrivateShopItemData,
+}
+
+impl GcPrivateShopSetItem {
+    /// Encode the header and the row in field order.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_SET_ITEM_RECORD_SIZE);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_SET_ITEM_RECORD_SIZE,
+            self.subheader,
+        );
+        self.item.encode_into(&mut out);
+        out
+    }
+}
+
+/// `ITEM_PRICE_CHANGE`: the ware's slot and its new price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopPriceChange {
+    /// The ware's shop slot.
+    pub pos: u16,
+    /// The new price in yang.
+    pub gold: i64,
+    /// The new price in cheques.
+    pub cheque: u32,
+}
+
+impl GcPrivateShopPriceChange {
+    /// Encode the header, the word and the price in field order.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_PRICE_CHANGE_RECORD_SIZE);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_PRICE_CHANGE_RECORD_SIZE,
+            SUBHEADER_GC_PRIVATE_SHOP_ITEM_PRICE_CHANGE,
+        );
+        out.extend_from_slice(&self.pos.to_le_bytes());
+        out.extend_from_slice(&self.gold.to_le_bytes());
+        out.extend_from_slice(&self.cheque.to_le_bytes());
+        out
+    }
+}
+
+/// `ITEM_MOVE`: the ware's slot and where it went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopMove {
+    /// The ware's old shop slot.
+    pub pos: u16,
+    /// The ware's new shop slot.
+    pub change_pos: u16,
+}
+
+impl GcPrivateShopMove {
+    /// Encode the header and the two words in field order.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_MOVE_RECORD_SIZE);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_MOVE_RECORD_SIZE,
+            SUBHEADER_GC_PRIVATE_SHOP_ITEM_MOVE,
+        );
+        out.extend_from_slice(&self.pos.to_le_bytes());
+        out.extend_from_slice(&self.change_pos.to_le_bytes());
+        out
+    }
+}
+
 /// Push the four header bytes: the header, the size word, and the subheader.
 fn push_header(out: &mut Vec<u8>, size: usize, subheader: u8) {
     let size = u16::try_from(size).unwrap_or(u16::MAX);
@@ -452,6 +560,93 @@ fn push_header(out: &mut Vec<u8>, size: usize, subheader: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An item row with distinct byte halves, so an endianness swap shows.
+    fn golden_row() -> GcPrivateShopItemData {
+        GcPrivateShopItemData {
+            vnum: 0x7531,
+            gold: 0x0102_0304_0506_0708,
+            cheque: 0x090a_0b0c,
+            checkin: 0x0d0e_0f10,
+            count: 0x1112_1314,
+            pos: 0x1516,
+            sockets: [0x0102, 0x0304, 0x0506, 0x0708, 0x090a, 0x0b0c],
+            attrs: [
+                (1, 0x0203),
+                (4, 0x0506),
+                (12, 0x0708),
+                (17, 0x090a),
+                (71, 0x0b0c),
+                (72, 0x0d0e),
+                (0, 0),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_edits_encode_in_field_order() {
+        let set = GcPrivateShopSetItem {
+            subheader: SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM,
+            item: golden_row(),
+        }
+        .encode();
+        assert_eq!(set.len(), GC_PRIVATE_SHOP_SET_ITEM_RECORD_SIZE);
+        assert_eq!(set[3], SUBHEADER_GC_PRIVATE_SHOP_SET_ITEM);
+        assert_eq!(
+            u32::from_le_bytes(set[4..8].try_into().expect("four")),
+            0x7531
+        );
+        assert_eq!(
+            i64::from_le_bytes(set[8..16].try_into().expect("eight")),
+            0x0102_0304_0506_0708
+        );
+        assert_eq!(
+            u16::from_le_bytes(set[28..30].try_into().expect("two")),
+            0x1516
+        );
+        let add = GcPrivateShopSetItem {
+            subheader: SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM,
+            item: golden_row(),
+        }
+        .encode();
+        assert_eq!(add.len(), GC_PRIVATE_SHOP_SET_ITEM_RECORD_SIZE);
+        assert_eq!(add[3], SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM);
+        let price = GcPrivateShopPriceChange {
+            pos: 0x1011,
+            gold: 0x0102_0304_0506_0708,
+            cheque: 0x090a_0b0c,
+        }
+        .encode();
+        assert_eq!(price.len(), GC_PRIVATE_SHOP_PRICE_CHANGE_RECORD_SIZE);
+        assert_eq!(price[3], SUBHEADER_GC_PRIVATE_SHOP_ITEM_PRICE_CHANGE);
+        assert_eq!(
+            u16::from_le_bytes(price[4..6].try_into().expect("two")),
+            0x1011
+        );
+        assert_eq!(
+            i64::from_le_bytes(price[6..14].try_into().expect("eight")),
+            0x0102_0304_0506_0708
+        );
+        assert_eq!(
+            u32::from_le_bytes(price[14..18].try_into().expect("four")),
+            0x090a_0b0c
+        );
+        let moved = GcPrivateShopMove {
+            pos: 0x1011,
+            change_pos: 0x1213,
+        }
+        .encode();
+        assert_eq!(moved.len(), GC_PRIVATE_SHOP_MOVE_RECORD_SIZE);
+        assert_eq!(moved[3], SUBHEADER_GC_PRIVATE_SHOP_ITEM_MOVE);
+        assert_eq!(
+            u16::from_le_bytes(moved[4..6].try_into().expect("two")),
+            0x1011
+        );
+        assert_eq!(
+            u16::from_le_bytes(moved[6..8].try_into().expect("two")),
+            0x1213
+        );
+    }
 
     #[test]
     fn a_load_encodes_in_field_order() {

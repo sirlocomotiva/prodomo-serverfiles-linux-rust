@@ -46350,3 +46350,136 @@ fn a_private_shop_flips_withdraws_and_closes() {
     let closed = alice.read_game();
     assert_eq!(closed[0], GC_CHAT, "the closed line: {closed:02x?}");
 }
+
+/// Enter Alice holding two swords and Yankee holding 10000 gold, side by side.
+fn enter_two_swords_and_buyer(
+    server: &Server,
+    database: &ScratchDatabase,
+) -> (Keyed, Listed, Keyed, Listed) {
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE player SET gold = 10000 WHERE name = 'Yankee'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, alice_listed, _entered) = enter_equipped_world_with(server, b"alice", 2);
+    let (mut yankee, yankee_listed) = enter_world(server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    alice.quiet("caught up");
+    yankee.quiet("caught up");
+    (alice, alice_listed, yankee, yankee_listed)
+}
+
+/// The four edits: the price reprices the ware, the move re-slots it, the
+/// checkin shelves a second ware, and the checkout unshelves it back to the
+/// window.
+#[test]
+fn a_private_shop_reprices_moves_checks_in_and_out() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    let (mut alice, _alice_listed, mut yankee, yankee_listed) =
+        enter_two_swords_and_buyer(&server, &database);
+    let entity = build_axes_shop(&mut alice, &mut yankee);
+    let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
+    let _ = (owner_vid, yankee_listed);
+    alice.send_record(&[CG_PRIVATE_SHOP, 8]);
+    let _flipped = alice.read_game();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The price reprices the ware at slot 3.
+    let mut price = vec![CG_PRIVATE_SHOP, 10, 3, 0];
+    price.extend_from_slice(&700i64.to_le_bytes());
+    price.extend_from_slice(&0u32.to_le_bytes());
+    alice.send_record(&price);
+    let changed = alice.read_game();
+    assert_eq!(
+        &changed[..4],
+        &[GC_PRIVATE_SHOP, 18, 0, 17],
+        "PRICE_CHANGE: {changed:02x?}"
+    );
+    assert_eq!(
+        i64::from_le_bytes(changed[6..14].try_into().expect("eight bytes")),
+        700,
+        "the new price"
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM private_shop_item WHERE id = 60 AND gold = 700)",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The move re-slots the ware from 3 to 5.
+    alice.send_record(&[CG_PRIVATE_SHOP, 11, 3, 0, 5, 0]);
+    let moved = alice.read_game();
+    assert_eq!(
+        &moved[..4],
+        &[GC_PRIVATE_SHOP, 8, 0, 18],
+        "MOVE: {moved:02x?}"
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM private_shop_item WHERE id = 60 AND pos = 5)",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The checkin shelves the second sword from cell 1 at slot 7.
+    let mut checkin = vec![CG_PRIVATE_SHOP, 12, 1, 1, 0];
+    checkin.extend_from_slice(&900i64.to_le_bytes());
+    checkin.extend_from_slice(&0u32.to_le_bytes());
+    checkin.extend_from_slice(&7i32.to_le_bytes());
+    alice.send_record(&checkin);
+    let set = alice.read_game();
+    assert_eq!(
+        &set[..4],
+        &[GC_PRIVATE_SHOP, 75, 0, 4],
+        "SET_ITEM: {set:02x?}"
+    );
+    assert_eq!(
+        u16::from_le_bytes(set[28..30].try_into().expect("two bytes")),
+        7,
+        "the shelved slot"
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM private_shop_item WHERE id = 61 AND pos = 7 AND gold = 900) \
+         AND NOT EXISTS (SELECT 1 FROM item WHERE id = 61)",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The checkout unshelves slot 7 back to the window.
+    let mut checkout = vec![CG_PRIVATE_SHOP, 13, 7, 0];
+    checkout.extend_from_slice(&(-1i32).to_le_bytes());
+    alice.send_record(&checkout);
+    let clear = alice.read_game();
+    assert_eq!(
+        &clear[..4],
+        &[GC_PRIVATE_SHOP, 6, 0, 14],
+        "REMOVE_MY_ITEM: {clear:02x?}"
+    );
+    let landed = alice.read_game();
+    assert_eq!(landed[0], ITEM_SET, "the ware's set: {landed:02x?}");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 61 AND vnum = 19 AND owner_id = (SELECT id \
+         FROM player WHERE name = 'Alpha')) AND NOT EXISTS (SELECT 1 FROM \
+         private_shop_item WHERE id = 61)",
+    );
+}

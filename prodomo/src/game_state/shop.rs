@@ -172,6 +172,40 @@ pub enum ShopStep {
     PrivateWithdraw,
     /// `SUBHEADER_CG_PRIVATE_SHOP_MODIFY`: flip the state.
     PrivateModify,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_ITEM_PRICE_CHANGE`: reprice the ware at `pos`.
+    PrivatePriceChange {
+        /// The ware's shop slot.
+        pos: u16,
+        /// The new price in yang.
+        gold: i64,
+        /// The new price in cheques.
+        cheque: u32,
+    },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_ITEM_MOVE`: move the ware at `pos` to `change_pos`.
+    PrivateMove {
+        /// The ware's old shop slot.
+        pos: u16,
+        /// The ware's new shop slot.
+        change_pos: u16,
+    },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_ITEM_CHECKIN`: shelve the held item at `src`.
+    PrivateCheckin {
+        /// The held item's window and cell.
+        src: protocol::item_pos::ItemPos,
+        /// The asking price in yang.
+        gold: i64,
+        /// The asking price in cheques.
+        cheque: u32,
+        /// The picked shop slot, or a negative pick for the first free one.
+        dst_pos: i32,
+    },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_ITEM_CHECKOUT`: unshelve the ware at `src_pos`.
+    PrivateCheckout {
+        /// The ware's shop slot.
+        src_pos: u16,
+        /// The picked inventory cell, or a negative pick for the first free one.
+        dst_pos: i32,
+    },
 }
 
 impl ShopStep {
@@ -281,6 +315,14 @@ pub enum ShopAnswer {
     PrivateWithdrawn(Box<super::private_shop::PrivateShopWithdrawn>),
     /// A personal-shop flip: the owner's new state, for the store.
     PrivateFlipped(super::private_shop::PrivateShopFlipped),
+    /// A personal-shop price change: the new price, for the store.
+    PrivatePriceChanged(super::private_shop::PrivateShopPriceChanged),
+    /// A personal-shop move: the new slot, for the store.
+    PrivateMoved(super::private_shop::PrivateShopMoved),
+    /// A personal-shop checkin: the ware's row, for the store.
+    PrivateCheckedIn(Box<super::private_shop::PrivateShopCheckedIn>),
+    /// A personal-shop checkout: the owner's move, for the store.
+    PrivateCheckedOut(Box<super::private_shop::PrivateShopCheckedOut>),
     /// A quest took the click: the records its scripts sent, the GRAND climbs
     /// its reads landed (each for the store's `store_skill`), and the `guild.*`
     /// calls the scripts made (each for the world's judge), in order.
@@ -327,6 +369,10 @@ impl PartialEq for ShopAnswer {
             | (Self::PrivateClosed(_), Self::PrivateClosed(_))
             | (Self::PrivateWithdrawn(_), Self::PrivateWithdrawn(_))
             | (Self::PrivateFlipped(_), Self::PrivateFlipped(_))
+            | (Self::PrivatePriceChanged(_), Self::PrivatePriceChanged(_))
+            | (Self::PrivateMoved(_), Self::PrivateMoved(_))
+            | (Self::PrivateCheckedIn(_), Self::PrivateCheckedIn(_))
+            | (Self::PrivateCheckedOut(_), Self::PrivateCheckedOut(_))
             | (Self::Quest { .. }, Self::Quest { .. }) => true,
             _ => false,
         }
@@ -463,6 +509,33 @@ impl GameState {
                 Ok(flipped) => Ok(ShopAnswer::PrivateFlipped(flipped)),
                 Err(refused) => Ok(ShopAnswer::Moved(refused)),
             },
+            ShopStep::PrivatePriceChange { pos, gold, cheque } => {
+                match self.private_price_change(vid, mover, pos, gold, cheque)? {
+                    Some(changed) => Ok(ShopAnswer::PrivatePriceChanged(changed)),
+                    None => Ok(ShopAnswer::Sent(Vec::new())),
+                }
+            }
+            ShopStep::PrivateMove { pos, change_pos } => {
+                match self.private_move(vid, mover, pos, change_pos)? {
+                    Some(relocated) => Ok(ShopAnswer::PrivateMoved(relocated)),
+                    None => Ok(ShopAnswer::Sent(Vec::new())),
+                }
+            }
+            ShopStep::PrivateCheckin {
+                src,
+                gold,
+                cheque,
+                dst_pos,
+            } => match self.private_checkin(vid, mover, src, gold, cheque, dst_pos)? {
+                Some(checked) => Ok(ShopAnswer::PrivateCheckedIn(Box::new(checked))),
+                None => Ok(ShopAnswer::Sent(Vec::new())),
+            },
+            ShopStep::PrivateCheckout { src_pos, dst_pos } => {
+                match self.private_checkout(vid, mover, src_pos, dst_pos)? {
+                    Ok(checked) => Ok(ShopAnswer::PrivateCheckedOut(Box::new(checked))),
+                    Err(refused) => Ok(ShopAnswer::Moved(refused)),
+                }
+            }
         }
     }
 
@@ -591,6 +664,10 @@ impl GameState {
             closed @ ShopAnswer::PrivateClosed(_) => closed,
             withdrawn @ ShopAnswer::PrivateWithdrawn(_) => withdrawn,
             flipped @ ShopAnswer::PrivateFlipped(_) => flipped,
+            changed @ ShopAnswer::PrivatePriceChanged(_) => changed,
+            relocated @ ShopAnswer::PrivateMoved(_) => relocated,
+            checked @ ShopAnswer::PrivateCheckedIn(_) => checked,
+            out @ ShopAnswer::PrivateCheckedOut(_) => out,
             ShopAnswer::Quest { .. } => {
                 debug_assert!(false, "the window opens no quest");
                 ShopAnswer::Sent(records)
