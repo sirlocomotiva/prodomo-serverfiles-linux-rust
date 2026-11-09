@@ -50811,3 +50811,27 @@ the inventory tests 6 passed; `cargo clippy --workspace --all-targets -- -D warn
 clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. No suite run: no code changed.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 503. The addon reachability
+
+No code: a reachability sweep of the last ported-but-unproven item row.
+`CItemAddonManager::ApplyAddonTo` (`G/item_addon.cpp:16-52`) is ported as
+`apply_addon_to` (`world/src/character/drop_item.rs:602-635`), reached from
+`make_drop_item` when the proto's `sAddonType` is nonzero and from
+`change_attribute` on the same gate, and pinned by the unit test
+`addon_adds_the_pair_once`. But the 152 owner protos with a nonzero `sAddonType`
+(all `ITEM_WEAPON`, all `-1`) never reach an honest client on the owner's data:
+no line of `mob_drop_item.txt`, `drop_item_group.txt`, any `shop_item` row, any
+grant table (`special_item_group`, `cube`, `ori_to_new`, `gaya`,
+`dragon_soul_table`), or any quest names one. The numeric hits are mob vnums in
+`group.txt`/`group_group.txt` (1131 is a mob proto), colour triples and `.tga`
+names in quest libraries, and the fishing difficulty 198. The positive controls:
+ordinary vnum 19 is named in the drop tables, `special_item_group.txt` and four
+quest files. `sys.item.addon` flips to `unused`, owner question 63 to confirm.
+Supply an addon weapon to any grant path and the row revives with a scenario.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean;
+the inventory tests 6 passed; `cargo clippy --workspace --all-targets -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. No suite run: no code changed.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

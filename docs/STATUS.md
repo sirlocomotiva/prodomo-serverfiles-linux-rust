@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 502 (the private-shop close).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 503
+Last reviewed: 2026-11-09, after ledger section 503 (the addon reachability).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 504
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -566,6 +566,7 @@ Since 499 `sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_SEARCH_CLOSE` and `sub.Priv
 Since 500 `sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_SEARCH_BUY` is `ported`: the ten picks check in order against the standing shops and settle through the shared settlement, without browsing. The
 Since 501 the two market-price sub-headers are `ported`: a sale notes its price, the hourly tick averages the pending sales with the standing price, and both requests price from the averages, zero until a tick folds a sale in. The sub-header table is fully `ported`. The
 Since 502 `cg.game.private_shop` and `sys.trade.private_shop` are `ported`: every dispatched client arm is live, and `STATE_UPDATE` has an enumerator but no dispatch arm, so the client cannot send it. The
+Since 503 `sys.item.addon` is `unused`: the code is ported and unit-tested, but the 152 protos with a nonzero `sAddonType` never reach an honest client on the owner's data. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

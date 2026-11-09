@@ -593,3 +593,10 @@ owner answers.
  `package/` dir — supply the files and the rows revive. `gc.login_success3`
  (6): the server's one login-success send writes byte 32, never 6. Waits on
  it: confirm the four rows `unused`.
+63. **`sys.item.addon` is `unused` (ledger 503).** The code is ported and unit-tested
+ (`apply_addon_to`, `world/src/character/drop_item.rs:602-635`, reached from
+ `make_drop_item` and `change_attribute`), but the 152 protos with a nonzero
+ `sAddonType` never reach an honest client on your data: no drop table, shop row,
+ grant table or quest names one (the numeric hits are mob vnums in `group*.txt`,
+ colour triples and `.tga` names in quest libraries, and a fishing difficulty).
+ Waits on it: confirm the row `unused`.
