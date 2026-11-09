@@ -1783,6 +1783,8 @@ fn game_len(header: u8) -> usize {
         GC_DIG_MOTION => DIG_MOTION_LEN,
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
         GC_CUBE_RENEWAL => CUBE_LEN,
+        // `TPacketGCSwitchbot` sizes from its own DWORD `size` (`G/packet.h:3415-3421`).
+        GC_SWITCHBOT => u32::MAX as usize,
         other => panic!("unexpected game header {other}"),
     }
 }
@@ -2697,6 +2699,7 @@ fn read_enter_tail(keyed: &mut Keyed) {
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
     let _report = read_fish_report(keyed);
+    read_switchbot_report(keyed);
     enter_war_list(keyed);
     read_login_event(keyed);
 }
@@ -2826,6 +2829,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
     let report = read_fish_report(keyed);
+    read_switchbot_report(keyed);
     enter_war_list(keyed);
     Entered {
         add,
@@ -3728,6 +3732,9 @@ impl Keyed {
         }
         self.read_sized(|header, first| match game_len(header) {
             usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
+            len if len == u32::MAX as usize => {
+                u32::from_le_bytes([first[1], first[2], first[3], first[4]]) as usize
+            }
             fixed => fixed,
         })
     }
@@ -3758,6 +3765,9 @@ impl Keyed {
         self.read_sized_until(
             &|header, first| match game_len(header) {
                 usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
+                len if len == u32::MAX as usize => {
+                    u32::from_le_bytes([first[1], first[2], first[3], first[4]]) as usize
+                }
                 fixed => fixed,
             },
             deadline,
@@ -4462,6 +4472,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
         server_fish_event(3, 0, 0),
         "the fish-event report: disabled, nothing used"
     );
+    read_switchbot_report(&mut keyed);
     enter_war_list(&mut keyed);
     read_login_event(&mut keyed);
     keyed.still("nothing follows");
@@ -5775,6 +5786,7 @@ fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
     let _report = read_fish_report(keyed);
+    read_switchbot_report(keyed);
     enter_war_list(keyed);
     seen[0]
 }
@@ -5803,6 +5815,7 @@ fn enter_beside_shown(keyed: &mut Keyed, vnum: u16) -> (u32, u32) {
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
     let _report = read_fish_report(keyed);
+    read_switchbot_report(keyed);
     enter_war_list(keyed);
     (own, seen[0])
 }
@@ -20826,6 +20839,7 @@ fn a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin() {
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
     let _report = read_fish_report(&mut alice);
+    read_switchbot_report(&mut alice);
     enter_war_list(&mut alice);
     read_rank_login(&mut alice, 0, &[], &[]);
     read_login_lines_hiding(
@@ -23483,6 +23497,34 @@ fn read_priv_burst(zulu: &mut Keyed) {
 /// her burst carries the `[LS;874]` line behind the Channel record, in type
 /// order with the gold grant's `[LS;872]`; the empire-2 grant touches nobody on
 /// empire 1. All three play on empire 1.
+/// The enter-game burst of a character that enters behind live empire-rate lines: the
+/// add, the info, the shown, the phase, the priv lines behind the Channel record, the
+/// fish and switchbot reports, the war list, the GM team, and the login event.
+fn read_priv_granted_enter(keyed: &mut Keyed) {
+    keyed.send_record(&client_enter_game());
+    let add = keyed.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = keyed.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let (_shown, _affect) = read_shown(keyed);
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(keyed, [false; 5]);
+    let _lands = read_land_lines(keyed);
+    let time = keyed.read_game();
+    assert_eq!(time[0], GC_TIME);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
+    read_priv_burst(keyed);
+    let _report = read_fish_report(keyed);
+    read_switchbot_report(keyed);
+    enter_war_list(keyed);
+    assert_eq!(
+        keyed.read_game(),
+        messenger_team_list(b"Alpha"),
+        "zulu hears the GM team"
+    );
+    read_login_event(keyed);
+}
+
 #[test]
 fn a_gm_grants_an_empire_rate_and_every_client_hears_it() {
     let Some(database) = ScratchDatabase::create() else {
@@ -23571,27 +23613,7 @@ fn a_gm_grants_an_empire_rate_and_every_client_hears_it() {
     );
     let (mut zulu, _, list) = select_screen(&server, b"carol");
     let burst = read_loading_burst(&mut zulu, &list, 0);
-    zulu.send_record(&client_enter_game());
-    let add = zulu.read_game();
-    assert_eq!(add[0], GC_CHARACTER_ADD);
-    let info = zulu.read_game();
-    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
-    let (_shown, _affect) = read_shown(&mut zulu);
-    assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_GAME]);
-    read_hide_restore(&mut zulu, [false; 5]);
-    let _lands = read_land_lines(&mut zulu);
-    let time = zulu.read_game();
-    assert_eq!(time[0], GC_TIME);
-    assert_eq!(zulu.read_game(), [GC_CHANNEL, 1]);
-    read_priv_burst(&mut zulu);
-    let _report = read_fish_report(&mut zulu);
-    enter_war_list(&mut zulu);
-    assert_eq!(
-        zulu.read_game(),
-        messenger_team_list(b"Alpha"),
-        "zulu hears the GM team"
-    );
-    read_login_event(&mut zulu);
+    read_priv_granted_enter(&mut zulu);
     zulu.still("nothing follows");
     alice.sees_enter(burst.character.id, true, None);
     yankee.sees_enter(burst.character.id, true, None);
@@ -23673,6 +23695,7 @@ fn a_gm_sets_a_flag_and_a_late_login_reads_it() {
     let chat = zulu.read_game();
     assert_eq!(&chat[10..], b"letters_event 0", "no priv grants this run");
     let _report = read_fish_report(&mut zulu);
+    read_switchbot_report(&mut zulu);
     enter_war_list(&mut zulu);
     assert_eq!(
         zulu.read_game(),
@@ -23899,6 +23922,7 @@ fn a_player_trades_the_six_letters_for_the_box_draw() {
     let chat = zulu.read_game();
     assert_eq!(&chat[10..], b"letters_event 1", "the set flag shows");
     let _report = read_fish_report(&mut zulu);
+    read_switchbot_report(&mut zulu);
     enter_war_list(&mut zulu);
     assert_eq!(
         zulu.read_game(),
@@ -24097,6 +24121,7 @@ fn a_pkmode_line_lands_its_mode_with_an_update() {
     let chat = zulu.read_game();
     assert_eq!(&chat[10..], b"letters_event 0");
     let _report = read_fish_report(&mut zulu);
+    read_switchbot_report(&mut zulu);
     enter_war_list(&mut zulu);
     read_login_event(&mut zulu);
     zulu.still("nothing follows");
@@ -30137,6 +30162,7 @@ fn enter_with_hair_burst(server: &Server) -> Keyed {
     let notice = alice.read_game();
     assert_eq!(notice[0], GC_CHAT);
     let _report = read_fish_report(&mut alice);
+    read_switchbot_report(&mut alice);
     enter_war_list(&mut alice);
     read_god_login_event(&mut alice);
     alice
@@ -35330,6 +35356,10 @@ fn server_fishing(subheader: u8, info: u32, dir: u8) -> Vec<u8> {
 
 /// `HEADER_GC_FISH_EVENT_INFO` (0xdf).
 const GC_FISH_EVENT_INFO: u8 = 0xdf;
+/// `HEADER_GC_SWITCHBOT` (171).
+const GC_SWITCHBOT: u8 = 171;
+/// `HEADER_CG_SWITCHBOT` (171).
+const CG_SWITCHBOT: u8 = 171;
 /// `TPacketGCFishEventInfo` (`G/packet.h:2876-2881`): the header, the sub-header and two
 /// `DWORD`s.
 const FISH_EVENT_INFO_LEN: usize = 10;
@@ -35387,6 +35417,24 @@ fn read_land_lines(keyed: &mut Keyed) -> Vec<Vec<u8>> {
         keyed.unread(vec![record]);
         return lines;
     }
+}
+
+/// The switchbot login report behind the burst's fish report: the attribute info every
+/// character hears (`CSwitchbotManager::EnterGame`, `G/refactorized_switchbot.cpp:748-761`),
+/// then the table when the character has one. Returns whether a table rode.
+fn read_switchbot_report(keyed: &mut Keyed) -> bool {
+    let info = keyed.read_game();
+    assert_eq!(
+        (info[0], info[5]),
+        (GC_SWITCHBOT, 2),
+        "the attribute info leads: {info:02x?}"
+    );
+    let line = keyed.read_game();
+    if line.len() > 5 && (line[0], line[5]) == (GC_SWITCHBOT, 0) {
+        return true;
+    }
+    keyed.unread(vec![line]);
+    false
 }
 
 /// The fish-event login report behind the burst's letters line: the enable record, then
@@ -45604,4 +45652,83 @@ fn a_grade_refine_spends_the_stones_and_lands_a_new_one() {
          'Alpha') AND window_type = 1 AND pos = 0) IN (110000, 111000)",
     );
     alice.still("nothing follows the refine");
+}
+
+/// `cg.game.switchbot`, `gc.switchbot`, `sys.custom.switchbot`: Alpha carries a sword in the
+/// base inventory and a stack of switchers. It moves the sword onto switchbot slot 0 (the slot
+/// registers, the update answers), starts the slot with a wish for apply 1 at 5 (the update
+/// answers again), and the dice runs: within 40 reads the client sees either the finish whisper
+/// (`WHISPER_TYPE_SYSTEM` from `[Switchbot]`) or an item copy (`SUBHEADER_GC_SWITCHBOT_UPDATE_ITEM`)
+/// behind the next update.
+#[test]
+fn a_switchbot_slot_registers_starts_and_runs() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         10, 71084 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 2);
+    // Move the sword from inventory cell 0 onto switchbot slot 0.
+    let switchbot = common::item_slots::EWindows::Switchbot as u8;
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let step = protocol::cg_item_move::CgItemMove::new(
+        protocol::item_pos::ItemPos::new(inventory, 0),
+        protocol::item_pos::ItemPos::new(switchbot, 0),
+        0,
+    )
+    .encode();
+    alice.send_record(&step);
+    let moved = alice.read_game();
+    assert_eq!(moved[0], ITEM_SET, "the sword lands: {moved:02x?}");
+    let cleared = alice.read_game();
+    assert_eq!(cleared[0], ITEM_SET, "the old cell clears: {cleared:02x?}");
+    let bound = alice.read_game();
+    assert_eq!(
+        (bound[0], bound[5]),
+        (GC_SWITCHBOT, 0),
+        "the register answers the update: {bound:02x?}"
+    );
+    // Start slot 0 with a wish for apply 1 at 5 in every wanted cell.
+    let mut start = vec![CG_SWITCHBOT, 30, 0, 0, 0, 0, 0];
+    for _ in 0..10 {
+        start.push(1);
+        start.extend(5i16.to_le_bytes());
+    }
+    alice.send_record(&start);
+    let update = alice.read_game();
+    assert_eq!(
+        (update[0], update[5]),
+        (GC_SWITCHBOT, 0),
+        "the start answers the update: {update:02x?}"
+    );
+    // The dice runs: a finish whispers, a miss changes behind an update.
+    let mut saw_copy = false;
+    let mut saw_whisper = false;
+    for _ in 0..40 {
+        let record = alice.read_game();
+        if record[0] == GC_SWITCHBOT && record.len() > 5 && record[5] == 1 {
+            saw_copy = true;
+        }
+        if record[0] == GC_WHISPER {
+            saw_whisper = true;
+        }
+        if saw_copy || saw_whisper {
+            break;
+        }
+    }
+    assert!(
+        saw_copy || saw_whisper,
+        "a copy or a finish whisper follows the start"
+    );
 }

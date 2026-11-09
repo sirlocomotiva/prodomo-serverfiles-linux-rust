@@ -154,6 +154,7 @@ mod sort_inventory;
 mod stack_attr;
 mod stat;
 mod state;
+mod switchbot;
 mod sync;
 mod target;
 mod target_info;
@@ -740,6 +741,7 @@ pub struct GameState {
     /// one tick per character, as `StartBlendExpireEvent` starts one event per item but a second
     /// use while another copy holds the marker is refused.
     blend_ticks: HashMap<common::vid::Vid, blend::BlendTick>,
+    switchbots: HashMap<u32, switchbot::Switchbot>,
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
@@ -2652,6 +2654,7 @@ impl GameState {
             | GameCommand::DragonSoulRefine { .. }
             | GameCommand::RefineElement { .. }
             | GameCommand::Attr67 { .. }
+            | GameCommand::Switchbot { .. }
             | GameCommand::Aura { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
@@ -3422,6 +3425,7 @@ impl GameState {
         // after the show, so the body's map is placed and the list names its lands.
         // The lines ride the burst before the time record.
         let land_lines = self.land_list_lines(vid);
+        let switchbot_lines = self.switchbot_report(vid);
         Shown {
             records,
             update,
@@ -3431,6 +3435,7 @@ impl GameState {
             letters_event,
             fish_lines,
             land_lines,
+            switchbot_lines,
             observer: self.is_observing(vid),
             landed: None,
         }
@@ -3605,13 +3610,22 @@ impl GameState {
         self.leave_world_by(vid, Departure::Disconnect)
     }
 
+    /// The departure-gated half of [`Self::leave_world_by`]: a warp stills the
+    /// switchbot's register, a disconnect drops the arena seat.
+    fn leave_world_departure_gates(&mut self, vid: common::vid::Vid, departure: Departure) {
+        if departure == Departure::Warp {
+            self.switchbot_warping(vid, true);
+        }
+        if departure == Departure::Disconnect {
+            self.arena_disconnect(vid);
+        }
+    }
+
     /// As [`GameState::leave_world`], for a character that leaves by `departure`. A player
     /// stunned or dead stands first with 50 hit points (B5), and its fight's events end; a
     /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
     pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
-        if departure == Departure::Disconnect {
-            self.arena_disconnect(vid);
-        }
+        self.leave_world_departure_gates(vid, departure);
         self.arena_potions.remove(&vid);
         // `CheckMultiFarmAccount(..., false)` (`G/char.cpp:1791`): the leaver stops
         // farming before its body goes.
@@ -3812,6 +3826,9 @@ impl GameState {
         request: MoveRequest,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
+        if self.switchbot_source_active(vid, request.from) {
+            return Err(MoveItemRefused::Refused(MoveRefused::SwitchbotActive));
+        }
         if self.sash_item_at(vid, request.from)
             || self.sash_item_at(vid, request.to)
             || self.changelook_item_at(vid, request.from)
@@ -3825,11 +3842,13 @@ impl GameState {
             // and is a Divergence, recorded in `docs/STATUS.md`.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
-        self.run_item_step(vid, actor, |items, ids, rules, gear, protos| {
+        let mut moved = self.run_item_step(vid, actor, |items, ids, rules, gear, protos| {
             move_item(items, ids, request, rules, gear, |vnum| {
                 move_facts(protos, vnum)
             })
-        })
+        })?;
+        self.switchbot_follow_move(vid, request.from, request.to, &mut moved);
+        Ok(moved)
     }
 
     /// Run one client quickslot request for the character online under `vid`, answering the
@@ -4785,7 +4804,8 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
             }
-            command @ (GameCommand::Aura { .. }
+            command @ (GameCommand::Switchbot { .. }
+            | GameCommand::Aura { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
             | GameCommand::CubeRenewal { .. }) => self.apply_window_step(command),
@@ -4890,9 +4910,23 @@ impl GameState {
     }
 
     /// The window steps of [`GameState::apply_ground`], split out so neither trips the
-    /// line lint: the aura, the sash, the changelook and the cube.
+    /// line lint: the switchbot, the aura, the sash, the changelook and the cube.
     fn apply_window_step(&mut self, command: GameCommand) {
         match command {
+            GameCommand::Switchbot {
+                vid,
+                sub_header,
+                slot,
+                bodies,
+                mover,
+                reply,
+            } => {
+                answer_item_step(
+                    vid,
+                    reply,
+                    self.switchbot(vid, sub_header, slot, &bodies, mover),
+                );
+            }
             GameCommand::Aura {
                 vid,
                 sub_header,
@@ -5897,6 +5931,7 @@ impl PulseProcessor for GameState {
         self.run_horse_timers(pulse);
         self.run_horse_dead_events(pulse);
         self.run_blend_ticks(pulse);
+        self.run_switchbot_ticks(pulse);
         self.run_real_time_expiry(pulse);
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
@@ -8337,14 +8372,21 @@ mod tests {
             outbox,
             reply,
         });
+        let shown = answer.blocking_recv().unwrap().expect("the entry lands");
         assert_eq!(
-            answer.blocking_recv().unwrap(),
-            Ok(crate::game_loop_messages::Shown {
-                // `ENABLE` with flag 0 and count 0: nothing used.
-                fish_lines: vec![vec![0xdf, 3, 0, 0, 0, 0, 0, 0, 0, 0]],
-                ..crate::game_loop_messages::Shown::default()
-            }),
+            shown.fish_lines,
+            // `ENABLE` with flag 0 and count 0: nothing used.
+            vec![vec![0xdf, 3, 0, 0, 0, 0, 0, 0, 0, 0]],
             "an entry with no body shows nothing but the fish report"
+        );
+        // The attribute info rides for every character, with no table behind it.
+        assert_eq!(shown.switchbot_lines.len(), 1);
+        assert_eq!(
+            (shown.switchbot_lines[0][0], shown.switchbot_lines[0][5]),
+            (
+                protocol::gc_switchbot::HEADER,
+                protocol::gc_switchbot::SUB_ATTR_INFO
+            )
         );
         let character = state.characters().find_by_vid(Vid::new(7)).unwrap();
         assert_eq!(character.gold(), 1_200_000_000_000_000_000 - 1);

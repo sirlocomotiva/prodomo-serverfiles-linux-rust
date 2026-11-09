@@ -775,10 +775,10 @@ impl CharacterItems {
     ///
     /// This is `CHARACTER::IsEmptyItemGrid` (`char_item.cpp:737-859`) for the
     /// `INVENTORY` window, which is the arm `MoveItem` reaches for the base inventory,
-    /// the custom banks and the belt. Every other window answers `false`: legacy's
-    /// switch has no `EQUIPMENT` arm, so an item can never be *placed* through window
-    /// 2, and the dragon-soul and switchbot arms belong to moves this storage does not
-    /// run yet.
+    /// the custom banks and the belt, and the `SWITCHBOT` arm, which answers whether
+    /// the slot is free. Every other window answers `false`: legacy's switch has no
+    /// `EQUIPMENT` arm, so an item can never be *placed* through window 2, and the
+    /// dragon-soul arm belongs to a move this storage does not run yet.
     ///
     /// `exception_cell` is the source cell of a move. Legacy passes `Cell.cell` and
     /// increments it (`:762`), so it matches the grid's one-based anchor of the item
@@ -805,6 +805,13 @@ impl CharacterItems {
         usable_cells: u16,
         belt_grade: Option<i32>,
     ) -> bool {
+        if dest.window_type == EWindows::Switchbot as u8 {
+            // `IsEmptyItemGrid`'s `SWITCHBOT` arm (`G/char_item.cpp:1017-1030`): a
+            // slot beyond the five is never empty, an occupied slot is never empty,
+            // and a free slot takes any size.
+            return dest.cell < common::item_slots::SWITCHBOT_SLOT_COUNT
+                && self.item_at(dest).is_none();
+        }
         if dest.window_type != EWindows::Inventory as u8 || size == 0 {
             return false;
         }
@@ -1301,14 +1308,8 @@ impl CharacterItems {
                 present,
             });
         }
-        if item.size > 1 {
-            return Err(Rejected::FootprintCutOff {
-                window: pos.window_type,
-                cell: pos.cell,
-                size: item.size,
-                covered: 1,
-            });
-        }
+        // A slot holds one item whatever its size: legacy's `SetItem` writes only
+        // `pSwitchbotItems` and checks no footprint (`G/char_item.cpp:535-561`).
         self.switchbot[usize::from(pos.cell)] = item.id;
         Ok(())
     }
@@ -2472,12 +2473,15 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_check_answers_only_for_the_inventory_window() {
+    fn the_grid_check_answers_only_for_the_inventory_window_and_the_switchbot() {
         let items = CharacterItems::new();
-        for window in [EQUIP, DS, SWITCH, A67, SAFEBOX, MALL, BELT] {
+        for window in [EQUIP, DS, A67, SAFEBOX, MALL, BELT] {
             assert!(!items.is_empty_item_grid(pos(window, 3), 1, None, 90, None));
         }
         assert!(!items.is_empty_item_grid(pos(INV, 3), 0, None, 90, None));
+        // A free slot takes any size; past the slots nothing is empty.
+        assert!(items.is_empty_item_grid(pos(SWITCH, 3), 2, None, 90, None));
+        assert!(!items.is_empty_item_grid(pos(SWITCH, 5), 1, None, 90, None));
     }
 
     #[test]

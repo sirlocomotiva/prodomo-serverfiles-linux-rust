@@ -1404,6 +1404,9 @@ pub struct BurstAfter {
     /// The map's guild lands: each owned land's NAME, then the one list
     /// (`CManager::SendLandList`, `G/building.cpp:938-989`).
     pub land_lines: Vec<Vec<u8>>,
+    /// The switchbot report: the attribute info, then the table when the character
+    /// has one (`CSwitchbotManager::EnterGame`, `G/refactorized_switchbot.cpp:748-761`).
+    pub switchbot_lines: Vec<Vec<u8>>,
 }
 
 /// The records the enter-game burst sends, in legacy order.
@@ -1491,9 +1494,11 @@ pub fn enter_game_burst(
     let mut line = GcChat::notice(CHAT_TYPE_COMMAND, character.empire, chat)
         .expect("the letters_event line is shorter than the chat length limit");
     out.push(encoded(&mut line, "the letters_event line"));
-    // `FishEventGeneralInfo` closes `Entergame` (`G/input_login.cpp:939`): the enable
-    // record, then one `SHAPE_ADD` per main cell, ride the burst last.
+    // `FishEventGeneralInfo` and `CSwitchbotManager::EnterGame` close `Entergame`
+    // (`G/input_login.cpp:939-956`): the enable record, one `SHAPE_ADD` per main cell, then
+    // the attribute info and the table, ride the burst last.
     out.extend(after.fish_lines);
+    out.extend(after.switchbot_lines);
     EnterGameBurst {
         before_phase: before,
         after_phase: out,
@@ -2366,6 +2371,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             1_600_000_000,
@@ -2398,6 +2404,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2484,6 +2491,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2528,6 +2536,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2558,6 +2567,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             4,
             1_600_000_000,
@@ -2590,6 +2600,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2631,6 +2642,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2657,6 +2669,7 @@ mod tests {
                 letters_event: true,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2680,6 +2693,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2829,6 +2843,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2857,6 +2872,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2881,6 +2897,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2959,6 +2976,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -2992,6 +3010,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,
@@ -3021,6 +3040,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                switchbot_lines: Vec::new(),
             },
             1,
             0,

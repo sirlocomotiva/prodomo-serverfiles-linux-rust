@@ -50155,3 +50155,52 @@ ledger touched and restoring the aura doc the command insert split; `RUSTDOCFLAG
 warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards
 no `prodomo\_%` database remained. No ADR changed.
+
+## 490. The switchbot
+
+`cg.game.switchbot`, `gc.switchbot` and `sys.custom.switchbot` port with the scenario
+`a_switchbot_slot_registers_starts_and_runs`: Alpha carries a sword in the base inventory and a
+stack of ten switchers, moves the sword onto switchbot slot 0 (the register answers the update),
+starts the slot with a wish for apply 1 at 5 (the update answers again), and within 40 reads the
+client sees either the finish whisper or an item copy behind the spend's update.
+
+The wire: `protocol::cg_switchbot` decodes the 7-byte prefix (`size`, subheader, slot) and the
+START's two 15-byte alternatives; `cg_variable` sizes START at 37 and STOP (or an unknown
+sub-header, which falls through the switch) at 7 (`G/input_main.cpp:5411-5455`).
+`protocol::gc_switchbot` encodes the head plus the update (191), the item copy (55) and the
+attribute info. The GC inventory row flips implemented (124 done, 10 missing).
+
+The system (`prodomo/src/game_state/switchbot.rs`, `ENABLE_SWITCHBOT`): a table per player id
+holding items, actives, finishes and alternatives, with the START/STOP entry, the register and
+unregister the slot moves call, the 2-pulse dice, the finish whisper
+(`WHISPER_TYPE_SYSTEM` from `[Switchbot]`), the out-of-switchers stop, the move gates (a potion
+cannot land on a slot, an active slot's sword cannot move), the warp stilling (`leave_world_by`
+sets it, the login report clears it and re-arms a live dice), and the login report (the
+attribute info for every character, then the table when it has one), which rides the enter-game
+burst after the fish lines (`G/input_login.cpp:956`).
+
+The dice spends first and changes second, and the copy rides unconditionally
+(`refactorized_switchbot.cpp:355-377`): the first version returned early when
+`ChangeAttribute` rolled nothing (an attribute-less sword), which spent in the world while the
+client and the store never learned of it — eleven ticks in the log, no record on the wire. The
+fix flushes the spend and the copy on every miss. A unit pins it through the character's inbox
+(the spend's `ITEM_UPDATE` and the 55-byte copy arrive for an attribute-less sword), and the
+mutant (the early return restored) fails on the missing update.
+
+Also: `MoveFacts` folds its four prototype bools into `flags` (`MOVE_*` bits), because the new
+`switchbot_item` bool tripped `struct_excessive_bools`; `leave_world_by` sheds its
+departure-gated half into `leave_world_departure_gates` at the 100-line limit; the START bodies
+parse defensively (a short `GameCommand` body leaves the defaults); the obsolete
+"variable header without a resolver" test becomes `every_variable_header_has_a_resolver`, since
+all twelve variable headers now resolve; and every enter-game burst reader in the parity
+harness and `game_loop_thread` reads the new report.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace
+--locked --offline` clean; the suite 5155 passed, 0 failed in 46 targets; doc-tests
+1 passed, 0 failed; `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings` clean after folding `MoveFacts`' bools into flags, extracting
+`leave_world_departure_gates` and the priv-granted burst reader at the line limit, and
+clearing the cast, similar-name and unused-import findings by refactoring;
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

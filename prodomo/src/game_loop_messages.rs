@@ -562,6 +562,22 @@ pub enum GameCommand {
         /// Where the game thread reports what the refine did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_SWITCHBOT` for the character online under `vid`, answered as a
+    /// move is.
+    Switchbot {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The sub-header: start or stop.
+        sub_header: u8,
+        /// The slot the client named.
+        slot: u8,
+        /// The START bodies, empty for STOP.
+        bodies: Vec<u8>,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the switchbot step did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_AURA` for the character online under `vid`, answered as a move is.
     Aura {
         /// The VID of the character whose client sent the request.
@@ -3266,6 +3282,11 @@ pub struct Shown {
     /// each owned land's NAME, then the one list. The burst carries them before the
     /// time record, where legacy sends them before it (`G/input_login.cpp:676-685`).
     pub land_lines: Vec<Vec<u8>>,
+    /// The switchbot report (`CSwitchbotManager::EnterGame`,
+    /// `G/refactorized_switchbot.cpp:748-761`): the attribute info for every character,
+    /// then the table when it has one. The burst carries them after the fish lines,
+    /// where legacy sends them at the end of `Entergame` (`G/input_login.cpp:956`).
+    pub switchbot_lines: Vec<Vec<u8>>,
     /// Whether the character observes: a war map's watch sets the flag at admission
     /// (`CWarMap::IncMember`, `G/war_map.cpp:384`). The descriptor gates the records by it.
     pub observer: bool,
@@ -4270,6 +4291,33 @@ impl GameLoopController {
             vid,
             sub_header,
             grid,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a switchbot request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn switchbot(
+        &self,
+        vid: common::vid::Vid,
+        sub_header: u8,
+        slot: u8,
+        bodies: Vec<u8>,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Switchbot {
+            vid,
+            sub_header,
+            slot,
+            bodies,
             mover,
             reply,
         })

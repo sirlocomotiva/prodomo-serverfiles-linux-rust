@@ -109,7 +109,8 @@ pub use inventory::{
 };
 pub use item_move::{
     move_item, GroundRecord, ItemChange, ItemRecord, MoveDone, MoveFacts, MoveKind, MoveRecord,
-    MoveRefused, MoveRequest, MoveRules, Unported, AUTO_FIND_CELL,
+    MoveRefused, MoveRequest, MoveRules, Unported, AUTO_FIND_CELL, MOVE_BELT_ELIGIBLE,
+    MOVE_CHAINS_QUICKSLOTS, MOVE_DRAGON_SOUL, MOVE_SWITCHBOT_ITEM,
 };
 pub use items::{
     belt_cell_is_available, AttributeRefused, CharacterItems, CountRefused, Lookup, Rejected,

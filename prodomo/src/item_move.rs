@@ -29,7 +29,7 @@ use common::vid::Vid;
 use db::items::{Attribute, ItemRow, RowChange};
 use gamedata::belt_inventory::can_move_into_belt_inventory;
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
-use gamedata::item_proto::ItemProtos;
+use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::item_proto_value::type_value;
 use gamedata::locale_string::LocaleStrings;
 use protocol::gc_actors::{GcCharacterGoldChange, GcCharacterUpdate};
@@ -380,14 +380,55 @@ impl std::error::Error for MoveItemRefused {}
 #[must_use]
 pub fn move_facts(protos: &ItemProtos, vnum: u32) -> Option<MoveFacts> {
     let proto = protos.get(vnum)?;
+    let mut flags = 0;
+    for (bit, set) in [
+        (
+            world::character::MOVE_BELT_ELIGIBLE,
+            can_move_into_belt_inventory(proto),
+        ),
+        (
+            world::character::MOVE_DRAGON_SOUL,
+            type_value(b"ITEM_DS") == Some(proto.item_type),
+        ),
+        (
+            world::character::MOVE_SWITCHBOT_ITEM,
+            is_switchbot_item(proto),
+        ),
+        (
+            world::character::MOVE_CHAINS_QUICKSLOTS,
+            world::character::chains_when_used_up(proto),
+        ),
+    ] {
+        if set {
+            flags |= bit;
+        }
+    }
     Some(MoveFacts {
         categories: (0..CATEGORY_NUM)
             .filter(|category| is_custom_category(proto, *category))
             .collect(),
-        belt_eligible: can_move_into_belt_inventory(proto),
-        dragon_soul: type_value(b"ITEM_DS") == Some(proto.item_type),
-        chains_quickslots: world::character::chains_when_used_up(proto),
+        flags,
     })
+}
+
+/// `SwitchbotHelper::IsValidItem` (`G/refactorized_switchbot.cpp:21-49`): a weapon,
+/// or body, head, shield, wrist, feet, neck or ear armour.
+#[must_use]
+pub fn is_switchbot_item(proto: &ItemProto) -> bool {
+    use gamedata::item_kind::{
+        ARMOR_BODY, ARMOR_EAR, ARMOR_FOOTS, ARMOR_HEAD, ARMOR_NECK, ARMOR_SHIELD, ARMOR_WRIST,
+        ITEM_ARMOR, ITEM_WEAPON,
+    };
+    if proto.item_type == ITEM_WEAPON {
+        return true;
+    }
+    if proto.item_type != ITEM_ARMOR {
+        return false;
+    }
+    matches!(
+        proto.sub_type,
+        ARMOR_BODY | ARMOR_HEAD | ARMOR_SHIELD | ARMOR_WRIST | ARMOR_FOOTS | ARMOR_NECK | ARMOR_EAR
+    )
 }
 
 /// The worn belt's `value0`, or `None` when no belt is worn.
@@ -622,11 +663,11 @@ mod tests {
         // Hand-checked in the owner's data: 27001 is a red potion (`ITEM_USE`, `USE_POTION`),
         // which a belt cell accepts, and 11 is a sword, which it does not.
         let potion = move_facts(&protos, 27001).expect("27001 is in the owner's data");
-        assert!(potion.belt_eligible);
-        assert!(!potion.dragon_soul);
+        assert!(potion.has(world::character::MOVE_BELT_ELIGIBLE));
+        assert!(!potion.has(world::character::MOVE_DRAGON_SOUL));
         let sword = move_facts(&protos, 11).expect("11 is in the owner's data");
-        assert!(!sword.belt_eligible);
-        assert!(!sword.dragon_soul);
+        assert!(!sword.has(world::character::MOVE_BELT_ELIGIBLE));
+        assert!(!sword.has(world::character::MOVE_DRAGON_SOUL));
         assert_eq!(move_facts(&protos, 0), None);
         // An item in two banks lists both, ascending (ledger 199.2 names 27987).
         let two_banks = move_facts(&protos, 27987).expect("27987 is in the owner's data");
@@ -637,7 +678,8 @@ mod tests {
             .iter()
             .find(|proto| Some(proto.item_type) == type_value(b"ITEM_DS"))
             .expect("the owner's data has a dragon-soul item");
-        assert!(move_facts(&protos, stone.vnum).is_some_and(|facts| facts.dragon_soul));
+        assert!(move_facts(&protos, stone.vnum)
+            .is_some_and(|facts| facts.has(world::character::MOVE_DRAGON_SOUL)));
     }
 
     #[test]

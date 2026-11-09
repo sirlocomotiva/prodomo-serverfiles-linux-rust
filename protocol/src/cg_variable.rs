@@ -31,8 +31,9 @@ use crate::cg_guild::{sub_packet_size, GUILD_SUBHEADER_CG_POST_COMMENT};
 use crate::cg_inventory::{
     HEADER_CG_AURA, HEADER_CG_CHAT, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_GUILD,
     HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MYSHOP, HEADER_CG_PRIVATE_SHOP,
-    HEADER_CG_SHOP, HEADER_CG_SYNC_POSITION, HEADER_CG_WHISPER,
+    HEADER_CG_SHOP, HEADER_CG_SWITCHBOT, HEADER_CG_SYNC_POSITION, HEADER_CG_WHISPER,
 };
+use crate::cg_switchbot::{SUBHEADER_CG_SWITCHBOT_START, SWITCHBOT_START_EXTRA_WIRE_SIZE};
 use crate::cg_wire::{
     resolve_client_frame_size, ClientFrame, ClientFrameError, ClientFrameSize,
     CLIENT_FRAME_HEADER_SIZE, DEFAULT_MAX_CLIENT_FRAME_SIZE,
@@ -111,6 +112,10 @@ pub const FISH_EVENT_SUBHEADER_SHAPE_ADD: u8 = 1;
 /// subheader (`packet.h:3056-3063`).
 pub const AURA_BASE_WIRE_SIZE: usize = 4;
 
+/// Active x86 `TPacketCGSwitchbot` prefix: header, the dead size dword, the
+/// subheader, and the slot (`packet.h:3400-3406`).
+pub const CG_SWITCHBOT_BASE_WIRE_SIZE: usize = 7;
+
 /// Variable client headers covered by this source-verified resolver.
 pub const RESOLVABLE_VARIABLE_CLIENT_HEADERS: &[u8] = &[
     HEADER_CG_CHAT.value(),
@@ -124,6 +129,7 @@ pub const RESOLVABLE_VARIABLE_CLIENT_HEADERS: &[u8] = &[
     HEADER_CG_MESSENGER.value(),
     HEADER_CG_PRIVATE_SHOP.value(),
     HEADER_CG_AURA.value(),
+    HEADER_CG_SWITCHBOT.value(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1049,35 @@ fn aura_subheader_extra(
 /// # Errors
 ///
 /// Returns a typed error for a wrong prefix size or a checked-size overflow.
+/// The switchbot arm of [`resolve_variable_client_frame_size`]: START appends the two
+/// alternatives' 30 bytes, STOP and an unknown sub-header none
+/// (`G/input_main.cpp:5423-5454`).
+///
+/// # Errors
+///
+/// Returns a typed error for a wrong prefix size or a checked-size overflow.
+fn switchbot_subheader_extra(
+    header: u8,
+    base_size: usize,
+    prefix: &[u8],
+) -> Result<usize, ClientFrameError> {
+    if base_size != CG_SWITCHBOT_BASE_WIRE_SIZE {
+        return Err(ClientFrameError::InvalidInventorySize {
+            header,
+            size: base_size,
+        });
+    }
+    let extra = match prefix[5] {
+        SUBHEADER_CG_SWITCHBOT_START => SWITCHBOT_START_EXTRA_WIRE_SIZE,
+        // `STOP` takes no sub-record, and an unknown sub-header falls through the
+        // switch and consumes the prefix alone (`:5453`).
+        _ => 0,
+    };
+    base_size
+        .checked_add(extra)
+        .ok_or(ClientFrameError::SizeOverflow)
+}
+
 fn fish_event_counted_size(
     header: u8,
     base_size: usize,
@@ -1129,6 +1164,9 @@ pub fn resolve_variable_client_frame_size(
         }
         value if value == HEADER_CG_AURA.value() => {
             aura_subheader_extra(header, base_size, prefix)?
+        }
+        value if value == HEADER_CG_SWITCHBOT.value() => {
+            switchbot_subheader_extra(header, base_size, prefix)?
         }
         _ => {
             return Err(ClientFrameError::VariableLengthUnsupported { header, base_size });
@@ -2370,14 +2408,41 @@ mod tests {
     }
 
     #[test]
-    fn variable_headers_without_a_resolver_remain_explicitly_unsupported() {
+    fn every_variable_header_has_a_resolver() {
+        use crate::cg_wire::LEGACY_CG_VARIABLE_HEADERS;
+        for header in LEGACY_CG_VARIABLE_HEADERS {
+            assert!(
+                RESOLVABLE_VARIABLE_CLIENT_HEADERS.contains(header),
+                "variable header {header:#04x} has no resolver"
+            );
+        }
+        for header in RESOLVABLE_VARIABLE_CLIENT_HEADERS {
+            assert!(
+                LEGACY_CG_VARIABLE_HEADERS.contains(header),
+                "resolver for non-variable header {header:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn switchbot_frames_size_by_subheader_past_the_dead_dword() {
         use crate::cg_inventory::HEADER_CG_SWITCHBOT;
+        use crate::cg_switchbot::SUBHEADER_CG_SWITCHBOT_STOP;
+        let header = HEADER_CG_SWITCHBOT.value();
+        // START with two empty alternatives: the 7-byte prefix plus 30.
+        let mut start = vec![header, 30, 0, 0, 0, 0, 0];
+        start.extend([0u8; 30]);
         let mut decoder = VariableClientFrameDecoder::new();
-        decoder.feed(&[HEADER_CG_SWITCHBOT.value(), 0]).unwrap();
-        assert!(matches!(
-            decoder.try_decode(),
-            Err(ClientFrameError::VariableLengthUnsupported { .. })
-        ));
+        decoder.feed(&start).unwrap();
+        let frame = decoder.try_decode().unwrap().expect("a whole start");
+        assert_eq!(frame.payload.len(), 6 + 30);
+        // STOP and an unknown sub-header consume the prefix alone.
+        for subheader in [SUBHEADER_CG_SWITCHBOT_STOP, 9] {
+            let mut decoder = VariableClientFrameDecoder::new();
+            decoder.feed(&[header, 0, 0, 0, 0, subheader, 0]).unwrap();
+            let frame = decoder.try_decode().unwrap().expect("a bare stop");
+            assert_eq!(frame.payload.len(), 6);
+        }
     }
 
     #[test]

@@ -150,9 +150,10 @@ use protocol::cg_inventory::{
     HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
     HEADER_CG_REFINE_ELEMENT, HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST,
     HEADER_CG_SASH, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
-    HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
-    HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
-    HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS, HEADER_CG_WORLD_BOSS,
+    HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SWITCHBOT,
+    HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD,
+    HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS,
+    HEADER_CG_WORLD_BOSS,
 };
 use protocol::cg_item_destroy::CgItemDestroy;
 use protocol::cg_item_drop::CgItemDrop;
@@ -1334,6 +1335,7 @@ fn is_belongings_step(header: u8) -> bool {
         || header == HEADER_CG_REFINE_ELEMENT.value()
         || header == HEADER_CG_ATTR67_ADD.value()
         || header == HEADER_CG_AURA.value()
+        || header == HEADER_CG_SWITCHBOT.value()
         || header == HEADER_CG_SASH.value()
         || header == HEADER_CG_CL.value()
         || header == HEADER_CG_CUBE_RENEWAL.value()
@@ -1405,6 +1407,8 @@ where
         refine_an_element(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ATTR67_ADD.value() {
         attr67_step(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_SWITCHBOT.value() {
+        switchbot_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_AURA.value() {
         aura_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_SASH.value() {
@@ -2174,6 +2178,44 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
+/// `CG_SWITCHBOT` (171) in the game phase: `CInputMain::Switchbot`
+/// (`G/input_main.cpp:5411-5455`). The world's rows are stored as a move's are.
+///
+/// A malformed record closes the connection; an unknown sub-header is absorbed.
+async fn switchbot_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use protocol::cg_switchbot::{
+        CgSwitchbot, SUBHEADER_CG_SWITCHBOT_START, SUBHEADER_CG_SWITCHBOT_STOP,
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "SWITCHBOT without a character in the world; ignoring");
+        return true;
+    };
+    let Ok(prefix) = CgSwitchbot::decode_prefix(frame) else {
+        warn!(%addr, "Client sent a malformed SWITCHBOT; closing");
+        return false;
+    };
+    let rest = &frame.payload[CgSwitchbot::PAYLOAD_SIZE..];
+    let bodies = match prefix.subheader {
+        SUBHEADER_CG_SWITCHBOT_START => rest.to_vec(),
+        SUBHEADER_CG_SWITCHBOT_STOP | 2..=u8::MAX => Vec::new(),
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .switchbot(vid, prefix.subheader, prefix.slot, bodies, actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
 /// `CG_AURA` (172) in the game phase: `CInputMain::Aura`
 /// (`G/input_main.cpp:5294-5340`), with no observer gate (`:3865-3868`). The world's rows
 /// are stored as a move's are.
@@ -2459,6 +2501,7 @@ async fn entering_burst(
             letters_event: shown.letters_event,
             fish_lines: shown.fish_lines,
             land_lines: shown.land_lines,
+            switchbot_lines: shown.switchbot_lines,
         },
         channel,
         global_time(),

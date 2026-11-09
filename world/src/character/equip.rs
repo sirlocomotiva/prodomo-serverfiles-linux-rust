@@ -1295,7 +1295,7 @@ mod tests {
 
     use super::*;
     use crate::character::item_move::{move_item, MoveDone, MoveKind, MoveRequest, MoveRules};
-    use crate::character::item_move::{MoveFacts, MoveRecord};
+    use crate::character::item_move::{MoveFacts, MoveRecord, MOVE_SWITCHBOT_ITEM};
     use crate::character::points::PointsRow;
 
     /// No groups: the sig tail appends nothing.
@@ -1545,9 +1545,7 @@ mod tests {
             let request = MoveRequest { from, to, count: 0 };
             let facts = MoveFacts {
                 categories: Vec::new(),
-                belt_eligible: false,
-                dragon_soul: false,
-                chains_quickslots: false,
+                flags: MOVE_SWITCHBOT_ITEM,
             };
             move_item(
                 &mut self.items,

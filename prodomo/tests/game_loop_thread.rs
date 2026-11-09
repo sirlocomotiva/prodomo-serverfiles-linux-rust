@@ -9,13 +9,26 @@ use prodomo::game_loop_messages::{
     Shown,
 };
 
-/// The burst's fish-event line for a character with nothing used: `ENABLE` with flag 0
-/// and count 0 (`FishEventGeneralInfo`, `G/char.cpp:10880-10913`).
-fn empty_fish_report() -> Shown {
-    Shown {
-        fish_lines: vec![vec![0xdf, 3, 0, 0, 0, 0, 0, 0, 0, 0]],
+/// An entry with nothing used shows the fish-event `ENABLE` with flag 0 and count 0
+/// (`FishEventGeneralInfo`, `G/char.cpp:10880-10913`), nothing else, and the switchbot
+/// attribute info with no table behind it.
+fn assert_empty_entry(shown: &Shown) {
+    assert_eq!(
+        shown.fish_lines,
+        vec![vec![0xdf, 3, 0, 0, 0, 0, 0, 0, 0, 0]]
+    );
+    let bare = Shown {
+        fish_lines: shown.fish_lines.clone(),
+        switchbot_lines: shown.switchbot_lines.clone(),
         ..Shown::default()
-    }
+    };
+    assert_eq!(*shown, bare, "an empty entry shows nothing else");
+    assert_eq!(shown.switchbot_lines.len(), 1);
+    assert_eq!(
+        (shown.switchbot_lines[0][0], shown.switchbot_lines[0][5]),
+        (171, 2),
+        "the attribute info rides with no table"
+    );
 }
 use prodomo::game_state::GameState;
 
@@ -601,7 +614,7 @@ async fn a_client_admitted_from_tokio_lands_on_the_thread_that_owns_the_world() 
     // Then: the world holds the character, and a grant addressed to its Name finds
     // it. That second half is the point of the whole unit: before this, nothing a
     // client did could put a character where a grant could reach it.
-    assert_eq!(admitted, Ok(empty_fish_report()));
+    assert_empty_entry(&admitted.expect("the admission lands"));
     let granted = tokio::time::timeout(
         Duration::from_secs(5),
         controller.request_grant(prodomo::item_grant::GrantRequest {
@@ -664,18 +677,16 @@ async fn a_client_that_enters_the_world_twice_is_refused_by_the_thread_that_owns
     let controller = game_loop.controller();
     let (tx, _inbox) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let outbox = prodomo::client_registry::ClientOutbox::new(tx);
-    assert_eq!(
-        controller
-            .enter_world(
-                common::vid::Vid::new(77),
-                77,
-                "Shaman".to_owned(),
-                outbox.clone()
-            )
-            .await
-            .expect("the answer crossed back"),
-        Ok(empty_fish_report())
-    );
+    let first = controller
+        .enter_world(
+            common::vid::Vid::new(77),
+            77,
+            "Shaman".to_owned(),
+            outbox.clone(),
+        )
+        .await
+        .expect("the answer crossed back");
+    assert_empty_entry(&first.expect("the first entry lands"));
 
     // When: a second descriptor claims the same VID.
     let second = controller
@@ -785,7 +796,7 @@ async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
         )
         .await
         .expect("the answer crossed back");
-    assert_eq!(readmitted, Ok(empty_fish_report()));
+    assert_empty_entry(&readmitted.expect("the re-admission lands"));
     // And the new session's inventory starts empty, so the first grant takes the
     // same cell the departed session held. A world that kept the old character's
     // items would hand the cell to somebody else and the player would see a hole.

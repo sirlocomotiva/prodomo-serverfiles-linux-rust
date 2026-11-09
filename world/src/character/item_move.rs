@@ -111,18 +111,33 @@ pub struct MoveRules {
     pub secured: bool,
 }
 
+/// One bit of [`MoveFacts::flags`]: a belt cell accepts it.
+pub const MOVE_BELT_ELIGIBLE: u8 = 1;
+/// One bit of [`MoveFacts::flags`]: it is a dragon-soul item (`ITEM_DS`).
+pub const MOVE_DRAGON_SOUL: u8 = 2;
+/// One bit of [`MoveFacts::flags`]: the switchbot takes it
+/// (`SwitchbotHelper::IsValidItem`, `G/refactorized_switchbot.cpp:21-49`): a weapon,
+/// or body, head, shield, wrist, feet, neck or ear armour.
+pub const MOVE_SWITCHBOT_ITEM: u8 = 4;
+/// One bit of [`MoveFacts::flags`]: a stack used up by a merge chains its slots
+/// ([`super::quickslot::chains_when_used_up`]).
+pub const MOVE_CHAINS_QUICKSLOTS: u8 = 8;
+
 /// The facts about an item's prototype a move reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveFacts {
     /// The custom banks the item belongs to, ascending.
     pub categories: Vec<u8>,
-    /// Whether a belt cell accepts it.
-    pub belt_eligible: bool,
-    /// Whether it is a dragon-soul item (`ITEM_DS`).
-    pub dragon_soul: bool,
-    /// Whether a stack used up by a merge chains its slots
-    /// ([`super::quickslot::chains_when_used_up`]).
-    pub chains_quickslots: bool,
+    /// The prototype's move flags, a combination of the `MOVE_*` bits.
+    pub flags: u8,
+}
+
+impl MoveFacts {
+    /// Whether `flags` carries `bit`.
+    #[must_use]
+    pub const fn has(&self, bit: u8) -> bool {
+        self.flags & bit != 0
+    }
 }
 
 /// Which of the three outcomes a move had.
@@ -181,6 +196,9 @@ pub enum MoveKind {
     /// destroyed and its next vnum stands in the same cell (`fishing::RealRefineRod`,
     /// `G/fishing.cpp:861-928`, `mining::RealRefinePick`, `G/mining.cpp:234-303`).
     Refined,
+    /// The switchbot changed a slotted item's attributes (`CSwitchbot::SwitchItems`,
+    /// `G/refactorized_switchbot.cpp:242-388`).
+    Switched,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -371,8 +389,6 @@ pub enum Unported {
     Equipment,
     /// A dragon-soul item.
     DragonSoul,
-    /// A switchbot slot.
-    Switchbot,
     /// Wearing this item starts a system this build does not have.
     Worn(WornSystem),
     /// `CG_ITEM_USE` on an item of this type, whose use arm is not ported.
@@ -415,6 +431,12 @@ pub enum MoveRefused {
     NotForBelt,
     /// A non-dragon-soul item was sent to the dragon-soul window.
     NotDragonSoulItem,
+    /// An item the switchbot does not take was sent to a switchbot slot
+    /// (`SwitchbotHelper::IsValidItem`, `G/refactorized_switchbot.cpp:21-49`).
+    NotSwitchbotItem,
+    /// An item was moved out of a switchbot slot the bot runs
+    /// (`G/char_item.cpp:7703-7707`).
+    SwitchbotActive,
     /// The two stacks would merge but their sockets differ.
     SocketsDiffer,
     /// `IsEmptyItemGrid` is false for the destination.
@@ -558,6 +580,14 @@ impl MoveRefused {
             }
             // `char_item.cpp:7698`.
             Self::NotForBelt => Some("[LS;1097]"),
+            // `char_item.cpp:7711`.
+            Self::NotSwitchbotItem => {
+                Some("@@(char_item.cpp)tradus:Invalid item type for switchbot.")
+            }
+            // `char_item.cpp:7705`.
+            Self::SwitchbotActive => {
+                Some("@@(char_item.cpp)tradus:cannot move active switchbot item.")
+            }
             // `char_item.cpp:10097-10139`.
             Self::LevelTooLow => Some("[LS;462]"),
             Self::ChampionTooLow => {
@@ -654,6 +684,8 @@ impl core::fmt::Display for MoveRefused {
             Self::WrongBank => f.write_str("the item does not belong in that bank"),
             Self::NotForBelt => f.write_str("the item may not go in the belt"),
             Self::NotDragonSoulItem => f.write_str("only a dragon-soul item goes there"),
+            Self::NotSwitchbotItem => f.write_str("the switchbot does not take this item"),
+            Self::SwitchbotActive => f.write_str("the switchbot runs this slot"),
             Self::SocketsDiffer => f.write_str("the two stacks have different sockets"),
             Self::NoRoom => f.write_str("the destination has no room"),
             Self::NoItemIds => f.write_str("no item id allocator is installed"),
@@ -726,7 +758,7 @@ impl std::error::Error for MoveRefused {}
 pub(crate) fn is_flat_window(window_type: u8) -> bool {
     matches!(
         EWindows::try_from(window_type),
-        Ok(EWindows::Inventory | EWindows::Equipment)
+        Ok(EWindows::Inventory | EWindows::Equipment | EWindows::Switchbot)
     )
 }
 
@@ -797,11 +829,13 @@ pub fn move_item(
             from,
             to,
             count,
-            chains: facts.chains_quickslots,
+            chains: facts.has(MOVE_CHAINS_QUICKSLOTS),
         };
         return grid_move(items, ids, place, rules, None);
     };
-    if is_dragon_soul_equip_position(from) || is_dragon_soul_equip_position(to) || facts.dragon_soul
+    if is_dragon_soul_equip_position(from)
+        || is_dragon_soul_equip_position(to)
+        || facts.has(MOVE_DRAGON_SOUL)
     {
         return Err(MoveRefused::NotPorted(Unported::DragonSoul));
     }
@@ -818,7 +852,7 @@ pub fn move_item(
         from,
         to,
         count,
-        chains: facts.chains_quickslots,
+        chains: facts.has(MOVE_CHAINS_QUICKSLOTS),
     };
     let moved = check_placement(to, &facts)
         .and_then(|()| grid_move(items, ids, place, rules, Some((worn, gear))));
@@ -930,18 +964,18 @@ fn check_destination(to: ItemPos, facts: &MoveFacts) -> Result<(), MoveRefused> 
     {
         return Err(MoveRefused::WrongBank);
     }
-    if is_belt_inventory_position(to) && !facts.belt_eligible {
+    if is_belt_inventory_position(to) && !facts.has(MOVE_BELT_ELIGIBLE) {
         return Err(MoveRefused::NotForBelt);
     }
-    if is_switchbot_position(to) {
-        return Err(MoveRefused::NotPorted(Unported::Switchbot));
+    if is_switchbot_position(to) && !facts.has(MOVE_SWITCHBOT_ITEM) {
+        return Err(MoveRefused::NotSwitchbotItem);
     }
     Ok(())
 }
 
 /// The destination checks after the wear-cell branches (`char_item.cpp:7758-7782`).
 fn check_placement(to: ItemPos, facts: &MoveFacts) -> Result<(), MoveRefused> {
-    if facts.dragon_soul {
+    if facts.has(MOVE_DRAGON_SOUL) {
         return Err(MoveRefused::NotPorted(Unported::DragonSoul));
     }
     if to.window_type == EWindows::DragonSoulInventory as u8 {
@@ -1272,9 +1306,7 @@ mod tests {
     fn facts(categories: &[u8]) -> MoveFacts {
         MoveFacts {
             categories: categories.to_vec(),
-            belt_eligible: false,
-            dragon_soul: false,
-            chains_quickslots: false,
+            flags: MOVE_SWITCHBOT_ITEM,
         }
     }
 
@@ -1407,7 +1439,7 @@ mod tests {
         assert_eq!(syncs(&done), [(0, QuickslotSync { from: 3, to })]);
         assert_eq!(done.records[1], clear);
         let chains = MoveFacts {
-            chains_quickslots: true,
+            flags: MOVE_SWITCHBOT_ITEM | MOVE_CHAINS_QUICKSLOTS,
             ..facts(&[])
         };
         let mut items = holding(&placed);
@@ -1537,7 +1569,7 @@ mod tests {
     }
 
     #[test]
-    fn the_equipment_the_dragon_soul_and_the_switchbot_are_not_ported() {
+    fn the_equipment_and_the_dragon_soul_are_not_ported_and_the_switchbot_checks_kind() {
         let mut items = holding(&[(at(INV, 3), plain(7, 19)), (at(INV, 207), plain(8, 18))]);
         assert_eq!(
             refused(&mut items, at(INV, 3), at(INV, 180), 0, facts(&[])),
@@ -1547,17 +1579,20 @@ mod tests {
             refused(&mut items, at(INV, 207), at(INV, 4), 0, facts(&[])),
             MoveRefused::NotPorted(Unported::Equipment)
         );
+        let alien = MoveFacts {
+            flags: 0,
+            ..facts(&[])
+        };
         assert_eq!(
-            refused(&mut items, at(INV, 3), at(8, 0), 0, facts(&[])),
-            MoveRefused::NotPorted(Unported::Switchbot)
+            refused(&mut items, at(INV, 3), at(8, 0), 0, alien),
+            MoveRefused::NotSwitchbotItem
         );
         assert_eq!(
             refused(&mut items, at(INV, 3), at(DS, 0), 0, facts(&[])),
             MoveRefused::NotDragonSoulItem
         );
         let dragon = MoveFacts {
-            dragon_soul: true,
-            chains_quickslots: false,
+            flags: MOVE_SWITCHBOT_ITEM | MOVE_DRAGON_SOUL,
             ..facts(&[])
         };
         assert_eq!(
@@ -1730,7 +1765,7 @@ mod tests {
     #[test]
     fn the_belt_takes_an_eligible_item_in_a_cell_its_grade_opens() {
         let potion = MoveFacts {
-            belt_eligible: true,
+            flags: MOVE_SWITCHBOT_ITEM | MOVE_BELT_ELIGIBLE,
             ..facts(&[])
         };
         let mut items = holding(&[(at(INV, 3), plain(7, 27001))]);
