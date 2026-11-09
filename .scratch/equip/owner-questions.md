@@ -600,3 +600,10 @@ owner answers.
  grant table or quest names one (the numeric hits are mob vnums in `group*.txt`,
  colour triples and `.tga` names in quest libraries, and a fishing difficulty).
  Waits on it: confirm the row `unused`.
+64. **`sys.adminpage` is `unused` (ledger 513).** The adminpage is unreachable in
+ legacy: byte 64 is registered but no analyzer dispatches it (the positive control
+ is `HEADER_CG_CHAT`'s arms, the negative control the dead `KEY_AGREEMENT`),
+ `IsAdminPage` has no caller, and the password is only logged, never compared —
+ so nothing in your deployment could ever speak to it, and the Rewrite closes on
+ byte 64 like an unknown header. There is no adminpage config in `prodomo.toml`
+ and none planned. Waits on it: confirm the row `unused`.

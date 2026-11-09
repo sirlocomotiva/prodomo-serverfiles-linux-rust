@@ -51109,3 +51109,34 @@ clean; the suite 5242 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo
 --workspace --all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc`
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
 measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 513. The unspoken page
+
+`sys.adminpage` is `unused`: the adminpage is unreachable in legacy, so there is nothing to
+port and no adminpage table in `prodomo.toml`. The evidence, with controls:
+
+- `HEADER_CG_TEXT` (64) is registered (`G/packet_info.cpp:98`) but no analyzer dispatches
+  it: no `case HEADER_CG_TEXT` in any of the seven `input*.cpp` files, no numeric `case 64`
+  or `case 0x40`, and no `Text` handler method. Positive control: `HEADER_CG_CHAT` has
+  `case` arms (`G/input_main.cpp:3669, 4110`). Negative control: `HEADER_CG_KEY_AGREEMENT`
+  shares byte 64's dead signature (enum plus size row only) and is already recorded dead.
+  `TPacketCGText` itself (`G/packet.h:450-454`) is named only by the size row.
+- `IsAdminPage` and `IsEmptyAdminPage` are defined (`G/input.cpp:24-37`) but declared
+  nowhere (`input.h` has no match) and called nowhere (the whole-tree file sweep names
+  only `input.cpp`).
+- The password defaults to `SHOWMETHEMONEY` (`G/config.cpp:110`), is set from config
+  (`:870`), and is only ever logged (`FN_log_adminpage`, `:301-313`), never compared.
+  The allowlist IPs are likewise only logged.
+
+The slice's test pins the Rewrite's side: `the_adminpage_byte_closes_the_connection`
+sends byte 64 on the auth listener and Channels 1 and 99 and hears the close on each,
+with the control that the byte is registered with a 1-byte frame
+(`resolve_cg_base_size` answers `Some(1)`), so the close is the missing dispatch arm,
+not the unregistered-header path. No production code changed. Owner question 64 asks the
+owner to confirm the drop.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace`
+clean; the suite 5242 passed, 1 failed in 46 targets, the failure `a_gm_flags_a_stray_dog_aggressive_and_coward` passing alone twice (the known fight-timing flake, ledgers 509-510, untouched by this slice); doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

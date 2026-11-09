@@ -21,7 +21,7 @@ use parity::inventory::{self, Status};
 use parity::server::{default_channels, ChannelSpec};
 use parity::{Client, Server};
 use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
-use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
+use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG, HEADER_CG_TEXT};
 use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload, CgSymbolCrc};
 use protocol::cg_variable::encode_guild_symbol_upload;
 use protocol::gc_chat::{
@@ -298,6 +298,25 @@ fn keep_alive_bytes_are_single_byte_frames() {
     server.wait_for("Received client keepalive");
 }
 
+/// `sys.adminpage`: the adminpage byte 64 (`HEADER_CG_TEXT`) closes the descriptor.
+/// Legacy registers it (`G/packet_info.cpp:98`) but no analyzer dispatches it, and
+/// `IsAdminPage` has no caller, so the Rewrite refuses it like an unknown header
+/// (ledger 160.5) instead of consuming it.
+#[test]
+fn the_adminpage_byte_closes_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // Control: the byte is registered with a 1-byte frame, so the close is the
+    // missing dispatch arm, not the unregistered-header path.
+    assert_eq!(resolve_cg_base_size(HEADER_CG_TEXT.value()), Some(1));
+    let server = Server::start(binary(), database.url());
+    for address in [server.auth(), server.channel(1), server.channel(99)] {
+        let mut client = Client::connect(address);
+        client.send(&[HEADER_CG_TEXT.value()]);
+        let _ = client.expect_closed();
+    }
+}
 /// `cg.any.unknown_header`: a header the client table does not register closes the descriptor.
 #[test]
 fn an_unregistered_header_closes_the_connection() {
