@@ -63,7 +63,10 @@
 //! - `POINT_GOLD` and `POINT_GAYA`: the currencies. `POINT_INVEN` is ported: the rise
 //!   refuses above `INVENTORY_LOCK_COVER_COUNT` (18) and keeps `m_points.envanter`.
 //! - `POINT_POLYMORPH`, `POINT_ENERGY` and `POINT_COSTUME_ATTR_BONUS`: each drives its
-//!   own system. The three biologist arms are ported: the mission, the taken and the
+//!   own system. `POINT_ENERGY` is ported with its attribute buff (`CBuffOnAttributes`,
+//!   `G/buff_on_attributes.cpp`, the `POINT_ENERGY` half of `__NEW_SET_BONUS__`);
+//!   `POINT_COSTUME_ATTR_BONUS` stays refused, because no owner proto, blend row or
+//!   quest lays its apply. The three biologist arms are ported: the mission, the taken and the
 //!   completed, kept beside the arrays as legacy's `DWORD`s are, the state clamped to
 //!   mission 9. The two protected-inventory arms are ported the same way: the locked
 //!   state (`BYTE`) and its password, kept beside the arrays and set by the amount,
@@ -81,7 +84,7 @@
 //! after a stamina change, the polymorph arm of the battle points (the mount arms are
 //! ported: the stat floor in [`Points::compute_points_with`] and the attack floor and
 //! horse bonus in [`Points::compute_battle_points`]), and the parts of `ComputePoints`
-//! that read skills, the dragon-soul deck and the attribute buffs (`BuffOnAttr`). The skill
+//! that read skills and the dragon-soul deck. The skill
 //! bonuses are set from outside ([`Points::set_passive_bonuses`]) so the skill system can
 //! supply them; today they are zero, which is exact for a character with no skill level. The
 //! worn items are computed: see [`Points::compute_points_with`]. The held affects are laid
@@ -495,7 +498,7 @@ const COUNTERS: [usize; 5] = [
 ];
 
 /// The arms whose side effects are not ported. See the module note.
-const NOT_PORTED: [usize; 10] = [
+const NOT_PORTED: [usize; 9] = [
     point::POINT_CONQUEROR_LEVEL,
     point::POINT_CONQUEROR_EXP,
     point::POINT_CONQUEROR_LEVEL_STEP,
@@ -504,7 +507,6 @@ const NOT_PORTED: [usize; 10] = [
     point::POINT_LEVEL_STEP,
     point::POINT_GOLD,
     point::POINT_POLYMORPH,
-    point::POINT_ENERGY,
     point::POINT_COSTUME_ATTR_BONUS,
 ];
 
@@ -614,6 +616,13 @@ pub struct Points {
     /// `ComputePoints`. The world owns the affects and keeps this list beside them
     /// ([`Points::affect_point_added`], [`Points::affect_point_removed`]).
     affect_points: Vec<(u8, i32)>,
+    /// `CBuffOnAttributes` for `POINT_ENERGY` (`G/buff_on_attributes.cpp`): the buff
+    /// value (`m_bBuffValue`), the per-type sums (`m_map_additional_attrs`), and the
+    /// value whose `On` waits for the worn attributes (`BuffOnAttr_ValueChange` runs
+    /// inside `PointChange`, which never sees the items).
+    energy_buff: u8,
+    energy_sums: BTreeMap<u8, i32>,
+    energy_pending: Option<u8>,
 }
 
 /// One call of the `PointChange(POINT_EXP, iExpBalance)` recursion, as a loop frame: each
@@ -683,6 +692,9 @@ impl Points {
             mount_group: 0,
             horse: Horse::default(),
             affect_points: Vec::new(),
+            energy_buff: 0,
+            energy_sums: BTreeMap::new(),
+            energy_pending: None,
         };
         // `SetPlayerProto` sets the base part, the hair and the sash from the row before it
         // computes (`char.cpp:2258-2265`); the computation then puts the base part in the
@@ -840,6 +852,116 @@ impl Points {
         {
             let _gone = self.affect_points.remove(at);
         }
+    }
+
+    /// The value whose `On` waits for the worn attributes, if the last energy change
+    /// armed it, disarmed: the caller drains this after its change and runs
+    /// [`Points::energy_buff_on`] with the eight wear cells' counted attributes.
+    pub fn take_energy_pending(&mut self) -> Option<u8> {
+        self.energy_pending.take()
+    }
+
+    /// `CBuffOnAttributes::On` (`G/buff_on_attributes.cpp:121-158`): the counted
+    /// attributes of the worn items sum per type, and each sum's `value` percent lands
+    /// on its point, the types in ascending order, as `std::map` visits them. A second
+    /// `On`, or a zero value, does nothing.
+    pub fn energy_buff_on(
+        &mut self,
+        worn: &[(u8, i16)],
+        value: u8,
+        records: &mut Vec<PointRecord>,
+    ) {
+        if self.energy_buff != 0 || value == 0 {
+            return;
+        }
+        self.energy_sums.clear();
+        for &(apply, got) in worn {
+            *self.energy_sums.entry(apply).or_insert(0) += i32::from(got);
+        }
+        let sums: Vec<(u8, i32)> = self.energy_sums.iter().map(|(&t, &v)| (t, v)).collect();
+        for (apply, sum) in sums {
+            self.apply(apply, sum * i32::from(value) / 100, records);
+        }
+        self.energy_buff = value;
+    }
+
+    /// `CBuffOnAttributes::Off` (`G/buff_on_attributes.cpp:160-170`): each sum's share
+    /// leaves its point, and the pool clears.
+    fn energy_buff_off(&mut self, records: &mut Vec<PointRecord>) {
+        if self.energy_buff == 0 {
+            return;
+        }
+        let sums: Vec<(u8, i32)> = self.energy_sums.iter().map(|(&t, &v)| (t, v)).collect();
+        for (apply, sum) in sums {
+            self.apply(apply, -sum * i32::from(self.energy_buff) / 100, records);
+        }
+        self.energy_buff_clear();
+    }
+
+    /// `CBuffOnAttributes::ChangeBuffValue` (`G/buff_on_attributes.cpp:99-119`): the old
+    /// share leaves each point; the new value arms from the same sums. The caller's
+    /// `On` never runs here: legacy only un-applies, and the sums stay for the next
+    /// change. A fall to 0 switches off, a rise from 0 arms `On`.
+    fn energy_buff_change(&mut self, value: u8, records: &mut Vec<PointRecord>) {
+        if self.energy_buff == 0 {
+            if value != 0 {
+                self.energy_pending = Some(value);
+            }
+            return;
+        }
+        if value == 0 {
+            self.energy_buff_off(records);
+            return;
+        }
+        let sums: Vec<(u8, i32)> = self.energy_sums.iter().map(|(&t, &v)| (t, v)).collect();
+        for (apply, sum) in sums {
+            self.apply(apply, -sum * i32::from(self.energy_buff) / 100, records);
+        }
+        self.energy_buff = value;
+    }
+
+    /// `CBuffOnAttributes::AddBuffFromItem` (`G/buff_on_attributes.cpp:60-97`) for an item
+    /// just worn: each counted attribute joins its sum, and the sum's grown share lands
+    /// on its point. With the buff off, nothing stirs.
+    pub fn energy_buff_add(&mut self, attrs: &[(u8, i16)], records: &mut Vec<PointRecord>) {
+        if self.energy_buff == 0 {
+            return;
+        }
+        for &(apply, got) in attrs {
+            let sum = self.energy_sums.entry(apply).or_insert(0);
+            let old = *sum * i32::from(self.energy_buff) / 100;
+            *sum += i32::from(got);
+            let new = *sum * i32::from(self.energy_buff) / 100;
+            self.apply(apply, new - old, records);
+        }
+    }
+
+    /// `CBuffOnAttributes::RemoveBuffFromItem` (`G/buff_on_attributes.cpp:24-58`) for an
+    /// item just taken off: each counted attribute leaves its sum, and the sum's shrunk
+    /// share leaves its point. An attribute with no sum logs in legacy and returns; here
+    /// it is skipped, because the pool is rebuilt from the worn items on every `On`.
+    pub fn energy_buff_remove(&mut self, attrs: &[(u8, i16)], records: &mut Vec<PointRecord>) {
+        if self.energy_buff == 0 {
+            return;
+        }
+        for &(apply, got) in attrs {
+            let Some(sum) = self.energy_sums.get_mut(&apply) else {
+                continue;
+            };
+            let old = *sum * i32::from(self.energy_buff) / 100;
+            *sum -= i32::from(got);
+            let new = *sum * i32::from(self.energy_buff) / 100;
+            self.apply(apply, new - old, records);
+        }
+    }
+
+    /// `CBuffOnAttributes::Initialize` (`G/buff_on_attributes.cpp:18-22`), as
+    /// `BuffOnAttr_ClearAll` calls it at the head of `ComputePoints` (`G/char.cpp:2892`):
+    /// the value and the sums clear with nothing un-applied, because the recompute
+    /// rebuilds every point from nothing anyway.
+    pub fn energy_buff_clear(&mut self) {
+        self.energy_buff = 0;
+        self.energy_sums.clear();
     }
 
     /// The character's horse.
@@ -1952,6 +2074,25 @@ impl Points {
                 self.set_bio_completed(value);
                 i64::from(value)
             }
+            // `POINT_ENERGY` (`char.cpp:4717-4724`): the amount adds, then
+            // `BuffOnAttr_ValueChange` runs with the old and new totals as bytes.
+            // A fall to 0 switches the buff off at once; a rise from 0 arms it,
+            // and the caller runs `On` with the worn attributes
+            // ([`Points::energy_buff_on`]); any other change rescales it.
+            point::POINT_ENERGY => {
+                let old = self.instant[kind];
+                let value = self.add(kind, amount);
+                let low = |total: i32| u8::from_ne_bytes([total.to_ne_bytes()[0]]);
+                let (old_b, new_b) = (low(old), low(value));
+                if new_b == 0 {
+                    self.energy_buff_off(records);
+                } else if old_b == 0 {
+                    self.energy_pending = Some(new_b);
+                } else {
+                    self.energy_buff_change(new_b, records);
+                }
+                i64::from(value)
+            }
             // `POINT_SECURED_STATE` (`char.cpp:4755-4761`): the amount becomes the
             // state. The `BYTE` keeps the low byte, as legacy's `SetSecuredState`
             // does.
@@ -2228,6 +2369,8 @@ impl Points {
 
         self.instant = [0; SLOTS];
         self.skill_damage_bonus.clear();
+        self.energy_buff_clear();
+        self.energy_pending = None;
         for (kind, value) in KEPT.into_iter().zip(kept) {
             self.instant[kind] = value;
         }
@@ -2305,6 +2448,13 @@ impl Points {
             self.nested(usize::from(apply_on), value, records);
         }
         self.affect_points = affects;
+        // The energy the affects put back arms its `On` (`BuffOnAttr_ValueChange` inside
+        // `RefreshAffect`'s `PointChange`, `G/char.cpp:4723`): the worn attributes run it
+        // here, where the recompute still holds the equipment.
+        if let Some(value) = self.take_energy_pending() {
+            let worn = super::equipment::energy_worn_attrs(equipment);
+            self.energy_buff_on(&worn, value, records);
+        }
         // `@fixme118` (`char.cpp:3152-3158`): whatever the clamp and the affects took from
         // the hit and spell points goes back, as far as the maxima allow.
         if self.hp != hp_before {
@@ -2355,7 +2505,7 @@ mod tests {
     use super::*;
     use crate::character::apply::{
         APPLY_ATTBONUS_BOSS, APPLY_ATTBONUS_HUMAN, APPLY_ATTBONUS_METIN, APPLY_CON,
-        APPLY_COSTUME_ATTR_BONUS, APPLY_ENERGY, APPLY_INT, APPLY_MAX_HP, APPLY_MAX_HP_PCT,
+        APPLY_COSTUME_ATTR_BONUS, APPLY_INT, APPLY_MAX_HP, APPLY_MAX_HP_PCT,
         APPLY_MAX_SP, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
     };
 
@@ -3135,8 +3285,81 @@ mod tests {
             assert!(points.apply_point(apply, 5).is_empty(), "{apply}");
             assert_eq!(points, before, "{apply}");
         }
-        assert_eq!(unported, [APPLY_ENERGY, APPLY_COSTUME_ATTR_BONUS]);
+        assert_eq!(unported, [APPLY_COSTUME_ATTR_BONUS]);
         assert_eq!(armless, [APPLY_MAGIC_ATTBONUS_PER]);
+    }
+
+    /// The energy buff: a rise from 0 arms `On`, which sums the worn attributes per type
+    /// and lands each sum's share; a second rise rescales; a fall to 0 takes it all off.
+    /// The records the buff writes come before the energy's own, as legacy applies the
+    /// buff before it writes the energy packet (`G/char.cpp:4717-4724` against `:4799`).
+    #[test]
+    fn the_energy_buff_sums_the_worn_attributes_and_scales_with_the_value() {
+        let mut points = warrior();
+        // Worn: MAX_HP 1000 on one piece, MAX_HP 500 and ATTBONUS_HUMAN 30 on another.
+        let worn = [
+            (APPLY_MAX_HP, 1000),
+            (APPLY_MAX_HP, 500),
+            (APPLY_ATTBONUS_HUMAN, 30),
+        ];
+        let records = points
+            .point_change(point::POINT_ENERGY, 10, false, false)
+            .expect("energy is ported");
+        assert_eq!(
+            records,
+            [record(point::POINT_ENERGY, 0, 10)],
+            "the rise arms, it does not apply: {records:?}"
+        );
+        let value = points.take_energy_pending().expect("armed");
+        assert_eq!(value, 10);
+        let mut records = Vec::new();
+        points.energy_buff_on(&worn, value, &mut records);
+        assert_eq!(points.get_point(point::POINT_MAX_HP), 150);
+        assert_eq!(points.get_point(point::POINT_ATTBONUS_HUMAN), 3);
+        assert_eq!(
+            records.len(),
+            3,
+            "the maximum, its pool share, the bonus: {records:?}"
+        );
+        // A rescale to 20 takes the 10% shares off; the caller re-arms... no: a
+        // nonzero-to-nonzero change only un-applies, and the new value arms from the
+        // same sums. Here the arm runs `ChangeBuffValue` directly.
+        let records = points
+            .point_change(point::POINT_ENERGY, 10, false, false)
+            .expect("energy is ported");
+        assert_eq!(points.get_point(point::POINT_MAX_HP), 0);
+        assert_eq!(points.get_point(point::POINT_ATTBONUS_HUMAN), 0);
+        let energy = u8::try_from(point::POINT_ENERGY).unwrap();
+        assert!(
+            records.iter().any(|r| r.kind == energy),
+            "the energy record: {records:?}"
+        );
+        // A fall to 0 switches off; with nothing applied it only clears.
+        let _ = points
+            .point_change(point::POINT_ENERGY, -20, false, false)
+            .expect("energy is ported");
+        assert_eq!(points.take_energy_pending(), None);
+        assert_eq!(points.get_point(point::POINT_ENERGY), 0);
+    }
+
+    /// A worn and taken-off item joins and leaves the sums with its counted attributes:
+    /// the first five slots up to the first zero type.
+    #[test]
+    fn the_energy_buff_follows_worn_and_taken_off_items() {
+        let mut points = warrior();
+        let mut records = Vec::new();
+        points.energy_buff_on(&[(APPLY_MAX_HP, 1000)], 10, &mut records);
+        assert_eq!(points.get_point(point::POINT_MAX_HP), 100);
+        points.energy_buff_add(&[(APPLY_MAX_HP, 500)], &mut records);
+        assert_eq!(points.get_point(point::POINT_MAX_HP), 150);
+        points.energy_buff_remove(&[(APPLY_MAX_HP, 1000)], &mut records);
+        assert_eq!(points.get_point(point::POINT_MAX_HP), 50);
+        // An attribute with no sum is skipped, and a recompute clears the pool.
+        points.energy_buff_remove(&[(APPLY_ATTBONUS_HUMAN, 3)], &mut records);
+        assert_eq!(points.get_point(point::POINT_ATTBONUS_HUMAN), 0);
+        points.energy_buff_clear();
+        let _ = points.compute_points();
+        assert_eq!(points.get_point(point::POINT_MAX_HP), 0);
     }
 
     #[test]

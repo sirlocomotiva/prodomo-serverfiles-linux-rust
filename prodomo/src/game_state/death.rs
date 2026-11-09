@@ -67,7 +67,8 @@ use protocol::gc_nested::GcDamageInfo;
 use protocol::gc_small::GcHeaderAndByte;
 use tracing::{debug, warn};
 use world::character::{
-    death_penalty_loss, number, pc_poison_rate, Equipment, PointRecord, Points, DAMAGE_POISON,
+    death_penalty_loss, energy_worn_attrs, number, pc_poison_rate, Equipment, PointRecord, Points,
+    DAMAGE_POISON,
 };
 
 use super::affect::{affect_add_frame, affect_remove_frame, Affect};
@@ -465,12 +466,32 @@ impl GameState {
         amount: i32,
         show_amount: bool,
     ) {
-        let Some(points) = self.pc_points_mut(vid.raw()) else {
+        let Self {
+            characters, protos, ..
+        } = self;
+        let Ok(character) = characters.find_by_vid_mut(vid) else {
             return;
         };
-        let records = points
+        let (items, Some(points)) = character.items_and_points_mut() else {
+            return;
+        };
+        let mut records = points
             .point_change(kind, amount, show_amount, false)
             .unwrap_or_default();
+        // The energy rise from 0 arms its `On`, which needs the worn attributes
+        // (`BuffOnAttr_ValueChange`, `G/char.cpp:4723`): the eight wear cells run it, and
+        // the energy record moves past the buff's, as legacy applies the buff before it
+        // writes the energy packet (`G/char.cpp:4717-4724` against `:4799-4804`).
+        if kind == point::POINT_ENERGY {
+            if let Some(value) = points.take_energy_pending() {
+                let worn = energy_worn_attrs(&Equipment::of(items, protos));
+                let at = records.len();
+                points.energy_buff_on(&worn, value, &mut records);
+                if records.len() > at {
+                    records[at - 1..].rotate_left(1);
+                }
+            }
+        }
         let mount = (kind == point::POINT_MOUNT).then(|| points.get_point(point::POINT_MOUNT));
         self.send_point_records(vid, &records);
         // `POINT_MOUNT`'s arm (`G/char.cpp:4711-4715`): `MountVnum` with the new total.

@@ -509,7 +509,7 @@ mod tests {
         LIMIT_REAL_TIME_START_FIRST_USE, LIMIT_TIMER_BASED_ON_WEAR,
     };
     use gamedata::item_proto::ItemValue;
-    use world::character::APPLY_ENERGY;
+    use world::character::APPLY_COSTUME_ATTR_BONUS;
 
     /// No groups: every loaded item stamps `SIGVnum` 0.
     static GROUPS: std::sync::LazyLock<gamedata::special_item_group::SpecialItemGroups> =
@@ -1002,9 +1002,9 @@ mod tests {
             60,
         );
         first_use.real_time_first_use = Some(0);
-        let mut energy = shaped(109, ITEM_ARMOR, 0);
-        energy.applies[0] = ItemValue {
-            kind: i32::from(APPLY_ENERGY),
+        let mut bonus = shaped(109, ITEM_ARMOR, 0);
+        bonus.applies[0] = ItemValue {
+            kind: i32::from(APPLY_COSTUME_ATTR_BONUS),
             value: 5,
         };
         let protos = ItemProtos::from_rows(vec![
@@ -1015,7 +1015,7 @@ mod tests {
             first_use,
             timer,
             immune,
-            energy,
+            bonus,
             shaped(110, ITEM_ARMOR, ARMOR_NECK),
         ]);
         let mut accessory = row(10, EQUIPMENT, 10, 110);
@@ -1048,7 +1048,7 @@ mod tests {
             (5, WornSystem::Timer),
             (6, WornSystem::Timer),
             (7, WornSystem::Immunity),
-            (8, WornSystem::Apply(APPLY_ENERGY)),
+            (8, WornSystem::Apply(APPLY_COSTUME_ATTR_BONUS)),
             (10, WornSystem::AccessoryTimer),
         ];
         let expected: Vec<(u32, Refused)> = expected

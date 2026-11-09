@@ -50858,3 +50858,39 @@ suite 5220 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 close scenario passed 4 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 505. The energy's share
+
+The new set bonus row was `missing`, but half of it had been live since ledger 213: the
+two hardcoded sets (`m_mapNewSetBonus`, `G/constants.cpp:205-276`) as
+`set_bonus_applies`/`is_set_item`, with a set piece recomputing the points on wear and
+take-off. All 16 piece vnums resolve on the owner's data. This slice ports the other
+half's reachable pool: `CBuffOnAttributes` (`G/buff_on_attributes.cpp`) for `POINT_ENERGY`.
+
+`POINT_ENERGY` leaves `NOT_PORTED` with its `PointChange` arm (`G/char.cpp:4717-4724`):
+the amount adds, then the old and new totals run `BuffOnAttr_ValueChange` as bytes — a
+fall to 0 switches off, a rise from 0 arms `On`, any other change rescales. `On` sums the
+eight wear cells' counted attributes (the first five slots up to the first zero type,
+`CItem::GetAttributeCount`) per type and lands each sum's energy percent through
+`ApplyPoint`, the types ascending as `std::map` visits them; the wear and take-off run
+`Add`/`Remove` in legacy's order (add before the recompute, remove before the wear
+clears); the recompute clears the pool and its re-applied affects re-arm it. `On` needs
+the worn attributes, which `PointChange` never sees, so the arm leaves a pending value
+that the recompute (which holds the equipment) and `change_pc_point` drain; the drain
+moves the energy record past the buff's, as legacy applies the buff before it writes the
+energy packet. The scenario drinks the energy crystal (51002, sockets 80/10/1800) while
+wearing the attributed armour: `AFFECT_ENERGY` lands, the maximum rises by 50 before the
+energy's 10, and the take-off takes the worn 500 and the share back. The divisor mutant
+(`/100` to `/10`) is killed by the unit test.
+
+Not ported: the costume-attr pool — `POINT_COSTUME_ATTR_BONUS` stays refused, because no
+owner proto, blend row or quest lays `APPLY_COSTUME_ATTR_BONUS` — and the attr-change
+`Remove` sites, which wait on `sys.item.attr`. The item-load test's example unported
+apply moves from `APPLY_ENERGY` to `APPLY_COSTUME_ATTR_BONUS` with it.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5223 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The
+scenario passed 4 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

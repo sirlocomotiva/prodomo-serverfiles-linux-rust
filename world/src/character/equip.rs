@@ -54,7 +54,8 @@ use protocol::item_pos::ItemPos;
 
 use super::dice::{number, Dice};
 use super::equipment::{
-    accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, Worn, PARTS,
+    accessory_socket_grade, counted_attrs, is_energy_wear, is_set_item, item_applies,
+    removal_applies, Equipment, Worn, PARTS,
 };
 use super::item_move::{
     ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, MoveRefused, Unported,
@@ -213,8 +214,9 @@ impl core::fmt::Display for WornSystem {
 /// `EquipTo` activates a dragon soul stone, applies the item's bonuses (`ModifyPoints`), starts
 /// the unique, wear-timer, accessory and aura-booster timers, and summons a mount or pet
 /// costume (`G/item.cpp:1458-1487`); `OnAfterCreatedItem` starts the real-time timer
-/// (`:2775-2781`). `BuffOnAttr_AddBuffsFromItem` does nothing, because only the two bonus types
-/// this build refuses fill its table.
+/// (`:2775-2781`). `BuffOnAttr_AddBuffsFromItem` runs beside the wear
+/// ([`Points::energy_buff_add`](super::points::Points::energy_buff_add)): only the costume-attr
+/// pool stays refused, because nothing on the owner's data fills it.
 ///
 /// A plain `LIMIT_REAL_TIME` item starts no equip timer (`G/item.cpp:1458-1487` names only the
 /// unique, wear, accessory and booster starts, and `IsRealTimeItem` exempts the wear one):
@@ -741,6 +743,13 @@ impl<'s, 'g> Equipper<'s, 'g> {
     pub(crate) fn take_off(&mut self, wear: u16, item: &Item) -> Result<(), MoveRefused> {
         let proto = self.proto(item.vnum)?;
         self.modify_points(wear, item, proto, false);
+        // `BuffOnAttr_RemoveBuffsFromItem` before the wear clears (`G/item.cpp:1560`).
+        if is_energy_wear(wear) {
+            let attrs = counted_attrs(item);
+            let mut records = Vec::new();
+            self.gear.points.energy_buff_remove(&attrs, &mut records);
+            self.push_points(records);
+        }
         let _ = self.items.release(item.id).map_err(MoveRefused::Storage)?;
         self.trail
             .records
@@ -778,6 +787,14 @@ impl<'s, 'g> Equipper<'s, 'g> {
             pos: stored.pos,
         });
         self.modify_points(wear, &stored, proto, true);
+        // `BuffOnAttr_AddBuffsFromItem` before the recompute (`G/item.cpp:1477`): a set
+        // piece's recompute clears the pool and its affects re-arm it.
+        if is_energy_wear(wear) {
+            let attrs = counted_attrs(&stored);
+            let mut records = Vec::new();
+            self.gear.points.energy_buff_add(&attrs, &mut records);
+            self.push_points(records);
+        }
         self.recompute(item.vnum);
         Ok(())
     }

@@ -525,6 +525,49 @@ pub fn is_set_item(vnum: u32) -> bool {
         .any(|set| set.slots.iter().any(|(_, piece)| *piece == vnum))
 }
 
+/// The wear cells the energy buff reads (`BuffOnAttr_ValueChange`,
+/// `G/char_item.cpp:8678`): body, head, feet, wrist, weapon, neck, ear, shield.
+const ENERGY_WEARS: [EWearPositions; 8] = [
+    EWearPositions::Body,
+    EWearPositions::Head,
+    EWearPositions::Foots,
+    EWearPositions::Wrist,
+    EWearPositions::Weapon,
+    EWearPositions::Neck,
+    EWearPositions::Ear,
+    EWearPositions::Shield,
+];
+
+/// The attributes `CBuffOnAttributes` counts on one item: the first five slots up to the
+/// first zero type (`CItem::GetAttributeCount`, `G/item_attribute.cpp:287-297`).
+#[must_use]
+pub fn counted_attrs(item: &Item) -> Vec<(u8, i16)> {
+    item.attributes
+        .iter()
+        .take(5)
+        .take_while(|attr| attr.b_type != 0)
+        .map(|attr| (attr.b_type, attr.s_value))
+        .collect()
+}
+
+/// Whether a wear cell is one the energy buff reads.
+#[must_use]
+pub fn is_energy_wear(wear: u16) -> bool {
+    ENERGY_WEARS.iter().any(|slot| *slot as u16 == wear)
+}
+
+/// The counted attributes of the eight wear cells the energy buff reads, in wear order.
+#[must_use]
+pub fn energy_worn_attrs(equipment: &Equipment<'_>) -> Vec<(u8, i16)> {
+    let mut worn = Vec::new();
+    for wear in ENERGY_WEARS {
+        if let Some(w) = equipment.wear(wear as u16) {
+            worn.extend(counted_attrs(w.item));
+        }
+    }
+    worn
+}
+
 /// The applies `ModifyPoints(true)` makes for one worn item, in the order legacy makes them.
 ///
 /// `protos` resolves the stones in the item's sockets and the item a sash has absorbed. An

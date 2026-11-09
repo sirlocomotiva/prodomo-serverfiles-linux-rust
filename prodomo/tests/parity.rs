@@ -47003,3 +47003,87 @@ fn the_market_prices_its_sales_after_the_hourly_tick() {
     );
     yankee.still("nothing follows");
 }
+
+/// `sys.custom.new_set_bonus` (the energy half, `CBuffOnAttributes`, `G/buff_on_attributes.cpp`
+/// with `BuffOnAttr_ValueChange`, `G/char.cpp:4717-4724`).
+///
+/// Alpha loads wearing the attributed armour (item 20, `MAX_HP` 500) and drinks the energy
+/// crystal (51002, sockets 80/10/1800): the use lays `AFFECT_ENERGY` (311), the energy rises
+/// to 10,
+/// and the buff lands 10% of the worn `MAX_HP` — the `MAX_HP` change and its pool share
+/// arrive before the energy's own record, as legacy applies the buff before it writes the
+/// energy packet. Taking the armour off takes the share back.
+#[test]
+fn an_energy_drink_buffs_the_worn_attributes_and_the_take_off_takes_it_back() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    give_alpha_equipment(&database);
+    // The crystal's level limit is 35; the equipment helper leaves level 9.
+    sql(
+        &database,
+        "UPDATE player SET level = 40 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1, \
+         socket2) SELECT 25, id, 1, 2, 1, 51002, 80, 10, 1800 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, listed, _entered) = enter_equipped_world_on(&server, b"alice", 0, 6);
+
+    // The armour loads worn (the helper's window is the Equipment window). When the
+    // crystal is drunk, the marker and the blend land, the energy rises to 10, and the
+    // buff lands 10% of the worn `MAX_HP` before the energy's own record.
+    std::thread::sleep(Duration::from_millis(1600));
+    alice.send_record(&client_item_use(2));
+    let (wire, _) = alice.drain_game(Duration::from_secs(2), game_len);
+    let adds: Vec<&Vec<u8>> = wire
+        .iter()
+        .filter(|record| record[0] == GC_AFFECT_ADD)
+        .collect();
+    assert!(
+        adds.iter().any(|add| add[1..5] == 311u32.to_le_bytes()),
+        "AFFECT_ENERGY lands: {wire:02x?}"
+    );
+    let changes: Vec<&Vec<u8>> = wire
+        .iter()
+        .filter(|record| record[0] == GC_POINT_CHANGE && record[4..8] == listed.id.to_le_bytes())
+        .collect();
+    let kinds: Vec<u8> = changes.iter().map(|record| record[8]).collect();
+    let energy_at = kinds
+        .iter()
+        .position(|kind| *kind == 128)
+        .unwrap_or_else(|| panic!("the energy rises: {kinds:?}"));
+    let buff_at = kinds
+        .iter()
+        .position(|kind| *kind == 6)
+        .unwrap_or_else(|| panic!("the maximum follows: {kinds:?}"));
+    assert!(buff_at < energy_at, "the buff before the energy: {kinds:?}");
+    let buffed = i64::from_le_bytes(changes[buff_at][17..25].try_into().expect("eight bytes"));
+    let energy = i64::from_le_bytes(changes[energy_at][17..25].try_into().expect("eight bytes"));
+    assert_eq!(energy, 10, "the drunk value");
+
+    // And: taking the armour off takes the worn 500 and the share 50 back.
+    alice.send_record(&client_item_move(180, 2, 0));
+    let (wire, _) = alice.drain_game(Duration::from_secs(1), game_len);
+    let falls: Vec<i64> = wire
+        .iter()
+        .filter(|record| {
+            record[0] == GC_POINT_CHANGE
+                && record[4..8] == listed.id.to_le_bytes()
+                && record[8] == 6
+        })
+        .map(|record| i64::from_le_bytes(record[17..25].try_into().expect("eight bytes")))
+        .collect();
+    let bare = falls
+        .last()
+        .unwrap_or_else(|| panic!("the maximum falls: {wire:02x?}"));
+    assert_eq!(
+        buffed - bare,
+        550,
+        "the worn 500 and the share 50: {falls:?}"
+    );
+}
