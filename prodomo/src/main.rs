@@ -346,6 +346,9 @@ struct ConnectionContext {
     client_version: ClientVersionCheck,
     /// `[game] block_login`.
     block_login: Arc<str>,
+    /// The `[access]` refused addresses, built once at startup, as legacy loaded its
+    /// `BANIP` file and country tables once at boot.
+    access: Arc<common::access::AccessRules>,
     /// `[game] user_limit`.
     user_limit: i32,
     /// `guild_mark_server` plus `[game] guild_mark_min_level` (`G/config.cpp:912`), one
@@ -7588,6 +7591,31 @@ where
     true
 }
 
+/// The login the blocked-country check compares: the raw `LOGIN2` login field through
+/// `trim_and_lower` (`libthecore/utils.cpp:122-165`) without the validity gate, so an
+/// invalid login is still checked, as legacy checks the lowercased raw before any other
+/// refusal.
+fn lower_login_field(field: &[u8; protocol::cg_account::CG_LOGIN_FIELD_BYTES]) -> String {
+    let end = field
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(field.len());
+    let start = field[..end]
+        .iter()
+        .position(|&byte| !matches!(byte, b' ' | b'\t'..=b'\r'))
+        .unwrap_or(end);
+    let kept = &field[start..end];
+    let trimmed = kept
+        .iter()
+        .rposition(|&byte| !matches!(byte, b' ' | b'\t'..=b'\r'))
+        .map_or(0, |index| index + 1);
+    kept[..trimmed]
+        .iter()
+        .map(u8::to_ascii_lowercase)
+        .map(char::from)
+        .collect()
+}
+
 async fn channel_login<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -7606,6 +7634,16 @@ where
             return false;
         }
     };
+    // The blocked-country check (`CInputLogin::LoginByKey`, `G/input_login.cpp:160-170`):
+    // before the shutdown gate, as legacy runs it first, against the lowercased typed
+    // login even when the field is otherwise invalid. A blocked peer is closed silently.
+    if context
+        .access
+        .is_blocked_country(addr.ip(), &lower_login_field(&record.login))
+    {
+        info!(%addr, "Refusing blocked-country IP at Channel login; closing");
+        return false;
+    }
     let no_more_clients = context.refusals.shutdowned
         || context.state.is_shutting_down()
         || context.metrics.bars_clients();
@@ -9999,6 +10037,13 @@ async fn run_accept_loop(
                        }
                    }
                    (role, result) = listeners.accept() => match result {
+                       Ok((stream, addr))
+                           if matches!(role, ListenerRole::Auth)
+                               && context.connection.access.is_ban_ip(addr.ip()) =>
+                       {
+                           warn!(%addr, "Refusing banned IP at the auth listener");
+                           drop(stream);
+                       }
                        Ok((stream, addr)) if !context.state.should_accept_connections() => {
                            warn!(%addr, %role, "Rejecting new connection while shutting down");
                            drop(stream);
@@ -11162,6 +11207,12 @@ fn connection_context(
             expected: Arc::from(config.game.check_version_value.as_str()),
         },
         block_login: Arc::from(config.game.block_login.as_str()),
+        access: Arc::new(
+            config
+                .access
+                .rules()
+                .expect("[access] was refused by validate"),
+        ),
         user_limit: config.game.user_limit,
         mark_server: MarkServer {
             serves: config.game.guild_mark_server,

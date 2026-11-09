@@ -104,6 +104,22 @@ impl Server {
         Self::start_in(root, binary, &config_text(store_url, channels, game))
     }
 
+    /// [`Server::start`] plus the lines of an `[access]` table, such as
+    /// `"ban_ip = [{ start = \"10.0.0.0\" }]"`; empty for none.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start`].
+    #[must_use]
+    pub fn start_accessed(binary: &Path, store_url: &str, access: &str) -> Self {
+        let root = unique_root();
+        Self::start_in(
+            root,
+            binary,
+            &config_text_accessed(store_url, &default_channels(), access),
+        )
+    }
+
     /// A server on [`default_channels`] whose Game data is the owner's with `lines` appended to
     /// the `npc.txt` of the map folder `map`, for a spawn the owner's data does not have.
     ///
@@ -576,6 +592,16 @@ fn data_keys_on(game_data: &Path) -> String {
 /// the legacy Game data.
 fn config_text(store_url: &str, channels: &[ChannelSpec], game: &str) -> String {
     config_text_on(&legacy_dir().join("gamedata"), store_url, channels, game)
+}
+
+/// [`config_text`] with an `[access]` table appended; empty `access` appends none.
+fn config_text_accessed(store_url: &str, channels: &[ChannelSpec], access: &str) -> String {
+    let mut text = config_text(store_url, channels, "");
+    if !access.is_empty() {
+        use std::fmt::Write as _;
+        write!(text, "\n[access]\n{access}\n").expect("writing to a String cannot fail");
+    }
+    text
 }
 
 /// [`config_text`] with `game_data` as the Game data folder.

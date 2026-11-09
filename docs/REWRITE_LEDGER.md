@@ -51035,3 +51035,47 @@ suite 5231 passed, 1 failed in 46 targets, the failure `a_gm_flags_a_stray_dog_a
 --all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 511. The refused addresses
+
+`sys.net.ip_ban` is `ported`: the auth listener's `BANIP` ranges (`G/ip_ban.cpp`, gated
+in `G/desc_manager.cpp:164`) and the Channel login's blocked-country ranges with their
+login exceptions (`G/block_country.cpp:74-151`, gated in `G/input_login.cpp:164-170`).
+
+Legacy loads both lists once at boot — the `BANIP` file when the auth process parses its
+config, the `iptocountry` and `block_exception` tables when the DB process loads, fanned to
+the game over the retired peer — so the Rewrite reads them once at startup from a new
+`[access]` table (`ban_ip`, `block_country_ip`, `block_exception`), empty by default, as
+the owner's deployment has no `BANIP` file and no rows in either table. A dotted address
+that does not parse fails startup naming its key (`TopologyError::BadAccessIp`).
+
+The match semantics are legacy's, quirks included. A `BANIP` line's mask is
+`255 - (start ^ end)` per octet and the match is bitwise, not a span: `10.0.0.0`-`10.0.0.5`
+bans `.0`, `.1`, `.4` and `.5` but not `.2`, `.3` or `.6`. The `mapBanIP` hash consults
+only ranges whose start shares the candidate's first octet, so a cross-octet line
+effectively bans its start address only. A country range compares first-octet-high
+(`htonl`). The exception matches the lowercased login, as legacy compares after
+`trim_and_lower` — including for a login the field otherwise refuses, which legacy still
+checks. Two dead ends stay unported: the DB-side `IsBlockedCountryIp` has no caller, and
+`RequestBlockException` is defined but never called. An IPv6 peer matches by its mapped
+IPv4 address when it has one and matches nothing otherwise; legacy never saw IPv6.
+
+The seams are legacy's gates: the accept loop refuses a banned peer on the auth listener
+before the handshake (Channel listeners still shake it), and `channel_login` refuses a
+blocked country right after the decode, before the shutdown gate, closing silently.
+Proof is `a_banned_ip_is_refused_at_auth_and_a_blocked_country_at_login`: three servers,
+a banned auth connect closing with no handshake beside a Channel control, a blocked
+Channel login closing after a granted auth key, and the excepted login listing from the
+same peer. Unit tests pin the mask (including the xor-not-or distinguisher), the hash,
+the span ends, the exception, and the mapped peer; a config test pins the table and the
+startup refusal.
+
+Mutants (all semantic kills): the mask's or, the hash's wrong end, the inverted ban
+match, the country range excluding its end, the exception falling through, and the
+negated login gate (killed by the scenario).
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5242 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

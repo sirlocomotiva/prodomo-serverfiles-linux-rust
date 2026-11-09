@@ -538,3 +538,36 @@ fn a_span_reports_room_below_its_own_last_id_only() {
     }
     .is_ordered());
 }
+
+#[test]
+fn the_access_table_builds_its_rules_and_refuses_a_bad_address() {
+    use std::net::IpAddr;
+    let channel = "[[channel]]\nnumber = 1\nports = [1]\nmaps = [1]\n";
+    let text = with_channels(&format!(
+        "[access]\nban_ip = [{{ start = \"10.0.0.0\", end = \"10.0.0.5\" }}]\nblock_country_ip = [{{ start = \"127.0.0.0\", end = \"127.0.0.255\" }}]\nblock_exception = [\"ALICE\"]\n{channel}"
+    ));
+    let config = parse(&text).expect("the access table parses");
+    let rules = config.access.rules().expect("the addresses parse");
+    assert!(rules.is_ban_ip(IpAddr::V4("10.0.0.4".parse().unwrap())));
+    assert!(!rules.is_ban_ip(IpAddr::V4("10.0.0.2".parse().unwrap())));
+    assert!(rules.is_blocked_country("127.0.0.1".parse().unwrap(), "bob"));
+    assert!(!rules.is_blocked_country("127.0.0.1".parse().unwrap(), "alice"));
+    // A bad address fails at startup, naming its key; empty refuses nothing.
+    for (key, value) in [("ban_ip", "10.0.0.999"), ("block_country_ip", "not-an-ip")] {
+        let text = with_channels(&format!(
+            "[access]\n{key} = [{{ start = \"{value}\" }}]\n{channel}"
+        ));
+        assert_eq!(
+            invalid(&text),
+            TopologyError::BadAccessIp {
+                key,
+                value: value.to_owned(),
+            },
+            "{key} = {value}"
+        );
+    }
+    let text = with_channels(&format!("[access]\n{channel}"));
+    let config = parse(&text).expect("an empty access table parses");
+    let rules = config.access.rules().expect("empty rules build");
+    assert!(!rules.is_ban_ip("127.0.0.1".parse().unwrap()));
+}

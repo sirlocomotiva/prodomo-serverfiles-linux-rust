@@ -598,6 +598,58 @@ fn the_channel_status_list_is_served_in_the_handshake_phase() {
     assert_eq!(client.expect_bytes(closed.len()), closed);
 }
 
+/// `sys.net.ip_ban`: a peer in a `ban_ip` range is refused at the auth listener before
+/// the handshake, while a Channel listener still shakes it; a peer in a
+/// `block_country_ip` range passes auth but its Channel login closes silently; and a
+/// login in `block_exception` passes both gates from the same peer.
+#[test]
+fn a_banned_ip_is_refused_at_auth_and_a_blocked_country_at_login() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // The auth gate: 127.0.0.1 is banned, so the auth listener closes before the
+    // handshake, while Channel 1 still shakes the same peer.
+    let server = Server::start_accessed(
+        binary(),
+        database.url(),
+        "ban_ip = [{ start = \"127.0.0.1\" }]",
+    );
+    let mut banned = Client::connect(server.auth());
+    assert_eq!(banned.expect_closed(), Vec::<u8>::new());
+    let (mut client, first) = accepted(server.channel(1));
+    assert_eq!(shake(&mut client, first), [GC_PHASE, PHASE_LOGIN]);
+    drop(server);
+    // The country gate: the whole loopback range is blocked, so auth still grants
+    // bob a key but its Channel login closes silently.
+    let server = Server::start_accessed(
+        binary(),
+        database.url(),
+        "block_country_ip = [{ start = \"127.0.0.0\", end = \"127.0.0.255\" }]",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    let pw = &ACCOUNT_PASSWORD[..];
+    let mut auth = auth_client(&server);
+    let key = log_in(&mut auth, b"bob", pw, 1).expect("auth still grants a key");
+    let mut keyed = Keyed::channel(server.channel(1));
+    keyed.send_login2(b"bob", key, CLIENT_KEY);
+    assert_eq!(keyed.client.expect_closed(), Vec::<u8>::new());
+    drop(server);
+    // The exception: alice's login is excepted, so her Channel login lists her
+    // characters from the same blocked peer.
+    let server = Server::start_accessed(
+        binary(),
+        database.url(),
+        "block_country_ip = [{ start = \"127.0.0.0\", end = \"127.0.0.255\" }]\nblock_exception = [\"alice\"]",
+    );
+    let mut auth = auth_client(&server);
+    let key = log_in(&mut auth, b"alice", pw, 1).expect("auth still grants a key");
+    let mut keyed = Keyed::channel(server.channel(1));
+    keyed.send_login2(b"alice", key, CLIENT_KEY);
+    let (empire, _) = login_by_key_rest(&mut keyed).expect("the excepted login lists");
+    assert_eq!(empire, 0, "no empire chosen yet");
+}
+
 /// Run one statement in the scenario's database.
 ///
 /// After any `INSERT INTO player`, the pools are filled to the item-less maxima

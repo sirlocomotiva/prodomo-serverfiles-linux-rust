@@ -110,6 +110,12 @@ pub struct ServerConfig {
     pub store: StoreSettings,
     /// The auth listener.
     pub auth: AuthSettings,
+    /// The refused addresses: the auth listener's `BANIP` ranges, the Channel login's
+    /// blocked-country ranges, and the logins excepted from the country check. Empty
+    /// refuses nothing, as the owner's deployment has no `BANIP` file and no rows in
+    /// either table.
+    #[serde(default)]
+    pub access: AccessSettings,
     /// One entry per Channel, written as `[[channel]]` tables. An empty list parses and then
     /// fails [`ServerConfig::validate`].
     #[serde(rename = "channel", default)]
@@ -237,6 +243,82 @@ impl fmt::Debug for StoreSettings {
 pub struct AuthSettings {
     /// Port of the auth listener. `0` lets the operating system choose one, which is logged.
     pub port: u16,
+}
+
+/// One `[access]` address range: two dotted IPv4 addresses, `start` to `end`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessRange {
+    /// The range's low address, dotted.
+    pub start: String,
+    /// The range's high address, dotted. A `ban_ip` range without one bans the single
+    /// address, as a `BANIP` line without a tab does.
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+impl AccessSettings {
+    /// The rules of the three lists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TopologyError::BadAccessIp`] for the first address that is not a
+    /// dotted IPv4 address.
+    pub fn rules(&self) -> Result<crate::access::AccessRules, TopologyError> {
+        let mut ban = Vec::with_capacity(self.ban_ip.len());
+        for range in &self.ban_ip {
+            ban.push(crate::access::BanRange::of(
+                parse_access_ip("ban_ip", &range.start)?,
+                range
+                    .end
+                    .as_deref()
+                    .map(|end| parse_access_ip("ban_ip", end))
+                    .transpose()?,
+            ));
+        }
+        let mut country = Vec::with_capacity(self.block_country_ip.len());
+        for range in &self.block_country_ip {
+            let from = parse_access_ip("block_country_ip", &range.start)?;
+            let to = range
+                .end
+                .as_deref()
+                .map_or(Ok(from), |end| parse_access_ip("block_country_ip", end))?;
+            country.push(crate::access::CountryRange::of(from, to));
+        }
+        Ok(crate::access::AccessRules::new(
+            ban,
+            country,
+            self.block_exception
+                .iter()
+                .map(|login| login.to_ascii_lowercase())
+                .collect(),
+        ))
+    }
+}
+
+/// Parse one `[access]` address.
+fn parse_access_ip(key: &'static str, value: &str) -> Result<Ipv4Addr, TopologyError> {
+    value.parse().map_err(|_| TopologyError::BadAccessIp {
+        key,
+        value: value.to_owned(),
+    })
+}
+
+/// The `[access]` table: the refused addresses (`common::access`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessSettings {
+    /// The ranges the auth listener refuses, as legacy's `BANIP` file refused them.
+    #[serde(default)]
+    pub ban_ip: Vec<AccessRange>,
+    /// The ranges the Channel login refuses, as legacy's `iptocountry` table refused
+    /// them, unless the login is excepted.
+    #[serde(default)]
+    pub block_country_ip: Vec<AccessRange>,
+    /// The logins excepted from the country check, as legacy's `block_exception`
+    /// table named them. Matched lowercased, as legacy compares after `trim_and_lower`.
+    #[serde(default)]
+    pub block_exception: Vec<String>,
 }
 
 /// One `[[channel]]` table.
@@ -625,6 +707,13 @@ pub enum TopologyError {
         /// The other Channel hosting it.
         channel: u8,
     },
+    /// An `[access]` address is not a dotted IPv4 address.
+    BadAccessIp {
+        /// The key holding it (`ban_ip` or `block_country_ip`).
+        key: &'static str,
+        /// The address as configured.
+        value: String,
+    },
 }
 
 impl fmt::Display for TopologyError {
@@ -666,6 +755,10 @@ impl fmt::Display for TopologyError {
                 f,
                 "map {map} is on the shared channel and also on channel {channel}"
             ),
+            Self::BadAccessIp { key, value } => write!(
+                f,
+                "access.{key} holds {value:?}, which is not a dotted IPv4 address"
+            ),
         }
     }
 }
@@ -679,6 +772,7 @@ impl ServerConfig {
     ///
     /// Returns the first [`TopologyError`] found.
     pub fn validate(&self) -> Result<(), TopologyError> {
+        self.access.rules().map(|_| ())?;
         if self.game.save_event_second_cycle == 0 {
             return Err(TopologyError::ZeroCycle("save_event_second_cycle"));
         }

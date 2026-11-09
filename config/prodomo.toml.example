@@ -38,6 +38,23 @@ max_connections = 8
 [auth]
 port = 30001
 
+# The refused addresses. Legacy loaded the `BANIP` file once at auth boot and the
+# `iptocountry` and `block_exception` tables once at DB boot; this table loads once at
+# startup instead. Empty refuses nothing.
+#
+# [access]
+# # The ranges the auth listener refuses, as legacy's `BANIP` file refused them: a line
+# # holds `start` and an optional `end`. The match is bitwise — each octet's mask is
+# # `255 - (start ^ end)` — so `10.0.0.0` to `10.0.0.5` bans `.0`, `.1`, `.4` and `.5`
+# # only, and a line spanning first octets only bans the start's.
+# ban_ip = [{ start = "10.0.0.0", end = "10.0.0.5" }]
+# # The ranges the Channel login refuses unless the login is excepted, as legacy's
+# # `iptocountry` table refused them. A range without `end` holds one address.
+# block_country_ip = [{ start = "10.0.1.0", end = "10.0.1.255" }]
+# # The logins excepted from the country check, as legacy's `block_exception` table
+# # named them. Matched lowercased.
+# block_exception = ["gm_login"]
+
 # One table per Channel. `ports` keeps every legacy Core port of the Channel so that a client
 # server list naming any of them still works; all of them lead into the same world. `maps` is the
 # union of the Channel's legacy `MAP_ALLOW` lists. Channel 99 is the Shared Channel: players reach

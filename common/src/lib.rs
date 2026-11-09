@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod access;
 pub mod config;
 
 /// Logging infrastructure using tracing
