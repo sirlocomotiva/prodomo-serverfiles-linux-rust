@@ -1447,6 +1447,195 @@ impl GameState {
         Ok(self.private_settle(vid, pid, owner, pos, &ware, actor))
     }
 
+    /// `CInputMain::PrivateShopSearchBuy` for the character under `vid`
+    /// (`G/input_main.cpp:5178-5246`), settled at once with the DB checks
+    /// (`D/ClientManagerPrivateShop.cpp:1520-1650`), the game transaction
+    /// (`G/private_shop_manager.cpp:517-655`) and the DB completion (`:2102-2186`).
+    ///
+    /// The gates run in input order before the checks: the stun, the open search
+    /// window, the buyer's own shop among the picks, and the one-second wait.
+    /// Then each pick runs the DB checks in order — the shop's presence, the
+    /// modify state, the ware's presence, the shown price, and the running gold
+    /// balance — and each passing pick settles through the shared settlement, so
+    /// a settling pick tells its viewers, its owner and the searchers, and the
+    /// buyer hears its bought line. The first failing pick stops the pass with
+    /// its line and nothing settles. Answers the settlements, or the refusal's
+    /// chats as a move.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_search_buy(
+        &mut self,
+        vid: Vid,
+        picks: Vec<Option<protocol::cg_private_shop::CgPrivateShopSearchPick>>,
+        actor: Mover,
+    ) -> Result<Result<Vec<PrivateShopBought>, MovedItems>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        if !self.searches_private_shop(vid) {
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        let live: Vec<protocol::cg_private_shop::CgPrivateShopSearchPick> = picks
+            .into_iter()
+            .take_while(Option::is_some)
+            .flatten()
+            .collect();
+        for pick in &live {
+            if pick.shop == pid {
+                self.tell(
+                    vid,
+                    actor,
+                    CHAT_TYPE_INFO,
+                    b"You cannot buy an item from your own personal shop.",
+                    &[],
+                );
+                return Ok(Err(self.private_refused(vid, pid, actor)));
+            }
+        }
+        let last = self.private_buy_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_BUY_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a moment before buying from a personal shop again.",
+                &[],
+            );
+            return Ok(Err(self.private_refused(vid, pid, actor)));
+        }
+        self.private_buy_at.insert(vid, self.last_pulse);
+        let mut balance = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::gold);
+        let mut passed: Vec<(Vid, u16, PrivateShopWare, protocol::item_pos::ItemPos)> =
+            Vec::with_capacity(live.len());
+        for pick in &live {
+            let Some(winner) = self.private_search_buy_check(vid, pid, pick, &mut balance, actor)
+            else {
+                return Ok(Err(self.private_refused(vid, pid, actor)));
+            };
+            passed.push(winner);
+        }
+        let mut settled = Vec::with_capacity(passed.len());
+        for (owner, pos, ware, at) in passed {
+            let gold = self
+                .characters
+                .find_by_vid(vid)
+                .map_or(0, world::character::Character::gold);
+            let price = u64::try_from(ware.gold).unwrap_or(u64::MAX);
+            settled
+                .push(self.private_close_sale(vid, pid, owner, pos, &ware, at, gold, price, actor));
+        }
+        Ok(Ok(settled))
+    }
+
+    /// One search-buy pick's checks (`D/ClientManagerPrivateShop.cpp:1527-1606`): the
+    /// shop's presence, the modify state, the ware, the shown price, and the running
+    /// gold balance, each with its own line. Then the buyer's cell, as
+    /// `ItemTransaction` finds it. Answers the owner, the slot, the ware and the
+    /// cell when all pass.
+    fn private_search_buy_check(
+        &mut self,
+        vid: Vid,
+        pid: u32,
+        pick: &protocol::cg_private_shop::CgPrivateShopSearchPick,
+        balance: &mut u64,
+        actor: Mover,
+    ) -> Option<(Vid, u16, PrivateShopWare, protocol::item_pos::ItemPos)> {
+        let Some(owner) = self.private_shop_vid_of(pick.shop) else {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"@@(input_db)tradus:You do not have an open personal shop.",
+                &[],
+            );
+            return None;
+        };
+        let state = self
+            .private_shops
+            .get(&owner)
+            .map_or(PRIVATE_SHOP_STATE_OPEN, |shop| shop.state);
+        if state == PRIVATE_SHOP_STATE_MODIFY {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"@@(input_db)tradus:You cannot buy an item while a personal shop is in a modifying state.",
+                &[],
+            );
+            return None;
+        }
+        let at = usize::from(pick.pos);
+        let Some(ware) = self
+            .private_shops
+            .get(&owner)
+            .and_then(|shop| shop.wares.get(at).and_then(Clone::clone))
+        else {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"@@(input_db)tradus:This item is currently unavailable.",
+                &[],
+            );
+            return None;
+        };
+        if ware.gold != pick.gold || ware.cheque != pick.cheque {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"@@(input_db)tradus:Refresh your search result to sync price of the item.",
+                &[],
+            );
+            return None;
+        }
+        let price = u64::try_from(ware.gold).unwrap_or(u64::MAX);
+        if *balance < price {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"@@(input_db)tradus:You don't have enough Yang.",
+                &[],
+            );
+            return None;
+        }
+        *balance -= price;
+        let _ = pid;
+        let Some(at) = self.private_buy_cell(vid, &ware.item) else {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You don't have enough space in your inventory.",
+                &[],
+            );
+            return None;
+        };
+        Some((owner, pick.pos, ware, at))
+    }
+
+    /// The VID whose built shop carries `pid`: the shop's id is its owner's player
+    /// id (`CPrivateShopManager::BuildPrivateShop`,
+    /// `G/private_shop_manager.cpp:127`).
+    fn private_shop_vid_of(&self, pid: u32) -> Option<Vid> {
+        self.private_shops.keys().copied().find(|owner| {
+            self.characters
+                .find_by_vid(*owner)
+                .is_ok_and(|character| character.player_id() == pid)
+        })
+    }
+
     /// Settle the buy of `ware` at `pos` of `owner`'s shop by the buyer under `vid`.
     fn private_settle(
         &mut self,
@@ -4482,6 +4671,72 @@ mod tests {
         assert_eq!(found.records.len(), 1);
         assert_eq!(found.records[0][3], SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT);
         let _ = PID;
+    }
+
+    /// A search buy settles its picks in order: each ware moves to the buyer, each
+    /// price joins its stash, and the buyer hears each bought line. A wrong price
+    /// stops the pass with the refresh line and settles nothing.
+    #[test]
+    fn a_search_buy_settles_its_picks_and_a_wrong_price_settles_nothing() {
+        use protocol::cg_private_shop::CgPrivateShopSearchPick;
+        let (mut state, mut inbox) = a_standing_shop();
+        let buyer = Vid::new(12);
+        let (mut buyer_inbox, _) = enter_seeing_with(
+            &mut state,
+            (1, 1),
+            12,
+            (5, 6),
+            10_000,
+            &[(inventory(0), held(7, 19, 1))],
+        );
+        drained(&mut inbox);
+        drained(&mut buyer_inbox);
+        state
+            .private_searching
+            .insert(buyer, super::PRIVATE_SHOP_SEARCH_LOOKING);
+        let pick = |shop: u32, pos: u16, gold: i64| {
+            Some(CgPrivateShopSearchPick {
+                shop,
+                pos,
+                gold,
+                cheque: 0,
+            })
+        };
+        // A wrong price stops the pass with the refresh line and settles nothing.
+        let picks = vec![pick(PID, 3, 700)];
+        let refused = state.private_search_buy(buyer, picks, mover()).unwrap();
+        assert!(refused.is_err());
+        let told = drained(&mut buyer_inbox);
+        assert_eq!(told.len(), 1);
+        assert_eq!(
+            chat_text(&told[0]),
+            b"@@(input_db)tradus:Refresh your search result to sync price of the item."
+        );
+        assert!(state.private_shops[&SELLER].wares[3].is_some());
+        state
+            .characters
+            .find_by_vid_mut(buyer)
+            .expect("the buyer is in the world")
+            .set_gold(10_000);
+        // The shown price settles: the ware moves, the stash takes the price, and
+        // the bought line chats.
+        state.last_pulse += super::PRIVATE_SHOP_BUY_WAIT_PULSES + 1;
+        let picks = vec![pick(PID, 3, 500)];
+        let settled = state
+            .private_search_buy(buyer, picks, mover())
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].owner, PID);
+        assert_eq!(settled[0].price, 500);
+        assert!(state.private_shops[&SELLER].wares[3].is_none());
+        assert_eq!(state.private_shops[&SELLER].gold, 500);
+        let told = drained(&mut buyer_inbox);
+        assert!(
+            told.iter()
+                .any(|record| chat_text(record).starts_with(b"You have bought")),
+            "the bought line: {told:02x?}"
+        );
     }
 
     /// A sold ware tells the searchers its shop, slot and removal, and a flip tells

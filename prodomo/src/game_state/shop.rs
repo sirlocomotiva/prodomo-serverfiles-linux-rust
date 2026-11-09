@@ -226,6 +226,12 @@ pub enum ShopStep {
         /// The decoded filter and flag.
         search: protocol::cg_private_shop::CgPrivateShopSearch,
     },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_SEARCH_BUY`: buy the picked wares off the search.
+    PrivateSearchBuy {
+        /// The decoded picks: the shop, the slot and the shown price each, in
+        /// wire order, ending at the first `None`.
+        picks: Vec<Option<protocol::cg_private_shop::CgPrivateShopSearchPick>>,
+    },
 }
 
 impl ShopStep {
@@ -328,6 +334,9 @@ pub enum ShopAnswer {
     /// A personal-shop buy: the buyer's move, for the store to write with the
     /// ware's move and the stash in one transaction.
     PrivateBought(Box<super::private_shop::PrivateShopBought>),
+    /// A personal-shop search buy: the settlements in pick order, each for the
+    /// store to write in one transaction.
+    PrivateSearchBought(Vec<super::private_shop::PrivateShopBought>),
     /// A personal-shop close: the owner's move, for the store to write with the
     /// wares' return and the shop's deletion in one transaction.
     PrivateClosed(Box<super::private_shop::PrivateShopClosed>),
@@ -581,6 +590,22 @@ impl GameState {
             ShopStep::PrivateSearch { search } => Ok(ShopAnswer::Sent(
                 self.private_search(vid, &search, mover)?.records,
             )),
+            ShopStep::PrivateSearchBuy { picks } => self.private_search_buy_step(vid, picks, mover),
+        }
+    }
+
+    /// Run one personal-shop search buy: the settlements answer in pick order,
+    /// each for the store to write in one transaction, or the refusal's chats as
+    /// a move when nothing settles.
+    fn private_search_buy_step(
+        &mut self,
+        vid: Vid,
+        picks: Vec<Option<protocol::cg_private_shop::CgPrivateShopSearchPick>>,
+        mover: Mover,
+    ) -> Result<ShopAnswer, MoveItemRefused> {
+        match self.private_search_buy(vid, picks, mover)? {
+            Ok(settled) => Ok(ShopAnswer::PrivateSearchBought(settled)),
+            Err(refused) => Ok(ShopAnswer::Moved(refused)),
         }
     }
 
@@ -715,6 +740,7 @@ impl GameState {
             out @ ShopAnswer::PrivateCheckedOut(_) => out,
             renamed @ ShopAnswer::PrivateRenamed(_) => renamed,
             unlocked @ ShopAnswer::PrivateUnlocked(_) => unlocked,
+            search_bought @ ShopAnswer::PrivateSearchBought(_) => search_bought,
             ShopAnswer::Quest { .. } => {
                 debug_assert!(false, "the window opens no quest");
                 ShopAnswer::Sent(records)

@@ -5920,10 +5920,10 @@ where
         PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
         PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_MODIFY,
         PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
-        PRIVATE_SHOP_SUBHEADER_SEARCH, PRIVATE_SHOP_SUBHEADER_SEARCH_CLOSE,
-        PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, PRIVATE_SHOP_SUBHEADER_START,
-        PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE, PRIVATE_SHOP_SUBHEADER_WARP_REQUEST,
-        PRIVATE_SHOP_SUBHEADER_WITHDRAW,
+        PRIVATE_SHOP_SUBHEADER_SEARCH, PRIVATE_SHOP_SUBHEADER_SEARCH_BUY,
+        PRIVATE_SHOP_SUBHEADER_SEARCH_CLOSE, PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST,
+        PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
+        PRIVATE_SHOP_SUBHEADER_WARP_REQUEST, PRIVATE_SHOP_SUBHEADER_WITHDRAW,
     };
     let subheader = frame.payload.first().copied().unwrap_or(u8::MAX);
     let step = match subheader {
@@ -6048,6 +6048,17 @@ where
                 }
             }
         }
+        PRIVATE_SHOP_SUBHEADER_SEARCH_BUY => {
+            match protocol::cg_private_shop::CgPrivateShopSearchPick::decode_search_buy(frame) {
+                Ok(picks) => ShopStep::PrivateSearchBuy {
+                    picks: picks.to_vec(),
+                },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed shop search buy; closing");
+                    return false;
+                }
+            }
+        }
         _ => {
             info!(%addr, subheader, "Client sent an unported private-shop subheader; ignoring");
             return true;
@@ -6067,6 +6078,10 @@ where
         Ok(Ok(ShopAnswer::PrivateBought(bought))) => {
             info!(%addr, "Private shop buy settled");
             return finish_private_buy(session, addr, context, held, actor, *bought).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateSearchBought(settled))) => {
+            info!(%addr, "Private shop search buy settled");
+            return finish_private_search_buy(session, addr, context, settled).await;
         }
         Ok(Ok(ShopAnswer::PrivateClosed(closed))) => {
             info!(%addr, "Private shop closed");
@@ -6217,6 +6232,71 @@ where
     bought.changes.clear();
     let moved = Ok(Ok(bought));
     finish_item_step(session, addr, context, held, actor, moved).await
+}
+
+/// Store a personal-shop search buy: each settlement's ware and stash in one
+/// transaction each, in pick order, then the buyer's records in order, as
+/// `ItemTransaction` settles (`G/private_shop_manager.cpp:517-655`) and `PrivateShopBuy`
+/// completes each (`D/ClientManagerPrivateShop.cpp:2102-2186`).
+async fn finish_private_search_buy<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    settled: Vec<PrivateShopBought>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut records = Vec::new();
+    let mut owner_id = 0;
+    let mut delta = 0;
+    for bought in &settled {
+        let PrivateShopBought {
+            bought,
+            ware,
+            owner,
+            price,
+        } = bought;
+        let placed = bought.changes.iter().find_map(|change| match change {
+            db::items::RowChange::Created(row) if row.id == *ware => {
+                Some((row.window_type, row.pos, row.count))
+            }
+            _ => None,
+        });
+        let Some((window_type, pos, count)) = placed else {
+            warn!(%addr, "A search buy settled no ware; closing");
+            return false;
+        };
+        if let Err(error) = db::private_shop::buy_ware(
+            &context.store,
+            db::private_shop::BoughtWare {
+                owner_id: *owner,
+                ware_id: *ware,
+                buyer_id: bought.owner_id,
+                window_type,
+                pos: u16::try_from(pos).unwrap_or(u16::MAX),
+                count,
+                price: *price,
+            },
+        )
+        .await
+        {
+            warn!(%addr, %error, "A search buy could not be stored; closing");
+            return false;
+        }
+        owner_id = bought.owner_id;
+        delta += bought.gold.unwrap_or(0);
+        records.extend(bought.records.iter().cloned());
+    }
+    if let Err(error) = db::items::apply_transfer(&context.store, owner_id, &[], delta).await {
+        warn!(%addr, %error, "A search buy's gold could not be stored; closing");
+        return false;
+    }
+    if let Err(error) = send_all(session, &records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
 }
 
 /// Close a personal shop: the wares' return and the shop's deletion in one
@@ -6573,7 +6653,8 @@ where
             | ShopAnswer::PrivateCheckedIn(_)
             | ShopAnswer::PrivateCheckedOut(_)
             | ShopAnswer::PrivateRenamed(_)
-            | ShopAnswer::PrivateUnlocked(_),
+            | ShopAnswer::PrivateUnlocked(_)
+            | ShopAnswer::PrivateSearchBought(_),
         )) => {
             warn!(%addr, "An NPC step ran a private shop; closing");
             return false;

@@ -46711,6 +46711,18 @@ fn client_shop_search(vnum: u32) -> Vec<u8> {
     search
 }
 
+/// A `CG_PRIVATE_SHOP` search buy of one pick: the shop, the slot and the shown
+/// price, with the other nine tables zero.
+fn client_shop_search_buy(shop: u32, pos: u16, gold: i64, cheque: u32) -> Vec<u8> {
+    let mut buy = vec![CG_PRIVATE_SHOP, 19];
+    buy.extend_from_slice(&shop.to_le_bytes());
+    buy.extend_from_slice(&pos.to_le_bytes());
+    buy.extend_from_slice(&gold.to_le_bytes());
+    buy.extend_from_slice(&cheque.to_le_bytes());
+    buy.extend_from_slice(&[0u8; 18 * 9]);
+    buy
+}
+
 /// Yankee holding the looking glass, beside the sword seller: the glass's expiry
 /// socket is live, because a zero socket expires at the first pulse.
 fn enter_seller_and_searcher(
@@ -46836,4 +46848,53 @@ fn a_glass_opens_the_search_and_a_sale_tells_the_searchers() {
     assert_eq!(update[12], 1, "the removal");
     let bought = yankee.read_game();
     assert_eq!(bought[0], GC_CHAT, "the bought line: {bought:02x?}");
+}
+
+/// Ledger 500: a search buy settles off the search window, without browsing: the
+/// gold, the ware's set, the searchers' update and the bought line, in legacy
+/// order. The buyer hears no `REMOVE_ITEM`, as only viewers do.
+#[test]
+fn a_search_buy_settles_the_picked_ware_off_the_search_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    let (mut alice, alice_listed, mut yankee, yankee_listed) =
+        enter_seller_and_searcher(&server, &database);
+    let _entity = build_axes_shop(&mut alice, &mut yankee);
+    // Yankee drinks the trading glass's sibling: the looking glass opens the
+    // search, and the search finds the sword's row.
+    yankee.send_record(&client_item_use(0));
+    let opened = yankee.read_game();
+    assert_eq!(
+        &opened[..4],
+        &[GC_PRIVATE_SHOP, 4, 0, 21],
+        "OPEN_LOOK: {opened:02x?}"
+    );
+    yankee.send_record(&client_shop_search(19));
+    let result = yankee.read_game();
+    assert_eq!(result[3], 23, "RESULT: {result:02x?}");
+    // The buy runs off the search: the gold, the ware's set, the searchers'
+    // update and the bought line. Yankee is not a viewer, so no `REMOVE_ITEM`
+    // reaches her; the update does, as she searches.
+    yankee.send_record(&client_shop_search_buy(alice_listed.id, 3, 500, 0));
+    assert_eq!(
+        yankee.read_game(),
+        gold_change(yankee_listed.id, 0, 9500),
+        "the buyer pays the full price"
+    );
+    let set = yankee.read_game();
+    assert_eq!(set[0], ITEM_SET, "the ware's set: {set:02x?}");
+    let update = yankee.read_game();
+    assert_eq!(
+        &update[..4],
+        &[GC_PRIVATE_SHOP, 13, 0, 24],
+        "SEARCH_UPDATE: {update:02x?}"
+    );
+    let bought = yankee.read_game();
+    assert_eq!(bought[0], GC_CHAT, "the bought line: {bought:02x?}");
+    yankee.still("nothing follows");
 }

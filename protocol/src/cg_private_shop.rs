@@ -36,7 +36,7 @@
 //! single field is read.
 //!
 //! The build, `START`, `BUY`, price-change, move, checkin, checkout, title-change,
-//! slot-unlock and search subheaders are decoded here; the other eleven are later slices. The
+//! slot-unlock, search and search-buy subheaders are decoded here; the other ten are later slices. The
 //! subheader byte is validated by the dispatch, not by this codec: a wrong subheader
 //! through any decoder is a header error, as a wrong header is.
 //!
@@ -45,6 +45,10 @@
 //! packed: 4 (vnum) + 25 (owner) + 4 + 4 (type, subtype) + 4 + 4 (job, gender) +
 //! 2 + 2 (stack) + 1 + 1 (refine) + 4 + 4 (level) + 21 (seven attrs) + 2 (sash) +
 //! 1 + 1 (alchemy) + 1 (use-filter) = 85.
+//!
+//! The search buy is ten `SPrivateShopSearchSelectedItem` tables (`packet.h:1309-1313`):
+//! the shop id (4), the slot (2) and the price (12), 18 bytes each, 180 after the
+//! prefix (`SELECTED_ITEM_MAX_NUM`, `C/length.h:140`).
 //!
 //! # What this codec deliberately does not do
 //!
@@ -58,8 +62,8 @@ use crate::cg_variable::{
     PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_ITEM_CHECKIN,
     PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
     PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_SEARCH,
-    PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, PRIVATE_SHOP_SUBHEADER_START,
-    PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
+    PRIVATE_SHOP_SUBHEADER_SEARCH_BUY, PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST,
+    PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
 };
 use crate::cg_wire::ClientFrame;
 use crate::item_pos::ItemPos;
@@ -489,6 +493,80 @@ impl CgPrivateShopSearch {
             alchemy_clarity: bytes[84],
             use_filter: bytes[85] != 0,
         })
+    }
+}
+
+/// One decoded search-buy table: the shop, the slot, and the price the search showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgPrivateShopSearchPick {
+    /// The shop's id: its owner's player id, as the search row names it.
+    pub shop: u32,
+    /// The ware's shop slot.
+    pub pos: u16,
+    /// The price in yang the search showed.
+    pub gold: i64,
+    /// The price in cheques the search showed.
+    pub cheque: u32,
+}
+
+/// The search buy's tables: `SELECTED_ITEM_MAX_NUM` (`C/length.h:140`).
+pub const CG_PRIVATE_SHOP_SEARCH_BUY_PICKS: usize = 10;
+
+/// Width of one search-buy table on the wire: the shop (4), the slot (2) and the
+/// price (12).
+pub const CG_PRIVATE_SHOP_SEARCH_PICK_WIRE_SIZE: usize = 18;
+
+/// Width of the search-buy body after the prefix: the ten tables.
+pub const CG_PRIVATE_SHOP_SEARCH_BUY_WIRE_SIZE: usize =
+    CG_PRIVATE_SHOP_SEARCH_BUY_PICKS * CG_PRIVATE_SHOP_SEARCH_PICK_WIRE_SIZE;
+
+impl CgPrivateShopSearchPick {
+    /// Decode the subheader and the ten tables (`PrivateShopSearchBuy`,
+    /// `G/input_main.cpp:5178-5246`). A zero shop id ends the picks, as legacy's
+    /// loop breaks on it.
+    ///
+    /// # Errors
+    ///
+    /// As [`CgPrivateShopBuildError`]: a wrong header or subheader, or a frame
+    /// short of the ten tables.
+    ///
+    /// # Panics
+    ///
+    /// Never: the slice is length-checked first.
+    pub fn decode_search_buy(
+        frame: &ClientFrame,
+    ) -> Result<[Option<Self>; CG_PRIVATE_SHOP_SEARCH_BUY_PICKS], CgPrivateShopBuildError> {
+        let bytes = &frame.payload;
+        let subheader = bytes.first().copied().unwrap_or(0);
+        if frame.header != HEADER_CG_PRIVATE_SHOP.value()
+            || subheader != PRIVATE_SHOP_SUBHEADER_SEARCH_BUY
+        {
+            return Err(CgPrivateShopBuildError::Header {
+                header: frame.header,
+                subheader,
+            });
+        }
+        if bytes.len() < 1 + CG_PRIVATE_SHOP_SEARCH_BUY_WIRE_SIZE {
+            return Err(CgPrivateShopBuildError::Truncated {
+                needed: 1 + CG_PRIVATE_SHOP_SEARCH_BUY_WIRE_SIZE,
+                available: bytes.len(),
+            });
+        }
+        let mut picks = [None; CG_PRIVATE_SHOP_SEARCH_BUY_PICKS];
+        for (index, pick) in picks.iter_mut().enumerate() {
+            let at = 1 + index * CG_PRIVATE_SHOP_SEARCH_PICK_WIRE_SIZE;
+            let shop = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+            if shop == 0 {
+                break;
+            }
+            *pick = Some(Self {
+                shop,
+                pos: u16::from_le_bytes(bytes[at + 4..at + 6].try_into().expect("two bytes")),
+                gold: i64::from_le_bytes(bytes[at + 6..at + 14].try_into().expect("eight bytes")),
+                cheque: u32::from_le_bytes(bytes[at + 14..at + 18].try_into().expect("four bytes")),
+            });
+        }
+        Ok(picks)
     }
 }
 
@@ -986,6 +1064,57 @@ mod tests {
             short,
             Err(CgPrivateShopBuildError::Truncated {
                 needed: 86,
+                available: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn the_search_buy_decodes_in_table_order() {
+        let mut payload = vec![PRIVATE_SHOP_SUBHEADER_SEARCH_BUY];
+        payload.extend_from_slice(&0x7531u32.to_le_bytes());
+        payload.extend_from_slice(&0x0203u16.to_le_bytes());
+        payload.extend_from_slice(&0x0102_0304_0506_0708i64.to_le_bytes());
+        payload.extend_from_slice(&0x0a0b_0c0du32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&[7u8; 14]);
+        payload.extend_from_slice(&[9u8; 18 * (CG_PRIVATE_SHOP_SEARCH_BUY_PICKS - 2)]);
+        assert_eq!(payload.len(), 1 + CG_PRIVATE_SHOP_SEARCH_BUY_WIRE_SIZE);
+        let picks = CgPrivateShopSearchPick::decode_search_buy(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: payload.clone(),
+        })
+        .expect("decoded");
+        assert_eq!(
+            picks[0],
+            Some(CgPrivateShopSearchPick {
+                shop: 0x7531,
+                pos: 0x0203,
+                gold: 0x0102_0304_0506_0708,
+                cheque: 0x0a0b_0c0d,
+            })
+        );
+        assert_eq!(picks[1], None, "the zero shop ends the picks");
+        assert_eq!(picks[9], None);
+        let crossed = CgPrivateShopSearchPick::decode_search_buy(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_SEARCH, 0x31],
+        });
+        assert_eq!(
+            crossed,
+            Err(CgPrivateShopBuildError::Header {
+                header: HEADER_CG_PRIVATE_SHOP.value(),
+                subheader: PRIVATE_SHOP_SUBHEADER_SEARCH,
+            })
+        );
+        let short = CgPrivateShopSearchPick::decode_search_buy(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_SEARCH_BUY, 0x31],
+        });
+        assert_eq!(
+            short,
+            Err(CgPrivateShopBuildError::Truncated {
+                needed: 181,
                 available: 2,
             })
         );

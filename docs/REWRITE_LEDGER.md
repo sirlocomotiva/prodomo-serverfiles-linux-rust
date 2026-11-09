@@ -50707,3 +50707,47 @@ suite 5212 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 scenario passed 4 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 500. The search buy
+
+The search's last record settles: the buyer picks wares off the search window and buys
+them without browsing (`CInputMain::PrivateShopSearchBuy`, `G/input_main.cpp:5178-5246`,
+with the DB checks, `D/ClientManagerPrivateShop.cpp:1520-1650`, the game transaction,
+`G/private_shop_manager.cpp:517-655`, and the DB completion, `:2102-2186`).
+
+The gates run in input order: the stun, the open search window, the buyer's own shop
+among the picks (with the own-shop line, as the browse buy's missing ware answers
+it), and the shared one-second buy wait. Then each pick runs the DB checks in order:
+the shop's presence (the no-shop `tradus` line), the modify state, the ware's
+presence, the shown price against the standing ware (a zero cheque on both sides, as
+cheque is off), and the running gold balance, which falls by each passing price, as
+legacy subtracts it on the request. The first failing pick stops the pass with its
+line and settles nothing. Each passing pick settles through the shared settlement,
+so the viewers hear `REMOVE_ITEM`, the owner hears `REMOVE_MY_ITEM`, `SET_SALE`, the
+sold whisper and `BALANCE_UPDATE`, the searchers hear the update, and the buyer hears
+its bought line. A pick with no room refuses with the space line at its check, as
+`ItemTransaction` finds the cell before charging; the DB completion's marks and the
+peer checks have no equivalent in one process (ADR-0002), where the world holds every
+shop. The store writes each settlement in one transaction each, in pick order, and the
+gold delta is the picks' sum.
+
+The codec is `CgPrivateShopSearchPick::decode_search_buy`: the ten 18-byte tables
+after the prefix (the shop id, the slot and the 12-byte price, 180 bytes), ending at
+the first zero shop id, as legacy's loop breaks. The framer's `SEARCH_BUY => 180` arm
+already covered the frame.
+
+The scenario `a_search_buy_settles_the_picked_ware_off_the_search_window` opens the
+search, finds the sword's row, and buys it off the window: the gold, the ware's set,
+the searchers' update and the bought line. The buyer hears no `REMOVE_ITEM`, as only
+viewers do. The unit test pins the wrong price's refresh line settling nothing and
+the shown price's settlement.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5213 passed, 2 failed in 46 targets, both load flakes that pass alone
+(`a_gm_flags_a_stray_dog_aggressive_and_coward`,
+`a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin`); doc
+tests 1 passed; `cargo clippy --workspace --all-targets -- -D warnings` clean after
+fixing three redundant closures and an unused parameter; `RUSTDOCFLAGS="-D warnings"
+cargo doc` clean. The scenario passed 4 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

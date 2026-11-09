@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 499 (the private-shop search).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 500
+Last reviewed: 2026-11-09, after ledger section 500 (the search buy).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 501
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -563,6 +563,7 @@ the register. Since 491 `cg.game.myshop`, `gc.shop_sign`, the two Switchbot sub-
 Since 492 `sys.trade.private_shop` is `partial`: a click on the seller opens its bundle window, and a buy of slot 3 moves the sword by id, charges the full 500, pays the seller whole without the flag, trails the sold update on both settled sides, and settles both sides in one transaction; a rebuy answers sold out, and the tax, the treasury and the refusals are unit-tested. The
 Since 493 `sys.trade.private_shop` is `partial`, with its own scope back: the panel opens and closes, and a build stands the shop on the empire's market map, stores the shop row and the wares in one transaction, and sends `LOAD` and the stand's `ADD_ENTITY`; the bundle buy ledger 492 filed there is `sys.npc.shop`'s PC arm instead. Since 494 the browse and the buy are `ported`: the window opens by the stand's VID and closes with `END`, and the buy settles the ware, the gold and the stash in one transaction and tells the viewers, the owner and the buyer. Since 495 the close, the withdraw and the modify are `ported`: the modify flips the state, the withdraw empties the stash and destroys the empty shop, and the close returns the wares biggest-first, cleans the viewers and deletes the rows. Since 496 the price, the move, the checkin and the checkout are `ported`: the four share the modify gates, the price and the move sync to the owner and the viewers, and the checkin and checkout move the ware between the window and the shop with the row to match. Since 497 the rename and the unlock are `ported`: the modify-state title change reaches the owner and the stand's neighbours, and the key at the named cell spends through `RemoveSpecifyItem`, growing the stand's or the point's count and telling the viewers; the build's and checkin's `i32` owner bind, which poisoned sqlx's per-connection statement cache for the unlock's `i64` destroy on the same text, now binds `i64` too. Since 498 the warp request and its countdown are `ported`: the owner closes its panel, zeroes the shop time and counts 3 calm or 10 fighting, and at 0 warps to the stand's spot past `CanWarp`, with the DB peer's channel match collapsed into the ownership since one process holds the shop. The
 Since 499 `sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_SEARCH_CLOSE` and `sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_SEARCH` are `ported`: the glasses open the search window, a search answers the matching wares with `SEARCH_RESULT` past the stun and the two-second wait, and a sale, a flip and a checkout tell the searchers with `SEARCH_UPDATE`. The
+Since 500 `sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_SEARCH_BUY` is `ported`: the ten picks check in order against the standing shops and settle through the shared settlement, without browsing. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
