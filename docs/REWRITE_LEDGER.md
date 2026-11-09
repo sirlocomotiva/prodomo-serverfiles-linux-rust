@@ -50962,3 +50962,23 @@ suite 5228 passed, 0 failed in 46 targets (the first run showed 5227 passed with
 scenario passed 2 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 509. The casket preview
+
+`sys.item.casket_preview` is `ported` with no code change. The system is two
+pieces: `/fetch_casket_items`, live since ledger 457 with its scenario (the group
+arm: one `AddCasketItem` line per row, then `SortCasketWindow`; empty and unknown
+silent), and the quest-registered preview map `m_casket_preview`, whose only
+writer is the quest call `add_casket_item` (`G/questlua_global.cpp:1690-1710`) and
+whose only reader is the fetch's fallback arm. A fresh sweep finds neither
+`add_casket_item` nor `casket` in any file under `locale/europe/quest/` (160
+files) or `locale/europe/*.lua` — with `give_item2` in 8 files as the positive
+control and a nonsense token in none as the negative — so the map stays empty at
+runtime and the fallback silence the port encodes stands. `lua.add_casket_item`
+was already `unused` (ledger 401, owner question 37).
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5228 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
