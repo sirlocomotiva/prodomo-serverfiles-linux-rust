@@ -5935,6 +5935,10 @@ where
     let account = quest_account(context, addr, held).await.unwrap_or_default();
     let answer = match context.game.shop(vid, step, place, actor, account).await {
         Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(moved)),
+        Ok(Ok(ShopAnswer::Settled(settled))) => {
+            info!(%addr, ?step, "Shop buy settled");
+            return finish_trade(session, addr, context, held, *settled).await;
+        }
         Ok(Ok(ShopAnswer::Sent(records))) => {
             info!(%addr, ?step, "Shop step answered");
             return send_shop_records(session, addr, &records).await;
@@ -6724,6 +6728,7 @@ where
         own,
         partner,
         partner_outbox,
+        monarch,
     } = settled;
     let sides = [&own, &partner].map(|moved| db::items::TransferSide {
         owner_id: moved.owner_id,
@@ -6733,6 +6738,12 @@ where
     if let Err(error) = db::items::apply_exchange(&context.store, &sides).await {
         warn!(%addr, %error, "The trade could not be stored; closing");
         return false;
+    }
+    if let Some((empire, money)) = monarch {
+        if let Err(error) = db::monarch::store_money(&context.store, empire, money).await {
+            warn!(%addr, %error, "The shop tax could not be stored; closing");
+            return false;
+        }
     }
     let rows = own.changes.len() + partner.changes.len();
     if let Some(quickslots) = own.quickslots {

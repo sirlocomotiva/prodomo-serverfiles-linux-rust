@@ -248,6 +248,9 @@ pub struct TradeSettled {
     pub partner: MovedItems,
     /// Where the other side's records go once the store has written the trade.
     pub partner_outbox: Option<ClientOutbox>,
+    /// The monarch cell a PC-shop buy's tax landed in: the slot and the cell, for the
+    /// store. A trade settles none.
+    pub monarch: Option<(u8, i64)>,
 }
 
 /// What a trade step did.
@@ -628,6 +631,7 @@ impl GameState {
             own,
             partner,
             partner_outbox: self.outboxes.get(&partner_vid).cloned(),
+            monarch: None,
         }
     }
 
@@ -1645,7 +1649,9 @@ mod tests {
             own,
             partner,
             partner_outbox,
+            monarch,
         } = *settled;
+        assert_eq!(monarch, None);
         assert_eq!(
             (own.kind, own.owner_id, own.gold),
             (MoveKind::Traded, 90, Some(100))

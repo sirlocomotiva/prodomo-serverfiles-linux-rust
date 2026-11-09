@@ -46,7 +46,7 @@ pub use apply::{
     APPLY_MAGIC_ATT_GRADE, APPLY_MAGIC_DEF_GRADE, APPLY_MAX_HP, APPLY_MAX_HP_PCT, APPLY_MAX_SP,
     APPLY_MAX_SP_PCT, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
 };
-pub use auto_give_new::{auto_give_item_new, GivenNew};
+pub use auto_give_new::{auto_give_item_new, dragon_soul_buy_cell, GivenNew};
 pub use bait::{is_bait, use_bait, Baited, ROD_BAIT_SOCKET, WEAPON_CELL};
 pub use blend::spend_blend;
 pub use campfire::{

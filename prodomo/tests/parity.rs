@@ -45853,3 +45853,201 @@ fn a_bundle_shop_opens_signs_and_closes() {
         alice.sees_arrive(*npc, false, None);
     }
 }
+
+/// Read a bundle-shop build's burst: the spend's clear, the sign on both wires, the
+/// polymorph's reencode, and the battle compute that trails it on the seller's wire.
+fn read_myshop_build(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    seller: u32,
+    witness: u32,
+    npcs: &[u32],
+) {
+    let spent = alice.read_game();
+    assert_eq!(spent[0], ITEM_SET, "the bundle's cell clears: {spent:02x?}");
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_SHOP_SIGN);
+    assert_eq!(&own[5..11], b"Swords");
+    let seen = yankee.read_game();
+    assert_eq!(seen, own, "the witness hears the same sign");
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_DEL);
+    alice.sees_arrive(seller, false, None);
+    assert_eq!(alice.read_game(), walk_mode_of(&witness.to_le_bytes()));
+    alice.sees_arrive(witness, false, None);
+    assert_eq!(yankee.read_game()[0], GC_CHARACTER_DEL);
+    yankee.sees_arrive(seller, false, None);
+    for npc in npcs {
+        let (_, insert, _) = alice.sees_arrive(*npc, false, None);
+        assert_eq!(insert[21], 1, "CHAR_TYPE_NPC");
+    }
+    // The polymorph's battle compute trails the reencode on the seller's wire, as the
+    // open scenario's `/close_shop` loop reads it.
+    loop {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        let Some(trailed) = alice.read_game_raw_until(deadline) else {
+            break;
+        };
+        if trailed[0] != GC_POINT_CHANGE {
+            alice.unread(vec![trailed]);
+            break;
+        }
+    }
+    alice.quiet("the build is over");
+    yankee.quiet("the witness is caught up");
+}
+
+/// A `CG_MYSHOP` build selling `count` of `vnum` from inventory cell `cell` for `price`
+/// yang in window slot `slot`, under the sign `Swords`.
+fn myshop_build(vnum: u32, cell: u16, price: u64, slot: u8) -> Vec<u8> {
+    let mut build = vec![CG_MYSHOP];
+    let mut sign = [0u8; 33];
+    sign[..6].copy_from_slice(b"Swords");
+    build.extend_from_slice(&sign);
+    build.push(1);
+    build.extend_from_slice(&vnum.to_le_bytes());
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&cell.to_le_bytes());
+    build.extend_from_slice(&price.to_le_bytes());
+    build.push(slot);
+    build.extend_from_slice(&[0u8; 50]);
+    build
+}
+
+/// Assert an `UPDATE_ITEM` names `slot` with vnum 0, the kept `price` and the kept
+/// `count`, as a sold slot's does.
+fn assert_sold_update(cleared: &[u8], slot: u8, price: u64, count: u16) {
+    assert_eq!(
+        &cleared[..4],
+        &[GC_SHOP, 0x4e, 0x00, 2],
+        "the buyer hears UPDATE_ITEM: {cleared:02x?}"
+    );
+    assert_eq!(cleared[4], slot, "the sold slot");
+    assert_eq!(&cleared[5..9], &[0, 0, 0, 0], "vnum 0");
+    assert_eq!(
+        u64::from_le_bytes(cleared[9..17].try_into().expect("eight bytes")),
+        price,
+        "the kept price"
+    );
+    assert_eq!(&cleared[17..19], &count.to_le_bytes(), "the kept count");
+}
+
+/// Read the shop's records past the affect event's tick: the tick never names a player,
+/// so any player's own update is kept.
+fn read_shop_past_ticks(keyed: &mut Keyed) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game();
+        let player_update = record[0] == GC_CHARACTER_UPDATE
+            && record.len() > 4
+            && u32::from_le_bytes(record[1..5].try_into().expect("four bytes")) < FIRST_NPC_VID;
+        if record[0] != GC_AFFECT_REMOVE && (player_update || record[0] != GC_CHARACTER_UPDATE) {
+            return record;
+        }
+    }
+}
+
+/// `sys.trade.private_shop`'s buy: Alpha builds a bundle shop selling the sword for 500 yang,
+/// Yankee clicks Alpha, buys slot 3, and both sides settle in one transaction before the
+/// records are sent. The buyer pays the full price, the seller gains it whole without the
+/// flag, the slot clears on both wires, and a second buy answers sold out.
+#[test]
+fn a_bundle_shop_buy_settles_both_sides() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 50200 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 1000 WHERE name = 'Yankee'",
+    );
+    let (mut alice, alice_listed, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let mut npcs: Vec<u32> = entered
+        .shown
+        .inserts()
+        .iter()
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    npcs.sort_unstable();
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    alice.send_record(&myshop_build(19, 0, 500, 3));
+    read_myshop_build(
+        &mut alice,
+        &mut yankee,
+        alice_listed.id,
+        yankee_listed.id,
+        &npcs,
+    );
+    // When: Alpha clicks its own window, then Yankee clicks Alpha. Then: both windows
+    // open with the sword in slot 3.
+    alice.send_record(&client_click(alice_listed.id));
+    let own_window = alice.read_game();
+    assert_eq!(
+        &own_window[..4],
+        &[GC_SHOP, 0x70, 0x0b, 0],
+        "wSize and START"
+    );
+    assert_eq!(shop_slot(&own_window, 3), (19, 500, 1));
+    yankee.send_record(&client_click(alice_listed.id));
+    let start = yankee.read_game();
+    assert_eq!(&start[..4], &[GC_SHOP, 0x70, 0x0b, 0], "wSize and START");
+    assert_eq!(&start[4..8], &alice_listed.id.to_le_bytes());
+    assert_eq!(shop_slot(&start, 3), (19, 500, 1));
+    // When: slot 3 is bought. Then: the buyer's gold goes, the item lands in its
+    // first free cell, and the store holds both sides before either record arrives.
+    yankee.send_record(&[CG_SHOP, 1, 0, 3]);
+    assert_eq!(
+        yankee.read_game(),
+        gold_change(yankee_listed.id, 0, 500),
+        "the buyer pays the full price"
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(set_fields(&yankee.read_game()), (inventory, 0, 19, 1));
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Yankee') = 500 AND (SELECT gold FROM player \
+         WHERE name = 'Alpha') = 500 AND EXISTS (SELECT 1 FROM item WHERE id = 60 AND vnum = \
+         19 AND window_type = 1 AND pos = 0 AND owner_id = (SELECT id FROM player WHERE name \
+         = 'Yankee'))",
+    );
+    // And: the seller hears its cell clear and its gold land, and both hear the slot clear.
+    assert_eq!(read_shop_past_ticks(&mut alice), a_clear_record(0));
+    assert_eq!(
+        read_shop_past_ticks(&mut alice),
+        gold_change(alice_listed.id, 500, 500)
+    );
+    let cleared = read_shop_past_ticks(&mut yankee);
+    assert_sold_update(&cleared, 3, 500, 1);
+    let witnessed = read_shop_past_ticks(&mut alice);
+    assert_eq!(witnessed, cleared, "the seller hears the same update");
+    // When: slot 3 is bought again. Then: sold out, and nothing is stored.
+    yankee.send_record(&[CG_SHOP, 1, 0, 3]);
+    assert_eq!(yankee.read_game(), shop_answer(9), "SOLD_OUT");
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Yankee') = 500 AND (SELECT gold FROM player \
+         WHERE name = 'Alpha') = 500",
+    );
+}

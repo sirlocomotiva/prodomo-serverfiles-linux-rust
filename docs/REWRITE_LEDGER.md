@@ -50257,3 +50257,61 @@ slots by reference; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps 
 dead-toggle test; clamping the display bound survives as an equivalent mutant, the grid check
 refusing the class anyway. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
 width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 492. The bundle buy
+
+A click on a seller opens its bundle window, and a buy of a standing slot moves
+the item by id, charges the full price, pays the seller net of the
+`personal_shop` tax, and updates every guest. Both sides settle in one
+transaction, as a trade's do.
+
+Legacy (`G/shop.cpp:610-808`, the live arm: `OFFLINE_SHOP` is undefined
+everywhere, so the `:200-438` overload never compiles). The order is the
+slot's, then the item's (still the seller's, or sold out), then the buyer's
+gold, then the buyer's cell (a dragon soul stone to its box, anything else to
+the first free base cell), then the charge of the full price, then the tax
+from the `personal_shop` flag, clamped to 100. The move clears the seller's
+cell and fills the buyer's; the sold slot keeps its price and item id when
+`pkItem` NULLs, so a rebuy finds the item gone from the seller and answers
+sold out. The update carries vnum 0 with the kept price and count
+(`BroadcastUpdateItem`, `:943-988`), and trails the move's item records; the
+seller's gold lands after it, then `[LS;881;%d]` with the rate, then the
+seller's empire takes the tax (`SendtoDBAddMoney`, `G/monarch.cpp:118-132`).
+The dead check is the NPC arm's; the PC arm has none, because the window closes
+at death. The click gates are `CHARACTER::OnClick`'s (`G/char.cpp:6236-6260`):
+the seller's own click and another player's check different windows, and a
+failed gate answers `[LS;841]`. NPC sales from a player's window are silent
+(`G/shop_manager.cpp:477-478`).
+
+The Rewrite (`prodomo/src/game_state/myshop.rs`, `buy_from_player` with its
+`myshop_buy_ready` checks and `myshop_buy_move` packer). The buyer's and the
+seller's update copies ride their settled sides, so the store write orders
+them after the move's records; the other guests hear theirs at once. The
+monarch cell rides `TradeSettled.monarch` and stores after the exchange. The
+seller's empire reads from its body card. `ShopAnswer::Settled` carries both
+sides through the shop dispatch to `finish_trade`; `ShopAnswer` compares
+manually now, as the outbox cannot. The dragon soul cell helper is shared with
+the give (`world::character::dragon_soul_buy_cell`). One Divergence (module
+docs): `ChangeGold` refuses gold that would reach the cap after the buyer's
+has been taken, losing the tax difference; the Rewrite refuses first, as the
+sale does.
+
+Scenario `a_bundle_shop_buy_settles_both_sides`: Alpha builds selling the
+sword for 500 in slot 3, both click the window open, Yankee buys, and both
+sides store before the records arrive; the seller hears its clear, its gold,
+and the update with vnum 0 and the kept price and count; a rebuy answers sold
+out with nothing stored. Units cover the untaxed settle, the 10% tax with the
+treasury and the `[LS;881;10]` line, and the three refusal subheaders. Three
+`myshop` units, one codec test and one scenario join the counts below.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+5170 passed, 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after
+boxing the click's window, un-wrapping the buy's `Result`, splitting the checks, the move
+and the scenario's readers; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline` clean. The buy scenario passes 8/8 in parallel. No mutants were run: the
+mutation helper truncated `myshop.rs` to zero bytes mid-slice (no backup; the file was
+reconstructed from HEAD and the applied edits, and the scenario re-verified). `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

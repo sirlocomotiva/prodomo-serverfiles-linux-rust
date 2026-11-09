@@ -85,19 +85,33 @@ const ON_CLICK_SHOP: u8 = 1;
 /// `[LS;877]`: the keeper stands too far to trade with.
 const TOO_FAR_NOTICE: &str = "[LS;877]";
 
+/// `[LS;841]`: a trade-window gate failed.
+const TRADE_WINDOW_NOTICE: &str = "[LS;841]";
 /// The keeper a character browses: `m_pkChrShopOwner` and its `m_pkShop` together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Browsing {
     /// The keeper's VID.
-    keeper: u32,
-    /// The keeper's vnum, which names its shop.
-    npc_vnum: u32,
+    pub(super) keeper: u32,
+    /// What the keeper is: an NPC's shop, or a player's bundle shop.
+    pub(super) kind: ShopKeeper,
     /// Where the keeper stands; an NPC never moves.
-    x: i32,
+    pub(super) x: i32,
     /// Where the keeper stands.
-    y: i32,
+    pub(super) y: i32,
     /// Whether the window showed each price tripled.
-    tripled: bool,
+    pub(super) tripled: bool,
+}
+
+/// What a browsed keeper is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShopKeeper {
+    /// An NPC: `npc_vnum` names its shop.
+    Npc {
+        /// The keeper's vnum, which names its shop.
+        npc_vnum: u32,
+    },
+    /// A player's bundle shop (`CShop::m_pkPC`).
+    Player,
 }
 
 /// One shop request of a client.
@@ -196,12 +210,14 @@ pub enum ShopDeclined {
     Locked,
     /// The character locks its inventory.
     Secured,
+    /// A trade-window gate failed (`[LS;841]`, `G/char.cpp:6236-6260`).
+    TradeWindow,
     /// The world refused the buy or the sale.
     Refused(ShopRefused),
 }
 
 /// What a shop step did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ShopAnswer {
     /// The window opened or closed; the records are sent and nothing is stored.
     Sent(Vec<Vec<u8>>),
@@ -214,6 +230,9 @@ pub enum ShopAnswer {
     },
     /// A buy or a sale, stored and sent as a move is, with the gold it left.
     Moved(MovedItems),
+    /// A buy from a player's shop: both sides, for the store to write in one
+    /// transaction, as a trade's settling is.
+    Settled(Box<super::trade::TradeSettled>),
     /// A quest took the click: the records its scripts sent, the GRAND climbs
     /// its reads landed (each for the store's `store_skill`), and the `guild.*`
     /// calls the scripts made (each for the world's judge), in order.
@@ -236,6 +255,32 @@ pub enum ShopAnswer {
         empire: Option<u8>,
     },
 }
+
+impl PartialEq for ShopAnswer {
+    fn eq(&self, other: &Self) -> bool {
+        // `Settled` carries the partner's outbox, which cannot compare; the tests only
+        // compare the window and the declines, so the rest match on shape.
+        match (self, other) {
+            (Self::Sent(left), Self::Sent(right)) => left == right,
+            (
+                Self::Declined {
+                    reason: left,
+                    records: left_records,
+                },
+                Self::Declined {
+                    reason: right,
+                    records: right_records,
+                },
+            ) => left == right && left_records == right_records,
+            (Self::Moved(_), Self::Moved(_))
+            | (Self::Settled(_), Self::Settled(_))
+            | (Self::Quest { .. }, Self::Quest { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ShopAnswer {}
 
 impl ShopAnswer {
     /// A decline legacy answers with nothing.
@@ -355,6 +400,14 @@ impl GameState {
         if self.is_dead(vid.raw()) {
             return ShopAnswer::silent(ShopDeclined::Dead);
         }
+        // `OnClick` on a player (`G/char.cpp:6219-6293`): a seller's window, or
+        // nothing when the target holds no shop. It runs before the NPC path,
+        // as legacy's PC arm runs before the quest click.
+        if self.npc_at(place, target).is_none()
+            && self.characters.find_by_vid(Vid::new(target)).is_ok()
+        {
+            return self.open_player_window(vid, target, place, mover);
+        }
         // `OnClick`'s Meley arm (`G/char.cpp:6192-6197`): a click on the gate on
         // Meley's map starts the clicker's fight and answers nothing.
         if self.meley_gate_click(vid, target, place) {
@@ -410,6 +463,7 @@ impl GameState {
                 ShopAnswer::Declined { reason, records }
             }
             sold @ ShopAnswer::Moved(_) => sold,
+            settled @ ShopAnswer::Settled(_) => settled,
             ShopAnswer::Quest { .. } => {
                 debug_assert!(false, "the window opens no quest");
                 ShopAnswer::Sent(records)
@@ -465,7 +519,7 @@ impl GameState {
         }
         let browsing = Browsing {
             keeper: target,
-            npc_vnum: npc.vnum,
+            kind: ShopKeeper::Npc { npc_vnum: npc.vnum },
             x: npc.x,
             y: npc.y,
             tripled: !self.shop_price_3x_disabled && mover.empire != npc.empire,
@@ -475,7 +529,66 @@ impl GameState {
         ShopAnswer::Sent(vec![window])
     }
 
-    /// `CShopManager::Buy` and `CShop::Buy` for an NPC's shop.
+    /// `CHARACTER::OnClick` on a player (`G/char.cpp:6219-6293`): the seller's
+    /// bundle window, or silence when the target holds no shop or is
+    /// quest-marked. A failed trade-window gate answers `[LS;841]`.
+    fn open_player_window(
+        &mut self,
+        vid: Vid,
+        target: u32,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> ShopAnswer {
+        let clicker_pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, Character::player_id);
+        match self.myshop_click_gates(vid, target, clicker_pid) {
+            super::myshop::MyShopClick::Silent => {
+                ShopAnswer::silent(ShopDeclined::NoSuchNpc { target })
+            }
+            super::myshop::MyShopClick::Refused => ShopAnswer::Declined {
+                reason: ShopDeclined::TradeWindow,
+                records: vec![notice(TRADE_WINDOW_NOTICE, mover, &self.locale)],
+            },
+            super::myshop::MyShopClick::Open { slots } => {
+                let open = self.browsing.get(&vid).copied();
+                if open.is_some_and(|open| open.keeper == target) {
+                    return ShopAnswer::silent(ShopDeclined::AlreadyBrowsing);
+                }
+                if let Some(open) = open {
+                    // `CShop::AddGuest` refuses a character that already browses
+                    // (`G/shop.cpp:821-822`); the owner rewrite is a Divergence (module docs).
+                    return ShopAnswer::silent(ShopDeclined::BrowsingAnother {
+                        keeper: open.keeper,
+                    });
+                }
+                let Some(spot) = self.spot_of(target) else {
+                    return ShopAnswer::silent(ShopDeclined::NoSuchNpc { target });
+                };
+                let distance = distance_approx(
+                    place.x.saturating_sub(spot.x),
+                    place.y.saturating_sub(spot.y),
+                );
+                if distance >= SHOP_MAX_DISTANCE {
+                    return ShopAnswer::silent(ShopDeclined::OutOfReach { distance });
+                }
+                let seller = Vid::new(target);
+                let window = self.myshop_window(target, &slots, seller);
+                let browsing = Browsing {
+                    keeper: target,
+                    kind: ShopKeeper::Player,
+                    x: spot.x,
+                    y: spot.y,
+                    tripled: false,
+                };
+                let _replaced = self.browsing.insert(vid, browsing);
+                ShopAnswer::Sent(vec![window])
+            }
+        }
+    }
+
+    /// `CShopManager::Buy` and `CShop::Buy`, for an NPC's shop or a player's.
     fn buy(
         &mut self,
         vid: Vid,
@@ -495,10 +608,16 @@ impl GameState {
                 records: vec![GcShop::new(SHOP_SUBHEADER_GC_INVALID_POS).encode()],
             });
         }
+        if browsing.kind == ShopKeeper::Player {
+            return Ok(self.buy_from_player(vid, browsing.keeper, slot, mover));
+        }
+        let ShopKeeper::Npc { npc_vnum } = browsing.kind else {
+            return Ok(ShopAnswer::silent(ShopDeclined::NotBrowsing));
+        };
         // An empty slot costs 0, which `CShop::Buy` answers as too little gold.
         let mut offer = self
             .shops
-            .for_npc(browsing.npc_vnum)
+            .for_npc(npc_vnum)
             .and_then(|shop| shop.slots[slot])
             .unwrap_or(ShopSlot {
                 vnum: 0,
@@ -543,7 +662,7 @@ impl GameState {
         }
     }
 
-    /// `CShopManager::Sell` to an NPC's shop.
+    /// `CShopManager::Sell` to an NPC's shop; a player's window takes no sales.
     fn sell(
         &mut self,
         vid: Vid,
@@ -552,8 +671,13 @@ impl GameState {
         place: GroundPlace,
         mover: Mover,
     ) -> Result<ShopAnswer, MoveItemRefused> {
-        if let Err(declined) = self.trading(vid, place, mover) {
-            return Ok(*declined);
+        let browsing = match self.trading(vid, place, mover) {
+            Ok(browsing) => browsing,
+            Err(declined) => return Ok(*declined),
+        };
+        // `GetShop()->IsPCShop()` (`G/shop_manager.cpp:477-478`): silent, as legacy is.
+        if browsing.kind == ShopKeeper::Player {
+            return Ok(ShopAnswer::silent(ShopDeclined::NotBrowsing));
         }
         if self.sash_item_at(vid, protocol::item_pos::ItemPos::new(1, cell))
             || self.changelook_item_at(vid, protocol::item_pos::ItemPos::new(1, cell))
@@ -613,10 +737,18 @@ impl GameState {
         let Some(browsing) = self.browsing.get(&vid).copied() else {
             return Err(Box::new(ShopAnswer::silent(ShopDeclined::NotBrowsing)));
         };
-        let distance = distance_approx(
-            place.x.saturating_sub(browsing.x),
-            place.y.saturating_sub(browsing.y),
-        );
+        // A player keeper walks; its window measures to where it stands now, as
+        // `DISTANCE_APPROX` reads the live coordinates (`G/shop_manager.cpp:405`).
+        let (x, y) = match browsing.kind {
+            ShopKeeper::Npc { .. } => (browsing.x, browsing.y),
+            ShopKeeper::Player => {
+                let Some(spot) = self.spot_of(browsing.keeper) else {
+                    return Err(Box::new(ShopAnswer::silent(ShopDeclined::NotBrowsing)));
+                };
+                (spot.x, spot.y)
+            }
+        };
+        let distance = distance_approx(place.x.saturating_sub(x), place.y.saturating_sub(y));
         if distance > SHOP_TRADE_DISTANCE {
             return Err(Box::new(ShopAnswer::Declined {
                 reason: ShopDeclined::TooFar { distance },

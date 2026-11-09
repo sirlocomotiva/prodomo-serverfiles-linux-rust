@@ -84,7 +84,7 @@ pub fn auto_give_item_new(
     }
     let dragon_soul = proto.is_some_and(|proto| proto.item_type == ITEM_DS);
     let pos = if dragon_soul {
-        empty_dragon_soul_cell(
+        dragon_soul_buy_cell(
             items,
             &item,
             proto.map_or(0, |proto| proto.sub_type),
@@ -112,7 +112,8 @@ pub fn auto_give_item_new(
 /// `GetEmptyDragonSoulInventory` (`G/char_item.cpp:1270-1288`): the first empty cell of the
 /// stone's box, `GetBasePosition` (`G/DragonSoul.cpp:130-147`) being the sub-type's column of
 /// six boxes and the grade (`(vnum / 1000) % 10`) its row. A grade past 6 has no box.
-fn empty_dragon_soul_cell(
+/// The give and the shop buy share it.
+pub fn dragon_soul_buy_cell(
     items: &CharacterItems,
     item: &Item,
     sub_type: i32,

@@ -59,6 +59,9 @@ pub const SHOP_HOST_ITEM_MAX_NUM: usize = 40;
 pub const GC_SHOP_START_WIRE_SIZE: usize =
     GC_SHOP_WIRE_SIZE + 4 + SHOP_HOST_ITEM_MAX_NUM * GC_SHOP_ITEM_WIRE_SIZE;
 
+/// The whole update record: the header, the slot, and the slot's item.
+pub const GC_SHOP_UPDATE_ITEM_WIRE_SIZE: usize = GC_SHOP_WIRE_SIZE + 1 + GC_SHOP_ITEM_WIRE_SIZE;
+
 /// `SHOP_SUBHEADER_GC_START` (0): the window opens.
 pub const SHOP_SUBHEADER_GC_START: u8 = 0;
 /// `SHOP_SUBHEADER_GC_END` (1): the window closes.
@@ -372,6 +375,68 @@ impl GcShopStart {
     }
 }
 
+/// `TPacketGCShop` with `SHOP_SUBHEADER_GC_UPDATE_ITEM`, then
+/// `TPacketGCShopUpdateItem` (`packet.h:1601-1606`): the slot and the slot's
+/// item, which `CShop::BroadcastUpdateItem` fans to every guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcShopUpdateItem {
+    /// `pos`: the window slot.
+    pub pos: u8,
+    /// The slot's item now: `vnum` 0 for a sold one.
+    pub item: GcShopItem,
+}
+
+impl GcShopUpdateItem {
+    /// The fixed header this record always carries.
+    #[must_use]
+    pub const fn header() -> u8 {
+        HEADER_GC_SHOP.value()
+    }
+
+    /// Build the update for a slot and its item.
+    #[must_use]
+    pub const fn new(pos: u8, item: GcShopItem) -> Self {
+        Self { pos, item }
+    }
+
+    /// Appends the 78 packed bytes to `out`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        push_header(
+            out,
+            GC_SHOP_UPDATE_ITEM_WIRE_SIZE,
+            SHOP_SUBHEADER_GC_UPDATE_ITEM,
+        );
+        out.push(self.pos);
+        self.item.encode_into(out);
+    }
+
+    /// Encode to a fresh buffer.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_SHOP_UPDATE_ITEM_WIRE_SIZE);
+        self.encode_into(&mut out);
+        out
+    }
+
+    /// Reads the whole update from the start of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GcShopError::Truncated`] for fewer than 78 bytes,
+    /// [`GcShopError::Header`] when the leading byte is not 38,
+    /// [`GcShopError::Size`] when `size` is not 78, and
+    /// [`GcShopError::Subheader`] when the subheader is not 2.
+    pub fn decode(bytes: &[u8]) -> Result<Self, GcShopError> {
+        let subheader = read_header(bytes, GC_SHOP_UPDATE_ITEM_WIRE_SIZE, "GcShopUpdateItem")?;
+        if subheader != SHOP_SUBHEADER_GC_UPDATE_ITEM {
+            return Err(GcShopError::Subheader { actual: subheader });
+        }
+        let body = &bytes[GC_SHOP_WIRE_SIZE..];
+        let item = GcShopItem::decode(&body[1..])?;
+        Ok(Self { pos: body[0], item })
+    }
+}
+
 fn push_header(out: &mut Vec<u8>, size: usize, subheader: u8) {
     let size = u16::try_from(size).unwrap_or(u16::MAX);
     out.push(HEADER_GC_SHOP.value());
@@ -422,14 +487,14 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GcShop, GcShopError, GcShopItem, GcShopStart, GC_SHOP_ITEM_WIRE_SIZE,
-        GC_SHOP_START_WIRE_SIZE, GC_SHOP_WIRE_SIZE, SHOPEX_GOLD, SHOP_HOST_ITEM_MAX_NUM,
-        SHOP_SUBHEADER_GC_END, SHOP_SUBHEADER_GC_INVALID_POS, SHOP_SUBHEADER_GC_INVENTORY_FULL,
-        SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP, SHOP_SUBHEADER_GC_NOT_ENOUGH_ITEM,
-        SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY, SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY_EX,
-        SHOP_SUBHEADER_GC_OK, SHOP_SUBHEADER_GC_SOLDOUT, SHOP_SUBHEADER_GC_SOLD_OUT,
-        SHOP_SUBHEADER_GC_START, SHOP_SUBHEADER_GC_START_EX, SHOP_SUBHEADER_GC_UPDATE_ITEM,
-        SHOP_SUBHEADER_GC_UPDATE_PRICE,
+        GcShop, GcShopError, GcShopItem, GcShopStart, GcShopUpdateItem, GC_SHOP_ITEM_WIRE_SIZE,
+        GC_SHOP_START_WIRE_SIZE, GC_SHOP_UPDATE_ITEM_WIRE_SIZE, GC_SHOP_WIRE_SIZE, SHOPEX_GOLD,
+        SHOP_HOST_ITEM_MAX_NUM, SHOP_SUBHEADER_GC_END, SHOP_SUBHEADER_GC_INVALID_POS,
+        SHOP_SUBHEADER_GC_INVENTORY_FULL, SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP,
+        SHOP_SUBHEADER_GC_NOT_ENOUGH_ITEM, SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY,
+        SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY_EX, SHOP_SUBHEADER_GC_OK, SHOP_SUBHEADER_GC_SOLDOUT,
+        SHOP_SUBHEADER_GC_SOLD_OUT, SHOP_SUBHEADER_GC_START, SHOP_SUBHEADER_GC_START_EX,
+        SHOP_SUBHEADER_GC_UPDATE_ITEM, SHOP_SUBHEADER_GC_UPDATE_PRICE,
     };
     use crate::gc_item_window::ItemAttribute;
 
@@ -621,6 +686,27 @@ mod tests {
         assert_eq!(
             GcShop::decode(&GcShop::new(SHOP_SUBHEADER_GC_END).encode()).map(|shop| shop.subheader),
             Ok(1)
+        );
+    }
+
+    #[test]
+    fn the_update_carries_its_slot_and_its_item() {
+        assert_eq!(GcShopUpdateItem::header(), 38);
+        assert_eq!(GC_SHOP_UPDATE_ITEM_WIRE_SIZE, 78);
+        let mut golden = vec![38, 78, 0, SHOP_SUBHEADER_GC_UPDATE_ITEM, 3];
+        golden.extend(marked_bytes());
+        assert_eq!(golden.len(), GC_SHOP_UPDATE_ITEM_WIRE_SIZE);
+        let record = GcShopUpdateItem::decode(&golden).expect("the golden update decodes");
+        assert_eq!(record.pos, 3);
+        assert_eq!(record.item, marked());
+        assert_eq!(record.encode(), golden);
+        assert_eq!(
+            GcShopUpdateItem::decode(&golden[..70]),
+            Err(GcShopError::Truncated {
+                context: "GcShopUpdateItem",
+                needed: GC_SHOP_UPDATE_ITEM_WIRE_SIZE,
+                actual: 70,
+            })
         );
     }
 
