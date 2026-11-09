@@ -585,3 +585,11 @@ owner answers.
  and `struct packet_mount` have no sender. `gc.character_add2` (120): no
  `server/` or `legacy/` line names it in any case, and no server enumerator is
  120. Waits on it: confirm the three rows `unused`.
+62. **Four more dead server bytes are `unused` (ledger 484).** `gc.dungeon`
+ (110): its only live arm sends from `d.set_dest`, which no quest calls
+ (`lua.d.set_dest` is `unused` since 401), and its other arm is enumerator-only.
+ `gc.hybridcrypt_keys` (152) and `gc.hybridcrypt_sdb` (153): both send only
+ when `package/cshybridcrypt*` files load at boot, and your snapshot has no
+ `package/` dir — supply the files and the rows revive. `gc.login_success3`
+ (6): the server's one login-success send writes byte 32, never 6. Waits on
+ it: confirm the four rows `unused`.

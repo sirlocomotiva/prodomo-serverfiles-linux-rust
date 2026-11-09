@@ -49894,3 +49894,37 @@ Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 --offline`, the inventory test, `cargo clippy --workspace --all-targets --locked --offline --
 -D warnings`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 484. Four more dead server bytes
+
+Two server-record rows stay `missing` (`gc.switchbot`, `gc.private_shop`: live systems with
+real sends). The other four are bytes the checked-in server never sends on the owner's data.
+
+`gc.dungeon` (110): `DESTINATION_POSITION` is built only in `FSendDestPosition`
+(`G/dungeon.cpp:88-113`), whose one caller is `dungeon_set_dest`
+(`G/questlua_dungeon.cpp:562`). That quest call's row `lua.d.set_dest` is `unused` since
+ledger 401 — no quest file calls it; only the `qc` name list `quest_functions` names it —
+so the send is unreachable. The other arm, `TIME_ATTACK_START`, is named only by its
+enumerator (`packet.h:2337`). The `dungeon_info` `GC_DUNGEON` hits are different bytes
+(142/143), not this one.
+
+`gc.hybridcrypt_keys` (152) and `gc.hybridcrypt_sdb` (153): both send only from the
+`CClientPackageCryptInfo` tables, which load at boot from `package/cshybridcrypt*` files
+(`G/main.cpp:438-441`, `ClientPackageCryptInfo.cpp:133-174`). The owner's snapshot has no
+`package/` directory — `legacy/` holds only `config/`, `gamedata/` and `sql/` — so
+`opendir` fails, the key stream stays empty and the SDB map stays empty, and neither the
+`KeyStreamLen > 0` gate nor `GetRelatedMapSDBStreams` ever opens. Unlike the other dead
+bytes these two revive if the owner supplies the files, and the rows say so.
+
+`gc.login_success3` (6): a whole-word search for `HEADER_GC_LOGIN_SUCCESS` over `server/`
+returns only the enumerator (`packet.h:106`). The one login-success send writes
+`HEADER_GC_LOGIN_SUCCESS_NEWSLOT` (byte 32) into the struct (`desc.cpp:880`), which is the
+control. The `gc_inventory` test already pins byte 6 unimplemented
+(`implementation_status_is_keyed_by_wire_byte_not_by_client_name`); the row catches up.
+
+All four move to `unused`, pending the owner's confirmation (question 62). No code changed.
+
+Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the inventory test, `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
