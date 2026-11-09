@@ -86,6 +86,7 @@ use protocol::gc_whisper::{GcWhisper, WHISPER_TYPE_SYSTEM};
 use world::item::{ItemId, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_MYSHOP};
 
 use super::GameState;
+use crate::chat_line::{chat_packet, Arg};
 use crate::item_move::{gold_delta, MoveItemRefused, MovedItems, Mover};
 use crate::loading_phase::INSTANCE_MAP_BASE;
 
@@ -177,6 +178,8 @@ pub struct PrivateShop {
     pub unlocked: u16,
     /// Where the stand stands: the map and the spot.
     pub at: (i32, i32, i32),
+    /// The Channel the stand is on: the owner's at the build, which never moves.
+    pub channel: u8,
 }
 
 /// A build's decoration: the title, the stand, and the pages.
@@ -304,6 +307,14 @@ pub struct PrivateShopUnlocked {
     pub slots: u16,
     /// Whether a stand stands and the shop row takes the count.
     pub standing: bool,
+}
+
+/// What a warp request did: the panel's close and the teleport line, in that
+/// order. The countdown itself fires on the timed slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateShopWarp {
+    /// The records the client is sent.
+    pub records: Vec<Vec<u8>>,
 }
 
 /// What a modify did: the owner's flip, for the store.
@@ -775,6 +786,7 @@ impl GameState {
                 state: PRIVATE_SHOP_STATE_OPEN,
                 unlocked: 0,
                 at: (map, spot.0, spot.1),
+                channel,
             },
         );
         self.private_panels.insert(vid);
@@ -2684,6 +2696,160 @@ impl GameState {
         }))
     }
 
+    /// `CInputMain::PrivateShopWarpRequest` and `CHARACTER::WarpToPrivateShop` for the
+    /// character under `vid` (`G/input_main.cpp:5014-5036`, `G/char.cpp:12435-12474`):
+    /// the gates in legacy order, then the countdown.
+    ///
+    /// The stunned and the dead refuse silently; a running timed event cancels with its
+    /// line; a non-owner hears `You do not have an open personal shop.`. The DB peer's
+    /// shop lookup and channel/port/map match (`D/ClientManagerPrivateShop.cpp:2008-2062`)
+    /// collapse into the ownership: one process holds the shop, so no peer can lose it
+    /// and no `NO_SHOP` line is reachable. Then, as the warp leg does: the panel closes,
+    /// the shop time zeroes (the workaround for the close the request just made), and
+    /// past `IsHack` the countdown starts at 10 seconds fighting, 3 else, with the
+    /// teleport line. The close and the line pack in that order; the fires tell.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_warp_request(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+    ) -> Result<Option<PrivateShopWarp>, MoveItemRefused> {
+        self.characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(None);
+        }
+        if self.timed_events.remove(&vid).is_some() {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Your logout has been canceled.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if !self.has_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You do not have an open personal shop.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let mut records = self.private_panel_close(vid).records;
+        self.clear_shop_time(vid);
+        if self.is_hack(vid, actor).is_some() {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You can not teleport to your private shop right now.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let fighting = self.bodies.get(&vid).is_some_and(|body| body.fighting);
+        let left = if fighting { 10 } else { 3 };
+        self.timed_events.insert(
+            vid,
+            super::timed_exit::TimedEvent::PrivateShopWarp {
+                left,
+                due: self.last_pulse.saturating_add(1),
+            },
+        );
+        let to = actor.recipient(&self.locale);
+        records.push(chat_packet(
+            to,
+            CHAT_TYPE_INFO,
+            b"You are teleporting to your private shop. Please wait.",
+            &[],
+        ));
+        Ok(Some(PrivateShopWarp { records }))
+    }
+
+    /// `private_shop_warp_event` (`G/char.cpp:12399-12433`): each due fire counts down
+    /// with `%u seconds until teleport.`; at 0 the event is gone and past `CanWarp` the
+    /// owner warps to the stand's spot, else the bare cancel line tells. A shop closed
+    /// mid-countdown leaves no spot, as the zeroed table leaves legacy's `WarpSet(0, 0)`
+    /// with no map: the owner stays, warned.
+    pub(super) fn fire_private_shop_warp(&mut self, vid: Vid, left: u8, pulse: u64) {
+        let Some(mover) = self.own_mover(vid) else {
+            let _gone = self.timed_events.remove(&vid);
+            return;
+        };
+        if left > 0 {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"%u seconds until teleport.",
+                &[Arg::Int(left.into())],
+            );
+            self.timed_events.insert(
+                vid,
+                super::timed_exit::TimedEvent::PrivateShopWarp {
+                    left: left - 1,
+                    due: pulse + u64::from(crate::save::PASSES_PER_SEC),
+                },
+            );
+            return;
+        }
+        let _done = self.timed_events.remove(&vid);
+        if !self.private_shop_can_warp(vid, mover) {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Teleport to the private shop has been canceled.",
+                &[],
+            );
+            return;
+        }
+        let (Some(shop), Some((here, map)), Some(clients)) = (
+            self.private_shops.get(&vid),
+            self.place_of(vid.raw()),
+            self.clients.as_ref(),
+        ) else {
+            tracing::warn!(vid = vid.raw(), "a shop warp found no shop to warp to");
+            return;
+        };
+        let (_, x, y) = shop.at;
+        let channel = shop.channel;
+        let order = crate::client_registry::ClientOrder::Warp {
+            x,
+            y,
+            private_map_index: 0,
+            channel: (channel != here).then_some(channel),
+            exit: None,
+            sorted_until: 0,
+        };
+        let raw = vid.raw();
+        let ordered = clients
+            .members_on_map(here, map)
+            .into_iter()
+            .find(|(_, entry)| entry.vid == raw)
+            .is_some_and(|(id, _)| clients.order(here, id, order));
+        if !ordered {
+            tracing::warn!(vid = raw, "a shop warp found no client to order");
+        }
+    }
+
+    /// `CanWarp` for the shop's owner (`G/char.cpp:8788-8814`): past `IsHack`, neither
+    /// a viewed shop nor an open panel warps. The search window has no state in this
+    /// build (the search is unported), so it never refuses.
+    fn private_shop_can_warp(&self, vid: Vid, mover: Mover) -> bool {
+        self.is_hack(vid, mover).is_none()
+            && !self.private_viewing.contains_key(&vid)
+            && !self.edits_private_shop(vid)
+    }
+
     /// The unlocked count the next key grows: the standing shop's count, else the
     /// character's point.
     fn private_unlocked_slots(&self, vid: Vid) -> u16 {
@@ -3606,6 +3772,164 @@ mod tests {
                 .any(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()),
             "the increased line: {told:02x?}"
         );
+        let _ = PID;
+    }
+
+    /// Build the seller's one-ware shop for the warp tests.
+    fn built_shop(state: &mut super::super::GameState) {
+        state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 1,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+    }
+
+    /// The text of one chat record.
+    fn chat_text(line: &[u8]) -> Vec<u8> {
+        let size = usize::from(u16::from_le_bytes([line[1], line[2]]));
+        assert_eq!(size, line.len());
+        line[10..].to_vec()
+    }
+
+    /// The warp request closes the panel, zeroes the shop time, and starts the
+    /// countdown with the teleport line: 3 calm, 10 fighting. The stunned, the
+    /// dead and the shopless refuse, and a running event cancels instead.
+    #[test]
+    fn a_warp_request_closes_counts_and_arms() {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        assert!(state
+            .private_warp_request(SELLER, mover())
+            .unwrap()
+            .is_none());
+        let told = drained(&mut inbox);
+        assert_eq!(told.len(), 1, "the shopless hears one line");
+        assert_eq!(
+            chat_text(&told[0]),
+            b"You do not have an open personal shop.".as_slice()
+        );
+        built_shop(&mut state);
+        assert!(state.edits_private_shop(SELLER));
+        state.set_shop_time(SELLER);
+        assert!(
+            state.is_hack(SELLER, mover()).is_some(),
+            "the stamped shop time refuses"
+        );
+        drained(&mut inbox);
+        let warped = state
+            .private_warp_request(SELLER, mover())
+            .unwrap()
+            .unwrap();
+        assert_eq!(warped.records.len(), 2, "the close and the line");
+        assert_eq!(
+            warped.records[0][3],
+            protocol::gc_private_shop::SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL
+        );
+        assert_eq!(
+            chat_text(&warped.records[1]),
+            b"You are teleporting to your private shop. Please wait.".as_slice()
+        );
+        assert!(!state.edits_private_shop(SELLER), "the panel closed");
+        assert!(
+            state.is_hack(SELLER, mover()).is_none(),
+            "the shop time zeroed"
+        );
+        let event = state.timed_events.get(&SELLER).expect("the countdown runs");
+        assert!(
+            matches!(
+                event,
+                super::super::timed_exit::TimedEvent::PrivateShopWarp { left: 3, .. }
+            ),
+            "calm waits 3, not {event:?}"
+        );
+        // A line while the countdown runs cancels it instead of warping.
+        let again = state.private_warp_request(SELLER, mover()).unwrap();
+        assert!(again.is_none());
+        assert!(!state.timed_events.contains_key(&SELLER));
+        let told = drained(&mut inbox);
+        assert!(
+            told.iter()
+                .any(|line| chat_text(line) == b"Your logout has been canceled."),
+            "the cancel line"
+        );
+        let _ = PID;
+    }
+
+    /// The fires count 3, 2, 1 one second apart, then warp the owner to the
+    /// stand's spot. A shop closed mid-countdown leaves the owner where it is.
+    #[test]
+    fn the_warp_fires_count_then_warp_to_the_stand() {
+        use std::sync::Arc;
+
+        use crate::client_registry::{ChannelClients, ClientEntry, ClientOrder};
+        let (world, mut inbox) = a_seller((6, 19, 1));
+        let clients = Arc::new(ChannelClients::new());
+        let mut world = world.with_clients(Arc::clone(&clients));
+        let mut lease = clients.join(ClientEntry {
+            channel: 1,
+            map: 1,
+            name: "P11".to_string(),
+            vid: 11,
+            empire: 1,
+            language: 0,
+        });
+        let mut orders = lease.take_orders().expect("the queue is home");
+        built_shop(&mut world);
+        let shop_at = world.private_shops[&SELLER].at;
+        // The owner walks away, so the warp has somewhere to go.
+        assert!(world.move_to(11, shop_at.1 + 700, shop_at.2));
+        drained(&mut inbox);
+        world
+            .private_warp_request(SELLER, mover())
+            .unwrap()
+            .unwrap();
+        let _start = drained(&mut inbox);
+        let mut pulse = world.last_pulse() + 1;
+        for left in (1..=3).rev() {
+            world.run_timed_exits(pulse);
+            let want = format!("{left} seconds until teleport.");
+            assert!(
+                drained(&mut inbox)
+                    .iter()
+                    .any(|line| chat_text(line) == want.as_bytes()),
+                "the fire tells {left}"
+            );
+            pulse += u64::from(crate::save::PASSES_PER_SEC);
+        }
+        world.run_timed_exits(pulse);
+        assert!(!world.timed_events.contains_key(&SELLER));
+        let order = orders.try_recv().expect("the warp order");
+        match order {
+            ClientOrder::Warp { x, y, channel, .. } => {
+                assert_eq!((x, y), (shop_at.1, shop_at.2), "the stand's spot");
+                assert_eq!(channel, None, "the stand's channel is home");
+            }
+            other => panic!("a warp, not {other:?}"),
+        }
+        // A shop closed mid-countdown: the 0 fire stays silent and stays put.
+        world
+            .private_warp_request(SELLER, mover())
+            .unwrap()
+            .unwrap();
+        world.private_shops.remove(&SELLER);
+        drained(&mut inbox);
+        let mut pulse = world.last_pulse() + 1;
+        for _ in 0..4 {
+            world.run_timed_exits(pulse);
+            pulse += u64::from(crate::save::PASSES_PER_SEC);
+        }
+        assert!(drained(&mut inbox)
+            .iter()
+            .all(|line| { chat_text(line) != b"Teleport to the private shop has been canceled." }));
+        assert!(orders.try_recv().is_err(), "no warp without a shop");
         let _ = PID;
     }
 

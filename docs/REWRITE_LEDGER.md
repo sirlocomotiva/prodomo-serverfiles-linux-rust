@@ -50592,3 +50592,50 @@ suite 5201 passed, 2 failed in 46 targets, both load flakes that pass alone
 3 sequential and 4 parallel runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 498. The private-shop warp
+
+The owner walks away from its stand and warps back
+(`sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_WARP_REQUEST`, `G/input_main.cpp:4039`, and
+`event.char.private_shop_warp_event`, `G/char.cpp:12399`, replacing the ledger 436 note that
+waited on the shop system).
+
+Legacy's request (`CInputMain::PrivateShopWarpRequest`, `:5014-5036`) refuses without a
+character or descriptor, the stunned and the dead silently, cancels a running timed event
+with its line, and refuses a non-owner with `You do not have an open personal shop.` — the
+panel is not asked. The DB peer (`CClientManager::PrivateShopWarpRequest`,
+`D/ClientManagerPrivateShop.cpp:2008-2062`) looks the shop up and matches the channel, the
+listen port and the map, answering the shop core's address and port or `NO_SHOP`. One process
+holds the shop, so the lookup and the match collapse into the ownership and no `NO_SHOP` line
+is reachable; that collapse is why the peer's three `sys_err` arms have no equivalent. The
+answer runs `WarpToPrivateShop` (`G/char.cpp:12435-12474`): the owner check and timed cancel
+again, the panel closed with its record, the shop time zeroed (the workaround for the close
+the request just made), past `IsHack(false, true, 10)` with `You can not teleport to your
+private shop right now.`, and the countdown at 10 seconds fighting, 3 else, with the
+teleport line. Each fire tells `%u seconds until teleport.`; at 0 the event is gone and past
+`CanWarp` the owner `WarpSet`s to the table's spot, else the bare cancel line tells. A shop
+closed mid-countdown leaves the zeroed table, whose (0, 0) finds no map: the owner stays.
+
+The Rewrite's `private_warp_request` (`prodomo/src/game_state/private_shop.rs`) keeps the
+game gates and the warp leg in legacy order, packs the `CLOSE_PANEL` and the teleport line in
+that order, and arms `TimedEvent::PrivateShopWarp` on the shared timed slot, so an exit line
+cancels it with `[LS;511]` like any other countdown. The build now records the stand's
+Channel beside its spot (`PrivateShop.channel`), which never moves. `fire_private_shop_warp`
+counts down and at 0 orders the shared `ClientOrder::Warp` to the stand's spot, naming its
+Channel only when it differs; the shop's `CanWarp` is `is_hack` plus the viewed-shop and
+open-panel arms (`:8805-8811`), while the search arm has no state yet and never refuses. The
+request takes no payload, so no codec was added: the framer's bare-prefix arm already covers
+it. Unit tests pin the gates, the zeroed time, the calm 3, the fires and the order, and the
+closed-shop stay.
+
+The scenario `a_private_shop_warp_request_counts_down_and_returns_to_the_stand` builds the
+one-sword shop, walks 700 east, and warps: the close, the teleport line, the 3-2-1, the
+sectree leave, and `GC_WARP` naming the stand's spot, which the row stores and the
+re-entered character stands on; the session answers `/move_channel 1` afterwards.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5206 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The
+scenario passed 5 sequential and 4 parallel runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

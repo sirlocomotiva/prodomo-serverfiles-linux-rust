@@ -289,6 +289,14 @@ impl GameState {
         self.portal_times.entry(vid).or_default().shop = Some(self.last_pulse);
     }
 
+    /// Clear `m_iMyShopTime` for the character under `vid`, as the shop warp does
+    /// after the panel it just closed (`G/char.cpp:12447-12450`).
+    pub(super) fn clear_shop_time(&mut self, vid: Vid) {
+        if let Some(times) = self.portal_times.get_mut(&vid) {
+            times.shop = None;
+        }
+    }
+
     /// `SetRefineTime` for the character under `vid`.
     pub(super) fn set_refine_time(&mut self, vid: Vid) {
         self.portal_times.entry(vid).or_default().refine = Some(self.last_pulse);

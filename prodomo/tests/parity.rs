@@ -46573,3 +46573,84 @@ fn a_private_shop_renames_and_unlocks_its_slots() {
          > 0)",
     );
 }
+
+/// `sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_WARP_REQUEST`,
+/// `event.char.private_shop_warp_event`: the owner walks away from its stand and warps back.
+/// The request closes the panel and tells the teleport line, the countdown tells 3, 2 and 1,
+/// and at 0 `GC_WARP` names the stand's spot and the row stores it, which the re-entered
+/// character stands on.
+#[test]
+fn a_private_shop_warp_request_counts_down_and_returns_to_the_stand() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, alpha, _entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let mut build = vec![CG_PRIVATE_SHOP, 0];
+    let mut title = [0u8; 33];
+    title[..4].copy_from_slice(b"Axes");
+    build.extend_from_slice(&title);
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.push(0);
+    build.push(1);
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&0u16.to_le_bytes());
+    build.extend_from_slice(&500i64.to_le_bytes());
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.extend_from_slice(&3u16.to_le_bytes());
+    alice.send_record(&build);
+    let _load = alice.read_game();
+    let _own_entity = alice.read_game();
+    let shop_at = ALPHA_ENTERS_AT;
+    // The owner walks east, so the warp has somewhere to return from.
+    let away = (shop_at.0 + 700, shop_at.1);
+    walk_to(&mut alice, shop_at, away);
+    alice.send_record(&[CG_PRIVATE_SHOP, 15]);
+    let closed = alice.read_game();
+    assert_eq!(
+        &closed[..4],
+        &[GC_PRIVATE_SHOP, 4, 0, 8],
+        "CLOSE_PANEL: {closed:02x?}"
+    );
+    assert_eq!(
+        read_chat_line(&mut alice),
+        an_info_line(b"You are teleporting to your private shop. Please wait.")
+    );
+    for left in [3, 2, 1] {
+        let line = format!("{left} seconds until teleport.");
+        assert_eq!(read_chat_line(&mut alice), an_info_line(line.as_bytes()));
+    }
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha.id.to_le_bytes());
+    assert_eq!(
+        alice.read_game(),
+        removed,
+        "the character leaves its sectree"
+    );
+    // `GC_WARP` names the stand's spot on Channel 1's address.
+    let warp = alice.read_game();
+    drop(alice);
+    let (mut alice, moved, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let port = server.channel(1).port();
+    assert_eq!(warp, a_warp_record(shop_at, port));
+    let home =
+        (i64::from(moved.x - shop_at.0).pow(2) + i64::from(moved.y - shop_at.1).pow(2)).isqrt();
+    assert!(home <= 300, "the stand's spot, {home} from the row");
+    let gone = (i64::from(moved.x - away.0).pow(2) + i64::from(moved.y - away.1).pow(2)).isqrt();
+    assert!(gone > 500, "away from the walk's end, {gone}");
+    alice.send_record(&client_enter_game());
+    while alice.read_game_raw() != [GC_CHANNEL, 1] {}
+    // The re-entered session answers: already home on Channel 1.
+    alice.send_record(&slash(b"/move_channel 1"));
+    let answer = an_info_line(b"You are already on channel 1");
+    while read_chat_line(&mut alice) != answer {}
+}

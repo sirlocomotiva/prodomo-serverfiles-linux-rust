@@ -5921,7 +5921,8 @@ where
         PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_MODIFY,
         PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
         PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, PRIVATE_SHOP_SUBHEADER_START,
-        PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE, PRIVATE_SHOP_SUBHEADER_WITHDRAW,
+        PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE, PRIVATE_SHOP_SUBHEADER_WARP_REQUEST,
+        PRIVATE_SHOP_SUBHEADER_WITHDRAW,
     };
     let subheader = frame.payload.first().copied().unwrap_or(u8::MAX);
     let step = match subheader {
@@ -6035,6 +6036,7 @@ where
                 }
             }
         }
+        PRIVATE_SHOP_SUBHEADER_WARP_REQUEST => ShopStep::PrivateWarpRequest,
         _ => {
             info!(%addr, subheader, "Client sent an unported private-shop subheader; ignoring");
             return true;

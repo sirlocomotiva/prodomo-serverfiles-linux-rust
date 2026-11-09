@@ -71,13 +71,22 @@ pub(super) enum TimedEvent {
         /// The Pulse the next fire runs on.
         due: u64,
     },
+    /// The shop warp's countdown (`private_shop_warp_info`, `G/char.cpp:12390-12433`).
+    PrivateShopWarp {
+        /// The seconds left (`m_bLeftSeconds`).
+        left: u8,
+        /// The Pulse the next fire runs on.
+        due: u64,
+    },
 }
 
 impl TimedEvent {
     /// The Pulse the next fire runs on.
     fn due(self) -> u64 {
         match self {
-            Self::Exit { due, .. } | Self::MoveChannel { due, .. } => due,
+            Self::Exit { due, .. }
+            | Self::MoveChannel { due, .. }
+            | Self::PrivateShopWarp { due, .. } => due,
         }
     }
 }
@@ -124,6 +133,10 @@ impl GameState {
                 Some(&TimedEvent::Exit { subcmd, left, .. }) => (subcmd, left),
                 Some(&TimedEvent::MoveChannel { channel, left, .. }) => {
                     self.fire_move_channel(vid, channel, left, pulse);
+                    continue;
+                }
+                Some(&TimedEvent::PrivateShopWarp { left, .. }) => {
+                    self.fire_private_shop_warp(vid, left, pulse);
                     continue;
                 }
                 None => continue,

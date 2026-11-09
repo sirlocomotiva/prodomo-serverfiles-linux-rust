@@ -217,6 +217,8 @@ pub enum ShopStep {
         /// The key's inventory cell.
         pos: u16,
     },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_WARP_REQUEST`: warp to the stand.
+    PrivateWarpRequest,
 }
 
 impl ShopStep {
@@ -559,6 +561,10 @@ impl GameState {
             },
             ShopStep::PrivateUnlock { pos } => match self.private_unlock(vid, mover, pos)? {
                 Some(unlocked) => Ok(ShopAnswer::PrivateUnlocked(Box::new(unlocked))),
+                None => Ok(ShopAnswer::Sent(Vec::new())),
+            },
+            ShopStep::PrivateWarpRequest => match self.private_warp_request(vid, mover)? {
+                Some(warped) => Ok(ShopAnswer::Sent(warped.records)),
                 None => Ok(ShopAnswer::Sent(Vec::new())),
             },
         }
