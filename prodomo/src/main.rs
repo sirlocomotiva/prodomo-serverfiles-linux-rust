@@ -5918,7 +5918,9 @@ where
         PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_CLOSE,
         PRIVATE_SHOP_SUBHEADER_END, PRIVATE_SHOP_SUBHEADER_ITEM_CHECKIN,
         PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
-        PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_MODIFY,
+        PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE,
+        PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_DATA_REQUEST,
+        PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_REQUEST, PRIVATE_SHOP_SUBHEADER_MODIFY,
         PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
         PRIVATE_SHOP_SUBHEADER_SEARCH, PRIVATE_SHOP_SUBHEADER_SEARCH_BUY,
         PRIVATE_SHOP_SUBHEADER_SEARCH_CLOSE, PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST,
@@ -6055,6 +6057,18 @@ where
                 },
                 Err(error) => {
                     warn!(%addr, %error, "Client sent a malformed shop search buy; closing");
+                    return false;
+                }
+            }
+        }
+        PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_DATA_REQUEST => ShopStep::PrivateMarketData,
+        PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_REQUEST => {
+            match protocol::cg_private_shop::CgPrivateShopMarketPriceRequest::decode_market_price(
+                frame,
+            ) {
+                Ok(price) => ShopStep::PrivateMarketPrice { vnum: price.vnum },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed market price; closing");
                     return false;
                 }
             }

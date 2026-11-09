@@ -75,8 +75,8 @@ use protocol::cg_private_shop::{
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_private_shop::{
     GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopItemData,
-    GcPrivateShopLoad, GcPrivateShopMove, GcPrivateShopPriceChange, GcPrivateShopRemove,
-    GcPrivateShopSale, GcPrivateShopSearchData, GcPrivateShopSearchResult,
+    GcPrivateShopLoad, GcPrivateShopMarketPrice, GcPrivateShopMove, GcPrivateShopPriceChange,
+    GcPrivateShopRemove, GcPrivateShopSale, GcPrivateShopSearchData, GcPrivateShopSearchResult,
     GcPrivateShopSearchUpdate, GcPrivateShopSetItem, GcPrivateShopStart, GcPrivateShopState,
     GcPrivateShopTitle, GcPrivateShopTitleChange, GcPrivateShopUnlocked,
     GC_PRIVATE_SHOP_SEARCH_DATA_WIRE_SIZE, PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN,
@@ -155,6 +155,21 @@ pub const PRIVATE_SHOP_SEARCH_REMOVED: u8 = 1;
 
 /// `STATE_MODIFY` (3): the shop takes no customers.
 pub const PRIVATE_SHOP_STATE_MODIFY: u8 = 3;
+
+/// The market price update's period: `MARKET_ITEM_PRICE_UPDATE_SEC_INTERVAL`
+/// (`C/length.h:143`), in Pulses.
+pub const PRIVATE_SHOP_MARKET_UPDATE_PULSES: u64 = 3600 * 25;
+
+/// The market's prices: the averaged price per vnum, and the sale prices since
+/// the last hourly update.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrivateMarket {
+    /// The averaged price per vnum (`m_map_marketItemPrice`).
+    pub averaged: std::collections::HashMap<u32, (i64, u32)>,
+    /// The sale prices since the last update, per vnum
+    /// (`m_map_marketItemPriceList`).
+    pub pending: std::collections::HashMap<u32, Vec<(i64, u32)>>,
+}
 
 /// The 3000 units past which a close refuses (`ClosePrivateShop`,
 /// `G/private_shop_manager.cpp:278-284`).
@@ -1365,6 +1380,139 @@ impl GameState {
     /// changed shop, its slot and its state. Legacy fans the update out to every core
     /// over P2P; one process holds every Channel (ADR-0002), so the walk already
     /// reaches them all.
+    /// `UpdateMarketItemPrice` (`D/ClientManagerPrivateShop.cpp:741-805`): every
+    /// vnum with pending sale prices folds them with the standing average into a
+    /// new average, and the pending lists clear. The game cores' fan-out has no
+    /// equivalent in one process (ADR-0002), where the world holds the prices the
+    /// requests read.
+    pub(super) fn run_market_tick(&mut self, pulse: u64) {
+        if pulse % PRIVATE_SHOP_MARKET_UPDATE_PULSES != 0 {
+            return;
+        }
+        let pending = std::mem::take(&mut self.private_market.pending);
+        for (vnum, prices) in &pending {
+            let mut gold: i128 = 0;
+            let mut cheque: i128 = 0;
+            let mut count: i128 = 0;
+            for (sale_gold, sale_cheque) in prices {
+                gold += i128::from(*sale_gold);
+                cheque += i128::from(*sale_cheque);
+                count += 1;
+            }
+            if let Some((at_gold, at_cheque)) = self.private_market.averaged.get(vnum) {
+                gold += i128::from(*at_gold);
+                cheque += i128::from(*at_cheque);
+                count += 1;
+            }
+            if count > 0 {
+                let averaged = (
+                    i64::try_from(gold / count).unwrap_or(i64::MAX),
+                    u32::try_from(cheque / count).unwrap_or(u32::MAX),
+                );
+                self.private_market.averaged.insert(*vnum, averaged);
+            }
+        }
+    }
+
+    /// `AddMarketItemPrice` (`D/ClientManagerPrivateShop.cpp:722-728`): the sale's
+    /// price joins the vnum's pending list, for the hourly update to average.
+    fn market_note_sale(&mut self, vnum: u32, gold: i64, cheque: u32) {
+        self.private_market
+            .pending
+            .entry(vnum)
+            .or_default()
+            .push((gold, cheque));
+    }
+
+    /// `SendMarketItemPrice` (`G/private_shop_manager.cpp:1183-1206`): the vnum's
+    /// row, with a zero price when no sale priced it yet, so the client never asks
+    /// again.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_market_price(
+        &mut self,
+        vid: Vid,
+        vnum: u32,
+    ) -> Result<PrivateShopPanel, MoveItemRefused> {
+        self.characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let (gold, cheque) = self
+            .private_market
+            .averaged
+            .get(&vnum)
+            .copied()
+            .unwrap_or((0, 0));
+        Ok(PrivateShopPanel {
+            records: vec![GcPrivateShopMarketPrice { vnum, gold, cheque }.encode_result()],
+        })
+    }
+
+    /// `SendMarketItemPriceData` (`G/private_shop_manager.cpp:1113-1181`): one row
+    /// per held vnum — the inventory and worn cells, the dragon soul box, and the
+    /// standing shop's wares — with a zero price when no sale priced it yet.
+    /// Nothing when nothing is held.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_market_price_data(
+        &mut self,
+        vid: Vid,
+    ) -> Result<PrivateShopPanel, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let mut vnums: Vec<u32> = Vec::new();
+        for (pos, _) in character.items().occupied() {
+            if pos.window_type != common::item_slots::EWindows::Inventory as u8
+                && pos.window_type != common::item_slots::EWindows::DragonSoulInventory as u8
+            {
+                continue;
+            }
+            let Some(item) = character.items().item_at(pos) else {
+                continue;
+            };
+            if !vnums.contains(&item.vnum) {
+                vnums.push(item.vnum);
+            }
+        }
+        if let Some(shop) = self.private_shops.get(&vid) {
+            for ware in shop.wares.iter().flatten() {
+                if !vnums.contains(&ware.item.vnum) {
+                    vnums.push(ware.item.vnum);
+                }
+            }
+        }
+        if vnums.is_empty() {
+            return Ok(PrivateShopPanel {
+                records: Vec::new(),
+            });
+        }
+        let rows: Vec<GcPrivateShopMarketPrice> = vnums
+            .iter()
+            .map(|vnum| {
+                let (gold, cheque) = self
+                    .private_market
+                    .averaged
+                    .get(vnum)
+                    .copied()
+                    .unwrap_or((0, 0));
+                GcPrivateShopMarketPrice {
+                    vnum: *vnum,
+                    gold,
+                    cheque,
+                }
+            })
+            .collect();
+        Ok(PrivateShopPanel {
+            records: vec![GcPrivateShopMarketPrice::encode_data(&rows)],
+        })
+    }
+
     fn private_search_update(&self, shop: u32, pos: i32, state: u8) {
         let record = GcPrivateShopSearchUpdate { shop, pos, state }.encode();
         let searching: Vec<Vid> = self.private_searching.keys().copied().collect();
@@ -1760,6 +1908,9 @@ impl GameState {
             .find_by_vid(owner)
             .map_or(0, world::character::Character::player_id);
         self.private_search_update(owner_pid, i32::from(pos), PRIVATE_SHOP_SEARCH_REMOVED);
+        // The market notes the sale's price, for the hourly update to average
+        // (`CPrivateShop::SetSale`, `D/PrivateShop.cpp:421-429`).
+        self.market_note_sale(item.vnum, ware.gold, ware.cheque);
         self.private_tell_sale(owner, vid, pos, ware, &item);
         // The buyer hears the bought line, as `ItemTransaction` chats it (`:640-643`).
         if let Some(proto) = self.protos.get(item.vnum) {
@@ -4737,6 +4888,73 @@ mod tests {
                 .any(|record| chat_text(record).starts_with(b"You have bought")),
             "the bought line: {told:02x?}"
         );
+    }
+
+    /// A sale notes its price for the market, the hourly tick averages the pending
+    /// sales with the standing price, and the data request prices the held vnums.
+    #[test]
+    fn the_market_averages_its_sales_and_prices_the_held_vnums() {
+        use protocol::gc_private_shop::{
+            SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_RESULT,
+            SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_RESULT,
+        };
+        let (mut state, mut inbox) = a_standing_shop();
+        let buyer = Vid::new(12);
+        let (mut buyer_inbox, _) = enter_seeing_with(
+            &mut state,
+            (1, 1),
+            12,
+            (5, 6),
+            10_000,
+            &[(inventory(0), held(7, 19, 1))],
+        );
+        drained(&mut inbox);
+        drained(&mut buyer_inbox);
+        state
+            .characters
+            .find_by_vid_mut(buyer)
+            .expect("the buyer is in the world")
+            .set_gold(10_000);
+        state
+            .private_searching
+            .insert(buyer, super::PRIVATE_SHOP_SEARCH_LOOKING);
+        // No sale yet: the vnum prices zero, so the client never asks again.
+        let zero = state.private_market_price(buyer, 19).unwrap();
+        assert_eq!(zero.records.len(), 1);
+        assert_eq!(
+            zero.records[0][3],
+            SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_RESULT
+        );
+        assert_eq!(
+            i64::from_le_bytes(zero.records[0][8..16].try_into().expect("eight")),
+            0
+        );
+        // The sale notes its price; the hourly tick averages it in.
+        let pick = Some(protocol::cg_private_shop::CgPrivateShopSearchPick {
+            shop: PID,
+            pos: 3,
+            gold: 500,
+            cheque: 0,
+        });
+        state
+            .private_search_buy(buyer, vec![pick], mover())
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.private_market.pending.get(&19), Some(&vec![(500, 0)]));
+        state.run_market_tick(super::PRIVATE_SHOP_MARKET_UPDATE_PULSES);
+        assert_eq!(state.private_market.averaged.get(&19), Some(&(500, 0)));
+        assert!(state.private_market.pending.is_empty());
+        // The data request prices the held sword with the averaged price.
+        let data = state.private_market_price_data(buyer).unwrap();
+        assert_eq!(data.records.len(), 1);
+        assert_eq!(
+            data.records[0][3],
+            SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_RESULT
+        );
+        let vnum = u32::from_le_bytes(data.records[0][4..8].try_into().expect("four"));
+        assert_eq!(vnum, 19);
+        let gold = i64::from_le_bytes(data.records[0][8..16].try_into().expect("eight"));
+        assert_eq!(gold, 500);
     }
 
     /// A sold ware tells the searchers its shop, slot and removal, and a flip tells

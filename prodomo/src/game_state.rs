@@ -774,6 +774,11 @@ pub struct GameState {
     private_searching: HashMap<common::vid::Vid, u8>,
     /// The Pulse each character last searched at (`m_tLastPrivateShopSearch`).
     private_search_at: HashMap<common::vid::Vid, u64>,
+    /// The market's averaged price per vnum (`m_map_marketItemPrice`), and the
+    /// sale prices since the last hourly update (`m_map_marketItemPriceList`).
+    /// A sale appends; the hourly update folds the lists into the averages and
+    /// clears them (`D/ClientManagerPrivateShop.cpp:741-805`).
+    private_market: private_shop::PrivateMarket,
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
@@ -5977,6 +5982,7 @@ impl PulseProcessor for GameState {
         self.run_blend_ticks(pulse);
         self.run_switchbot_ticks(pulse);
         self.run_real_time_expiry(pulse);
+        self.run_market_tick(pulse);
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_dungeon_ticks(pulse);

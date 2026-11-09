@@ -46898,3 +46898,95 @@ fn a_search_buy_settles_the_picked_ware_off_the_search_window() {
     assert_eq!(bought[0], GC_CHAT, "the bought line: {bought:02x?}");
     yankee.still("nothing follows");
 }
+
+/// Ledger 501: the market prices what its sales taught it. Before the sale the
+/// data request prices the held glass at zero; the search buy settles, and both
+/// requests still price zero, because the hourly tick has not folded the sale
+/// into the average yet.
+#[test]
+fn the_market_prices_its_sales_after_the_hourly_tick() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    let (mut alice, alice_listed, mut yankee, _yankee_listed) =
+        enter_seller_and_searcher(&server, &database);
+    let _entity = build_axes_shop(&mut alice, &mut yankee);
+    yankee.send_record(&client_item_use(0));
+    let opened = yankee.read_game();
+    assert_eq!(
+        &opened[..4],
+        &[GC_PRIVATE_SHOP, 4, 0, 21],
+        "OPEN_LOOK: {opened:02x?}"
+    );
+    // Before the sale the held glass prices zero.
+    yankee.send_record(&[CG_PRIVATE_SHOP, 20]);
+    let data = yankee.read_game();
+    assert_eq!(
+        &data[..4],
+        &[GC_PRIVATE_SHOP, 20, 0, 25],
+        "DATA: {data:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(data[4..8].try_into().expect("four")),
+        60004,
+        "the held glass"
+    );
+    assert_eq!(
+        i64::from_le_bytes(data[8..16].try_into().expect("eight")),
+        0,
+        "no sale priced it yet"
+    );
+    // The search buy settles; the one-vnum request still prices zero, because
+    // the hourly tick has not folded the sale in.
+    yankee.send_record(&client_shop_search(19));
+    let result = yankee.read_game();
+    assert_eq!(result[3], 23, "RESULT: {result:02x?}");
+    yankee.send_record(&client_shop_search_buy(alice_listed.id, 3, 500, 0));
+    let _gold = yankee.read_game();
+    let _set = yankee.read_game();
+    let _update = yankee.read_game();
+    let _bought = yankee.read_game();
+    let mut price = vec![CG_PRIVATE_SHOP, 21];
+    price.extend_from_slice(&19u32.to_le_bytes());
+    yankee.send_record(&price);
+    let row = yankee.read_game();
+    assert_eq!(
+        &row[..4],
+        &[GC_PRIVATE_SHOP, 20, 0, 26],
+        "RESULT: {row:02x?}"
+    );
+    assert_eq!(
+        i64::from_le_bytes(row[8..16].try_into().expect("eight")),
+        0,
+        "the tick has not run yet"
+    );
+    // After the buy Yankee holds the sword too: the data request prices both,
+    // the glass first in cell order, both still zero.
+    yankee.send_record(&[CG_PRIVATE_SHOP, 20]);
+    let data = yankee.read_game();
+    assert_eq!(
+        &data[..4],
+        &[GC_PRIVATE_SHOP, 36, 0, 25],
+        "DATA: {data:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(data[4..8].try_into().expect("four")),
+        60004,
+        "the glass first"
+    );
+    assert_eq!(
+        u32::from_le_bytes(data[20..24].try_into().expect("four")),
+        19,
+        "then the bought sword"
+    );
+    assert_eq!(
+        i64::from_le_bytes(data[24..32].try_into().expect("eight")),
+        0,
+        "the tick has not run yet"
+    );
+    yankee.still("nothing follows");
+}

@@ -36,7 +36,8 @@
 //! single field is read.
 //!
 //! The build, `START`, `BUY`, price-change, move, checkin, checkout, title-change,
-//! slot-unlock, search and search-buy subheaders are decoded here; the other ten are later slices. The
+//! slot-unlock, search, search-buy and market-price subheaders are decoded here; the
+//! other nine are later slices. The
 //! subheader byte is validated by the dispatch, not by this codec: a wrong subheader
 //! through any decoder is a header error, as a wrong header is.
 //!
@@ -61,9 +62,10 @@ use crate::cg_inventory::{CgHeader, HEADER_CG_PRIVATE_SHOP};
 use crate::cg_variable::{
     PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_ITEM_CHECKIN,
     PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
-    PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_SEARCH,
-    PRIVATE_SHOP_SUBHEADER_SEARCH_BUY, PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST,
-    PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
+    PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_REQUEST,
+    PRIVATE_SHOP_SUBHEADER_SEARCH, PRIVATE_SHOP_SUBHEADER_SEARCH_BUY,
+    PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, PRIVATE_SHOP_SUBHEADER_START,
+    PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
 };
 use crate::cg_wire::ClientFrame;
 use crate::item_pos::ItemPos;
@@ -647,6 +649,48 @@ impl CgPrivateShopStart {
     }
 }
 
+/// One decoded `MARKET_ITEM_PRICE_REQUEST`: the vnum to price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgPrivateShopMarketPriceRequest {
+    /// The vnum to price.
+    pub vnum: u32,
+}
+
+impl CgPrivateShopMarketPriceRequest {
+    /// Decode the subheader and the bare `DWORD` (`PrivateShopMarketItemPriceRequest`,
+    /// `G/input_main.cpp:5255-5271`).
+    ///
+    /// # Errors
+    ///
+    /// As [`CgPrivateShopBuildError`]: a wrong header or subheader, or a frame
+    /// short of the four vnum bytes.
+    ///
+    /// # Panics
+    ///
+    /// Never: the slice is length-checked first.
+    pub fn decode_market_price(frame: &ClientFrame) -> Result<Self, CgPrivateShopBuildError> {
+        let bytes = &frame.payload;
+        let subheader = bytes.first().copied().unwrap_or(0);
+        if frame.header != HEADER_CG_PRIVATE_SHOP.value()
+            || subheader != PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_REQUEST
+        {
+            return Err(CgPrivateShopBuildError::Header {
+                header: frame.header,
+                subheader,
+            });
+        }
+        if bytes.len() < 1 + 4 {
+            return Err(CgPrivateShopBuildError::Truncated {
+                needed: 1 + 4,
+                available: bytes.len(),
+            });
+        }
+        Ok(Self {
+            vnum: u32::from_le_bytes(bytes[1..5].try_into().expect("four bytes")),
+        })
+    }
+}
+
 /// One decoded `BUY`: the shop slot the client wants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CgPrivateShopBuy {
@@ -1064,6 +1108,44 @@ mod tests {
             short,
             Err(CgPrivateShopBuildError::Truncated {
                 needed: 86,
+                available: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn the_market_price_request_decodes_its_dword() {
+        let price = CgPrivateShopMarketPriceRequest::decode_market_price(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![
+                PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_REQUEST,
+                0x31,
+                0x75,
+                0,
+                0,
+            ],
+        })
+        .expect("decoded");
+        assert_eq!(price.vnum, 0x7531);
+        let crossed = CgPrivateShopMarketPriceRequest::decode_market_price(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_BUY, 0x13, 0x12],
+        });
+        assert_eq!(
+            crossed,
+            Err(CgPrivateShopBuildError::Header {
+                header: HEADER_CG_PRIVATE_SHOP.value(),
+                subheader: PRIVATE_SHOP_SUBHEADER_BUY,
+            })
+        );
+        let short = CgPrivateShopMarketPriceRequest::decode_market_price(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_MARKET_ITEM_PRICE_REQUEST, 0x31],
+        });
+        assert_eq!(
+            short,
+            Err(CgPrivateShopBuildError::Truncated {
+                needed: 5,
                 available: 2,
             })
         );

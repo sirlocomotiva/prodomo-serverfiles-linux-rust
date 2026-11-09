@@ -70,6 +70,10 @@
 //! `_APPLY_RANDOM`) are all off (`prodomodefines.h:186-188`), and the pet tail is
 //! commented out. `SEARCH_UPDATE`'s body (`packet.h:1316-1321`) is the shop id, the
 //! specific slot (`int`, -1 for the whole shop) and the state byte: 9 bytes.
+//!
+//! `MARKET_ITEM_PRICE_RESULT`'s body is one `TMarketItemPrice`
+//! (`tables.h:1974-1978`): the vnum and the 12-byte `TItemPrice`, 16 packed
+//! bytes. The data result carries one row per asked vnum.
 
 use crate::gc_inventory::HEADER_GC_PRIVATE_SHOP;
 
@@ -210,6 +214,11 @@ pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE: u8 = 22;
 pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_RESULT: u8 = 23;
 /// `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE` (24): a ware or shop changed.
 pub const SUBHEADER_GC_PRIVATE_SHOP_SEARCH_UPDATE: u8 = 24;
+/// `SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_RESULT` (25): the held vnums'
+/// prices.
+pub const SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_RESULT: u8 = 25;
+/// `SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_RESULT` (26): one vnum's price.
+pub const SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_RESULT: u8 = 26;
 
 /// `STATE_OPEN` (2): the shop takes customers.
 pub const PRIVATE_SHOP_STATE_OPEN: u8 = 2;
@@ -746,6 +755,65 @@ pub struct GcPrivateShopSearchUpdate {
     pub state: u8,
 }
 
+/// One market price row: the vnum and its averaged price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopMarketPrice {
+    /// The vnum the row prices.
+    pub vnum: u32,
+    /// The averaged price in yang, or 0 when no sale priced it yet.
+    pub gold: i64,
+    /// The averaged price in cheques, or 0 when no sale priced it yet.
+    pub cheque: u32,
+}
+
+/// Width of one market price row on the wire: `TMarketItemPrice`
+/// (`tables.h:1974-1978`), the vnum and the 12-byte price.
+pub const GC_PRIVATE_SHOP_MARKET_PRICE_WIRE_SIZE: usize = 16;
+
+impl GcPrivateShopMarketPrice {
+    /// Encode the 20-byte one-row result for `vnum`
+    /// (`SendMarketItemPrice`, `G/private_shop_manager.cpp:1183-1206`).
+    #[must_use]
+    pub fn encode_result(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out, SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_RESULT);
+        out
+    }
+
+    /// Encode the one header and one row per price, in order
+    /// (`SendMarketItemPriceData`, `G/private_shop_manager.cpp:1113-1181`).
+    #[must_use]
+    pub fn encode_data(prices: &[Self]) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_MARKET_PRICE_WIRE_SIZE * prices.len(),
+            SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_RESULT,
+        );
+        for price in prices {
+            price.encode_row(&mut out);
+        }
+        out
+    }
+
+    /// Encode one header and one body row.
+    fn encode_into(&self, out: &mut Vec<u8>, subheader: u8) {
+        push_header(
+            out,
+            GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_MARKET_PRICE_WIRE_SIZE,
+            subheader,
+        );
+        self.encode_row(out);
+    }
+
+    /// Encode the row's 16 body bytes in field order.
+    fn encode_row(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.vnum.to_le_bytes());
+        out.extend_from_slice(&self.gold.to_le_bytes());
+        out.extend_from_slice(&self.cheque.to_le_bytes());
+    }
+}
+
 impl GcPrivateShopSearchUpdate {
     /// Encode the 13-byte record.
     #[must_use]
@@ -1207,6 +1275,62 @@ mod tests {
                 3
             ]
         );
+    }
+
+    #[test]
+    fn the_market_prices_encode_in_field_order() {
+        let row = GcPrivateShopMarketPrice {
+            vnum: 0x7531,
+            gold: 0x0102_0304_0506_0708,
+            cheque: 0x0a0b_0c0d,
+        };
+        assert_eq!(
+            row.encode_result(),
+            vec![
+                HEADER_GC_PRIVATE_SHOP.value(),
+                20,
+                0,
+                SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_RESULT,
+                0x31,
+                0x75,
+                0,
+                0,
+                0x08,
+                0x07,
+                0x06,
+                0x05,
+                0x04,
+                0x03,
+                0x02,
+                0x01,
+                0x0d,
+                0x0c,
+                0x0b,
+                0x0a,
+            ]
+        );
+        let data = GcPrivateShopMarketPrice::encode_data(&[
+            row,
+            GcPrivateShopMarketPrice {
+                vnum: 19,
+                gold: 0,
+                cheque: 0,
+            },
+        ]);
+        assert_eq!(
+            data.len(),
+            GC_PRIVATE_SHOP_WIRE_SIZE + 2 * GC_PRIVATE_SHOP_MARKET_PRICE_WIRE_SIZE
+        );
+        assert_eq!(
+            data[3],
+            SUBHEADER_GC_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_RESULT
+        );
+        assert_eq!(
+            u16::from_le_bytes([data[1], data[2]]),
+            u16::try_from(data.len()).expect("fits")
+        );
+        assert_eq!(&data[4..8], &0x7531u32.to_le_bytes());
+        assert_eq!(&data[20..24], &19u32.to_le_bytes());
     }
 
     #[test]

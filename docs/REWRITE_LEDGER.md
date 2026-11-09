@@ -50751,3 +50751,46 @@ fixing three redundant closures and an unused parameter; `RUSTDOCFLAGS="-D warni
 cargo doc` clean. The scenario passed 4 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 501. The market prices
+
+The private-shop record set closes: the two market-price sub-headers are the last
+missing rows in the sub-header table, which is now fully `ported`
+(`SUBHEADER_CG_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_REQUEST` and
+`SUBHEADER_CG_PRIVATE_SHOP_MARKET_ITEM_PRICE_REQUEST`, `G/input_main.cpp:5247-5271`,
+with the game sends, `G/private_shop_manager.cpp:1113-1206`, the DB average,
+`D/ClientManagerPrivateShop.cpp:722-805`, and the hourly call,
+`D/ClientManager.cpp:3192-3193`).
+
+Every settling sale notes its price in the vnum's pending list, as `SetSale` does
+(`D/PrivateShop.cpp:421-429`). The hourly tick folds each pending list with the
+standing average into a new average and clears the lists, as `UpdateMarketItemPrice`
+does; the sums run in `i128` and clamp to the wire widths, so a pathological price
+cannot wrap the average. The game cores' fan-out has no equivalent in one process
+(ADR-0002), where the world holds the prices the requests read. The data request
+prices the held vnums — the inventory and worn cells, the dragon soul box, and the
+standing shop's wares — in cell order, and the one-vnum request prices the named
+vnum; both answer zero until a tick folds a sale in, so the client never asks again.
+A zero price and the cheque side 0 ride because cheque is off. The pending lists and
+the averages live only for the boot, as legacy's maps do. No sale's buyer or seller
+needs to be online at the tick: the world holds the lists.
+
+The codecs are `CgPrivateShopMarketPriceRequest` (the bare `DWORD` after the prefix)
+and `GcPrivateShopMarketPrice` (the 16-byte `TMarketItemPrice` row, `tables.h:1974-1978`),
+with the one-row result (26) and the data result (25) encoders. The framer's arms
+already covered both frames.
+
+The scenario `the_market_prices_its_sales_after_the_hourly_tick` prices the held
+glass at zero, settles the search buy, and prices again: the one-vnum request and
+the two-row data request both still price zero, pinning that the sale alone moves
+nothing and the tick moves the average. The unit test pins the sale's note, the
+tick's average, and the priced data row.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5218 passed, 1 failed in 46 targets, a load flake that passes alone
+(`a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit`); doc tests 1 passed;
+`cargo clippy --workspace --all-targets -- -D warnings` clean after documenting the
+two fallible requests and splitting two dispatch arms out of the overlong `shop`;
+`RUSTDOCFLAGS="-D warnings" cargo doc` clean. The scenario passed 4 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

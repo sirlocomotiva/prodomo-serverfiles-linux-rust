@@ -232,6 +232,14 @@ pub enum ShopStep {
         /// wire order, ending at the first `None`.
         picks: Vec<Option<protocol::cg_private_shop::CgPrivateShopSearchPick>>,
     },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_MARKET_ITEM_PRICE_DATA_REQUEST`: price the held
+    /// vnums.
+    PrivateMarketData,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_MARKET_ITEM_PRICE_REQUEST`: price one vnum.
+    PrivateMarketPrice {
+        /// The vnum to price.
+        vnum: u32,
+    },
 }
 
 impl ShopStep {
@@ -507,9 +515,7 @@ impl GameState {
             ShopStep::PrivatePanelOpen => Ok(ShopAnswer::Sent(
                 self.private_panel_open(vid, mover).records,
             )),
-            ShopStep::PrivatePanelClose => {
-                Ok(ShopAnswer::Sent(self.private_panel_close(vid).records))
-            }
+            ShopStep::PrivatePanelClose => Ok(self.private_panel_close_step(vid)),
             ShopStep::PrivateBuild {
                 title,
                 poly_vnum,
@@ -540,10 +546,7 @@ impl GameState {
                 Ok(withdrawn) => Ok(ShopAnswer::PrivateWithdrawn(Box::new(withdrawn))),
                 Err(refused) => Ok(ShopAnswer::Moved(refused)),
             },
-            ShopStep::PrivateModify => match self.private_modify(vid, mover)? {
-                Ok(flipped) => Ok(ShopAnswer::PrivateFlipped(flipped)),
-                Err(refused) => Ok(ShopAnswer::Moved(refused)),
-            },
+            ShopStep::PrivateModify => self.private_modify_step(vid, mover),
             ShopStep::PrivatePriceChange { pos, gold, cheque } => {
                 match self.private_price_change(vid, mover, pos, gold, cheque)? {
                     Some(changed) => Ok(ShopAnswer::PrivatePriceChanged(changed)),
@@ -591,6 +594,12 @@ impl GameState {
                 self.private_search(vid, &search, mover)?.records,
             )),
             ShopStep::PrivateSearchBuy { picks } => self.private_search_buy_step(vid, picks, mover),
+            ShopStep::PrivateMarketData => Ok(ShopAnswer::Sent(
+                self.private_market_price_data(vid)?.records,
+            )),
+            ShopStep::PrivateMarketPrice { vnum } => Ok(ShopAnswer::Sent(
+                self.private_market_price(vid, vnum)?.records,
+            )),
         }
     }
 
@@ -605,6 +614,24 @@ impl GameState {
     ) -> Result<ShopAnswer, MoveItemRefused> {
         match self.private_search_buy(vid, picks, mover)? {
             Ok(settled) => Ok(ShopAnswer::PrivateSearchBought(settled)),
+            Err(refused) => Ok(ShopAnswer::Moved(refused)),
+        }
+    }
+
+    /// Run one personal-shop panel close, answering its records and nothing stored.
+    fn private_panel_close_step(&mut self, vid: Vid) -> ShopAnswer {
+        ShopAnswer::Sent(self.private_panel_close(vid).records)
+    }
+
+    /// Run one personal-shop flip, answering `PrivateFlipped` for the store or the
+    /// refusal's chats as a move.
+    fn private_modify_step(
+        &mut self,
+        vid: Vid,
+        mover: Mover,
+    ) -> Result<ShopAnswer, MoveItemRefused> {
+        match self.private_modify(vid, mover)? {
+            Ok(flipped) => Ok(ShopAnswer::PrivateFlipped(flipped)),
             Err(refused) => Ok(ShopAnswer::Moved(refused)),
         }
     }
