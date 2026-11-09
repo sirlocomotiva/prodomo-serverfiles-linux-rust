@@ -46150,3 +46150,149 @@ fn a_private_shop_builds_and_its_stand_appears() {
     assert_eq!(entity[49], 0, "the title type");
     assert_eq!(&entity[50..54], b"Axes");
 }
+
+/// A private build under `Axes`, selling the sword for 500 in slot 3, answering the
+/// stand's entity as the witness hears it.
+fn build_axes_shop(alice: &mut Keyed, yankee: &mut Keyed) -> Vec<u8> {
+    let mut build = vec![CG_PRIVATE_SHOP, 0];
+    let mut title = [0u8; 33];
+    title[..4].copy_from_slice(b"Axes");
+    build.extend_from_slice(&title);
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.push(0);
+    build.push(1);
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&0u16.to_le_bytes());
+    build.extend_from_slice(&500i64.to_le_bytes());
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.extend_from_slice(&3u16.to_le_bytes());
+    alice.send_record(&build);
+    let _load = alice.read_game();
+    // Alice also sees her own stand appear (the relay includes the self).
+    let _own_entity = alice.read_game();
+    yankee.read_game()
+}
+
+/// Enter Alice holding the sword and Yankee holding 10000 gold, side by side.
+fn enter_seller_and_buyer(
+    server: &Server,
+    database: &ScratchDatabase,
+) -> (Keyed, Listed, Keyed, Listed) {
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE player SET gold = 10000 WHERE name = 'Yankee'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, alice_listed, _entered) = enter_equipped_world_with(server, b"alice", 1);
+    let (mut yankee, yankee_listed) = enter_world(server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    alice.quiet("caught up");
+    yankee.quiet("caught up");
+    (alice, alice_listed, yankee, yankee_listed)
+}
+
+/// A browse opens the window with the ware's row, and a buy moves the ware to the
+/// buyer, grows the stash, and tells the viewers, the owner and the buyer.
+#[test]
+fn a_private_shop_browse_opens_and_a_buy_settles() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    let (mut alice, _alice_listed, mut yankee, yankee_listed) =
+        enter_seller_and_buyer(&server, &database);
+    // The build under `Axes`, selling the sword for 500 in slot 3.
+    let entity = build_axes_shop(&mut alice, &mut yankee);
+    let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
+    // When: the browse of the stand.
+    let mut start = vec![CG_PRIVATE_SHOP, 4];
+    start.extend_from_slice(&owner_vid.to_le_bytes());
+    yankee.send_record(&start);
+    // Then: the window with the ware's row in slot 3.
+    let window = yankee.read_game();
+    assert_eq!(
+        &window[..4],
+        &[GC_PRIVATE_SHOP, 0xad, 0x23, 11],
+        "START: {window:02x?}"
+    );
+    assert_eq!(&window[4..8], b"Axes");
+    let at = 45 + 3 * 71;
+    assert_eq!(
+        u32::from_le_bytes(window[at..at + 4].try_into().expect("four bytes")),
+        19,
+        "the ware's vnum: {window:02x?}"
+    );
+    assert_eq!(
+        i64::from_le_bytes(window[at + 4..at + 12].try_into().expect("eight bytes")),
+        500,
+        "the ware's price"
+    );
+    // When: the buy of slot 3.
+    yankee.send_record(&[CG_PRIVATE_SHOP, 6, 3, 0]);
+    // Then: the gold and the ware's set, which the store's write orders first.
+    assert_eq!(
+        yankee.read_game(),
+        gold_change(yankee_listed.id, 0, 9500),
+        "the buyer pays the full price"
+    );
+    let set = yankee.read_game();
+    assert_eq!(set[0], ITEM_SET, "the ware's set: {set:02x?}");
+    // And: the ware moved tables, the buyer paid, and the stash grew.
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 60 AND vnum = 19 AND owner_id = (SELECT id          FROM player WHERE name = 'Yankee')) AND (SELECT gold FROM player WHERE name =          'Yankee') = 9500 AND (SELECT gold FROM private_shop WHERE owner_id = (SELECT id          FROM player WHERE name = 'Alpha')) = 500 AND NOT EXISTS (SELECT 1 FROM          private_shop_item WHERE id = 60)",
+    );
+    // And: the viewers heard the slot clear, and the buyer the bought line.
+    let remove = yankee.read_game();
+    assert_eq!(
+        &remove[..4],
+        &[GC_PRIVATE_SHOP, 6, 0, 13],
+        "REMOVE_ITEM: {remove:02x?}"
+    );
+    let bought = yankee.read_game();
+    assert_eq!(bought[0], GC_CHAT, "the bought line: {bought:02x?}");
+    // And: the owner heard the slot clear, the sale, the whisper, and the stash.
+    let owner_remove = alice.read_game();
+    assert_eq!(
+        &owner_remove[..4],
+        &[GC_PRIVATE_SHOP, 6, 0, 14],
+        "REMOVE_MY_ITEM: {owner_remove:02x?}"
+    );
+    let sale = alice.read_game();
+    assert_eq!(
+        &sale[..4],
+        &[GC_PRIVATE_SHOP, 104, 0, 5],
+        "SET_SALE: {sale:02x?}"
+    );
+    assert_eq!(&sale[4..10], b"Yankee", "the customer");
+    let whisper = alice.read_game();
+    assert_eq!(whisper[0], GC_WHISPER, "the sold whisper: {whisper:02x?}");
+    let balance = alice.read_game();
+    assert_eq!(
+        &balance[..4],
+        &[GC_PRIVATE_SHOP, 16, 0, 6],
+        "BALANCE_UPDATE: {balance:02x?}"
+    );
+    assert_eq!(
+        i64::from_le_bytes(balance[4..12].try_into().expect("eight bytes")),
+        500,
+        "the stash's growth"
+    );
+}

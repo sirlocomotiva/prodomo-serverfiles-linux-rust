@@ -1,4 +1,4 @@
-//! Transport-free codec for the legacy `HEADER_CG_PRIVATE_SHOP` (236) build record.
+//! Transport-free codec for the legacy `HEADER_CG_PRIVATE_SHOP` (236) build, browse and buy records.
 //!
 //! # Wire layout
 //!
@@ -35,10 +35,10 @@
 //! `PrivateShopBuild` (`server/server/game/input_main.cpp:4136-4149`) before a
 //! single field is read.
 //!
-//! Only the build subheader is decoded here; the other twenty are later slices.
-//! The subheader byte is validated by the dispatch, not by this codec: a
-//! non-build subheader through `decode_build` is a header error, as a wrong
-//! header is.
+//! The build, `START` and `BUY` subheaders are decoded here; the other eighteen are
+//! later slices. The subheader byte is validated by the dispatch, not by this codec:
+//! a non-build subheader through `decode_build` is a header error, as a wrong
+//! header is, and so are `START` and `BUY` through each other's decoders.
 //!
 //! # What this codec deliberately does not do
 //!
@@ -48,7 +48,9 @@
 //! the prices and the display slots are opaque; the bounds on them belong to the shop.
 
 use crate::cg_inventory::{CgHeader, HEADER_CG_PRIVATE_SHOP};
-use crate::cg_variable::PRIVATE_SHOP_SUBHEADER_BUILD;
+use crate::cg_variable::{
+    PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_START,
+};
 use crate::cg_wire::ClientFrame;
 use crate::item_pos::ItemPos;
 
@@ -134,6 +136,89 @@ impl std::fmt::Display for CgPrivateShopBuildError {
 }
 
 impl std::error::Error for CgPrivateShopBuildError {}
+
+/// One decoded `START`: the VID of the stand the client clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgPrivateShopStart {
+    /// The clicked stand's VID.
+    pub vid: u32,
+}
+
+impl CgPrivateShopStart {
+    /// Decode the subheader and the bare `DWORD` (`PrivateShopStart`,
+    /// `G/input_main.cpp:4271-4322`).
+    ///
+    /// # Errors
+    ///
+    /// As [`CgPrivateShopBuildError`]: a wrong header or subheader, or a frame
+    /// short of the four VID bytes.
+    ///
+    /// # Panics
+    ///
+    /// Never: the slice is length-checked first.
+    pub fn decode_start(frame: &ClientFrame) -> Result<Self, CgPrivateShopBuildError> {
+        let bytes = &frame.payload;
+        let subheader = bytes.first().copied().unwrap_or(0);
+        if frame.header != HEADER_CG_PRIVATE_SHOP.value()
+            || subheader != PRIVATE_SHOP_SUBHEADER_START
+        {
+            return Err(CgPrivateShopBuildError::Header {
+                header: frame.header,
+                subheader,
+            });
+        }
+        if bytes.len() < 1 + 4 {
+            return Err(CgPrivateShopBuildError::Truncated {
+                needed: 1 + 4,
+                available: bytes.len(),
+            });
+        }
+        Ok(Self {
+            vid: u32::from_le_bytes(bytes[1..5].try_into().expect("four bytes")),
+        })
+    }
+}
+
+/// One decoded `BUY`: the shop slot the client wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgPrivateShopBuy {
+    /// The shop slot.
+    pub pos: u16,
+}
+
+impl CgPrivateShopBuy {
+    /// Decode the subheader and the bare `WORD` (`PrivateShopBuy`,
+    /// `G/input_main.cpp:4332-4395`).
+    ///
+    /// # Errors
+    ///
+    /// As [`CgPrivateShopBuildError`]: a wrong header or subheader, or a frame
+    /// short of the two slot bytes.
+    ///
+    /// # Panics
+    ///
+    /// Never: the slice is length-checked first.
+    pub fn decode_buy(frame: &ClientFrame) -> Result<Self, CgPrivateShopBuildError> {
+        let bytes = &frame.payload;
+        let subheader = bytes.first().copied().unwrap_or(0);
+        if frame.header != HEADER_CG_PRIVATE_SHOP.value() || subheader != PRIVATE_SHOP_SUBHEADER_BUY
+        {
+            return Err(CgPrivateShopBuildError::Header {
+                header: frame.header,
+                subheader,
+            });
+        }
+        if bytes.len() < 1 + 2 {
+            return Err(CgPrivateShopBuildError::Truncated {
+                needed: 1 + 2,
+                available: bytes.len(),
+            });
+        }
+        Ok(Self {
+            pos: u16::from_le_bytes(bytes[1..3].try_into().expect("two bytes")),
+        })
+    }
+}
 
 impl CgPrivateShopBuild {
     /// The legacy header byte.
@@ -280,6 +365,45 @@ mod tests {
             Err(CgPrivateShopBuildError::Header {
                 header: HEADER_CG_PRIVATE_SHOP.value(),
                 subheader: PRIVATE_SHOP_SUBHEADER_BUILD + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_start_decodes_its_vid_and_a_buy_its_slot() {
+        let start = CgPrivateShopStart::decode_start(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_START, 0x31, 0x75, 0x00, 0x00],
+        })
+        .expect("decoded");
+        assert_eq!(start.vid, 0x7531);
+        let buy = CgPrivateShopBuy::decode_buy(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_BUY, 0x13, 0x12],
+        })
+        .expect("decoded");
+        assert_eq!(buy.pos, 0x1213);
+        // Each through the other's decoder is a header error.
+        let crossed = CgPrivateShopBuy::decode_buy(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_START, 0x31, 0x75, 0x00, 0x00],
+        });
+        assert_eq!(
+            crossed,
+            Err(CgPrivateShopBuildError::Header {
+                header: HEADER_CG_PRIVATE_SHOP.value(),
+                subheader: PRIVATE_SHOP_SUBHEADER_START,
+            })
+        );
+        let short = CgPrivateShopStart::decode_start(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_START, 0x31],
+        });
+        assert_eq!(
+            short,
+            Err(CgPrivateShopBuildError::Truncated {
+                needed: 5,
+                available: 2,
             })
         );
     }

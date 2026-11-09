@@ -50371,3 +50371,55 @@ scenario's store check before its first record read. No mutants were run: the su
 failures were the count pins and the race, both fixed by the change itself. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 494. The private browse and buy
+
+A click on a stand opens the shop's window with the wares' rows, an `END` closes
+it, and a buy moves the ware to the buyer's window, grows the stash, and tells
+the viewers, the owner and the buyer.
+
+Legacy (`CInputMain::PrivateShopStart`, `PrivateShopEnd` and `PrivateShopBuy`,
+`G/input_main.cpp:4271-4395`, `CPrivateShop::AddShopViewer`, `RemoveShopViewer`
+and `RemoveItem`, `G/private_shop.cpp:524-551,739-811`, `StopShopping` and
+`ItemTransaction`, `G/private_shop_manager.cpp:393-402,517-655`,
+`CHARACTER::SaleUpdate`, `G/char.cpp:12474-12536`, and the DB checks and
+completion, `D/ClientManagerPrivateShop.cpp:1520-1650,2102-2186`). The browse runs
+the logout cancel, the trade windows, the shop found by its stand's VID, the
+owner's own click opening its panel, the same window ignored, and the old shop
+left behind; the buy runs the logout cancel, the one-second wait, the stun, the
+viewed shop, the ware, the space, the gold twice, the placement, the price to
+the stash, the slot's clear to the viewers and the owner, the sale, the sold
+whisper, the stash and the bought line. The sold line's price groups by threes
+with dots (`format_number`, `G/private_shop_util.h:12-24`).
+
+The Rewrite (`prodomo/src/game_state/private_shop.rs`, `protocol::cg_private_shop`,
+`protocol::gc_private_shop`, `db::private_shop::buy_ware`). The four legacy hops
+settle as one: the ware leaves `private_shop_item` for `item` under the buyer and
+the price joins the stash in one transaction, then the buyer's gold and set go
+out. The wares now hold their instances, because the window's rows show the
+sockets and attrs. The game's price check compares the shop's own price with
+itself: legacy forwards the game copy's price and re-checks it against the DB
+copy, and with one world the two are one. The cheque arms are compiled out
+(`ENABLE_PRIVATE_SHOP_CHEQUE` is off), the search and market updates are later
+slices, and the prototype's locale name stands for the item name table this
+build does not load. The private dispatch is pinned, because the buy's future
+pushed the connection past the stack budget.
+
+Scenario `a_private_shop_browse_opens_and_a_buy_settles`: Yankee browses Alpha's
+stand and reads the window with the sword's row in slot 3, buys it, reads the
+gold and the set, the ware moved tables with the buyer at 9500 and the stash at
+500, the viewers heard the slot clear and the buyer the bought line, and the
+owner heard the clear, the sale, the whisper and the stash. Units cover the
+window's row and the slot's clear, the sale, the stash and the bought line. Two
+`private_shop` units, two codec tests and one scenario join the counts below.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+5187 passed, 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` 1
+passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after
+splitting the settlement, pinning the private dispatch, and sharing the scenario's
+build and entry; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. No mutants were run: the slice's two failures were the suite's own double store
+of the ware's row and the scenario's gold header, both fixed by the change itself.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

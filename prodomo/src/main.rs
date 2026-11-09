@@ -78,8 +78,8 @@ use prodomo::game_loop_messages::{
     RestartKind, Settled, Shown, WhisperOutcome,
 };
 use prodomo::game_state::{
-    world_item_id_range, GameState, PrivateShopBuilt, ShopAnswer, ShopStep, TradeAnswer,
-    TradeSettled, TradeStep,
+    world_item_id_range, GameState, PrivateShopBought, PrivateShopBuilt, ShopAnswer, ShopStep,
+    TradeAnswer, TradeSettled, TradeStep,
 };
 use prodomo::game_state::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -5856,7 +5856,7 @@ where
     } else if frame.header == HEADER_CG_MYSHOP.value() {
         myshop_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_PRIVATE_SHOP.value() {
-        private_shop_step(session, addr, context, held, frame).await
+        Box::pin(private_shop_step(session, addr, context, held, frame)).await
     } else {
         shop_step(session, addr, context, held, frame).await
     }
@@ -5891,11 +5891,11 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// `CG_PRIVATE_SHOP` (236) in the game phase: the panel and the build
-/// (`CInputMain::Analyze`'s `HEADER_CG_PRIVATE_SHOP` arm, `G/input_main.cpp:3954-4085`).
-/// Only the panel and the build subheaders are ported; the rest are later slices, and an
-/// unported subheader is ignored, as legacy's `default:` logs and ignores it (`:4078-4080`).
-/// A malformed build closes the connection.
+/// `CG_PRIVATE_SHOP` (236) in the game phase: the panel, the build, the browse and the
+/// buy (`CInputMain::Analyze`'s `HEADER_CG_PRIVATE_SHOP` arm, `G/input_main.cpp:3954-4085`).
+/// Only those subheaders are ported; the rest are later slices, and an unported subheader
+/// is ignored, as legacy's `default:` logs and ignores it (`:4078-4080`). A malformed
+/// build, browse or buy closes the connection.
 async fn private_shop_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -5907,8 +5907,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     use protocol::cg_variable::{
-        PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE,
-        PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
+        PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_END,
+        PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
+        PRIVATE_SHOP_SUBHEADER_START,
     };
     let subheader = frame.payload.first().copied().unwrap_or(u8::MAX);
     let step = match subheader {
@@ -5929,6 +5930,25 @@ where
                 }
             }
         }
+        PRIVATE_SHOP_SUBHEADER_START => {
+            match protocol::cg_private_shop::CgPrivateShopStart::decode_start(frame) {
+                Ok(start) => ShopStep::PrivateStart { target: start.vid },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed private-shop browse; closing");
+                    return false;
+                }
+            }
+        }
+        PRIVATE_SHOP_SUBHEADER_END => ShopStep::PrivateEnd,
+        PRIVATE_SHOP_SUBHEADER_BUY => {
+            match protocol::cg_private_shop::CgPrivateShopBuy::decode_buy(frame) {
+                Ok(buy) => ShopStep::PrivateBuy { pos: buy.pos },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed private-shop buy; closing");
+                    return false;
+                }
+            }
+        }
         _ => {
             info!(%addr, subheader, "Client sent an unported private-shop subheader; ignoring");
             return true;
@@ -5944,6 +5964,10 @@ where
         Ok(Ok(ShopAnswer::PrivateBuilt(built))) => {
             info!(%addr, "Private shop built");
             return finish_private_shop(session, addr, context, held, *built).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateBought(bought))) => {
+            info!(%addr, "Private shop buy settled");
+            return finish_private_buy(session, addr, context, held, actor, *bought).await;
         }
         Ok(Ok(ShopAnswer::Sent(records))) => {
             info!(%addr, subheader, "Private-shop step answered");
@@ -6003,6 +6027,60 @@ where
     true
 }
 
+/// Settle a personal-shop buy: the ware's move, the stash and the row, then the buyer's
+/// records, as `ItemTransaction` and `PrivateShopBuy` settle them
+/// (`G/private_shop_manager.cpp:517-655` and `D/ClientManagerPrivateShop.cpp:2102-2186`).
+async fn finish_private_buy<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    actor: Mover,
+    bought: PrivateShopBought,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let PrivateShopBought {
+        mut bought,
+        ware,
+        owner,
+        price,
+    } = bought;
+    let placed = bought.changes.iter().find_map(|change| match change {
+        db::items::RowChange::Created(row) if row.id == ware => {
+            Some((row.window_type, row.pos, row.count))
+        }
+        _ => None,
+    });
+    let Some((window_type, pos, count)) = placed else {
+        warn!(%addr, "A private-shop buy settled no ware; closing");
+        return false;
+    };
+    if let Err(error) = db::private_shop::buy_ware(
+        &context.store,
+        db::private_shop::BoughtWare {
+            owner_id: owner,
+            ware_id: ware,
+            buyer_id: bought.owner_id,
+            window_type,
+            pos: u16::try_from(pos).unwrap_or(u16::MAX),
+            count,
+            price,
+        },
+    )
+    .await
+    {
+        warn!(%addr, %error, "The private-shop buy could not be stored; closing");
+        return false;
+    }
+    // The ware's row is written: only the buyer's gold is left for the item step,
+    // which would otherwise insert the same row a second time.
+    bought.changes.clear();
+    let moved = Ok(Ok(bought));
+    finish_item_step(session, addr, context, held, actor, moved).await
+}
+
 /// `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase: `CInputMain::OnClick` and
 /// `CInputMain::Shop` (`G/input_main.cpp:1241-1316`), which no observer check guards
 /// (`:3756-3771`).
@@ -6055,8 +6133,8 @@ where
             info!(%addr, "Shop buy settled");
             return finish_trade(session, addr, context, held, *settled).await;
         }
-        Ok(Ok(ShopAnswer::PrivateBuilt(_))) => {
-            warn!(%addr, "An NPC step built a private shop; closing");
+        Ok(Ok(ShopAnswer::PrivateBuilt(_) | ShopAnswer::PrivateBought(_))) => {
+            warn!(%addr, "An NPC step ran a private shop; closing");
             return false;
         }
         Ok(Ok(ShopAnswer::Sent(records))) => {

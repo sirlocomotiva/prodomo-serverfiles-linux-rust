@@ -154,6 +154,98 @@ pub async fn build_shop(
     Ok(())
 }
 
+/// One settled personal-shop buy: the ware, the buyer, and the stash's growth.
+#[derive(Debug, Clone, Copy)]
+pub struct BoughtWare {
+    /// The shop owner's player id.
+    pub owner_id: u32,
+    /// The ware's item id, leaving `private_shop_item` for `item`.
+    pub ware_id: u32,
+    /// The buyer's player id.
+    pub buyer_id: u32,
+    /// The window the world placed the ware at.
+    pub window_type: u8,
+    /// The cell the world placed the ware at.
+    pub pos: u16,
+    /// The ware's count.
+    pub count: u16,
+    /// The price in yang, joining the shop's stash.
+    pub price: i64,
+}
+
+/// Settle a personal-shop buy: the ware leaves `private_shop_item` for `item` under
+/// the buyer at the window and cell the world placed it at, and the price joins the
+/// shop's stash, all in one transaction.
+///
+/// # Errors
+///
+/// Returns [`ItemError::NoSuchItem`] when the ware is gone, or [`ItemError::Database`].
+pub async fn buy_ware(store: &Store, bought: BoughtWare) -> Result<(), ItemError> {
+    let BoughtWare {
+        owner_id,
+        ware_id,
+        buyer_id,
+        window_type,
+        pos,
+        count,
+        price,
+    } = bought;
+    let mut tx = store.pool().begin().await?;
+    let rows = sqlx::query(
+        "SELECT id, owner_id, pos, count, vnum, gold, cheque, checkin, socket0, socket1,          socket2, socket3, socket4, socket5, attrtype0, attrvalue0, attrtype1, attrvalue1,          attrtype2, attrvalue2, attrtype3, attrvalue3, attrtype4, attrvalue4, attrtype5,          attrvalue5, attrtype6, attrvalue6 FROM private_shop_item WHERE id = $1 AND          owner_id = $2",
+    )
+    .bind(i64::from(ware_id))
+    .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+    .fetch_all(&mut *tx)
+    .await?;
+    let [row] = rows.as_slice() else {
+        return Err(ItemError::NoSuchItem(ware_id));
+    };
+    let ware = ware_from(row)?;
+    sqlx::query("DELETE FROM private_shop_item WHERE id = $1")
+        .bind(i64::from(ware_id))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO item (id, owner_id, window_type, pos, vnum, count, socket0, socket1,          socket2, socket3, socket4, socket5, attrtype0, attrvalue0, attrtype1,          attrvalue1, attrtype2, attrvalue2, attrtype3, attrvalue3, attrtype4,          attrvalue4, attrtype5, attrvalue5, attrtype6, attrvalue6) VALUES ($1, $2, $3,          $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,          $21, $22, $23, $24, $25, $26)",
+    )
+    .bind(i64::from(ware_id))
+    .bind(i32::try_from(buyer_id).map_err(|_| corrupt("buyer_id", buyer_id))?)
+    .bind(i16::from(window_type))
+    .bind(i32::from(pos))
+    .bind(i64::from(ware.item.vnum))
+    .bind(i16::try_from(count).map_err(|_| corrupt("count", count))?)
+    .bind(ware.item.sockets[0])
+    .bind(ware.item.sockets[1])
+    .bind(ware.item.sockets[2])
+    .bind(ware.item.sockets[3])
+    .bind(ware.item.sockets[4])
+    .bind(ware.item.sockets[5])
+    .bind(i16::from(ware.item.attributes[0].b_type))
+    .bind(ware.item.attributes[0].s_value)
+    .bind(i16::from(ware.item.attributes[1].b_type))
+    .bind(ware.item.attributes[1].s_value)
+    .bind(i16::from(ware.item.attributes[2].b_type))
+    .bind(ware.item.attributes[2].s_value)
+    .bind(i16::from(ware.item.attributes[3].b_type))
+    .bind(ware.item.attributes[3].s_value)
+    .bind(i16::from(ware.item.attributes[4].b_type))
+    .bind(ware.item.attributes[4].s_value)
+    .bind(i16::from(ware.item.attributes[5].b_type))
+    .bind(ware.item.attributes[5].s_value)
+    .bind(i16::from(ware.item.attributes[6].b_type))
+    .bind(ware.item.attributes[6].s_value)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE private_shop SET gold = gold + $1 WHERE owner_id = $2")
+        .bind(price)
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Load one character's shop row, or `None` when it has no shop.
 ///
 /// # Errors

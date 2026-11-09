@@ -154,6 +154,18 @@ pub enum ShopStep {
         /// The priced tables, in wire order.
         tables: Vec<protocol::cg_private_shop::CgPrivateShopItem>,
     },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_START`: browse the stand with this VID.
+    PrivateStart {
+        /// The clicked stand's VID.
+        target: u32,
+    },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_END`: stop the browse.
+    PrivateEnd,
+    /// `SUBHEADER_CG_PRIVATE_SHOP_BUY`: buy the window's slot `pos`.
+    PrivateBuy {
+        /// The shop slot.
+        pos: u16,
+    },
 }
 
 impl ShopStep {
@@ -253,6 +265,9 @@ pub enum ShopAnswer {
     /// A personal-shop build: the shop and wares, for the store to write in one
     /// transaction, and the records for after.
     PrivateBuilt(Box<super::private_shop::PrivateShopBuilt>),
+    /// A personal-shop buy: the buyer's move, for the store to write with the
+    /// ware's move and the stash in one transaction.
+    PrivateBought(Box<super::private_shop::PrivateShopBought>),
     /// A quest took the click: the records its scripts sent, the GRAND climbs
     /// its reads landed (each for the store's `store_skill`), and the `guild.*`
     /// calls the scripts made (each for the world's judge), in order.
@@ -295,6 +310,7 @@ impl PartialEq for ShopAnswer {
             (Self::Moved(_), Self::Moved(_))
             | (Self::Settled(_), Self::Settled(_))
             | (Self::PrivateBuilt(_), Self::PrivateBuilt(_))
+            | (Self::PrivateBought(_), Self::PrivateBought(_))
             | (Self::Quest { .. }, Self::Quest { .. }) => true,
             _ => false,
         }
@@ -414,6 +430,25 @@ impl GameState {
                 &tables,
                 mover,
             ),
+            ShopStep::PrivateStart { target } => Ok(ShopAnswer::Sent(
+                self.private_start(vid, target, mover).records,
+            )),
+            ShopStep::PrivateEnd => Ok(ShopAnswer::Sent(self.private_end(vid).records)),
+            ShopStep::PrivateBuy { pos } => self.private_buy_step(vid, pos, mover),
+        }
+    }
+
+    /// Run one personal-shop buy, answering `PrivateBought` for the store or the
+    /// refusal's chats as a move.
+    fn private_buy_step(
+        &mut self,
+        vid: Vid,
+        pos: u16,
+        mover: Mover,
+    ) -> Result<ShopAnswer, MoveItemRefused> {
+        match self.private_buy(vid, pos, mover)? {
+            Ok(bought) => Ok(ShopAnswer::PrivateBought(Box::new(bought))),
+            Err(refused) => Ok(ShopAnswer::Moved(refused)),
         }
     }
 
@@ -524,6 +559,7 @@ impl GameState {
             sold @ ShopAnswer::Moved(_) => sold,
             settled @ ShopAnswer::Settled(_) => settled,
             built @ ShopAnswer::PrivateBuilt(_) => built,
+            bought @ ShopAnswer::PrivateBought(_) => bought,
             ShopAnswer::Quest { .. } => {
                 debug_assert!(false, "the window opens no quest");
                 ShopAnswer::Sent(records)
