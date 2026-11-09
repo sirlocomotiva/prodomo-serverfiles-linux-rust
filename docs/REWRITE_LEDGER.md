@@ -50794,3 +50794,20 @@ two fallible requests and splitting two dispatch arms out of the overlong `shop`
 `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The scenario passed 4 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 502. The private-shop close
+
+No code: the close of the book the last nine ledgers wrote. Every
+`HEADER_CG_PRIVATE_SHOP` arm legacy dispatches (`G/input_main.cpp:3954-4077`) is live in
+the Rewrite — the 21 sub-headers from the panel through the market prices — and
+`SUBHEADER_CG_PRIVATE_SHOP_STATE_UPDATE` has an enumerator (`packet.h:1146`) but no
+dispatch arm anywhere in `server/`, so the client cannot send it. `cg.game.private_shop`
+and `sys.trade.private_shop` flip to `ported`, both named by the market scenario. The
+sub-header table was already fully `ported` in ledger 501; this closes the packet and
+system rows above it.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean;
+the inventory tests 6 passed; `cargo clippy --workspace --all-targets -- -D warnings`
+clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. No suite run: no code changed.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
