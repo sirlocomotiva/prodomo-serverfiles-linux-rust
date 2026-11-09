@@ -86,6 +86,41 @@ pub const CG_DRAGON_SOUL_REFINE_WIRE_SIZE: usize =
 /// The framed payload of `SPacketCGDragonSoulRefine`, everything after the header.
 pub const CG_DRAGON_SOUL_REFINE_PAYLOAD_SIZE: usize = CG_DRAGON_SOUL_REFINE_WIRE_SIZE - 1;
 
+/// `DS_SUB_HEADER_OPEN` (`packet.h:2757`): the server name; the client calls it the same.
+pub const DS_SUB_HEADER_OPEN: u8 = 0;
+/// `DS_SUB_HEADER_CLOSE` (`packet.h:2758`): the server name; the client calls it the same.
+pub const DS_SUB_HEADER_CLOSE: u8 = 1;
+/// `DS_SUB_HEADER_DO_REFINE_GRADE` (`packet.h:2759`): the server name; the client calls it
+/// `DS_SUB_HEADER_DO_UPGRADE`. The byte is the same.
+pub const DS_SUB_HEADER_DO_REFINE_GRADE: u8 = 2;
+/// `DS_SUB_HEADER_DO_REFINE_STEP` (`packet.h:2760`): the server name; the client calls it
+/// `DS_SUB_HEADER_DO_IMPROVEMENT`. The byte is the same.
+pub const DS_SUB_HEADER_DO_REFINE_STEP: u8 = 3;
+/// `DS_SUB_HEADER_DO_REFINE_STRENGTH` (`packet.h:2761`): the server name; the client calls
+/// it `DS_SUB_HEADER_DO_REFINE`. The byte is the same.
+pub const DS_SUB_HEADER_DO_REFINE_STRENGTH: u8 = 4;
+/// `DS_SUB_HEADER_REFINE_FAIL` (`packet.h:2762`): a server-to-client result only.
+pub const DS_SUB_HEADER_REFINE_FAIL: u8 = 5;
+/// `DS_SUB_HEADER_REFINE_FAIL_MAX_REFINE` (`packet.h:2763`): a server-to-client result only.
+pub const DS_SUB_HEADER_REFINE_FAIL_MAX_REFINE: u8 = 6;
+/// `DS_SUB_HEADER_REFINE_FAIL_INVALID_MATERIAL` (`packet.h:2764`): a server-to-client result
+/// only.
+pub const DS_SUB_HEADER_REFINE_FAIL_INVALID_MATERIAL: u8 = 7;
+/// `DS_SUB_HEADER_REFINE_FAIL_NOT_ENOUGH_MONEY` (`packet.h:2765`): a server-to-client result
+/// only.
+pub const DS_SUB_HEADER_REFINE_FAIL_NOT_ENOUGH_MONEY: u8 = 8;
+/// `DS_SUB_HEADER_REFINE_FAIL_NOT_ENOUGH_MATERIAL` (`packet.h:2766`): a server-to-client
+/// result only.
+pub const DS_SUB_HEADER_REFINE_FAIL_NOT_ENOUGH_MATERIAL: u8 = 9;
+/// `DS_SUB_HEADER_REFINE_FAIL_TOO_MUCH_MATERIAL` (`packet.h:2767`): a server-to-client result
+/// only.
+pub const DS_SUB_HEADER_REFINE_FAIL_TOO_MUCH_MATERIAL: u8 = 10;
+/// `DS_SUB_HEADER_REFINE_SUCCEED` (`packet.h:2768`): a server-to-client result only.
+pub const DS_SUB_HEADER_REFINE_SUCCEED: u8 = 11;
+/// `DS_SUB_HEADER_REFINE_ALL` (`packet.h:2769`): the server name; the client calls it the
+/// same.
+pub const DS_SUB_HEADER_REFINE_ALL: u8 = 12;
+
 /// Every way the dragon-soul decoder can refuse a byte slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CgDragonSoulError {

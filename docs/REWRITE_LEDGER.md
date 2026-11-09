@@ -50089,3 +50089,69 @@ Gates (2026-11-09): 5136 passed, 0 failed in 46 targets, `cargo fmt --all -- --c
 warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 --offline`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 489. The dragon soul refine window
+
+`cg.game.dragon_soul_refine` is `ported` and `sys.custom.dragon_soul` is `partial`:
+the window opens, closes and refines grade, step, strength and all
+(`CInputMain::Analyze`, `G/input_main.cpp:3885-3919`, no observer gate; `DSManager`,
+`G/DragonSoul.cpp:599-1155`).
+
+The request reaches the world as `GameCommand::DragonSoulRefine` (new in
+`game_loop_messages.rs`, through `apply_refine_step`), decoded by the existing
+`CgDragonSoulRefine` codec in a new `ds_refine_step` handler in `main.rs`, which is
+also named in `is_belongings_step` — without that the frame never reached the arm
+and the scenario's connection died, which is how the missing gate was found. The
+port itself is the new `prodomo/src/game_state/ds_refine.rs`:
+
+- the open and close flip `ds_windows` and the open answers the `(0, NPOS)` record
+  (`DragonSoul_RefineWindow_Open`, `G/char_dragonsoul.cpp:60-75`); a refine without
+  the window chats nothing for step/strength/all and fails, while the grade run
+  chats the system-error line first (`:688-704` vs `:824-840`);
+- the gather skips worn cells and dedupes in grid order (legacy's `set<LPITEM>`);
+  the grade and step runs check soul-kind, same-kind (type and grade, plus the step
+  for the level run), the row's count (too few and too many fail differently), the
+  fee and the gamble, in legacy's order, with legacy's chat lines;
+- `Gamble` is the first probability whose running sum reaches `fnumber(0, range)`,
+  with the pick split into `ds_pick` so the boundary is testable: a draw exactly
+  on a sum picks that index;
+- the spend takes whole stacks in grid order and decrements the last, with an exact
+  stack leaving (`left >= stack`: `SetCount(0)` refuses, so `>` kept a ghost stone
+  — the grade test caught it);
+- the fee sets `moved.gold` to the delta (not the packed `None`, which never
+  stored; the scenario caught it);
+- the result is made with its drawn attributes (`DragonSoulItemInitialize`:
+  basics scaled by the new weight, `number(add_min, add_max)` distinct additionals
+  by weight, the duration socket) because `make_drop_item` refuses `ITEM_DS`;
+  `auto_give_made` (new in `letters.rs`) places the already-made stone, and the
+  result record names its cell;
+- the strength run pairs one soul with one normal/blessed/holly material, refuses
+  past the weights (`weight(strength + 1)` missing or under epsilon) with
+  `FAIL_MAX_REFINE`, spends the fee before the draw, hardens one rung up on a win,
+  gives nothing on a loss at 0, and softens one rung down above 0 — the copies
+  carrying the old attributes through `RefreshItemAttributes` (basics rescaled,
+  kept additionals re-looked-up and rescaled);
+- the all run sweeps one grade box of one slot in 15-cell sweeps through the grade
+  arm, stopping when a sweep writes nothing.
+
+Six unit tests pin the grade success (Pcg32(0,0)'s 89.4 lands grade 1 with the
+`111000` stone at inventory 0), the count fail, the gamble boundary, the strength
+win (prob 100), loss (89.4 beats 80, softens to `110000`) and max-refine, and the
+scenario `a_grade_refine_spends_the_stones_and_lands_a_new_one` opens the window
+over the wire, runs the grade refine, and checks the result, the 30000 fee, the
+emptied soul inventory and the landed stone. Mutation sweep: `>=` vs `>` on the
+gamble and the spend, a dropped gold delta, swapped strength draws, and the
+epsilon dropped from the max-refine gate — all killed (the first and third only
+after the boundary test and the `moved.gold` assert were added).
+
+The six `sub.DragonSoulRefine.*` rows port with it. The four `sub.Aura.*` rows
+ledger 488 ported but never marked are marked here too.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace
+--locked --offline` clean; the suite 5144 passed, 0 failed in 46 targets; doc-tests
+1 passed, 0 failed; `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings` clean after fixing an unbalanced backtick in the refine-table doc the
+ledger touched and restoring the aura doc the command insert split; `RUSTDOCFLAGS="-D
+warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards
+no `prodomo\_%` database remained. No ADR changed.

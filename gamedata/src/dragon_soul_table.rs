@@ -6,9 +6,10 @@
 //! `CGroupTextParseTreeLoader` port: group names are lowercased, keys keep their first value, and
 //! the `#--#` header line maps column names to indexes.
 //!
-//! Only the groups `ChangeAttributes` reads are kept: the type names (`VnumMapper`), the basic
-//! and additional applies, the apply-number settings, and the weight tables. The refine and
-//! extract groups ride with their systems.
+//! Only the groups the refines and the redraw read are kept: the type names
+//! (`VnumMapper`), the basic and additional applies, the apply-number settings, the
+//! weight tables, and the three refine tables. The extract groups ride with their
+//! system.
 //!
 //! Three legacy behaviours are reproduced rather than improved:
 //!
@@ -74,8 +75,9 @@ pub struct DragonSoulApply {
     pub prob: f32,
 }
 
-/// What `ChangeAttributes` reads of the table: the applies by soul type, the apply numbers
-/// by grade, and the weights by grade, step and strength.
+/// What the refines and the redraw read of the table: the applies by soul type, the
+/// apply numbers by grade, the weights by grade, step and strength, and the three
+/// refine tables.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DragonSoulTable {
     /// The basic applies of each soul type, in row order.
@@ -86,6 +88,12 @@ pub struct DragonSoulTable {
     numbers: [(i32, i32, i32); GRADES],
     /// The weight of each grade, step and strength.
     weights: [[[f32; STRENGTHS]; STEPS]; GRADES],
+    /// The `(need_count, fee, probs)` of each grade refine, by grade.
+    refine_grade: Vec<(i32, i32, Vec<f32>)>,
+    /// The `(need_count, fee, probs)` of each step refine, by step.
+    refine_step: Vec<(i32, i32, Vec<f32>)>,
+    /// The `(fee, probs)` of each strength refine, by material.
+    refine_strength: Vec<(i32, Vec<f32>)>,
 }
 
 /// Why the dragon soul table could not be read.
@@ -149,6 +157,9 @@ impl DragonSoulTable {
         read_applies(&file, &names, &mut table)?;
         read_numbers(&file, &mut table)?;
         read_weights(&file, &mut table)?;
+        read_refine_grade(&file, &mut table)?;
+        read_refine_step(&file, &mut table)?;
+        read_refine_strength(&file, &mut table)?;
         Ok(table)
     }
 
@@ -171,6 +182,41 @@ impl DragonSoulTable {
     #[must_use]
     pub fn apply_numbers(&self, grade: u8) -> Option<(i32, i32, i32)> {
         self.numbers.get(usize::from(grade)).copied()
+    }
+
+    /// The strength-refine materials (`g_astMaterialName`, `G/dragon_soul_table.cpp:28-38`).
+    pub const MATERIAL_REFINES: [&'static str; 3] = [
+        "material_ds_refine_normal",
+        "material_ds_refine_blessed",
+        "material_ds_refine_holly",
+    ];
+
+    /// `GetRefineGradeValues` (`G/dragon_soul_table.cpp:680-720`): the `(need_count, fee,
+    /// probs)` of `grade`, or `None` past the grades.
+    #[must_use]
+    pub fn refine_grade(&self, grade: u8) -> Option<(i32, i32, &[f32])> {
+        self.refine_grade
+            .get(usize::from(grade))
+            .map(|(need, fee, probs)| (*need, *fee, probs.as_slice()))
+    }
+
+    /// `GetRefineStepValues` (`G/dragon_soul_table.cpp:722-762`): the `(need_count, fee,
+    /// probs)` of `step`, or `None` past the steps.
+    #[must_use]
+    pub fn refine_step(&self, step: u8) -> Option<(i32, i32, &[f32])> {
+        self.refine_step
+            .get(usize::from(step))
+            .map(|(need, fee, probs)| (*need, *fee, probs.as_slice()))
+    }
+
+    /// `GetRefineStrengthValues` (`G/dragon_soul_table.cpp:764-806`): the `(fee, probs)` of
+    /// `material` (the `EMaterialSubTypes` index: normal 5, blessed 6, holly 7), or `None`
+    /// outside them.
+    #[must_use]
+    pub fn refine_strength(&self, material: u8) -> Option<(i32, &[f32])> {
+        self.refine_strength
+            .get(usize::from(material.checked_sub(5)?))
+            .map(|(fee, probs)| (*fee, probs.as_slice()))
     }
 
     /// `GetWeight` (`G/dragon_soul_table.cpp:640-678`): the weight of `grade`, `step` and
@@ -403,6 +449,137 @@ fn read_weights(file: &TextFile, table: &mut DragonSoulTable) -> Result<(), Drag
     Ok(())
 }
 
+/// The rows `GetRefineGradeValues` reads (`G/dragon_soul_table.cpp:680-720`): the
+/// `need_count`, `fee` and six grade probabilities of every grade but mythic, from
+/// the `default` child. Mythic (grade 5) has no row: the lookup refuses it
+/// (`grade_idx >= DRAGON_SOUL_GRADE_MAX - 1`), and the check walks only
+/// `0..GRADE_MAX - 1`.
+///
+/// The grade lookups take no `default` fallback: `GetGroupRow` on the soul name refuses
+/// outright when the group is missing. The owner's file names only `default`, so a lookup
+/// names it directly.
+fn read_refine_grade(
+    file: &TextFile,
+    table: &mut DragonSoulTable,
+) -> Result<(), DragonSoulTableError> {
+    let grades = file
+        .group(b"refinegradetables")
+        .ok_or(DragonSoulTableError::MissingGroup("RefineGradeTables"))?;
+    let defaults = grades
+        .children
+        .iter()
+        .find(|child| child.name == b"default")
+        .ok_or(DragonSoulTableError::MissingGroup("RefineGradeTables"))?;
+    for name in &GRADE_NAMES[..GRADES - 1] {
+        let need = column(
+            defaults,
+            name.as_bytes(),
+            b"need_count",
+            "RefineGradeTables",
+        )
+        .and_then(|raw| {
+            parse_int(&raw).ok_or_else(|| bad("RefineGradeTables", name.as_bytes(), b"need_count"))
+        })?;
+        let fee =
+            column(defaults, name.as_bytes(), b"fee", "RefineGradeTables").and_then(|raw| {
+                parse_int(&raw).ok_or_else(|| bad("RefineGradeTables", name.as_bytes(), b"fee"))
+            })?;
+        let mut probs = Vec::with_capacity(GRADES);
+        for target in GRADE_NAMES {
+            let raw = column(
+                defaults,
+                name.as_bytes(),
+                target.as_bytes(),
+                "RefineGradeTables",
+            )?;
+            probs.push(
+                parse_float(&raw)
+                    .ok_or_else(|| bad("RefineGradeTables", name.as_bytes(), target.as_bytes()))?,
+            );
+        }
+        table.refine_grade.push((need, fee, probs));
+    }
+    Ok(())
+}
+
+/// `GetRefineStepValues`' rows (`G/dragon_soul_table.cpp:722-762`): the `need_count`,
+/// `fee` and five step probabilities of every step, from the `default` child.
+fn read_refine_step(
+    file: &TextFile,
+    table: &mut DragonSoulTable,
+) -> Result<(), DragonSoulTableError> {
+    let steps = file
+        .group(b"refinesteptables")
+        .ok_or(DragonSoulTableError::MissingGroup("RefineStepTables"))?;
+    let defaults = steps
+        .children
+        .iter()
+        .find(|child| child.name == b"default")
+        .ok_or(DragonSoulTableError::MissingGroup("RefineStepTables"))?;
+    for name in &STEP_NAMES[..STEPS - 1] {
+        let need = column(defaults, name.as_bytes(), b"need_count", "RefineStepTables").and_then(
+            |raw| {
+                parse_int(&raw)
+                    .ok_or_else(|| bad("RefineStepTables", name.as_bytes(), b"need_count"))
+            },
+        )?;
+        let fee =
+            column(defaults, name.as_bytes(), b"fee", "RefineStepTables").and_then(|raw| {
+                parse_int(&raw).ok_or_else(|| bad("RefineStepTables", name.as_bytes(), b"fee"))
+            })?;
+        let mut probs = Vec::with_capacity(STEPS);
+        for target in STEP_NAMES {
+            let raw = column(
+                defaults,
+                name.as_bytes(),
+                target.as_bytes(),
+                "RefineStepTables",
+            )?;
+            probs.push(
+                parse_float(&raw)
+                    .ok_or_else(|| bad("RefineStepTables", name.as_bytes(), target.as_bytes()))?,
+            );
+        }
+        table.refine_step.push((need, fee, probs));
+    }
+    Ok(())
+}
+
+/// `GetRefineStrengthValues`' rows (`G/dragon_soul_table.cpp:764-806`): the `fee` and six
+/// strength probabilities of every material, from the `default` child, keyed by the
+/// `EMaterialSubTypes` index (normal 5, blessed 6, holly 7).
+fn read_refine_strength(
+    file: &TextFile,
+    table: &mut DragonSoulTable,
+) -> Result<(), DragonSoulTableError> {
+    let strengths = file
+        .group(b"refinestrengthtables")
+        .ok_or(DragonSoulTableError::MissingGroup("RefineStrengthTables"))?;
+    let defaults = strengths
+        .children
+        .iter()
+        .find(|child| child.name == b"default")
+        .ok_or(DragonSoulTableError::MissingGroup("RefineStrengthTables"))?;
+    for material in 5..8u8 {
+        let name = DragonSoulTable::MATERIAL_REFINES[usize::from(material) - 5];
+        let fee =
+            column(defaults, name.as_bytes(), b"fee", "RefineStrengthTables").and_then(|raw| {
+                parse_int(&raw).ok_or_else(|| bad("RefineStrengthTables", name.as_bytes(), b"fee"))
+            })?;
+        let mut probs = Vec::with_capacity(STRENGTHS - 1);
+        for strength in 0..STRENGTHS - 1 {
+            let key = strength.to_string().into_bytes();
+            let raw = column(defaults, name.as_bytes(), &key, "RefineStrengthTables")?;
+            probs.push(
+                parse_float(&raw)
+                    .ok_or_else(|| bad("RefineStrengthTables", name.as_bytes(), &key))?,
+            );
+        }
+        table.refine_strength.push((fee, probs));
+    }
+    Ok(())
+}
+
 /// The value of `column` in `row`: the header names the index, `from_string` reads the text.
 ///
 /// The header names compare lowercased: legacy lowers them on the way in
@@ -572,6 +749,31 @@ mod tests {
         assert_eq!(table.weight(6, 0, 0), None);
         assert_eq!(table.weight(0, 5, 0), None);
         assert_eq!(table.weight(0, 0, 7), None);
+    }
+
+    #[test]
+    fn the_owner_refine_tables_read() {
+        let table = DragonSoulTable::parse(&owner_bytes()).expect("the owner's table parses");
+        let (need, fee, probs) = table.refine_grade(0).expect("normal's grade row");
+        assert_eq!((need, fee), (15, 30_000));
+        assert_eq!(probs.len(), GRADES);
+        assert_eq!(probs[0].to_bits(), 70.0f32.to_bits());
+        let (need, fee, probs) = table.refine_grade(4).expect("legendary's grade row");
+        assert_eq!((need, fee), (2, 200_000));
+        assert_eq!(probs[5].to_bits(), 200.0f32.to_bits());
+        let (need, fee, probs) = table.refine_step(0).expect("lowest's step row");
+        assert_eq!((need, fee), (4, 20_000));
+        assert_eq!(probs.len(), STEPS);
+        assert_eq!(probs[2].to_bits(), 5.0f32.to_bits());
+        let (fee, probs) = table.refine_strength(5).expect("normal's strength row");
+        assert_eq!(fee, 10_000);
+        assert_eq!(probs.len(), STRENGTHS - 1);
+        assert_eq!(probs[3].to_bits(), 50.0f32.to_bits());
+        let (fee, _) = table.refine_strength(7).expect("holly's strength row");
+        assert_eq!(fee, 30_000);
+        assert_eq!(table.refine_grade(6), None);
+        assert_eq!(table.refine_step(5), None);
+        assert_eq!(table.refine_strength(8), None);
     }
 
     #[test]

@@ -82,6 +82,7 @@ mod death;
 mod detail_log;
 mod dice;
 mod dragon_soul;
+mod ds_refine;
 mod duel;
 mod dungeon_info;
 mod dungeons;
@@ -901,6 +902,10 @@ pub struct GameState {
     /// its VID: `m_pAuraRefineWindowItemSlot` (`G/char.h:2469`), as the held item ids
     /// (absent when the window stands empty or no window stands).
     aura_held: HashMap<common::vid::Vid, [Option<world::item::ItemId>; 2]>,
+    /// The characters whose dragon soul refine window stands:
+    /// `m_pDragonSoulRefineWindowOpener` (`G/char.h:473`,
+    /// `G/char_dragonsoul.cpp:137-168`). Absent when no window stands.
+    ds_windows: std::collections::HashSet<common::vid::Vid>,
     /// The Gaya market shelf of each character that has one, keyed by its VID:
     /// the nine items and the six slot unlocks (`<Name>_gaya_system.txt`,
     /// `G/char_gaya.cpp:175-273`). Absent until the market opens.
@@ -2644,6 +2649,7 @@ impl GameState {
             | GameCommand::DropGold { .. }
             | GameCommand::DestroyItem { .. }
             | GameCommand::Refine { .. }
+            | GameCommand::DragonSoulRefine { .. }
             | GameCommand::RefineElement { .. }
             | GameCommand::Attr67 { .. }
             | GameCommand::Aura { .. }
@@ -4765,7 +4771,9 @@ impl GameState {
             } => {
                 answer_item_step(vid, reply, self.destroy_item(vid, at, mover));
             }
-            command @ (GameCommand::Refine { .. } | GameCommand::RefineElement { .. }) => {
+            command @ (GameCommand::Refine { .. }
+            | GameCommand::DragonSoulRefine { .. }
+            | GameCommand::RefineElement { .. }) => {
                 self.apply_refine_step(command);
             }
             GameCommand::Attr67 {
@@ -4855,6 +4863,19 @@ impl GameState {
                 reply,
             } => {
                 answer_item_step(vid, reply, self.refine(vid, pos, refine_type, mover));
+            }
+            GameCommand::DragonSoulRefine {
+                vid,
+                sub_header,
+                grid,
+                mover,
+                reply,
+            } => {
+                answer_item_step(
+                    vid,
+                    reply,
+                    self.dragon_soul_refine(vid, sub_header, grid, mover),
+                );
             }
             GameCommand::RefineElement {
                 vid,

@@ -260,6 +260,33 @@ impl GameState {
         ))
     }
 
+    /// `CHARACTER::AutoGiveItem(item)` (`G/char_item.cpp:9027-9075`) on the character
+    /// `vid`: the already-made `item` onto the stacks, into a free cell, or back as
+    /// unplaced for the caller to lay with [`Self::lay_auto_given`]. `None` when the
+    /// character is gone.
+    pub(super) fn auto_give_made(&mut self, vid: Vid, item: Item) -> Option<(AutoGiven, MoveDone)> {
+        let character = self.characters.find_by_vid_mut(vid).ok()?;
+        let usable = usable_inventory_cells(character.inven_point());
+        let rules = MoveRules {
+            count_limit: self.item_count_limit,
+            usable_cells: usable,
+            belt_grade: None,
+            questing: false,
+            secured: false,
+        };
+        let protos = std::sync::Arc::clone(&self.protos);
+        let (items, _, slots) = character.items_points_and_quickslots_mut();
+        let vnum = item.vnum;
+        Some(auto_give_item(
+            items,
+            slots,
+            &rules,
+            &protos,
+            (vnum, item.count),
+            |_| Some(item),
+        ))
+    }
+
     /// An item `AutoGiveItem` could not place lies at the caller's feet, owned for 300
     /// seconds when it cannot be dropped and 60 otherwise (`G/char_item.cpp:9214-9217`). It
     /// has no row until it is picked up, as a monster's drop has none.

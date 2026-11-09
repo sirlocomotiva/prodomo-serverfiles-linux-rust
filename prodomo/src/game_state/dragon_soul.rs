@@ -86,7 +86,7 @@ fn is_active(stone: &Item) -> bool {
 /// attribute's value. The casts are the C++ expression's own: `float` product, `ceil`,
 /// then the `short` conversion.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn weighed(value: i32, factor: f32) -> i16 {
+pub(super) fn weighed(value: i32, factor: f32) -> i16 {
     f32::ceil(value as f32 * factor - 0.01) as i16
 }
 
@@ -98,6 +98,11 @@ fn weighed(value: i32, factor: f32) -> i16 {
 fn fnumber(dice: &mut dyn Dice, from: f32, to: f32) -> f32 {
     (f64::from(dice.random31() & 0x7fff_ffff) / f64::from(0x7fff_ffffu32)) as f32 * (to - from)
         + from
+}
+
+/// `Gamble`'s draw (`G/DragonSoul.cpp:23`): `fnumber(0, range)` for the refine's caller.
+pub(super) fn fnumber_ds(dice: &mut dyn Dice, range: f32) -> f32 {
+    fnumber(dice, 0.0, range)
 }
 
 impl GameState {

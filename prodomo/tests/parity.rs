@@ -29602,6 +29602,16 @@ fn a_use_item_record(header: u8) -> usize {
     }
 }
 
+/// The width of a record the refine answers with: the use answer's set plus the gold
+/// change and the refine result.
+fn a_ds_refine_record(header: u8) -> usize {
+    match header {
+        GC_GOLD_CHANGE => GOLD_CHANGE_LEN,
+        GC_DRAGON_SOUL_REFINE => DS_REFINE_LEN,
+        other => a_use_item_record(other),
+    }
+}
+
 /// The owner's first dragon soul stone: vnum 110000, a wear-timed `ITEM_DS` of one cell.
 const DS_STONE: u32 = 110_000;
 
@@ -34711,6 +34721,31 @@ const REFINE_INFORMATION_LEN: usize = 1 + 1 + 1 + 4 + 4 + 1 + 4 + 4 + 5 * 8;
 /// A `CG_REFINE` for the inventory `cell` with `refine_type`.
 fn client_refine(cell: u8, refine_type: u8) -> Vec<u8> {
     vec![CG_REFINE, cell, refine_type]
+}
+
+/// `HEADER_CG_DRAGON_SOUL_REFINE` (205, `G/packet.h`).
+const CG_DRAGON_SOUL_REFINE: u8 = 205;
+
+/// The refine sub-headers (`G/packet.h:2755-2770`).
+const DS_REFINE_OPEN: u8 = 0;
+const DS_REFINE_GRADE: u8 = 2;
+const DS_REFINE_FAIL: u8 = 5;
+const DS_REFINE_SUCCEED: u8 = 11;
+
+/// A `CG_DRAGON_SOUL_REFINE`: the sub-header and the fifteen-cell grid, naming `cells`
+/// of the soul inventory (window 5), the rest the reserved position.
+fn client_ds_refine(sub: u8, cells: &[u16]) -> Vec<u8> {
+    let mut record = vec![CG_DRAGON_SOUL_REFINE, sub];
+    for slot in 0..15 {
+        if let Some(cell) = cells.get(slot) {
+            record.push(5);
+            record.extend_from_slice(&cell.to_le_bytes());
+        } else {
+            record.push(1);
+            record.extend_from_slice(&u16::MAX.to_le_bytes());
+        }
+    }
+    record
 }
 
 /// A `CG_REFINE_ELEMENT` with `arg`: the change's element, or 255 to close.
@@ -45484,4 +45519,89 @@ fn an_aura_absorbs_a_shield_and_banks_the_drain() {
     };
     let keyed = aura_open_absorb(&server);
     aura_absorb_and_bank(keyed, &database);
+}
+
+/// `cg.game.dragon_soul_refine`: Alpha enters with fifteen grade-0 stones in the soul
+/// inventory and a purse of a million; the open runs, the grade refine spends the fee
+/// and the stones, lands a new stone with its drawn attributes, and answers a result.
+#[test]
+fn a_grade_refine_spends_the_stones_and_lands_a_new_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET gold = 1000000 WHERE name = 'Alpha'",
+    );
+    for cell in 0..15u32 {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 5, {cell}, 1, 110000 FROM player WHERE name = 'Alpha'",
+                40 + cell
+            ),
+        );
+    }
+    let (server, _console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alice);
+    alice.still("nothing follows the login");
+    // The window opens without the alchemist: the request runs with no observer gate.
+    alice.send_record(&client_ds_refine(DS_REFINE_OPEN, &[]));
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_DRAGON_SOUL_REFINE, DS_REFINE_OPEN, 1, 0xff, 0xff],
+        "the open"
+    );
+    let cells: Vec<u16> = (0..15).collect();
+    alice.send_record(&client_ds_refine(DS_REFINE_GRADE, &cells));
+    let (landed, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_ds_refine_record);
+    assert_eq!(
+        quiet,
+        Quiet::Open,
+        "the connection stays open: {}",
+        server.console()
+    );
+    let results: Vec<u8> = landed
+        .iter()
+        .filter(|record| record.first() == Some(&GC_DRAGON_SOUL_REFINE))
+        .map(|record| record[1])
+        .collect();
+    assert_eq!(results.len(), 1, "one result: {landed:02x?}");
+    assert!(
+        results[0] == DS_REFINE_SUCCEED || results[0] == DS_REFINE_FAIL,
+        "success or fail: {results:?}"
+    );
+    let (window, cell) = {
+        let record = landed
+            .iter()
+            .find(|record| record.first() == Some(&GC_DRAGON_SOUL_REFINE))
+            .expect("the result");
+        (record[2], u16::from_le_bytes([record[3], record[4]]))
+    };
+    assert_eq!(
+        (window, cell),
+        (1, 0),
+        "the result names the inventory cell"
+    );
+    wait_for(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 970000",
+    );
+    check(
+        &database,
+        "(SELECT count(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND window_type = 5) = 0",
+    );
+    check(
+        &database,
+        "(SELECT vnum FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+         'Alpha') AND window_type = 1 AND pos = 0) IN (110000, 111000)",
+    );
+    alice.still("nothing follows the refine");
 }

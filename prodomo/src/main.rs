@@ -123,6 +123,7 @@ use protocol::cg_chat::CgChat;
 use protocol::cg_client_version::CgClientVersion;
 use protocol::cg_cube_renewal::CgCubeRenewal;
 use protocol::cg_daily_gift::CgDailyGift;
+use protocol::cg_dragon_soul::CgDragonSoulRefine;
 use protocol::cg_exchange::CgExchange;
 use protocol::cg_fish_event::CgFishEvent;
 use protocol::cg_fly_target::CgFlyTarget;
@@ -135,20 +136,20 @@ use protocol::cg_inventory::{
     HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_CL,
     HEADER_CG_CLIENT_VERSION, HEADER_CG_CLIENT_VERSION2, HEADER_CG_CUBE_RENEWAL,
-    HEADER_CG_DAILY_GIFT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE,
-    HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING, HEADER_CG_GAYA_SYSTEM,
-    HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK, HEADER_CG_INVENTORY_PROTECTED,
-    HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE,
-    HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM,
-    HEADER_CG_LOGIN, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST,
-    HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER,
-    HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
-    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
-    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM,
-    HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL,
-    HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REFINE_ELEMENT,
-    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
-    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
+    HEADER_CG_DAILY_GIFT, HEADER_CG_DRAGON_SOUL_REFINE, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
+    HEADER_CG_EXCHANGE, HEADER_CG_FISHING, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_FLY_TARGETING,
+    HEADER_CG_GAYA_SYSTEM, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_HACK,
+    HEADER_CG_INVENTORY_PROTECTED, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
+    HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
+    HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN, HEADER_CG_LOGIN2,
+    HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN,
+    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK,
+    HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER,
+    HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
+    HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING,
+    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
+    HEADER_CG_REFINE_ELEMENT, HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST,
+    HEADER_CG_SASH, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
     HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
     HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
     HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS, HEADER_CG_WORLD_BOSS,
@@ -1325,6 +1326,7 @@ where
 /// fishing record, a fish-event record, a ground step or a quickslot request.
 fn is_belongings_step(header: u8) -> bool {
     header == HEADER_CG_ITEM_USE.value()
+        || header == HEADER_CG_DRAGON_SOUL_REFINE.value()
         || header == HEADER_CG_ITEM_USE_TO_ITEM.value()
         || header == HEADER_CG_ITEM_DESTROY.value()
         || header == HEADER_CG_ITEM_GIVE.value()
@@ -1397,6 +1399,8 @@ where
         give_an_item(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_REFINE.value() {
         refine_an_item(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_DRAGON_SOUL_REFINE.value() {
+        ds_refine_step(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_REFINE_ELEMENT.value() {
         refine_an_element(session, addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ATTR67_ADD.value() {
@@ -2065,6 +2069,38 @@ where
     let answer = context
         .game
         .refine(vid, (record.pos, record.ty), actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// `CG_DRAGON_SOUL_REFINE` (205) in the game phase: `CInputMain::Analyze`
+/// (`G/input_main.cpp:3885-3919`), with no observer gate (`:3885` sits outside
+/// `IsObserverMode`). The sub-record carries the alchemy grid.
+async fn ds_refine_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgDragonSoulRefine::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed DRAGON_SOUL_REFINE; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "DRAGON_SOUL_REFINE without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .dragon_soul_refine(vid, record.by_sub_header, record.grid, actor)
         .await;
     finish_item_step(session, addr, context, held, actor, answer).await
 }

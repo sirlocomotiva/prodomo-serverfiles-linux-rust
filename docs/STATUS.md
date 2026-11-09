@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 488 (the aura absorb window).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 489
+Last reviewed: 2026-11-09, after ledger section 489 (the dragon soul refine window).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 490
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -555,7 +555,7 @@ code: the stack table (486's reader, unmarked), the skill power (whose file no l
 opens — the rows live in `common.sql`), the dragon soul table, the battle pass, the exp
 tables and the locale table, each live since its system's ledger. Since 488 `cg.game.aura`,
 `gc.aura` and `sys.custom.aura` are `ported`: the absorb window checks in, previews, checks out,
-accepts and cancels, with the locks and the death close; growth and evolve wait for their systems. The
+accepts and cancels, with the locks and the death close; growth and evolve wait for their systems. Since 489 `cg.game.dragon_soul_refine` is `ported` and `sys.custom.dragon_soul` is `partial`: the window opens, closes and refines grade, step, strength and all, with the gamble, the fee, the spend, the made stone's drawn attributes and the strength refresh; the extract and the heart charge stay. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

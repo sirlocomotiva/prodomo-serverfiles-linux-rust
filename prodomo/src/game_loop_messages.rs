@@ -548,6 +548,20 @@ pub enum GameCommand {
         /// Where the game thread reports what the regist did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_DRAGON_SOUL_REFINE` for the character online under `vid`, answered
+    /// as a move is.
+    DragonSoulRefine {
+        /// The VID of the character whose client sent the request.
+        vid: common::vid::Vid,
+        /// The sub-header: open, close, grade, step, strength, or all.
+        sub_header: u8,
+        /// The alchemy grid the client named.
+        grid: [protocol::item_pos::ItemPos; protocol::cg_dragon_soul::CG_DRAGON_SOUL_GRID_SIZE],
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the refine did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Runs one `CG_AURA` for the character online under `vid`, answered as a move is.
     Aura {
         /// The VID of the character whose client sent the request.
@@ -4231,6 +4245,31 @@ impl GameLoopController {
             vid,
             sub_header,
             regist,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run a dragon soul refine request, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn dragon_soul_refine(
+        &self,
+        vid: common::vid::Vid,
+        sub_header: u8,
+        grid: [protocol::item_pos::ItemPos; protocol::cg_dragon_soul::CG_DRAGON_SOUL_GRID_SIZE],
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DragonSoulRefine {
+            vid,
+            sub_header,
+            grid,
             mover,
             reply,
         })
