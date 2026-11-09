@@ -51079,3 +51079,33 @@ suite 5242 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 --all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 512. The board's login line
+
+`sys.dungeon.info` is `ported`: the admit fans `SendDungeonCooldown(0)` after the recovery
+event starts (`G/input_login.cpp:657-661`), as the one seam the system still lacked. The six
+compiled-in rows, the rank chats, the command arms and the damage arm were already live
+(ledger 463), the three quest functions are `unused` (ledger 401, owner question 37), and the
+`dungeon_info.txt` file manager is compiled out — `__DUNGEON_SYSTEM__` is never defined, so
+only `dungeon_info.cpp` and `dungeon_info.h` name it.
+
+`GameState::send_dungeon_cooldown` is now `pub(super)`, and `shown_on_admit` calls it with
+boss 0 in the shown arm, after `start_pc_recovery`, when a mover stands. The flags it reads
+were loaded at the admit's head and the level from the placed body, so the line is the full
+one for the entrant's window. Its chat rides the outbox behind the burst, ahead of the rank
+lines — which every login reader now hears: `read_rank_login` reads the board's `-` first
+(the common case: the entrant sits outside every window), `read_rank_login_cooldown` takes a
+full line, and `read_dungeon_cooldown_cells` answers the raw record when its `cooldown-now`
+cells tick on the wall clock.
+
+The ledger-463 scenario is the system's: it now asserts the admit's own line first (level 70
+sits in the 1092 and 1093 windows, so two cells with the stored completed and damage counts),
+then the rank and command arms as before. Three more scenarios pin the admit's cells
+(level 90 hears the 2598 single, level 60 the 1092/1093 pair, level 40 the 1093 single),
+and the Shared Channel enters read the line between the team list and the duel-start.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace`
+clean; the suite 5242 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy
+--workspace --all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc`
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was
+measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

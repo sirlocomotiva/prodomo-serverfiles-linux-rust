@@ -154,7 +154,7 @@ impl GameState {
     /// row the caller's level sits in; else the one row. Each cell is
     /// `<boss>|<cooldown-now>|<completed>|<fastest>|<damage>#`, and the line is
     /// `dungeon_info_cooldown <boss == 0> <cells or ->`.
-    fn send_dungeon_cooldown(&mut self, vid: Vid, mover: Mover, boss: u32) {
+    pub(super) fn send_dungeon_cooldown(&mut self, vid: Vid, mover: Mover, boss: u32) {
         let Some(body) = self.bodies.get(&vid) else {
             return;
         };

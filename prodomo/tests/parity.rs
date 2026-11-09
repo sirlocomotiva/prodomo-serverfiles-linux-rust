@@ -2260,6 +2260,15 @@ fn enter_game_view(keyed: &mut Keyed) -> Entered {
     keyed.still("nothing follows");
     entered
 }
+/// [`enter_game_view`] for an entrant inside a window: answers the burst and the
+/// board's raw login record, for the shape asserts.
+fn enter_game_view_cells(keyed: &mut Keyed) -> (Entered, Vec<u8>) {
+    let entered = enter_game_shown(keyed);
+    let cooldown = read_dungeon_cooldown_cells(keyed);
+    read_login_event_past_cooldown(keyed);
+    keyed.still("nothing follows");
+    (entered, cooldown)
+}
 
 /// [`enter_game_view`] for a master whose login walk carries `members` member LOGINs
 /// before its own view pair.
@@ -2279,6 +2288,15 @@ fn enter_game_view_guilded(
 /// ([`read_login_event_blocking`]).
 fn read_login_event(keyed: &mut Keyed) {
     let _marks = read_login_event_blocking(keyed, 0, None);
+}
+/// [`read_login_event`] past the board's line: the rank lines and the rest, for an
+/// entrant whose login line an earlier read consumed (the Shared Channel's
+/// duel-start lands between the two).
+fn read_login_event_past_cooldown(keyed: &mut Keyed) {
+    read_rank_login_raw(keyed, 0, &[], &[]);
+    read_login_lines_hiding(keyed, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
 }
 /// The quest numbers of the letters a login sends: the quests of `quest_list`, then every
 /// other script by path, numbered as `qc` met their names.
@@ -2425,13 +2443,80 @@ fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) 
     read_login_update(keyed);
     marks
 }
+/// The dungeon board's login line (`ch->SendDungeonCooldown(0)`,
+/// `G/input_login.cpp:657-661`): the full line for the entrant's level window, fanned
+/// during the admit, so it lands right before the rank lines. `want` is the line's
+/// text; most entrants sit outside every window and hear `-`.
+fn read_dungeon_cooldown(keyed: &mut Keyed, want: &[u8]) {
+    let first = keyed.read_game();
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, want),
+        "the board's login line"
+    );
+}
+/// The board's login line when its `cooldown-now` cells tick on the wall clock:
+/// reads it and answers the raw record, for the shape asserts.
+fn read_dungeon_cooldown_cells(keyed: &mut Keyed) -> Vec<u8> {
+    let first = keyed.read_game();
+    assert_eq!(first[0], GC_CHAT, "the board's login line: {first:02x?}");
+    assert_eq!(
+        first[3], CHAT_TYPE_COMMAND,
+        "the board's login line: {first:02x?}"
+    );
+    first
+}
+/// The admit's line for a level-70 entrant with the stored 1092 counts (5 completed,
+/// 322 damage): the cells tick on the wall clock, so only the shape pins them — the
+/// 1092 lead, the stored counts, 1093's empty tail — then the login event's rest.
+fn read_dungeon_admit_counts(keyed: &mut Keyed) {
+    let admitted = read_dungeon_cooldown_cells(keyed);
+    let text = &admitted[GC_CHAT_WIRE_SIZE..];
+    assert!(
+        text.starts_with(b"dungeon_info_cooldown 1 1092|"),
+        "the 1092 cell leads the admit: {text:?}"
+    );
+    assert!(
+        text.windows(b"|5|0|322#1093|".len())
+            .any(|window| window == b"|5|0|322#1093|"),
+        "the counts ride, and 1093 follows: {text:?}"
+    );
+    assert!(
+        text.ends_with(b"|0|0|0#"),
+        "1093's counts are empty: {text:?}"
+    );
+    read_rank_login_raw(keyed, 0, &[], &[]);
+    read_login_lines_hiding(keyed, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
 /// The global rank's lines that close every `Entergame` (`G/input_login.cpp:946-949`): the
 /// clears, `ref_season` of `season`, `entries`, and the refresh. No prizes are listed on a
 /// scratch database, so none follow. The empire byte is the first line's own. `entries`
 /// are the board lines: the counters in order, the character's own place behind its
 /// counter's line. `prizes` are the `GlobalRankDataItem` lines behind the refresh: the
-/// clear and one line per listed prize, or none when no prize is listed.
+/// clear and one line per listed prize, or none when no prize is listed. The entrant
+/// hears the board's `-`: it sits outside every window; an entrant inside one reads
+/// [`read_rank_login_cooldown`] instead.
 fn read_rank_login(keyed: &mut Keyed, season: i32, entries: &[&[u8]], prizes: &[&[u8]]) {
+    read_rank_login_cooldown(keyed, season, entries, prizes, b"dungeon_info_cooldown 1 -");
+}
+/// [`read_rank_login`] for an entrant inside a window: `cooldown` is the board's full
+/// line, read where the `-` would land.
+fn read_rank_login_cooldown(
+    keyed: &mut Keyed,
+    season: i32,
+    entries: &[&[u8]],
+    prizes: &[&[u8]],
+    cooldown: &[u8],
+) {
+    read_dungeon_cooldown(keyed, cooldown);
+    read_rank_login_raw(keyed, season, entries, prizes);
+}
+/// [`read_rank_login`] past the board's line: the rank lines alone, for an entrant
+/// whose login line the shape asserts read.
+fn read_rank_login_raw(keyed: &mut Keyed, season: i32, entries: &[&[u8]], prizes: &[&[u8]]) {
     let first = keyed.read_game();
     let empire = first[8];
     assert_eq!(
@@ -7027,7 +7112,15 @@ fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
     keyed.still("nothing follows");
 
     // `EncodeInsertPacket` writes `GetLimitPoint` of both speeds (`G/char.cpp:1089-1091`).
-    let add = enter_game_burst(&mut keyed);
+    // Level 90 sits in the 2598 window, so the admit fans the boss's single cell.
+    let (entered, cooldown) = enter_game_view_cells(&mut keyed);
+    let text = &cooldown[GC_CHAT_WIRE_SIZE..];
+    assert!(
+        text.starts_with(b"dungeon_info_cooldown 1 2598|"),
+        "the 2598 cell leads the admit: {text:?}"
+    );
+    assert!(text.ends_with(b"|0|0|0#"), "no count is stored: {text:?}");
+    let add = entered.add;
     assert_eq!(add.len(), CHARACTER_ADD_LEN);
     // The header, `dwVID`, `angle`, `x`, `y`, `z`, `bType` and `wRaceNum` come first.
     assert_eq!(add[24], 50, "bMovingSpeed");
@@ -12611,6 +12704,21 @@ fn enter_equipped_world_with(
     item_count: usize,
 ) -> (Keyed, Listed, Entered) {
     enter_equipped_world_on(server, login, 0, item_count)
+}
+/// [`enter_equipped_world_on`] for an entrant inside a window: answers the client,
+/// its row, the burst, and the board's raw login record, for the shape asserts.
+fn enter_equipped_world_on_cells(
+    server: &Server,
+    login: &[u8],
+    slot: u8,
+    item_count: usize,
+) -> (Keyed, Listed, Entered, Vec<u8>) {
+    let (mut keyed, _empire, list) = select_screen(server, login);
+    let character = listed(&list, usize::from(slot));
+    keyed.send_record(&client_select(slot));
+    select_equipped_enter(&mut keyed, item_count);
+    let (entered, cooldown) = enter_game_view_cells(&mut keyed);
+    (keyed, character, entered, cooldown)
 }
 
 /// The select and load burst [`enter_equipped_world_on`] reads before entering.
@@ -26171,12 +26279,18 @@ fn enter_world_hearing_team(
     }
     assert_eq!(team_record, messenger_team_list_many(team), "{what}");
     if channel == 99 {
+        // The board's line rides between the team list and the duel-start: the
+        // admit fans it, `enter_arena` fans the list after. Every entrant here
+        // sits outside the windows and hears `-`.
+        read_dungeon_cooldown(&mut keyed, b"dungeon_info_cooldown 1 -");
         let record = keyed.read_game();
         if record != [GC_DUEL_START, 3, 0] {
             keyed.unread(vec![record]);
         }
+        read_login_event_past_cooldown(&mut keyed);
+    } else {
+        read_login_event(&mut keyed);
     }
-    read_login_event(&mut keyed);
     keyed.still("nothing follows");
     (keyed, character, entered)
 }
@@ -34124,7 +34238,23 @@ fn an_assassin_flies_the_dog_and_shoots_it() {
          50, 8000 FROM player WHERE name = 'Yankee'",
     );
     let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
-    let (mut yankee, yankee_listed, yankee_entered) = enter_equipped_world_with(&server, b"bob", 2);
+    // Level 60 sits in the 1092 and 1093 windows, so the admit fans both cells.
+    let (mut yankee, yankee_listed, yankee_entered, cooldown) =
+        enter_equipped_world_on_cells(&server, b"bob", 0, 2);
+    let text = &cooldown[GC_CHAT_WIRE_SIZE..];
+    assert!(
+        text.starts_with(b"dungeon_info_cooldown 1 1092|"),
+        "the 1092 cell leads the admit: {text:?}"
+    );
+    assert!(
+        text.windows(b"|0|0|0#1093|".len())
+            .any(|window| window == b"|0|0|0#1093|"),
+        "1093 follows the empty 1092 counts: {text:?}"
+    );
+    assert!(
+        text.ends_with(b"|0|0|0#"),
+        "1093's counts are empty: {text:?}"
+    );
     let dog = vid_shown_at(
         yankee_entered.shown.monsters.iter().map(Vec::as_slice),
         ALPHA_ENTERS_AT,
@@ -45060,11 +45190,12 @@ fn a_reward_update_opens_the_window_and_a_dog_kill_marks_nothing() {
     check(&database, "(SELECT count(*) FROM reward_solo) = 0");
 }
 
-/// `cmd.dungeon_info` (`do_dungeon_info`, `G/cmd_general.cpp:4095-4117`): a bare line, a
-/// strange second word and a short `rank` stay silent; `rank 1092 0` fans
-/// `dungeon_log_info 1092 0 -` (no flag stored), then `test_cooldown` stamps the three
-/// cooldowns and fans the full line — level 70 sits in the 1092 and 1093 windows, so
-/// two cells with the stored counts — and `update` fans the full line again.
+/// `cmd.dungeon_info` (`do_dungeon_info`, `G/cmd_general.cpp:4095-4117`): the admit fans
+/// the full line first — level 70 sits in the 1092 and 1093 windows, so two cells
+/// with the stored counts — then a bare line, a strange second word and a short
+/// `rank` stay silent; `rank 1092 0` fans `dungeon_log_info 1092 0 -` (no flag
+/// stored), then `test_cooldown` stamps the three cooldowns and fans the full line,
+/// and `update` fans the full line again.
 #[test]
 fn a_dungeon_info_rank_cooldown_and_update_fan_their_lines() {
     let Some(database) = ScratchDatabase::create() else {
@@ -45087,7 +45218,7 @@ fn a_dungeon_info_rank_cooldown_and_update_fan_their_lines() {
     );
     let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alpha);
-    read_login_event(&mut alpha);
+    read_dungeon_admit_counts(&mut alpha);
     alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info"));
     alpha.still("a bare line stays silent");
     alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info rank"));
@@ -45595,11 +45726,16 @@ fn enter_arena_round_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed
         messenger_team_list_many(&[(b"Yankee", false)])
     );
     if channel == 99 {
+        // The board's line rides ahead of the duel-start (see
+        // `enter_world_hearing_team`); Alpha sits outside the windows.
+        read_dungeon_cooldown(&mut alice, b"dungeon_info_cooldown 1 -");
         // `enter_arena`'s member branch sends the empty opponent list behind the team
         // list (ledger 469); the duel is running on this entry.
         assert_eq!(alice.read_game(), [GC_DUEL_START, 3, 0]);
+        read_login_event_past_cooldown(&mut alice);
+    } else {
+        read_login_event(&mut alice);
     }
-    read_login_event(&mut alice);
     alice.still("nothing follows the geared arena entry");
     if channel == 99 {
         assert_eq!(inserted_at(&entered.add), (853_400, 10_100));
@@ -47685,7 +47821,15 @@ fn an_energy_drink_buffs_the_worn_attributes_and_the_take_off_takes_it_back() {
         "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1, \
          socket2) SELECT 25, id, 1, 2, 1, 51002, 80, 10, 1800 FROM player WHERE name = 'Alpha'",
     );
-    let (mut alice, listed, _entered) = enter_equipped_world_on(&server, b"alice", 0, 6);
+    // Level 40 sits in the 1093 window, so the admit fans the boss's single cell.
+    let (mut alice, listed, _entered, cooldown) =
+        enter_equipped_world_on_cells(&server, b"alice", 0, 6);
+    let text = &cooldown[GC_CHAT_WIRE_SIZE..];
+    assert!(
+        text.starts_with(b"dungeon_info_cooldown 1 1093|"),
+        "the 1093 cell leads the admit: {text:?}"
+    );
+    assert!(text.ends_with(b"|0|0|0#"), "no count is stored: {text:?}");
 
     // The armour loads worn (the helper's window is the Equipment window). When the
     // crystal is drunk, the marker and the blend land, the energy rises to 10, and the

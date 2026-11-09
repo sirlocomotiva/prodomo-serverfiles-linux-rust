@@ -3428,6 +3428,13 @@ impl GameState {
             Some(show) => {
                 let records = self.place_body(vid, show.place, show.card);
                 self.start_pc_recovery(vid);
+                // `ch->SendDungeonCooldown(0)` (`G/input_login.cpp:657-661`) runs after
+                // the recovery event starts: the full line for the entrant's level
+                // window, read from the loaded flags. Its chat rides the outbox behind
+                // the burst, as the enter's own `ChatPacket` does.
+                if let Some(mover) = self.own_mover(vid) {
+                    self.send_dungeon_cooldown(vid, mover, 0);
+                }
                 self.seat_ox_attender(vid, player_id, show.place);
                 (records, self.enter_revive_invisible(vid))
             }
