@@ -50535,3 +50535,60 @@ cell is 0, not 1), the GC test's pos offset, and the scenario's load count for t
 swords, each fixed by the change itself.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 497. The private rename and unlock
+
+The stand gets its name changed and its locked slots opened
+(`sub.PrivateShop.SUBHEADER_CG_PRIVATE_SHOP_TITLE_CHANGE` and
+`SUBHEADER_CG_PRIVATE_SHOP_SLOT_UNLOCK_REQUEST`, `G/input_main.cpp:4033,4044`).
+
+Legacy's rename (`CInputMain::PrivateShopTitleChange`, `:4961-5000`) refuses the stunned and the
+dead silently, then the non-owner or closed panel, the non-modify state, the short title
+(`TITLE_MIN_LEN` 3, `C/length.h:147`), and the one-second wait, each with its line, and forwards
+the title to the DB peer. The DB completion (`D/ClientManagerPrivateShop.cpp`, the title arm)
+writes the row and the game side answers `TITLE_CHANGE` to the owner and re-emits the stand's
+`TITLE` to the neighbours. The Rewrite's `private_rename`
+(`prodomo/src/game_state/private_shop.rs:2450`) keeps the gates in legacy order with the same
+lines, stores through `db::private_shop::set_title`, and sends both records on the game thread;
+`finish_private_rename` (`prodomo/src/main.rs:6424`) is the store-then-send.
+
+Legacy's unlock (`CInputMain::PrivateShopSlotUnlockRequest`, `:5051-5123`) reads a bare `WORD`
+cell, refuses the stunned, the dead and `CanHandleItem` silently, then the trade windows, the
+logout cancel and the non-modify open panel with their lines, demands the Personal Shop Key
+(vnum 72357, `C/length.h:138`) at the named cell, and refuses past the cap
+(`PRIVATE_SHOP_LOCKED_SLOT_MAX_NUM` 64, `:137`). A standing shop forwards the key's value 0 to
+the DB peer; without a stand the game side grows `POINT_PRIVATE_SHOP_UNLOCKED_SLOT` at once and
+decrements the key. The DB completion grows the row's count and the game side spends the key
+through `RemoveSpecifyItem` and tells the viewers `UNLOCKED_SLOTS_CHANGE`. The Rewrite's
+`private_unlock` (`:2559`) keeps the gates and the lines, grows the stand's count or the point
+(`private_unlocked_slots`, `:2689`), and spends the key through `remove_specify_item` either way
+(`private_spend_key_and_grow`, `:2705`), whose `MovedItems` carries the spend's `ITEM_SET` clear
+and the point record; `finish_private_unlock` (`:6449`) stores the count and the step. The point
+rides the player row (`private_shop_unlocked_slot`, migration `0042`, loaded and saved with the
+rest) so a stand-less unlock survives the session.
+
+The scenario `a_private_shop_renames_and_unlocks_its_slots` builds the two-sword shop, browses
+it from the second client, flips to modify, renames to `Swords` (owner's `TITLE_CHANGE`, both
+wires' `TITLE`, the row), and unlocks with the key at cell 2 (the spend's clear, the viewers'
+`UNLOCKED_SLOTS_CHANGE`, the key row gone, the count grown). Unit tests cover the unguarded
+title's 32-byte truncation, the solo unlock's line, and the no-key and capped refusals.
+
+The unlock's scenario failed five runs out of six with the connection closing and nothing on
+the wire. The server log named it: `incorrect binary data format in bind parameter 2` on the
+item step's destroy. The build's and checkin's `DELETE FROM item WHERE id = $1 AND owner_id =
+$2` bound the owner as `i32` while `destroy_row` binds it as `i64` on the same text, and sqlx
+caches the prepared statement per connection by its text: whichever connection ran the build
+first described `$2` as `INT4`, and the unlock's 8-byte bind died in `exec_bind_message`. The
+passing run had simply drawn a connection that never saw the build. Both sites now bind `i64`
+(`db/src/private_shop.rs:105,335`), and a sweep of the other seven duplicated query texts found
+their binds already consistent.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5201 passed, 2 failed in 46 targets, both load flakes that pass alone
+(`a_dead_ended_follower_past_1000_walks_back_to_its_leader`,
+`a_gm_flags_a_stray_dog_aggressive_and_coward`); doc tests 1 passed; `cargo clippy
+--workspace --all-targets -- -D warnings` clean after fixing a lossy cast and an unhandled
+`set` in the new unit test; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The scenario passed
+3 sequential and 4 parallel runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

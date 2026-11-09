@@ -331,6 +331,7 @@ mod tests {
             biologist: [0; 3],
             secured: (0, 999_999),
             premium: (0, 0),
+            shop_unlocked: 0,
         });
         let _ = points.compute_points();
         for kind in [point::POINT_HP, point::POINT_SP] {

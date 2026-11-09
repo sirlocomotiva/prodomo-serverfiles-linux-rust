@@ -206,6 +206,17 @@ pub enum ShopStep {
         /// The picked inventory cell, or a negative pick for the first free one.
         dst_pos: i32,
     },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_TITLE_CHANGE`: rename the shop.
+    PrivateRename {
+        /// The raw 33-byte title field.
+        title: [u8; protocol::cg_private_shop::CG_PRIVATE_SHOP_TITLE_FIELD_SIZE],
+    },
+    /// `SUBHEADER_CG_PRIVATE_SHOP_SLOT_UNLOCK_REQUEST`: unlock slots with the key
+    /// at this inventory cell.
+    PrivateUnlock {
+        /// The key's inventory cell.
+        pos: u16,
+    },
 }
 
 impl ShopStep {
@@ -323,6 +334,10 @@ pub enum ShopAnswer {
     PrivateCheckedIn(Box<super::private_shop::PrivateShopCheckedIn>),
     /// A personal-shop checkout: the owner's move, for the store.
     PrivateCheckedOut(Box<super::private_shop::PrivateShopCheckedOut>),
+    /// A personal-shop rename: the new title, for the store.
+    PrivateRenamed(super::private_shop::PrivateShopRenamed),
+    /// A personal-shop unlock: the owner's move and the count, for the store.
+    PrivateUnlocked(Box<super::private_shop::PrivateShopUnlocked>),
     /// A quest took the click: the records its scripts sent, the GRAND climbs
     /// its reads landed (each for the store's `store_skill`), and the `guild.*`
     /// calls the scripts made (each for the world's judge), in order.
@@ -373,6 +388,8 @@ impl PartialEq for ShopAnswer {
             | (Self::PrivateMoved(_), Self::PrivateMoved(_))
             | (Self::PrivateCheckedIn(_), Self::PrivateCheckedIn(_))
             | (Self::PrivateCheckedOut(_), Self::PrivateCheckedOut(_))
+            | (Self::PrivateRenamed(_), Self::PrivateRenamed(_))
+            | (Self::PrivateUnlocked(_), Self::PrivateUnlocked(_))
             | (Self::Quest { .. }, Self::Quest { .. }) => true,
             _ => false,
         }
@@ -536,6 +553,14 @@ impl GameState {
                     Err(refused) => Ok(ShopAnswer::Moved(refused)),
                 }
             }
+            ShopStep::PrivateRename { title } => match self.private_rename(vid, mover, title)? {
+                Some(renamed) => Ok(ShopAnswer::PrivateRenamed(renamed)),
+                None => Ok(ShopAnswer::Sent(Vec::new())),
+            },
+            ShopStep::PrivateUnlock { pos } => match self.private_unlock(vid, mover, pos)? {
+                Some(unlocked) => Ok(ShopAnswer::PrivateUnlocked(Box::new(unlocked))),
+                None => Ok(ShopAnswer::Sent(Vec::new())),
+            },
         }
     }
 
@@ -668,6 +693,8 @@ impl GameState {
             relocated @ ShopAnswer::PrivateMoved(_) => relocated,
             checked @ ShopAnswer::PrivateCheckedIn(_) => checked,
             out @ ShopAnswer::PrivateCheckedOut(_) => out,
+            renamed @ ShopAnswer::PrivateRenamed(_) => renamed,
+            unlocked @ ShopAnswer::PrivateUnlocked(_) => unlocked,
             ShopAnswer::Quest { .. } => {
                 debug_assert!(false, "the window opens no quest");
                 ShopAnswer::Sent(records)

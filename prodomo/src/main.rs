@@ -80,8 +80,8 @@ use prodomo::game_loop_messages::{
 use prodomo::game_state::{
     world_item_id_range, GameState, PrivateShopBought, PrivateShopBuilt, PrivateShopCheckedIn,
     PrivateShopCheckedOut, PrivateShopClosed, PrivateShopFlipped, PrivateShopMoved,
-    PrivateShopPriceChanged, PrivateShopWithdrawn, ShopAnswer, ShopStep, TradeAnswer, TradeSettled,
-    TradeStep,
+    PrivateShopPriceChanged, PrivateShopRenamed, PrivateShopUnlocked, PrivateShopWithdrawn,
+    ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
 };
 use prodomo::game_state::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -1117,6 +1117,10 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
         held_character.premium_time = points.premium_time();
         // The unlocks ride the points' field beside the slots (`m_points.envanter`).
         held_character.envanter = points.inven_point();
+        // The shop slots ride the instant slot (`GetPoint(POINT_PRIVATE_SHOP_UNLOCKED_SLOT)`).
+        held_character.private_shop_unlocked_slot =
+            i16::try_from(points.get_point(point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT))
+                .unwrap_or(i16::MAX);
         held_character.level_step =
             i16::try_from(points.get_point(point_slot::POINT_LEVEL_STEP)).unwrap_or(i16::MAX);
         held_character.stat_reset_count =
@@ -5916,7 +5920,8 @@ where
         PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
         PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_MODIFY,
         PRIVATE_SHOP_SUBHEADER_PANEL_CLOSE, PRIVATE_SHOP_SUBHEADER_PANEL_OPEN,
-        PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_WITHDRAW,
+        PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, PRIVATE_SHOP_SUBHEADER_START,
+        PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE, PRIVATE_SHOP_SUBHEADER_WITHDRAW,
     };
     let subheader = frame.payload.first().copied().unwrap_or(u8::MAX);
     let step = match subheader {
@@ -6010,6 +6015,26 @@ where
                 }
             }
         }
+        PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE => {
+            match protocol::cg_private_shop::CgPrivateShopTitleChange::decode_title_change(frame) {
+                Ok(renamed) => ShopStep::PrivateRename {
+                    title: renamed.title,
+                },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed shop rename; closing");
+                    return false;
+                }
+            }
+        }
+        PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST => {
+            match protocol::cg_private_shop::CgPrivateShopSlotUnlock::decode_slot_unlock(frame) {
+                Ok(unlock) => ShopStep::PrivateUnlock { pos: unlock.pos },
+                Err(error) => {
+                    warn!(%addr, %error, "Client sent a malformed shop unlock; closing");
+                    return false;
+                }
+            }
+        }
         _ => {
             info!(%addr, subheader, "Client sent an unported private-shop subheader; ignoring");
             return true;
@@ -6060,6 +6085,14 @@ where
                 session, addr, context, held, actor, *checked,
             ))
             .await;
+        }
+        Ok(Ok(ShopAnswer::PrivateRenamed(renamed))) => {
+            info!(%addr, "Private shop renamed");
+            return finish_private_rename(session, addr, context, held, renamed).await;
+        }
+        Ok(Ok(ShopAnswer::PrivateUnlocked(unlocked))) => {
+            info!(%addr, "Private shop slots unlocked");
+            return finish_private_unlock(session, addr, context, held, actor, *unlocked).await;
         }
         Ok(Ok(ShopAnswer::Sent(records))) => {
             info!(%addr, subheader, "Private-shop step answered");
@@ -6385,6 +6418,62 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
+/// Rename a personal shop: store the title, as `ChangeTitle` writes it
+/// (`D/PrivateShop.cpp` behind `D/ClientManagerPrivateShop.cpp:1990-1991`). The
+/// `TITLE_CHANGE` and `TITLE` went out on the game thread.
+async fn finish_private_rename<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    renamed: PrivateShopRenamed,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) =
+        db::private_shop::rename_shop(&context.store, renamed.owner, &renamed.title).await
+    {
+        warn!(%addr, %error, "The shop's rename could not be stored; closing");
+        return false;
+    }
+    let _ = (session, held);
+    info!(%addr, "Shop renamed");
+    true
+}
+
+/// Unlock a shop's slots: the shop row takes the count with a stand standing,
+/// else the player row does, as the DB unlock and the point grow write them
+/// (`D/ClientManagerPrivateShop.cpp:2060-2100` and `G/input_main.cpp:5122`). The
+/// key's spend and the owner's records settle as a move is.
+async fn finish_private_unlock<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    actor: Mover,
+    unlocked: PrivateShopUnlocked,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let PrivateShopUnlocked {
+        moved,
+        owner,
+        slots,
+        standing,
+    } = unlocked;
+    if standing {
+        if let Err(error) = db::private_shop::set_unlocked_slots(&context.store, owner, slots).await
+        {
+            warn!(%addr, %error, "The shop's unlock could not be stored; closing");
+            return false;
+        }
+    }
+    let answer = Ok(Ok(moved));
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
 /// Flip a personal shop's state: store it, as `PrivateShopModifyRequest` flips it
 /// (`D/ClientManagerPrivateShop.cpp:1457-1515`). The `STATE_UPDATE` went out on the
 /// game thread.
@@ -6469,7 +6558,9 @@ where
             | ShopAnswer::PrivatePriceChanged(_)
             | ShopAnswer::PrivateMoved(_)
             | ShopAnswer::PrivateCheckedIn(_)
-            | ShopAnswer::PrivateCheckedOut(_),
+            | ShopAnswer::PrivateCheckedOut(_)
+            | ShopAnswer::PrivateRenamed(_)
+            | ShopAnswer::PrivateUnlocked(_),
         )) => {
             warn!(%addr, "An NPC step ran a private shop; closing");
             return false;
@@ -16697,6 +16788,7 @@ mod tests {
             premium: 0,
             premium_time: 0,
             envanter: 0,
+            private_shop_unlocked_slot: 0,
             conqueror_exp: 0,
             conqueror_level_step: 0,
             conqueror_point: 0,

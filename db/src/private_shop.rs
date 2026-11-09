@@ -104,7 +104,10 @@ pub async fn build_shop(
     for ware in wares {
         let deleted: u64 = sqlx::query("DELETE FROM item WHERE id = $1 AND owner_id = $2")
             .bind(i64::from(ware.item.id))
-            .bind(i32::try_from(ware.item.owner_id.unwrap_or(0)).unwrap_or(0))
+            // An `i64`, as every other site that deletes on this text binds it:
+            // sqlx caches the prepared statement by its text, so a narrower
+            // bind here would poison the cache for them (`exec_bind_message`).
+            .bind(i64::from(ware.item.owner_id.unwrap_or(0)))
             .execute(&mut *tx)
             .await?
             .rows_affected();
@@ -331,7 +334,8 @@ pub async fn checkin_ware(
     let mut tx = store.pool().begin().await?;
     let deleted: u64 = sqlx::query("DELETE FROM item WHERE id = $1 AND owner_id = $2")
         .bind(i64::from(ware.item.id))
-        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        // An `i64`, as every other site that deletes on this text binds it (see above).
+        .bind(i64::from(owner_id))
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -477,6 +481,34 @@ pub async fn checkout_ware(store: &Store, checked: CheckedOutWare) -> Result<(),
             .await?;
     }
     tx.commit().await?;
+    Ok(())
+}
+
+/// Rename one shop: the 33 title bytes.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Database`].
+pub async fn rename_shop(store: &Store, owner_id: u32, title: &[u8]) -> Result<(), ItemError> {
+    sqlx::query("UPDATE private_shop SET title = $1 WHERE owner_id = $2")
+        .bind(title)
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Grow one shop's unlocked count.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Database`].
+pub async fn set_unlocked_slots(store: &Store, owner_id: u32, slots: u16) -> Result<(), ItemError> {
+    sqlx::query("UPDATE private_shop SET unlocked_slots = $1 WHERE owner_id = $2")
+        .bind(i32::from(slots))
+        .bind(i32::try_from(owner_id).map_err(|_| corrupt("owner_id", owner_id))?)
+        .execute(store.pool())
+        .await?;
     Ok(())
 }
 

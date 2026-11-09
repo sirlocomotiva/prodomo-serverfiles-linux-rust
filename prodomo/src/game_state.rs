@@ -207,7 +207,7 @@ pub use premium::{
 pub use private_shop::{
     PrivateShopBought, PrivateShopBuilt, PrivateShopCheckedIn, PrivateShopCheckedOut,
     PrivateShopClosed, PrivateShopFlipped, PrivateShopMoved, PrivateShopPriceChanged,
-    PrivateShopWithdrawn,
+    PrivateShopRenamed, PrivateShopUnlocked, PrivateShopWithdrawn,
 };
 pub use protected::{
     ProtectedStep, PROTECTED_ACTIVATE, PROTECTED_FRESH_PASSWORD, PROTECTED_PASSWORD_CHANGE,
@@ -8140,6 +8140,7 @@ mod tests {
             biologist: [0; 3],
             secured: (0, 999_999),
             premium: (0, 0),
+            shop_unlocked: 0,
         });
         let _ = points.compute_points();
         for kind in [common::point_slot::POINT_HP, common::point_slot::POINT_SP] {

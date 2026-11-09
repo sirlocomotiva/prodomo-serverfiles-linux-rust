@@ -35,10 +35,10 @@
 //! `PrivateShopBuild` (`server/server/game/input_main.cpp:4136-4149`) before a
 //! single field is read.
 //!
-//! The build, `START`, `BUY`, price-change, move, checkin and checkout subheaders are
-//! decoded here; the other fourteen are later slices. The subheader byte is validated
-//! by the dispatch, not by this codec: a wrong subheader through any decoder is a
-//! header error, as a wrong header is.
+//! The build, `START`, `BUY`, price-change, move, checkin, checkout, title-change and
+//! slot-unlock subheaders are decoded here; the other twelve are later slices. The
+//! subheader byte is validated by the dispatch, not by this codec: a wrong subheader
+//! through any decoder is a header error, as a wrong header is.
 //!
 //! # What this codec deliberately does not do
 //!
@@ -51,7 +51,8 @@ use crate::cg_inventory::{CgHeader, HEADER_CG_PRIVATE_SHOP};
 use crate::cg_variable::{
     PRIVATE_SHOP_SUBHEADER_BUILD, PRIVATE_SHOP_SUBHEADER_BUY, PRIVATE_SHOP_SUBHEADER_ITEM_CHECKIN,
     PRIVATE_SHOP_SUBHEADER_ITEM_CHECKOUT, PRIVATE_SHOP_SUBHEADER_ITEM_MOVE,
-    PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_START,
+    PRIVATE_SHOP_SUBHEADER_ITEM_PRICE_CHANGE, PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST,
+    PRIVATE_SHOP_SUBHEADER_START, PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
 };
 use crate::cg_wire::ClientFrame;
 use crate::item_pos::ItemPos;
@@ -331,6 +332,90 @@ impl CgPrivateShopCheckout {
         Ok(Self {
             src_pos: u16::from_le_bytes(bytes[1..3].try_into().expect("two bytes")),
             dst_pos: i32::from_le_bytes(bytes[3..7].try_into().expect("four bytes")),
+        })
+    }
+}
+
+/// One decoded `TITLE_CHANGE`: the raw 33-byte title field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgPrivateShopTitleChange {
+    /// The raw `char[TITLE_MAX_LEN + 1]` title field.
+    pub title: [u8; CG_PRIVATE_SHOP_TITLE_FIELD_SIZE],
+}
+
+impl CgPrivateShopTitleChange {
+    /// Decode the subheader and the 33 title bytes (`PrivateShopTitleChange`,
+    /// `G/input_main.cpp:4961-5005`).
+    ///
+    /// # Errors
+    ///
+    /// As [`CgPrivateShopBuildError`]: a wrong header or subheader, or a frame
+    /// short of the title.
+    ///
+    /// # Panics
+    ///
+    /// Never: the slice is length-checked first.
+    pub fn decode_title_change(frame: &ClientFrame) -> Result<Self, CgPrivateShopBuildError> {
+        let bytes = &frame.payload;
+        let subheader = bytes.first().copied().unwrap_or(0);
+        if frame.header != HEADER_CG_PRIVATE_SHOP.value()
+            || subheader != PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE
+        {
+            return Err(CgPrivateShopBuildError::Header {
+                header: frame.header,
+                subheader,
+            });
+        }
+        if bytes.len() < 1 + CG_PRIVATE_SHOP_TITLE_FIELD_SIZE {
+            return Err(CgPrivateShopBuildError::Truncated {
+                needed: 1 + CG_PRIVATE_SHOP_TITLE_FIELD_SIZE,
+                available: bytes.len(),
+            });
+        }
+        let mut title = [0u8; CG_PRIVATE_SHOP_TITLE_FIELD_SIZE];
+        title.copy_from_slice(&bytes[1..=CG_PRIVATE_SHOP_TITLE_FIELD_SIZE]);
+        Ok(Self { title })
+    }
+}
+
+/// One decoded `SLOT_UNLOCK_REQUEST`: the key's inventory cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgPrivateShopSlotUnlock {
+    /// The key's inventory cell.
+    pub pos: u16,
+}
+
+impl CgPrivateShopSlotUnlock {
+    /// Decode the subheader and the bare `WORD` (`PrivateShopSlotUnlockRequest`,
+    /// `G/input_main.cpp:5047-5135`).
+    ///
+    /// # Errors
+    ///
+    /// As [`CgPrivateShopBuildError`]: a wrong header or subheader, or a frame
+    /// short of the two cell bytes.
+    ///
+    /// # Panics
+    ///
+    /// Never: the slice is length-checked first.
+    pub fn decode_slot_unlock(frame: &ClientFrame) -> Result<Self, CgPrivateShopBuildError> {
+        let bytes = &frame.payload;
+        let subheader = bytes.first().copied().unwrap_or(0);
+        if frame.header != HEADER_CG_PRIVATE_SHOP.value()
+            || subheader != PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST
+        {
+            return Err(CgPrivateShopBuildError::Header {
+                header: frame.header,
+                subheader,
+            });
+        }
+        if bytes.len() < 1 + 2 {
+            return Err(CgPrivateShopBuildError::Truncated {
+                needed: 1 + 2,
+                available: bytes.len(),
+            });
+        }
+        Ok(Self {
+            pos: u16::from_le_bytes(bytes[1..3].try_into().expect("two bytes")),
         })
     }
 }
@@ -671,6 +756,49 @@ mod tests {
             short,
             Err(CgPrivateShopBuildError::Truncated {
                 needed: 7,
+                available: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn the_title_and_the_unlock_decode_in_field_order() {
+        let mut payload = vec![PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE];
+        let mut title = [0u8; CG_PRIVATE_SHOP_TITLE_FIELD_SIZE];
+        title[..4].copy_from_slice(b"Axes");
+        payload.extend_from_slice(&title);
+        let renamed = CgPrivateShopTitleChange::decode_title_change(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload,
+        })
+        .expect("decoded");
+        assert_eq!(&renamed.title[..4], b"Axes");
+        assert_eq!(renamed.title[4], 0);
+        let unlock = CgPrivateShopSlotUnlock::decode_slot_unlock(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_SLOT_UNLOCK_REQUEST, 0x13, 0x12],
+        })
+        .expect("decoded");
+        assert_eq!(unlock.pos, 0x1213);
+        let crossed = CgPrivateShopSlotUnlock::decode_slot_unlock(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE, 0x13, 0x12],
+        });
+        assert_eq!(
+            crossed,
+            Err(CgPrivateShopBuildError::Header {
+                header: HEADER_CG_PRIVATE_SHOP.value(),
+                subheader: PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE,
+            })
+        );
+        let short = CgPrivateShopTitleChange::decode_title_change(&ClientFrame {
+            header: HEADER_CG_PRIVATE_SHOP.value(),
+            payload: vec![PRIVATE_SHOP_SUBHEADER_TITLE_CHANGE, b'A'],
+        });
+        assert_eq!(
+            short,
+            Err(CgPrivateShopBuildError::Truncated {
+                needed: 34,
                 available: 2,
             })
         );

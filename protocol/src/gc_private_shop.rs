@@ -32,7 +32,12 @@
 //! `ADD_ITEM` (14), which `CPrivateShop::ItemCheckin` (`private_shop.cpp:559-595`)
 //! broadcasts to the viewers; and the price and the move, which both the owner
 //! and the stand send (`char.cpp:12317-12373`, `private_shop.cpp:597-671`). The
-//! rest are later slices.
+//! rename records are encoded here: `TITLE_CHANGE` (19), which
+//! `ChangePrivateShopTitle` (`char.cpp:12375-12390`) sends to the owner, and
+//! `TITLE` (2), which `CPrivateShop::ChangeTitle` (`private_shop.cpp:674-697`)
+//! sends around the stand, and `UNLOCKED_SLOTS_CHANGE` (20), which
+//! `CPrivateShop::SetUnlockedSlots` (`private_shop.cpp:721-737`) broadcasts to
+//! the viewers. The rest are later slices.
 //!
 //! # Width
 //!
@@ -87,6 +92,9 @@ pub const GC_PRIVATE_SHOP_PRICE_CHANGE_WIRE_SIZE: usize = 14;
 /// `sizeof(TPacketGCPrivateShopItemMove)`: the two words.
 pub const GC_PRIVATE_SHOP_MOVE_WIRE_SIZE: usize = 4;
 
+/// `sizeof(TPacketGCPrivateShopTitle)`: the VID, the title and the type.
+pub const GC_PRIVATE_SHOP_TITLE_WIRE_SIZE: usize = 4 + 33 + 1;
+
 /// `sizeof(WORD)`: what `REMOVE_ITEM` and `REMOVE_MY_ITEM` carry.
 pub const GC_PRIVATE_SHOP_REMOVE_WIRE_SIZE: usize = 2;
 
@@ -126,6 +134,10 @@ pub const GC_PRIVATE_SHOP_PRICE_CHANGE_RECORD_SIZE: usize =
 pub const GC_PRIVATE_SHOP_MOVE_RECORD_SIZE: usize =
     GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_MOVE_WIRE_SIZE;
 
+/// The whole `TITLE` record: the header, the VID, the title and the type.
+pub const GC_PRIVATE_SHOP_TITLE_RECORD_SIZE: usize =
+    GC_PRIVATE_SHOP_WIRE_SIZE + GC_PRIVATE_SHOP_TITLE_WIRE_SIZE;
+
 /// The title field both bodies carry: `TITLE_MAX_LEN + 1` and `SHOP_SIGN_MAX_LEN + 1`
 /// are both 33.
 pub const PRIVATE_SHOP_TITLE_FIELD_SIZE: usize = 33;
@@ -159,6 +171,12 @@ pub const SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM: u8 = 14;
 pub const SUBHEADER_GC_PRIVATE_SHOP_ITEM_PRICE_CHANGE: u8 = 17;
 /// `SUBHEADER_GC_PRIVATE_SHOP_ITEM_MOVE` (18): the ware's new slot.
 pub const SUBHEADER_GC_PRIVATE_SHOP_ITEM_MOVE: u8 = 18;
+/// `SUBHEADER_GC_PRIVATE_SHOP_TITLE` (2): the new title, as the viewers hear it.
+pub const SUBHEADER_GC_PRIVATE_SHOP_TITLE: u8 = 2;
+/// `SUBHEADER_GC_PRIVATE_SHOP_TITLE_CHANGE` (19): the new title, as the owner hears it.
+pub const SUBHEADER_GC_PRIVATE_SHOP_TITLE_CHANGE: u8 = 19;
+/// `SUBHEADER_GC_PRIVATE_SHOP_UNLOCKED_SLOTS_CHANGE` (20): the unlocked count.
+pub const SUBHEADER_GC_PRIVATE_SHOP_UNLOCKED_SLOTS_CHANGE: u8 = 20;
 /// `SUBHEADER_GC_PRIVATE_SHOP_START` (11): the window opens for the viewer.
 pub const SUBHEADER_GC_PRIVATE_SHOP_START: u8 = 11;
 /// `SUBHEADER_GC_PRIVATE_SHOP_END` (12): the window closes for the viewer.
@@ -549,6 +567,78 @@ impl GcPrivateShopMove {
     }
 }
 
+/// `TITLE_CHANGE`: the new title, as the owner hears it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopTitleChange {
+    /// The raw 33-byte title field.
+    pub title: [u8; PRIVATE_SHOP_TITLE_FIELD_SIZE],
+}
+
+impl GcPrivateShopTitleChange {
+    /// Encode the header and the title in field order.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_WIRE_SIZE + PRIVATE_SHOP_TITLE_FIELD_SIZE);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_WIRE_SIZE + PRIVATE_SHOP_TITLE_FIELD_SIZE,
+            SUBHEADER_GC_PRIVATE_SHOP_TITLE_CHANGE,
+        );
+        out.extend_from_slice(&self.title);
+        out
+    }
+}
+
+/// `TITLE`: the stand's VID and new title, as the viewers hear it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopTitle {
+    /// The stand's VID.
+    pub vid: u32,
+    /// The raw 33-byte title field.
+    pub title: [u8; PRIVATE_SHOP_TITLE_FIELD_SIZE],
+    /// The title's type byte.
+    pub title_type: u8,
+}
+
+impl GcPrivateShopTitle {
+    /// Encode the header, the VID, the title and the type in field order.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_TITLE_RECORD_SIZE);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_TITLE_RECORD_SIZE,
+            SUBHEADER_GC_PRIVATE_SHOP_TITLE,
+        );
+        out.extend_from_slice(&self.vid.to_le_bytes());
+        out.extend_from_slice(&self.title);
+        out.push(self.title_type);
+        out
+    }
+}
+
+/// `UNLOCKED_SLOTS_CHANGE`: the shop's unlocked count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcPrivateShopUnlocked {
+    /// The unlocked count.
+    pub slots: u16,
+}
+
+impl GcPrivateShopUnlocked {
+    /// Encode the header and the word.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_PRIVATE_SHOP_REMOVE_RECORD_SIZE);
+        push_header(
+            &mut out,
+            GC_PRIVATE_SHOP_REMOVE_RECORD_SIZE,
+            SUBHEADER_GC_PRIVATE_SHOP_UNLOCKED_SLOTS_CHANGE,
+        );
+        out.extend_from_slice(&self.slots.to_le_bytes());
+        out
+    }
+}
+
 /// Push the four header bytes: the header, the size word, and the subheader.
 fn push_header(out: &mut Vec<u8>, size: usize, subheader: u8) {
     let size = u16::try_from(size).unwrap_or(u16::MAX);
@@ -644,6 +734,44 @@ mod tests {
         );
         assert_eq!(
             u16::from_le_bytes(moved[6..8].try_into().expect("two")),
+            0x1213
+        );
+    }
+
+    #[test]
+    fn the_rename_encodes_in_field_order() {
+        let mut title = [0u8; PRIVATE_SHOP_TITLE_FIELD_SIZE];
+        title[..4].copy_from_slice(b"Axes");
+        let changed = GcPrivateShopTitleChange { title }.encode();
+        assert_eq!(
+            changed.len(),
+            GC_PRIVATE_SHOP_WIRE_SIZE + PRIVATE_SHOP_TITLE_FIELD_SIZE
+        );
+        assert_eq!(changed[3], SUBHEADER_GC_PRIVATE_SHOP_TITLE_CHANGE);
+        assert_eq!(&changed[4..8], b"Axes");
+        let titled = GcPrivateShopTitle {
+            vid: 0x7531,
+            title,
+            title_type: 1,
+        }
+        .encode();
+        assert_eq!(titled.len(), GC_PRIVATE_SHOP_TITLE_RECORD_SIZE);
+        assert_eq!(titled[3], SUBHEADER_GC_PRIVATE_SHOP_TITLE);
+        assert_eq!(
+            u32::from_le_bytes(titled[4..8].try_into().expect("four")),
+            0x7531
+        );
+        assert_eq!(&titled[8..12], b"Axes");
+        assert_eq!(titled[titled.len() - 1], 1);
+    }
+
+    #[test]
+    fn the_unlock_encodes_its_count() {
+        let unlocked = GcPrivateShopUnlocked { slots: 0x1213 }.encode();
+        assert_eq!(unlocked.len(), GC_PRIVATE_SHOP_REMOVE_RECORD_SIZE);
+        assert_eq!(unlocked[3], SUBHEADER_GC_PRIVATE_SHOP_UNLOCKED_SLOTS_CHANGE);
+        assert_eq!(
+            u16::from_le_bytes(unlocked[4..6].try_into().expect("two")),
             0x1213
         );
     }

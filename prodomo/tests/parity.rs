@@ -46351,10 +46351,12 @@ fn a_private_shop_flips_withdraws_and_closes() {
     assert_eq!(closed[0], GC_CHAT, "the closed line: {closed:02x?}");
 }
 
-/// Enter Alice holding two swords and Yankee holding 10000 gold, side by side.
+/// Enter Alice holding two swords (and the key at cell 2 when `with_key`) and
+/// Yankee holding 10000 gold, side by side.
 fn enter_two_swords_and_buyer(
     server: &Server,
     database: &ScratchDatabase,
+    with_key: bool,
 ) -> (Keyed, Listed, Keyed, Listed) {
     sql(
         database,
@@ -46379,7 +46381,15 @@ fn enter_two_swords_and_buyer(
         "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
          1, 19 FROM player WHERE name = 'Alpha'",
     );
-    let (mut alice, alice_listed, _entered) = enter_equipped_world_with(server, b"alice", 2);
+    if with_key {
+        sql(
+            database,
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 62, id, 1, \
+             2, 1, 72357 FROM player WHERE name = 'Alpha'",
+        );
+    }
+    let held = if with_key { 3 } else { 2 };
+    let (mut alice, alice_listed, _entered) = enter_equipped_world_with(server, b"alice", held);
     let (mut yankee, yankee_listed) = enter_world(server, b"bob", 0);
     alice.sees_enter(yankee_listed.id, true, None);
     alice.quiet("caught up");
@@ -46400,7 +46410,7 @@ fn a_private_shop_reprices_moves_checks_in_and_out() {
     create_account(&server, "bob");
     add_characters(&database);
     let (mut alice, _alice_listed, mut yankee, yankee_listed) =
-        enter_two_swords_and_buyer(&server, &database);
+        enter_two_swords_and_buyer(&server, &database, false);
     let entity = build_axes_shop(&mut alice, &mut yankee);
     let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
     let _ = (owner_vid, yankee_listed);
@@ -46481,5 +46491,85 @@ fn a_private_shop_reprices_moves_checks_in_and_out() {
         "EXISTS (SELECT 1 FROM item WHERE id = 61 AND vnum = 19 AND owner_id = (SELECT id \
          FROM player WHERE name = 'Alpha')) AND NOT EXISTS (SELECT 1 FROM \
          private_shop_item WHERE id = 61)",
+    );
+}
+
+/// The rename retitles the shop, and the unlock opens its locked slots: the
+/// owner hears the title, the viewers the stand's, and the count follows.
+#[test]
+fn a_private_shop_renames_and_unlocks_its_slots() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    let (mut alice, _alice_listed, mut yankee, yankee_listed) =
+        enter_two_swords_and_buyer(&server, &database, true);
+    let entity = build_axes_shop(&mut alice, &mut yankee);
+    let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
+    let _ = yankee_listed;
+    // Yankee browses the stand first, so the rename and the unlock both sync to
+    // a viewer.
+    let mut start = vec![CG_PRIVATE_SHOP, 4];
+    start.extend_from_slice(&owner_vid.to_le_bytes());
+    yankee.send_record(&start);
+    let _window = yankee.read_game();
+    alice.send_record(&[CG_PRIVATE_SHOP, 8]);
+    let _flipped = alice.read_game();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The rename retitles the shop to `Swords`.
+    let mut rename = vec![CG_PRIVATE_SHOP, 14];
+    let mut title = [0u8; 33];
+    title[..6].copy_from_slice(b"Swords");
+    rename.extend_from_slice(&title);
+    alice.send_record(&rename);
+    let changed = alice.read_game();
+    assert_eq!(
+        &changed[..4],
+        &[GC_PRIVATE_SHOP, 37, 0, 19],
+        "TITLE_CHANGE: {changed:02x?}"
+    );
+    assert_eq!(&changed[4..10], b"Swords", "the new title");
+    // The stand's `TITLE` reaches the owner too, as `PacketAround` sends it.
+    let titled = alice.read_game();
+    assert_eq!(
+        &titled[..4],
+        &[GC_PRIVATE_SHOP, 42, 0, 2],
+        "TITLE: {titled:02x?}"
+    );
+    assert_eq!(&titled[8..14], b"Swords", "the stand's title");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM private_shop WHERE owner_id = (SELECT id FROM player WHERE \
+         name = 'Alpha') AND substring(title FROM 1 FOR 6) = 'Swords')",
+    );
+    // Yankee heard the stand's `TITLE` too.
+    let yankee_title = yankee.read_game();
+    assert_eq!(
+        &yankee_title[..4],
+        &[GC_PRIVATE_SHOP, 42, 0, 2],
+        "TITLE: {yankee_title:02x?}"
+    );
+    // The unlock spends the key at cell 2 and opens the shop's slots.
+    alice.send_record(&[CG_PRIVATE_SHOP, 16, 2, 0]);
+    let unlocked = alice.read_game();
+    assert_eq!(unlocked[0], ITEM_SET, "the key's spend: {unlocked:02x?}");
+    let viewed = yankee.read_game();
+    assert_eq!(
+        &viewed[..4],
+        &[GC_PRIVATE_SHOP, 6, 0, 20],
+        "UNLOCKED_SLOTS_CHANGE: {viewed:02x?}"
+    );
+    assert!(
+        u16::from_le_bytes(viewed[4..6].try_into().expect("two bytes")) > 0,
+        "the opened count"
+    );
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id = 62) AND EXISTS (SELECT 1 FROM private_shop \
+         WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha') AND unlocked_slots \
+         > 0)",
     );
 }

@@ -75,6 +75,7 @@ use protocol::gc_private_shop::{
     GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopItemData,
     GcPrivateShopLoad, GcPrivateShopMove, GcPrivateShopPriceChange, GcPrivateShopRemove,
     GcPrivateShopSale, GcPrivateShopSetItem, GcPrivateShopStart, GcPrivateShopState,
+    GcPrivateShopTitle, GcPrivateShopTitleChange, GcPrivateShopUnlocked,
     PRIVATE_SHOP_OWNER_FIELD_SIZE, PRIVATE_SHOP_STATE_OPEN, SUBHEADER_GC_PRIVATE_SHOP_ADD_ITEM,
     SUBHEADER_GC_PRIVATE_SHOP_CLOSE, SUBHEADER_GC_PRIVATE_SHOP_CLOSE_PANEL,
     SUBHEADER_GC_PRIVATE_SHOP_END, SUBHEADER_GC_PRIVATE_SHOP_OPEN_PANEL,
@@ -131,6 +132,14 @@ pub const PRIVATE_SHOP_STATE_MODIFY: u8 = 3;
 /// `G/private_shop_manager.cpp:278-284`).
 pub const PRIVATE_SHOP_CLOSE_DISTANCE: i32 = 3000;
 
+/// The key that unlocks a shop's slots: `PRIVATE_SHOP_SLOT_UNLOCK_ITEM`
+/// (`C/length.h:138`).
+pub const PRIVATE_SHOP_SLOT_UNLOCK_VNUM: u32 = 72357;
+
+/// The locked slots: `PRIVATE_SHOP_LOCKED_SLOT_MAX_NUM` (`C/length.h:137`), the
+/// window's second half.
+pub const PRIVATE_SHOP_LOCKED_SLOT_MAX_NUM: u16 = 64;
+
 /// One ware of a built shop: the instance, its slot and its price. The instance rides
 /// along because the window's rows show the sockets and attrs (`AddShopViewer` reads
 /// them off the shop's items, `G/private_shop.cpp:775-786`), and the buy hands the same
@@ -164,6 +173,8 @@ pub struct PrivateShop {
     pub gold: i64,
     /// The shop's state: open (2) or modify (3).
     pub state: u8,
+    /// The unlocked count of the window's locked second half.
+    pub unlocked: u16,
     /// Where the stand stands: the map and the spot.
     pub at: (i32, i32, i32),
 }
@@ -268,6 +279,31 @@ pub struct PrivateShopCheckedOut {
     pub pos: u16,
     /// Whether no wares are left and the shop is destroyed with the checkout.
     pub destroy: bool,
+}
+
+/// What a rename did: the shop's owner and the new title, for the store. The
+/// owner hears `TITLE_CHANGE`, the viewers around the stand `TITLE`.
+#[derive(Debug, Clone, Copy)]
+pub struct PrivateShopRenamed {
+    /// The shop owner's player id.
+    pub owner: u32,
+    /// The raw 33-byte title field.
+    pub title: [u8; CG_PRIVATE_SHOP_TITLE_FIELD_SIZE],
+}
+
+/// What an unlock did: the owner's move and the unlocked count, for the store.
+/// The viewers around the stand hear the unlocked count; a character with no
+/// stand hears the increased line.
+#[derive(Debug, Clone)]
+pub struct PrivateShopUnlocked {
+    /// The owner's move: the key's spend and the point's records.
+    pub moved: MovedItems,
+    /// The character's player id.
+    pub owner: u32,
+    /// The unlocked count, for the shop row or the player row.
+    pub slots: u16,
+    /// Whether a stand stands and the shop row takes the count.
+    pub standing: bool,
 }
 
 /// What a modify did: the owner's flip, for the store.
@@ -737,6 +773,7 @@ impl GameState {
                 wares: slots,
                 gold: 0,
                 state: PRIVATE_SHOP_STATE_OPEN,
+                unlocked: 0,
                 at: (map, spot.0, spot.1),
             },
         );
@@ -2397,6 +2434,329 @@ impl GameState {
             .map(|cell| protocol::item_pos::ItemPos::new(EWindows::Inventory as u8, cell))
     }
 
+    /// `CInputMain::PrivateShopTitleChange` for the character under `vid`
+    /// (`G/input_main.cpp:4961-5005`), settled at once with the DB rename and the
+    /// two syncs (`D/ClientManagerPrivateShop.cpp:1957-2012` and the game rename,
+    /// `G/char.cpp:12375-12390` with `G/private_shop.cpp:674-697`): the stun, the
+    /// owner with its panel open, the modify state, the short title, and the
+    /// one-second wait. No banword check runs, unlike the build. The title is
+    /// copied at 32 bytes, as `strncpy` copies it. The owner hears
+    /// `TITLE_CHANGE`, the viewers around the stand `TITLE`. Answers the rename
+    /// for the store, or `None` after telling the refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    pub fn private_rename(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        title: [u8; CG_PRIVATE_SHOP_TITLE_FIELD_SIZE],
+    ) -> Result<Option<PrivateShopRenamed>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(None);
+        }
+        if !self.has_private_shop(vid) || !self.edits_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You do not have an open personal shop.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if self
+            .private_shops
+            .get(&vid)
+            .is_none_or(|shop| shop.state != PRIVATE_SHOP_STATE_MODIFY)
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot manage personal shop's content while it is not in a modifying state.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let end = title
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(title.len());
+        if end < PRIVATE_SHOP_TITLE_MIN_LEN {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"The entered name is too short.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let last = self.private_state_at.get(&vid).copied().unwrap_or(0);
+        if last != 0 && self.last_pulse.saturating_sub(last) < PRIVATE_SHOP_STATE_WAIT_PULSES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Please wait a moment before editing your personal shop's content again.",
+                &[],
+            );
+            return Ok(None);
+        }
+        self.private_state_at.insert(vid, self.last_pulse);
+        let mut renamed = [0u8; CG_PRIVATE_SHOP_TITLE_FIELD_SIZE];
+        renamed[..32.min(title.len())].copy_from_slice(&title[..32.min(title.len())]);
+        let title_type = self
+            .private_shops
+            .get(&vid)
+            .map_or(0, |shop| shop.title_type);
+        if let Some(shop) = self.private_shops.get_mut(&vid) {
+            shop.title = renamed;
+        }
+        let changed = GcPrivateShopTitleChange { title: renamed }.encode();
+        let _sent = self.write_to_client(vid, changed);
+        let titled = GcPrivateShopTitle {
+            vid: Self::private_vid(vid),
+            title: renamed,
+            title_type,
+        }
+        .encode();
+        // `PacketAround` from the stand (`G/private_shop.cpp:687-696`): the owner
+        // stands where the stand does, so the owner's key sees the same viewers.
+        self.packet_around(
+            crate::game_state::view::EntityKey::Character(vid.raw()),
+            &titled,
+            None,
+        );
+        Ok(Some(PrivateShopRenamed {
+            owner: pid,
+            title: renamed,
+        }))
+    }
+
+    /// `CInputMain::PrivateShopSlotUnlockRequest` for the character under `vid`
+    /// (`G/input_main.cpp:5047-5135`), settled at once with the DB unlock and the
+    /// completion (`D/ClientManagerPrivateShop.cpp:2060-2100` and
+    /// `G/input_db.cpp:2803-2822`): the stun, `CanHandleItem`, the trade windows,
+    /// the logout cancel, the modify state when the panel edits, the key at the
+    /// named cell, and the locked count. The key's proto value is the slots it
+    /// opens, clamped to what is left. With a stand standing the shop's count
+    /// grows and the viewers hear it; without one the point grows and the owner
+    /// hears the increased line. The key spends either way. Answers the unlock
+    /// for the store, or `None` after telling the refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`.
+    #[allow(clippy::too_many_lines)]
+    pub fn private_unlock(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        pos: u16,
+    ) -> Result<Option<PrivateShopUnlocked>, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        if self.is_stunned(vid.raw()) || self.is_dead(vid.raw()) {
+            return Ok(None);
+        }
+        if !self.private_can_handle_item(vid) {
+            return Ok(None);
+        }
+        if !self.private_trade_windows_clear(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot modify a personal shop while having other trading windows open.",
+                &[],
+            );
+            return Ok(None);
+        }
+        if self.timed_events.remove(&vid).is_some() {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Your logout has been canceled.",
+                &[],
+            );
+            return Ok(None);
+        }
+        // The gate reads the panel, not the ownership: an owner whose panel is
+        // closed unlocks without the modify state (`:5082-5086`).
+        if self.edits_private_shop(vid)
+            && self
+                .private_shops
+                .get(&vid)
+                .is_none_or(|shop| shop.state != PRIVATE_SHOP_STATE_MODIFY)
+        {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot manage personal shop's content while it is not in a modifying state.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let at = protocol::item_pos::ItemPos::new(EWindows::Inventory as u8, pos);
+        let key = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at).cloned());
+        let Some(key) = key else {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot unlock a slot on your personal shop without Personal Shop Key.",
+                &[],
+            );
+            return Ok(None);
+        };
+        if key.vnum != PRIVATE_SHOP_SLOT_UNLOCK_VNUM {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot unlock a slot on your personal shop without Personal Shop Key.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let unlocked = self.private_unlocked_slots(vid);
+        if unlocked >= PRIVATE_SHOP_LOCKED_SLOT_MAX_NUM {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot unlock any more slots.",
+                &[],
+            );
+            return Ok(None);
+        }
+        let opens = self
+            .protos
+            .get(key.vnum)
+            .map_or(0, |proto| proto.values[0].max(0));
+        let opens = u16::try_from(opens).unwrap_or(u16::MAX);
+        let room = PRIVATE_SHOP_LOCKED_SLOT_MAX_NUM - unlocked;
+        let opens = opens.min(room);
+        let slots = unlocked + opens;
+        let standing = self.has_private_shop(vid);
+        if standing {
+            if let Some(shop) = self.private_shops.get_mut(&vid) {
+                shop.unlocked = slots;
+            }
+        }
+        // The key spends either way: one key, as `RemoveSpecifyItem` spends it
+        // (`G/input_db.cpp:2811` and `G/input_main.cpp:5126`).
+        let moved = self.private_spend_key_and_grow(vid, actor, pid, key.id, slots);
+        if standing {
+            let record = GcPrivateShopUnlocked { slots }.encode();
+            self.private_tell_viewers(vid, &record);
+        } else {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You have increased available space on your personal shop.",
+                &[],
+            );
+        }
+        Ok(Some(PrivateShopUnlocked {
+            moved,
+            owner: pid,
+            slots,
+            standing,
+        }))
+    }
+
+    /// The unlocked count the next key grows: the standing shop's count, else the
+    /// character's point.
+    fn private_unlocked_slots(&self, vid: Vid) -> u16 {
+        if let Some(shop) = self.private_shops.get(&vid) {
+            return shop.unlocked;
+        }
+        self.characters.find_by_vid(vid).map_or(0, |character| {
+            let point = character.points().map_or(0, |points| {
+                points.get_point(common::point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT)
+            });
+            u16::try_from(point.max(0)).unwrap_or(u16::MAX)
+        })
+    }
+
+    /// Spend the unlock key and grow the point, answering the owner's move: the
+    /// key leaves as `RemoveSpecifyItem` spends it, and the point grows to `slots`
+    /// through `PointChange`, as the input and the completion grow it
+    /// (`G/input_main.cpp:5122` and `G/input_db.cpp:2809-2811`).
+    fn private_spend_key_and_grow(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        pid: u32,
+        key: ItemId,
+        slots: u16,
+    ) -> MovedItems {
+        use world::character::{MoveDone, MoveKind, MoveRecord};
+        let protos = self.protos.clone();
+        let done = {
+            let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+                return self.private_refused(vid, pid, actor);
+            };
+            let usable = usable_inventory_cells(character.inven_point());
+            let (items, _, slots) = character.items_points_and_quickslots_mut();
+            world::character::remove_specify_item(
+                items,
+                slots,
+                &protos,
+                usable,
+                (PRIVATE_SHOP_SLOT_UNLOCK_VNUM, 1),
+            )
+        };
+        let _ = key;
+        let mut done = MoveDone {
+            kind: MoveKind::Removed,
+            records: done.records,
+            changes: done.changes,
+        };
+        if let Some(points) = self
+            .characters
+            .find_by_vid_mut(vid)
+            .ok()
+            .and_then(|character| character.items_and_points_mut().1)
+        {
+            let now = points.get_point(common::point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT);
+            let grow = i32::from(slots) - now;
+            if let Ok(records) = points.point_change(
+                common::point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT,
+                grow,
+                true,
+                false,
+            ) {
+                done.records
+                    .extend(records.into_iter().map(MoveRecord::Point));
+            }
+        }
+        let mut moved = MovedItems::new(pid, vid.raw(), done, actor, &protos, &self.locale);
+        if let Ok(character) = self.characters.find_by_vid(vid) {
+            moved.points = character.points().cloned();
+        }
+        moved
+    }
+
     /// `time(0)`, which the checkin times and the premium expiry are.
     fn private_now() -> i64 {
         std::time::SystemTime::now()
@@ -3164,6 +3524,89 @@ mod tests {
             owner_heard.is_empty(),
             "the clear rides the move: {owner_heard:02x?}"
         );
+    }
+
+    /// The rename retitles the shop and syncs the owner and the neighbours;
+    /// the short title refuses with its line.
+    #[test]
+    fn a_rename_retitles_and_syncs() {
+        let (mut state, mut inbox) = a_standing_shop();
+        let (mut viewer_inbox, _) = enter_seeing_with(
+            &mut state,
+            (1, 1),
+            12,
+            (5, 6),
+            10_000,
+            &[(inventory(0), held(7, 19, 1))],
+        );
+        drained(&mut inbox);
+        drained(&mut viewer_inbox);
+        state.private_modify(SELLER, mover()).unwrap().unwrap();
+        state.last_pulse += super::PRIVATE_SHOP_STATE_WAIT_PULSES;
+        drained(&mut inbox);
+        let renamed = state
+            .private_rename(SELLER, mover(), title_of(b"Swords"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(&renamed.title[..7], b"Swords\x00");
+        assert_eq!(&state.private_shops[&SELLER].title[..7], b"Swords\x00");
+        let owner_heard = drained(&mut inbox);
+        assert!(
+            owner_heard
+                .iter()
+                .any(|record| record.len() == 37 && record[3] == 19),
+            "TITLE_CHANGE: {owner_heard:02x?}"
+        );
+        let viewer_heard = drained(&mut viewer_inbox);
+        assert!(
+            viewer_heard
+                .iter()
+                .any(|record| record.len() == 42 && record[3] == 2),
+            "TITLE: {viewer_heard:02x?}"
+        );
+        state.last_pulse += super::PRIVATE_SHOP_STATE_WAIT_PULSES;
+        let refused = state
+            .private_rename(SELLER, mover(), title_of(b"Ax"))
+            .unwrap();
+        assert!(refused.is_none());
+        let told = drained(&mut inbox);
+        assert_eq!(told.len(), 1, "the short-title refusal chats");
+    }
+
+    /// The unlock spends the key, grows the shop's count, and tells the viewers;
+    /// without a stand the point grows and the owner hears the increased line.
+    #[test]
+    fn an_unlock_opens_slots_with_and_without_a_stand() {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        // Cell 2 holds the shop key.
+        let key = held(8, super::PRIVATE_SHOP_SLOT_UNLOCK_VNUM, 1);
+        state
+            .characters
+            .find_by_vid_mut(SELLER)
+            .expect("the seller is in the world")
+            .items_mut()
+            .set(inventory(2), &key)
+            .expect("cell 2 is free");
+        drained(&mut inbox);
+        let unlocked = state.private_unlock(SELLER, mover(), 2).unwrap().unwrap();
+        assert!(!unlocked.standing);
+        let owner = state.characters.find_by_vid(SELLER).unwrap();
+        assert!(
+            owner.items().item_at(inventory(2)).is_none(),
+            "the key spent"
+        );
+        let point = owner.points().map_or(0, |points| {
+            points.get_point(common::point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT)
+        });
+        assert_eq!(point, i32::from(unlocked.slots), "the point grew");
+        assert!(unlocked.slots > 0, "the key's value opened slots");
+        let told = drained(&mut inbox);
+        assert!(
+            told.iter()
+                .any(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()),
+            "the increased line: {told:02x?}"
+        );
+        let _ = PID;
     }
 
     /// A build on map 41 refuses for empire 1, whose market is map 1.

@@ -732,6 +732,7 @@ fn whole_save() -> PlayerSave {
         premium: 1,
         premium_time: 1_700_000_000,
         envanter: 7,
+        private_shop_unlocked_slot: 9,
         horse: db::players::PlayerHorse {
             level: 23,
             riding: true,
@@ -913,6 +914,7 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         premium: 0,
         premium_time: 0,
         envanter: 0,
+        private_shop_unlocked_slot: 0,
         horse: db::players::PlayerHorse::default(),
     };
     // Bob's account naming Alice's character is a miss, not a write.

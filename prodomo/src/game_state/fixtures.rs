@@ -135,6 +135,7 @@ pub(super) fn points_at(level: u8, stamina: i32, exp: i64) -> Points {
         biologist: [0; 3],
         secured: (0, 999_999),
         premium: (0, 0),
+        shop_unlocked: 0,
     });
     let _ = points.compute_points();
     points

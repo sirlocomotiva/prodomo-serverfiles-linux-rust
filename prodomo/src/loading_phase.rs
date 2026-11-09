@@ -809,6 +809,7 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
             u8::try_from(character.premium).unwrap_or(0),
             character.premium_time,
         ),
+        shop_unlocked: character.private_shop_unlocked_slot,
     });
     points.set_conqueror_progress(
         i32::from(character.conqueror_level_step),
@@ -1655,6 +1656,7 @@ mod tests {
             premium: 0,
             premium_time: 0,
             envanter: 5,
+            private_shop_unlocked_slot: 9,
             conqueror_exp: 0x00fe_dcba,
             conqueror_level_step: 0,
             conqueror_point: 0,

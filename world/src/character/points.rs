@@ -325,6 +325,9 @@ pub struct PointsRow {
     /// The premium-players flag and its timer (`G/char.cpp:1548-1549`): `BYTE` and
     /// `long` from the player row, both 0 on a fresh character.
     pub premium: (u8, i32),
+    /// The unlocked shop slots (`G/char.cpp:2359`): the word from the player row,
+    /// 0 on a fresh character.
+    pub shop_unlocked: i16,
 }
 
 /// The four sungma slots, in the order of [`PointsRow::sungma`].
@@ -712,6 +715,9 @@ impl Points {
         // `SetRealPoint(POINT_PLAYTIME, t->playtime)` (`char.cpp:2296`): the real array only.
         // Nothing sets the instant slot, so `PointsPacket`'s `GetPoint` sends 0 there.
         points.real[point::POINT_PLAYTIME] = row.playtime;
+        // `SetPoint(POINT_PRIVATE_SHOP_UNLOCKED_SLOT, t->wPrivateShopUnlockedSlot)`
+        // (`char.cpp:2359`): the instant array only, before the compute.
+        points.instant[point::POINT_PRIVATE_SHOP_UNLOCKED_SLOT] = i32::from(row.shop_unlocked);
         let _discarded = points.compute_points();
         points.hp = row.hp;
         points.sp = row.sp;
@@ -2429,6 +2435,7 @@ mod tests {
             biologist: [0; 3],
             secured: (0, 999_999),
             premium: (0, 0),
+            shop_unlocked: 0,
         }
     }
 

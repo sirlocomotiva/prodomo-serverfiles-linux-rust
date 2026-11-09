@@ -274,6 +274,7 @@ pub fn player_save(
         premium: character.premium,
         premium_time: character.premium_time,
         envanter: character.envanter,
+        private_shop_unlocked_slot: character.private_shop_unlocked_slot,
         horse: character.horse.clone(),
     }
 }
@@ -324,6 +325,7 @@ mod tests {
             premium: 1,
             premium_time: 1_700_000_000,
             envanter: 3,
+            private_shop_unlocked_slot: 9,
             voice: 47,
             part_base: 2,
             main_part: 1001,
