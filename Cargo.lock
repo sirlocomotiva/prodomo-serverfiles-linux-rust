@@ -1168,6 +1168,7 @@ dependencies = [
  "common",
  "db",
  "gamedata",
+ "md-5",
  "net",
  "parity",
  "protocol",

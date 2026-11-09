@@ -38,6 +38,7 @@ mlua = { version = "0.10", features = ["lua51", "vendored", "send"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 rustix = { version = "1", features = ["process"] }
+md-5 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

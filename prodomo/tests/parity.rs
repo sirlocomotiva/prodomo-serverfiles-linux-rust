@@ -8209,6 +8209,38 @@ fn a_gm_notice_crosses_channels_and_a_map_notice_stays() {
     charlie.quiet("not even to the Shared Channel");
 }
 
+/// `cmd.in_game_mall` (`do_in_game_mall`, `G/cmd_general.cpp:3382-3456`): any character may
+/// run it, and the caller alone hears the signed web-shop line as one `CHAT_TYPE_COMMAND`
+/// record: `mall https://{mall_url}/ishop?pid={pid}&c=eu&sid={sid}&sas={sas}`, with the
+/// MD5 of `"{pid}{aid}GF9001"` in hex. Alice is the first account and Alpha the first
+/// character of the scratch database, so the pair is 1 and 1.
+#[test]
+fn a_player_hears_the_signed_web_shop_line() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "mall_url = \"shop.example\"\nserver_id = 9",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/in_game_mall"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_COMMAND,
+            1,
+            b"mall https://shop.example/ishop?pid=1&c=eu&sid=9&sas=4dbbea3b4ec13fab1f9fa4f6ccbc85d7"
+        ),
+        "the caller hears the signed shop line"
+    );
+    drop(server);
+}
+
 /// `sys.char.chat` (shout), with `shout_limit_level` at 1 and global shouting off: a shout from
 /// empire 2 reaches empire 2 on every Channel and nobody in empire 1. The empire `FuncShout`
 /// compares is the shouter's (`G/input_p2p.cpp:227`), and the country code is the shouter's

@@ -50913,3 +50913,35 @@ suite 5224 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --w
 scenario passed 2 sequential runs.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 507. The web-shop line
+
+`cmd.in_game_mall` was the last `missing` command. `do_in_game_mall`
+(`G/cmd_general.cpp:3382-3456`) is descriptor-pure: past the Europe gate, which this
+build's `europe` Locale passes (`LC_EUROPE` under `__MULTI_LANGUAGE_SYSTEM__`, so the
+country code is `eu` and the test-server default arm never fires), the caller alone
+hears one `CHAT_TYPE_COMMAND` record naming the web shop:
+`mall https://{mall_url}/ishop?pid={pid}&c=eu&sid={sid}&sas={sas}`, where the
+signature is the lowercase hex MD5 of `"{pid}{aid}GF9001"` as `%u%u%s` prints it. A
+new `Command::InGameMall` routes through the notice dispatch to `in_game_mall_step`,
+which reads the PIDs from the descriptor's character and account and the two keys
+from `[game] mall_url` and `[game] server_id` (plumbed into the connection context,
+documented in the shipped example); without a character or an account there is no
+one to sign for, which legacy cannot reach, and the line is silent. The line rides
+`%s` with the URL as its text argument rather than as the format, so a `%` in an
+operator's URL prints literally where legacy's `ChatPacket(CHAT_TYPE_COMMAND, buf)`
+would misread it.
+
+The MD5 comes from the `md-5` crate, already at 0.10.6 in `Cargo.lock` through
+`sqlx-mysql`; the lock gains exactly one edge (`prodomo -> md-5`), no new crate
+enters the graph, no version changes, and no `cargo fetch` ran — everything
+resolved offline. The golden signature is pinned against the system's `md5sum`, not
+the crate. The scenario boots with a distinctive shop and server ID and reads the
+whole signed line on Alice's wire for the 1/1 pair.
+
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the
+suite 5227 passed, 0 failed in 46 targets; doc tests 1 passed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The
+scenario passed 2 sequential runs.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

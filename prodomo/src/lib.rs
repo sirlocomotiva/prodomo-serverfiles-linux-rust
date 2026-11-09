@@ -90,6 +90,9 @@ pub mod save;
 pub mod sync_position;
 pub mod warp;
 
+/// The in-game mall line (`do_in_game_mall`).
+pub mod mall;
+
 /// Process-level shutdown and connection-acceptance flags.
 pub struct ServerState {
     shutdown: AtomicBool,

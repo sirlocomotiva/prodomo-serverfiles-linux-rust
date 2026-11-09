@@ -388,6 +388,9 @@ struct ConnectionContext {
     delete_levels: (i32, i32),
     /// `[game] shout_limit_level`: the level a character needs to shout.
     shout_limit_level: i32,
+    /// `[game] mall_url` and `[game] server_id`: the web shop the `/in_game_mall` line
+    /// names and the ID it signs the line with (`G/config.cpp:1337-1344`).
+    mall: (std::sync::Arc<str>, i32),
     /// `[game] enable_global_shout`: every empire hears a shout, not only the shouter's, and
     /// `[game] test_server`: the test-server mode, which makes every character a game master
     /// (`CHARACTER::IsGM`, `G/char.cpp:6373-6380`).
@@ -11185,6 +11188,10 @@ fn connection_context(
             config.game.player_delete_level_limit_lower,
         ),
         shout_limit_level: config.game.shout_limit_level,
+        mall: (
+            std::sync::Arc::from(config.game.mall_url.as_str()),
+            config.game.server_id,
+        ),
         modes: Modes {
             global_shout: config.game.enable_global_shout,
             test_server: config.game.test_server,
@@ -11783,6 +11790,7 @@ where
         command @ (LineCommand::GlobalNotice
         | LineCommand::MapNotice
         | LineCommand::BigNotice
+        | LineCommand::InGameMall
         | LineCommand::NotPorted(_)) => {
             run_line_notice(session, command, addr, context, held, rest).await
         }
@@ -11915,6 +11923,7 @@ where
         LineCommand::GlobalNotice => global_notice_step(addr, context, held, &rest),
         LineCommand::MapNotice => map_notice_step(addr, context, held, &rest),
         LineCommand::BigNotice => big_notice_step(session, addr, context, held, &rest).await,
+        LineCommand::InGameMall => in_game_mall_step(session, addr, context, held).await,
         LineCommand::NotPorted(handler) => {
             info!(%addr, handler, "Command not ported; ignoring");
             true
@@ -16211,6 +16220,44 @@ where
 }
 
 /// One server line to this descriptor, in its language.
+/// `do_in_game_mall` (`G/cmd_general.cpp:3382-3456`): the caller hears the signed web-shop
+/// line as one `CHAT_TYPE_COMMAND` record. The Europe gate passes (this build's Locale is
+/// `europe`), so no Locale check runs; the country code is `eu`. Without a character or an
+/// account there is no one to sign for, which legacy cannot reach, and the line is silent.
+async fn in_game_mall_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (Some(character), Some(account)) = (held.character.as_ref(), held.account.as_ref()) else {
+        return true;
+    };
+    let line = prodomo::mall::mall_line(
+        character.id,
+        account.id.get(),
+        &context.mall.0,
+        context.mall.1,
+    );
+    let sent = send_line_args(
+        session,
+        addr,
+        context,
+        held,
+        CHAT_TYPE_COMMAND,
+        b"%s",
+        &[prodomo::chat_line::Arg::Text(&line)],
+    )
+    .await;
+    if sent {
+        info!(%addr, "In-game mall line sent");
+    }
+    sent
+}
+
 async fn send_line<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,

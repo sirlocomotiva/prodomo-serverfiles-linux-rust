@@ -20,6 +20,7 @@ gamedata = { path = "../gamedata" }
 world = { path = "../world" }
 quest = { path = "../quest" }
 rustix = { workspace = true, features = ["termios"] }
+md-5 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

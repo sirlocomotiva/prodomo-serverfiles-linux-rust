@@ -148,6 +148,7 @@ impl CommandEntry {
             "do_notice" => Command::GlobalNotice,
             "do_map_notice" => Command::MapNotice,
             "do_big_notice" => Command::BigNotice,
+            "do_in_game_mall" => Command::InGameMall,
             "do_setblockmode" => Command::SetBlockMode,
             "do_block_chat" => Command::BlockChat,
             "do_block_chat_list" => Command::BlockChatList,
@@ -1005,6 +1006,9 @@ pub enum Command {
     /// `do_click_special_inv`: the `ShowSpecialInventory` command line
     /// (`G/cmd_general.cpp:4006-4009`).
     ClickSpecialInv,
+    /// `do_in_game_mall`: the caller hears the signed web-shop line
+    /// (`G/cmd_general.cpp:3382-3456`).
+    InGameMall,
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
 }

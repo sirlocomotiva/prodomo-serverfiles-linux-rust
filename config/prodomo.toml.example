@@ -172,3 +172,8 @@ check_version_value = "1215955205"
 # Empty disables the admin page. Legacy defaulted to a well-known password.
 adminpage_ips = []
 adminpage_password = ""
+# mall_url / server_id: the web shop the `/in_game_mall` line names and the ID it signs
+# the line with (`G/config.cpp:1337-1344`, `G/cmd_general.cpp:3382-3456`). The owner's
+# legacy CONFIG files never set either, so the compiled-in values applied.
+mall_url = "www.metin2galaxy.ro"
+server_id = 0
