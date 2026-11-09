@@ -54,8 +54,8 @@ use prodomo::auth_login::{
     AuthRegistry, LoginGrant,
 };
 use prodomo::channel_login::{
-    admit, empire_shown, judge_key, login_success, random_key, ChannelRefusal, LogonClaim,
-    LogonRegistry, MapLocations,
+    admit, admit_password, empire_shown, judge_key, login_success, random_key, ChannelRefusal,
+    LogonClaim, LogonRegistry, MapLocations,
 };
 use prodomo::channel_status::ChannelStatusBoard;
 use prodomo::chat::{
@@ -109,7 +109,7 @@ use prodomo::select_phase::{
 };
 use prodomo::ServerState;
 use protocol::cg_account::{
-    CgEnterGame, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
+    CgEnterGame, CgLogin, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
 };
 use protocol::cg_arg_u8::CgChangeLanguage;
 use protocol::cg_arg_u8::CgRequestEventData;
@@ -138,15 +138,15 @@ use protocol::cg_inventory::{
     HEADER_CG_FLY_TARGETING, HEADER_CG_GAYA_SYSTEM, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD,
     HEADER_CG_HACK, HEADER_CG_INVENTORY_PROTECTED, HEADER_CG_ITEM_DESTROY, HEADER_CG_ITEM_DROP,
     HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_GIVE, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP,
-    HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
-    HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
-    HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
-    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
-    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_PREMIUM_PLAYERS,
-    HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
-    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE, HEADER_CG_REFINE_ELEMENT,
-    HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST, HEADER_CG_SASH,
-    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
+    HEADER_CG_ITEM_USE, HEADER_CG_ITEM_USE_TO_ITEM, HEADER_CG_LOGIN, HEADER_CG_LOGIN2,
+    HEADER_CG_LOGIN3, HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN,
+    HEADER_CG_MARK_UPLOAD, HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK,
+    HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER,
+    HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL,
+    HEADER_CG_PREMIUM_PLAYERS, HEADER_CG_QUEST_CONFIRM, HEADER_CG_QUEST_INPUT_STRING,
+    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_REFINE,
+    HEADER_CG_REFINE_ELEMENT, HEADER_CG_REQUEST_EVENT_DATA, HEADER_CG_REQUEST_EVENT_QUEST,
+    HEADER_CG_SASH, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SCRIPT_SELECT_ITEM,
     HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC,
     HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_TARGET_INFO_LOAD, HEADER_CG_USE_SKILL,
     HEADER_CG_WARP, HEADER_CG_WHISPER, HEADER_CG_WHISPER_DETAILS, HEADER_CG_WORLD_BOSS,
@@ -5253,8 +5253,19 @@ where
                 None => report_step(addr, LiveStep::Record { phase, frame }),
             }
         }
-        // `CInputLogin::Analyze` (`G/input_login.cpp:1181-1182`), which serves the
+        // `CInputLogin::Analyze` (`G/input_login.cpp:1177-1182`), which serves the
         // login, select, and loading phases (`G/desc.cpp:515-519`).
+        LiveStep::Record { phase, frame }
+            if matches!(
+                phase,
+                ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading
+            ) && frame.header == HEADER_CG_LOGIN.value() =>
+        {
+            match seat {
+                Some(seat) => channel_password_login(session, addr, context, &seat, &frame).await,
+                None => report_step(addr, LiveStep::Record { phase, frame }),
+            }
+        }
         LiveStep::Record { phase, frame }
             if matches!(
                 phase,
@@ -6557,6 +6568,42 @@ struct ChannelSeat<'a> {
 /// the client key is installed (`SetSecurityKey`) and the login key is judged
 /// (`QUERY_LOGIN_BY_KEY`); on success `GC_EMPIRE`, `GC_LOGIN_SUCCESS`, and the select phase follow
 /// (`CInputDB::LoginSuccess`).
+///
+/// `CInputLogin::Login` (`G/input_login.cpp:101-151`): the password login on a Channel.
+/// The three refusals go out under the handshake key; past them the record's DB packet
+/// (`HEADER_GD_LOGIN`) has no handler in the checked-in server, so legacy sends nothing
+/// more and the descriptor waits. The password itself is never read: authentication by
+/// password is the auth listener's work, and the Channel answers only whether the gate
+/// stands. `false` closes the connection.
+async fn channel_password_login<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    _seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) = CgLogin::decode_frame(frame) {
+        warn!(%addr, %error, "Client sent a malformed LOGIN; closing");
+        return false;
+    }
+    let no_more_clients = context.refusals.shutdowned
+        || context.state.is_shutting_down()
+        || context.metrics.bars_clients();
+    let online = u32::try_from(context.clients.len()).unwrap_or(u32::MAX);
+    if let Err(refusal) = admit_password(
+        context.modes.test_server,
+        no_more_clients,
+        context.user_limit,
+        online,
+    ) {
+        return refuse_channel_login(session, addr, refusal).await;
+    }
+    true
+}
+
 async fn channel_login<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,

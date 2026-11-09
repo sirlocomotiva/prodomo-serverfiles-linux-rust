@@ -49773,3 +49773,42 @@ Gates (2026-11-08): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 cargo doc --workspace --no-deps --locked --offline`, and `legacy/` is clean. `rustfmt`
 and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards
 no `prodomo\_%` database remained. No ADR changed.
+
+## 480. The channel password login
+
+`cg.login.login` was the last `missing` login row: the 49-byte password record on a
+Channel (`CInputLogin::Login`, `G/input_login.cpp:101-151`). The live dispatch had no
+arm for it, so the record fell through to the main input and died silent; the only
+mention was the unwired router's `PasswordLoginUnsupported`. This slice routes it and
+ports the row with the scenario
+`a_channel_password_login_is_refused_version_or_waits_silent`.
+
+The checks are `admit_password` in `channel_login.rs`: the test-server gate first
+(`VERSION`), then the shared shutdown and user-limit pair (`SHUTDOWN`, `FULL`), in
+legacy order, all answered under the handshake key through the existing
+`refuse_channel_login`. `ChannelRefusal::Version` carries the new status. Past the
+gate the record waits silent: its DB packet (`HEADER_GD_LOGIN = 1`) has no handler —
+`ClientManager.cpp` dispatches only `HEADER_GD_LOGIN_BY_KEY`, and no DB file names
+`TLoginPacket` or the header — so legacy sends nothing more and the descriptor waits.
+The password itself is never read: authentication by password is the auth listener's
+work (argon2id, ADR-0003), and the Channel answers only whether the gate stands.
+
+The scenario's first half runs on `test_server = false`: the `VERSION` refusal arrives
+sealed under the setup key, and a `LOGIN2` on the same wire then logs in, proving the
+refusal leaves the connection open. The second half runs on the default config, where
+`test_server` is on (legacy ships it on, `config.cpp:72`), and asserts the wire stays
+quiet. The debugging detour is worth recording: the first draft ran the `VERSION` half
+on the default config and read nothing for 9 seconds, because the default is a test
+server and the gate stood open. The unit test pins the refusal order
+(`VERSION` before `SHUTDOWN` before `FULL`).
+
+`login_by_key` split into a send and `login_by_key_rest`, so the scenario can send the
+`LOGIN2` after the `VERSION` read on the same `Keyed`. The suite summed 5116 passed,
+0 failed in 46 targets.
+
+Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite, `cargo test --workspace --doc --locked --offline`, `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline`, the scenario's 8x flake check, and
+`legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
+was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

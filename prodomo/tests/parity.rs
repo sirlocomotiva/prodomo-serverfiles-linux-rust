@@ -843,6 +843,25 @@ fn a_login3_outside_the_auth_phase_closes_the_connection() {
     assert_eq!(client.expect_closed(), Vec::<u8>::new());
 }
 
+/// `HEADER_CG_LOGIN` (`game/packet.h:74`).
+const CG_LOGIN: u8 = 1;
+/// `TPacketCGLogin`: `BYTE header`, `char login[31]`, `char passwd[17]`
+/// (`game/packet.h:465`).
+const LOGIN_LEN: usize = 49;
+
+/// The 49 bytes of a client `LOGIN`, laid out by hand.
+fn client_login(login: &[u8], password: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_LOGIN];
+    let mut login_field = [0u8; 31];
+    login_field[..login.len()].copy_from_slice(login);
+    record.extend_from_slice(&login_field);
+    let mut password_field = [0u8; 17];
+    password_field[..password.len()].copy_from_slice(password);
+    record.extend_from_slice(&password_field);
+    assert_eq!(record.len(), LOGIN_LEN);
+    record
+}
+
 /// `HEADER_CG_LOGIN2` (`game/packet.h:75`).
 const CG_LOGIN2: u8 = 109;
 /// `TPacketCGLogin2`: `BYTE header`, `char login[31]`, `DWORD dwLoginKey`, `DWORD adwClientKey[4]`
@@ -989,6 +1008,12 @@ fn login_by_key(
     client_key: [u32; 4],
 ) -> Result<(u8, Vec<u8>), String> {
     keyed.send_login2(login, key, client_key);
+    login_by_key_rest(keyed)
+}
+
+/// [`login_by_key`] after its `LOGIN2` is on the wire: the empire byte and the character
+/// list, or the failure status.
+fn login_by_key_rest(keyed: &mut Keyed) -> Result<(u8, Vec<u8>), String> {
     let first = keyed.read(|header| match header {
         GC_EMPIRE => EMPIRE_LEN,
         GC_LOGIN_FAILURE => LOGIN_FAILURE_LEN,
@@ -1217,6 +1242,46 @@ fn assert_alpha(list: &[u8], port: u16) {
 /// of map 1's `server_attr`, and the first movable point `GetMovablePosition` finds around it is
 /// 100 east (`G/input_login.cpp:572-585`, `G/sectree_manager.cpp:789-812`).
 const ALPHA_ENTERS_AT: (i32, i32) = (470_100, 950_000);
+
+/// `cg.login.login`, `gc.login_failure`: a Channel `LOGIN` on a live server is refused
+/// `VERSION` under the handshake key, and the connection stays open for a `LOGIN2`, which
+/// logs in. On a test server (the default: legacy ships `test_server` on) the same `LOGIN`
+/// is answered with nothing: its DB packet has no handler in the checked-in server, so
+/// legacy sends nothing more.
+#[test]
+fn a_channel_password_login_is_refused_version_or_waits_silent() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    let (_auth, key) = login_key(&server, b"alice");
+
+    // LOGIN under the setup key is refused VERSION under the same key: no client key
+    // is installed, so the answer goes out where the question came in.
+    let mut first = Keyed::channel(server.channel(1));
+    first.send_record(&client_login(b"alice", b"whatever"));
+    let refusal = first.read(|header| {
+        assert_eq!(header, GC_LOGIN_FAILURE);
+        LOGIN_FAILURE_LEN
+    });
+    assert_eq!(failure_status(&refusal), "VERSION");
+    // The refusal leaves the connection open: a LOGIN2 on the same wire logs in.
+    first.send_login2(b"alice", key, CLIENT_KEY);
+    let back = login_by_key_rest(&mut first).expect("LOGIN2 still logs in");
+    assert_eq!(back.0, 0, "alice has no empire yet");
+    drop(server);
+
+    let configured = Server::start(binary(), database.url());
+    let mut silent = Keyed::channel(configured.channel(1));
+    silent.send_record(&client_login(b"alice", b"whatever"));
+    silent.quiet("a test server answers a password login with nothing");
+}
 
 /// `cg.login.login2`, `sys.login.by_key`, `gc.empire`, `gc.login_success`: a Channel `LOGIN2`
 /// carrying the login key, the login, and the client key of the auth login is answered on the

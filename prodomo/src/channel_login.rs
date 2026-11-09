@@ -53,10 +53,13 @@ pub const EMPIRE_START_MAP: [i32; 4] = [
     41, // Shinjo
 ];
 
-/// A reason the Channel login refuses `LOGIN2`. Each is sent as `HEADER_GC_LOGIN_FAILURE`, and
-/// the descriptor stays open.
+/// A reason the Channel login refuses `LOGIN2` or `LOGIN`. Each is sent as
+/// `HEADER_GC_LOGIN_FAILURE`, and the descriptor stays open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelRefusal {
+    /// A password login reached a Channel that is not a test server
+    /// (`CInputLogin::Login`, `G/input_login.cpp:114-121`).
+    Version,
     /// The login key is unknown, or the login or client key does not match its grant.
     NoId,
     /// Another Channel descriptor holds the login; it is kicked.
@@ -72,12 +75,35 @@ impl ChannelRefusal {
     #[must_use]
     pub const fn status(self) -> &'static [u8] {
         match self {
+            Self::Version => b"VERSION",
             Self::NoId => b"NOID",
             Self::Already => b"ALREADY",
             Self::Shutdown => b"SHUTDOWN",
             Self::Full => b"FULL",
         }
     }
+}
+
+/// The checks `CInputLogin::Login` makes before it asks the DB server for the account, in
+/// legacy order: the test-server gate, `g_bNoMoreClient`, then the user limit
+/// (`G/input_login.cpp:114-145`). All three answers go out under the handshake key, because a
+/// password login installs no client key.
+///
+/// `user_limit` at or below zero is unlimited; `online` counts every character in game.
+///
+/// # Errors
+///
+/// Returns the refusal legacy sends first.
+pub fn admit_password(
+    test_server: bool,
+    no_more_clients: bool,
+    user_limit: i32,
+    online: u32,
+) -> Result<(), ChannelRefusal> {
+    if !test_server {
+        return Err(ChannelRefusal::Version);
+    }
+    admit(no_more_clients, user_limit, online)
 }
 
 /// The checks `CInputLogin::LoginByKey` makes before it asks for the account, in legacy order:
@@ -441,10 +467,25 @@ mod tests {
 
     #[test]
     fn refusal_statuses_are_the_legacy_bytes() {
+        assert_eq!(ChannelRefusal::Version.status(), b"VERSION");
         assert_eq!(ChannelRefusal::NoId.status(), b"NOID");
         assert_eq!(ChannelRefusal::Already.status(), b"ALREADY");
         assert_eq!(ChannelRefusal::Shutdown.status(), b"SHUTDOWN");
         assert_eq!(ChannelRefusal::Full.status(), b"FULL");
+    }
+
+    #[test]
+    fn the_password_gate_stands_before_shutdown_and_full() {
+        assert_eq!(
+            admit_password(false, true, 1, 5),
+            Err(ChannelRefusal::Version)
+        );
+        assert_eq!(
+            admit_password(true, true, 1, 5),
+            Err(ChannelRefusal::Shutdown)
+        );
+        assert_eq!(admit_password(true, false, 5, 5), Err(ChannelRefusal::Full));
+        assert_eq!(admit_password(true, false, 5, 4), Ok(()));
     }
 
     #[test]
