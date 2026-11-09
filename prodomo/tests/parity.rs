@@ -34527,6 +34527,54 @@ fn server_target_info(vid: u32, race: u32, vnum: u32, count: u16, rarity: u32) -
     record
 }
 
+/// `data.item.ori_to_new` (`ITEM_MANAGER::ReadItemVnumMaskTable`,
+/// `G/item_manager_read_tables.cpp:938-953`; `GetVnum`, `G/item.h:106`): the mask table
+/// shows the ori vnum. The drop list names the new vnum 27004, the override file maps
+/// 27002 onto it, and the target window shows 27002 — the created item's proto is the
+/// new vnum's, but `GetVnum` answers the mask's. The file is read in place from the
+/// Locale folder, as `LoadLocaleFile` reads it (`G/input_db.cpp:887-932`).
+#[test]
+fn the_target_window_shows_the_masked_vnum() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(DOG_AT_ALPHA.as_bytes());
+    let dog_group = b"Group\tMaskDog\n{\n\tMob\t101\n\tType\tdrop\n\t1\t27004\t1\t1\n}\n";
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            (npc, &npc_text),
+            ("locale/europe/mob_drop_item.txt", dog_group),
+            ("locale/europe/ori_to_new_table.txt", b"27002 27004\n"),
+        ],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target_info_load(dog));
+    assert_eq!(
+        alpha.read_game(),
+        server_target_info(dog, 101, 27_002, 1, 10_000),
+        "the mask's vnum shows, not the created vnum"
+    );
+    alpha.quiet("the masked list is one entry");
+}
+
 /// `cg.game.target_info_load`, `gc.target_info` (`CInputMain::TargetInfoLoad`,
 /// `G/input_main.cpp:66-123`; `CreateDropItemVector`, `G/item_manager.cpp:915-1095`): the
 /// target window's drop list. The dog lists its `drop` rows and its one `kill` row, but not

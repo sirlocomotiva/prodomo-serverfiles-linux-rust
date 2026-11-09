@@ -49928,3 +49928,25 @@ Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 --offline`, the inventory test, `cargo clippy --workspace --all-targets --locked --offline --
 -D warnings`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 485. The masked vnum
+
+`data.item.ori_to_new` sat `missing` while its reader, its wiring and its consumer were all
+live. `gamedata::item_mask` reads the table (`ReadItemVnumMaskTable`,
+`G/item_manager_read_tables.cpp:938-953`), boot loads it into the game thread
+(`main.rs:9655`, `game_state.rs:713`), and the target-info list shows the mask's vnum
+(`target_info.rs:118`, `GetVnum`, `G/item.h:106`). What was missing was the proof. This
+slice is the scenario `the_target_window_shows_the_masked_vnum`, and the row moves to
+`ported`.
+
+The scenario overrides `ori_to_new_table.txt` with the one row `27002 27004` and the drop
+table with a dog group naming 27004: the window shows 27002 with the new vnum's count and
+rarity. Both vnums have owner protos (red and blue potions), so the list builds exactly as
+on the owner's data; only the mask row is synthetic. No game code changed.
+
+Gates (2026-11-09): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the scenario run, the inventory test, `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --locked --offline`, and `legacy/` is clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.

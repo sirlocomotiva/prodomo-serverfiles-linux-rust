@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-09, after ledger section 484 (four more dead server bytes).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 485
+Last reviewed: 2026-11-09, after ledger section 485 (the masked vnum).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 486
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -546,7 +546,8 @@ system, and the scenario sends all three arms (`INFO`, `REWARD`, `RANKING`). Sin
 encoder and a struct no sender calls, the third is named nowhere in the checked-in trees.
 Since 484 `gc.dungeon`, the hybridcrypt pair and `gc.login_success3` are `unused`: the
 dungeon arms need a quest call nobody makes, the crypt pair needs a `package/` dir the
-snapshot lacks, and byte 6's send writes byte 32 instead. The
+snapshot lacks, and byte 6's send writes byte 32 instead. Since 485 `data.item.ori_to_new`
+is `ported`: the target window shows the mask's vnum for a drop that names the new one. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
