@@ -10468,6 +10468,10 @@ fn is_effect(record: &[u8]) -> bool {
 
 /// A plain body armour of the owner's data: `LEVEL 0`, `value1` 12, `value5` 18.
 const SWAPPED_ARMOUR: u32 = 11_806;
+/// A shaman fan of the owner's data: `WEAPON_FAN`, `LEVEL 0`, no shaman anti flag.
+const WORN_SWORD: u32 = 7000;
+/// A fan-fit Halloween costume weapon: `COSTUME_WEAPON`, `value3` 5 (`WEAPON_FAN`).
+const SWORD_COSTUME: u32 = 40_106;
 /// A grade-1 sash, whose absorption legacy fixes at 1.
 const SASH: u32 = 85_001;
 
@@ -10699,6 +10703,155 @@ fn an_armour_is_worn_swapped_and_taken_off_and_the_store_follows() {
         &database,
         "(SELECT (part_main, part_sash) = (0, 1) FROM player WHERE name = 'Alpha')",
     );
+}
+
+/// `sys.item.costume`: a fan is worn, a costume weapon covers it, `/hide_costume 5`
+/// shows the fan again, and taking the weapon off first takes the costume off.
+///
+/// Alpha (a shaman of the owner's data) holds the fan (7000) at cell 0 and the
+/// fan-fit (`value3` 5) Halloween costume (40106) at cell 1, its `REAL_TIME` clock
+/// stamped a day out so the expiry tick leaves it alone. The weapon cell is
+/// `EWearPositions::Weapon` (4) and the costume-weapon cell 22, so the
+/// `CG_ITEM_MOVE` targets are 184 and 202. The enter waits out the revive affect's
+/// five seconds and drains its end; each move waits out the 1.5 s equip gate the
+/// last one re-armed.
+#[test]
+fn a_costume_weapon_covers_and_a_hide_unhides() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // The costume's `REAL_TIME` clock is stamped a day out, so the expiry tick leaves
+    // it alone; unstamped socket 0 (the epoch) would expire on the first tick.
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock runs forward")
+        .as_secs()
+        + 86_400;
+    for (id, pos, vnum, socket) in [(30, 0, WORN_SWORD, 0), (31, 1, SWORD_COSTUME, expiry)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT {id}, id, 1, {pos}, 1, {vnum}, {socket} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _character, quickslots, items) =
+        load_with_quickslots_in(&server, b"alice", 0, GERMAN);
+    assert!(quickslots.is_empty());
+    assert_eq!(items.len(), 2);
+    let waited = std::time::Instant::now();
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    drain_revive_end(&mut alpha, waited);
+    let look = |weapon: u32, attack: u8| {
+        let weapon = u16::try_from(weapon).expect("a part is a WORD");
+        Seen::Look([0, weapon, 0, 50132, 58870, 0], 100, attack)
+    };
+    let worn_look = |weapon: u32| look(weapon, 126);
+    let bare_look = |weapon: u32| look(weapon, 100);
+    // The sword goes on: the cell clears, the wear cell sets, and the weapon part
+    // shows the sword (besides the battle points the sword's values add). The drain
+    // starts before the send, so the burst's last strays cannot pollute the window.
+    alpha.send_record(&client_item_move(0, 184, 0));
+    let moved = read_a_move(&mut alpha, vid);
+    assert!(
+        moved.contains(&Seen::Set(0, 0)),
+        "the cell clears: {moved:?}"
+    );
+    assert!(
+        moved.contains(&Seen::Set(184, WORN_SWORD)),
+        "the wear cell sets: {moved:?}"
+    );
+    assert!(
+        moved.contains(&worn_look(WORN_SWORD)),
+        "the sword shows: {moved:?}"
+    );
+    // The costume covers it: the weapon part becomes the costume's vnum. The equip
+    // gate re-armed on the wear, so the move waits it out first.
+    std::thread::sleep(Duration::from_millis(1700));
+    alpha.send_record(&client_item_move(1, 202, 0));
+    let moved = read_a_move(&mut alpha, vid);
+    assert!(
+        moved.contains(&Seen::Set(1, 0)),
+        "the cell clears: {moved:?}"
+    );
+    assert!(
+        moved.contains(&Seen::Set(202, SWORD_COSTUME)),
+        "the costume cell sets: {moved:?}"
+    );
+    assert!(
+        moved.contains(&worn_look(SWORD_COSTUME)),
+        "the costume shows: {moved:?}"
+    );
+    hide_costume_weapon(&mut alpha);
+    // Taking the weapon off first takes the costume off: the costume lands at the
+    // first free cell, the weapon at its target, and the weapon part falls to 0.
+    // With the hide still on and no costume worn, the part the unequip's own update
+    // carries is 0 too — legacy's `GetPart` answers the banked part, which is 0 by
+    // then (`G/char.cpp:5409-5421`).
+    std::thread::sleep(Duration::from_millis(1700));
+    alpha.send_record(&client_item_move(184, 10, 0));
+    let moved = read_a_move(&mut alpha, vid);
+    assert!(
+        moved.contains(&Seen::Set(202, 0)),
+        "the costume clears: {moved:?}"
+    );
+    assert!(
+        moved.contains(&Seen::Set(0, SWORD_COSTUME)),
+        "the costume lands at the first free cell: {moved:?}"
+    );
+    assert!(
+        moved.contains(&Seen::Set(184, 0)),
+        "the weapon clears: {moved:?}"
+    );
+    assert!(
+        moved.contains(&Seen::Set(10, WORN_SWORD)),
+        "the weapon lands at its target: {moved:?}"
+    );
+    assert!(
+        moved.contains(&bare_look(0)),
+        "the weapon part falls: {moved:?}"
+    );
+}
+
+/// Past the move window and the revive affect's five seconds since `entered`, drained
+/// so the affect end's pair lands here and not in a move's window.
+fn drain_revive_end(alpha: &mut Keyed, entered: std::time::Instant) {
+    std::thread::sleep(Duration::from_millis(5200).saturating_sub(entered.elapsed()));
+    let (ends, quiet) = alpha.drain_game(Duration::from_millis(700), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    assert!(
+        ends.iter()
+            .filter(|r| !is_revive_end(r))
+            .all(|r| r[0] == GC_CHARACTER_UPDATE),
+        "only the revive end lands: {ends:02x?}"
+    );
+}
+
+/// `/hide_costume 5` past the 1.5 s move window: the hide chats
+/// `SetWeaponCostumeHidden 1` and the update carries the worn fan's look.
+fn hide_costume_weapon(alpha: &mut Keyed) {
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/hide_costume 5"));
+    assert_eq!(
+        alpha.read_game(),
+        a_command_line(b"SetWeaponCostumeHidden 1"),
+        "the hide chats"
+    );
+    let update = alpha.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    let parts: [u16; 6] = std::array::from_fn(|index| {
+        let at = 5 + 2 * index;
+        u16::from_le_bytes([update[at], update[at + 1]])
+    });
+    assert_eq!(parts[1], 7000, "the fan shows: {update:02x?}");
 }
 
 /// Ledger 264: `CG_ITEM_USE` of an `ITEM_QUEST` runs the item's own `use` script

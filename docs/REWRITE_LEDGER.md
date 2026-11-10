@@ -51410,3 +51410,30 @@ clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
 `RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+
+## 518. The weapon costume and the skin sweep
+
+`sys.item.costume` is `ported` and `sys.item.skin` is `unused`. No code changed: the
+cover switch, the hide mask and the take-off-first cascade were all live from earlier
+ledgers — only the scenario and the sweep were missing.
+
+The scenario is `a_costume_weapon_covers_and_a_hide_unhides`. Alpha, a shaman, holds
+the fan 7000 at cell 0 and the fan-fit Halloween costume 40106 (`value3` 5, `WEAPON_FAN`)
+at cell 1. Wearing the fan banks the weapon part; wearing the costume covers it
+(`ITEM_WEAPON` banks nothing with a costume worn, `COSTUME_WEAPON` banks the look,
+`G/item.cpp:1164-1320`); `/hide_costume 5` unhides past the 1.5 s move window
+(`SetWeaponCostumeHidden 1`, then the fan's look, mask bit 4, `G/char.cpp:5409-5419`);
+taking the weapon off first takes the costume off first (the costume lands at the
+first free cell, the weapon at its target, `G/char_item.cpp:919-924`), and the part
+falls to 0. The armour cover rides the same switch. Three scenario traps, each worth
+its line: the costume needs a `value3`-matching worn weapon or the move refuses
+silently; its `REAL_TIME` clock must be stamped (unstamped socket 0 is the epoch, and
+the expiry tick clears it on the first second); and the enter waits out the revive
+affect's five seconds, whose end pair otherwise lands in a move's window.
+
+The skin row died on a sweep: `__SKIN_SYSTEM__` is defined in
+`C/prodomodefines.h:198` but no game source names it — the sweep of `server/server`
+finds only the define. The controls are `ENABLE_NEW_PASSIVE_SKILL` and
+`__ENABLE_ADVANCE_SKILL_SELECT__`, which each hit game sources. Owner to confirm.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5259 passed, 1 failed in 46 targets — the failure is the known load flake `a_gm_aggregates_and_forgets_the_dogs_around` (a read timeout under load; passes alone in 12 s), not this slice; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean after splitting the scenario's revive drain and hide step into helpers (111/100 lines); `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The scenario passes 8 of 8. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
