@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 535 (the take-back).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 536
+Last reviewed: 2026-11-10, after ledger section 536 (there and back again).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 537
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -589,6 +589,7 @@ Since 532 `lua.pc.give_item2_select`, `lua.item.get_cell`, `lua.item.get_socket`
 Since 533 `lua.setleftimage`, `lua.settopimage`, `lua.getnpcid` and `lua.get_locale_base_path` are `ported`: the frame probe names the teacher's NPC id, misses an unknown name, shows the temp locale base, and frames a line with both image tags — a swapped-tags mutant dies on the suffix. The
 Since 534 `lua.target.npc`, `lua.target.pc`, `lua.target.id` and `lua.target.clear` are `ported`: the mark probe marks the clicker's VID under both spellings, says both ids, clears both marks, and says 0 twice — a wrong-quest mutant dies on the page. The
 Since 535 `lua.pc.remove_item`, `lua.pc.countitem` and `lua.pc.removeitem` are `ported`: the take-back probe gives five red potions, counts 5, takes 2 under the long spelling, counts 3, takes the rest under the short spelling, and counts 0 — a short-count mutant dies on the page. The
+Since 536 `lua.q.setstate` and `lua.q.set_state` are `ported`: three clicks walk the state probe from `start` to `away` under the short spelling and back under the long one — a dropped short spelling dies on the second click. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

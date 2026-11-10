@@ -51984,3 +51984,13 @@ with its quickslot sync, and the short counts 5, 3, 0 on the page. One mutant di
 remove one short breaks the counts.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5309 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 536. There and back again
+
+The two `q.*` spellings of `set_state` sat `partial`: bridged, but no loaded script calls
+either. `STATE_PROBE` holds both states: `three_clicks_walk_the_probe_there_and_back_again`
+clicks three times — `here`, `away`, `here` — proving the short spelling moves out and
+the long spelling moves back, each landing when its script ends. One mutant died: without
+the short spelling the second click still says `here`.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5309 passed, 1 failed in 46 targets (`a_grade_refine_spends_the_stones_and_lands_a_new_one`, a load flake, green alone); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

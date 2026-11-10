@@ -40666,6 +40666,24 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 536's state probe: the skill teacher (vnum 20300, bound but questless)
+/// says `here` in `start` and moves to `away` under the short spelling, then says
+/// `away` there and moves back under the long spelling.
+const STATE_PROBE: &[u8] = b"quest state_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('here')\n\
+    q.setstate('away')\n\
+    end\n\
+    end\n\
+    state away begin\n\
+    when 20300.click begin\n\
+    say('away')\n\
+    q.set_state('start')\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 535's take-back probe: the skill teacher (vnum 20300, bound but questless)
 /// gives five red potions, counts them under the short spelling, takes two under the
 /// long spelling, counts, takes the rest under the short spelling, and counts again.
@@ -41160,6 +41178,51 @@ fn a_click_gives_counts_and_takes_back_the_potions() {
         alice.read_game(),
         server_script(1, b"have=5[ENTER]left=3[ENTER]gone=0[ENTER][DONE]"),
         "the short counts"
+    );
+    alice.quiet("the step ends");
+}
+
+/// `lua.q.setstate` and `lua.q.set_state`: Beta clicks the skill teacher three
+/// times; the first says `here` and moves to `away` under the short spelling, the
+/// second says `away` and moves back under the long spelling, and the third says
+/// `here` again.
+#[test]
+fn three_clicks_walk_the_probe_there_and_back_again() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/state_probe.lua", STATE_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"here[ENTER][DONE]"),
+        "the start state says here"
+    );
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"away[ENTER][DONE]"),
+        "the short spelling moved away"
+    );
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"here[ENTER][DONE]"),
+        "the long spelling moved back"
     );
     alice.quiet("the step ends");
 }
