@@ -51852,3 +51852,25 @@ with the spiral's scenario. `lua.pc.remove_item` and `lua.pc.removeitem` stay
 for a scenario.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5302 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.
+
+## 528. The proven draw and skin
+
+No code changed and no scenario was written: two `partial` bridges were already
+proven by passing tests, and the mutants confirm each one.
+
+**`lua.number`.** The temple's kill table draws `number(1, 100)` ten times, and
+the world test `a_bodyguard_kill_on_the_temple_lays_the_scripts_passing_rows`
+pins the passing rows at seed 5636. A bridge answering the high bound lays
+nothing and kills the test (an always-low answer would pass the same eight rows,
+so the high mutant pins the class). A wire kill of the 218k-HP boss is out of
+reach, as ledger 524 records, so the world test proves it (owner decision,
+2026-10-14) — the same standing as the poison and fire rows.
+
+**`lua.setskin`.** One arm with the ported `set_skin`, now called over the wire:
+the attr67 dialog's empty-window click runs `setskin(NOWINDOW)` and ends `[DONE]`
+in skin 0. A bridge answering skin 1 kills `an_attr67_regist_waits_and_collects`.
+
+`setleftimage` and `settopimage` stay `partial`: the quest-folder sweep finds no
+owner caller (controls: the same sweep finds `setskin` in eight files).
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5302 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.
