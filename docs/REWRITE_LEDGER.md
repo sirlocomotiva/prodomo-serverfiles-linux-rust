@@ -52404,3 +52404,40 @@ skips whatever rides behind the success line.
 No game code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5321 passed, 0 failed in 46 targets), `cargo test --workspace --doc` (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 557. The reviver's second death
+
+`event.char_battle.dead_event` was `partial` for the party reviver, whose port (the 3 s
+wait, the stand-up, the once-flag) waited on a group no scenario stood. The scenario
+stands one: the probe ships a patched mob proto (dog 102 with `AI_FLAG` `REVIVE` and
+`SP_REVIVE` 100 — the owner's data tops out at 40, so no hosted mob revives
+deterministically), a probe group of 101 + 102, and a 1x1 `g` regen at the entrant's feet
+(the 10x10 box spawned the victim out of punch range).
+
+The first kill waits 75 Pulses and the dog stands back up at full hit points (re-targeted
+to 100%); the second kill waits 25, destroys it, and no third life rides the next 3 s.
+The stand-up mutant (destroy even past a reviver) kills the revive wait.
+
+The slice also settles `IsRevive`'s `Reward(false)` (`G/char_battle.cpp:1492`): it needs no
+gate. `Dead` consumes the exp (`SetExp(0)`, `:2894`) and nothing restores it — the stand-up
+sets hit points only — so the second death's `DistributeExp` finds nothing and `Reward`
+returns before any half. The unit test pins it: the first death lays gold and flies the
+orb, the second flies no orb and the ground stays as it was. An earlier revision of the
+slice ported the gate, then reverted it when the second death flew no orb; the comment at
+the `Reward` call records why.
+
+No game code changed.
+
+Two gate notes. The seed hunt for the unit test's `Pcg32` rewrote every seeded test in
+`fight.rs` through a global `sed`; the diff caught it (the boss split went 29 to 34) and
+each seed is restored — only the new test keeps 28. And the full suite flaked twice under
+load, two different single tests (`a_party_enters_the_forest_and_its_timer_sends_it_home`
+saw a VID-4 remove where the leaver's own should lead; `a_sort_gives_the_inventory_back_`
+`by_name_and_merges_the_stacks` missed its cooldown window), each green alone and absent
+from the other run; the receipt's run holds `--test-threads=8`. The clippy refactor after it (helpers
+hoisted out of the scenario, asserts identical) re-ran the scenario green, and the parity
+target's re-run passed it too — that re-run's own single flake
+(`a_grade_refine_spends_the_stones_and_lands_a_new_one`, a mid-run database read under
+parallel servers) is green alone, the third such unrelated single of the slice.
+
+Gates (2026-11-10): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5323 passed, 0 failed in 46 targets), `cargo test --workspace --doc` (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

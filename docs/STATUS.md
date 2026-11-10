@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 556 (the ore's freed name).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 557
+Last reviewed: 2026-11-10, after ledger section 557 (the reviver's second death).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 558
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -613,7 +613,9 @@ dismounts, and the unit test pins the handover. Since 554 the destroy timer's au
 (`event.item.item_destroy_event` stays `partial`, its gold arm still scenarioless): the
 scenario lays a sword from a full inventory and watches it go 2 s on. Since 555 `event.item.item_destroy_event` is `ported`: the gold scenario proves the
 last unwired lifetime, and every configured destroy clock now has its two-second proof. Since 556 `event.item.ownership_event` is `ported`: the dug ore's 15 s claim lapses
-in view, ending ledger 229p's D5 wait without a kill. The
+in view, ending ledger 229p's D5 wait without a kill. Since 557 `event.char_battle.dead_event` is `ported`: the party reviver's 3 s/1 s
+pair finally has its scenario, and `IsRevive`'s `Reward(false)` is shown pre-empted by the
+spent exp. One `partial` timer remains (`affect_event`). The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

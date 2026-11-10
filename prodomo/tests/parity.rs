@@ -14700,6 +14700,73 @@ fn vid_shown_at<'a>(inserts: impl IntoIterator<Item = &'a [u8]>, at: (i32, i32))
     u32::from_le_bytes(insert[1..5].try_into().expect("a VID"))
 }
 
+/// The revive probe's mob line: dog 102 with `AI_FLAG` `REVIVE` and `SP_REVIVE` 100, so
+/// its party search always passes (`G/char.cpp:8518`).
+fn revive_proto(owner: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in owner.split_inclusive(|&byte| byte == b'\n') {
+        if line.starts_with(b"102\t") {
+            let mut cells: Vec<&[u8]> = line
+                .strip_suffix(b"\r\n")
+                .expect("the owner's CRLF")
+                .split(|&byte| byte == b'\t')
+                .collect();
+            assert_eq!(cells.len(), 72, "the 102 line keeps its columns");
+            cells[7] = b"REVIVE";
+            cells[70] = b"100";
+            out.extend_from_slice(&cells.join(&b'\t'));
+            out.extend_from_slice(b"\r\n");
+        } else {
+            out.extend_from_slice(line);
+        }
+    }
+    out
+}
+
+/// The revive probe's group: 101 the victim, 102 the reviver (`G/mob_manager.cpp:255`).
+const REVIVE_GROUP: &str =
+    "\nGroup\tRevive_Probe\n{\n\tVnum\t39999\n\tLeader\trevive_victim\t101\n\t1\trevive_helper\t102\n}\n";
+
+/// The revive probe's regen: the group in the box the entrant stands in.
+const REVIVE_REGEN: &str = "g\t605\t540\t1\t1\t0\t0\t60s\t100\t1\t39999\n";
+
+/// A server whose dog 102 revives and whose map 1 stands the probe group at the entrant's
+/// feet: the patched proto, the probe group and the probe regen.
+fn revive_stage(database: &ScratchDatabase) -> Server {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata");
+    let proto = revive_proto(
+        &std::fs::read(root.join("proto/mob_proto.txt")).expect("the owner's mob proto"),
+    );
+    let mut group =
+        std::fs::read(root.join("locale/europe/group.txt")).expect("the owner's groups");
+    group.extend_from_slice(REVIVE_GROUP.as_bytes());
+    let mut regen = std::fs::read(root.join("locale/europe/map/metin2_map_a1/regen.txt"))
+        .expect("the owner's a1 regen");
+    regen.extend_from_slice(REVIVE_REGEN.as_bytes());
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            ("proto/mob_proto.txt", &proto),
+            ("locale/europe/group.txt", &group),
+            ("locale/europe/map/metin2_map_a1/regen.txt", &regen),
+        ],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    server
+}
+
+/// The VIDs the burst showed for the races, in burst order.
+fn vids_of_race(shown: &Shown, race: u16) -> Vec<u32> {
+    shown
+        .monsters
+        .iter()
+        .filter(|add| u16::from_le_bytes(add[22..24].try_into().expect("a race")) == race)
+        .map(|add| u32::from_le_bytes(add[1..5].try_into().expect("a VID")))
+        .collect()
+}
 /// A server whose map 1 has the `npc.txt` `lines` and no monster wanders, Alpha entered, its
 /// VID, what the burst showed it, and its revive ended by a swing where it stands, the client's
 /// `FUNC_ATTACK` move before its `CG_ATTACK`.
@@ -51610,4 +51677,240 @@ fn a_dug_ore_loses_its_diggers_name_fifteen_seconds_on() {
         owned_at.elapsed()
     );
     let _ = digger;
+}
+
+/// The revive probe entered: the staged server, Alpha keyed, her row, and the burst that
+/// showed the group — the swing ends the revive, as `alpha_swinging_by`'s does.
+fn revive_enter(database: &ScratchDatabase) -> (Server, Keyed, Listed, Entered) {
+    let server = revive_stage(database);
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let swing = client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    );
+    alpha.send_record(&swing);
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    (server, alpha, listed, entered)
+}
+
+/// The reviver's 3 s past `died`: the remove, then the insert of the same dog, re-targeted
+/// to full hit points.
+fn revive_stand_up(alpha: &mut Keyed, victim: u32, died: std::time::Instant) {
+    revive_next(
+        alpha,
+        &removal_of(victim),
+        Duration::from_secs(8),
+        "the dead dog goes",
+    );
+    assert!(
+        died.elapsed() >= Duration::from_millis(2_500),
+        "the reviver waits 75 Pulses: {:?}",
+        died.elapsed()
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let insert = loop {
+        let record = alpha
+            .read_fight_until(deadline)
+            .expect("the reviver stands the dog up");
+        if record[0] == GC_CHARACTER_ADD
+            && u32::from_le_bytes(record[1..5].try_into().expect("a VID")) == victim
+        {
+            break record;
+        }
+    };
+    assert_eq!(
+        u16::from_le_bytes(insert[22..24].try_into().expect("a race")),
+        101,
+        "the same dog stands"
+    );
+    alpha.send_record(&client_target(victim));
+    revive_next(
+        alpha,
+        &target_of(victim, 100, DOG_HP, DOG_HP, 0),
+        Duration::from_secs(5),
+        "the stood dog is full",
+    );
+}
+
+/// The second death's destroy: no orb past the spent exp, the remove 25 Pulses on (not
+/// the reviver's 75), and no third life in the 3 s after.
+fn revive_destroy(alpha: &mut Keyed, victim: u32, alpha_vid: u32) {
+    let mut orbless = true;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let died_again = loop {
+        let record = alpha
+            .read_fight_until(deadline)
+            .expect("the victim dies again");
+        if record == fly_of(FLY_EXP, victim, alpha_vid) {
+            orbless = false;
+        }
+        if record == dead_of(victim) {
+            break std::time::Instant::now();
+        }
+    };
+    assert!(orbless, "the spent exp flies no orb");
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let mut third_life = false;
+    loop {
+        let record = alpha.read_fight_until(deadline).expect("the destroy comes");
+        if record == removal_of(victim) {
+            break;
+        }
+        if record[0] == GC_CHARACTER_ADD
+            && u32::from_le_bytes(record[1..5].try_into().expect("a VID")) == victim
+        {
+            third_life = true;
+        }
+    }
+    assert!(
+        died_again.elapsed() >= Duration::from_millis(750),
+        "the dead dog lies 25 Pulses: {:?}",
+        died_again.elapsed()
+    );
+    assert!(
+        died_again.elapsed() < Duration::from_millis(2_500),
+        "not the reviver's 75: {:?}",
+        died_again.elapsed()
+    );
+    assert!(!third_life, "once revived stays dead");
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while let Some(record) = alpha.read_fight_until(deadline) {
+        assert!(
+            record[0] != GC_CHARACTER_ADD
+                || u32::from_le_bytes(record[1..5].try_into().expect("a VID")) != victim,
+            "no third life"
+        );
+    }
+}
+
+/// The next fight record matching `want`, skipping the reviver's party assist.
+fn revive_next(alpha: &mut Keyed, want: &[u8], within: std::time::Duration, why: &str) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let record = alpha
+            .read_fight_until(deadline)
+            .unwrap_or_else(|| panic!("{why}"));
+        if record == want {
+            return record;
+        }
+    }
+}
+
+/// The probe victim punched to a stun: the attack, the damage, the fallen hit points and
+/// the stun, strays skipped.
+fn revive_punch_to_stun(alpha: &mut Keyed, victim: u32, why: &str) {
+    alpha.send_record(&client_attack(victim));
+    revive_next(
+        alpha,
+        &damage_info(victim, DAMAGE_NORMAL, PUNCH_ON_THE_DOG),
+        Duration::from_secs(5),
+        &format!("{why} lands"),
+    );
+    revive_next(
+        alpha,
+        &target_of(victim, 0, 0, DOG_HP, 0),
+        Duration::from_secs(5),
+        "the hit points fall",
+    );
+    revive_next(
+        alpha,
+        &stun_of(victim),
+        Duration::from_secs(5),
+        "the stun lands",
+    );
+}
+
+/// `event.char_battle.dead_event`'s party reviver (`G/char_battle.cpp:529-541`, `:1599-1610`):
+/// the probe group stands 101 with its reviver 102; the first kill waits 3 s and the dog
+/// stands back up at full hit points, and the second kill waits 1 s and destroys it — the
+/// exp already spent, no orb and no more gold (`SetExp(0)`, `:2894`, pre-empts `Reward(false)`).
+/// The row turns `ported`: the last `partial` timer closes.
+#[test]
+fn a_revived_dog_stands_back_up_once_and_dies_for_good_the_second_time() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, mut alpha, listed, entered) = revive_enter(&database);
+    let _ = server;
+    let ones = vids_of_race(&entered.shown, 101);
+    let twos = vids_of_race(&entered.shown, 102);
+    assert_eq!(ones.len(), 1, "the probe victim stands: {ones:?}");
+    assert_eq!(twos.len(), 1, "the probe reviver stands: {twos:?}");
+    let (victim, reviver) = (ones[0], twos[0]);
+    let _ = reviver;
+
+    // The first kill: the punch, the stun, and 3 s on the death.
+    alpha.send_record(&client_target(victim));
+    revive_next(
+        &mut alpha,
+        &target_of(victim, 100, DOG_HP, DOG_HP, 0),
+        Duration::from_secs(5),
+        "the victim targets at full",
+    );
+    let alpha_vid = listed.id;
+    let _ = listed;
+    revive_punch_to_stun(&mut alpha, victim, "the punch");
+    revive_next(
+        &mut alpha,
+        &ownership_of(alpha_vid, victim),
+        Duration::from_secs(5),
+        "the claim lands",
+    );
+    revive_next(
+        &mut alpha,
+        &target_of(0, 0, 0, 0, 0),
+        Duration::from_secs(8),
+        "the stun ends",
+    );
+    revive_next(
+        &mut alpha,
+        &ownership_of(0, victim),
+        Duration::from_secs(5),
+        "the claim clears",
+    );
+    revive_next(
+        &mut alpha,
+        &point_change(alpha_vid, POINT_EXP, 0, 0),
+        Duration::from_secs(5),
+        "the empty exp record",
+    );
+    revive_next(
+        &mut alpha,
+        &fly_of(FLY_EXP, victim, alpha_vid),
+        Duration::from_secs(5),
+        "the exp orb",
+    );
+    revive_next(
+        &mut alpha,
+        &dead_of(victim),
+        Duration::from_secs(5),
+        "the victim dies",
+    );
+    let died = std::time::Instant::now();
+
+    revive_stand_up(&mut alpha, victim, died);
+
+    // The second kill: the punch, the stun, and 3 s on the death — with no orb, the exp
+    // spent — then 1 s on the destroy, and no third life.
+    revive_punch_to_stun(&mut alpha, victim, "the second punch");
+    revive_next(
+        &mut alpha,
+        &target_of(0, 0, 0, 0, 0),
+        Duration::from_secs(8),
+        "the stun ends again",
+    );
+    revive_destroy(&mut alpha, victim, alpha_vid);
 }

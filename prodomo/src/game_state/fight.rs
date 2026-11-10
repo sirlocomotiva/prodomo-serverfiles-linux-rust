@@ -1710,7 +1710,9 @@ impl GameState {
         // and neither spawns on a hosted map — so the exp, gold and item halves run, unless
         // a guard's swing set `NO_REWARD` (`:1475`), which skips them all, or the killer is
         // a PC whose guild fights a field war (`:1477`), which skips them with a throttled
-        // line (`:1501-1507`).
+        // line (`:1501-1507`). `IsRevive`'s `Reward(false)` (`:1492`) needs no gate: `Dead`
+        // consumes the exp (`SetExp(0)`, `:2894`), so a revived monster's second death
+        // finds none and `Reward` returns before any half.
         let no_reward = self
             .npc_combat
             .get(&vid)
@@ -2814,6 +2816,55 @@ mod tests {
         assert_eq!(world.npc_combat[&ME].dead_due, Some(P0 + 250));
         world.process_pulse(P0 + 250);
         assert!(world.npc_by_vid(ME).is_none(), "the second death destroys");
+    }
+    /// A revived monster's second death pays nothing (`G/char_battle.cpp:1492`): the first
+    /// death lays the gold and flies the orb, consuming the exp (`SetExp(0)`, `:2894`); past
+    /// the stand-up the second death finds none, so `Reward` returns before any half and
+    /// the ground stays as it was — `IsRevive`'s `Reward(false)` needs no gate.
+    #[test]
+    fn a_revived_monsters_second_death_pays_nothing() {
+        use gamedata::mob_proto::AIFLAG_REVIVE;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut victim = a_monster(1);
+        victim.exp = 75;
+        victim.fight.level = 10;
+        victim.fight.gold_range = [100, 100];
+        let mut follower = a_monster(MAX_HP);
+        follower.vid = ME + 1;
+        follower.x = SPOT.0 + 100;
+        follower.leader = Some(ME);
+        follower.ai_flags |= AIFLAG_REVIVE;
+        follower.fight.revive_point = 100;
+        let mut world = a_field_on(&clock, vec![victim, follower], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.dice = Pcg32::new(28, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut inbox);
+        world.process_pulse(P0 + 75);
+        let first = drained(&mut inbox);
+        assert!(
+            first.iter().any(|record| record == &fly(1)),
+            "the first death flies the orb: {first:02x?}"
+        );
+        let laid = world.ground.len();
+        assert!(laid >= 1, "the first death lays the gold");
+        world.process_pulse(P0 + 150);
+        drained(&mut inbox);
+        assert!(world.npc_combat[&ME].revived, "the stand-up ran");
+        world.npc_mut(ME).expect("the monster stands").hp = 1;
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut inbox);
+        world.process_pulse(P0 + 225);
+        let second = drained(&mut inbox);
+        assert!(
+            !second.iter().any(|record| record == &fly(1)),
+            "the second death flies no orb: {second:02x?}"
+        );
+        assert_eq!(world.ground.len(), laid, "and lays no more gold");
     }
     /// (`m_map_kDamage`, `G/char_battle.cpp:2407-2423`); a blocked hit writes nothing.
     #[test]
