@@ -153,6 +153,7 @@ mod shaman;
 mod ship;
 mod shop;
 mod shutdown;
+mod siege_war;
 mod skill_admin;
 mod smith_refine;
 mod socket_item;
@@ -1000,6 +1001,9 @@ pub struct GameState {
     minds: mob_ai::Minds,
     /// The Ochao temple's rooms and VIDs. See [`temple_ochao`].
     temple_ochao: temple_ochao::TempleOchao,
+    /// The siege and kingdom wars' scores (`m_bSiegeScore`, `m_aKingdomWarScore`,
+    /// `G/event_manager.h:146-148`). See [`siege_war`].
+    siege_war: siege_war::SiegeWar,
     /// What each non-player keeps of its fight: its killer, its owner and its events. See
     /// [`fight`].
     npc_combat: HashMap<u32, fight::NpcCombat>,
@@ -3517,6 +3521,9 @@ impl GameState {
         // after the show, so the body's map is placed and the list names its lands.
         // The lines ride the burst before the time record.
         let land_lines = self.land_list_lines(vid);
+        // `SendKingdomWarScorePacket` (`G/input_login.cpp:680-683`) runs after the
+        // land list: an entrant on 103 while the war runs hears its words.
+        let kingdom_line = self.kingdom_score_line(vid);
         let switchbot_lines = self.switchbot_report(vid);
         // `ch->AdvanceSkillSelect()` (`G/input_login.cpp:723-725`,
         // `__ENABLE_ADVANCE_SKILL_SELECT__`): the window line for an ungrouped
@@ -3532,6 +3539,7 @@ impl GameState {
             letters_event,
             fish_lines,
             land_lines,
+            kingdom_line,
             switchbot_lines,
             observer: self.is_observing(vid),
             landed: None,
@@ -6097,6 +6105,7 @@ impl PulseProcessor for GameState {
         self.run_ship_ticks(pulse);
         self.run_meley_ticks(pulse);
         self.run_temple_ochao(pulse);
+        self.run_war_home(pulse);
         self.run_gaya_ticks(pulse);
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);

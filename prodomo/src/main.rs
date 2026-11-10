@@ -2516,6 +2516,7 @@ async fn entering_burst(
             letters_event: shown.letters_event,
             fish_lines: shown.fish_lines,
             land_lines: shown.land_lines,
+            kingdom_line: shown.kingdom_line,
             switchbot_lines: shown.switchbot_lines,
         },
         channel,

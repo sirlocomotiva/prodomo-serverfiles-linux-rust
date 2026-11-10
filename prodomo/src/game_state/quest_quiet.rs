@@ -470,13 +470,22 @@ impl GameState {
     /// and the switch falls through; so is an event whose state already holds, as
     /// legacy's early return does. Else the flag takes the state, and the exp and
     /// loot arms grant their empire privs (`SetExperienceEvent`, `SetItemDropEvent`,
-    /// `:928-982`); every other arm waits for its system.
-    fn start_game_event(&mut self, index: i32, value0: i32, value1: i32) {
+    /// `:928-982`); the siege and kingdom arms stand their wars (`SetSiegeWarEvent`,
+    /// `SetKingdomWarEvent`, `:1531-1680`); every other arm waits for its system.
+    pub(super) fn start_game_event(&mut self, index: i32, value0: i32, value1: i32) {
         let _ = value1;
         let Some(flag) = event_flag_name(index) else {
             return;
         };
         if self.manager_event_flag(flag) != 0 {
+            return;
+        }
+        if index == 13 {
+            self.start_siege_war();
+            return;
+        }
+        if index == 14 {
+            self.start_kingdom_war();
             return;
         }
         self.set_event_flag(flag, 1);
@@ -491,12 +500,21 @@ impl GameState {
 
     /// `_end_event` (`G/questlua_global.cpp:1668-1686`) after the step: an index no
     /// event has, or whose state already cleared, is quiet. Else the flag clears,
-    /// and the exp and loot arms chat their end.
-    fn end_game_event(&mut self, index: i32) {
+    /// and the exp and loot arms chat their end; the siege and kingdom arms end
+    /// their wars (`SetSiegeWarEvent`, `SetKingdomWarEvent`, `:1566-1726`).
+    pub(super) fn end_game_event(&mut self, index: i32) {
         let Some(flag) = event_flag_name(index) else {
             return;
         };
         if self.manager_event_flag(flag) == 0 {
+            return;
+        }
+        if index == 13 {
+            self.end_siege_war();
+            return;
+        }
+        if index == 14 {
+            self.end_kingdom_war();
             return;
         }
         self.set_event_flag(flag, 0);

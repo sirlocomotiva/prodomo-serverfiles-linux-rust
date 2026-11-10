@@ -51574,3 +51574,56 @@ all `ITEM_UNIQUE` on the owner's data) refuses with `[LS;467]`
 in the world. Owner to confirm (question 65).
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5278 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 522. The siege and kingdom wars
+
+`sys.event.manager` carries its war arms (13-14); `gc.event_kw_score` is `ported`;
+`event.event_manager.warp_all_to_village_event` is `partial`.
+
+Both wars run on map 103 (`metin2_map_t1`, in the owner's index, hosted by every
+Channel). The siege start stands the three kingdom stones (8020-8022) at the base
+plus offsets on every Channel hosting 103, clears the defeat count and the three
+score flags, chats the start and raises `siege_war_event`
+(`SetSiegeWarEvent(true)`, `G/event_manager.cpp:1531-1565`). A stone a PC kills on
+103 chats its empire's line, counts the defeat, queues that empire's 3 s home
+warp, and on the second defeat writes its score flag at once, then ends the war
+(`OnDead`'s stone arms, `:833-923`). The end pays each empire 25, 50 or 100 exp
+(the winner's 3 also 50 loot) for 48 hours by rank — an undefeated empire takes
+the `m_bSiegeScore + 1` fallback — clears the flags, chats the end, queues the
+60 s home warp, kills the monsters, stones and veins on 103 (`FKillSectree`,
+`:191-203`), and chats the map the teleport line (`:1566-1658`). The kingdom
+start zeroes the four score rows and chats the start; a player a PC of another
+empire kills on 103 counts one for the killer's empire and fans the score
+record to every PC on 103; the end pays by the sorted rows' positions
+(all-empires holds 0 and sorts first, so the kingdoms take 1-3), clears the
+rows, chats the end, queues the 60 s warp and chats the teleport line
+(`:1662-1730`). An entrant on 103 while the kingdom war runs hears the score
+record ahead of the time record (`G/input_login.cpp:680-683`).
+
+The hooks sit where legacy puts them: the map gate is `Dead`'s
+(`G/char_battle.cpp:1364-1367`), the PC-killer gate is `OnDead`'s own (`:803`),
+so the quest and `FKillSectree` deaths stay quiet, and the warps fire on the
+Pulse with the empire filter and the empire-0 skip of `FWarpAllToVillage`
+(`:133-166`). `RequestSetEventFlag` writes the flag directly: the DB peer is
+retired (ADR-0001). The 48-hour grants and their notices are `give_empire_priv`'s.
+
+Coverage: `a_click_starts_and_ends_the_siege_and_kingdom_wars` starts both wars
+and ends both unfought over the wire (both starts, the fallback rank-1 pays,
+the scoreless-sort position pays with the winner's loot, both ends); the
+kingdom scenario's kill is a real cross-empire punch kill on 103 with the
+scoreless burst records, the 1/0/0 fan on both and the scored end with the
+teleport line on 103 only; the siege scenario reads all three stone inserts at
+the base plus offsets and drains every in-view death (release, dead, release,
+removal — a stone carries no sync, so its releases stay out) before the
+teleport line. The stone-defeat kill, the 3 s warp order with its destination
+and empire-0 skip, the killerless silence and the scored second-defeat end are
+unit-tested in the state: the 2.9M-HP stone is unkillable over the wire in
+reasonable time, and no scenario waits out the 60 s fire, so the warp timer is
+`partial`.
+
+Two traps, each worth its line: the kingdom end also chats the teleport line
+(`:1726`), which the first draft omitted; and the test client's burst buckets
+monster and stone inserts under `monsters`, not `inserts` — the stones stood
+all along.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5287 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets` clean after lifting two mid-test imports and splitting the two long scenarios' seeds and end readers into helpers; `cargo doc` clean. The mutation sweep kills 4 of 4: the inverted same-empire check, the second-defeat threshold, the dropped fallback rank, and the skipped pay position. Afterwards no `prodomo\_%` database remained. No ADR changed.

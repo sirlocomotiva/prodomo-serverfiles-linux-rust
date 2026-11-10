@@ -856,6 +856,16 @@ impl GameState {
         }
         let agreed_pvp = self.pvp_dead(vid, self.pvp_pid_of(killer.vid));
         let arena_duel = self.arena_on_dead(killer.vid, vid);
+        // `OnDead`'s kingdom arm (`G/event_manager.cpp:807-828`, gated by
+        // `G/char_battle.cpp:1364-1367`): a player a PC kills on 103 while the war
+        // runs counts for the killer's empire and fans the score.
+        let on_war = self
+            .bodies
+            .get(&vid)
+            .is_some_and(|body| body.map == super::siege_war::WAR_MAP);
+        if on_war && self.event_rate(b"kingdom_war_event") != 0 {
+            self.kingdom_kill(killer.vid, vid);
+        }
         // The killer's no-NPC `kill` scripts still run during an arena death.
         self.raise_quest_kill(vid.raw(), killer.vid, 0);
         self.guild_war_kill(killer.vid, vid);

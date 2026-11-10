@@ -1418,6 +1418,10 @@ pub struct BurstAfter {
     /// The map's guild lands: each owned land's NAME, then the one list
     /// (`CManager::SendLandList`, `G/building.cpp:938-989`).
     pub land_lines: Vec<Vec<u8>>,
+    /// The kingdom war's score record (`G/input_login.cpp:680-683`): `Some` with the
+    /// record for an entrant on 103 while the war runs. The burst carries it after
+    /// the land lines, where legacy sends it after them.
+    pub kingdom_line: Option<Vec<u8>>,
     /// The switchbot report: the attribute info, then the table when the character
     /// has one (`CSwitchbotManager::EnterGame`, `G/refactorized_switchbot.cpp:748-761`).
     pub switchbot_lines: Vec<Vec<u8>>,
@@ -1484,9 +1488,13 @@ pub fn enter_game_burst(
     let mut out = Vec::with_capacity(3 + after.hide_lines.len() + after.land_lines.len());
     out.extend(after.hide_lines);
     // `CManager::SendLandList` (`G/input_login.cpp:676`) runs after the guild-war
-    // send and before the time record; the marriage and kingdom-war records it sits
-    // among belong to unported systems, so the land lines ride directly before time.
+    // send and before the time record; the marriage record it sits among belongs to
+    // an unported system. The kingdom-war score (`:680-683`) rides after the land
+    // lines, where legacy sends it after them.
     out.extend(after.land_lines);
+    if let Some(line) = after.kingdom_line {
+        out.push(line);
+    }
     out.push(encoded(
         &mut GcHeaderAndDword::new(HEADER_GC_TIME.value(), now),
         "the time record",
@@ -2392,6 +2400,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2426,6 +2435,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2514,6 +2524,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2560,6 +2571,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2592,6 +2604,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             4,
@@ -2626,6 +2639,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2669,6 +2683,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2697,6 +2712,7 @@ mod tests {
                 letters_event: true,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2722,6 +2738,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2873,6 +2890,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2903,6 +2921,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -2929,6 +2948,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -3009,6 +3029,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -3044,6 +3065,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,
@@ -3075,6 +3097,7 @@ mod tests {
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
+                kingdom_line: None,
                 switchbot_lines: Vec::new(),
             },
             1,

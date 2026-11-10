@@ -1797,6 +1797,7 @@ fn game_len(header: u8) -> usize {
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
         GC_TIME => TIME_LEN,
+        GC_EVENT_KW_SCORE => 1 + 2 * 3,
         GC_CHANNEL => CHANNEL_LEN,
         GC_POINT_CHANGE => POINT_CHANGE_LEN,
         GC_GOLD_CHANGE => GOLD_CHANGE_LEN,
@@ -2308,6 +2309,48 @@ fn enter_game_view_guilded(
 /// ([`read_login_event_blocking`]).
 fn read_login_event(keyed: &mut Keyed) {
     let _marks = read_login_event_blocking(keyed, 0, None);
+}
+
+/// [`read_login_event`] while the siege war runs: the war's letter and title ride
+/// between `dungeon_info`'s line and the hides, in quest order.
+fn read_login_event_siege(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    read_letter(keyed, 15, b"Siege War - Attack and Defend ", "the war");
+    read_login_lines_hiding_after_dungeon(keyed, empire, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
+
+/// [`read_login_event`] while the kingdom war runs: the war's letter and title ride
+/// between `dungeon_info`'s line and the hides, in quest order.
+fn read_login_event_kingdom(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    read_letter(keyed, 16, b"Kingdom War Event ", "the war");
+    read_login_lines_hiding_after_dungeon(keyed, empire, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
 }
 /// [`read_login_event`] past the board's line: the rank lines and the rest, for an
 /// entrant whose login line an earlier read consumed (the Shared Channel's
@@ -2942,6 +2985,80 @@ fn enter_game_shown(keyed: &mut Keyed) -> Entered {
     let info = keyed.read_game();
     assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
     finish_enter_game(keyed, add, info)
+}
+
+/// [`enter_game_shown`] for an entrant on 103 while the kingdom war runs: the
+/// burst carries the score record after the land lines, where legacy sends it
+/// after them (`G/input_login.cpp:680-683`).
+fn enter_game_shown_kingdom(keyed: &mut Keyed, scores: [u16; 3]) -> Entered {
+    keyed.send_record(&client_enter_game());
+    let add = keyed.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = keyed.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    finish_enter_game_kingdom(keyed, add, info, scores)
+}
+
+/// [`finish_enter_game`] with the kingdom score record between the land lines
+/// and the time record.
+fn finish_enter_game_kingdom(
+    keyed: &mut Keyed,
+    add: Vec<u8>,
+    info: Vec<u8>,
+    scores: [u16; 3],
+) -> Entered {
+    assert_eq!(
+        info[69], keyed.language,
+        "bLanguage from the descriptor: the language the auth login chose"
+    );
+    let own_walk = walk_mode_of(&add[1..5]);
+    if keyed.walking {
+        assert_eq!(keyed.read_game(), own_walk, "a spent stamina walks");
+    }
+    let (shown, affect) = read_shown(keyed);
+    let affect = revive_add(keyed, affect);
+    assert!(
+        !shown.records.contains(&own_walk),
+        "its own walk mode once at most"
+    );
+    let update = shown
+        .update
+        .as_deref()
+        .expect("the entrant's GC_CHARACTER_UPDATE follows the map's records");
+    assert_eq!(
+        update.len(),
+        CHARACTER_UPDATE_LEN,
+        "no wSize: a fixed record"
+    );
+    assert_eq!(&update[1..5], &add[1..5], "dwVID is the entrant's own");
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    read_hide_restore(keyed, [false; 5]);
+    let lands = read_land_lines(keyed);
+    let mut score = vec![GC_EVENT_KW_SCORE];
+    for word in scores {
+        score.extend_from_slice(&word.to_le_bytes());
+    }
+    assert_eq!(
+        keyed.read_game(),
+        score,
+        "the kingdom score rides the burst"
+    );
+    assert_eq!(keyed.read_game()[0], GC_TIME);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
+    let window = read_priv_run(keyed);
+    let report = read_fish_report(keyed);
+    read_switchbot_report(keyed);
+    enter_war_list(keyed);
+    Entered {
+        add,
+        info,
+        shown,
+        affect,
+        report,
+        lands,
+        window,
+    }
 }
 
 /// [`enter_game_shown`] for a master whose login walk carries `members` member LOGINs:
@@ -36373,6 +36490,8 @@ fn an_attr67_close_shuts_the_window() {
 const CG_REQUEST_EVENT_DATA: u8 = 0x75;
 /// `HEADER_GC_EVENT_INFO` (0x9b).
 const GC_EVENT_INFO: u8 = 0x9b;
+/// `HEADER_GC_EVENT_KW_SCORE` (0x9d): the header and three kingdom words.
+const GC_EVENT_KW_SCORE: u8 = 0x9d;
 
 /// A `CG_REQUEST_EVENT_DATA` for 0-based `month`.
 fn client_request_event_data(month: u8) -> Vec<u8> {
@@ -48801,4 +48920,632 @@ fn a_used_toggle_summons_its_buff_follower_and_casts() {
         "the follower goes: {gone:02x?}"
     );
     drop(alice);
+}
+
+/// Ledger 522's war probe: the skill teacher (vnum 20300, bound but questless)
+/// answers a click by starting the siege, killing two stones is the GM's work,
+/// so the probe starts and ends the siege and the kingdom wars in turn.
+const WAR_PROBE: &[u8] = b"quest war_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    start_event(13)\n\
+    end_event(13)\n\
+    start_event(14)\n\
+    end_event(14)\n\
+    say('wars run')\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `sys.event.manager`'s siege and kingdom arms (`SetSiegeWarEvent`,
+/// `SetKingdomWarEvent`, `G/event_manager.cpp:1531-1726`): the click starts both
+/// wars, then ends both — the start lines, the fallback rank-1 pay, the kingdom
+/// position pay, both end lines — and the dialog lands.
+#[test]
+fn a_click_starts_and_ends_the_siege_and_kingdom_wars() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/war_probe.lua", WAR_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"wars run[ENTER][DONE]"),
+        "the dialog"
+    );
+    // The quiet queue runs the starts before the ends, so both wars start
+    // before either ends.
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Siege War Event has started. Coordinate with the kingdom to become victorious."
+        ),
+        "the siege start"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Kingdom War Event has started. Sharpen your weapons and join the battlefield."
+        ),
+        "the kingdom start"
+    );
+    // No stone died, so every empire's score is 0 and each takes the
+    // `m_bSiegeScore + 1` fallback rank 1: 25 exp, Shinsoo first, then Chunjo,
+    // then Jinno.
+    for empire in [b"[LS;793]", b"[LS;794]", b"[LS;795]"] {
+        let mut exp = b"[LS;724;".to_vec();
+        exp.extend_from_slice(empire);
+        exp.extend_from_slice(b";[LS;1040];25]");
+        assert_eq!(
+            alice.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, 1, &exp),
+            "the fallback rank's exp"
+        );
+    }
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Siege War Event has ended. Thank you for participating!"
+        ),
+        "the siege end"
+    );
+    // Nobody stands on 103, so the siege's teleport line has no hearer.
+    // All four rows hold 0, so the stable sort keeps empire order: all-empires
+    // first (skipped), then Shinsoo, Chunjo and Jinno take positions 1-3.
+    for (empire, value) in [
+        (b"[LS;793]".as_slice(), b"25".as_slice()),
+        (b"[LS;794]".as_slice(), b"50".as_slice()),
+        (b"[LS;795]".as_slice(), b"100".as_slice()),
+    ] {
+        let mut exp = b"[LS;724;".to_vec();
+        exp.extend_from_slice(empire);
+        exp.extend_from_slice(b";[LS;1040];");
+        exp.extend_from_slice(value);
+        exp.extend_from_slice(b"]");
+        assert_eq!(
+            alice.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, 1, &exp),
+            "the position's exp"
+        );
+    }
+    let loot = b"[LS;724;[LS;795];[LS;1038];50]".to_vec();
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, &loot),
+        "the winner's loot"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Kingdom War Event has ended. Thank you for participating!"
+        ),
+        "the kingdom end"
+    );
+    alice.quiet("the step ends");
+}
+
+/// Ledger 522's kingdom probe: the skill teacher (vnum 20300) starts the kingdom
+/// war on the first click and ends it on the second, the quest flag remembering
+/// which.
+const WAR_PROBE_KINGDOM: &[u8] = b"quest war_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    if pc.getqf('war_on') == 0 then\n\
+    start_event(14)\n\
+    pc.setqf('war_on', 1)\n\
+    say('kingdom runs')\n\
+    else\n\
+    end_event(14)\n\
+    say('kingdom over')\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Channel 1 with the war map, and the Shared Channel, for the kingdom kill.
+fn war_103_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 3, 103],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// Read the kingdom war's scored end after the second click: the three position
+/// pays, the winner's loot
+/// and the end line, draining past the kill's fight fallout; then the teleport
+/// line on the two on 103. One Shinsoo kill sorts last of the four rows, so
+/// Chunjo takes position 1, Jinno 2 and Shinsoo 3 with the loot.
+fn read_kingdom_end(carol: &mut Keyed, alice: &mut Keyed, bob: &mut Keyed) {
+    let end_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    for (watcher, note, hue) in [
+        (&mut *carol, "carol", 3),
+        (&mut *alice, "alice", 1),
+        (&mut *bob, "bob", 2),
+    ] {
+        let mut pays = Vec::new();
+        for (empire, value) in [
+            (b"[LS;794]".as_slice(), b"25".as_slice()),
+            (b"[LS;795]".as_slice(), b"50".as_slice()),
+            (b"[LS;793]".as_slice(), b"100".as_slice()),
+        ] {
+            let mut exp = b"[LS;724;".to_vec();
+            exp.extend_from_slice(empire);
+            exp.extend_from_slice(b";[LS;1040];");
+            exp.extend_from_slice(value);
+            exp.extend_from_slice(b"]");
+            pays.push(chat_packet(CHAT_TYPE_NOTICE, hue, &exp));
+        }
+        pays.push(chat_packet(
+            CHAT_TYPE_NOTICE,
+            hue,
+            b"[LS;724;[LS;793];[LS;1038];50]",
+        ));
+        pays.push(chat_packet(
+            CHAT_TYPE_NOTICE,
+            hue,
+            b"Kingdom War Event has ended. Thank you for participating!",
+        ));
+        for (at, pay) in pays.iter().enumerate() {
+            let (seen, got) = read_until_record_keeping(watcher, pay, end_deadline);
+            assert!(
+                seen.iter()
+                    .all(|record| matches!(record[0], GC_DAMAGE_INFO | GC_AFFECT_ADD)),
+                "only fight fallout queues ahead on {note}: {seen:02x?}"
+            );
+            assert_eq!(got, *pay, "pay {at} on {note}");
+        }
+    }
+    carol.quiet_allowing_farm("map 1 hears no teleport line");
+    for (watcher, note, hue) in [(alice, "alice", 1), (bob, "bob", 2)] {
+        assert_eq!(
+            watcher.read_game(),
+            chat_packet(
+                CHAT_TYPE_NOTICE,
+                hue,
+                b"Everyone will be teleported into the city shortly."
+            ),
+            "the teleport line on {note}"
+        );
+        watcher.quiet_allowing_farm("the step ends");
+    }
+}
+
+/// Seed the kingdom war's three accounts — Alice on 103's west edge, Yankee a
+/// level-20 swing away, Charlie on map 1 — and boot the war probe.
+/// Yankee stands past the protect level, or its `PK_MODE_PROTECT` refuses a
+/// cross-empire swing (`G/pvp.cpp:428-437`).
+fn seed_kingdom_war(database: &ScratchDatabase) -> (Server, std::path::PathBuf) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "bob");
+    create_account_before_boot(database, "carol");
+    add_characters(database);
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 3 WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         18600, 54300 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         471800, 951600 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "UPDATE player SET x = 18500, y = 54200 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "UPDATE player SET stamina = 12345 WHERE name IN ('Yankee', 'Charlie')",
+    );
+    sql(
+        database,
+        "UPDATE player SET level = 20 WHERE name = 'Yankee'",
+    );
+    Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/war_probe.lua",
+            WAR_PROBE_KINGDOM,
+        )],
+        &war_103_channels(),
+        "no_wander = true",
+    )
+}
+
+/// `sys.event.manager`'s kingdom kill (`OnDead`'s kingdom arm, `SendKingdomWarScorePacket`,
+/// `G/event_manager.cpp:807-828`, `:1732-1742`, and the login send, `G/input_login.cpp:680-683`):
+/// Carol starts the war from map 1, Alice and Bob enter on 103 and each hears the scoreless
+/// record in its burst, then Alice's punch kills Bob and both hear Shinsoo's 1/0/0, while
+/// Carol on map 1 hears nothing more.
+#[test]
+fn a_kingdom_kill_on_the_war_map_fans_the_score() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _data) = seed_kingdom_war(&database);
+    let (mut carol, _, entered) = enter_world_seeing_on(&server, 1, b"carol", 0, ENGLISH);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    carol.send_record(&client_click(teacher));
+    assert_eq!(
+        carol.read_game(),
+        server_script(1, b"kingdom runs[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        carol.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            3,
+            b"Kingdom War Event has started. Sharpen your weapons and join the battlefield."
+        ),
+        "the kingdom start"
+    );
+    carol.quiet("the start ends the step");
+    let (mut alice, alpha, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown_kingdom(&mut alice, [0, 0, 0]);
+    read_login_event_kingdom(&mut alice);
+    alice.still("nothing follows");
+    let (mut bob, yankee, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"bob", 0, ENGLISH);
+    let _entered = enter_game_shown_kingdom(&mut bob, [0, 0, 0]);
+    read_login_event_kingdom(&mut bob);
+    bob.still("nothing follows");
+    // Alice's punches kill: Yankee stands past the protect level, so more than
+    // one lands before he falls. The fan runs inside the death before its
+    // `GC_DEAD`, so the score lands first on both.
+    let score = vec![GC_EVENT_KW_SCORE, 1, 0, 0, 0, 0, 0];
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut landed = false;
+    let mut swings = 0;
+    while !landed && swings < 8 {
+        alice.send_record(&client_attack(yankee.id));
+        swings += 1;
+        loop {
+            let Some(record) = alice.read_game_until(deadline) else {
+                break;
+            };
+            if record == score {
+                landed = true;
+                break;
+            }
+            // One answered hit, then the next swing.
+            if record[0] == GC_DAMAGE_INFO {
+                break;
+            }
+        }
+    }
+    assert!(landed, "the fan lands within {swings} swings");
+    assert_eq!(
+        read_until_record(&mut alice, &dead_of(yankee.id), deadline),
+        dead_of(yankee.id),
+        "then the death"
+    );
+    assert_eq!(
+        read_until_record(&mut bob, &score, deadline),
+        score,
+        "the victim hears the fan"
+    );
+    assert_eq!(
+        read_until_record(&mut bob, &dead_of(yankee.id), deadline),
+        dead_of(yankee.id),
+        "then its own death"
+    );
+    carol.quiet_allowing_farm("map 1 hears no fan");
+    // The second click ends the war: one Shinsoo kill sorts last of the four
+    // rows, so Chunjo takes position 1, Jinno 2 and Shinsoo 3 with the loot.
+    carol.send_record(&client_click(teacher));
+    assert_eq!(
+        carol.read_game(),
+        server_script(1, b"kingdom over[ENTER][DONE]"),
+        "the dialog"
+    );
+    read_kingdom_end(&mut carol, &mut alice, &mut bob);
+    let _ = alpha;
+    drop(carol);
+    drop(alice);
+    drop(bob);
+}
+
+/// Ledger 522's siege probe: the skill teacher (vnum 20300) starts the siege on the
+/// first click and ends it on the second, the quest flag remembering which.
+const WAR_PROBE_SIEGE: &[u8] = b"quest war_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    if pc.getqf('war_on') == 0 then\n\
+    start_event(13)\n\
+    pc.setqf('war_on', 1)\n\
+    say('siege runs')\n\
+    else\n\
+    end_event(13)\n\
+    say('siege over')\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Read the siege's forced end after the second click: the dialog, the fallback
+/// rank-1 pays and the end line everywhere, then on each 103 watcher its map's
+/// deaths — every NPC in view dies release, dead, release, removal (`Dead`
+/// then destroy; a stone carries no sync, so its releases stay out) — with its
+/// own stone among them, and the teleport line last. Map 1 hears no teleport
+/// line.
+fn read_siege_end(carol: &mut Keyed, teacher: u32, watchers: [(&mut Keyed, &[u8; 4]); 3]) {
+    carol.send_record(&client_click(teacher));
+    assert_eq!(
+        carol.read_game(),
+        server_script(1, b"siege over[ENTER][DONE]"),
+        "the dialog"
+    );
+    for empire in [b"[LS;793]", b"[LS;794]", b"[LS;795]"] {
+        let mut exp = b"[LS;724;".to_vec();
+        exp.extend_from_slice(empire);
+        exp.extend_from_slice(b";[LS;1040];25]");
+        assert_eq!(
+            carol.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, 1, &exp),
+            "the fallback rank's exp"
+        );
+    }
+    assert_eq!(
+        carol.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Siege War Event has ended. Thank you for participating!"
+        ),
+        "the siege end"
+    );
+    carol.quiet_allowing_farm("map 1 hears no teleport line");
+    for (watcher, stone_vid) in watchers {
+        for empire in [b"[LS;793]", b"[LS;794]", b"[LS;795]"] {
+            let mut exp = b"[LS;724;".to_vec();
+            exp.extend_from_slice(empire);
+            exp.extend_from_slice(b";[LS;1040];25]");
+            assert_eq!(
+                watcher.read_game(),
+                chat_packet(CHAT_TYPE_NOTICE, 1, &exp),
+                "the fallback rank's exp"
+            );
+        }
+        assert_eq!(
+            watcher.read_game(),
+            chat_packet(
+                CHAT_TYPE_NOTICE,
+                1,
+                b"Siege War Event has ended. Thank you for participating!"
+            ),
+            "the siege end"
+        );
+        let teleport = chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Everyone will be teleported into the city shortly.",
+        );
+        let mut saw_stone = false;
+        loop {
+            let record = watcher.read_game_raw();
+            if record == teleport {
+                break;
+            }
+            let vid: [u8; 4] = if record[0] == GC_OWNERSHIP {
+                assert_eq!(&record[1..5], &[0, 0, 0, 0], "to nobody: {record:02x?}");
+                record[5..9].try_into().expect("a VID")
+            } else {
+                assert_eq!(record[0], GC_DEAD, "the death leads: {record:02x?}");
+                record[1..5].try_into().expect("a VID")
+            };
+            if record[0] == GC_OWNERSHIP {
+                let dead = watcher.read_game_raw();
+                assert_eq!(
+                    dead,
+                    [[GC_DEAD].as_slice(), &vid].concat(),
+                    "then its death"
+                );
+            }
+            let next = watcher.read_game_raw();
+            let del = if next[0] == GC_OWNERSHIP {
+                assert_eq!(
+                    next,
+                    [[GC_OWNERSHIP, 0, 0, 0, 0].as_slice(), &vid].concat(),
+                    "destroy releases again"
+                );
+                watcher.read_game_raw()
+            } else {
+                next
+            };
+            assert_eq!(
+                del,
+                [[GC_CHARACTER_DEL].as_slice(), &vid].concat(),
+                "then its removal"
+            );
+            saw_stone |= vid == *stone_vid;
+        }
+        assert!(saw_stone, "its own stone dies in view");
+        watcher.quiet_allowing_farm("the step ends");
+    }
+}
+
+/// Seed the siege's four watchers — Alice, Yankee and Dave beside their stones
+/// on 103, Charlie on map 1 — and boot the siege probe.
+fn seed_siege_war(database: &ScratchDatabase) -> (Server, std::path::PathBuf) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "bob");
+    create_account_before_boot(database, "carol");
+    create_account_before_boot(database, "dave");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         43300, 82200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         471800, 951600 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Dave', 1, \
+         46700, 47200 FROM account WHERE login = 'dave'",
+    );
+    sql(
+        database,
+        "UPDATE player SET x = 22400, y = 55800 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "UPDATE player SET stamina = 12345 WHERE name IN ('Yankee', 'Charlie', 'Dave')",
+    );
+    Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/war_probe.lua",
+            WAR_PROBE_SIEGE,
+        )],
+        &war_103_channels(),
+        "no_wander = true",
+    )
+}
+
+/// `sys.event.manager`'s siege start and forced end (`SetSiegeWarEvent`, `G/event_manager.cpp:1531-1658`):
+/// Carol starts the siege from map 1, and the three watchers enter on 103 beside their stones;
+/// each burst carries its stone's insert at the base plus offsets. Carol's second click ends the
+/// war unfought: every empire takes the fallback rank 1, the map's stones die, and 103 hears the
+/// teleport line while map 1 does not.
+#[test]
+fn a_click_starts_the_siege_and_a_second_ends_it_unfought() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _data) = seed_siege_war(&database);
+    let (mut carol, _, entered) = enter_world_seeing_on(&server, 1, b"carol", 0, ENGLISH);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    carol.send_record(&client_click(teacher));
+    assert_eq!(
+        carol.read_game(),
+        server_script(1, b"siege runs[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        carol.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Siege War Event has started. Coordinate with the kingdom to become victorious."
+        ),
+        "the siege start"
+    );
+    carol.quiet("the start ends the step");
+    // Each watcher enters beside its stone and reads its insert's feet.
+    let (mut alice, _, _, _) = load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    let stone = entered
+        .shown
+        .monsters
+        .iter()
+        .find(|insert| insert[22..24] == 8020u16.to_le_bytes())
+        .expect("the Shinsoo stone stands");
+    let shinsoo: [u8; 4] = stone[1..5].try_into().expect("a VID");
+    assert_eq!(
+        inserted_at(stone),
+        (22_400, 55_800),
+        "at the base plus offsets"
+    );
+    read_login_event_siege(&mut alice);
+    alice.still("nothing follows");
+    let (mut bob, _, _, _) = load_with_quickslots_on(&server, 1, b"bob", 0, ENGLISH);
+    let entered = enter_game_shown(&mut bob);
+    let stone = entered
+        .shown
+        .monsters
+        .iter()
+        .find(|insert| insert[22..24] == 8021u16.to_le_bytes())
+        .expect("the Jinno stone stands");
+    let jinno: [u8; 4] = stone[1..5].try_into().expect("a VID");
+    assert_eq!(
+        inserted_at(stone),
+        (43_300, 82_200),
+        "at the base plus offsets"
+    );
+    read_login_event_siege(&mut bob);
+    bob.still("nothing follows");
+    let (mut dave, _, _, _) = load_with_quickslots_on(&server, 1, b"dave", 0, ENGLISH);
+    let entered = enter_game_shown(&mut dave);
+    let stone = entered
+        .shown
+        .monsters
+        .iter()
+        .find(|insert| insert[22..24] == 8022u16.to_le_bytes())
+        .expect("the Chunjo stone stands");
+    let chunjo: [u8; 4] = stone[1..5].try_into().expect("a VID");
+    assert_eq!(
+        inserted_at(stone),
+        (46_700, 47_200),
+        "at the base plus offsets"
+    );
+    read_login_event_siege(&mut dave);
+    dave.still("nothing follows");
+    // The second click ends the war unfought: every empire's score is 0 and
+    // takes the fallback rank 1. The pays fan everywhere, the map's stones
+    // die, and 103 hears the teleport line while map 1 does not.
+    read_siege_end(
+        &mut carol,
+        teacher,
+        [
+            (&mut alice, &shinsoo),
+            (&mut bob, &jinno),
+            (&mut dave, &chunjo),
+        ],
+    );
+    drop(carol);
+    drop(alice);
+    drop(bob);
+    drop(dave);
 }

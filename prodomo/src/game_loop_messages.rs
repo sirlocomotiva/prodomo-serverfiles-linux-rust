@@ -3302,6 +3302,11 @@ pub struct Shown {
     /// each owned land's NAME, then the one list. The burst carries them before the
     /// time record, where legacy sends them before it (`G/input_login.cpp:676-685`).
     pub land_lines: Vec<Vec<u8>>,
+    /// The kingdom war's score record (`SendKingdomWarScorePacket`,
+    /// `G/event_manager.cpp:1732-1742`): `Some` with the record for an entrant on 103
+    /// while the war runs (`G/input_login.cpp:680-683`). The burst carries it after
+    /// the land lines, where legacy sends it after them.
+    pub kingdom_line: Option<Vec<u8>>,
     /// The switchbot report (`CSwitchbotManager::EnterGame`,
     /// `G/refactorized_switchbot.cpp:748-761`): the attribute info for every character,
     /// then the table when it has one. The burst carries them after the fish lines,

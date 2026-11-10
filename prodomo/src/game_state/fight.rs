@@ -1637,6 +1637,21 @@ impl GameState {
         {
             self.raise_temple_portal(killer);
         }
+        // `OnDead`'s stone arms (`G/event_manager.cpp:803-923`): a kingdom stone
+        // a PC kills on 103 while the siege runs chats its empire's line and may
+        // end it. `GetMapIndex() == SIEGE_MAP_INDEX` gates the call
+        // (`G/char_battle.cpp:1364-1367`); the killer gate keeps the quest and
+        // `FKillSectree` deaths quiet, as `OnDead`'s own does.
+        if killer.is_some_and(|killer| self.bodies.contains_key(&killer))
+            && self.event_rate(b"siege_war_event") != 0
+            && self
+                .npc_of
+                .get(&vid)
+                .is_some_and(|&(_, map, _)| map == super::siege_war::WAR_MAP)
+        {
+            let vnum = self.npc_by_vid(vid).map_or(0, |npc| npc.vnum);
+            self.siege_stone_dead(vnum);
+        }
         // The battle-pass kill hook (`G/char_battle.cpp:1270-1272`): the
         // killer's race match counts before the target clears. The mover is the
         // killer's own.
