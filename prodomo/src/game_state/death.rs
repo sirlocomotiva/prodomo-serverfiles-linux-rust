@@ -1037,6 +1037,8 @@ impl GameState {
         self.set_pc_hp(vid, full, false);
         self.death_penalty(vid, false, mover);
         self.revive_invisible(vid);
+        // `CheckMount` (`G/cmd_general.cpp:515-517`), ungated, before the price.
+        self.check_mount(vid);
         // `ChangeGold(-300000)` (`G/char.cpp:3823-3850`): the record shows no amount for a loss.
         let left = gold - RESTART_NOW_GOLD;
         if let Ok(character) = self.characters.find_by_vid_mut(vid) {

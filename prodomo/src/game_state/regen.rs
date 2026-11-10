@@ -539,8 +539,9 @@ impl GameState {
     /// `:2824-2861`): every NPC of the sectrees around the caller is destroyed
     /// (`purge`) or set to 10 hit points (`weaken`), `all` or within
     /// `DISTANCE_APPROX` 1000. An NPC is `char_type != CHAR_TYPE_PC`; `purge`
-    /// spares a summoned horse that has its rider (`GetRider() == NULL`), and the
-    /// pet, mount and auto-shaman gates are dead (no ported path sets them).
+    /// spares a summoned horse that has its rider (`GetRider() == NULL`) and a mount
+    /// follower (`IsMount`), and the pet and auto-shaman gates are dead (no ported
+    /// path sets them).
     /// With no sectree legacy logs and destroys nothing (`:857-861`).
     /// `weaken`'s set is `PointChange(POINT_HP)`: dead or stunned refuses,
     /// the change caps at the maximum, and the targeters hear it.
@@ -574,7 +575,7 @@ impl GameState {
             {
                 continue;
             }
-            if !weaken && self.has_rider(npc) {
+            if !weaken && (self.has_rider(npc) || self.is_mount_npc(npc)) {
                 continue;
             }
             swept.push(npc);
@@ -1265,6 +1266,8 @@ impl GameState {
         let key = (channel, map);
         // `HorseSummon(false)` and `GetRider()->ClearHorseInfo()` (`G/char.cpp:632-635`).
         self.forget_horse_npc(vid);
+        // `DeleteMount` of a mount follower (`G/MountSystem.cpp:391-404`).
+        self.forget_mount_npc(vid);
         let Some(list) = self.npcs.get_mut(&key) else {
             return;
         };

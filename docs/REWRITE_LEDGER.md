@@ -51140,3 +51140,82 @@ clean; the suite 5242 passed, 1 failed in 46 targets, the failure `a_gm_flags_a_
 --all-targets -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 514. The costume mount
+
+`sys.char.mount` is `ported`: the follower a worn mount costume summons, its follow, and
+the ride (`ENABLE_MOUNT_COSTUME_SYSTEM`, `G/MountSystem.cpp`, `G/char.cpp:11117-11237`).
+New module `prodomo/src/game_state/mount.rs` holds the system; `GameState.mount_npcs`
+is the actor map (rider, summon item, mob by follower VID).
+
+The port, in legacy order:
+
+- `MountSummon` (`G/char.cpp:11117-11163`): a morph hears the Romanian line, map 113
+  and the arena maps stay silent, a horse ride stops and a summoned horse goes, and
+  the `VALUE1` mob (or the transmutation target's, `__CHANGELOOK_SYSTEM__` being
+  defined) stands within 100 of the rider, named `<rider> Mount`, of the rider's
+  empire, facing the rider's heading turned half round. A mob the spawn refuses
+  stands nothing, as legacy's null `SpawnMob` does past its `sys_err`.
+- `MountUnsummon` (`:11165-11194`): a ridden mount of the same mob unmounts first,
+  then the follower goes. A mob 0 never unmounts: legacy's `Unmount(0)` finds no
+  actor and only logs.
+- `CheckMount` (`:11196-11226`) is ungated; the login gates it on 113 and the arenas
+  (`G/input_login.cpp:932-936`) and the restart-now arm calls it bare (`:515-517`).
+  The plain here/town arms call nothing (only the unreachable threeway arm and the
+  unhosted war-map arms do), so they are unchanged.
+- The `/ride` mount arm (`G/cmd_general.cpp:3529-3570`) runs after the morph check and
+  returns: ridden with none summoned unmounts, unridden with exactly one mounts. The
+  ride item's three-cell condition always holds past it (no unique is ever worn).
+- The `/unmount` mount arm (`:2315-2350`) runs the ridden arm and returns before the
+  unique-item arm.
+- The ride is `AFFECT_MOUNT` on `POINT_MOUNT` for socket 0 minus now in `DWORD` wrap
+  (`INFINITE_AFFECT_DURATION` for a limitless mount), plus one appended
+  `AFFECT_MOUNT_BONUS` per non-`NONE` proto apply. `Unmount` re-stands the follower
+  while the costume is worn (wider view first, so the insert leads the removes),
+  then clears the affects and the vnum, stops a horse
+  ride, unsummons a summoned horse, and clears the vnum again.
+- The mount tick runs every 12 Pulses (the 6-Pulse event with the 400 ms gate, which
+  skips every other fire): a dead owner, a dead follower, a lost summon item or an
+  item held by another unsummons; past 4500 the follower re-stands 200 behind the
+  rider's heading on the rider's map (same-map `Show` or the cross-map move, whose
+  insert and view rebuild are the move's own); past 300 it runs to 200 of the rider
+  and stamps its last-attacked; nearer it waits. `m_dwLastActionTime`,
+  `START_RUN_DISTANCE` and `m_originalMoveSpeed` are write-only and stay out, and so
+  does the follower's `SetMount` flag (only `do_purge`'s `IsMount` reads the state,
+  and the tick's map is what it reads here).
+- The state machine skips followers (their actor's event does everything: no chat,
+  guard, leader-follow or wander); `do_purge` spares them; `destroy_npc` drops their
+  entry; the leave drops them with the character.
+
+The equip hook is `run_item_step`'s tail: the mount cell's occupant is read before the
+step, and after the answer is built the taken-off mount unsummons and the new occupant
+summons, in legacy's unequip-first order. That covers the move, the use-to-wear (whose
+first-use stamp lands before the wear checks, so a timed costume wears through the use
+and refuses through the drag), the swap, and the expiry — whose destroyed item
+unsummons by the follower's own entry, with the same ridden-first order. `world`'s
+`WornSystem::Mount` is gone with it.
+
+The quest horse gates needed nothing: ledger 393's `riding_mount` already reads the
+wear cell and `AFFECT_MOUNT` with the 113/arena returns. The stale `Not ported` section
+in `horse_summon.rs` (names, landed in 395, and `IsRidingMount`) is removed, and the
+`cmd.ride` / `cmd.unmount` notes now name the mount arms.
+
+Reachability: the owner's 52001-52090 are timed `COSTUME_MOUNT` protos with `VALUE1`
+20201 and no applies, so the scenario's ride is `AFFECT_MOUNT` alone.
+
+Tests: three unit tests (wear summons, ride mounts, unmount re-stands, take-off
+unsummons; the re-stand, the follow's Goto, the dead-owner unsummon; the login gate)
+and the scenario `a_mount_costume_summons_mounts_and_comes_off` (use stamps, wears and
+stands 20201 within 100 named `Alpha Mount`, `/ride` mounts, `/ride` unmounts and the
+follower stands again, the worn use takes it off and the follower goes, the store
+follows each step).
+
+The scenario hunts: a summon-distance mutant (`dx` shifted 500) fails on the
+within-100 assert, and it passed 8 parallel runs against the pristine build (the
+ninth slot ran the mutant binary and failed as expected, then passed on rebuild).
+Gates (2026-11-09): `cargo fmt --all -- --check` clean; `cargo build --workspace`
+clean; the suite 5248 passed, 0 failed in 46 targets; `cargo test --workspace --doc`
+clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
+`RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.

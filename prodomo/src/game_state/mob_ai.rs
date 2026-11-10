@@ -426,6 +426,11 @@ impl GameState {
             self.idle_horse(vid);
             return;
         }
+        // A mount follower idles on the mount tick, not in the state machine: its actor's
+        // own event runs `Update`, so it never chats, guards, follows a leader or wanders.
+        if self.is_mount_npc(vid) {
+            return;
+        }
         match who.char_type {
             CHAR_TYPE_STONE => self.idle_stone(vid),
             // A warp or goto would wait 60 seconds (`:369-374`), but none is ever started.
@@ -434,7 +439,7 @@ impl GameState {
         }
     }
 
-    /// `__StateIdle_NPC` (`G/char_state.cpp:507-624`). No pet, mount or shaman is ported. A
+    /// `__StateIdle_NPC` (`G/char_state.cpp:507-624`). No pet or shaman is ported. A
     /// guard searches for a monster victim past the `noguard` event flag (`:522-538`); a
     /// follower past 500 of its group's leader walks back to within `number(100, 300)` of
     /// it (`:586-598`; [`super::mob_party`]); a lapsed Santa hops maps (`:539-578`).

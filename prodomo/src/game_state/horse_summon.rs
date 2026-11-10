@@ -21,10 +21,7 @@
 //! running when more than 700 away; nearer, it wanders 200 to 400 at a walk every 5 to 12
 //! seconds. A horse with no rider is destroyed, as a horse race spawned by `/mob` is.
 //!
-//! # Not ported
-//!
-//! - The horse names (`CHorseNameManager`): every horse carries its rider's name.
-//! - `IsRidingMount` reads the mount costume's wear cell and `AFFECT_MOUNT`.
+//! The quest gates read `IsRidingMount` (a mount costume worn or `AFFECT_MOUNT`).
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::vid::Vid;

@@ -266,14 +266,15 @@ impl GameState {
 
     /// `ACMD(do_ride)` (`G/cmd_general.cpp:3516-3642`) for the player under `vid`: the dead,
     /// the stunned and the OX map (113) are silent and a morph hears it may not mount; a
-    /// horse rider stops, a mount rider dismounts (`do_unmount`), and with a summoned horse
-    /// the caller rides. Otherwise the first inventory cell holding a ride item, one of the
-    /// four quest seals 71114-71120 or a mount seal 52001-52090 runs through `UseItem`, and
-    /// with none `[LS;501]` answers.
+    /// worn mount costume mounts or unmounts, and the line returns. Else a horse rider
+    /// stops, a mount rider dismounts (`do_unmount`), and with a summoned horse the
+    /// caller rides. Otherwise the first inventory cell holding a ride item, one of the
+    /// four quest seals 71114-71120 or a mount seal 52001-52090 runs through `UseItem`,
+    /// and with none `[LS;501]` answers.
     ///
-    /// The mount-costume arm never runs: every mount costume in the owner's data carries the
-    /// first-use timer the use refuses, so none is worn, and the ride item's three-cell
-    /// condition always holds for the same reason.
+    /// The ride item's three-cell condition (an empty unique cell or an empty mount
+    /// cell, `:3596-3602`) always holds: no unique is ever worn and the arm above
+    /// returned while a mount costume was.
     ///
     /// # Errors
     ///
@@ -307,6 +308,11 @@ impl GameState {
                 let line = b"Nu poti folosi un mount atat timp cat esti transformat.";
                 self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);
             }
+            return None;
+        }
+        // `do_ride`'s mount-costume arm (`G/cmd_general.cpp:3529-3570`): with a costume
+        // worn the ride runs here and the line returns, whatever else is ridden.
+        if self.ride_mount_costume(vid) {
             return None;
         }
         if riding {

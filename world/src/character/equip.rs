@@ -175,8 +175,6 @@ pub enum WornSystem {
     DragonSoul,
     /// An aura costume: its drain, its armour and its booster timer.
     Aura,
-    /// A mount costume: `EquipTo` summons the mount.
-    Mount,
     /// A pet costume: `EquipTo` summons the pet.
     Pet,
     /// An `ITEM_UNIQUE` or `WEARABLE_UNIQUE` item: its expiry timer, its special group and the
@@ -198,7 +196,6 @@ impl core::fmt::Display for WornSystem {
         match self {
             Self::DragonSoul => formatter.write_str("the dragon soul deck"),
             Self::Aura => formatter.write_str("the aura costume"),
-            Self::Mount => formatter.write_str("the mount costume"),
             Self::Pet => formatter.write_str("the pet costume"),
             Self::Unique => formatter.write_str("the unique item expiry"),
             Self::Timer => formatter.write_str("the item timers"),
@@ -212,17 +209,19 @@ impl core::fmt::Display for WornSystem {
 /// The first system `EquipTo` would start for this item that the Rewrite has not ported.
 ///
 /// `EquipTo` activates a dragon soul stone, applies the item's bonuses (`ModifyPoints`), starts
-/// the unique, wear-timer, accessory and aura-booster timers, and summons a mount or pet
-/// costume (`G/item.cpp:1458-1487`); `OnAfterCreatedItem` starts the real-time timer
-/// (`:2775-2781`). `BuffOnAttr_AddBuffsFromItem` runs beside the wear
+/// the unique, wear-timer, accessory and aura-booster timers, and summons a pet costume
+/// (`G/item.cpp:1458-1487`); the mount costume's summon is the world's (`MountSummon`);
+/// `OnAfterCreatedItem` starts the real-time timer (`:2775-2781`).
+/// `BuffOnAttr_AddBuffsFromItem` runs beside the wear
 /// ([`Points::energy_buff_add`](super::points::Points::energy_buff_add)): only the costume-attr
 /// pool stays refused, because nothing on the owner's data fills it.
 ///
 /// A plain `LIMIT_REAL_TIME` item starts no equip timer (`G/item.cpp:1458-1487` names only the
 /// unique, wear, accessory and booster starts, and `IsRealTimeItem` exempts the wear one):
 /// its clock runs from creation whether worn or not, and the world's expiry tick removes it.
-/// Only a first-use clock (which the use stamps, not the wear), a wear timer (all owner's
-/// rows are dragon soul, which never reaches here) and the accessory stones refuse.
+/// Only an unstamped first-use clock (the use stamps, not the wear, so a use-to-wear lands
+/// stamped), a wear timer (all owner's rows are dragon soul, which never reaches here) and
+/// the accessory stones refuse.
 #[must_use]
 pub fn worn_system_not_ported(
     item: &Item,
@@ -233,7 +232,6 @@ pub fn worn_system_not_ported(
     if proto.item_type == ITEM_COSTUME {
         match proto.sub_type {
             COSTUME_AURA => return Some(WornSystem::Aura),
-            COSTUME_MOUNT => return Some(WornSystem::Mount),
             COSTUME_PET => return Some(WornSystem::Pet),
             _ => {}
         }
@@ -241,8 +239,12 @@ pub fn worn_system_not_ported(
     if proto.item_type == ITEM_UNIQUE {
         return Some(WornSystem::Unique);
     }
-    let clocked = proto.real_time_first_use.is_some() || proto.timer_based_on_wear.is_some();
-    if clocked {
+    if proto.timer_based_on_wear.is_some() {
+        return Some(WornSystem::Timer);
+    }
+    // A started first-use clock wears: the use stamped socket 1 before the equip checks
+    // ran (`UseItemEx`, `G/char_item.cpp:2804-2820`), so only an unstamped one refuses.
+    if proto.real_time_first_use.is_some() && item.sockets[USE_SOCKET] == 0 {
         return Some(WornSystem::Timer);
     }
     if accessory_socket_grade(item, proto) > 0 {
@@ -1132,6 +1134,9 @@ pub fn use_item(
             .map_or(0, |limit| limit.value);
         stamped = stamp_first_use_clock(items, &item, value, now);
     }
+    // The stamp landed in `items`: the arms below read the stamped sockets, as the
+    // equip checks do when they admit a started first-use clock.
+    let item = items.item(item.id).cloned().unwrap_or(item);
     if quest {
         // `case ITEM_QUEST` changes nothing here: the caller runs the item's quest, or the
         // pick-up arm `RENEWAL_PICKUP_AFFECT` gives 70002 (`G/char_item.cpp:2852-2872`).
@@ -1336,6 +1341,8 @@ mod tests {
     const WEDDING: u32 = 11_901;
     /// A mount costume without the first-use timer the owner's rows carry.
     const MOUNT_COSTUME: u32 = 52_001;
+    /// A mount costume with the first-use timer, like the owner's rows.
+    const TIMED_MOUNT: u32 = 52_002;
     const MALE_ONLY: u32 = 11_230;
     const UNIQUE: u32 = 71_001;
     const RING: u32 = 70_001;
@@ -1412,6 +1419,12 @@ mod tests {
             value: 0,
         };
         timed.real_time_first_use = Some(0);
+        let mut timed_mount = proto(TIMED_MOUNT, ITEM_COSTUME, COSTUME_MOUNT, 0);
+        timed_mount.limits[0] = ItemValue {
+            kind: gamedata::item_kind::LIMIT_REAL_TIME_START_FIRST_USE,
+            value: 0,
+        };
+        timed_mount.real_time_first_use = Some(0);
         let mut male_only = proto(MALE_ONLY, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY);
         male_only.anti_flags = ITEM_ANTIFLAG_MALE;
         let mut male_only_high = proto(MALE_ONLY_HIGH, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY);
@@ -1449,6 +1462,7 @@ mod tests {
             grade_2,
             proto(COSTUME, ITEM_COSTUME, COSTUME_BODY, 0),
             proto(MOUNT_COSTUME, ITEM_COSTUME, COSTUME_MOUNT, 0),
+            timed_mount,
             proto(WEDDING, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY),
             male_only,
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
@@ -1933,6 +1947,36 @@ mod tests {
         assert!(case.run(inv(3), wear_pos(BODY)).is_ok(), "a walker dresses");
     }
 
+    /// A first-use mount wears through the use: the stamp lands first
+    /// (`G/char_item.cpp:2804-2820`), then the equip checks read the started clock and
+    /// the costume lands on the mount cell. A drag of the unstamped item to the cell
+    /// refuses with the timer, as the wear stamps nothing; a drag of a started one
+    /// lands.
+    #[test]
+    fn a_first_use_mount_wears_through_the_use_and_not_through_the_drag() {
+        let mut case = Case::new(&[(inv(3), Item::new(7, TIMED_MOUNT))]);
+        let done = case.use_at(inv(3)).expect("the use stamps and wears");
+        assert_eq!(done.kind, MoveKind::Equipped);
+        assert_eq!(case.at(wear_pos(MOUNT_CELL)), Some(7));
+        let worn = case.items.item(7).expect("the costume is held");
+        assert_eq!(worn.sockets[1], 1, "socket 1 counts the use");
+        assert_ne!(worn.sockets[0], 0, "socket 0 holds the expiry");
+
+        let mut case = Case::new(&[(inv(3), Item::new(7, TIMED_MOUNT))]);
+        assert_eq!(
+            case.refused(inv(3), wear_pos(MOUNT_CELL)),
+            MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)),
+            "an unstamped drag refuses"
+        );
+
+        let mut started = Item::new(7, TIMED_MOUNT);
+        started.sockets = [1_700_060_000, 1, 0, 0, 0, 0];
+        let mut case = Case::new(&[(inv(3), started)]);
+        assert!(
+            case.run(inv(3), wear_pos(MOUNT_CELL)).is_ok(),
+            "a started drag lands"
+        );
+    }
     #[test]
     fn the_limits_the_sex_and_the_wedding_are_checked_before_any_change() {
         let mut case = Case::new(&[(inv(3), Item::new(7, HIGH_SWORD))]);

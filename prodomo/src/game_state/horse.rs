@@ -79,11 +79,13 @@ impl GameState {
                 self.user_horse_ride(vid);
                 None
             }
-            // `do_unmount` (`G/cmd_general.cpp:2313-2368`): no mount costume is ever worn
-            // (each carries the first-use timer the use refuses) and no unique is, so
+            // `do_unmount` (`G/cmd_general.cpp:2313-2368`): a worn mount costume runs the
+            // ridden arm and returns; else no unique is ever worn, so
             // `UnEquipSpecialRideUniqueItem` answers true and the line is `pc.unmount`'s.
             HorseLine::Unmount => {
-                self.unmount(vid);
+                if !self.unmount_line(vid) {
+                    self.unmount(vid);
+                }
                 None
             }
             // `do_mount_test` (`G/cmd_gm.cpp:3212-3224`): the word's vnum mounts, 0 when the

@@ -120,6 +120,7 @@ mod mob_skill;
 mod mob_strike;
 mod monarch;
 mod motion;
+mod mount;
 mod move_channel;
 mod multi_farm;
 mod myshop;
@@ -783,6 +784,9 @@ pub struct GameState {
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
+    /// Each summoned costume mount standing, by its VID (its rider, its summon item
+    /// and its mob, `CMountSystem::m_mountActorMap`).
+    mount_npcs: HashMap<u32, mount::MountNpc>,
     /// `CHorseNameManager::m_mapHorseNames` (`G/horsename_manager.h:10`): each rider's
     /// horse name by its player id, empty for a rider the store read nameless. The
     /// summon and the compute read it; the enter-game load installs it, `horse.set_name`
@@ -2875,6 +2879,9 @@ impl GameState {
             // refresh (`:887-897`), the last `Entergame` lines before the quest login.
             self.enter_horse(vid);
             self.enter_arena(vid);
+            // `CheckMount` (`G/input_login.cpp:932-936`), gated on map 113 and the
+            // arenas, before the ranks close `Entergame`.
+            self.enter_mount(vid);
             // `RankGlobal_send_players` and `RankGlobal_send_items` close `Entergame`
             // (`G/input_login.cpp:946-949`).
             self.rank_login(vid);
@@ -3711,6 +3718,9 @@ impl GameState {
         let _horse = self.horse_timers.remove(&vid);
         // `HorseSummon(false)` in `CHARACTER::Destroy` (`G/char.cpp:632`).
         self.horse_unsummon(vid, false);
+        // `CMountSystem::Destroy` in `CHARACTER::Destroy` (`G/char.cpp:719`): the
+        // followers go with the character.
+        self.leave_mounts(vid);
         // `m_sortInventoryPulse` is the `CHARACTER`'s: the next login starts at 0.
         let _sorted = self.sort_inventory_until.remove(&vid);
         self.stop_browsing(vid);
@@ -5834,6 +5844,13 @@ impl GameState {
             .find_by_vid_mut(vid)
             .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
         let owner_id = character.player_id();
+        // The mount cell's occupant before the step, for the summon sync after it.
+        let mount_before = character
+            .items()
+            .item_at(world::character::wear_pos(
+                common::enums::EWearPositions::CostumeMount as u16,
+            ))
+            .map(|item| item.id);
         let secured = character
             .points()
             .is_some_and(world::character::Points::is_secured);
@@ -5862,6 +5879,11 @@ impl GameState {
         let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor, protos, &self.locale);
         moved.points = character.points().cloned();
         moved.quickslots = Some(quickslots);
+        let _ = character;
+        // `CItem::Equip` and `CItem::Unequip` summon and unsummon the mount costume
+        // (`G/item.cpp:1478-1482`, `:1524-1527`): a step that changed the mount cell
+        // resyncs it, after the answer is built.
+        self.sync_mount_costume(vid, mount_before);
         Ok(moved)
     }
 
@@ -5992,6 +6014,7 @@ impl PulseProcessor for GameState {
         self.run_mining_events(pulse);
         self.run_horse_timers(pulse);
         self.run_horse_dead_events(pulse);
+        self.run_mount_ticks(pulse);
         self.run_blend_ticks(pulse);
         self.run_switchbot_ticks(pulse);
         self.run_real_time_expiry(pulse);

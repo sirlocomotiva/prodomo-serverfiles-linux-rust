@@ -47903,3 +47903,202 @@ fn an_energy_drink_buffs_the_worn_attributes_and_the_take_off_takes_it_back() {
         "the worn 500 and the share 50: {falls:?}"
     );
 }
+
+/// The owner's 52001 is a timed mount costume for 20201 with no applies; give Alpha
+/// one row of it at cell 0.
+fn give_alpha_a_mount_costume(database: &ScratchDatabase) {
+    let protos = owners_protos();
+    let proto = protos.get(52_001).expect("the owner's data has it");
+    assert_eq!(
+        (
+            proto.item_type,
+            proto.sub_type,
+            proto.values[1],
+            proto.real_time_first_use.is_some()
+        ),
+        (
+            gamedata::item_kind::ITEM_COSTUME,
+            gamedata::item_kind::COSTUME_MOUNT,
+            20_201,
+            true
+        )
+    );
+    assert!(proto.applies.iter().all(|apply| apply.kind == 0));
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 70, id, 1, 0, \
+         1, 52001 FROM player WHERE name = 'Alpha'",
+    );
+}
+/// The mount costume's wear cell on the wire: `INVENTORY_MAX_NUM + WEAR_COSTUME_MOUNT`.
+fn mount_wear_cell() -> u16 {
+    common::item_slots::INVENTORY_MAX_NUM + common::enums::EWearPositions::CostumeMount as u16
+}
+
+/// Reads until a record of `header` lands, answering everything read.
+fn read_until_mount_header(alice: &mut Keyed, header: u8) -> Vec<Vec<u8>> {
+    let mut read: Vec<Vec<u8>> = Vec::new();
+    while read.iter().filter(|record| record[0] == header).count() < 1 {
+        read.push(alice.read_game());
+    }
+    read
+}
+
+/// Using the costume at cell 0 stamps its clock, wears it on `mount_cell`, and stands
+/// 20201 within 100 named `Alpha Mount`; the store holds the worn row. Answers the
+/// follower's VID.
+fn use_summons_the_mount(alice: &mut Keyed, database: &ScratchDatabase, mount_cell: u16) -> u32 {
+    alice.send_record(&client_item_use(0));
+    let mut read = read_until_mount_header(alice, GC_CHARACTER_ADD);
+    read.extend(read_until_mount_header(alice, GC_CHAR_ADDITIONAL_INFO));
+    let updates: Vec<(u8, u16, u16)> = read
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE)
+        .map(|record| update_fields(record))
+        .collect();
+    assert!(
+        updates
+            .iter()
+            .any(|&(window, cell, _)| window == 1 && cell == 0),
+        "the stamp's update: {read:02x?}"
+    );
+    let sets: Vec<(u8, u16, u32, u16)> = read
+        .iter()
+        .filter(|record| record[0] == ITEM_SET)
+        .map(|record| set_fields(record))
+        .collect();
+    assert!(sets.contains(&(1, 0, 0, 0)), "cell 0 clears: {sets:?}");
+    assert!(
+        sets.iter()
+            .any(|&(window, cell, vnum, _)| window == 1 && cell == mount_cell && vnum == 52_001),
+        "the costume wears: {sets:?}"
+    );
+    let (stood, at) = added_mount_named(&read, b"Alpha Mount\0");
+    for offset in [at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1] {
+        assert!(offset.abs() <= 100, "within 100: {at:?}");
+    }
+    check(
+        database,
+        "(SELECT (window_type, pos) = (2, 21) FROM item WHERE id = 70)",
+    );
+    stood
+}
+
+/// `/ride` takes the follower `stood` off the map and mounts 20201 on `vid`.
+fn ride_mounts_the_follower(alice: &mut Keyed, vid: u32, stood: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let read = read_until_mount_header(alice, GC_AFFECT_ADD);
+    assert!(
+        read.contains(&header_and_vid_record(GC_CHARACTER_DEL, stood)),
+        "the follower goes: {read:02x?}"
+    );
+    let (added, _) = affect_moves(&read);
+    assert_eq!(added, [(221, 109, 20_201)], "the ride");
+    assert_eq!(shown_mount(&read, vid), 20_201);
+}
+
+/// `/ride` again: the ride comes off and the follower stands again, the summon's
+/// inserts leading the removes. Answers the new follower's VID.
+fn ride_unmounts_and_the_follower_stands_again(alice: &mut Keyed, vid: u32) -> u32 {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let mut read: Vec<Vec<u8>> = Vec::new();
+    while read
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_ADD)
+        .count()
+        < 1
+        || read
+            .iter()
+            .filter(|record| record[0] == GC_AFFECT_REMOVE)
+            .count()
+            < 1
+    {
+        read.push(alice.read_game());
+    }
+    // The re-stand's additional record rides the same insert as its add, so it is
+    // already in `read` (the removes it waits on land after the summon returns).
+    assert_eq!(shown_mount(&read, vid), 0);
+    let (_, removed) = affect_moves(&read);
+    assert_eq!(removed, [(221, 109)], "the unmount");
+    added_mount_named(&read, b"Alpha Mount\0").0
+}
+
+/// Using the worn costume takes it off to cell 0 and the follower `stood` goes; the
+/// store holds the inventory row.
+fn use_takes_the_costume_off(
+    alice: &mut Keyed,
+    database: &ScratchDatabase,
+    mount_cell: u16,
+    stood: u32,
+) {
+    alice.send_record(&client_item_use(mount_cell));
+    let read = read_until_mount_header(alice, GC_CHARACTER_DEL);
+    assert!(
+        read.contains(&header_and_vid_record(GC_CHARACTER_DEL, stood)),
+        "the follower goes: {read:02x?}"
+    );
+    let sets: Vec<(u8, u16, u32, u16)> = read
+        .iter()
+        .filter(|record| record[0] == ITEM_SET)
+        .map(|record| set_fields(record))
+        .collect();
+    assert!(
+        sets.iter()
+            .any(|&(window, cell, vnum, _)| window == 1 && cell == 0 && vnum == 52_001),
+        "the costume comes off: {sets:?}"
+    );
+    check(
+        database,
+        "(SELECT (window_type, pos) = (1, 0) FROM item WHERE id = 70)",
+    );
+}
+
+/// `sys.char.mount`: a used mount costume stamps its first-use clock, wears, and stands
+/// its follower; `/ride` mounts the follower and unmounts the ride; using the worn
+/// costume takes it off and the follower goes. The owner's 52001 is timed with
+/// `VALUE1` 20201 and no applies, so the ride is `AFFECT_MOUNT` alone.
+#[test]
+fn a_mount_costume_summons_mounts_and_comes_off() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    give_alpha_a_mount_costume(&database);
+    let (mut alice, _character, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items.len(), 1);
+    let add = enter_game_burst(&mut alice);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    // `EquipItem` refuses a wear within 1.5 s of the select.
+    std::thread::sleep(std::time::Duration::from_millis(1600));
+
+    let mount_cell = mount_wear_cell();
+    let stood = use_summons_the_mount(&mut alice, &database, mount_cell);
+
+    ride_mounts_the_follower(&mut alice, vid, stood);
+
+    let stood = ride_unmounts_and_the_follower_stands_again(&mut alice, vid);
+
+    use_takes_the_costume_off(&mut alice, &database, mount_cell, stood);
+    drop(alice);
+}
+
+/// The VID and point of the `GC_CHARACTER_ADD` of race 20201 among `records` whose
+/// additional record names `want`.
+fn added_mount_named(records: &[Vec<u8>], want: &[u8]) -> (u32, (i32, i32)) {
+    let adds: Vec<&Vec<u8>> = records
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_ADD && record[22..24] == 20_201u16.to_le_bytes())
+        .collect();
+    let [add] = adds[..] else {
+        panic!("one mount added, not {adds:02x?}");
+    };
+    let info = records
+        .iter()
+        .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == add[1..5])
+        .expect("the mount's additional record");
+    assert_eq!(&info[5..5 + want.len()], want, "the mount's name");
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    (vid, inserted_at(add))
+}
