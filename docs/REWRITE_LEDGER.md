@@ -51825,3 +51825,30 @@ and `lua.pc.get_y` are `ported` with their aliases (`changemoney`, `change_gold`
 `change_money`, `getx`, `gety`, `getguild`); `quest.guild_building` is `ported`.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5302 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.
+
+## 527. The spiral's proven pair
+
+No code changed and no scenario was written: `the_time_spiral_shortens_the_attr67_wait`
+already runs three `partial` arms over the wire, and the mutants prove each one.
+
+**The arms.** The spiral's `use` script (`item_attr67add.quest:71-80`) reads
+`pc.getf("attr67add_item", "wait_time")` and `get_global_time()` twice — the
+comparison, then the shortened stamp — and the scenario banks the stamp within a
+10-second window of the tenth it shortens. It also runs `pc.remove_item`, whose
+take the emptied cell and the gone store row prove.
+
+**The mutants** (each on the pristine tree, restored after):
+
+- `get_global_time` answering 0 kills the scenario (the comparison fails, the
+  stamp never shortens). `get_time` shares the arm.
+- `pc.getf` answering 0 kills it (the `if` body is skipped, the stamp stays
+  seeded). A +1 answer survives inside the 355-365 stamp window — the tolerance
+  absorbs a second — so the 0 mutant pins the class.
+- `pc.remove_item` swallowed kills it (the cell never clears, the row stays).
+
+Parity rows: `lua.get_time`, `lua.get_global_time` and `lua.pc.getf` are `ported`
+with the spiral's scenario. `lua.pc.remove_item` and `lua.pc.removeitem` stay
+`partial`: their take arm is proven, but ledger 265's no-store arm still waits
+for a scenario.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5302 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.

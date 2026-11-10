@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 526 (the land seller's dialog).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 527
+Last reviewed: 2026-11-10, after ledger section 527 (the spiral's proven pair).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 528
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -580,6 +580,7 @@ Since 522 `sys.event.manager` carries its siege and kingdom war arms (13-14): th
 Since 524 `sys.dungeon.temple_ochao` and `quest.temple_of_the_ochao` are `ported`: the portal's forest chat runs over the wire (the map-209 gate, the `enchanted_forest.limit_activity` 0 write, the warp to (816700, 1505000) on the Channel hosting 210), and the 6311 kill table drops owned for 300 s in the world and manager tests, a 218k-HP boss no wire kill reaches in reasonable time.
 Since 525 `quest.guild_manage` is `ported`: the guild man's menu gates both GM chats on `pc.is_gm`, the info chat sends the triad and empires, and the re-entry tool reads a parted member's stamp through `pc.select` (whose switch now moves the flag map and quest, `GetPC`) before dying on the never-assigned `u_disbandTime`, with the relog-moved quest proving the prefix follows the target. The
 Since 526 `quest.guild_building` is `ported`: the staged seller's dialog sells land 4 to a level-10 guild master over the wire (the price leaves, the claim fans, the buy notice chats, the store banks both), porting `pc.changegold`, `notice`, `pc.get_guild`, `pc.get_x` and `pc.get_y` with their aliases. The
+Since 527 `lua.get_time`, `lua.get_global_time` and `lua.pc.getf` are `ported`: the Time Spiral's scenario already runs all three arms, and the mutants prove it — a 0 clock, a 0 flag read, and a swallowed removal each kill it. `pc.remove_item` stays `partial` for its no-store arm (ledger 265). The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
