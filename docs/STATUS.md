@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 553 (the horse's slow drink).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 554
+Last reviewed: 2026-11-10, after ledger section 554 (the auto-give's own clock).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 555
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -609,7 +609,9 @@ Since 552 `event.event_manager.warp_all_to_village_event` is `ported`: the stone
 scenario waits out the 3 s fire and proves the empire filter, which the 60 s end-arm
 shares. Since 553 `event.horse_rider.horse_stamina_regen_event` is `ported`: the world test
 fires the twelve-minute timer through the Pulse wiring, the rider scenario already
-dismounts, and the unit test pins the handover. The
+dismounts, and the unit test pins the handover. Since 554 the destroy timer's auto-give arm keeps `item_destroy_time_autogive`
+(`event.item.item_destroy_event` stays `partial`, its gold arm still scenarioless): the
+scenario lays a sword from a full inventory and watches it go 2 s on. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

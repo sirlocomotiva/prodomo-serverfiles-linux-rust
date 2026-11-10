@@ -11520,6 +11520,7 @@ fn build_world(
         )
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_gold_lifetime(config.game.item_destroy_time_dropgold)
+        .with_autogive_lifetime(config.game.item_destroy_time_autogive)
         .with_clients(Arc::clone(clients))
         .with_clock(Box::new(clock))
         .with_view_range(config.game.view_range)

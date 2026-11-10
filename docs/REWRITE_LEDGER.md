@@ -52339,3 +52339,27 @@ which refills both pools, so the stamina must be lowered after the enter, not be
 No game code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5318 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 554. The auto-give's own clock
+
+`lay_drop_hit` laid every ground item with the fixed 300 s destroy event, including the
+unplaced auto-gives, whose lifetime legacy configures (`item_destroy_time_autogive`,
+`G/config.cpp:56`; the config key existed but nothing read it). The lay now takes its
+lifetime: the monster, quest, mining and Meley drops keep the fixed 300 s
+(`StartDestroyEvent()` with no argument, `G/char_battle.cpp:883-889`,
+`G/questlua_game.cpp:163,211,265`, `G/mining.cpp:146`, `G/MeleyLair.cpp:1345`), while
+`lay_given` and `lay_owned` — `AutoGiveItem`'s three ground arms (`:9066`, `:9207`,
+`:10823`), the sort spill and the pickup leftover — pass the new `autogive_lifetime`,
+wired from the config in `main.rs` beside its two siblings.
+
+The scenario fills Alpha's 90 base cells, clicks a probe giving vnum 1000 (a one-cell
+sword, stackless, bankless, with no drop bar): none is held (`given=0`), the sword lies at
+her feet owned, and with a two-second lifetime it is destroyed on time. The fixed-300
+mutant kills the scenario. `event.item.item_destroy_event` stays `partial`: the gold
+lifetime is wired but still scenarioless.
+
+One probe lesson: `pc.give_item` (v1) does not exist in the Rewrite — `lua.pc.give_item`
+is `unused`, no owner quest names it — so the probe must call `pc.give_item2`, whose nil
+call aborts the quest with no dialog.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5319 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after lifting `GIVE_PROBE` to a module const and re-running the scenario green; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

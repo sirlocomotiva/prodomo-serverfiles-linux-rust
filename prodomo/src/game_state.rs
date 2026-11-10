@@ -580,6 +580,8 @@ pub struct GameState {
     drop_lifetime: u64,
     /// `item_destroy_time_dropgold`, in pulses.
     gold_lifetime: u64,
+    /// `item_destroy_time_autogive`, in pulses.
+    autogive_lifetime: u64,
     /// The Channel's client registry: who a trade or a warp NPC finds online.
     clients: Option<Arc<ChannelClients>>,
     /// The offline mail (`whisper::OfflineMail`): the lines waiting for an absent
@@ -1123,6 +1125,7 @@ impl GameState {
             next_ground_vid: 1,
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             gold_lifetime: drop_lifetime_pulses(DEFAULT_GOLD_LIFETIME_SECS),
+            autogive_lifetime: drop_lifetime_pulses(DEFAULT_AUTOGIVE_LIFETIME_SECS),
             test_server: true,
             item_bonus_change_time: 60,
             permanent_scrolls: PermanentScrolls::default(),
@@ -1193,6 +1196,13 @@ impl GameState {
     #[must_use]
     pub fn with_gold_lifetime(mut self, seconds: i32) -> Self {
         self.gold_lifetime = drop_lifetime_pulses(seconds);
+        self
+    }
+    /// Set `item_destroy_time_autogive`, the seconds an unplaced auto-given item lies before
+    /// it is destroyed.
+    #[must_use]
+    pub fn with_autogive_lifetime(mut self, seconds: i32) -> Self {
+        self.autogive_lifetime = drop_lifetime_pulses(seconds);
         self
     }
 
@@ -6133,6 +6143,8 @@ impl PulseProcessor for GameState {
 const DEFAULT_DROP_LIFETIME_SECS: i32 = 300;
 /// Legacy's `item_destroy_time_dropgold` default, in seconds (`G/config.cpp:56`).
 const DEFAULT_GOLD_LIFETIME_SECS: i32 = 150;
+/// Legacy's `item_destroy_time_autogive` default, in seconds (`G/config.cpp:56`).
+const DEFAULT_AUTOGIVE_LIFETIME_SECS: i32 = 300;
 /// A monster drop's destroy event, `StartDestroyEvent`'s default delay in Pulses
 /// (`G/item.cpp:247-248`, called with no argument from `RewardGold` and `Reward`). Fixed, not
 /// configured: legacy reads no config for it.

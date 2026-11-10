@@ -307,7 +307,8 @@ impl GameState {
         let spot = self.spot_of(vid.raw());
         let (x, y) = spot.map_or((0, 0), |spot| (spot.x, spot.y));
         let z = spot.map_or(0, |spot| spot.z);
-        let Some(ground) = self.lay_drop_hit(channel, map, (x, y, z), item) else {
+        let autogive = self.autogive_lifetime;
+        let Some(ground) = self.lay_drop_hit(channel, map, (x, y, z), item, autogive) else {
             return;
         };
         let Ok(character) = self.characters.find_by_vid(vid) else {

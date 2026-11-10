@@ -275,9 +275,13 @@ impl GameState {
         };
         let dx = number(&mut self.dice, -200, 200);
         let dy = number(&mut self.dice, -200, 200);
-        let Some(ground) =
-            self.lay_drop_hit(channel, map, (spot.x + dx, spot.y + dy, spot.z), item)
-        else {
+        let Some(ground) = self.lay_drop_hit(
+            channel,
+            map,
+            (spot.x + dx, spot.y + dy, spot.z),
+            item,
+            super::MONSTER_DROP_LIFETIME,
+        ) else {
             return;
         };
         let Some(body) = self.bodies.get(&vid) else {

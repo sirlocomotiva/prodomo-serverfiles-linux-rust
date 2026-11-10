@@ -51383,3 +51383,97 @@ fn a_fallen_stone_sends_its_empire_home_and_leaves_the_other() {
         "Bob of Chunjo stays: {records:02x?}"
     );
 }
+
+/// The probe quest the auto-give scenario adds: the skill teacher (vnum 20300) gives the
+/// one-cell sword (vnum 1000) and says how many of it the clicker holds.
+const GIVE_PROBE: &[u8] = b"quest give_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    pc.give_item2(1000, 1)\n\
+    say('given='..pc.countitem(1000))\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `event.item.item_destroy_event`'s auto-give arm (`AutoGiveItem`'s ground fall,
+/// `G/char_item.cpp:9202-9217`): with a two-second `item_destroy_time_autogive`, the sword a
+/// probe gives a full inventory lies at the giver's feet owned, and two seconds on it is
+/// destroyed and the view sees it go. The monster, quest, mining and Meley lays keep the
+/// fixed 300 s (`lay_drop_hit`'s other callers).
+#[test]
+fn an_autogive_nobody_picks_up_is_destroyed_on_its_own_lifetime() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let protos = owners_protos();
+    let sword = protos.get(1000).expect("the owner's data has vnum 1000");
+    assert_eq!(sword.size, 1, "one cell");
+    assert_eq!(
+        sword.flags & world::item::ITEM_FLAG_STACKABLE,
+        0,
+        "never stacks"
+    );
+    assert_eq!(
+        sword.anti_flags & world::item::ITEM_ANTIFLAG_DROP,
+        0,
+        "no drop bar"
+    );
+    assert!(
+        (0..6).all(|category| !gamedata::item_custom_category::is_custom_category(sword, category)),
+        "outside every bank"
+    );
+    let filler = a_stackable_vnum(&protos);
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    for cell in 0..90u16 {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, 1,                  {cell}, 1, {filler} FROM player WHERE name = 'Alpha'",
+                100 + u32::from(cell),
+            ),
+        );
+    }
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/give_probe.lua", GIVE_PROBE)],
+        &default_channels(),
+        "item_destroy_time_autogive = 2",
+    );
+    let (mut alice, _, _, _) = load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_view(&mut alice);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"given=0[ENTER][DONE]"),
+        "none held: it lies"
+    );
+    let laid = std::time::Instant::now();
+    let add = alice.read_game();
+    assert_eq!(add[0], GROUND_ADD, "it lies at her feet: {add:02x?}");
+    assert_eq!(
+        i32::from_le_bytes(add[17..21].try_into().expect("four bytes")),
+        1000,
+        "the sword"
+    );
+    let mut owned = vec![GC_ITEM_OWNERSHIP];
+    owned.extend_from_slice(&add[13..17]);
+    let mut name = [0u8; 25];
+    name[..5].copy_from_slice(b"Alpha");
+    owned.extend_from_slice(&name);
+    assert_eq!(alice.read_game(), owned, "owned for 60 s");
+    let mut del = vec![GROUND_DEL];
+    del.extend_from_slice(&add[13..17]);
+    assert_eq!(alice.read_game(), del, "two seconds on it goes");
+    assert!(
+        laid.elapsed() >= Duration::from_millis(1900),
+        "destroyed after {:?}",
+        laid.elapsed()
+    );
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE vnum = 1000)",
+    );
+}

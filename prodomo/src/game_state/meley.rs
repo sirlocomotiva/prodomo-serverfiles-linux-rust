@@ -1791,7 +1791,13 @@ impl GameState {
         else {
             return;
         };
-        let Some(ground) = self.lay_drop_hit(channel, map, (x, y, spot.z), item) else {
+        let Some(ground) = self.lay_drop_hit(
+            channel,
+            map,
+            (x, y, spot.z),
+            item,
+            super::MONSTER_DROP_LIFETIME,
+        ) else {
             return;
         };
         let Ok(character) = self.characters.find_by_vid(killer) else {

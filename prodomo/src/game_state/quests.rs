@@ -4516,7 +4516,8 @@ impl GameState {
         let z = self.spot_of(reader.raw()).map_or(0, |spot| spot.z);
         let secs = given_ownership_secs(item.anti_flags);
         let at = (place.x, place.y, z);
-        let Some(ground) = self.lay_drop_hit(place.channel, place.map, at, item) else {
+        let autogive = self.autogive_lifetime;
+        let Some(ground) = self.lay_drop_hit(place.channel, place.map, at, item, autogive) else {
             return;
         };
         let Ok(character) = self.characters.find_by_vid(reader) else {
@@ -4554,6 +4555,7 @@ impl GameState {
             place.map,
             (place.x + dx, place.y + dy, z),
             item,
+            super::MONSTER_DROP_LIFETIME,
         ) else {
             return;
         };
@@ -4584,6 +4586,7 @@ impl GameState {
             place.map,
             (place.x + dx, place.y + dy, z),
             item,
+            super::MONSTER_DROP_LIFETIME,
         );
     }
 

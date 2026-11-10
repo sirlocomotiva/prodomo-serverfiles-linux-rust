@@ -802,7 +802,13 @@ impl GameState {
             if self.can_pickup_directly(attacker) {
                 self.give_drop_directly(attacker, item);
             } else {
-                let ground = self.lay_drop_hit(channel, map, (px, py, z), item);
+                let ground = self.lay_drop_hit(
+                    channel,
+                    map,
+                    (px, py, z),
+                    item,
+                    super::MONSTER_DROP_LIFETIME,
+                );
                 if let Some(ground) = ground {
                     self.set_drop_owner(ground, attacker);
                 }
@@ -833,7 +839,13 @@ impl GameState {
                 self.give_drop_directly(owner, item);
                 continue;
             }
-            let ground = self.lay_drop_hit(channel, map, (px, py, z), item);
+            let ground = self.lay_drop_hit(
+                channel,
+                map,
+                (px, py, z),
+                item,
+                super::MONSTER_DROP_LIFETIME,
+            );
             if let (Some(ground), Some(owner)) = (ground, owner) {
                 self.set_drop_owner(ground, owner);
             }
@@ -892,17 +904,19 @@ impl GameState {
         self.set_ground_ownership(ground, Some((pid, name)), 10);
     }
 
-    /// Lay one made drop item `item` at `at` on `channel`'s `map`: `AddToGround` with the
-    /// fixed 300 s destroy event (`G/item.cpp:549-584`, `G/char_battle.cpp:883-889`).
-    /// Answers the ground VID for `SetOwnership`. A point with no sectree drops the item
-    /// unseen, its draws kept (OQ10: legacy's `AddToGround` fails the same way but keeps
-    /// the failed item for 300 s where nothing can observe it).
+    /// Lay one made drop item `item` at `at` on `channel`'s `map`: `AddToGround` (`G/item.cpp:549-584`)
+    /// with the destroy event `lifetime` Pulses out — the fixed 300 s for a monster, quest,
+    /// mining or Meley drop (`G/char_battle.cpp:883-889`), `item_destroy_time_autogive` for
+    /// an unplaced auto-give. Answers the ground VID for `SetOwnership`. A point with no
+    /// sectree drops the item unseen, its draws kept (OQ10: legacy's `AddToGround` fails the
+    /// same way but keeps the failed item for 300 s where nothing can observe it).
     pub(super) fn lay_drop_hit(
         &mut self,
         channel: u8,
         map: i32,
         at: (i32, i32, i32),
         item: Item,
+        lifetime: u64,
     ) -> Option<u32> {
         use world::character::GroundItem;
         let key = (channel, map);
@@ -926,7 +940,7 @@ impl GameState {
                 ground,
                 channel,
                 map,
-                expires: self.last_pulse.saturating_add(super::MONSTER_DROP_LIFETIME),
+                expires: self.last_pulse.saturating_add(lifetime),
                 owner: None,
                 stored,
             },
