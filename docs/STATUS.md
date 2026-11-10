@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 524 (the Ochao temple).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 525
+Last reviewed: 2026-11-10, after ledger section 525 (the guild GM chats).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 526
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -577,7 +577,9 @@ Since 520 `sys.skill.buff_npc` is `ported`: the 69700 toggle flips its socket-3 
 The
 Since 521 `sys.marriage` is `unused`: a marriage forms only through `marriage.engage_to`, which no quest names, and the DB peer that carried the add is retired, so the wedding map never stands and `GC_LOVER_INFO` is never sent; the live hook is ported (71069-71074 refuse with `[LS;467]`).
 Since 522 `sys.event.manager` carries its siege and kingdom war arms (13-14): the stones stand at the base plus offsets, the cross-empire kill fans the score record to 103 (and the entrant's burst carries it), the ends pay the rank table for 48 hours, kill the map and chat the teleport line, and the 3 s/60 s home warps queue with the empire-0 skip; the stone-defeat kill is unit-tested, the 2.9M-HP stone being unkillable over the wire in reasonable time. `gc.event_kw_score` is `ported` and `event.event_manager.warp_all_to_village_event` is `partial` (the 60 s fire is unit-tested only). Since 523 `sys.event.manager` carries its OX arm (11): the panel index starts the event over the wire (the start line, then the dialog), Uriel's herald warps the entrant to the attender seat on 113, and the engine — the 567-quiz loader, the open/quiz/end process, the three-step timer, the answer check with its effects and cheers, the miss warp, the 50109 reward and the login mount-strip — is unit-tested in the state, no scenario waiting out the 5-minute registration. `data.ox`, `quest.ox_event`, `event.OXEvent.oxevent_timer` and `event.event_manager.ox_event_process` are `ported`; `sys.event.ox` stays `ported` with the scenario. The
-Since 524 `sys.dungeon.temple_ochao` and `quest.temple_of_the_ochao` are `ported`: the portal's forest chat runs over the wire (the map-209 gate, the `enchanted_forest.limit_activity` 0 write, the warp to (816700, 1505000) on the Channel hosting 210), and the 6311 kill table drops owned for 300 s in the world and manager tests, a 218k-HP boss no wire kill reaches in reasonable time. The
+Since 524 `sys.dungeon.temple_ochao` and `quest.temple_of_the_ochao` are `ported`: the portal's forest chat runs over the wire (the map-209 gate, the `enchanted_forest.limit_activity` 0 write, the warp to (816700, 1505000) on the Channel hosting 210), and the 6311 kill table drops owned for 300 s in the world and manager tests, a 218k-HP boss no wire kill reaches in reasonable time.
+Since 525 `quest.guild_manage` is `ported`: the guild man's menu gates both GM chats on `pc.is_gm`, the info chat sends the triad and empires, and the re-entry tool reads a parted member's stamp through `pc.select` (whose switch now moves the flag map and quest, `GetPC`) before dying on the never-assigned `u_disbandTime`, with the relog-moved quest proving the prefix follows the target. The
+The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
@@ -1601,6 +1603,11 @@ owner should know about (178.5):
   line while its training arm is commented out (`G/char_item.cpp:6944-6964`), so the
   premium flag is never set by any ported path. The Rewrite keeps the line (it is the
   arm's whole behaviour) but not the TEST chats (ledger 520).
+- The guild re-entry tool reads `u_disbandTime`, which nothing assigns (the line above
+  assigns `u_withdrawTime` twice, `guild_manage.lua:17-18`), so the `nil > 0` errors and
+  the retry math, `get_time` and `is_test_server` never run — in Lua 5.0
+  (`luaV_lessthan` -> `luaG_ordererror`, `server/server/liblua/lvm.c:258-268`) and 5.1
+  alike. The Rewrite runs the script to the same error end (`GotoEndState`, ledger 525).
 
 ## Environment
 

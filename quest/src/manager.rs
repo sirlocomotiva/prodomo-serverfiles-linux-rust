@@ -1927,6 +1927,10 @@ impl Manager {
             .iter_mut()
             .map(|(pid, pc)| (*pid, std::mem::take(&mut pc.flags)))
             .collect();
+        let current_quests: BTreeMap<u32, Vec<u8>> = pcs
+            .iter()
+            .map(|(pid, pc)| (*pid, pc.current.clone()))
+            .collect();
         let host: &Host = host;
         let npcs: &BTreeMap<u32, Npc> = npcs;
         let quest_indices = host.quest_indices();
@@ -1944,6 +1948,8 @@ impl Manager {
             pending_others: Vec::new(),
             borrowed: Some(&mut borrowed),
             current: pid,
+            root: pid,
+            current_quests,
             stack: Vec::new(),
             window: Window::default(),
             categories,
@@ -2635,6 +2641,15 @@ struct Cx<'g> {
     /// The PID whose flag map the bridge reads: the step's root, or the innermost
     /// blocked PC's (`m_pCurrentPC->GetID()`, `G/questmanager.cpp:2051-2093`).
     current: u32,
+    /// The step's root PID, whose script runs: `execute` writes its last-run quest
+    /// here as it writes `pc.current`, so the flag prefix follows the running
+    /// script even though `operate` snapshotted the names before it ran.
+    root: u32,
+    /// Every PC's last-run quest (`m_stCurQuest`, `G/questpc.cpp:42-45`), as `operate`
+    /// read it: `getqf`/`setqf`/`delqf` prefix with the `current` PC's, since legacy
+    /// reads `GetCurrentPC()->GetCurrentQuestName()`, and a `pc.select` or a block
+    /// switches the current PC away from the running quest's.
+    current_quests: BTreeMap<u32, Vec<u8>>,
     /// `m_vecPCStack`: the PIDs the open blocks pushed, oldest first.
     stack: Vec<u32>,
     /// The quest window of the script whose step runs, which `q.set_title`, `q.start` and
@@ -2654,6 +2669,15 @@ impl Cx<'_> {
     /// bridge never touched it.
     fn flag_map(&self) -> Option<&BTreeMap<Vec<u8>, i32>> {
         self.borrowed.as_deref()?.get(&self.current)
+    }
+
+    /// The quest whose flags `getqf`/`setqf`/`delqf` name: the `current` PC's
+    /// last-run quest (`GetCurrentPC()->GetCurrentQuestName()`), the running
+    /// quest's when the bridge never switched PCs.
+    fn flag_quest(&self) -> &[u8] {
+        self.current_quests
+            .get(&self.current)
+            .map_or(&self.quest, Vec::as_slice)
     }
 
     /// The live flag map for a write: the `current` PC's, made when the bridge
@@ -2961,7 +2985,12 @@ impl Run<'_, '_> {
         pc.quests.insert(quest, state);
         pc.flags.insert([&name[..], b".__status"].concat(), state);
         pc.send_done = false;
-        self.cx.borrow_mut().quest.clone_from(&name);
+        {
+            let mut cx = self.cx.borrow_mut();
+            let root = cx.root;
+            cx.quest.clone_from(&name);
+            cx.current_quests.insert(root, name.clone());
+        }
         pc.current = name;
         pc.pending_state = None;
         pc.running = Some(Running {
@@ -3939,7 +3968,7 @@ fn set_quest_flag(
         return Ok(None);
     };
     let value = host::c_int(lua, Value::Number(value.round_ties_even()))?;
-    let name = [&cx.quest[..], b".", &flag].concat();
+    let name = [cx.flag_quest(), b".", &flag].concat();
     if let Some(flags) = cx.flags() {
         if value == 0 {
             flags.remove(&name);
@@ -3968,7 +3997,7 @@ fn pc_flags(
                 tracing::warn!("QUEST wrong get flag");
                 return Ok(Some(MultiValue::new()));
             };
-            let name = [&cx.quest[..], b".", &flag].concat();
+            let name = [cx.flag_quest(), b".", &flag].concat();
             let value = cx
                 .flag_map()
                 .and_then(|flags| flags.get(&name).copied())
@@ -4033,7 +4062,7 @@ fn pc_flags(
                 tracing::warn!("argument error");
                 return Ok(Some(MultiValue::new()));
             };
-            let name = [&cx.quest[..], b".", &flag].concat();
+            let name = [cx.flag_quest(), b".", &flag].concat();
             if let Some(flags) = cx.flags() {
                 flags.remove(&name);
             }
@@ -4364,10 +4393,18 @@ fn pc_tail(
             None
         }
         // `pc_select_vid` (`:1814-1836`): `lua_tonumber` of the first argument is the
-        // VID; the old VID is pushed, or 0 with none under it.
+        // VID; the old VID is pushed, or 0 with none under it. `GetPC` switches the
+        // current PC too, so the flag map and quest follow when the VID names one —
+        // no stack, the restore names the old VID back — as the block's switch does.
         b"pc.select" => {
             let vid = dword(lua.coerce_number(first.clone())?.unwrap_or(0.0));
-            Some(Value::Number(f64::from(cx.game.select_pc(vid))))
+            let old = cx.game.select_pc(vid);
+            if old != 0 {
+                if let Some(pid) = cx.game.pid_of(vid) {
+                    cx.current = pid;
+                }
+            }
+            Some(Value::Number(f64::from(old)))
         }
         // `pc_get_killee_drop_pct` (`:2962-2980`): two pushes, so its own return.
         b"pc.get_killee_drop_pct" => {
@@ -8433,6 +8470,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -8609,6 +8647,9 @@ mod tests {
         /// The PID whose map the bridge reads, as `operate`'s `Cx` holds it: the
         /// block arms switch it, and it persists across calls.
         current: u32,
+        /// Every PC's last-run quest, as `operate`'s `Cx` holds it: overlaid on the
+        /// running `q`, so a select test can pin the quest-name half.
+        quests: BTreeMap<u32, Vec<u8>>,
         /// The open blocks' pushed PIDs, as `operate`'s `Cx` holds them.
         stack: Vec<u32>,
         /// The quest window the `q.*` arms change.
@@ -8631,6 +8672,12 @@ mod tests {
                 pending_others: Vec::new(),
                 borrowed: Some(&mut self.borrowed),
                 current: self.current,
+                root: self.current,
+                current_quests: {
+                    let mut quests = BTreeMap::from([(self.current, b"q".to_vec())]);
+                    quests.extend(self.quests.clone());
+                    quests
+                },
                 stack: std::mem::take(&mut self.stack),
                 window: std::mem::take(&mut self.window),
                 categories: &self.manager.categories,
@@ -8667,6 +8714,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -8767,6 +8815,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -8823,6 +8872,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -8876,6 +8926,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -8931,6 +8982,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9001,6 +9053,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9100,6 +9153,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9137,6 +9191,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9206,6 +9261,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9245,6 +9301,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9319,6 +9376,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9346,6 +9404,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9410,6 +9469,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9481,6 +9541,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9570,6 +9631,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9625,6 +9687,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9676,6 +9739,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9764,6 +9828,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9826,6 +9891,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9868,6 +9934,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -9924,6 +9991,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10001,6 +10069,7 @@ mod tests {
                 ]),
             )]),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10056,6 +10125,7 @@ mod tests {
                 BTreeMap::from([(b"attr67add_item.success".to_vec(), 0)]),
             )]),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10102,6 +10172,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10179,6 +10250,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10217,6 +10289,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10326,6 +10399,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10460,6 +10534,84 @@ mod tests {
             "the master flag"
         );
         assert_eq!(probe.call("pc.get_guild", &[]).unwrap(), number(42.0));
+    }
+
+    /// `pc.select` switches the flag map too (`GetPC`, `G/questmanager.cpp:1087-1099`):
+    /// after selecting the VID of 11, `getqf` reads 11's map and `setqf` writes it, an
+    /// unknown VID switches nothing, and naming a known VID back restores the root's.
+    /// The probe pins `q` as the quest, so the quest-name half rides `operate`'s
+    /// per-PC names, which the scenario below covers through the GM tool.
+    #[test]
+    fn a_select_switches_the_flag_map() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake {
+                char_vid: 100,
+                vids: [(100, PID), (200, 11)].into_iter().collect(),
+                ..Fake::default()
+            },
+            output: Output::default(),
+            borrowed: BTreeMap::from([
+                (PID, BTreeMap::from([(b"q.stamp".to_vec(), 7)])),
+                (
+                    11,
+                    BTreeMap::from([(b"q.stamp".to_vec(), 5), (b"other.stamp".to_vec(), 9)]),
+                ),
+            ]),
+            current: PID,
+            quests: BTreeMap::from([(11, b"other".to_vec())]),
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let stamp = Value::String(lua.create_string(b"stamp").unwrap());
+        let num = |value: f64| Value::Number(value);
+        assert_eq!(
+            probe.call("pc.select", &[num(200.0)]).unwrap(),
+            [num(100.0)],
+            "the old VID is pushed"
+        );
+        assert_eq!(
+            probe.call("pc.getqf", &[stamp.clone()]).unwrap(),
+            [num(9.0)],
+            "11's stamp reads under 11's quest, not the running one"
+        );
+        assert!(probe
+            .call("pc.setqf", &[stamp.clone(), num(3.0)])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe.borrowed[&11].get(b"other.stamp".as_slice()),
+            Some(&3),
+            "the write lands on 11's map under 11's quest"
+        );
+        assert_eq!(
+            probe.borrowed[&11].get(b"q.stamp".as_slice()),
+            Some(&5),
+            "the running quest's flag on 11's map is untouched"
+        );
+        assert_eq!(probe.borrowed[&PID].get(b"q.stamp".as_slice()), Some(&7));
+        assert_eq!(
+            probe.call("pc.select", &[num(999.0)]).unwrap(),
+            [num(0.0)],
+            "an unknown VID pushes 0"
+        );
+        assert_eq!(
+            probe.call("pc.getqf", &[stamp.clone()]).unwrap(),
+            [num(3.0)],
+            "an unknown VID switches nothing"
+        );
+        assert_eq!(
+            probe.call("pc.select", &[num(100.0)]).unwrap(),
+            [num(200.0)],
+            "naming the old VID back pushes the blocked one"
+        );
+        assert_eq!(
+            probe.call("pc.getqf", &[stamp]).unwrap(),
+            [num(7.0)],
+            "the root's stamp reads again"
+        );
     }
 
     /// The mount and the party among the reader names: `pc.is_mount` answers the
@@ -10735,6 +10887,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10789,6 +10942,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10827,6 +10981,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10883,6 +11038,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10919,6 +11075,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -10945,6 +11102,7 @@ mod tests {
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -11220,6 +11378,7 @@ end
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -11275,6 +11434,7 @@ end
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -11341,6 +11501,7 @@ end
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -11378,6 +11539,7 @@ end
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };
@@ -11471,6 +11633,7 @@ end
             output: Output::default(),
             borrowed: BTreeMap::new(),
             current: PID,
+            quests: BTreeMap::new(),
             stack: Vec::new(),
             window: Window::default(),
         };

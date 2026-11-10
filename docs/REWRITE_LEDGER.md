@@ -51730,3 +51730,60 @@ came — on the temple map the sash's mark finds no Theowahdan, and only the let
 pass sends its letters.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean (after scoping the test-only `BODYGUARD_VNUM` into the test module, which the lib build flagged as dead); the suite 5299 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean (1 passed in 9 targets); `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. The mutation sweep kills 4 of 4: the 300 s ownership window, a dropped passing row, the world test's level gate, and the manager test's level gate. The scenario passes 8 of 8 parallel runs. The first full run failed only the inventory rule — the drop API's scenario cell named a module path, which the checker does not accept — fixed to the file path and rerun green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 525. The guild GM chats
+
+The guild man's two GM entries (`guild_manage.lua:3-66`) run over the wire, and
+`pc.select` learns what `GetPC` always did. Ten API rows and the quest turn `ported`.
+
+**Legacy** (`G/questlua_pc.cpp:1814-1836`, `:1180-1197`, `G/questmanager.cpp:1087-1099`,
+`G/questpc.cpp:42-45`, `G/questlua_global.cpp:80-87,743-757`,
+`server/server/liblua/lvm.c:258-268`):
+
+- `pc.select(vid)` calls `GetPC(pid)`, which switches `m_pCurrentPC` and
+  `m_pCurrentCharacter` — the whole current character, not just the game fields.
+  `getqf`/`setqf`/`delqf` then read `GetCurrentPC()->GetCurrentQuestName()` as their
+  prefix: the *target's* last-run quest, not the running script's. No stack: naming
+  the old VID back restores by direct set.
+- The re-entry tool reads `u_disbandTime` at line 31, which nothing assigns — line 17
+  assigns `u_withdrawTime` twice (positive control: the double assignment; negative:
+  no `u_disbandXyzTime` anywhere). `nil > 0` errors in Lua 5.0 (`luaV_lessthan` ->
+  `luaG_ordererror`) and 5.1 alike, so the retry math, `get_time` and
+  `is_test_server` never run, on legacy too. The error ends the script through
+  `GotoEndState`: the buffered page plus `[DONE]`.
+- The `_50` format string (`"Abgezogene Zeit Tag"`) holds no `%s`, so the computed
+  `time_to_str` text is discarded — the bridge still runs.
+- `questlib.lua:456-530` resolves `pc.*`/`npc.*` field reads through metatables onto
+  the bridged getters, so the info chat's `pc.has_guild()`, `pc.isguildmaster()`,
+  `pc.empire` and `npc.empire` need no new bridge.
+
+**Rewrite** (`quest/src/manager.rs`, `prodomo/tests/parity.rs`):
+
+- The `pc.select` arm now switches `cx.current` to `pid_of(vid)` when the select
+  switched (old VID nonzero), mirroring the block's switch without its stack.
+- `getqf`/`setqf`/`delqf` prefix with `flag_quest()`: the current PC's last-run
+  quest, snapshotted per-PC in `operate` and refreshed for the root by `execute`
+  (which already wrote `pc.current`; without the refresh the login tests read
+  empty prefixes — the first red run).
+- The scenario `a_gm_reads_the_guild_info_and_the_re_entry_tool` founds `MyGuild`,
+  joins Yankee and parts it (the stamp lands, Yankee's quest rests at
+  `guild_building`), then reads twice: before the relog the stamp says the withdraw
+  line; after the relog the login scripts moved Yankee's quest and the line stays
+  out — the prefix-follows-target pin. The unknown name says the missing-user page;
+  the info chat sends the triad and empires over `CHAT_TYPE_TALKING`. Both mutant
+  halves (no map switch, running-quest prefix) kill the scenario, and the unit test
+  `quest::manager::a_select_switches_the_flag_map` pins the switch with 11 last
+  running `other`.
+- Two traps, each worth its line: Yankee's enter needs the GM `TEAM_LIST` drain
+  (`enter_world_on_with_team`), since Alpha's grant names someone else; and the
+  info chat's end sends `[DONE]` in skin 0, because the client picked a menu entry.
+
+Parity rows: `lua.pc.is_gm`, `lua.chat`, `lua.pc.has_guild`, `lua.pc.isguildmaster`,
+`lua.pc.is_guild_master`, `lua.pc.getempire`, `lua.pc.get_empire`,
+`lua.npc.get_empire`, `lua.find_pc_by_name` and `lua.time_to_str` are `ported`;
+`quest.guild_manage` is `ported` (all five arms scenario-covered: founding in 269,
+part and disband in 273, the GM pair here). `lua.pc.select` notes the switch.
+`lua.get_time` and `lua.is_test_server` stay `partial`: the defect kills the only
+caller before them. The `u_disbandTime` defect joins STATUS.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5301 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean (the 130-line scenario split into `gm_guild_stage` plus `gm_tool_read`); `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. The 13 lingering `prodomo_proc_2836734_*` databases belonged to the aborted stale suite run (killed before the refactor; no activity held them) and were dropped by hand. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.

@@ -22291,6 +22291,192 @@ fn disband_guild(alice: &mut Keyed, yankee: &mut Keyed, man: u32, master: u32) {
     yankee.quiet("the parted member hears no disband");
 }
 
+/// One run of the guild re-entry tool: the click, the menu, the first entry's ask,
+/// the input of `name`, and the `page` it says. The menu is pinned once by the caller.
+fn gm_tool_read(alice: &mut Keyed, man: u32, ask: &[u8], name: &[u8], page: &[u8], note: &str) {
+    alice.send_record(&client_click(man));
+    alice.read_game();
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(1, ask), "the ask");
+    alice.send_record(&client_quest_input(name));
+    assert_eq!(alice.read_game(), server_script(1, page), "the page");
+    alice.quiet(note);
+}
+
+/// The GM-chats stage: Alpha, a `HIGH_WIZARD` master of `MyGuild`, and Yankee, parted
+/// with its withdraw stamp written and its last-run quest at `guild_building`. Answers
+/// the database, the server, both clients, Yankee's VID and the guild man's VID.
+fn gm_guild_stage() -> Option<(ScratchDatabase, Server, Keyed, Keyed, u32, u32)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 474300, 954100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET x = 474300, y = 954100, gold = 200000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+         70101 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    // Yankee hears the GM team list behind its burst, since Alpha's grant names
+    // someone else (`LoadTeamList`); the VIDs are per-map, so the guild man's is
+    // Alice's.
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    let men_of = |shown: &Shown| {
+        shown
+            .inserts()
+            .iter()
+            .filter(|insert| insert[22..24] == 11_000u16.to_le_bytes())
+            .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+            .collect::<Vec<_>>()
+    };
+    let men = men_of(&alice_entered.shown);
+    assert_eq!(men.len(), 1, "map 1 has one guild man in view");
+    let yankee_men = men.clone();
+    let guest = yankee_listed.id;
+    let member = u32::try_from(
+        support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Yankee'",
+            1,
+        )[0][0],
+    )
+    .unwrap();
+    let master = u32::try_from(
+        support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Alpha'",
+            1,
+        )[0][0],
+    )
+    .unwrap();
+    let id = drain_guild_founding(&mut alice, &mut yankee, master);
+    join_guild(&mut alice, &mut yankee, guest, id);
+    part_guild(&database, &mut alice, &mut yankee, yankee_men[0], member);
+    Some((database, server, alice, yankee, guest, men[0]))
+}
+
+/// `lua.pc.is_gm`, `lua.chat`, `lua.pc.has_guild`, `lua.pc.isguildmaster`,
+/// `lua.pc.getempire`, `lua.npc.get_empire`, `lua.find_pc_by_name`, `lua.time_to_str`,
+/// `quest.guild_manage`: Alpha is a `HIGH_WIZARD` GM and master of `MyGuild`, Yankee a
+/// parted member whose withdraw stamp the parting wrote. The guild man's menu offers the
+/// two GM chats first. The tool reads Yankee's stamp through `pc.select` (the flag map
+/// and quest switch, `GetPC`) and says the check page with the withdraw line — then the
+/// script dies on the never-assigned `u_disbandTime` (`guild_manage.lua:31`, a Defect:
+/// `nil > 0` errors in Lua 5.0 and 5.1 alike), so the page ends with `[DONE]` exactly as
+/// legacy's `GotoEndState` ends it, and the retry math, `get_time` and `is_test_server`
+/// never run. Yankee relogs, the login scripts move its quest, and the tool reads 0 and
+/// says the check page without the line. The info chat (`_100`) chats the guild triad
+/// and empires over `CHAT_TYPE_TALKING`; an unknown name says the missing-user page.
+#[test]
+fn a_gm_reads_the_guild_info_and_the_re_entry_tool() {
+    let Some((_database, mut server, mut alice, yankee, guest, man)) = gm_guild_stage() else {
+        return;
+    };
+    // Yankee's parting wrote the withdraw stamp and left its last-run quest at
+    // `guild_building`, which the tool's `select` + `getqf` read back below.
+    let ask = titled_page(
+        b"Gardian:",
+        &[b"Introdu numele utilizatorului ale carui[ENTER]informatii le doresti. "],
+        b"[INPUT]",
+    );
+    // The tool with Yankee before its relog: the stamp reads, the withdraw line
+    // says (its `time_to_str` runs, though the format drops the text), then
+    // `u_disbandTime` kills the script and `[DONE]` ends the page where legacy's
+    // `GotoEndState` ends it.
+    let menu = server_script(1, b"[QUESTION 1;GM: Reinscriere|2;GM: Citeste informatia breslei|3;Desfiinteaza breasla|4;Arata rangul breslei tale|5;Vezi cele mai mari ranguri ale breslelor (1-8)|6;Vezi scorul breslei tale|7;Inchide]");
+    alice.send_record(&client_click(man));
+    assert_eq!(
+        alice.read_game(),
+        menu,
+        "the GM menu offers both chats first"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_quest_input(b"Yankee"));
+    let stamped = titled_page(
+        b"Gardian:",
+        &[
+            b"Verifica cea mai apropiata data de reinscriere.",
+            b"Abgezogene Zeit Tag",
+        ],
+        b"[DONE]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &stamped));
+    alice.quiet("the defect ends the tool");
+    // Yankee relogs: the stamp row survives, but the login scripts leave its
+    // last-run quest at a login quest, not `guild_building` — so the tool reads 0
+    // under legacy's `GetCurrentPC()->GetCurrentQuestName` prefix, and the
+    // withdraw line stays out. A prefix pinned to the running quest would wrongly
+    // say the stamp.
+    drop(yankee);
+    server.wait_for("Character left the world");
+    alice.sees_disconnect(guest);
+    let (_yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    assert_eq!(yankee_listed.id, guest, "the relog keeps the VID");
+    alice.sees_enter(guest, true, None);
+    // The info chat: the menu offers the two GM entries first, and the info line
+    // chats the triad and empires — master of a guild, empire 1, the man on map 1.
+    alice.send_record(&client_click(man));
+    assert_eq!(alice.read_game(), menu);
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_TALKING,
+            1,
+            b"pc.has_guild: true; pc.is_guildmaster: true; pc.empire: 1; npc.empire: 1"
+        ),
+        "the info chat"
+    );
+    // The client picked a menu entry, so the script's end closes the window.
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    alice.quiet("the info chat ends silent");
+    // The tool with an unknown name: the ask, the input, the missing-user page.
+    let missing = titled_page(b"Acest utilizator nu exista.", &[b"Nobody"], b"[DONE]");
+    gm_tool_read(
+        &mut alice,
+        man,
+        &ask,
+        b"Nobody",
+        &missing,
+        "the unknown name ends the tool",
+    );
+    // The tool with Yankee: no withdraw line (the relog moved its quest), then
+    // `u_disbandTime` kills the script and `[DONE]` ends the page where legacy ends it.
+    let check = titled_page(
+        b"Gardian:",
+        &[b"Verifica cea mai apropiata data de reinscriere."],
+        b"[DONE]",
+    );
+    gm_tool_read(
+        &mut alice,
+        man,
+        &ask,
+        b"Yankee",
+        &check,
+        "the defect ends the tool",
+    );
+}
+
 /// `lua.pc.warp`, `quest.temple_of_the_ochao`: the temple guardian stands on map 1, and
 /// Alpha, level 154, enters beside him. The click offers the one chat whose level holds;
 /// "Da" runs `pc.warp(853700, 1416400)` (`G/questlua_pc.cpp:209-240`), past `IsHack`, and
