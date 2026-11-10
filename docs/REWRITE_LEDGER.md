@@ -52083,3 +52083,15 @@ there. The probe cannot name `away`'s number: `qc` refuses a literal it would pr
 partial left: 337 ported, 362 unused.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 543. The party walk
+
+Seven `codec` rows were already on the wire: the request scenario's invite lands with the
+exact header and its drain counts the join walk's ADDs, LINKs, UPDATE and PARAMETER; the
+role scenario pins the ADD bodies (`pid + name`) and the leader's drop unlink; the ungroup
+scenario pins the REMOVE's PID. `gc.party_invite`, `gc.party_add`, `gc.party_update`,
+`gc.party_link`, `gc.party_parameter`, `gc.party_unlink` and `gc.party_remove` are `ported`,
+pointing at those three scenarios. One mutant died: a skipped link-one-to-all breaks the
+request drain. No code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
