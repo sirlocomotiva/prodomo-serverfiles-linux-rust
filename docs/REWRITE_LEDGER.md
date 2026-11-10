@@ -52104,3 +52104,14 @@ and `gc.request_make_guild` are `ported`. Two mutants died: a shifted group and 
 ask, each at its exact assert. No code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite's one failure was the refine load flake, green alone and in the parity re-run's 408 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 545. The set and the update
+
+Two more `codec` rows with exact asserts: the letters trade reads six clears with window,
+cell and vnum 0, and the move/split/merge reads the UPDATEs' window, cell and count.
+`gc.item_set` and `gc.item_update` are `ported`. Two mutants died: a clear vnum of 1 and an
+update count off by one. A cell-shifted `gc_item_set` survived first, which showed the
+clears go through `gc_item_clear`, not `gc_item_set` — the vnum mutant kills the class of
+real defect the survivor hid. No code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite's one failure was the fish-length load flake, green alone and in the parity re-run's 408 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
