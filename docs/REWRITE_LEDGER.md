@@ -52268,3 +52268,28 @@ sending one is a Divergence from the dead send, recorded here. The ledger-548 cl
 Both rows move to `unused`, pending the owner's confirmation (question 69). No code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 551. The special cells
+
+`sys.item.special_inventory` sat `missing` while its machine was long ported: the bounds
+(`common::item_slots`, ledger 194), the grid (`CharacterItems::find_free_custom_cell`),
+the category rules (`gamedata::item_custom_category`), the grant's bank scan, and the
+move's `WrongBank` gate. What was missing was the proof. This slice is the scenario
+`a_bank_zero_item_moves_into_its_special_cells_and_a_plain_one_is_refused`, and the row
+moves to `ported`.
+
+The scenario seeds a one-cell bank-0 book (the first the owner's protos carry, a
+skillbook) at base cell 0 and a one-cell item in no bank (vnum 1) at base cell 1: the
+book moves to the bank's first cell 290 with a clear and a set, and the plain item is
+refused from 291 with
+`@@(char_item.cpp)tradus:[Special_Inventory]Nu poti plasa acest obiect aici.`
+(`char_item.cpp:7691`). The store holds the moved row at 290 and keeps the refused one
+at 1. A mutant that compares the destination against the next bank dies on the book's
+clear.
+
+The scenario first hung: the seeds used cells 258/259, which are dragon soul reserved
+cells, not bank 0 — `CUSTOM_INVENTORY_SLOT_START` is 290, past the belt. The move was
+silently refused with `NoRoom` (`cell >= end`, end 90), which the kept server log showed.
+No game code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5316 passed, 0 failed in 46 targets (the full suite's one failure was the known `a_gaya_craft` load flake, green alone and in the parity re-run's 409 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

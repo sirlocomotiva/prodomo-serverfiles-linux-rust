@@ -10301,6 +10301,31 @@ fn client_item_use(cell: u16) -> Vec<u8> {
         .encode()
 }
 
+/// A one-cell vnum in custom bank 0 (a skill book) and one in no bank at all, so a
+/// scenario can move into a special cell and be refused from the next.
+fn a_bank_zero_vnum_and_a_plain_one(protos: &gamedata::item_proto::ItemProtos) -> (u32, u32) {
+    let banked = protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            proto.size == 1 && gamedata::item_custom_category::is_custom_category(proto, 0)
+        })
+        .map(|proto| proto.vnum)
+        .expect("the owner's data has a one-cell item in bank 0");
+    let plain = protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            proto.size == 1
+                && !(0..6).any(|category| {
+                    gamedata::item_custom_category::is_custom_category(proto, category)
+                })
+        })
+        .map(|proto| proto.vnum)
+        .expect("the owner's data has a one-cell item in no bank");
+    (banked, plain)
+}
+
 /// A one-cell stackable vnum in no custom bank, so a grant of it lands in the base inventory
 /// and a move of it can split and merge.
 fn a_stackable_vnum(protos: &gamedata::item_proto::ItemProtos) -> u32 {
@@ -51068,5 +51093,59 @@ fn a_yes_to_the_temple_portal_writes_the_limit_and_warps_to_the_forest() {
         &database,
         "NOT EXISTS (SELECT 1 FROM quest_flag q JOIN player p ON p.id = q.player_id WHERE \
          p.name = 'Alpha' AND q.name = 'enchanted_forest.limit_activity'::bytea)",
+    );
+}
+
+/// `sys.item.special_inventory` (`ENABLE_CUSTOM_INVENTORY`): a one-cell bank-0 item at base
+/// cell 0 moves to the bank's first cell 290, and a one-cell item in no bank at base cell 1
+/// is refused from cell 291 with the `[Special_Inventory]` line. The store holds the moved
+/// row at 290, and the refused item stays where it was.
+#[test]
+fn a_bank_zero_item_moves_into_its_special_cells_and_a_plain_one_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let protos = owners_protos();
+    let (banked, plain) = a_bank_zero_vnum_and_a_plain_one(&protos);
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    for (id, pos, vnum) in [(20, 0, banked), (21, 1, plain)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    // The loading burst already carried the two seeds (cells 0 and 1); the moves below
+    // prove where they stand.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+
+    // Bank 0 starts at `CUSTOM_INVENTORY_SLOT_START` (290), past the belt.
+    alpha.send_record(&client_item_move(0, 290, 0));
+    assert_eq!(alpha.read_game(), a_clear_record(0));
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 290, banked, 1),
+        "the book lands in bank 0"
+    );
+
+    alpha.send_record(&client_item_move(1, 291, 0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(
+            b"@@(char_item.cpp)tradus:[Special_Inventory]Nu poti plasa acest obiect aici."
+        ),
+        "the plain item is refused from bank 0"
+    );
+    alpha.still("nothing follows the refusal");
+
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 20 AND window_type = 1 AND pos = 290) AND \
+         EXISTS (SELECT 1 FROM item WHERE id = 21 AND window_type = 1 AND pos = 1)",
     );
 }
