@@ -52293,3 +52293,28 @@ silently refused with `NoRoom` (`cell >= end`, end 90), which the kept server lo
 No game code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5316 passed, 0 failed in 46 targets (the full suite's one failure was the known `a_gaya_craft` load flake, green alone and in the parity re-run's 409 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 552. The stone's home warp
+
+The war-home timer (`event.event_manager.warp_all_to_village_event`) was `partial` since
+ledger 522: the queue, the empire filter, the empire-0 skip and the warp order were
+unit-tested, but no scenario waited out a fire. The scenario exists now, and the row is
+`ported`.
+
+The path it proves is the stone-fall one (`OnDead`, `G/event_manager.cpp:833-923`):
+Charlie starts the siege from map 1 through the probe, Alice of Shinsoo fells stone 8020
+on 103 with two punches — the first stuns at 0 HP, the second finishes (`Damage`
+`:2248-2252`) — the empire's line chats, and 3 s after the death Alice warps to the
+empire-1 home (469300, 964200) while Bob of Chunjo, on 103 beside his own stone, stays.
+The 60 s end-arm shares the queue (`run_war_home`), so the one fire proves both.
+
+Two scenario facts worth recording. The stones carry 2965500 HP on the owner's data, so
+the scenario overlays `proto/mob_proto.txt` with the three stones at one hit point (the
+patch rewrites only the `MAX_HP` column of the three rows, byte-exact otherwise, CRLF
+kept). And the notice's empire byte is the recipient's: Bob's stone line carries 2 where
+Alice's carries 1 (`mover.recipient`). The mutant (`STONE_EMPIRES[0]` to 2) kills the
+scenario — Alice never warps — so the empire filter is what the test holds.
+
+No game code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5317 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after splitting the 130-line scenario (the stone-fall reads moved to `fell_stone_and_read_the_lines`, the bool assert to `assert!`) and re-running it green; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

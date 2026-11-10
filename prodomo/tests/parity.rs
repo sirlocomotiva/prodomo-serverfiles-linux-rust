@@ -50584,6 +50584,92 @@ fn a_kingdom_kill_on_the_war_map_fans_the_score() {
     drop(bob);
 }
 
+/// The owner's `mob_proto.txt` with the three siege stones (8020-8022) at one hit point,
+/// so a scenario's punch fells one. The Rewrite reads the file byte-exact, so the patch
+/// rewrites only the `MAX_HP` column of the three rows and keeps every other byte,
+/// CRLF included.
+fn siege_stones_at_one_hp() -> Vec<u8> {
+    let proto = include_bytes!("../../legacy/gamedata/proto/mob_proto.txt");
+    let header = proto.split(|byte| *byte == b'\n').next().expect("a header");
+    let hp = header
+        .split(|byte| *byte == b'\t')
+        .position(|cell| cell == b"MAX_HP")
+        .expect("a MAX_HP column");
+    let mut out = Vec::with_capacity(proto.len());
+    let mut lines = proto.split(|byte| *byte == b'\n').peekable();
+    let ends_newline = proto.last() == Some(&b'\n');
+    while let Some(line) = lines.next() {
+        let bare = line.strip_suffix(b"\r").unwrap_or(line);
+        let mut cells: Vec<&[u8]> = bare.split(|byte| *byte == b'\t').collect();
+        if cells.len() > hp && (cells[0] == b"8020" || cells[0] == b"8021" || cells[0] == b"8022") {
+            assert_eq!(cells[hp], b"2965500", "the stone's hit points");
+            cells[hp] = b"1";
+        }
+        for (at, cell) in cells.iter().enumerate() {
+            if at > 0 {
+                out.push(b'\t');
+            }
+            out.extend_from_slice(cell);
+        }
+        if line.ends_with(b"\r") {
+            out.push(b'\r');
+        }
+        if lines.peek().is_some() || ends_newline {
+            out.push(b'\n');
+        }
+    }
+    assert_eq!(
+        out.len(),
+        proto.len() - 3 * ("2965500".len() - 1),
+        "three cells shrink"
+    );
+    out
+}
+
+/// Seed the stone-fall war: Alice of Shinsoo beside stone 8020 and Bob of Chunjo beside
+/// stone 8022, both on 103, and Charlie on map 1 by the skill teacher, with the siege
+/// probe and the one-hit-point stones.
+fn seed_stone_fall_war(database: &ScratchDatabase) -> (Server, std::path::PathBuf) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "bob");
+    create_account_before_boot(database, "carol");
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login IN ('alice', 'carol')",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Alice', 1,          22400, 55800 FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Bob', 1,          46700, 47200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2,          471800, 951600 FROM account WHERE login = 'carol'",
+    );
+    let stones = siege_stones_at_one_hp();
+    let files: [(&str, &[u8]); 2] = [
+        (
+            "locale/europe/quest/zz_probe/war_probe.lua",
+            WAR_PROBE_SIEGE,
+        ),
+        ("proto/mob_proto.txt", &stones),
+    ];
+    Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &files,
+        &war_103_channels(),
+        "no_wander = true",
+    )
+}
+
 /// Ledger 522's siege probe: the skill teacher (vnum 20300) starts the siege on the
 /// first click and ends it on the second, the quest flag remembering which.
 const WAR_PROBE_SIEGE: &[u8] = b"quest war_probe begin\n\
@@ -51147,5 +51233,153 @@ fn a_bank_zero_item_moves_into_its_special_cells_and_a_plain_one_is_refused() {
         &database,
         "EXISTS (SELECT 1 FROM item WHERE id = 20 AND window_type = 1 AND pos = 290) AND \
          EXISTS (SELECT 1 FROM item WHERE id = 21 AND window_type = 1 AND pos = 1)",
+    );
+}
+
+/// Fell the one-hit-point stone `shinsoo` with two punches and read the fallout: the
+/// first punch lands, empties and stuns, the second finishes (`Dead(attacker)`,
+/// `G/char_battle.cpp:2248-2252`), and — past whatever reward the stone pays — the clear,
+/// the death and the empire-1 line follow, with the empire-2 line on the second client
+/// (the notice's empire byte is the recipient's). Answers when the death was read.
+fn fell_stone_and_read_the_lines(
+    alice: &mut Keyed,
+    bob: &mut Keyed,
+    shinsoo: u32,
+) -> std::time::Instant {
+    alice.send_record(&client_target(shinsoo));
+    assert_eq!(alice.read_game(), target_of(shinsoo, 100, 1, 1, 0));
+    alice.send_record(&client_attack(shinsoo));
+    let damage = alice.read_fight();
+    assert_eq!(damage[0], GC_DAMAGE_INFO, "the punch lands: {damage:02x?}");
+    assert_eq!(
+        alice.read_fight(),
+        target_of(shinsoo, 0, 0, 1, 0),
+        "no hit point left"
+    );
+    assert_eq!(alice.read_fight(), stun_of(shinsoo), "it stands stunned");
+    alice.send_record(&client_attack(shinsoo));
+    let clear = target_of(0, 0, 0, 0, 0);
+    let line = chat_packet(
+        CHAT_TYPE_NOTICE,
+        1,
+        b"Shinsoo Stone has been destroyed. Shinsoo players will be teleported to their villages.",
+    );
+    let bob_line = chat_packet(CHAT_TYPE_NOTICE, 2, &line[10..]);
+    let death = dead_of(shinsoo);
+    let mut saw = [false; 3];
+    let mut died = std::time::Instant::now();
+    let fall = std::time::Instant::now();
+    while saw != [true; 3] {
+        let record = alice.read_fight();
+        if record == clear {
+            saw[0] = true;
+        } else if record == death {
+            saw[1] = true;
+            died = std::time::Instant::now();
+        } else if record == line {
+            saw[2] = true;
+        }
+    }
+    assert!(
+        fall.elapsed() < Duration::from_secs(2),
+        "the punch fells it: {:?}",
+        fall.elapsed()
+    );
+    loop {
+        let record = bob.read_fight();
+        if record == bob_line {
+            break;
+        }
+    }
+    died
+}
+
+/// `event.event_manager.warp_all_to_village_event`'s stone arm (`OnDead`, `G/event_manager.cpp:833-923`):
+/// Alice of Shinsoo fells her one-hit-point stone on 103 with a punch. The empire's line
+/// chats, and 3 s later Alice warps home to (469300, 964200) while Bob of Chunjo, on 103
+/// beside his own stone, stays.
+#[test]
+fn a_fallen_stone_sends_its_empire_home_and_leaves_the_other() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _data) = seed_stone_fall_war(&database);
+    let (mut carol, _, entered) = enter_world_seeing_on(&server, 1, b"carol", 0, ENGLISH);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    carol.send_record(&client_click(teacher));
+    assert_eq!(
+        carol.read_game(),
+        server_script(1, b"siege runs[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        carol.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Siege War Event has started. Coordinate with the kingdom to become victorious."
+        ),
+        "the siege start"
+    );
+    read_war_letter(&mut carol, 15, "siege");
+    carol.quiet("the start ends the step");
+    let (mut alice, _, _, _) = load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    let stone = entered
+        .shown
+        .monsters
+        .iter()
+        .find(|insert| insert[22..24] == 8020u16.to_le_bytes())
+        .expect("Alice's burst carries 8020");
+    let shinsoo = u32::from_le_bytes(stone[1..5].try_into().expect("a VID"));
+    read_login_event_siege(&mut alice);
+    alice.still("nothing follows");
+    let (mut bob, _, _, _) = load_with_quickslots_on(&server, 1, b"bob", 0, ENGLISH);
+    let entered = enter_game_shown(&mut bob);
+    assert!(
+        entered
+            .shown
+            .monsters
+            .iter()
+            .any(|insert| insert[22..24] == 8022u16.to_le_bytes()),
+        "Bob's burst carries 8022"
+    );
+    read_login_event_siege(&mut bob);
+    bob.still("nothing follows");
+    let died = fell_stone_and_read_the_lines(&mut alice, &mut bob, shinsoo);
+    let delete = [[GC_CHARACTER_DEL].as_slice(), &shinsoo.to_le_bytes()].concat();
+    loop {
+        let record = alice.read_fight();
+        if record == delete {
+            break;
+        }
+    }
+    let warp = a_warp_record((469_300, 964_200), server.channel(1).port());
+    let warp_until = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let Some(record) = alice.read_fight_until(warp_until) else {
+            panic!("Alice never warps home");
+        };
+        if record == warp {
+            break;
+        }
+    }
+    assert!(
+        died.elapsed() >= Duration::from_millis(2_500),
+        "3 s after the fall: {:?}",
+        died.elapsed()
+    );
+    let (records, quiet) = bob.drain_wire(Duration::from_secs(2), |header| match header {
+        GC_POINT_CHANGE => POINT_CHANGE_LEN,
+        GC_CHARACTER_DEL => 5,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        GC_WARP => WARP_LEN,
+        other => panic!("bob hears nothing else: header {other}"),
+    });
+    assert_eq!(quiet, Quiet::Open, "Bob stays connected");
+    assert!(
+        records.iter().all(|record| record[0] != GC_WARP),
+        "Bob of Chunjo stays: {records:02x?}"
     );
 }
