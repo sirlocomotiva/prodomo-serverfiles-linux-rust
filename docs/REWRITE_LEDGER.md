@@ -52211,3 +52211,33 @@ All eight rows move to `unused`, pending the owner's confirmation (question 67).
 changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite's one failure was the known `a_gm_aggregates` load flake, green alone and in the parity re-run's 408 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 549. The gated pickup and the effect without a file
+
+Four `codec` rows stood after ledger 548. Two stay: `gc.skill_level` (72) is the old
+generation beside the live byte 76, and `gc.event_reload` (156) is the live event-manager
+send the Rewrite must port. The other two are unreachable.
+
+`gc.pickup_item_sc` (64): every send and the enumerator itself sit behind
+`ENABLE_SPECIAL_DROP_CHAT_RENEWAL` — the enumerator (`packet.h:153`), the struct
+(`packet.h:3313`), the `SendPickupItemPacket` definition (`char.cpp:11790`), its declaration
+(`char.h:728`), and all five call sites (`char_item.cpp:8045,8077,8141,9122,9178`). No
+`server/` file defines that switch, so the compiled server takes the `#else` arm every
+time: the `[LS;444;%s]` chat line. The positive control is a switch that is defined:
+`__SASH_SYSTEM__` at `prodomodefines.h:15`. Define the switch and the rows revive; on the
+owner's defines the byte never leaves the server.
+
+`gc.specific_effect` (208): `SpecificEffectPacket` (`char.cpp:7544`) has exactly two
+callers in `server/`. The wear arm (`char_item.cpp:8592-8603`) needs a UNIQUE or RING item
+whose SIGVnum names a SPECIAL group (`item_manager.cpp:426,436`) with an attr group
+carrying an `effect` filename (`item_manager_read_tables.cpp:204-207`,
+`item_manager.h:206-208`). The owner's `special_item_group.txt` is one group
+(`Cufar_Lumina_Lunii`, 50011) with no `type` line at all — type NORMAL — and no `effect`
+line anywhere in the file, so `GetSpecialAttrGroup` can only ever return nothing on the
+owner's data. Supply a SPECIAL group and the row revives. The pet arm
+(`questlua_pet.cpp:134`) needs `pet.spawn_effect`, which no Lua file names
+(`lua.pet.spawn_effect` is `unused`, ledger 401, question 37).
+
+Both rows move to `unused`, pending the owner's confirmation (question 68). No code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite's one failure was a load flake — a stray record under parallel load — green alone and in the parity re-run's 408 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

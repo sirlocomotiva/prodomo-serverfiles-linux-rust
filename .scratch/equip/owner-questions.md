@@ -636,3 +636,10 @@ owner answers.
  (132): sent only on a live `TMarriage`, which needs `marriage.engage_to`, which no
  quest names (question 65 already covers the system). Waits on it: confirm the eight
  rows `unused`.
+68. **Two more dead server bytes are `unused` (ledger 549).** `gc.pickup_item_sc` (64):
+ every send and the enumerator sit behind `ENABLE_SPECIAL_DROP_CHAT_RENEWAL`, which
+ no `server/` file defines — the live build takes the `[LS;444]` chat arm instead.
+ `gc.specific_effect` (208): the wear arm needs a SPECIAL group's attr group with an
+ effect file, but your one special-item group is type NORMAL with no `effect` line —
+ supply a SPECIAL group and the row revives — and the pet arm needs
+ `pet.spawn_effect`, which no quest names. Waits on it: confirm the two rows `unused`.

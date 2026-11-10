@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 548 (eight more dead server bytes).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 549
+Last reviewed: 2026-11-10, after ledger section 549 (the gated pickup and the effect without a file).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 550
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -602,6 +602,7 @@ Since 545 `gc.item_set` and `gc.item_update` are `ported`: the letters trade pin
 Since 546 `gc.add_fly_targeting` and `gc.auto_shaman_skill` are `ported`: the assassin scenario pins the extra relay, and the toggle scenario the buff cast. The
 Since 547 `gc.main_character`, `gc.login_key` and `gc.bindudp` are `unused`: byte 15 is the dead `_OLD` generation, byte 118 has no sender, and byte 254's only sender is unreachable behind commented-out UDP input and `__UDP_BLOCK__`. The
 Since 548 eight more `codec` rows are `unused`: the enumerator-only speed, the callerless motion, the three enumeratorless bytes (73, 117, 213), the struct-only safebox money, and the lover pair that waits on the unreachable marriage. The
+Since 549 `gc.pickup_item_sc` and `gc.specific_effect` are `unused`: the pickup's switch is never defined, and the effect's wear arm wants a SPECIAL group the owner's file lacks while its pet arm wants a quest call no quest makes. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
