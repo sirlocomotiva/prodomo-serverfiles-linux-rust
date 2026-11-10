@@ -125,6 +125,7 @@ mod move_channel;
 mod multi_farm;
 mod myshop;
 mod observer;
+mod ox_event;
 mod party;
 mod pc_heal;
 pub(crate) mod pc_skill;
@@ -596,6 +597,10 @@ pub struct GameState {
     /// event took, attenders and audience alike, which `CloseEvent`'s warp names.
     /// `Default` is empty, and both paths' leave drops it with the rest.
     ox_roster: std::collections::HashSet<u32>,
+    /// The OX process and timer. See [`ox_event`].
+    ox_event: ox_event::OxEvent,
+    /// The Locale folder, which the OX start reads `oxquiz.lua` from.
+    locale_dir: std::path::PathBuf,
     /// GM arena slots, ordered by map and insertion order (key's first component reserved).
     arenas: std::collections::BTreeMap<(u8, u32), Vec<arena::Arena>>,
     /// Character-local arena potion count (`G/char.cpp:389`, `G/char.h:1917-1918`).
@@ -1157,6 +1162,13 @@ impl GameState {
     #[must_use]
     pub fn with_locale_strings(mut self, locale: Arc<LocaleStrings>) -> Self {
         self.locale = locale;
+        self
+    }
+
+    /// Share the Locale folder, which the OX start reads `oxquiz.lua` from.
+    #[must_use]
+    pub fn with_locale_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.locale_dir = dir;
         self
     }
 
@@ -6106,6 +6118,7 @@ impl PulseProcessor for GameState {
         self.run_meley_ticks(pulse);
         self.run_temple_ochao(pulse);
         self.run_war_home(pulse);
+        self.run_ox_event(pulse);
         self.run_gaya_ticks(pulse);
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);

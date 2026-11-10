@@ -246,7 +246,7 @@ impl GameState {
 
     /// An `add_ox_quiz` call after the step: the quiz lands in the OX list, as
     /// `COXEventManager::AddQuiz` lands it (`G/OXEvent.cpp:175-186`).
-    fn land_ox_quiz(&mut self, level: u8, question: &[u8], answer: bool) {
+    pub(super) fn land_ox_quiz(&mut self, level: u8, question: &[u8], answer: bool) {
         let slot = usize::from(level);
         if self.ox_quiz.len() < slot + 1 {
             self.ox_quiz.resize_with(slot + 1, Vec::new);
@@ -480,6 +480,10 @@ impl GameState {
         if self.manager_event_flag(flag) != 0 {
             return;
         }
+        if index == 11 {
+            self.start_ox_event();
+            return;
+        }
         if index == 13 {
             self.start_siege_war();
             return;
@@ -507,6 +511,10 @@ impl GameState {
             return;
         };
         if self.manager_event_flag(flag) == 0 {
+            return;
+        }
+        if index == 11 {
+            self.end_ox_event();
             return;
         }
         if index == 13 {

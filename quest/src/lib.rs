@@ -7,6 +7,7 @@
 //! - [`api`]: every function legacy's quest runtime registers;
 //! - [`host`]: the Lua 5.1 state, its Lua 5.0 shims and every library and script loaded;
 //! - [`manager`]: what an NPC click runs, the state machine of a running script and its dialog.
+//! - [`ox_quiz`]: the OX quiz file through a Lua state of its own.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
@@ -16,6 +17,7 @@ pub mod dialect;
 pub mod host;
 pub mod lex;
 pub mod manager;
+pub mod ox_quiz;
 pub mod qc;
 pub mod sources;
 

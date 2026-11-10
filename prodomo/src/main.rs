@@ -11497,6 +11497,7 @@ fn build_world(
         .with_view_range(config.game.view_range)
         .with_no_wander(config.game.no_wander)
         .with_locale_strings(Arc::clone(&data.locale))
+        .with_locale_dir(config.locale_dir())
         .with_quest_translate(Arc::clone(&data.quest_translate))
         .with_quests(quests)
         .with_max_level(config.game.max_level)

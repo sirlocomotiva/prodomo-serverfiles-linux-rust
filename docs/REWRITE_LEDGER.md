@@ -51627,3 +51627,62 @@ monster and stone inserts under `monsters`, not `inserts` — the stones stood
 all along.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5287 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets` clean after lifting two mid-test imports and splitting the two long scenarios' seeds and end readers into helpers; `cargo doc` clean. The mutation sweep kills 4 of 4: the inverted same-empire check, the second-defeat threshold, the dropped fallback rank, and the skipped pay position. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 523. The OX quiz engine
+
+The panel index 11 starts the OX event (`CEventManager::SetOXEvent`,
+`G/event_manager.cpp:1482-1525`): the start refuses while `oxevent_status` holds
+or the process runs, clears the quiz list, loads `oxquiz.lua` beside the quests,
+chats the start, arms the open process with five registration minutes and three
+rounds, and opens the status. The end chats, finishes the flag and the status,
+warps the roster home and disarms. The process (`ox_event_process`, `:1376-1478`)
+counts the open minutes down with their lines, closes the entries and spends a
+round, quizzes while more than five attenders stand, pays the 50109 reward and
+chats the teleport line at five or fewer, and turns the round or ends the event.
+A quiz draws one level-1 question, chats the header, the text and the footer,
+arms the timer with the answer, quizzes the status and leaves the list; the
+timer (`oxevent_timer`, `G/OXEvent.cpp:226-272`) waits, checks, and warps the
+misses to the audience before closing. The check fails the wrong foot with
+`SE_FAIL` into the miss list, passes the right foot with `[LS;980]`, a cheer and
+`SE_SUCCESS`, and drops the offline from the attenders, the roster and the
+misses. The 113 entry strips the ride first, in legacy's order.
+
+Reachability first, as ledger 466 taught: the attender seat, the audience seat,
+both answer halves and all four miss spots sit inside map 113's 8x8 `server_attr`
+on cells holding attribute 4 (no-fight), so the whole engine runs on the owner's
+data. The loader (`quest::ox_quiz`) runs the file on a Lua state of its own that
+knows only `add_ox_quiz`: the start is judged after the quest step that queues
+it, when the step's session is gone, and running the file during the step would
+land quizzes even when the world then refuses the start. On the owner's data the
+file is 567 pure level-1 calls and the answers are what the live state would
+collect; anything else fails the load, as a failed `lua_dofile` fails the start.
+
+Coverage: `a_click_starts_the_ox_event_and_the_herald_seats_the_entrant` starts
+the event over the wire (the dialog, then the start line — the quiet queue runs
+the dialog first) and runs Uriel's herald behind it: the menu, the first page,
+the entry page with its `Enter`/`Cancel` select, the farewell page, the removal
+and the warp to the attender seat on Channel 1, with the contest's letter riding
+Bob's login behind the flag. The minutes, the draw, the feet, the misses, the
+reward's vnum bytes, the round turn and the end are unit-tested in the state: no
+scenario waits out the 5-minute registration.
+
+Three traps, each worth its line: the attender seat (896500) stands in the gap
+between the O half (to 896300) and the X half (from 896600), so the feet must
+walk before the check; in test-time `last_pulse` never steps, so the quiz's
+timer is already due when the quiz fires and step 0 runs inside the same call;
+and the reward test first asserted only a non-empty inbox, which the enter burst
+and the notices fill with no give at all — the mutant that swapped the vnum
+survived until the test pinned the `ITEM_SET` bytes with item ids installed.
+
+A fourth trap surfaced in review after the suite went green: the reward's first
+cut dropped `packed.changes`, so the giftbox vanished on relog — the game
+thread owns no store handle, and inventory rows persist only through command
+answers or a descriptor order. The reward now orders its rows to the winner's
+descriptor, as the direct pick-up orders its given rows, and the pin covers the
+`Created` 50109 row behind a joined lease. The battle-pass tier grant had the
+same drop — a tier earned off a kill hook has no descriptor in the step — so
+`pass_give` orders its rows the same way, with the free 27005 row pinned
+behind a quest runtime that answers the points flag. Both order mutants
+(empty rows) kill their tests.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5296 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean (1 passed in 9 targets); `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. The mutation sweep kills 4 of 4: the swapped reward vnum, the emptied OX rows, the emptied pass-tier rows, and the swapped answer halves. The scenario passes 8 of 8 parallel runs. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

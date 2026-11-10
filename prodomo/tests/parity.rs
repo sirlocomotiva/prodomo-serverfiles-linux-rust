@@ -49549,3 +49549,160 @@ fn a_click_starts_the_siege_and_a_second_ends_it_unfought() {
     drop(bob);
     drop(dave);
 }
+
+/// Ledger 523's OX probe: the skill teacher (vnum 20300) starts the OX event on
+/// the click, then says so.
+const OX_START_PROBE: &[u8] = b"quest ox_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    start_event(11)\n\
+    say('ox runs')\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// [`read_login_event`] while the OX event runs: the contest's letter and title
+/// ride between `dungeon_info`'s line and the hides, in quest order
+/// (`ox_event.quest` is 13th in `quest_list`).
+fn read_login_event_ox(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    read_letter(keyed, 13, b"OX Contest ", "the contest");
+    read_login_lines_hiding_after_dungeon(keyed, empire, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+    keyed.still("nothing follows");
+}
+
+/// The Channels the OX run needs: Channel 1 hosts map 1 and the OX map (113),
+/// the Shared Channel its own map.
+fn ox_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 3, 113],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// `sys.event.ox` and `data.ox` (`SetOXEvent`, `ox_event_process`, `G/OXEvent.cpp`):
+/// the panel index starts the event over the wire — the start line, then the
+/// dialog — and Uriel's herald warps the entrant to the attender seat on 113.
+/// The minutes, the quiz and the checks are unit-tested in the state: no scenario
+/// waits out the 5-minute registration.
+#[test]
+fn a_click_starts_the_ox_event_and_the_herald_seats_the_entrant() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1,          480900, 955500 FROM account WHERE login = 'bob'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/ox_start_probe.lua",
+            OX_START_PROBE,
+        )],
+        &ox_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"ox runs[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"OX Event will be starting soon, prepare yourselves."
+        ),
+        "the start line"
+    );
+    alice.quiet("the step ends");
+    let (mut bob, _yankee, list) = select_screen(&server, b"bob");
+    let _bob_row = listed(&list, 0);
+    bob.send_record(&client_select(0));
+    select_equipped_enter(&mut bob, 0);
+    let seen = enter_game_shown(&mut bob);
+    read_login_event_ox(&mut bob);
+    let herald = shown_vid(&seen, OX_MANAGER_VNUM, "map 1 shows one OX manager");
+    bob.send_record(&client_click(herald));
+    assert_eq!(
+        bob.read_game(),
+        server_script(1, b"[QUESTION 1;OX Contest |2;Inchide]"),
+        "the menu"
+    );
+    bob.send_record(&client_script_answer(0));
+    let first = [OX_TITLE, OX_FIRST_PAGE, b"[ENTER][NEXT]"].concat();
+    assert_eq!(bob.read_game(), server_script(1, &first), "the first page");
+    bob.send_record(&client_script_answer(254));
+    let second = [
+        OX_TITLE,
+        b"Do you want to participate? You could, of course,[ENTER]just watch... ".as_slice(),
+        b"[ENTER][QUESTION 1;Enter |2;Cancel ]",
+    ]
+    .concat();
+    assert_eq!(bob.read_game(), server_script(1, &second), "the entry page");
+    bob.send_record(&client_script_answer(0));
+    let third = [
+        OX_TITLE,
+        b"Do you want to try it? Okay - then let's get[ENTER]going. ".as_slice(),
+        b"[ENTER][NEXT]",
+    ]
+    .concat();
+    assert_eq!(
+        bob.read_game(),
+        server_script(1, &third),
+        "the farewell page"
+    );
+    bob.send_record(&client_script_answer(254));
+    assert_eq!(
+        bob.read_game(),
+        server_script(0, b"[DONE]"),
+        "the dialog ends"
+    );
+    let removal = bob.read_game();
+    assert_eq!(removal[0], GC_CHARACTER_DEL, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        bob.read_game(),
+        a_warp_record((896_500, 24_600), port),
+        "the herald warps to the attender seat on Channel 1"
+    );
+    bob.quiet("the warp is the step's last word");
+}

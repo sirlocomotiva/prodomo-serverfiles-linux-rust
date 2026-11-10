@@ -59,7 +59,7 @@ const NORM_ATTRS: usize = 5;
 const OXEVENT_MAP_INDEX: i32 = 113;
 
 /// The `oxevent_status` event flag (`G/OXEvent.cpp:39-58`), 0 finished.
-const OXEVENT_STATUS: &[u8] = b"oxevent_status";
+pub(super) const OXEVENT_STATUS: &[u8] = b"oxevent_status";
 
 /// The finished status (`OXEVENT_FINISH`), which seats nobody.
 const OXEVENT_FINISHED: i32 = 0;
@@ -959,6 +959,18 @@ impl GameState {
         if crate::loading_phase::public_map_index(place.map) != OXEVENT_MAP_INDEX {
             return;
         }
+        // `ENABLE_MOUNT_COSTUME_SYSTEM`'s 113 strip (`G/input_login.cpp:854-864`):
+        // a ridden horse stops and goes, the mount affects go, and a ride still
+        // held stops. It runs before `Enter`, on every entry to 113.
+        if self.is_horse_riding(vid.raw()) {
+            self.stop_riding(vid);
+            self.horse_unsummon(vid, false);
+        }
+        let _mount = self.remove_pc_affect(vid, crate::loading_phase::AFFECT_MOUNT);
+        let _bonus = self.remove_pc_affect(vid, crate::loading_phase::AFFECT_MOUNT_BONUS);
+        if self.is_riding(vid.raw()) {
+            self.stop_riding(vid);
+        }
         let status = self
             .quests
             .as_ref()
@@ -1212,6 +1224,54 @@ mod ox_seat_tests {
 
     /// A finished event refuses: a GM is sent nowhere, and a warp keeps the seat
     /// while a disconnect from map 113 drops it (`G/char.cpp:1827-1830`).
+    /// The 113 strip: a rider entering 113 is unhorsed, its horse goes, and the
+    /// mount affects go, before the seat lands.
+    #[test]
+    fn the_ox_entry_strips_the_ride() {
+        let clock = TestClock::default();
+        let (mut world, _clients) = open_world(&clock);
+        let _inbox = enter_on(
+            &mut world,
+            (1, OXEVENT_MAP_INDEX),
+            9,
+            (896_500, 24_600),
+            820,
+        );
+        world
+            .pc_points_mut(9)
+            .expect("the rider has points")
+            .horse_mut()
+            .start_riding();
+        world.add_pc_affect(
+            Vid::new(9),
+            crate::game_state::affect::Affect {
+                kind: crate::loading_phase::AFFECT_MOUNT,
+                apply_on: 0,
+                value: 0,
+                flag: 0,
+                remaining: 100,
+                sp_cost: 0,
+            },
+            false,
+        );
+        seat(&mut world, 9, (896_500, 24_600));
+        assert!(!world.is_horse_riding(9), "the horse stops");
+        assert!(
+            world
+                .affect_events
+                .get(&Vid::new(9))
+                .is_none_or(|event| event
+                    .affects
+                    .iter()
+                    .all(|row| row.kind != crate::loading_phase::AFFECT_MOUNT)),
+            "the mount affect goes"
+        );
+        assert!(
+            world.ox_attenders.contains(&9),
+            "the seat lands after the strip"
+        );
+    }
+
     #[test]
     fn a_finished_event_refuses_and_the_leave_drops_the_seat() {
         let clock = TestClock::default();

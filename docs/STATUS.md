@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 522 (the siege and kingdom wars).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 523
+Last reviewed: 2026-11-10, after ledger section 523 (the OX quiz engine).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 524
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -576,7 +576,7 @@ Since 519 `sys.npc.shop` is `ported`: keeper 9001 opens `START_EX` with its `sho
 Since 520 `sys.skill.buff_npc` is `ported`: the 69700 toggle flips its socket-3 bit (unstacking past 1) and stands 20114 within 100 with the name `Buff` and the armour and weapon parts, the follower walks and runs to 250 of its owner and re-stands 200 behind past 4500, the five buffs cast in order past the 3 s stamp for the hour with `GC_AUTO_SHAMAN_SKILL`, the books train past the read-time gate, and 69699 chats the success line and is kept, as its training arm is commented out. The TEST chats stay out as Defects.
 The
 Since 521 `sys.marriage` is `unused`: a marriage forms only through `marriage.engage_to`, which no quest names, and the DB peer that carried the add is retired, so the wedding map never stands and `GC_LOVER_INFO` is never sent; the live hook is ported (71069-71074 refuse with `[LS;467]`).
-Since 522 `sys.event.manager` carries its siege and kingdom war arms (13-14): the stones stand at the base plus offsets, the cross-empire kill fans the score record to 103 (and the entrant's burst carries it), the ends pay the rank table for 48 hours, kill the map and chat the teleport line, and the 3 s/60 s home warps queue with the empire-0 skip; the stone-defeat kill is unit-tested, the 2.9M-HP stone being unkillable over the wire in reasonable time. `gc.event_kw_score` is `ported` and `event.event_manager.warp_all_to_village_event` is `partial` (the 60 s fire is unit-tested only). The
+Since 522 `sys.event.manager` carries its siege and kingdom war arms (13-14): the stones stand at the base plus offsets, the cross-empire kill fans the score record to 103 (and the entrant's burst carries it), the ends pay the rank table for 48 hours, kill the map and chat the teleport line, and the 3 s/60 s home warps queue with the empire-0 skip; the stone-defeat kill is unit-tested, the 2.9M-HP stone being unkillable over the wire in reasonable time. `gc.event_kw_score` is `ported` and `event.event_manager.warp_all_to_village_event` is `partial` (the 60 s fire is unit-tested only). Since 523 `sys.event.manager` carries its OX arm (11): the panel index starts the event over the wire (the start line, then the dialog), Uriel's herald warps the entrant to the attender seat on 113, and the engine — the 567-quiz loader, the open/quiz/end process, the three-step timer, the answer check with its effects and cheers, the miss warp, the 50109 reward and the login mount-strip — is unit-tested in the state, no scenario waiting out the 5-minute registration. `data.ox`, `quest.ox_event`, `event.OXEvent.oxevent_timer` and `event.event_manager.ox_event_process` are `ported`; `sys.event.ox` stays `ported` with the scenario. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

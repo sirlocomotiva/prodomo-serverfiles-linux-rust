@@ -399,7 +399,10 @@ impl GameState {
         Some(empty_pass_rows(pid, character.points().cloned()))
     }
 
-    /// Grant one reward tier as `AutoGiveItem` does, silently.
+    /// Grant one reward tier as `AutoGiveItem` does, silently. A tier earned
+    /// off a kill or a drop has no descriptor in the step, so the rows are
+    /// ordered to the one that holds the winner, as the direct pick-up orders
+    /// its rows; unwritten rows would vanish on relog.
     fn pass_give(&mut self, vid: Vid, mover: Mover, (vnum, count): (u32, u32)) {
         let questing = self.quest_running(vid);
         let pid = self
@@ -427,6 +430,12 @@ impl GameState {
         );
         for record in packed.records {
             let _sent = self.write_to_client(vid, record);
+        }
+        if !packed.changes.is_empty() {
+            if let Some((channel, map)) = self.place_of(vid.raw()) {
+                let order = crate::item_move::StoreOrder::default();
+                let _ordered = self.order_the_item_rows(vid, channel, map, packed.changes, order);
+            }
         }
     }
 
@@ -1051,6 +1060,72 @@ mod tests {
         assert_eq!(chats, 1, "only the completion notice rides");
         world.register_pass_kill(vid, mover, 101);
         assert!(inbox.try_recv().is_err(), "a filled mission stays silent");
+    }
+
+    /// A crossed tier's rows ride an `ItemRows` order, as the direct
+    /// pick-up's rows do. The quest flags live behind the quest runtime,
+    /// so the world carries the real locale's quests and the 9000 held
+    /// points land through the flag; the daily's 1300 then cross the
+    /// first 10000 tier on the second kill.
+    #[test]
+    fn a_crossed_tier_orders_its_rows_to_the_descriptor() {
+        use gamedata::mob_locale_names::MobNamesByLanguage;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock)
+            .with_battle_pass_table(wired())
+            .with_clients(std::sync::Arc::new(
+                crate::client_registry::ChannelClients::new(),
+            ));
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager =
+            quest::manager::Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        world.quests = Some(crate::game_state::quests::Quests::new(
+            manager,
+            std::sync::Arc::default(),
+            MobNamesByLanguage::default(),
+        ));
+        world
+            .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+            .expect("the first install");
+        let registry = std::sync::Arc::clone(world.clients.as_ref().expect("the registry rides"));
+        let mut inbox = enter(&mut world, 0x6001, (3200, 3200), 10_000);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(0x6001))
+            .expect("entered")
+            .set_points(Some(points_at(30, 10_000, 0)));
+        let mover = world.own_mover(Vid::new(0x6001)).expect("entered");
+        let mut lease = registry.join(crate::client_registry::ClientEntry {
+            channel: crate::game_state::fixtures::PLACE.0,
+            map: crate::game_state::fixtures::PLACE.1,
+            name: "P24577".to_string(),
+            vid: 0x6001,
+            empire: 1,
+            language: 0,
+        });
+        world.run_battle_pass_gm_line(Vid::new(0x6001), b"open 1", mover);
+        while inbox.try_recv().is_ok() {}
+        world.set_pass_flag(Vid::new(0x6001), POINTS_FLAG, 9000);
+        world.register_pass_kill(Vid::new(0x6001), mover, 101);
+        let mut orders = lease.take_orders().expect("the queue is home");
+        let got: Vec<_> = std::iter::from_fn(|| orders.try_recv().ok()).collect();
+        lease.put_orders(orders);
+        assert!(got.is_empty(), "progress alone orders nothing");
+        world.register_pass_kill(Vid::new(0x6001), mover, 101);
+        let mut orders = lease.take_orders().expect("the queue is home");
+        let got: Vec<_> = std::iter::from_fn(|| orders.try_recv().ok()).collect();
+        lease.put_orders(orders);
+        assert_eq!(got.len(), 1, "one order carries the tier's rows");
+        let crate::client_registry::ClientOrder::ItemRows { changes, .. } = &got[0] else {
+            panic!("the order is the tier's rows");
+        };
+        assert!(
+            changes.iter().any(
+                |change| matches!(change, db::items::RowChange::Created(row) if row.vnum == 27005)
+            ),
+            "the free tier's row is written"
+        );
     }
 
     #[test]
