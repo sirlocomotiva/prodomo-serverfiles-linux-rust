@@ -51527,3 +51527,87 @@ fn a_dropped_gold_pile_nobody_picks_up_is_destroyed_on_its_own_lifetime() {
     );
     alpha.still("nothing follows the destruction");
 }
+
+/// `event.item.ownership_event` (`G/item.cpp:1704-1728`): the diamond ore a +9 pick digs at
+/// mining 40 lies owned by the digger, and 15 s on the empty-name record goes around it.
+/// The row turns `ported`: the destroy sweep's twin finally has its scenario (ledger 229p's
+/// D5 wait ends at the vein, not at a kill).
+#[test]
+fn a_dug_ore_loses_its_diggers_name_fifteen_seconds_on() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, digger) = vein_stage(&database, MINING_PROBE);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 50, id, 2, 4,          1, 29110 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD'          FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 1);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    let vein = shown_vein(&entered);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setskill 124 40"));
+    let wire = alice.wire_for(std::time::Duration::from_secs(2));
+    assert!(
+        wire.iter().any(|record| record[0] == GC_SKILL_LEVEL_NEW),
+        "mining stands at 40"
+    );
+    let mut ore = Vec::new();
+    for _ in 0..4 {
+        let started = std::time::Instant::now();
+        let strokes = u64::from(start_digging(&mut alice, vid, vein));
+        let deadline = started + Duration::from_secs(2 * strokes + 2);
+        let ended = alice.read_game_until(deadline).expect("the dig ends");
+        if ended[0] == GROUND_ADD {
+            ore = ended;
+            break;
+        }
+        assert_eq!(ended, an_info_line(b"Mining failed."), "a miss");
+        // Half the digs practice the maxed pick: the topped pair rides behind.
+        let tail = started + Duration::from_secs(2 * strokes + 5);
+        if let Some(line) = alice.read_game_until(tail) {
+            assert_eq!(
+                line,
+                an_info_line(b"The pickaxe has reached its maximum training level."),
+                "the topped pair leads"
+            );
+            assert_eq!(
+                alice.read_game(),
+                an_info_line(b"You can upgrade to the next level pickaxe through the woodcutter."),
+                "and follows"
+            );
+        }
+    }
+    assert_eq!(ore[0], GROUND_ADD, "four digs at 81% land an ore");
+    let field = |at: usize| i32::from_le_bytes(ore[at..at + 4].try_into().expect("four"));
+    assert_eq!(field(17), 50_601, "the vein's raw ore");
+    let mut owned = vec![GC_ITEM_OWNERSHIP];
+    owned.extend_from_slice(&ore[13..17]);
+    let mut name = [0u8; 25];
+    name[..5].copy_from_slice(b"Alpha");
+    owned.extend_from_slice(&name);
+    assert_eq!(alice.read_game(), owned, "the digger owns the ore");
+    assert_eq!(alice.read_game(), an_info_line(b"Mining was successful."));
+    let owned_at = std::time::Instant::now();
+    let mut freed = vec![GC_ITEM_OWNERSHIP];
+    freed.extend_from_slice(&ore[13..17]);
+    freed.extend_from_slice(&[0u8; 25]);
+    let deadline = owned_at + Duration::from_secs(20);
+    loop {
+        let record = alice
+            .read_game_until(deadline)
+            .expect("the ownership lapses");
+        if record == freed {
+            break;
+        }
+    }
+    assert!(
+        owned_at.elapsed() >= Duration::from_millis(14_500),
+        "fifteen seconds on: {:?}",
+        owned_at.elapsed()
+    );
+    let _ = digger;
+}

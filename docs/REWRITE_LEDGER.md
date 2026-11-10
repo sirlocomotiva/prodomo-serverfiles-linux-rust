@@ -52382,3 +52382,25 @@ Two record facts the scenario tripped on: the drop answers `GC_CHARACTER_GOLD_CH
 No game code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5320 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after separating the literal and dropping the unused `mut`, re-running the scenario green; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 556. The ore's freed name
+
+`event.item.ownership_event` was `partial` since ledger 229p: the sweep existed, but no
+scenario reached it — no hosted kill dropped an item, so D5 was awaited. The wait ends at
+the vein instead: the mining ore is owned for 15 seconds, the shortest claim in the game,
+and the scenario watches it lapse.
+
+A +9 pick (grade 9, +50) at mining 40 (+11) digs at 81%: up to four digs land the diamond
+ore, which lies owned by the digger, and 15 s on the empty-name record goes around it.
+The named-record mutant (the sweep re-sending the owner's name) kills the wait, so the
+test holds the release, not just the clock.
+
+Two +9 facts the scenario tripped on. The maxed pick never trains: `values[1]` is 0, so
+half the digs practice into the topped pair ("The pickaxe has reached its maximum
+training level." + the woodcutter line) with no update record, and the miss branch drains
+the pair before the next dig. And the hit branch carries no update either — the wait loop
+skips whatever rides behind the success line.
+
+No game code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5321 passed, 0 failed in 46 targets), `cargo test --workspace --doc` (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
