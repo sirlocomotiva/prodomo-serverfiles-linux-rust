@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 543 (the party walk).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 544
+Last reviewed: 2026-11-10, after ledger section 544 (the group and the guild ask).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 545
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -597,6 +597,7 @@ Since 540 the loading burst sends the map's music: `gc.main_character3_bgm`, `gc
 Since 541 `lua.arena.add_map` is `ported`: the ledger-227 note was stale — `with_quests` seeds the world from `settings.arenas`, and the duel scenario's list names the four map-112 arenas (an unseeded world dies there). One API partial left: `set_state`. The
 Since 542 `lua.set_state` is `ported` and the quest-API table has no partial left: the `__status` flag changes at once (`SetCurrentQuestStateName`), and the flag probe's `getqf` reads 0 before the call and non-zero right after it. The
 Since 543 the seven party walk records are `ported` (`gc.party_invite/add/update/link/parameter/unlink/remove`): the request scenario pins the invite and the join walk, the role scenario the unlink and the ADD bodies, the ungroup scenario the REMOVE. The
+Since 544 `gc.change_skill_group` and `gc.request_make_guild` are `ported`: `/setjob` leads with byte 112 and the group, and the guard's yes asks with the bare byte 82. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

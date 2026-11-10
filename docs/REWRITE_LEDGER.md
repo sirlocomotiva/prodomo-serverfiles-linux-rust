@@ -52095,3 +52095,12 @@ pointing at those three scenarios. One mutant died: a skipped link-one-to-all br
 request drain. No code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 544. The group and the guild ask
+
+Two more `codec` rows were already on the wire with exact asserts: `/setjob` leads with
+`[112, group]` and the guard's yes answers with the bare byte 82. `gc.change_skill_group`
+and `gc.request_make_guild` are `ported`. Two mutants died: a shifted group and a dropped
+ask, each at its exact assert. No code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite's one failure was the refine load flake, green alone and in the parity re-run's 408 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
