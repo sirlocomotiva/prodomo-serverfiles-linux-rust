@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 531 (every gauge).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 532
+Last reviewed: 2026-11-10, after ledger section 532 (the satchel's readings).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 533
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -585,6 +585,7 @@ Since 528 `lua.number` and `lua.setskin` are `ported`: the temple's kill table d
 Since 529 `lua.npc.getrace`, `lua.pc.enough_inventory` and `lua.pc.get_gm_level` are `ported`: the race alias shares its arm, the attr67 collect's gate reads room, and the implementor's login passes the panel letter's gate — the two gates each proven by a killing mutant. The
 Since 530 `quest.kingdom_war_event` is `ported`: every event flag's change runs the no-target `event_begin`/`event_end` scripts on every online character, the war letters quest 16, the button joins (No refuses, Yes warps to the war map's corner), and the end clears all twelve event letters; the 522, exp, OX, siege-unfought and kingdom-kill scenarios now read the same traffic. The
 Since 531 the twenty-four `pc.get_*` gauges are `ported`: one probe says them all on a naked level-1 warrior — 650 HP, 200 SP, 300 to level 2, race 1, the local cells, nil wear, bare weapon and armor, the name, and the enter's VID — and a max-HP mutant dies on the page. The
+Since 532 `lua.pc.give_item2_select`, `lua.item.get_cell`, `lua.item.get_socket`, `lua.item.set_socket`, `lua.item.get_count`, `lua.item.get_type` and `lua.item.get_sub_type` are `ported`: the satchel probe gives two red potions into cell 1, says the stack's count, type pair, cell and socket, writes socket 0, and a count mutant dies on the page. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

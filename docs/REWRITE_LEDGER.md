@@ -51939,3 +51939,15 @@ enter showed. One mutant died: `max_hp` reading `sp` breaks the page. `pc.getpla
 stays `partial`: its value races the login clock, and no quest calls it.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5305 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 532. The satchel's readings
+
+Seven quest-item rows sat `partial` behind the sash's missing 85000 proto: the select give
+and the count, type, subtype, cell and socket gauges. A probe reaches them without the
+sash. `SATCHEL_PROBE` gives the book into cell 0, then `pc.give_item2_select(27001, 2)`
+lays two red potions in cell 1 and selects the stack; `a_click_fills_the_satchel_and_says_the_stacks_readings`
+pins the lines, the sets, the potion's quickslot fill and the socket write's update
+(socket 0 takes 7), then the page: count 2, type 3, subtype 0, cell 1, socket 0 before
+and 7 after, vnum 27001. One mutant died: `get_count` reading the type breaks the page.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5306 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

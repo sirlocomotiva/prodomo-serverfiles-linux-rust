@@ -40666,6 +40666,26 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 532's satchel probe: the skill teacher (vnum 20300, bound but questless)
+/// gives two red potions and selects them, then says the quest item's readings.
+/// The socket write and the vnum close the page.
+const SATCHEL_PROBE: &[u8] = b"quest satchel_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    pc.give_item2(70101)\n\
+    pc.give_item2_select(27001, 2)\n\
+    say('count='..item.get_count())\n\
+    say('type='..item.get_type())\n\
+    say('subtype='..item.get_sub_type())\n\
+    say('cell='..item.get_cell())\n\
+    say('socket0='..item.get_socket(0))\n\
+    item.set_socket(0, 7)\n\
+    say('socket0set='..item.get_socket(0))\n\
+    say('vnum='..item.get_vnum())\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 531's gauge probe: the skill teacher (vnum 20300, bound but questless)
 /// says every `pc.get_*` reading on a click.
 const GAUGE_PROBE: &[u8] = b"quest gauge_probe begin\n\
@@ -40852,6 +40872,83 @@ fn a_click_beside_the_teacher_says_every_gauge() {
     page.extend_from_slice(vid.to_string().as_bytes());
     page.extend_from_slice(b"[ENTER][DONE]");
     assert_eq!(alice.read_game(), server_script(1, &page), "every gauge");
+    alice.quiet("the step ends");
+}
+
+/// `lua.pc.give_item2_select`, the `item.get_*` gauges and `lua.item.set_socket`:
+/// Beta, level 1 with an empty satchel beside the skill teacher, clicks; the give
+/// lays two red potions in the first free cell and selects the stack, and the page
+/// says its count, type pair, cell and socket — then the socket write lands and the
+/// vnum closes it.
+#[test]
+fn a_click_fills_the_satchel_and_says_the_stacks_readings() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/satchel_probe.lua",
+            SATCHEL_PROBE,
+        )],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;444;Cartea Intelepciunii]"),
+        "the book's line"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (inventory, 0, 70_101, 1),
+        "the book fills cell 0"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;444;Licoare Rosie(K)]"),
+        "the potions' line"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (inventory, 1, 27_001, 2),
+        "the stack lands in cell 1"
+    );
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_QUICKSLOT_ADD, 0, 1, 1],
+        "the given potion fills the quickslot"
+    );
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (inventory, 1, 2),
+        "the socket write updates cell 1"
+    );
+    assert_eq!(
+        u32::from_le_bytes(update[14..18].try_into().expect("four bytes")),
+        7,
+        "socket 0 takes 7"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"count=2[ENTER]type=3[ENTER]subtype=0[ENTER]cell=1[ENTER]socket0=0[ENTER]socket0set=7[ENTER]vnum=27001[ENTER][DONE]"
+        ),
+        "the stack's readings"
+    );
     alice.quiet("the step ends");
 }
 
