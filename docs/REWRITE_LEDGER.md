@@ -52028,3 +52028,26 @@ caller a probe can be: `MODE_PROBE` says it on a click, and
 `test_server = false`. One mutant died: a negated bridge breaks the first click.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5312 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 540. The map's music
+
+`MainCharacterPacket` is not one record. Legacy reads the character's map, folds an
+instance map onto its base (`FIX_DUNGEON_MUSIC` is defined), and looks the music up in the
+table `settings.lua` built: a named song plays byte 137, or byte 138 with the volume when
+`set_bgm_volume_enable` ran, and a map with no music — or an empty name — plays the plain
+byte 113 (`G/char.cpp:1965-2030`). The Rewrite sent 113 everywhere.
+
+The settings now ride boot into the loading burst: `load_game_data` reads the quest host's
+settings, `ConnectionContext` holds them, and `main_character_on` picks the variant from
+the character's map before the `map_allow_find` test, which is where legacy reads
+`GetMapIndex()`. Unit tests pin all three variants, the field shifts, and the instance fold;
+`a_select_hears_the_maps_music` pins the wire: map 1 hears 138 with `enter_the_east.mp3`
+at 0.5, the Shared Channel's musicless map 72 hears 113, and a boot whose `settings.lua`
+lost its volume line hears 137. Two mutants died: a negated flag and a shifted map both
+break the map-1 arm. The strip is byte-exact — the file's goto names are Korean in a legacy
+code page, and a UTF-8 decode corrupts them and kills the quest load (found the hard way).
+
+Four rows flip: `gc.main_character3_bgm`, `gc.main_character4_bgm_vol`, `lua.add_bgm_info`
+and `lua.set_bgm_volume_enable`. Two API partials left: `arena.add_map` and `set_state`.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5314 passed, 0 failed in 46 targets (the run after the recall-offset fix; the clippy-driven refactor that followed changed no behaviour — the music and recall scenarios pass, and two later parity re-runs failed only on known load flakes, the fish length once and the dogs EAGAIN once, each passing alone); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

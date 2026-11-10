@@ -374,6 +374,9 @@ struct ConnectionContext {
     /// The locale strings every language's chat lines are looked up in, shared with the game
     /// thread.
     locale: Arc<LocaleStrings>,
+    /// The quest libraries' load-time settings: the map music `MainCharacterPacket` sends
+    /// (`add_bgm_info`, `set_bgm_volume_enable`, `G/char.cpp:1972-2009`).
+    settings: Arc<quest::host::Settings>,
     /// The address clients are told to reconnect to.
     public_ip: Ipv4Addr,
     /// The maps each Channel hosts, and the Shared Channel's.
@@ -7860,6 +7863,46 @@ where
     true
 }
 
+/// The maps a select loads a character on: the named map `MainCharacterPacket` reads before
+/// the map test, and the resolved map `SetPlayerProto` computes the points on.
+///
+/// `PlayerLoad` leaves the character on the map its saved position belongs to
+/// (`G/input_db.cpp:335-354`): the row's own map index comes first, and the atlas answers with
+/// the public map for a position, because a private map's index names the copy of a base map
+/// the character stands on. `GetValidLocation` (`G/sectree_manager.cpp:816-842`) then folds a
+/// private map the world does not host onto its base, because the copy died with the process
+/// that held it, and only the world knows which private maps it holds.
+///
+/// `SetPlayerProto` (`G/char.cpp:2289-2294`) sends a character whose row names a private map
+/// back to the place it came from: legacy holds that place as the pending Warp, so the next
+/// save writes the row there and the war's end sends the character back.
+async fn selected_maps(
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    addr: SocketAddr,
+    character: &db::players::Character,
+    warp: &mut Option<prodomo::warp::WarpTarget>,
+) -> Option<(Option<i32>, Option<i32>)> {
+    let named = if character.map_index != 0 {
+        Some(character.map_index)
+    } else {
+        context.atlas.index_at(character.x, character.y)
+    };
+    let Ok(map_index) = resolved_map_index(context, seat, addr, named).await else {
+        return None;
+    };
+    if map_index.is_some_and(|index| index >= prodomo::loading_phase::INSTANCE_MAP_BASE)
+        && (character.exit_x != 0 || character.exit_y != 0)
+    {
+        *warp = Some(prodomo::warp::WarpTarget {
+            map_index: character.exit_map_index,
+            x: character.exit_x,
+            y: character.exit_y,
+        });
+    }
+    Some((named, map_index))
+}
+
 /// `CG_CHARACTER_SELECT`: load the selected character and send the loading burst; `false` when
 /// the connection must close.
 ///
@@ -7896,44 +7939,23 @@ where
     let account_id = account.id;
     let vid = character_vid(&character);
     let view = empty_view();
-    // `PlayerLoad` leaves the character on the map its saved position belongs to, and
-    // `SetPlayerProto` computes the points there, because the map's conqueror will is part of
-    // them.
-    //
-    // The row's own map index comes first, as legacy's `PlayerLoad` reads it
-    // (`G/input_db.cpp:335-354`): a private map's index names the copy of a base map the
-    // character stands on, and the position lies in the base map's coordinates, so the atlas
-    // can only answer with the public map.
-    let named = if character.map_index != 0 {
-        Some(character.map_index)
-    } else {
-        context.atlas.index_at(character.x, character.y)
-    };
-    // `GetValidLocation` (`G/sectree_manager.cpp:816-842`): a private map the world does
-    // not host is the base map it was copied from, because the copy a guild war is fought
-    // on died with the process that held it. The world is asked, because only the world
-    // knows which private maps it holds.
-    let Ok(map_index) = resolved_map_index(context, seat, addr, named).await else {
+    let Some((named, map_index)) =
+        selected_maps(context, seat, addr, &character, &mut held.warp).await
+    else {
         return false;
     };
-    // `SetPlayerProto` (`G/char.cpp:2289-2294`): a character whose row names a private map
-    // comes back to the place it came from, because the copy it stood on is gone with the
-    // process that held it. Legacy holds that place as the pending Warp, so the next save
-    // writes the row there and the war's end sends the character back.
-    if map_index.is_some_and(|index| index >= prodomo::loading_phase::INSTANCE_MAP_BASE)
-        && (character.exit_x != 0 || character.exit_y != 0)
-    {
-        held.warp = Some(prodomo::warp::WarpTarget {
-            map_index: character.exit_map_index,
-            x: character.exit_x,
-            y: character.exit_y,
-        });
-    }
     let mut points = load_points(&character, map_index.unwrap_or(0));
     // `d->BindCharacter(ch)` is the step that makes the character the descriptor's own, and it
     // is what `CInputLogin::Entergame` later reads. Without it `CG_ENTER_GAME` has nothing to
     // answer, so the loaded row is held here and kept for the descriptor's life.
-    let mut burst = loading_burst(&character, &points, vid, &view);
+    let mut burst = loading_burst(
+        &character,
+        &points,
+        vid,
+        &view,
+        named.unwrap_or(0),
+        &context.settings,
+    );
     // `PlayerLoad` sets each stored quickslot right after the map test and before the points
     // packet (`G/input_db.cpp:439-440`), and `TPlayerTable::skills` rides the player row.
     let Some((quickslots, skills, quest_flags, affects, fish_board, daily_gift, battle_pass)) =
@@ -10507,6 +10529,9 @@ struct GameData {
     world_boss: Arc<gamedata::world_boss::WorldBossTable>,
     /// The battle-pass table, which the game thread holds.
     battle_pass: Arc<gamedata::battle_pass::BattlePassTable>,
+    /// The quest libraries' load-time settings, which `MainCharacterPacket` reads the map's
+    /// music from.
+    settings: quest::host::Settings,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -10557,6 +10582,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let world_boss = load_world_boss(config)?;
     let battle_pass = load_battle_pass(config)?;
     let quests = load_quests(config, &npcs)?;
+    let settings = quests.manager().host().settings();
     let data = GameData {
         atlas: Arc::new(atlas),
         cells,
@@ -10592,6 +10618,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         cube_recipes,
         world_boss,
         battle_pass,
+        settings,
     };
     Ok((data, quests))
 }
@@ -11266,6 +11293,7 @@ fn connection_context(
         protos: data.protos,
         groups: data.groups,
         locale: data.locale,
+        settings: Arc::new(data.settings),
         public_ip: config.public_ip,
         routes: Arc::new(map_routes(config, listeners)),
         handles: Arc::new(AtomicU32::new(0)),

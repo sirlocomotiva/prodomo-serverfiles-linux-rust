@@ -1680,6 +1680,10 @@ const GC_WORLD_BOSS: u8 = 148;
 /// `WORD wSize`, like the other dynamic records.
 const GC_BATTLE_PASS: u8 = 238;
 const GC_MAIN_CHARACTER2_EMPIRE: u8 = 113;
+/// `HEADER_GC_MAIN_CHARACTER3_BGM` (137) and `HEADER_GC_MAIN_CHARACTER4_BGM_VOL` (138):
+/// the own-character record with the map's music, without and with the volume.
+const GC_MAIN_CHARACTER3_BGM: u8 = 137;
+const GC_MAIN_CHARACTER4_BGM_VOL: u8 = 138;
 const GC_CHARACTER_GOLD: u8 = 224;
 const GC_PLAYER_POINTS: u8 = 16;
 const GC_SKILL_LEVEL_NEW: u8 = 76;
@@ -1746,6 +1750,10 @@ const PHASE_LEN: usize = 2;
 /// `GC_MAIN_CHARACTER2_EMPIRE`: header, `dwVID`, `bJob`, `szName[25]`, `x`, `y`, `z`,
 /// `bEmpire`, `bSkillGroup` (46 bytes under the packed x86 profile).
 const MAIN_CHARACTER_LEN: usize = 1 + 4 + 2 + 25 + 4 + 4 + 4 + 1 + 1;
+/// The 137 record: the 113 fields with a 25-byte BGM name after the Name.
+const MAIN_CHARACTER3_BGM_LEN: usize = MAIN_CHARACTER_LEN + 25;
+/// The 138 record: the 137 fields with a 4-byte volume after the music.
+const MAIN_CHARACTER4_BGM_VOL_LEN: usize = MAIN_CHARACTER3_BGM_LEN + 4;
 /// `GC_CHARACTER_GOLD`: header and a `long long` (`ENABLE_REMOVE_LIMIT_GOLD`).
 const GOLD_LEN: usize = 1 + 8;
 /// `TPacketGCCharacterAdd`: header, `dwVID`, `angle`, `x`, `y`, `z`, `bType`, `wRaceNum`,
@@ -1783,6 +1791,8 @@ fn game_len(header: u8) -> usize {
     match header {
         GC_PHASE => PHASE_LEN,
         GC_MAIN_CHARACTER2_EMPIRE => MAIN_CHARACTER_LEN,
+        GC_MAIN_CHARACTER3_BGM => MAIN_CHARACTER3_BGM_LEN,
+        GC_MAIN_CHARACTER4_BGM_VOL => MAIN_CHARACTER4_BGM_VOL_LEN,
         GC_CHARACTER_GOLD => GOLD_LEN,
         GC_PLAYER_POINTS => POINTS_LEN,
         GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
@@ -2227,6 +2237,23 @@ fn read_loading_burst(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBurst 
     burst
 }
 
+/// The own-character record after a select: byte 138 with the volume where `settings.lua`
+/// names music for the map (maps 1 and 3 among the hosted ones), byte 137 where the volume
+/// flag is off, and byte 113 where the map has no music (`MainCharacterPacket`,
+/// `G/char.cpp:1972-2029`).
+fn read_main_character(keyed: &mut Keyed) -> Vec<u8> {
+    let main = keyed.read_game();
+    assert!(
+        main[0] == GC_MAIN_CHARACTER2_EMPIRE && main.len() == MAIN_CHARACTER_LEN
+            || main[0] == GC_MAIN_CHARACTER3_BGM && main.len() == MAIN_CHARACTER3_BGM_LEN
+            || main[0] == GC_MAIN_CHARACTER4_BGM_VOL && main.len() == MAIN_CHARACTER4_BGM_VOL_LEN,
+        "the own-character record is one of the three variants, got {} of {} bytes",
+        main[0],
+        main.len()
+    );
+    main
+}
+
 /// [`read_loading_burst`] without the version report: a select that leaves the enter-game
 /// check nothing to pass on.
 fn read_loading_burst_raw(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBurst {
@@ -2234,8 +2261,7 @@ fn read_loading_burst_raw(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBu
     keyed.send_record(&client_select(slot));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
-    let main = keyed.read_game();
-    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let main = read_main_character(keyed);
     let mut quickslots = Vec::new();
     let gold = loop {
         let record = keyed.read_game();
@@ -4727,19 +4753,22 @@ fn a_character_asked_to_rename_takes_a_free_name() {
     alice.closed_by(&client_rename(4, b"Delta"));
 }
 
-/// `MainCharacterPacket` is the 46-byte empire variant, carrying the VID, the job, the Name,
-/// the position, the empire, and the skill group, in source field order.
+/// `MainCharacterPacket` on map 1 is the 75-byte volume variant (`settings.lua` names
+/// `enter_the_east.mp3` at 0.5 and enables the volume): the VID, the job, the Name, the music,
+/// the volume, the position, the empire, and the skill group, in source field order.
 fn assert_alphas_main_character(main: &[u8], alpha: &Listed) {
-    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
-    assert_eq!(main.len(), MAIN_CHARACTER_LEN);
+    assert_eq!(main[0], GC_MAIN_CHARACTER4_BGM_VOL);
+    assert_eq!(main.len(), MAIN_CHARACTER4_BGM_VOL_LEN);
     assert_eq!(&main[1..5], &alpha.id.to_le_bytes(), "dwVID");
     assert_eq!(&main[5..7], &3u16.to_le_bytes(), "wJob");
     assert_eq!(&main[7..32], &name_field(b"Alpha"), "szName");
-    assert_eq!(&main[32..36], &470_000i32.to_le_bytes(), "x");
-    assert_eq!(&main[36..40], &950_000i32.to_le_bytes(), "y");
-    assert_eq!(&main[40..44], &0i32.to_le_bytes(), "z");
-    assert_eq!(main[44], 1, "bEmpire");
-    assert_eq!(main[45], 49, "bSkillGroup");
+    assert_eq!(&main[32..50], b"enter_the_east.mp3", "szBGMName");
+    assert_eq!(&main[57..61], &0.5f32.to_le_bytes(), "fBGMVol");
+    assert_eq!(&main[61..65], &470_000i32.to_le_bytes(), "x");
+    assert_eq!(&main[65..69], &950_000i32.to_le_bytes(), "y");
+    assert_eq!(&main[69..73], &0i32.to_le_bytes(), "z");
+    assert_eq!(main[73], 1, "bEmpire");
+    assert_eq!(main[74], 49, "bSkillGroup");
 }
 
 /// `cg.login.character_select`, `sys.login.enter`: `CG_CHARACTER_SELECT` loads the character
@@ -4874,7 +4903,14 @@ fn entered(server: &Server, login: &[u8]) -> (Keyed, (i32, i32), (i32, i32)) {
     let (mut keyed, _empire, list) = select_screen(server, login);
     let main = read_loading_burst(&mut keyed, &list, 0).main;
     let word = |at: usize| i32::from_le_bytes([main[at], main[at + 1], main[at + 2], main[at + 3]]);
-    let loaded = (word(32), word(36));
+    // The coordinates sit after the Name at 113, after the music at 137, and after the
+    // volume at 138.
+    let at = match main.first().copied() {
+        Some(GC_MAIN_CHARACTER3_BGM) => 57,
+        Some(GC_MAIN_CHARACTER4_BGM_VOL) => 61,
+        _ => 32,
+    };
+    let loaded = (word(at), word(at + 4));
     let add = enter_game_burst(&mut keyed);
     (keyed, loaded, inserted_at(&add))
 }
@@ -7263,7 +7299,7 @@ fn the_points_are_computed_at_load_and_the_item_load_clamps_the_pools() {
     keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
-    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let _ = read_main_character(&mut keyed);
     let gold = keyed.read_game();
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = keyed.read_game();
@@ -7364,7 +7400,7 @@ fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
     keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
-    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let _ = read_main_character(&mut keyed);
     let gold = keyed.read_game();
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = keyed.read_game();
@@ -7459,8 +7495,8 @@ fn a_map_the_channel_does_not_host_warps_home_and_closes_silently_after_the_reco
     // close. Nothing else.
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
-    let main = keyed.read_game();
-    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let main = read_main_character(&mut keyed);
+    assert_eq!(main[0], GC_MAIN_CHARACTER4_BGM_VOL, "Delta stands on map 1");
     assert_eq!(&main[7..32], &name_field(b"Delta"), "szName");
     // The refusal is `SetPhase(PHASE_CLOSE)`, and it is silent: the phase is assigned before
     // `Packet` is called, and `Packet` returns at once for `PHASE_CLOSE`, so the `GC_PHASE`
@@ -7489,10 +7525,10 @@ fn a_map_the_channel_does_not_host_warps_home_and_closes_silently_after_the_reco
     again.send_record(&client_select(3));
     assert_eq!(again.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(again.read_game(), [GC_ENTITY, 3, 0]);
-    let main = again.read_game();
+    let main = read_main_character(&mut again);
     assert_eq!(
-        main[0], GC_MAIN_CHARACTER2_EMPIRE,
-        "the load is no longer refused"
+        main[0], GC_MAIN_CHARACTER4_BGM_VOL,
+        "the load is no longer refused, still on map 1"
     );
 }
 
@@ -10586,7 +10622,7 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
-    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let _ = read_main_character(&mut keyed);
     let gold = keyed.read_game();
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = keyed.read_game();
@@ -13155,7 +13191,7 @@ fn select_equipped_enter(keyed: &mut Keyed, item_count: usize) {
     keyed.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
-    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let _ = read_main_character(keyed);
     let gold = keyed.read_game();
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = keyed.read_game();
@@ -25213,7 +25249,7 @@ fn a_gm_rings_the_christmas_flags_and_a_late_login_hears_them() {
     zulu.send_record(&client_select(0));
     assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(zulu.read_game(), [GC_ENTITY, 3, 0]);
-    assert_eq!(zulu.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let _ = read_main_character(&mut zulu);
     for expected in [b"xmas_snow 3".as_slice(), b"xmas_boom 1", b"DayMode dark"] {
         assert_eq!(
             zulu.read_game(),
@@ -38070,7 +38106,7 @@ fn relogs_to_a_refilled_horse(server: &Server) {
     alice.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(alice.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(alice.read_game(), [GC_ENTITY, 3, 0]);
-    assert_eq!(alice.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let _ = read_main_character(&mut alice);
     let gold = alice.read_game();
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = alice.read_game();
@@ -41297,6 +41333,105 @@ fn a_click_says_the_playtime_twice() {
         "seconds since the login: {short}"
     );
     alice.quiet("the step ends");
+}
+
+/// `gc.main_character4_bgm_vol`, `gc.main_character3_bgm`, `lua.add_bgm_info` and
+/// `lua.set_bgm_volume_enable`: Beta selects on map 1 and hears the 75-byte volume record
+/// with `enter_the_east.mp3` at 0.5; on the Shared Channel's musicless map 72 she hears the
+/// plain 46-byte record. With `settings.lua` stripped of its volume line the map-1 select
+/// hears the 71-byte record with the name and no volume.
+#[test]
+fn a_select_hears_the_maps_music() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _list) = select_screen_beta(&server);
+    alice.send_record(&client_select(1));
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(alice.read_game(), [GC_ENTITY, 3, 0]);
+    let main = alice.read_game();
+    assert_eq!(main[0], GC_MAIN_CHARACTER4_BGM_VOL, "map 1 has music");
+    assert_eq!(main.len(), MAIN_CHARACTER4_BGM_VOL_LEN);
+    assert_eq!(&main[7..32], name_field(b"Beta"), "szName");
+    assert_eq!(&main[32..50], b"enter_the_east.mp3", "szBGMName");
+    assert_eq!(&main[57..61], &0.5f32.to_le_bytes(), "fBGMVol");
+    drop(alice);
+    drop(server);
+    // The Shared Channel hosts map 72, which `settings.lua` names no music for.
+    sql(
+        &database,
+        "UPDATE player SET x = 76800, y = 1278400 WHERE name = 'Beta'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _list) = select_screen_on_beta(&server);
+    alice.send_record(&client_select(1));
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(alice.read_game(), [GC_ENTITY, 3, 0]);
+    let main = alice.read_game();
+    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE, "map 72 is silent");
+    assert_eq!(main.len(), MAIN_CHARACTER_LEN);
+    drop(alice);
+    drop(server);
+    // Without the volume line the same map-1 select hears the 71-byte record.
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    // Byte-exact: the file's goto names are Korean in a legacy code page, so no UTF-8
+    // decode may touch it.
+    let settings = std::fs::read(legacy_settings()).expect("the owner's settings.lua is readable");
+    let needle = b"set_bgm_volume_enable();";
+    assert!(
+        settings
+            .windows(needle.len())
+            .any(|window| window == needle),
+        "the owner enables the volume"
+    );
+    let mut stripped = settings.clone();
+    if let Some(at) = stripped
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        stripped.drain(at..at + needle.len());
+    }
+    let (server, _data) = Server::start_with_files(
+        binary(),
+        database.url(),
+        &[("locale/europe/settings.lua", &stripped)],
+    );
+    let (mut alice, _list) = select_screen_beta(&server);
+    alice.send_record(&client_select(1));
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(alice.read_game(), [GC_ENTITY, 3, 0]);
+    let main = alice.read_game();
+    assert_eq!(main[0], GC_MAIN_CHARACTER3_BGM, "no flag, no volume");
+    assert_eq!(main.len(), MAIN_CHARACTER3_BGM_LEN);
+    assert_eq!(&main[32..50], b"enter_the_east.mp3", "szBGMName");
+}
+
+/// [`select_screen`] for Beta's slot, answering the client and the list.
+fn select_screen_beta(server: &Server) -> (Keyed, Vec<u8>) {
+    let (keyed, _empire, list) = select_screen(server, b"alice");
+    (keyed, list)
+}
+
+/// [`select_screen_beta`] on the Shared Channel, which hosts map 72.
+fn select_screen_on_beta(server: &Server) -> (Keyed, Vec<u8>) {
+    let (keyed, _empire, list) = select_screen_on(server, 99, b"alice", ENGLISH);
+    (keyed, list)
+}
+
+/// The owner's `settings.lua`, which the music scenario strips its volume line from.
+fn legacy_settings() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../legacy/gamedata/locale/europe/settings.lua")
 }
 
 /// `lua.is_test_server`: Beta clicks the skill teacher on a default boot and hears
@@ -47254,7 +47389,7 @@ fn enter_arena_round_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed
     alice.send_record(&client_version(DEFAULT_CLIENT_VERSION));
     assert_eq!(alice.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(alice.read_game(), [GC_ENTITY, 3, 0]);
-    assert_eq!(alice.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let _ = read_main_character(&mut alice);
     let gold = alice.read_game();
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = alice.read_game();

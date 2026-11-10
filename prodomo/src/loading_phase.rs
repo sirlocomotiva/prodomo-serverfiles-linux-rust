@@ -47,9 +47,6 @@
 //! - `GC_HYBRIDCRYPT_SDB` (153), the package SDB, is a **loading** record, not an enter-game
 //!   one. `SendClientPackageSDBToLoadMap` writes only when the package crypt knows the map's
 //!   SDB stream, and `legacy/` has no `package_info.txt`, so legacy sends it for no map.
-//! - The BGM variants of the main-character record (137 and 138) need
-//!   `CHARACTER_AddBGMInfo`, fed by the legacy `map_bgm_info` table. `legacy/sql/` has no such
-//!   table, so byte 113 is the only variant this deployment can send.
 //! - `BroadcastEventFlagOnLogin` sends one `GC_CHAT` per non-zero event flag (`worldboss`,
 //!   `xmas_snow`, `xmas_boom`, `xmas_tree`, `DayMode`, `newyear_boom`). The descriptor asks the
 //!   world for them and puts them at the front of the after-map-test half; with every flag 0, as
@@ -96,7 +93,8 @@ use db::players::{Character, PLAYER_SLOTS};
 use gamedata::map_atlas::MapAtlas;
 use gamedata::mob_proto::{CHAR_TYPE_NPC, CHAR_TYPE_PC};
 use protocol::gc_actors::{
-    GcCharacterAdd, GcCharacterAdditionalInfo, GcMainCharacter2Empire, NAME_LEN,
+    GcCharacterAdd, GcCharacterAdditionalInfo, GcMainCharacter2Empire, GcMainCharacter3Bgm,
+    GcMainCharacter4BgmVol, NAME_LEN,
 };
 use protocol::gc_chat::{GcChat, CHAT_TYPE_COMMAND};
 use protocol::gc_entity::{GcEntity, GcEntityInfo, ENTITY_PART_NUM};
@@ -967,6 +965,73 @@ pub fn name_bytes_field(name: &[u8]) -> [u8; NAME_LEN] {
     field
 }
 
+/// The own-character record `MainCharacterPacket` sends for a character on `map_index`
+/// (`CHARACTER::MainCharacterPacket`, `G/char.cpp:1965-2030`): the 46-byte plain record at
+/// byte 113 when the map has no music, the 71-byte record at byte 137 when it has music
+/// and the volume flag is off, and the 75-byte record at byte 138 when the flag is on.
+///
+/// `map_index` is the map the character stands on, before the `map_allow_find` test: legacy
+/// reads `GetMapIndex()` and folds an instance map onto its base (`FIX_DUNGEON_MUSIC` is
+/// defined), exactly as [`public_map_index`] does. The music is what `settings.lua` recorded
+/// (`add_bgm_info`, `set_bgm_volume_enable`); an empty name is no music, as legacy's
+/// `bgmInfo.name.empty()` is.
+#[must_use]
+pub fn main_character_on(
+    character: &Character,
+    vid: u32,
+    map_index: i32,
+    settings: &quest::host::Settings,
+) -> Vec<u8> {
+    let map = u32::try_from(public_map_index(map_index)).unwrap_or(0);
+    let music = settings
+        .bgm
+        .get(&map)
+        .filter(|music| !music.name.is_empty());
+    let mut bytes = Vec::new();
+    match music {
+        None => encoded(
+            &mut main_character(character, vid),
+            "the own-character record",
+        ),
+        Some(music) => {
+            let name = name_field(&character.name);
+            let bgm = name_bytes_field(&music.name);
+            if settings.bgm_volume_enable {
+                // Legacy stores the volume as a `float` (`CHARACTER_AddBGMInfo`, `char.cpp:1937`).
+                #[allow(clippy::cast_possible_truncation)]
+                let volume = music.volume as f32;
+                GcMainCharacter4BgmVol::new(
+                    vid,
+                    u16::from(character.job),
+                    name,
+                    bgm,
+                    volume,
+                    character.x,
+                    character.y,
+                    0,
+                    character.empire,
+                    character.skill_group,
+                )
+                .encode_into(&mut bytes);
+            } else {
+                GcMainCharacter3Bgm::new(
+                    vid,
+                    u16::from(character.job),
+                    name,
+                    bgm,
+                    character.x,
+                    character.y,
+                    0,
+                    character.empire,
+                    character.skill_group,
+                )
+                .encode_into(&mut bytes);
+            }
+            bytes
+        }
+    }
+}
+
 /// The 46-byte own-character record the server sends at byte 113
 /// (`CHARACTER::MainCharacterPacket`, `G/char.cpp:2005-2029`).
 #[must_use]
@@ -1209,6 +1274,8 @@ pub fn loading_burst(
     state: &Points,
     vid: u32,
     view: &Neighbourhood,
+    map_index: i32,
+    settings: &quest::host::Settings,
 ) -> LoadingBurst {
     let entities: Vec<GcEntityInfo> = view
         .characters
@@ -1220,10 +1287,7 @@ pub fn loading_burst(
             &mut GcEntity::new(entities),
             "a character list from the world",
         ),
-        encoded(
-            &mut main_character(character, vid),
-            "the own-character record",
-        ),
+        main_character_on(character, vid, map_index, settings),
     ];
     let mut after_map_test = points_packet(character, state);
     after_map_test.push(encoded(
@@ -1848,7 +1912,14 @@ mod tests {
     /// them. `GC_PHASE` is the descriptor's own phase transition and is not in either half.
     #[test]
     fn loading_burst_headers_are_in_legacy_order() {
-        let burst = loading_burst(&hero(), &hero_points(), 0x1122_3344, &empty_view());
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            0x1122_3344,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
         assert_eq!(
             headers(&burst.before_map_test),
             vec![249, 113],
@@ -1863,7 +1934,14 @@ mod tests {
 
     #[test]
     fn loading_burst_frame_widths_are_the_legacy_widths() {
-        let burst = loading_burst(&hero(), &hero_points(), 0x1122_3344, &empty_view());
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            0x1122_3344,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
         let widths = |frames: &[Vec<u8>]| -> Vec<usize> { frames.iter().map(Vec::len).collect() };
         assert_eq!(
             widths(&burst.before_map_test),
@@ -1881,7 +1959,14 @@ mod tests {
     /// `SetPhase(PHASE_LOADING)`, so a caller that also wrote one would put two on the wire.
     #[test]
     fn no_loading_burst_half_carries_a_phase_record() {
-        let burst = loading_burst(&hero(), &hero_points(), 7, &empty_view());
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            7,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
         for frame in burst
             .before_map_test
             .iter()
@@ -1956,6 +2041,71 @@ mod tests {
         main_character(&hero, 1).encode_into(&mut bytes);
         assert_eq!(&bytes[7..31], &[b'B'; 24]);
         assert_eq!(bytes[31], 0);
+    }
+
+    /// `MainCharacterPacket` sends the map's music: byte 138 with the name and the volume
+    /// when the volume flag is on, byte 137 with the name alone when it is off, and byte 113
+    /// when the map has no music (`G/char.cpp:1972-2009`). An empty name is no music.
+    #[test]
+    fn the_own_character_record_carries_the_maps_music() {
+        use quest::host::{Bgm, Settings};
+        use std::collections::BTreeMap;
+        let hero = hero();
+        let settings = Settings {
+            bgm: BTreeMap::from([(
+                1,
+                Bgm {
+                    name: b"enter_the_east.mp3".to_vec(),
+                    volume: 0.5,
+                },
+            )]),
+            bgm_volume_enable: true,
+            ..Settings::default()
+        };
+        let vol = main_character_on(&hero, 1, 1, &settings);
+        assert_eq!(vol[0], 138, "music with the flag is byte 138");
+        assert_eq!(vol.len(), 75, "the volume variant is 75 packed bytes");
+        assert_eq!(&vol[7..12], b"Arges", "the Name still leads");
+        assert_eq!(
+            &vol[32..50],
+            b"enter_the_east.mp3",
+            "szBGMName follows the Name"
+        );
+        assert_eq!(&vol[57..61], &0.5f32.to_le_bytes(), "fBGMVol");
+        assert_eq!(&vol[61..65], &hero.x.to_le_bytes(), "lx shifts by 29");
+        let plain = Settings {
+            bgm_volume_enable: false,
+            ..settings.clone()
+        };
+        let novol = main_character_on(&hero, 1, 1, &plain);
+        assert_eq!(novol[0], 137, "music without the flag is byte 137");
+        assert_eq!(
+            novol.len(),
+            71,
+            "the plain music variant is 71 packed bytes"
+        );
+        assert_eq!(
+            &novol[32..50],
+            b"enter_the_east.mp3",
+            "szBGMName follows the Name"
+        );
+        assert_eq!(&novol[57..61], &hero.x.to_le_bytes(), "lx unshifted");
+        let silent = main_character_on(&hero, 1, 72, &settings);
+        assert_eq!(silent[0], 113, "a map with no music is byte 113");
+        assert_eq!(silent.len(), 46, "the plain record is 46 packed bytes");
+        // An instance map folds onto its base (`FIX_DUNGEON_MUSIC`).
+        let folded = main_character_on(&hero, 1, 10_001, &settings);
+        assert_eq!(folded[0], 138, "instance map 10001 plays map 1's music");
+        let mut empty = settings;
+        empty.bgm.insert(
+            1,
+            Bgm {
+                name: Vec::new(),
+                volume: 0.5,
+            },
+        );
+        let none = main_character_on(&hero, 1, 1, &empty);
+        assert_eq!(none[0], 113, "an empty name is no music");
     }
 
     #[test]
@@ -2966,7 +3116,14 @@ mod tests {
     /// holding the whole record, and each `TPacketEntityInfo` is 28 bytes.
     #[test]
     fn a_visible_character_reaches_the_loading_burst() {
-        let burst = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &with_neighbour(),
+            0,
+            &quest::host::Settings::default(),
+        );
         let entity = &burst.before_map_test[0];
         assert_eq!(entity[0], 249, "GC_ENTITY is byte 249");
         assert_eq!(entity.len(), 31, "3 header bytes plus one 28-byte entry");
@@ -2990,7 +3147,14 @@ mod tests {
     /// legacy writes it with a size of 3 and no entries.
     #[test]
     fn an_empty_view_still_sends_the_entity_record() {
-        let burst = loading_burst(&hero(), &hero_points(), 1, &empty_view());
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
         assert_eq!(
             burst.before_map_test[0],
             vec![249, 3, 0],
@@ -3002,7 +3166,14 @@ mod tests {
     /// built from the row alone holds none.
     #[test]
     fn the_burst_leaves_the_quickslot_records_to_the_descriptor() {
-        let burst = loading_burst(&hero(), &hero_points(), 1, &empty_view());
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
         assert!(
             !all(&burst.before_map_test, &burst.after_map_test)
                 .into_iter()
@@ -3015,7 +3186,14 @@ mod tests {
     /// `package_info.txt`, so legacy sends it for no map. It must be absent from both bursts.
     #[test]
     fn the_package_sdb_is_absent_from_both_bursts() {
-        let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
+        let loading = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &with_neighbour(),
+            0,
+            &quest::host::Settings::default(),
+        );
         let entering = enter_game_burst(
             &hero(),
             own_pair(0),
@@ -3083,7 +3261,14 @@ mod tests {
     /// where legacy hands it several.
     #[test]
     fn every_record_is_its_own_frame() {
-        let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
+        let loading = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &with_neighbour(),
+            0,
+            &quest::host::Settings::default(),
+        );
         let entering = enter_game_burst(
             &hero(),
             own_pair(0),

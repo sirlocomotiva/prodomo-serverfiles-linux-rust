@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 539 (the test mode).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 540
+Last reviewed: 2026-11-10, after ledger section 540 (the map's music).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 541
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -593,6 +593,7 @@ Since 536 `lua.q.setstate` and `lua.q.set_state` are `ported`: three clicks walk
 Since 537 `lua.pc.in_dungeon` and `lua.pc.get_channel_id` are `ported`: both ledger notes were stale — the forest dungeon lives — and the forest report proves both, the login gate leaning on the first and a new `ch 1` notice pinning the second after `evt 1` let a channel-0 mutant survive. The
 Since 538 `lua.pc.getplaytime` and `lua.q.done` are `ported`: the playtime probe says both spellings seconds after the login and they agree, while `q.done` is a re-read — the 530 clears already prove the bridge, and the callerless helpers are questlib Lua, not the row. The
 Since 539 `lua.is_test_server` is `ported`: the mode probe says it on a default boot (true) and a `test_server = false` boot (false) — a negated bridge dies on the first click. The
+Since 540 the loading burst sends the map's music: `gc.main_character3_bgm`, `gc.main_character4_bgm_vol`, `lua.add_bgm_info` and `lua.set_bgm_volume_enable` are `ported` — a map-1 select hears 138 with `enter_the_east.mp3` at 0.5, map 72 hears 113, and a flag-off boot hears 137. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
