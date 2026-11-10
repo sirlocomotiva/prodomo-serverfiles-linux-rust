@@ -232,6 +232,10 @@ pub struct Npc {
     /// `m_pGuild` (`CObject::RegenNPC`, `G/building.cpp:268-298`): the guild of a
     /// building's NPC, and `None` for every other NPC.
     pub npc_guild: Option<u32>,
+    /// `GetPart(PART_*)`: the six worn parts (`EParts` order), which the additional
+    /// record and `UpdatePacket` name (`CHR_EQUIPPART_ARMOR` reads `PART_MAIN`, and so
+    /// on). All 0 but for the buff follower's armour and weapon (520).
+    pub parts: [u16; crate::character::PARTS],
 }
 
 impl Npc {
@@ -856,6 +860,7 @@ impl<'a> NpcSpawner<'a> {
             ndr: 0,
             nda: std::collections::BTreeSet::new(),
             npc_guild: None,
+            parts: [0; 6],
         });
         self.report.spawned += 1;
         if proto.mob_type == CHAR_TYPE_STONE {
@@ -1527,6 +1532,7 @@ mod tests {
                 ndr: 0,
                 nda: std::collections::BTreeSet::new(),
                 npc_guild: None,
+                parts: [0; 6],
             }]
         );
         assert_eq!(report.spawned, 1);

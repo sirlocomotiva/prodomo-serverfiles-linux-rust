@@ -429,7 +429,7 @@ impl GameState {
         // A mount follower idles on the mount tick, not in the state machine: its actor's
         // own event runs `Update`, so it never chats, guards, follows a leader or wanders.
         // So does a pet (`G/char_state.cpp:516-520`).
-        if self.is_mount_npc(vid) || self.is_pet_npc(vid) {
+        if self.is_mount_npc(vid) || self.is_pet_npc(vid) || self.is_shaman_npc(vid) {
             return;
         }
         match who.char_type {

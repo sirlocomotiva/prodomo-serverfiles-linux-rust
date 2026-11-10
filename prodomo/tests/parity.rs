@@ -1875,6 +1875,7 @@ fn game_len(header: u8) -> usize {
         GC_ITEM_OWNERSHIP => ITEM_OWNERSHIP_LEN,
         GC_CUBE_RENEWAL => CUBE_LEN,
         GC_SHOP_SIGN => SHOP_SIGN_LEN,
+        GC_AUTO_SHAMAN_SKILL => SHAMAN_SKILL_LEN,
         // `TPacketGCSwitchbot` sizes from its own DWORD `size` (`G/packet.h:3415-3421`).
         GC_SWITCHBOT => u32::MAX as usize,
         other => panic!("unexpected game header {other}"),
@@ -36507,6 +36508,11 @@ const GC_PRIVATE_SHOP: u8 = 175;
 const GC_SHOP_SIGN: u8 = 39;
 /// `TPacketGCShopSign`: the header, the VID, and the 33-byte sign.
 const SHOP_SIGN_LEN: usize = 38;
+/// `HEADER_GC_AUTO_SHAMAN_SKILL` (57).
+const GC_AUTO_SHAMAN_SKILL: u8 = 57;
+/// `TPacketGCAutoShamanSkill`: the header, the skill vnum, the caster VID, and the
+/// level byte.
+const SHAMAN_SKILL_LEN: usize = 10;
 /// `TPacketGCFishEventInfo` (`G/packet.h:2876-2881`): the header, the sub-header and two
 /// `DWORD`s.
 const FISH_EVENT_INFO_LEN: usize = 10;
@@ -48657,5 +48663,142 @@ fn a_pet_costume_summons_and_comes_off() {
     let stood = use_summons_the_pet(&mut alice, &database, pet_cell);
 
     use_takes_the_pet_costume_off(&mut alice, &database, pet_cell, stood);
+    drop(alice);
+}
+
+/// The owner's toggle (69700): `ITEM_TOGGLE`/`TOGGLE_SHAMAN`, group 1, no applies.
+fn give_alpha_a_shaman_toggle(database: &ScratchDatabase) {
+    let protos = owners_protos();
+    let proto = protos.get(69_700).expect("the owner's data has it");
+    assert_eq!(
+        (proto.item_type, proto.sub_type, proto.values[0]),
+        (
+            gamedata::item_kind::ITEM_TOGGLE,
+            gamedata::item_kind::TOGGLE_SHAMAN,
+            1
+        )
+    );
+    assert_eq!(proto.values[5], 0, "the legacy group index reads 0");
+    assert!(proto.applies.iter().all(|apply| apply.kind == 0));
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 72, id, 1, 0, 1, \
+         69700 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// The VID and point of the `GC_CHARACTER_ADD` of race 20114 among `records`,
+/// asserting the name `Buff` its additional record carries.
+fn added_shaman_named(records: &[Vec<u8>]) -> (u32, (i32, i32)) {
+    let adds: Vec<&Vec<u8>> = records
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_ADD && record[22..24] == 20_114u16.to_le_bytes())
+        .collect();
+    let [add] = adds[..] else {
+        panic!("one follower added, not {adds:02x?}");
+    };
+    let info = records
+        .iter()
+        .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == add[1..5])
+        .expect("the follower's additional record");
+    assert_eq!(&info[5..9], b"Buff", "the follower's name");
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    (vid, inserted_at(add))
+}
+
+/// `sys.skill.buff_npc`: using the toggle stands the buff follower within 100 with
+/// the name `Buff` and the parts, reports the five skills and the premium, and the
+/// first tick casts 94 for the hour with `GC_AUTO_SHAMAN_SKILL`; using it again
+/// unsummons. The owner's 69700 is group 1 with no applies.
+#[test]
+fn a_used_toggle_summons_its_buff_follower_and_casts() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    give_alpha_a_shaman_toggle(&database);
+    let (mut alice, _character, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items.len(), 1);
+    let add = enter_game_burst(&mut alice);
+    let _vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+
+    alice.send_record(&client_item_use(0));
+    let mut read = read_until_pet_header(&mut alice, GC_CHARACTER_ADD);
+    read.extend(read_until_pet_header(&mut alice, GC_CHAR_ADDITIONAL_INFO));
+    let (stood, at) = added_shaman_named(&read);
+    for offset in [at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1] {
+        assert!(offset.abs() <= 100, "within 100: {at:?}");
+    }
+    let info = read
+        .iter()
+        .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO)
+        .expect("the additional record");
+    assert_eq!(
+        u16::from_le_bytes([info[30], info[31]]),
+        11_899,
+        "the armour part: {info:02x?}"
+    );
+    assert_eq!(
+        u16::from_le_bytes([info[32], info[33]]),
+        5109,
+        "the weapon part: {info:02x?}"
+    );
+    // The socket flipped: the update, then the skill and premium reports.
+    let updates: Vec<&Vec<u8>> = read
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE)
+        .collect();
+    assert_eq!(updates.len(), 1, "the socket write: {read:02x?}");
+    let text = |record: &Vec<u8>| record[10..].to_vec();
+    let commands: Vec<Vec<u8>> = read
+        .iter()
+        .filter(|record| {
+            record[0] == GC_CHAT && record.len() > 10 && record[3] == CHAT_TYPE_COMMAND
+        })
+        .map(text)
+        .collect();
+    assert!(
+        commands
+            .iter()
+            .any(|line| line.starts_with(b"RECV_ShamanSkills 94|20,")),
+        "the skills report: {commands:?}"
+    );
+    assert!(
+        commands.iter().any(|line| line == b"RECV_ShamanPremium 0"),
+        "the premium report: {commands:?}"
+    );
+    // The first buff tick casts 94 for the hour, announced with the skill record.
+    let mut cast = read_until_pet_header(&mut alice, GC_AUTO_SHAMAN_SKILL);
+    cast.extend(read_until_pet_header(&mut alice, GC_AFFECT_ADD));
+    let skill = cast
+        .iter()
+        .find(|record| record[0] == GC_AUTO_SHAMAN_SKILL)
+        .expect("the cast record");
+    assert_eq!(
+        u32::from_le_bytes(skill[1..5].try_into().expect("four bytes")),
+        94
+    );
+    assert_eq!(
+        u32::from_le_bytes(skill[5..9].try_into().expect("four bytes")),
+        stood
+    );
+    assert_eq!(skill[9], 20, "the unset level");
+    let grant = cast
+        .iter()
+        .find(|record| record[0] == GC_AFFECT_ADD)
+        .expect("the affect lands");
+    assert_eq!(
+        u32::from_le_bytes(grant[1..5].try_into().expect("four bytes")),
+        94
+    );
+    // The second use unsummons it.
+    alice.send_record(&client_item_use(0));
+    let gone = read_until_pet_header(&mut alice, GC_CHARACTER_DEL);
+    assert!(
+        gone.contains(&header_and_vid_record(GC_CHARACTER_DEL, stood)),
+        "the follower goes: {gone:02x?}"
+    );
     drop(alice);
 }

@@ -149,6 +149,7 @@ mod reward_window;
 mod safebox;
 mod sash;
 mod set_attr;
+mod shaman;
 mod ship;
 mod shop;
 mod shutdown;
@@ -793,6 +794,9 @@ pub struct GameState {
     /// Each summoned costume pet standing, by its VID (its owner, its summon item
     /// and its mob, `CPetSystem::m_petActorMap`).
     pet_npcs: HashMap<u32, pet::PetNpc>,
+    /// Each summoned buff follower standing, by its VID (its owner, its summon item
+    /// and its buff stamp, `CShamanSystem::m_ShamanItemsMap`).
+    shaman_npcs: HashMap<u32, shaman::ShamanNpc>,
     /// `CHorseNameManager::m_mapHorseNames` (`G/horsename_manager.h:10`): each rider's
     /// horse name by its player id, empty for a rider the store read nameless. The
     /// summon and the compute read it; the enter-game load installs it, `horse.set_name`
@@ -2909,6 +2913,9 @@ impl GameState {
             // arenas, before the ranks close `Entergame`.
             self.enter_pet(vid);
             self.enter_mount(vid);
+            // `SendAutoShamanInformations` (`G/char.cpp:12751-12757`) at
+            // `G/input_login.cpp:952`, after the ranks: a standing follower's report.
+            self.send_shaman_report(vid);
             // `RankGlobal_send_players` and `RankGlobal_send_items` close `Entergame`
             // (`G/input_login.cpp:946-949`).
             self.rank_login(vid);
@@ -3750,12 +3757,7 @@ impl GameState {
         let _horse = self.horse_timers.remove(&vid);
         // `HorseSummon(false)` in `CHARACTER::Destroy` (`G/char.cpp:632`).
         self.horse_unsummon(vid, false);
-        // `CMountSystem::Destroy` in `CHARACTER::Destroy` (`G/char.cpp:719`): the
-        // followers go with the character.
-        self.leave_mounts(vid);
-        // `CPetSystem::Destroy` in `CHARACTER::Destroy` (`G/char.cpp:609-612`): the
-        // pets go with the character, after the mounts.
-        self.leave_pets(vid);
+        self.leave_followers(vid);
         // `m_sortInventoryPulse` is the `CHARACTER`'s: the next login starts at 0.
         let _sorted = self.sort_inventory_until.remove(&vid);
         self.stop_browsing(vid);
@@ -3877,6 +3879,19 @@ impl GameState {
         Some(kept)
     }
 
+    /// The `Destroy` follower drops (`G/char.cpp:609-629`): the mounts
+    /// (`CMountSystem::Destroy`, `:719`), the pets, then the shaman followers, go
+    /// with the character.
+    fn leave_followers(&mut self, vid: common::vid::Vid) {
+        self.leave_mounts(vid);
+        // `CPetSystem::Destroy` in `CHARACTER::Destroy` (`G/char.cpp:609-612`): the
+        // pets go with the character, after the mounts.
+        self.leave_pets(vid);
+        // The shaman system's destroy (`G/char.cpp:618-629`): the followers go with
+        // the character, after the pets.
+        self.leave_shamans(vid);
+    }
+
     /// Whether a character is online under that VID.
     ///
     /// This is what decides whether a record the world is about to build has a
@@ -3935,11 +3950,13 @@ impl GameState {
             || self.changelook_item_at(vid, request.to)
             || self.aura_item_at(vid, request.from)
             || self.aura_item_at(vid, request.to)
+            || self.shaman_locked_at(vid, request.from)
         {
             // `CItem::isLocked` (`G/char_item.cpp:7636-7637`): a sash or changelook material
             // cannot be moved, and nothing lands on one. Silent, as legacy's source check is; the
             // destination arm has no legacy twin — legacy lets a move bury the held item —
-            // and is a Divergence, recorded in `docs/STATUS.md`.
+            // and is a Divergence, recorded in `docs/STATUS.md`. An active toggle cannot
+            // move either (`ActivateToggleItem` locks it, `G/ItemUtils.cpp:78`).
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
         let mut moved = self.run_item_step(vid, actor, |items, ids, rules, gear, protos| {
@@ -4203,6 +4220,9 @@ impl GameState {
         }
         if multi_farm::premium_at(self, vid, at) {
             return multi_farm::use_premium(self, vid, at, actor);
+        }
+        if let Some(shaman) = self.use_shaman_item(vid, at, actor) {
+            return shaman;
         }
         if let Some(glass) = self.search_glass_at(vid, at) {
             return self.open_shop_search(vid, glass, actor);
@@ -5161,9 +5181,10 @@ impl GameState {
         if self.sash_item_at(vid, at)
             || self.changelook_item_at(vid, at)
             || self.aura_item_at(vid, at)
+            || self.shaman_locked_at(vid, at)
         {
             // `CItem::isLocked` (`G/char_item.cpp:7476-7477`): a sash or changelook
-            // material cannot be dropped. Silent, as legacy is.
+            // material, or an active toggle, cannot be dropped. Silent, as legacy is.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
         let owner_id = self
@@ -5324,7 +5345,9 @@ impl GameState {
     /// A sash material refuses silently too (`isLocked`); the lock gates at legacy's
     /// place, with the popup it chats. The personal shop, the cube, the dragon soul
     /// refine, the warp, the aura and the other locks are not ported, so none refuses,
-    /// and each port re-gates here.
+    /// and each port re-gates here. As of 520 the toggle lock gates everywhere legacy
+    /// gates it: destroy, drop, move, give, sell, check-in, regist, trade, and the
+    /// sash, changelook, aura and transmutation windows.
     ///
     /// # Errors
     ///
@@ -5345,6 +5368,7 @@ impl GameState {
         if self.sash_item_at(vid, at)
             || self.changelook_item_at(vid, at)
             || self.aura_item_at(vid, at)
+            || self.shaman_locked_at(vid, at)
         {
             // `CItem::isLocked` (`G/char_item.cpp:7422-7423`): a sash or changelook
             // material cannot be destroyed. Silent, as legacy is.
@@ -5425,11 +5449,12 @@ impl GameState {
         if self.sash_item_at(vid, at)
             || self.changelook_item_at(vid, at)
             || self.aura_item_at(vid, at)
+            || self.shaman_locked_at(vid, at)
         {
-            // A sash or changelook material cannot be given: the window holds it. Legacy's `GiveItem`
-            // runs no `isLocked` check (a Defect, fixed by the window the gift would have
-            // to cross); the Rewrite refuses rather than lose the material, and records
-            // the Divergence in `docs/STATUS.md`.
+            // A sash or changelook material, or an active toggle, cannot be given: the
+            // window holds it. Legacy's `GiveItem` runs no `isLocked` check (a Defect,
+            // fixed by the window the gift would have to cross); the Rewrite refuses
+            // rather than lose the material, and records the Divergence in `docs/STATUS.md`.
             return Err(MoveItemRefused::Refused(MoveRefused::Locked));
         }
         let pid = self
@@ -6061,6 +6086,7 @@ impl PulseProcessor for GameState {
         self.run_horse_dead_events(pulse);
         self.run_mount_ticks(pulse);
         self.run_pet_ticks(pulse);
+        self.run_shaman_ticks(pulse);
         self.run_blend_ticks(pulse);
         self.run_switchbot_ticks(pulse);
         self.run_real_time_expiry(pulse);

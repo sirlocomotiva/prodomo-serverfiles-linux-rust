@@ -204,6 +204,11 @@ impl GameState {
         let Some(item) = character.items().item_at(at).cloned() else {
             return;
         };
+        // `Attr67Add`'s lock arm (`G/char_item.cpp:10525-10527`): an active toggle
+        // never registers. Silent, as legacy is.
+        if self.shaman_locked(vid, item.id) {
+            return;
+        }
         let Some(proto) = self.protos.get(item.vnum).cloned() else {
             return;
         };

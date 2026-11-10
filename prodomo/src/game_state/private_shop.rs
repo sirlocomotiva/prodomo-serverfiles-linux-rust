@@ -781,6 +781,7 @@ impl GameState {
             if self.sash_item_at(vid, table.pos)
                 || self.changelook_item_at(vid, table.pos)
                 || self.aura_item_at(vid, table.pos)
+                || self.shaman_locked_at(vid, table.pos)
             {
                 self.tell(
                     vid,
@@ -2878,6 +2879,7 @@ impl GameState {
         if self.sash_item_at(vid, src)
             || self.changelook_item_at(vid, src)
             || self.aura_item_at(vid, src)
+            || self.shaman_locked_at(vid, src)
         {
             self.tell(
                 vid,

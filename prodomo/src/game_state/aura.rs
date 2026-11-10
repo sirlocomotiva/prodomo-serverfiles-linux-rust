@@ -320,7 +320,7 @@ impl GameState {
         if character.items().is_exchanging(item.id) {
             return;
         }
-        if self.aura_locked(item.id) {
+        if self.aura_locked(item.id) || self.shaman_locked(vid, item.id) {
             moved
                 .records
                 .push(self.aura_line(actor, AURA_ABSORB_LOCKED_NOTICE));

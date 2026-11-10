@@ -341,6 +341,7 @@ impl GameState {
             if self.sash_item_at(vid, table.pos)
                 || self.changelook_item_at(vid, table.pos)
                 || self.aura_item_at(vid, table.pos)
+                || self.shaman_locked_at(vid, table.pos)
             {
                 self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;1133]", &[]);
                 return None;

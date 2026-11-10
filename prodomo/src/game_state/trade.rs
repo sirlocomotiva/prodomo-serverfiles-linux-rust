@@ -319,6 +319,13 @@ impl GameState {
         Ok(match step {
             TradeStep::Start { target } => self.start_trade(vid, target, place, mover),
             TradeStep::AddItem { at, display } => {
+                // `CExchange::AddItem`'s lock arm (`G/exchange.cpp:210-213`): an
+                // active toggle is never offered. Silent, as legacy is.
+                if self.shaman_locked_at(vid, at) {
+                    return Ok(self.offer(vid, |_trade, _side, _character, _protos| {
+                        world::character::Said::default()
+                    }));
+                }
                 self.offer(vid, |trade, side, character, protos| {
                     trade.add_item(side, character.items_mut(), at, display, protos)
                 })

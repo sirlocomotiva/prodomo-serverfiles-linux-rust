@@ -444,6 +444,16 @@ pub const AFF_JUMAGAP: u32 = 22;
 pub const AFF_MANASHIELD: u32 = 26;
 /// `AFF_PABEOP` (`G/affect.h:254`), numbered from 1 (230f).
 pub const AFF_PABEOP: u32 = 33;
+/// `AFF_HOSIN` (`G/affect.h:238`), numbered from 1 (520).
+pub const AFF_HOSIN: u32 = 23;
+/// `AFF_BOHO` (`G/affect.h:239`), numbered from 1 (520).
+pub const AFF_BOHO: u32 = 24;
+/// `AFF_KWAESOK` (`G/affect.h:240`), numbered from 1 (520).
+pub const AFF_KWAESOK: u32 = 25;
+/// `AFF_GICHEON` (`G/affect.h:245`), numbered from 1 (520).
+pub const AFF_GICHEON: u32 = 30;
+/// `AFF_JEUNGRYEOK` (`G/affect.h:246`), numbered from 1 (520).
+pub const AFF_JEUNGRYEOK: u32 = 31;
 
 /// `POISON_LENGTH + 1` (`G/char.h:78`, `G/char_resist.cpp:205`): the poison's ticks.
 pub const POISON_TICKS: i32 = 31;
@@ -720,14 +730,15 @@ pub fn npc_add_at(npc: &Npc, at: InsertAt, words: [u32; 2]) -> GcCharacterAdd {
 /// or a goto gets `None` (`G/char.cpp:1111`).
 ///
 /// The Name is `GetName()`, the `LOCALE_YMIR` mob name of the race. `ENABLE_SHOWNPCLEVEL` is not
-/// defined, so the level is 0, and an NPC has no parts, guild, mount, alignment or language.
+/// defined, so the level is 0, and an NPC has no guild, mount, alignment or language. Its
+/// parts are its worn parts, 0 but for the buff follower's armour and weapon (520).
 #[must_use]
 pub fn npc_additional(npc: &Npc) -> Option<GcCharacterAdditionalInfo> {
     (npc.char_type == CHAR_TYPE_NPC).then(|| {
         GcCharacterAdditionalInfo::new(
             npc.vid,
             name_bytes_field(&npc.name),
-            [0; ENTITY_PART_NUM],
+            npc.parts,
             npc.empire,
             0,
             0,

@@ -35,6 +35,7 @@ mod smith_refine;
 mod sort_inventory;
 mod specify_item;
 mod state;
+mod toggle;
 mod tool_refine;
 mod trade;
 mod use_to_item;
@@ -154,6 +155,7 @@ pub use specify_item::{
     remove_quest_item, remove_specify_item, remove_specify_type_item, set_item_socket,
 };
 pub use state::{Activity, CoreState, Posture};
+pub use toggle::{is_shaman_toggle, use_toggle_item, Toggled};
 pub use tool_refine::{refine_cell, refine_tool, ToolOutcome, ToolRefine};
 pub use trade::{
     settle, Accepted, Offered, Said, Settled, Side, Trade, TradeRecord, Trader, Unsettled,

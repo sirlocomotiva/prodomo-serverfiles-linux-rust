@@ -54,9 +54,9 @@ pub struct ShopSlot {
     /// `price`, from [`shop_price`], or the `shopex_item.price` column for a renewal item.
     pub price: u64,
     /// `price_type`, the renewal price selector (`SHOPEX_*`, `C/tables.h:786-793`).
-    /// A base item is always [`SHOP_PRICE_TYPE_GOLD`].
+    /// A base item is always [`crate::records::SHOP_PRICE_TYPE_GOLD`].
     pub price_type: u8,
-    /// `price_vnum`, the price item of a [`SHOP_PRICE_TYPE_ITEM`] renewal item.
+    /// `price_vnum`, the price item of a `SHOPEX_ITEM` renewal item.
     pub price_vnum: u32,
     /// `alSockets`: the renewal item's sockets, which a buy stamps on the bought item.
     pub sockets: [i32; crate::records::SHOP_ITEM_SOCKET_MAX_NUM],

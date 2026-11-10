@@ -325,7 +325,7 @@ impl GameState {
         if proto.item_type != ITEM_COSTUME && (combination || slot == 0) {
             return;
         }
-        if self.sash_locked(item.id) {
+        if self.sash_locked(item.id) || self.shaman_locked(vid, item.id) {
             moved
                 .records
                 .push(self.sash_line(actor, SASH_LOCKED_NOTICE, &[]));

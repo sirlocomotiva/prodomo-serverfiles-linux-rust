@@ -135,6 +135,12 @@ pub const USE_ADD_ATTRIBUTE2: i32 = 22;
 /// `USE_CHANGE_ATTRIBUTE2` (`C/item_length.h:278`), behind `__ATTR_6TH_7TH__`: a rare
 /// bonus change scroll.
 pub const USE_CHANGE_ATTRIBUTE2: i32 = 24;
+/// `USE_UNLOCK_SHAMAN` (`C/item_length.h:306`): 47. The buff-premium item (69699), which
+/// legacy answers with the success line and keeps (520: its training arm is commented out).
+pub const USE_UNLOCK_SHAMAN: i32 = 47;
+/// `TOGGLE_SHAMAN` (`C/item_length.h:118`): 0, the only `EToggleSubTypes` member. The buff
+/// follower's summon item (69700).
+pub const TOGGLE_SHAMAN: i32 = 0;
 
 /// `COSTUME_BODY`, which the source pins to `ARMOR_BODY`.
 pub const COSTUME_BODY: i32 = 0;

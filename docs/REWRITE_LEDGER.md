@@ -51479,3 +51479,71 @@ secondary-coin `shopex` arm above is not it: it spends items of type 32, and the
 owner's data has none. Owner to confirm.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5271 passed, 0 failed in 46 targets (an earlier 5267/1 run failed the sort scenario's 14/15-second wait window under load; it passes alone in 7 s and the rerun is green); `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean after a `RenewalShops` alias, merging the dump-value arms, folding the silent selector into the wildcard, splitting `buy`'s slot lookup and price spend into `npc_offer` and `spend_price_first`, and dropping a `mut`; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The mutation sweep kills 8 of 8: the unknown selector's silence, the goldless item price, the socket stamp (which caught the stamp running before the gain roll instead of after it — fixed), the saturated price, the type count, the tab math, the gold-only tripling (extracted as `charged_price`, tested both arms), and the tab name. The scenario passes 8 of 8. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 520. The buff follower
+
+`sys.skill.buff_npc` is `ported`.
+
+The toggle 69700 flips its socket-3 bit (`OnUseToggleItem`, `G/ItemUtils.cpp:177-196`):
+a set socket clears with `DeactivateToggleItem` (`:104-132`), a clear one sets with
+`ActivateToggleItem` (`:58-102`), and a stack past 1 unstacks first — the count drops
+by one and a fresh single item takes the first free base cell, refusing with the
+no-room line when there is none (`:61-76`). The group check reads value 5 and no
+second toggle exists, so it always passes on the owner's data (whose proto reads
+group 0 there, not 1 — value 0's 1 is the wear flag). The world's
+`use_toggle_item` answers the flip with the socket write, the unstack, and the store
+changes; the state flips the summon, then runs `CheckMaximumPoints` and
+`UpdatePacket` (`:99-101`, `:129-131`).
+
+The summon stands mob 20114 within 100 of the owner (`CShamanActor::Summon`,
+`G/ShamanSystem.cpp:93-141`), of the owner's empire with the name `Buff`, facing the
+owner's heading turned half round, wearing armour 11899 with weapon 5109
+(`UpdateEquipment`, `:143-150`) — the parts the additional record names. The follow
+runs every 3 Pulses (the `shamansystem_update_event`, `:50-68`): a moved or dropped
+summon item unsummons, then a live owner is buffed (`CShamanActor::Update`,
+`:161-172`) and the follower walks — running past 750 — to 250 of the owner,
+re-standing 200 behind past 4500 (`UpdateFollowAI`, `:447-487`).
+
+`UseSkills` (`:392-416`) casts the first missing buff of the five, in index order,
+one per tick past a 3-second stamp: 94 (`AFF_HOSIN`, `POINT_RESIST_NORMAL_DAMAGE`,
+1.3x level), 95 (`AFF_BOHO`, `POINT_MAX_HP`, 100x level), 96 (`AFF_GICHEON`,
+`POINT_CRITICAL_PCT`, 1.3x level), 111 (`AFF_JEUNGRYEOK`, `POINT_ATT_GRADE`, 8.75x
+level, premium), 110 (`AFF_KWAESOK`, `POINT_NORMAL_HIT_DAMAGE_BONUS`, 0.3x level,
+premium, plus a same-flag `POINT_CASTING_SPEED` row of the bare level). Each lands
+through `AddAffect` for the hour and is announced with `GC_AUTO_SHAMAN_SKILL`. The
+premium arms stay dark: 69699's use arm chats the success line but never trains
+(`G/char_item.cpp:6944-6964`), so the `shaman_system.is_premium` flag is never set.
+Levels read the `shaman_system.skill_level{i}` quest flags, clamped to 20-40
+(`GetBuffLevel`); unset, all five are 20. The login sends the skills and premium
+report for a standing follower (`SendAutoShamanInformations`,
+`G/char.cpp:12751-12757`). The TEST chats of `GetBuffLevel` and `SetBuffLevel`
+stay out as Defects.
+
+The books 50494-50496/50510-50511 train (`TrainSkill`, `UpgradeSkill`,
+`G/char_item.cpp:3310`): past the read-time gate (with the no-delay book) and the
+level-30 stone line, the 65% read counts past the level's books until the level
+climbs, the report follows, and the fresh buff casts at once. The quest arms
+`pc.get_buff_level` and `pc.learn_shaman_skill` stay `unused` (no quest names them).
+The purge spares the follower and the state machine skips it; the active toggle
+locks on every legacy `isLocked` site the build reaches (destroy, drop, move, give,
+sell, check-in, regist, trade, and the sash, changelook, aura and transmutation
+windows).
+
+Coverage: the scenario `a_used_toggle_summons_its_buff_follower_and_casts` uses the
+toggle over the wire, checks the follower within 100 with its name and parts, the
+socket write, both report lines, the 94 cast with its level-20 record, and the
+unsummon on the second use. The gaits, the re-stand, the drop-unsummon, the dead
+owner, the premium keep, and the training body are unit-tested in the state; the
+flip, unstack and group refusal in the world.
+
+Two traps, each worth its line: the owner's outbox only carries view records, so
+the summon's report and the clamp ride the step's answer records, not `tell`; and
+`ITEM_VALUE_TOGGLE_GROUP` is value 5, where the owner's proto reads 0 — the 1 at
+value 0 misled the first draft.
+
+Drive-by: ledger 519's `cargo doc` gate was red on `main` — two broken intra-doc
+links in `gamedata/src/npc_shop.rs` (bare `SHOP_PRICE_TYPE_*` names; the `ITEM`
+one names a constant that does not exist). Both now resolve; the `ITEM` one reads
+as code, since there is no such constant.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5277 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. Afterwards no `prodomo\_%` database remained. No ADR changed.

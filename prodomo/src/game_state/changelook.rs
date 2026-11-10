@@ -240,7 +240,7 @@ impl GameState {
                 .push(self.cl_line(actor, CL_CANNOT_NOTICE, &[]));
             return;
         }
-        if self.changelook_locked(item.id) {
+        if self.changelook_locked(item.id) || self.shaman_locked(vid, item.id) {
             moved
                 .records
                 .push(self.cl_line(actor, CL_LOCKED_NOTICE, &[]));

@@ -550,6 +550,9 @@ pub enum MoveRefused {
     /// A sash material (`CItem::isLocked`): it cannot be destroyed, dropped, moved, sold,
     /// stored, or refined with a scroll. Silent, as each of legacy's checks is.
     Locked,
+    /// `OnUseToggleItem`: another toggle of the same group is already active
+    /// (`G/ItemUtils.cpp:187-191`).
+    ToggleGroupTaken,
     /// `PickupItem`: `IsOwnership` refused (`G/item.cpp:1696-1702`) — another character's
     /// ownership event still runs. Legacy sends nothing and returns false (`:8160`).
     OwnedByOther,
@@ -672,6 +675,8 @@ impl MoveRefused {
             Self::PickedUpWhileQuesting => {
                 Some("You cannot pickup this item if you're using quests")
             }
+            // `ItemUtils.cpp:190`.
+            Self::ToggleGroupTaken => Some("You cannot activate two items of this kind."),
             _ => None,
         }
     }
@@ -755,6 +760,7 @@ impl core::fmt::Display for MoveRefused {
             Self::DestroyedWhileDead => f.write_str("an item is destroyed while dead"),
             Self::WindowOpen => f.write_str("a window holds the character's items"),
             Self::Locked => f.write_str("a sash window holds the item"),
+            Self::ToggleGroupTaken => f.write_str("a toggle of its group is already active"),
             Self::OwnedByOther => f.write_str("another character owns the ground item"),
             Self::GoldOverflow => f.write_str("the gold pile would reach the gold cap"),
             Self::Secured => f.write_str("the inventory is locked"),

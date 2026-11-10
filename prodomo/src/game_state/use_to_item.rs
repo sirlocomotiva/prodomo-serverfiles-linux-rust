@@ -398,6 +398,15 @@ impl GameState {
             .flatten()
             .copied()
             .collect::<Vec<_>>();
+        let dest_id = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(dest))
+            .map(|item| item.id);
+        // `CleanTransmutation`'s lock arm (`G/char.cpp:10755-10760`): the toggle is
+        // the only other lock the build writes, so a held target chats the line.
+        let toggle_locked = dest_id.is_some_and(|id| self.shaman_locked(vid, id));
         match self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
             let stone = world::character::use_source(items, at)?;
             let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
@@ -406,7 +415,7 @@ impl GameState {
                 .ok_or(MoveRefused::UnknownVnum(stone.vnum))?;
             world::character::use_checks(&stone, proto, rules, gear.points)?;
             world::character::clean_transmutation(items, (&stone, proto), dest, protos, |id| {
-                sash.contains(&Some(id)) || looks.contains(&Some(id))
+                sash.contains(&Some(id)) || looks.contains(&Some(id)) || toggle_locked
             })
         }) {
             Err(MoveItemRefused::Refused(MoveRefused::Locked)) => {

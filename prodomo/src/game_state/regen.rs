@@ -575,7 +575,12 @@ impl GameState {
             {
                 continue;
             }
-            if !weaken && (self.has_rider(npc) || self.is_mount_npc(npc) || self.is_pet_npc(npc)) {
+            if !weaken
+                && (self.has_rider(npc)
+                    || self.is_mount_npc(npc)
+                    || self.is_pet_npc(npc)
+                    || self.is_shaman_npc(npc))
+            {
                 continue;
             }
             swept.push(npc);
@@ -1270,6 +1275,8 @@ impl GameState {
         self.forget_mount_npc(vid);
         // `DeletePet` of a pet (`G/PetSystem.cpp:404-421`).
         self.forget_pet_npc(vid);
+        // The follower's entry drop (`CShamanSystem::UnsummonItem`, `G/ShamanSystem.cpp:665-677`).
+        self.forget_shaman_npc(vid);
         let Some(list) = self.npcs.get_mut(&key) else {
             return;
         };

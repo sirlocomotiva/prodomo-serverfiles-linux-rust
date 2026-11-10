@@ -650,8 +650,8 @@ impl super::GameState {
     /// `d.kill_all()` (`G/questlua_dungeon.cpp:1491-1499`, `G/dungeon.cpp:996-1008`):
     /// every non-player on the dungeon's map dies (`Dead()`, no killer), in VID
     /// order. Players are spared structurally, as `FKillSectree` spares them; the
-    /// pet, mount and auto-shaman gates are dead, as the purge's are (no ported
-    /// path sets them). Quiet with none.
+    /// pet, mount and buff-follower gates spare them (`G/dungeon.cpp:965`). Quiet
+    /// with none.
     pub(super) fn dungeon_kill_all(&mut self, index: i32) {
         let Some(channel) = self
             .maps
@@ -669,6 +669,9 @@ impl super::GameState {
             .collect();
         vids.sort_unstable();
         for vid in vids {
+            if self.is_pet_npc(vid) || self.is_mount_npc(vid) || self.is_shaman_npc(vid) {
+                continue;
+            }
             self.dead_npc(vid, None);
         }
     }

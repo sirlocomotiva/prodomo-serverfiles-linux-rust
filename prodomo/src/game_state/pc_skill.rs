@@ -151,9 +151,9 @@ const AFF_FIRE: u32 = 30;
 const CRUSH_SLIDE_PC: f32 = 200.0;
 /// `SKILLBOOK_DELAY_MIN/MAX` (`C/length.h:73-74`): the book-read delay window,
 /// 18-30 h in `get_global_time()` seconds.
-const SKILLBOOK_DELAY_MIN: i32 = 64800;
+pub(super) const SKILLBOOK_DELAY_MIN: i32 = 64800;
 /// `SKILLBOOK_DELAY_MAX` (see [`SKILLBOOK_DELAY_MIN`]).
-const SKILLBOOK_DELAY_MAX: i32 = 108_000;
+pub(super) const SKILLBOOK_DELAY_MAX: i32 = 108_000;
 /// The book read's experience cost (`:484-490`): 20,000 below the max level.
 const BOOK_NEED_EXP: i64 = 20_000;
 /// `aiGrandMasterSkillBookCountForLevelUp` (`G/constants.cpp:921`): the `number(1, count)`
@@ -459,7 +459,7 @@ impl GameState {
     }
 
     /// The skill state of the player under `vid`, creating it.
-    fn pc_skill_state(&mut self, vid: u32) -> &mut PcSkillState {
+    pub(super) fn pc_skill_state(&mut self, vid: u32) -> &mut PcSkillState {
         self.pc_skills.entry(vid).or_default()
     }
 
@@ -1091,6 +1091,11 @@ impl GameState {
                 return (false, None);
             }
             let vnum = u32::try_from(skill).unwrap_or(0);
+            // `TrainSkill` first (`G/char_item.cpp:3310-3311`): a standing follower
+            // reads the book as training.
+            if self.shaman_train_book(vid, mover, vnum) {
+                return (true, None);
+            }
             let (read, climbed) = self.learn_skill_by_book(vid, mover, vnum, 0);
             if read {
                 self.stamp_next_read(vid, vnum);
@@ -1203,7 +1208,7 @@ impl GameState {
     /// `SkillLearnWaitMoreTimeMessage(ms)` (`:3264-3300`): the TALKING lines for
     /// the seconds a read still waits (3m/5m/10m/30m/1h/2h/3h/6h/12h/18h ladder;
     /// 978-979 share 3-6h, 981-982 6-12h, 983-984 12-18h, 985-986 past it).
-    fn skill_learn_wait_more_time_message(&self, vid: Vid, mover: Mover, wait: u32) {
+    pub(super) fn skill_learn_wait_more_time_message(&self, vid: Vid, mover: Mover, wait: u32) {
         let lines: &[&[u8]] = if wait < 3 * 60 {
             &[b"[LS;970]"]
         } else if wait < 5 * 60 {
@@ -1234,7 +1239,7 @@ impl GameState {
     /// Whether the affects hold `kind` with no apply (`FindAffect(kind)`,
     /// `G/char_affect.cpp:129-141`: the default `APPLY_NONE` arm matches any
     /// row of the kind).
-    fn has_book_affect(affects: &[super::affect::Affect], kind: u32) -> bool {
+    pub(super) fn has_book_affect(affects: &[super::affect::Affect], kind: u32) -> bool {
         affects.iter().any(|affect| affect.kind == kind)
     }
     /// `get_global_time()`: the wall clock in seconds, as the quest bridge
