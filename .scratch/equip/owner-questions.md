@@ -616,3 +616,14 @@ owner answers.
  read their unmarried branches, as the Rewrite does. The one live hook is ported:
  wearing 71069-71074 refuses with `[LS;467]` (`G/char_item.cpp:10156-10161`).
  Waits on it: confirm the row `unused`.
+66. **Three more dead server bytes are `unused` (ledger 547).** `gc.main_character` (15):
+ the enumerator is `HEADER_GC_MAIN_CHARACTER_OLD` (`G/packet.h:115`), and no
+ `TPacketGCMainCharacterOld` or `MainCharacterOld` line exists in `server/` or `legacy/`
+ in any case, with no send writing a literal 15 — the live main character is byte 113
+ (`char.cpp:2018`). `gc.login_key` (118): the enumerator and `TPacketGCLoginKey` have
+ no sender; every other `login_key` hit is the DB-peer or session key, and no send
+ writes a literal 118. `gc.bindudp` (254): its only send sits in `UDPGrant`, whose
+ only caller is the commented-out `CInputUDP::Handshake` arm — `CInputUDP` is never
+ instantiated, the UDP socket sits behind `__UDP_BLOCK__` (defined), and `io_loop`
+ never checks it, so even legacy could not send it. Waits on it: confirm the three
+ rows `unused`.

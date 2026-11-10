@@ -52125,3 +52125,36 @@ doubled fly target and a shifted buff skill. (`gc.fly_targeting` itself was alre
 in ledger 229s.) No code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite and the parity re-run each failed once on a known load flake — the hide line, then the version close — each green alone); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 547. Three more dead server bytes
+
+Twelve `codec` rows stood after ledger 546, and three more of them are bytes the
+checked-in server never sends.
+
+`gc.main_character` (15): the enumerator is `HEADER_GC_MAIN_CHARACTER_OLD`
+(`G/packet.h:115`), and no `TPacketGCMainCharacterOld` or `MainCharacterOld` line exists in
+`server/` or `legacy/` in any case, with no send writing a literal 15. The live main
+character is byte 113, sent from `char.cpp:2018`, which is the control. (`spec §47` calls
+byte 15 a dead generation; the sweep now pins it.)
+
+`gc.login_key` (118): the enumerator (`packet.h:191`) and `TPacketGCLoginKey`
+(`packet.h:491-495`) have no sender, and no send writes a literal 118. Every other
+`login_key` hit is the DB-peer key (`C/tables.h` `GD_LOGIN_KEY`), the session key
+(`desc`/`desc_manager` `CLoginKey`), or the auth-success field
+(`TPacketGCAuthSuccess.dwLoginKey`, `packet.h:844`) — none of them this record. The
+positive control is the live auth send: `HEADER_GC_AUTH_SUCCESS` from `input_db.cpp:1715`.
+The `legacy/` hits are a MySQL index name, not a send.
+
+`gc.bindudp` (254): `UDPGrant` fills the record (`desc.cpp:551-561`), but its only caller is
+`CInputUDP::Handshake` (`input_udp.cpp:65`), and both arms of `CInputUDP::Analyze` are
+commented out (`input_udp.cpp:102-120`), as is the whole of `CInputUDP::Process`
+(`:124` onwards). `CInputUDP` is never instantiated — the only `CInputUDP` lines are the
+class, its constructor and its member definitions — the UDP bind, watch and close sit
+behind `__UDP_BLOCK__` (`main.cpp:678,692,740`, defined at `prodomodefines.h:195`), and
+`io_loop` checks only the TCP and P2P sockets (`main.cpp:852-860`). So even legacy, with
+the owner's defines, could not send byte 254 on any path.
+
+All three rows move to `unused`, pending the owner's confirmation (question 66). No code
+changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
