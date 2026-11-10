@@ -52051,3 +52051,13 @@ Four rows flip: `gc.main_character3_bgm`, `gc.main_character4_bgm_vol`, `lua.add
 and `lua.set_bgm_volume_enable`. Two API partials left: `arena.add_map` and `set_state`.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5314 passed, 0 failed in 46 targets (the run after the recall-offset fix; the clippy-driven refactor that followed changed no behaviour — the music and recall scenarios pass, and two later parity re-runs failed only on known load flakes, the fish length once and the dogs EAGAIN once, each passing alone); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 541. The seeded arenas
+
+Ledger 227's `arena.add_map` note said no ported system reads the recording. That has not
+been true for a long time: `with_quests` seeds the world's arenas from `settings.arenas`,
+and `a_gm_lists_starts_and_ends_an_arena_duel` hears the four map-112 arenas in the GM's
+list. The mutant check is an unseeded world, which comes back empty and dies there. No code
+changed; the row points at the scenario now. One API partial left: `set_state`.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5314 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
