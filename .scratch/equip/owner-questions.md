@@ -627,3 +627,12 @@ owner answers.
  instantiated, the UDP socket sits behind `__UDP_BLOCK__` (defined), and `io_loop`
  never checks it, so even legacy could not send it. Waits on it: confirm the three
  rows `unused`.
+67. **Eight more dead server bytes are `unused` (ledger 548).** `gc.change_speed` (18)
+ and `gc.motion` (36): the first is enumerator-only, and `CHARACTER::Motion`'s only
+ call sites are commented out. `gc.skill_cooltime_end` (73), `gc.character_update2`
+ (117) and `gc.unk_213` (213): the server has no enumerator for any of the three —
+ its GC enum jumps from 212 to 214. `gc.safebox_money_change` (84): struct-only,
+ with no enumerator and no sender. `gc.lover_info` (131) and `gc.love_point_update`
+ (132): sent only on a live `TMarriage`, which needs `marriage.engage_to`, which no
+ quest names (question 65 already covers the system). Waits on it: confirm the eight
+ rows `unused`.

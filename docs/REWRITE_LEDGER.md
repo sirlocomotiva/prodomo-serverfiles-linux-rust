@@ -52158,3 +52158,56 @@ All three rows move to `unused`, pending the owner's confirmation (question 66).
 changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 548. Eight more dead server bytes
+
+Nine `codec` rows stood after ledger 547. One is live: `gc.event_reload` (156) sends from
+`BroadcastEventReload` (`cmd_gm.cpp:1604`), which `ReloadEvent` runs when the event manager
+reloads on the event Channel (`event_manager.cpp:558`), and the Rewrite must port it with
+the event board. The other eight are bytes the checked-in server never sends.
+
+`gc.change_speed` (18): enumerator-only. The only `HEADER_GC_CHANGE_SPEED` and
+`TPacketGCChangeSpeed` lines in `server/` are the enumerator and the struct
+(`packet.h:118,1690`); no send site exists. The positive control is the next row's byte:
+`HEADER_GC_MOTION` sends from `char.cpp:5047`.
+
+`gc.motion` (36): `CHARACTER::Motion` (`char.cpp:5057-5063`) has no caller. A whole-tree
+search for `Motion(` returns only the declaration (`char.h:889`), the definition, and five
+commented-out call sites (three in `char_item.cpp`, two in `fishing.cpp`) — so
+`MotionPacketEncode` and the `PacketAround` at `char.cpp:5061` never run. That live send
+line is the positive control for the sweep method: real code, unreachable.
+
+`gc.skill_cooltime_end` (73): no server enumerator for byte 73, no producer. The
+`gc_small.rs` doc already records the zero-hit sweep, and the client registers the byte
+without a dispatch case. The `gc_inventory` test pins this row serverless
+(`no_server_name_means_client_only_decode`).
+
+`gc.safebox_money_change` (84): struct-only. The only `safebox_money` lines in `server/`
+are the two structs and the save/withdraw enum (`packet.h:2123-2138`); there is no
+enumerator for byte 84, no game file names either struct, and no CG row feeds it. The
+`gc_inventory` test pins this row serverless too.
+
+`gc.character_update2` (117): no server enumerator, no producer. The `gc_actors.rs` doc
+already records byte 117 dead, and the `gc_inventory` test pins the row serverless.
+
+`gc.lover_info` (131) and `gc.love_point_update` (132): both send only on a live
+`TMarriage` — `SendLoverInfo` from the engage and login arms (`marriage.cpp:202,208,418,419`),
+the point update from the near-check timer (`marriage.cpp:351`). The only `TMarriage`
+creation is `CManager::Add` (`marriage.cpp:574`), reached only through the DB-peer's
+`MarriageAdd` (`input_db.cpp:1848`), which only `RequestAdd` feeds
+(`marriage.cpp:543`), whose only caller is `marriage.engage_to`
+(`questlua_marriage.cpp:25`) — the sweep finds no other `RequestAdd` caller, and the
+guild `RequestAddMember` hits are a different function. No quest names that call (all 15
+`lua.marriage.*` rows `unused`, ledger 401), and the DB peer is retired (ADR-0001), so
+`sys.marriage` is already `unused` (ledger 521, question 65); these two rows are its wire
+tail.
+
+`gc.unk_213` (213): the server's GC enum jumps from 212
+(`HEADER_GC_DS_PLUS_CHANGE_ATTR_RESULT`) to 214 (`HEADER_GC_AURA`); no enumerator, no
+producer. The `gc_small.rs` doc already records the client's `// @fixme007` registration,
+and the `gc_inventory` test pins the row serverless.
+
+All eight rows move to `unused`, pending the owner's confirmation (question 67). No code
+changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite's one failure was the known `a_gm_aggregates` load flake, green alone and in the parity re-run's 408 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
