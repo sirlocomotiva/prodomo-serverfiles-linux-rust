@@ -585,7 +585,13 @@ impl GameState {
     }
 
     /// A step's records sent to the client at once; answers its rows.
-    fn send_step(&self, vid: Vid, pid: u32, done: MoveDone, mover: Mover) -> Vec<RowChange> {
+    pub(super) fn send_step(
+        &self,
+        vid: Vid,
+        pid: u32,
+        done: MoveDone,
+        mover: Mover,
+    ) -> Vec<RowChange> {
         let packed = MovedItems::new(pid, vid.raw(), done, mover, &self.protos, &self.locale);
         for record in packed.records {
             let _sent = self.write_to_client(vid, record);

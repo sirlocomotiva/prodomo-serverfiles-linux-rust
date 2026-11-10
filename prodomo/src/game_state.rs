@@ -66,6 +66,7 @@ mod alignment;
 mod arena;
 mod attr67;
 mod aura;
+mod auto_potion;
 mod battle_arena;
 mod battle_pass;
 mod biologist;
@@ -3623,6 +3624,14 @@ impl GameState {
                 continue;
             }
             self.add_affect(vid, revived);
+            // A restored automatic-potion row re-locks the item it names (`LoadAffect`,
+            // `G/char_affect.cpp:600-608`); `orphaned` above already dropped a row whose
+            // item is gone.
+            if revived.kind == crate::loading_phase::AFFECT_AUTO_HP_RECOVERY
+                || revived.kind == crate::loading_phase::AFFECT_AUTO_SP_RECOVERY
+            {
+                self.lock_restored_auto_item(vid, revived.flag);
+            }
             if let Some(points) = self.pc_points_mut(vid.raw()) {
                 points.affect_point_added(revived.apply_on, revived.value);
             }
@@ -4217,6 +4226,37 @@ impl GameState {
     /// a book-shaped item that reaches its step is always consumed, and the read gates keep
     /// every refused book from reaching it, so the two steps cannot disagree.
     ///
+    /// The use's guards before any arm runs: the downed refusal, then the stack flood
+    /// and the arena's own gate, each with legacy's line. `None` when the use passes.
+    fn use_item_guards(
+        &mut self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        actor: Mover,
+    ) -> Option<Result<MovedItems, MoveItemRefused>> {
+        if self.is_down(vid.raw()) {
+            return Some(Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown)));
+        }
+        // The stack flood, then the arena's own gate: each refuses with legacy's line.
+        if !self.stack_use_allowed(vid) {
+            self.tell_stack_flood(vid, actor);
+            return Some(self.arena_item_refused(vid, actor));
+        }
+        if !self.arena_item_use_allowed(vid, at) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
+        None
+    }
+
+    /// Run one `CG_ITEM_USE` for the character online under `vid`: an equippable item goes on
+    /// or comes off, a potion is drunk, and a skill book is read (`CHARACTER::UseItem`,
+    /// `G/char_item.cpp:7168`).
+    ///
+    /// A book is read before the world step, because the read's gates talk and the world
+    /// refuses a gated book without a line. The world then consumes the one it just read:
+    /// a book-shaped item that reaches its step is always consumed, and the read gates keep
+    /// every refused book from reaching it, so the two steps cannot disagree.
+    ///
     /// # Errors
     ///
     /// As [`Self::move_item`].
@@ -4227,18 +4267,13 @@ impl GameState {
         actor: Mover,
         account: &crate::game_loop_messages::QuestAccount,
     ) -> Result<MovedItems, MoveItemRefused> {
-        if self.is_down(vid.raw()) {
-            return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
-        }
-        // The stack flood, then the arena's own gate: each refuses with legacy's line.
-        if !self.stack_use_allowed(vid) {
-            self.tell_stack_flood(vid, actor);
-            return self.arena_item_refused(vid, actor);
-        }
-        if !self.arena_item_use_allowed(vid, at) {
-            return self.arena_item_refused(vid, actor);
+        if let Some(guarded) = self.use_item_guards(vid, at, actor) {
+            return guarded;
         }
         let potion = self.arena_potion_at(vid, at);
+        if let Some((kind, special)) = self.auto_at(vid, at) {
+            return self.use_auto_item(vid, at, actor, kind, special);
+        }
         if self.bait_at(vid, at) {
             return self.use_bait(vid, at, actor);
         }
@@ -6355,6 +6390,50 @@ mod tests {
         let mut item = world::item::Item::new(id, 19);
         item.set_size(size).expect("a positive footprint");
         item
+    }
+
+    #[test]
+    fn a_restored_auto_row_relocks_the_item_it_names_and_drops_an_orphan() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        let inventory = common::item_slots::EWindows::Inventory as u8;
+        let mut item = world::item::Item::new(11, 72_723);
+        item.set_size(1).expect("a positive footprint");
+        state
+            .enter_world_with_items(
+                "",
+                Vid::new(7),
+                7,
+                "Shaman",
+                &[(ItemPos::new(inventory, 0), item)],
+                outbox,
+            )
+            .expect("the character is admitted with its items");
+        let row = |flag| db::player_affects::StoredAffect {
+            affect_type: crate::loading_phase::AFFECT_AUTO_HP_RECOVERY,
+            apply_on: 0,
+            apply_value: 4,
+            flag,
+            duration: crate::loading_phase::INFINITE_AFFECT_DURATION,
+            sp_cost: 0,
+        };
+        let frames = state.load_affects(Vid::new(7), &[row(11), row(4242)], 1);
+        assert_eq!(frames.len(), 1, "the orphan sends no add frame");
+        let event = state
+            .affect_events
+            .get(&Vid::new(7))
+            .expect("the event starts");
+        assert_eq!(event.affects.len(), 1);
+        assert_eq!(event.affects[0].flag, 11);
+        let locked = state
+            .characters()
+            .find_by_vid(Vid::new(7))
+            .expect("the character is in the world")
+            .items()
+            .item(11)
+            .expect("the item is held")
+            .locked;
+        assert!(locked, "the restored row re-locks its item");
     }
 
     #[test]

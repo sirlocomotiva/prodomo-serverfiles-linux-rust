@@ -434,6 +434,16 @@ impl GameState {
         fight
     }
 
+    /// `CPVPManager::IsFighting(pid)` (`G/pvp.cpp:244-260`): any live pair holding `pid`
+    /// whose both sides agreed. Read-only: unlike [`Self::pvp_is_fight`], it stamps no
+    /// `last_fight`.
+    pub(super) fn pvp_is_fighting(&self, pid: u32) -> bool {
+        self.duels
+            .pairs
+            .values()
+            .any(|duel| duel.is_fight() && (duel.sides[0].pid == pid || duel.sides[1].pid == pid))
+    }
+
     /// `CPVPManager::Connect` (`:282-285`): the entrant's live pairs re-stamp its
     /// VID. `Disconnect` (`:287-290`) is a commented-out no-op, so leaving stamps
     /// nothing.

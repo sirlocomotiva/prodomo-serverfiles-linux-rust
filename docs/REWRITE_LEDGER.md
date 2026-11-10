@@ -52441,3 +52441,73 @@ target's re-run passed it too — that re-run's own single flake
 parallel servers) is green alone, the third such unrelated single of the slice.
 
 Gates (2026-11-10): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5323 passed, 0 failed in 46 targets), `cargo test --workspace --doc` (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 558. The automatic potions
+
+The twelve automatic-potion vnums toggle their rows now (`G/char_item.cpp:5334-5510`),
+and the affect tick tops their recovery up (`AutoRecoveryItemProcess`, `:9892-10020`).
+
+`world/src/item.rs` gains `Item.locked` (`m_isLocked`, `G/item.h:412`), memory-only with
+no row column, and `world/src/character/items.rs` its `set_locked`. The item half is
+`world::character::potion::toggle_auto_potion`: a swap stands the old item down first (a
+missing old item is silently fine, as legacy's `NULL` check is), a stack splits one
+single off into the first free base cell carrying socket 1 only, and the single toggles
+socket 0 and the lock on — or off. Seven unit tests pin the fresh single, the split (with
+its `Count`/`Created`/`Sockets` changes), the toggle-off, the swap, the missing old item,
+the roomless split and the roomless swap (which leaves the old item lit).
+
+`prodomo/src/game_state/auto_potion.rs` holds the rest. `auto_at` dispatches the twelve
+vnums by vnum alone (72723-72730, 76004/76005, 76021/76022); `use_auto_item` runs the
+arena gate (`[LS;403]`), the flagged-duel gate (`[LS;1205]`, read live from the
+`no_potions_on_pvp` event flag `questlib_extra.lua` sets at load, with legacy's allowed
+list plus the SP X) and the one-second throttle (`@0949WAIT_BUFF` — `WAIT_BUFF` is in no
+locale file: the main table and all 12 country files were swept, so europe's lookup
+answers `@0949` plus the key, `G/locale.cpp:244-255`), then the step, the row
+(`AddAffect(type, bonus, 4, id, INF, 0)`, the X laying `POINT_MAX_HP/SP_PCT`) and the
+immediate process. A stack with nowhere to split hears `[LS;1130]`. The tick runs the
+process HP then SP after the drain: the dead, stunned and stun-marked are skipped, a
+missing or stood-down item removes the row, an arena map or flagged duel strips it (the
+strip's step sends and orders its rows, as the fishing timeout does), else the missing
+pool pays into the recovery with `SE_AUTO_HPUP`/`SE_AUTO_SPUP`. The restore re-locks the
+named item (`LoadAffect`, `G/char_affect.cpp:600-608`); `pvp_is_fighting` (`G/pvp.cpp:244-260`)
+is new in `duel.rs`. Thirteen GameState tests and one restore test cover the use, the
+toggle-off, the split, the swap, the X pair, the full pools, the roomless stack, the
+arena gate and strip, the tick's top-up, the allowed list and the strip's end rule.
+
+Two orders are the architecture's, not legacy's: the step's Update precedes the add frame
+(the store commits before the records go), and on toggle-off the answer's Update precedes
+the remove frame (a command's direct frames land behind its answer, as the blend's do).
+Legacy toggles the socket after the add and removes before the unlock; the final states
+match. The PvP gate's live-duel composition (flag up plus a fighting pair) is
+review-only: no unit harness holds both a quest manager and a consent pair, and its three
+reads are one line each, shared with the tested strip. The throttle's adjacent-second
+boundary is review-only too: it mirrors legacy's `< 1` byte-for-byte, and straddling it
+in a scenario would be timing-flaky by nature.
+
+Review caught two order bugs before the gates ran: the swap stood the old item down
+before the split, so a roomless swap left the old item dark in memory while the store kept
+it lit (legacy splits first, `:5419-5440` against `:5442`), and the tick ran the process
+before the drain's records went out while `again` was computed before the process, so a
+strip of the last row lingered an extra tick and the Points rode inverted. Both are fixed
+(the split precedes the stand-down, with a regression test; the drain sends, then the
+process runs, then `again` is recomputed), and the end rule has its own test.
+
+Scenario `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off`: the use lays the
+row with the item's id, lights socket 0, pays the 920 missing and shows effect 19; two
+ticks spend 99 each while the heals keep the pool past the maximum, so the process stays
+silent (the top-up itself is the unit test's, where no heals run); the second use darkens
+the socket and removes the row; and past a quiet second a double-use toggles once and
+hears the wait line once. The store follows the socket both ways. 8/8 parallel runs green.
+
+Mutation sweep, each applied to the pristine file and restored by checksum: pay-at-zero
+(`>` to `>=`, killed by the full-pools test), the wrong SP X (killed by the new SP-X test —
+the first run survived, which is why the test exists), the throttle off (`< 1` to `< 0`,
+killed by the scenario), the flipped toggle branch (killed) and the AND-strip (killed).
+
+Gates (2026-11-10): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite558b.txt` (5345 passed, 0 failed in 46 targets), `cargo test --workspace --doc --locked
+--offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

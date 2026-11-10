@@ -240,6 +240,11 @@ pub struct Item {
     /// `m_wCell` and leaves them meaningful only while the owner is set; the
     /// pair is the same shape as a `TItemPos`.
     pub pos: ItemPos,
+    /// `m_isLocked` (`G/item.h:412`): an automatic potion in use, a cube or refine
+    /// material, or a changelook/aura/shaman-window piece. Memory-only: no row column
+    /// carries it, and a relog clears it. Only the automatic-potion arm sets it; the
+    /// windows keep their own bits, which the gates below still read.
+    pub locked: bool,
 }
 
 impl Item {
@@ -266,6 +271,7 @@ impl Item {
             // `CItem(dwVnum)` zeroes it (`G/item.cpp:41`).
             sig_vnum: 0,
             pos: NPOS,
+            locked: false,
         }
     }
 

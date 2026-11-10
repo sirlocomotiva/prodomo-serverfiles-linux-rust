@@ -501,6 +501,18 @@ impl CharacterItems {
         Ok(body.sockets)
     }
 
+    /// Set the item lock (`CItem::Lock`, `G/item.h:294`) of the held item `id`.
+    /// Memory-only: no row column carries it, so no change row answers it.
+    ///
+    /// # Errors
+    ///
+    /// [`SocketRefused::NotHeld`] when this storage does not hold the id. Nothing changes.
+    pub fn set_locked(&mut self, id: ItemId, locked: bool) -> Result<(), SocketRefused> {
+        let body = self.bodies.get_mut(&id).ok_or(SocketRefused::NotHeld(id))?;
+        body.locked = locked;
+        Ok(())
+    }
+
     /// Write one attribute of a stored item and answer its attributes after the write.
     ///
     /// # Errors

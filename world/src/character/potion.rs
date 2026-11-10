@@ -13,8 +13,11 @@
 //! potion's are deleted.
 //!
 //! Arena admission and accepted-use counts run in the game state's item dispatch. Not ported:
-//! the `PvP` potion limits, dungeon and guild war hooks, moon cake timer, continuous recovery
-//! affects and automatic potions. The rest of the affect event runs in the game state.
+//! the `PvP` potion limits, dungeon and guild war hooks, moon cake timer and continuous
+//! recovery affects. The rest of the affect event runs in the game state.
+//!
+//! The automatic potions' item half is [`toggle_auto_potion`] (ledger 558); their gates,
+//! rows and tick run in the game state's `auto_potion`.
 
 use common::point_slot as point;
 use gamedata::item_kind::{USE_POTION, USE_POTION_NODELAY};
@@ -22,17 +25,134 @@ use gamedata::item_proto::ItemProto;
 
 use super::equip::Trail;
 use super::item_move::{
-    declined, done, ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, MoveRefused, Unported,
+    declined, done, ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, MoveRefused, MoveRules,
+    Unported,
 };
 use super::items::CharacterItems;
 use super::points::{PointRecord, Points};
 use super::quickslot::{chains_when_used_up, QuickslotSync, SyncTo};
+use crate::item::ItemIds;
 use crate::item::{gc_item_clear, Item};
+use protocol::item_pos::ItemPos;
 
 /// `SE_HPUP_RED` (`common/length.h`): the red effect a hit point potion shows.
 pub const SE_HPUP_RED: u8 = 1;
 /// `SE_SPUP_BLUE`: the blue effect a spell point potion shows.
 pub const SE_SPUP_BLUE: u8 = 2;
+
+/// Which automatic-potion branch the use takes (`G/char_item.cpp:5434-5504`): a fresh
+/// toggle-on, the same item's toggle-off, or a swap that first stands the old item down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoBranch {
+    /// No row of the type holds: the item toggles on.
+    Fresh,
+    /// The row's item is this one: it toggles off.
+    ToggleOff,
+    /// Another item holds the row: it stands down first, then this one toggles on.
+    Swap {
+        /// The standing-down item's id.
+        old: u32,
+    },
+}
+
+/// The item half of an automatic potion's use (`G/char_item.cpp:5408-5504`): the old
+/// item, if any, is unlocked with its socket 0 cleared; a stack splits one single off
+/// into the first free base cell (carrying socket 1 only, `CreateItem` fresh otherwise);
+/// and the single toggles its socket 0 and lock on — or off, when it already holds the
+/// row. Answers the step and the toggled item's id, which the affect names as its flag.
+///
+/// # Errors
+///
+/// [`MoveRefused::Empty`] at an empty cell, [`MoveRefused::NoItemIds`] with no allocator,
+/// [`MoveRefused::IdsExhausted`] past the range, and [`MoveRefused::NoRoomInInventory`]
+/// when a stack has nowhere to split (the use then hears `[LS;1130]`).
+pub fn toggle_auto_potion(
+    items: &mut CharacterItems,
+    ids: Option<&mut ItemIds>,
+    rules: &MoveRules,
+    at: ItemPos,
+    branch: AutoBranch,
+) -> Result<(MoveDone, u32), MoveRefused> {
+    let mut done = MoveDone {
+        kind: MoveKind::Used,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
+    if branch == AutoBranch::ToggleOff {
+        stand_auto_down(items, item.id, &mut done);
+        return Ok((done, item.id));
+    }
+    let id = if item.count > 1 {
+        let cell = items
+            .find_free_inventory_cell(rules.usable_cells, item.size)
+            .ok_or(MoveRefused::NoRoomInInventory)?;
+        let ids = ids.ok_or(MoveRefused::NoItemIds)?;
+        let single = ids.allocate().map_err(|_| MoveRefused::IdsExhausted)?;
+        let mut piece = Item::new(single, item.vnum);
+        piece.flags = item.flags;
+        piece.anti_flags = item.anti_flags;
+        piece.size = item.size;
+        piece.sockets[1] = item.sockets[1];
+        let pos = ItemPos::new(at.window_type, cell);
+        items.set(pos, &piece).map_err(MoveRefused::Storage)?;
+        let left = item.count - 1;
+        if let Err(reason) = items.set_count(item.id, u32::from(left)) {
+            let _ = items.release(single);
+            return Err(MoveRefused::Count(reason));
+        }
+        if let Some(source) = items.item(item.id) {
+            done.records.push(MoveRecord::Item(ItemRecord::Update(
+                source.gc_item_update(),
+            )));
+        }
+        done.changes.push(ItemChange::Count {
+            id: item.id,
+            count: left,
+        });
+        if let Some(placed) = items.item(single) {
+            done.records.push(MoveRecord::Item(ItemRecord::Set(
+                placed.gc_item_set(pos, 0),
+            )));
+        }
+        let placed = items.item(single).cloned().ok_or(MoveRefused::Count(
+            super::items::CountRefused::NotHeld(single),
+        ))?;
+        done.changes.push(ItemChange::Created(placed));
+        single
+    } else {
+        item.id
+    };
+    // The split precedes the old item's stand-down, as legacy splits before it finds the
+    // row (`:5419-5440` against `:5442`): a roomless split leaves the old item lit. A
+    // missing old item is silently fine (`NULL != old`, `:5468`).
+    if let AutoBranch::Swap { old } = branch {
+        stand_auto_down(items, old, &mut done);
+    }
+    let sockets = items.set_socket(id, 0, 1).map_err(|_| MoveRefused::Empty)?;
+    let _ = items.set_locked(id, true);
+    if let Some(item) = items.item(id) {
+        done.records
+            .push(MoveRecord::Item(ItemRecord::Update(item.gc_item_update())));
+    }
+    done.changes.push(ItemChange::Sockets { id, sockets });
+    Ok((done, id))
+}
+
+/// Stand an automatic potion down: unlocked, its socket 0 cleared, the cell updated.
+/// An item the character does not hold is silently skipped, as legacy's `NULL` old one
+/// is (`G/char_item.cpp:5468-5473`).
+fn stand_auto_down(items: &mut CharacterItems, id: u32, done: &mut MoveDone) {
+    let Ok(sockets) = items.set_socket(id, 0, 0) else {
+        return;
+    };
+    let _ = items.set_locked(id, false);
+    if let Some(item) = items.item(id) {
+        done.records
+            .push(MoveRecord::Item(ItemRecord::Update(item.gc_item_update())));
+    }
+    done.changes.push(ItemChange::Sockets { id, sockets });
+}
 
 /// The share of the maximum one second of recovery may restore, in percent.
 const RECOVERY_PER_SECOND_PCT: i64 = 7;
@@ -190,7 +310,8 @@ pub fn is_recovering(points: &Points) -> bool {
 
 /// One second of `UpdateAffect`'s recovery: for each pool with recovery left, a full pool
 /// drops the recovery, and otherwise at most 7% of the maximum moves from the recovery into
-/// the pool. Answers the point records, in the order legacy writes them.
+/// the pool; then each pool's flat keep pays in whole (`G/char_affect.cpp:201-210`).
+/// Answers the point records, in the order legacy writes them.
 pub fn update_recovery(points: &mut Points) -> Vec<PointRecord> {
     let mut records = Vec::new();
     for pool in [Pool::Hp, Pool::Sp] {
@@ -210,6 +331,18 @@ pub fn update_recovery(points: &mut Points) -> Vec<PointRecord> {
             records.extend(
                 points
                     .point_change(kind, amount, false, false)
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    // `POINT_HP/SP_RECOVER_CONTINUE` (`G/char_affect.cpp:201-210`): past the pools, the
+    // flat keep pays into its pool whole, unclamped by any maximum but the pool's own.
+    for pool in [Pool::Hp, Pool::Sp] {
+        let keep = points.get_point(pool.keep());
+        if keep > 0 {
+            records.extend(
+                points
+                    .point_change(pool.kind(), keep, false, false)
                     .unwrap_or_default(),
             );
         }
@@ -256,6 +389,13 @@ impl Pool {
         }
     }
 
+    const fn keep(self) -> usize {
+        match self {
+            Self::Hp => point::POINT_HP_RECOVER_CONTINUE,
+            Self::Sp => point::POINT_SP_RECOVER_CONTINUE,
+        }
+    }
+
     const fn effect(self) -> u8 {
         match self {
             Self::Hp => SE_HPUP_RED,
@@ -286,6 +426,7 @@ mod tests {
 
     use super::*;
     use crate::character::points::PointsRow;
+    use crate::item::ItemIdRange;
 
     const AT: ItemPos = ItemPos {
         window_type: EWindows::Inventory as u8,
@@ -627,5 +768,190 @@ mod tests {
             ]
         );
         assert!(!is_recovering(&points));
+    }
+    const RULES: MoveRules = MoveRules {
+        count_limit: 200,
+        usable_cells: 90,
+        belt_grade: None,
+        questing: false,
+        secured: false,
+    };
+
+    fn ids() -> ItemIds {
+        ItemIds::new(ItemIdRange::new(1, 100, 8).expect("the test range holds"))
+    }
+
+    fn changes(done: &MoveDone) -> Vec<ItemChange> {
+        done.changes.clone()
+    }
+
+    #[test]
+    fn a_fresh_single_toggles_on_with_its_socket_lit_and_locked() {
+        let (mut items, _) = holding(1, 72_723);
+        let (done, id) =
+            toggle_auto_potion(&mut items, Some(&mut ids()), &RULES, AT, AutoBranch::Fresh)
+                .expect("toggles on");
+        assert_eq!(id, 7);
+        let item = items.item(7).expect("still held");
+        assert_eq!(item.sockets[0], 1);
+        assert!(item.locked);
+        assert_eq!(
+            changes(&done),
+            vec![ItemChange::Sockets {
+                id: 7,
+                sockets: item.sockets,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_fresh_stack_splits_one_single_off_and_toggles_the_single_on() {
+        let (mut items, _) = holding(3, 72_727);
+        items.set_socket(7, 1, 900).expect("the socket sticks");
+        let (done, id) =
+            toggle_auto_potion(&mut items, Some(&mut ids()), &RULES, AT, AutoBranch::Fresh)
+                .expect("splits and toggles");
+        assert_eq!(id, 8);
+        // The `Created` answers the split-time snapshot (socket 0 still dark); the
+        // toggle's `Sockets` follows it.
+        assert!(matches!(
+            &changes(&done)[..],
+            [
+                ItemChange::Count { id: 7, count: 2 },
+                ItemChange::Created(piece),
+                ItemChange::Sockets { id: 8, .. },
+            ] if piece.id == 8 && piece.count == 1 && piece.sockets == [0, 900, 0, 0, 0, 0]
+        ));
+        let left = items.item(7).expect("the stack stays");
+        assert_eq!(left.count, 2);
+        assert_eq!(left.sockets[0], 0);
+        let single = items.item(8).expect("the single places");
+        assert_eq!(single.count, 1);
+        assert_eq!(single.sockets[0], 1);
+        assert_eq!(single.sockets[1], 900);
+        assert!(single.locked);
+    }
+
+    #[test]
+    fn the_same_item_toggles_off_unlocked_with_its_socket_dark() {
+        let (mut items, _) = holding(1, 72_723);
+        items.set_socket(7, 0, 1).expect("the socket sticks");
+        let _ = items.set_locked(7, true);
+        let (done, id) = toggle_auto_potion(
+            &mut items,
+            Some(&mut ids()),
+            &RULES,
+            AT,
+            AutoBranch::ToggleOff,
+        )
+        .expect("toggles off");
+        assert_eq!(id, 7);
+        let item = items.item(7).expect("still held");
+        assert_eq!(item.sockets[0], 0);
+        assert!(!item.locked);
+        assert_eq!(
+            changes(&done),
+            vec![ItemChange::Sockets {
+                id: 7,
+                sockets: item.sockets,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_swap_stands_the_old_item_down_before_the_new_one_toggles_on() {
+        let mut items = CharacterItems::new();
+        let mut old = Item::new(7, 72_723);
+        old.sockets[0] = 1;
+        items.set(AT, &old).expect("the old places");
+        let _ = items.set_locked(7, true);
+        let other = ItemPos {
+            window_type: EWindows::Inventory as u8,
+            cell: 4,
+        };
+        items
+            .set(other, &Item::new(9, 72_724))
+            .expect("the new places");
+        let (done, id) = toggle_auto_potion(
+            &mut items,
+            Some(&mut ids()),
+            &RULES,
+            other,
+            AutoBranch::Swap { old: 7 },
+        )
+        .expect("swaps");
+        assert_eq!(id, 9);
+        let stood = items.item(7).expect("the old stays");
+        assert_eq!(stood.sockets[0], 0);
+        assert!(!stood.locked);
+        let toggled = items.item(9).expect("the new stays");
+        assert_eq!(toggled.sockets[0], 1);
+        assert!(toggled.locked);
+        assert_eq!(changes(&done).len(), 2);
+    }
+
+    #[test]
+    fn a_swap_whose_old_item_is_gone_still_toggles_the_new_one_on() {
+        let (mut items, _) = holding(1, 72_724);
+        let (done, id) = toggle_auto_potion(
+            &mut items,
+            Some(&mut ids()),
+            &RULES,
+            AT,
+            AutoBranch::Swap { old: 4242 },
+        )
+        .expect("the missing old is silently fine");
+        assert_eq!(id, 7);
+        assert_eq!(items.item(7).unwrap().sockets[0], 1);
+        assert_eq!(changes(&done).len(), 1);
+    }
+
+    #[test]
+    fn a_stack_with_nowhere_to_split_is_refused_with_no_room() {
+        let (mut items, _) = holding(3, 72_723);
+        let cramped = MoveRules {
+            usable_cells: 0,
+            ..RULES
+        };
+        let refused = toggle_auto_potion(
+            &mut items,
+            Some(&mut ids()),
+            &cramped,
+            AT,
+            AutoBranch::Fresh,
+        );
+        assert_eq!(refused.unwrap_err(), MoveRefused::NoRoomInInventory);
+        assert_eq!(items.item(7).unwrap().count, 3);
+    }
+    #[test]
+    fn a_swap_with_nowhere_to_split_leaves_the_old_item_lit() {
+        let mut items = CharacterItems::new();
+        let mut old = Item::new(7, 72_723);
+        old.sockets[0] = 1;
+        items.set(AT, &old).expect("the old places");
+        let _ = items.set_locked(7, true);
+        let other = ItemPos {
+            window_type: EWindows::Inventory as u8,
+            cell: 4,
+        };
+        let mut stack = Item::new(9, 72_724);
+        stack.count = 3;
+        items.set(other, &stack).expect("the stack places");
+        let cramped = MoveRules {
+            usable_cells: 0,
+            ..RULES
+        };
+        let refused = toggle_auto_potion(
+            &mut items,
+            Some(&mut ids()),
+            &cramped,
+            other,
+            AutoBranch::Swap { old: 7 },
+        );
+        assert_eq!(refused.unwrap_err(), MoveRefused::NoRoomInInventory);
+        let stood = items.item(7).expect("the old stays");
+        assert_eq!(stood.sockets[0], 1, "the split fails before the stand-down");
+        assert!(stood.locked);
+        assert_eq!(items.item(9).unwrap().count, 3);
     }
 }

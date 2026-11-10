@@ -821,10 +821,21 @@ impl GameState {
             true
         });
         let expired = count_down(&mut event.affects, wall_now());
-        let again = recovering || !event.affects.is_empty() || !stamina_full;
         for frame in point_changes(&records, vid.raw()) {
             let _delivered = self.write_to_client(vid, frame);
         }
+        // The automatic potions' top-up (`AutoRecoveryItemProcess`,
+        // `G/char_item.cpp:9892-10020`), HP then SP, after the recovery drain
+        // (`UpdateAffect`, `G/char_affect.cpp:213-214`).
+        self.run_auto_recovery(vid);
+        // After the process, as legacy ends the event only when the list the process
+        // may have stripped is empty (`UpdateAffect`, `:226-231`).
+        let again = recovering
+            || !self
+                .affect_events
+                .get(&vid)
+                .is_some_and(|event| event.affects.is_empty())
+            || !stamina_full;
         // The starved affects end like expired ones (their point back, then the
         // remove packet); the drain spends after them, so a starved SP row cannot
         // cover itself.

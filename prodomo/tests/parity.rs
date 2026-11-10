@@ -11497,6 +11497,362 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
     );
 }
 
+/// `cg.game.item_use` of an automatic hit-point potion: the use lays the row with the
+/// item's id, locks, lights its socket 0, pays the missing pool into the recovery and
+/// shows the effect; the affect tick spends 7% into the pool and the process tops the
+/// recovery back up; the same item's second use stands it down and removes the row. The
+/// store follows the socket both ways.
+#[test]
+fn an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE player SET hp = 500 WHERE name = 'Alpha'");
+    let (hp, recovery) = (
+        u8::try_from(common::point_slot::POINT_HP).expect("a point byte"),
+        u8::try_from(common::point_slot::POINT_HP_RECOVERY).expect("a point byte"),
+    );
+
+    // Given: Alpha, at 500 of 1420 hit points, holds one automatic HP potion.
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    Server::write_console(&console, "item give Alpha 72723 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (1, 0, 72_723, 1));
+
+    // When: it is used.
+    alpha.send_record(&client_item_use(0));
+    // Then: its socket 0 lights, the row lays with the item's id, the flags go around,
+    // the 920 missing pay into the recovery, and the effect shows. Heal ticks and the
+    // entry-started event's own second may interleave, so the five are picked out of the
+    // window in order.
+    let mut hp_now = 500i64;
+    let window = drain_use_window(&mut alpha, &mut hp_now, 1420, hp, recovery);
+    assert_eq!(
+        window.updates,
+        [(0, 1, 1)],
+        "socket 0 lights, count stays 1"
+    );
+    // Legacy's add order is the flags before the add frame (`AddAffect`,
+    // `G/char_affect.cpp:735-752`); the tags below pin it that way.
+    assert_eq!(
+        window.adds,
+        [(534, 0, 4, 100_000_000)],
+        "the row with the item's id"
+    );
+    assert_eq!(window.looks, 1, "the flags go around");
+    // The event's own second may fall inside the window: its drain spends 99 first,
+    // and the heals it builds on leave nothing missing, so its process stays silent.
+    assert!(
+        window.recoveries == [920] || window.recoveries == [920, 821],
+        "the missing pool pays: {:?}",
+        window.recoveries
+    );
+    assert_eq!(window.effects, [19], "SE_AUTO_HPUP");
+    check(
+        &database,
+        "(SELECT socket0 = 1 FROM item WHERE id = 100000000)",
+    );
+
+    // And: the ticks spend 99 into the pool each — 7% of 1420 — while the heals keep
+    // the pool plus the owed recovery past the maximum, so the process stays silent
+    // (its top-up is the unit test's, where no heals run).
+    let mut owed = if window.recoveries.len() == 2 {
+        821
+    } else {
+        920
+    };
+    for _ in 0..2 {
+        let (step_base, potion_hp, left) =
+            read_auto_drain(&mut alpha, vid, hp, recovery, &mut hp_now, 1420);
+        assert_eq!(potion_hp - step_base, 99, "7% of 1420");
+        owed -= 99;
+        assert_eq!(left, owed, "the drain spends");
+        assert!(
+            potion_hp + left >= 1420,
+            "the pool plus the owed cover the maximum, so the process stays silent"
+        );
+    }
+
+    // When: the same item is used again.
+    alpha.send_record(&client_item_use(0));
+    // Then: the socket darkens and the row goes. The answer's Update precedes the
+    // remove frame: a command's direct frames always land behind its answer, as the
+    // blend's do. Ticks may interleave; the owed recovery keeps paying without the row.
+    let off = drain_off_window(&mut alpha, vid, hp, recovery);
+    assert_eq!(off.removes, [(534, 0)], "the row goes");
+    assert_eq!(off.updates, [(0, 1, 0)], "socket 0 darkens, count stays 1");
+    assert!(
+        off.update_before_remove,
+        "the answer's Update precedes the remove frame"
+    );
+    check(
+        &database,
+        "(SELECT socket0 = 0 FROM item WHERE id = 100000000)",
+    );
+
+    // And: past a quiet second, two uses in the same second toggle on once and hear
+    // the wait line once.
+    throttle_second_use_hears_the_wait_line(&mut alpha, &database);
+    drop(alpha);
+}
+
+/// Past a quiet second, two uses in the same second: the first toggles the row back on
+/// and the second hears the wait line, so the socket stays lit.
+fn throttle_second_use_hears_the_wait_line(keyed: &mut Keyed, database: &ScratchDatabase) {
+    let (records, quiet) = keyed.drain_game(Duration::from_millis(1200), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    assert!(
+        records.iter().all(|record| {
+            record.first() == Some(&GC_POINT_CHANGE)
+                || record.first() == Some(&GC_CHARACTER_UPDATE)
+                || is_revive_end(record)
+        }),
+        "only ticks in the quiet second: {records:02x?}"
+    );
+    keyed.send_record(&client_item_use(0));
+    keyed.send_record(&client_item_use(0));
+    // The wait line's record is 10 + 13: the `@0949WAIT_BUFF` text rides raw.
+    let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        GC_CHAT => 10 + b"@0949WAIT_BUFF".len(),
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    let chats: Vec<&Vec<u8>> = records
+        .iter()
+        .filter(|record| record.first() == Some(&GC_CHAT))
+        .collect();
+    assert_eq!(chats.len(), 1, "the second use hears the wait line");
+    assert_eq!(
+        &chats[0][10..],
+        b"@0949WAIT_BUFF",
+        "the missing key rides raw"
+    );
+    check(
+        database,
+        "(SELECT socket0 = 1 FROM item WHERE id = 100000000)",
+    );
+}
+
+/// What the automatic-potion use window holds besides heal ticks and the event's own
+/// second: the socket Update, the row's add, the flags, the recovery and the effect.
+struct AutoUseWindow {
+    /// The base-window Updates as (cell, count, socket 0).
+    updates: Vec<(u16, u16, i32)>,
+    /// The row adds as (type, apply, value, flag).
+    adds: Vec<(u32, u8, i32, u32)>,
+    /// How many `GC_CHARACTER_UPDATE`s of the mover went around.
+    looks: usize,
+    /// The recovery points paid.
+    recoveries: Vec<i64>,
+    /// The effects shown.
+    effects: Vec<u8>,
+}
+
+/// Drain the use's window, folding heal ticks and the event's own second into `hp_now`,
+/// and pick the five out in order.
+fn drain_use_window(
+    keyed: &mut Keyed,
+    hp_now: &mut i64,
+    max_hp: i64,
+    hp: u8,
+    recovery: u8,
+) -> AutoUseWindow {
+    let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    let mut window = AutoUseWindow {
+        updates: Vec::new(),
+        adds: Vec::new(),
+        looks: 0,
+        recoveries: Vec::new(),
+        effects: Vec::new(),
+    };
+    for record in &records {
+        if is_revive_end(record) {
+            continue;
+        }
+        match record.first().copied().unwrap_or_default() {
+            ITEM_UPDATE => {
+                let (_window, cell, count) = update_fields(record);
+                let socket0 = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+                window.updates.push((cell, count, socket0));
+            }
+            GC_AFFECT_ADD => {
+                assert_eq!(record.len(), AFFECT_ADD_LEN);
+                window.adds.push((
+                    u32::from_le_bytes(record[1..5].try_into().expect("four bytes")),
+                    record[5],
+                    i32::from_le_bytes(record[6..10].try_into().expect("four bytes")),
+                    u32::from_le_bytes(record[10..14].try_into().expect("four bytes")),
+                ));
+            }
+            GC_CHARACTER_UPDATE => window.looks += 1,
+            GC_POINT_CHANGE => {
+                let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+                if record[8] == recovery {
+                    window.recoveries.push(value);
+                } else {
+                    assert_eq!(record[8], hp, "{record:02x?}");
+                    if is_heal_step(*hp_now, value, max_hp) {
+                        *hp_now = value;
+                    } else {
+                        // The event's own second, inside the use's window: the drain's
+                        // pair, which the next record completes.
+                        *hp_now = value;
+                    }
+                }
+            }
+            GC_SPECIAL_EFFECT => window.effects.push(record[1]),
+            other => panic!("a record nobody accounted for in the use: {other}"),
+        }
+    }
+    // The five in legacy's order: the step's Update, the flags, the add frame, the
+    // recovery and the effect. Heal ticks and the event's own second interleave freely,
+    // so only the relative order of the five is pinned.
+    let mut tags: Vec<u8> = Vec::new();
+    for record in &records {
+        if is_revive_end(record) {
+            continue;
+        }
+        match record.first().copied().unwrap_or_default() {
+            ITEM_UPDATE => tags.push(0),
+            GC_CHARACTER_UPDATE => tags.push(1),
+            GC_AFFECT_ADD => tags.push(2),
+            GC_POINT_CHANGE if record.get(8) == Some(&recovery) => tags.push(3),
+            GC_SPECIAL_EFFECT => tags.push(4),
+            _ => {}
+        }
+    }
+    let mut want = 0;
+    for tag in &tags {
+        if *tag == want {
+            want += 1;
+        }
+    }
+    assert_eq!(want, 5, "the five in order: {tags:?}");
+    window
+}
+
+/// The next drain pair with the row up: the pool before it, the pool after the drain,
+/// and the owed recovery after the drain. Heal ticks fold into `hp_now`; the revive's end
+/// is skipped.
+fn read_auto_drain(
+    keyed: &mut Keyed,
+    vid: u32,
+    hp: u8,
+    recovery: u8,
+    hp_now: &mut i64,
+    max_hp: i64,
+) -> (i64, i64, i64) {
+    let point_of = |record: &Vec<u8>| {
+        assert_eq!(record[0], GC_POINT_CHANGE, "{record:02x?}");
+        assert_eq!(&record[4..8], &vid.to_le_bytes(), "the drinker's VID");
+        let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+        (record[8], value)
+    };
+    let (step_base, potion_hp) = loop {
+        let record = keyed.read_game();
+        if is_revive_end(&record) {
+            continue;
+        }
+        let (kind, value) = point_of(&record);
+        if kind == hp {
+            if is_heal_step(*hp_now, value, max_hp) {
+                *hp_now = value;
+                continue;
+            }
+            let step_base = *hp_now;
+            *hp_now = value;
+            break (step_base, value);
+        }
+        panic!("a recovery half with no HP half: {kind} {value}");
+    };
+    loop {
+        let (kind, value) = point_of(&keyed.read_game());
+        if kind == recovery {
+            return (step_base, potion_hp, value);
+        }
+        if kind == hp && is_heal_step(*hp_now, value, max_hp) {
+            *hp_now = value;
+            continue;
+        }
+        panic!("past the drain's HP half, a record nobody accounted for: {kind} {value}");
+    }
+}
+
+/// What the toggle-off window holds: the row's remove, the socket's Update, and whether
+/// the remove came first.
+struct AutoOffWindow {
+    /// The removes as (type, apply).
+    removes: Vec<(u32, u8)>,
+    /// The base-window Updates as (cell, count, socket 0).
+    updates: Vec<(u16, u16, i32)>,
+    /// Whether the answer's Update precedes the remove frame.
+    update_before_remove: bool,
+}
+
+/// Drain the toggle-off's window, skipping heal ticks and the event's ongoing drain,
+/// which keeps paying the owed recovery without the row.
+fn drain_off_window(keyed: &mut Keyed, vid: u32, hp: u8, recovery: u8) -> AutoOffWindow {
+    let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    let mut window = AutoOffWindow {
+        removes: Vec::new(),
+        updates: Vec::new(),
+        update_before_remove: false,
+    };
+    let mut seen_update = false;
+    for record in &records {
+        if is_revive_end(record) {
+            continue;
+        }
+        match record.first().copied().unwrap_or_default() {
+            GC_AFFECT_REMOVE => {
+                assert_eq!(record.len(), AFFECT_REMOVE_LEN);
+                window.removes.push((
+                    u32::from_le_bytes(record[1..5].try_into().expect("four bytes")),
+                    record[5],
+                ));
+                if seen_update {
+                    window.update_before_remove = true;
+                }
+            }
+            ITEM_UPDATE => {
+                let (_window, cell, count) = update_fields(record);
+                let socket0 = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+                window.updates.push((cell, count, socket0));
+                seen_update = true;
+            }
+            GC_POINT_CHANGE => {
+                assert_eq!(&record[4..8], &vid.to_le_bytes(), "the drinker's VID");
+                assert!(record[8] == hp || record[8] == recovery, "{record:02x?}");
+            }
+            GC_CHARACTER_UPDATE => {}
+            other => panic!("a record nobody accounted for in the toggle-off: {other}"),
+        }
+    }
+    window
+}
+
 /// `event.char_affect.affect_event` and the save cycle: with a one-second cycle, the row of a
 /// character still connected is written with what the event paid, because the descriptor asks
 /// the world for its points before each save.

@@ -128,7 +128,9 @@ pub use points::{
 pub use polymorph::{
     polymorph_power, POLYMORPH_MAX_LEVEL, POLYMORPH_POWER_BY_LEVEL, SKILL_POLYMORPH,
 };
-pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
+pub use potion::{
+    is_recovering, toggle_auto_potion, update_recovery, AutoBranch, SE_HPUP_RED, SE_SPUP_BLUE,
+};
 pub use premium::{is_premium, use_premium, PREMIUM_VNUMS};
 pub use purge::{
     book_give, purge_all, slow_give, BOOK_SOCKET, BOOK_VNUM, DRAGON_SOUL_SLOTS, SLOW_COUNT,
