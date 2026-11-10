@@ -51787,3 +51787,41 @@ part and disband in 273, the GM pair here). `lua.pc.select` notes the switch.
 caller before them. The `u_disbandTime` defect joins STATUS.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5301 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean (the 130-line scenario split into `gm_guild_stage` plus `gm_tool_read`); `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. The 13 lingering `prodomo_proc_2836734_*` databases belonged to the aborted stale suite run (killed before the refactor; no activity held them) and were dropped by hand. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.
+
+## 526. The land seller's dialog
+
+`quest.guild_building` has one arm — 20040's click — and it runs over the wire,
+porting five backed bridges with their aliases. Eleven API rows and the quest turn
+`ported`; no bridge changed.
+
+**Reachability.** 20040 ("Vanzator de terenuri") is named in the mob names but
+spawned by no `npc.txt` on the owner's maps (the tree-wide sweep finds only its
+name rows and three animation files; positive control: the guild man 11000 spawns
+on map 1). Both share `ON_CLICK` 2. The scenario stages the seller beside Alpha
+through an `npc.txt` append, the way the rank scenario stages its dog.
+
+**Rewrite** (`prodomo/tests/parity.rs`):
+
+- `a_guild_master_buys_the_land_by_the_sellers_dialog`: Alpha masters `MyGuild`
+  (level 10, meeting land 4's limit) and stands at (466700, 907100), whose
+  base-relative (57100, 11100) sits inside land 4 (55600-58600, 9600-12600).
+  The click offers the plot; "Da" prices it (limit 10, `65000000Yang: %d` —
+  the `%d` stays literal, as `locale.gold` rides inside the `%s` argument, on
+  legacy too); "Da" again spends the price (the 0xe1 change to 135,000,000),
+  claims land 4 (the one-element list fanning guild 7), and chats the buy
+  notice (`Breasla a cumparat locul!`, `CHAT_TYPE_NOTICE`). The store banks
+  both halves. Two wire details the first cut missed: the price page repeats
+  the title before the second say, and the picked dialog ends with `[DONE]`
+  in skin 0 before the claim fans.
+- Mutants: `pc.get_x` answering 0 (land 0, the `_50` page), `pc.get_guild`
+  answering 0 (the gates diverge), a swallowed `notice`, and a no-op
+  `change_gold` all kill the scenario. A mutant dropping only the
+  `gold_changes` queue survived — the 0xe1 record is built in the shadow's
+  `change_gold` beside the queue, not from it — so the no-op mutant pins the
+  class instead.
+
+Parity rows: `lua.pc.changegold`, `lua.notice`, `lua.pc.get_guild`, `lua.pc.get_x`
+and `lua.pc.get_y` are `ported` with their aliases (`changemoney`, `change_gold`,
+`change_money`, `getx`, `gety`, `getguild`); `quest.guild_building` is `ported`.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5302 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.

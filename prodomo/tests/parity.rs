@@ -40744,6 +40744,114 @@ fn rebuild_the_refinery_on_land_5(server: &Server, database: &ScratchDatabase) {
     beta.quiet("the rebuild step ends");
 }
 
+/// `lua.pc.changegold`, `lua.notice`, `lua.pc.get_guild`, `lua.pc.get_x`, `lua.pc.get_y`,
+/// `quest.guild_building`: Alpha masters `MyGuild` (level 10) and stands on land 4's
+/// ground. The staged land seller (20040, unspawned on the owner's maps) offers the
+/// plot: the guild and level gates pass, the price leaves (the 0xe1 gold change), the
+/// claim fans land 4's list, and the buy notice chats.
+#[test]
+fn a_guild_master_buys_the_land_by_the_sellers_dialog() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO guild (id, name, master_pid, level) SELECT 7, 'MyGuild', id, 10 FROM \
+         player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN \
+         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         FROM generate_series(1, 15) grade",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 7, 1 FROM player WHERE \
+         name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 200000000, x = 466700, y = 907100 WHERE name = 'Alpha'",
+    );
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(b"m\t573\t113\t0\t0\t0\t1\t1s\t100\t1\t20040\n");
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(npc, &npc_text)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_world_seeing_guilded(
+        &server,
+        b"alice",
+        0,
+        1,
+        Some(&[(803, 147, 8), (804, 146, 8), (805, 53, 10)]),
+    );
+    let seller = shown_vid(&entered, 20_040, "map 1 shows the staged seller");
+    alice.send_record(&client_click(seller));
+    let ask = titled_page(
+        b"Administratorul terenului :",
+        &[b"Sunt administrator de teren si ma ocup de[ENTER]vanzarea parcelelor. Inainte ca monstrii sa[ENTER]cucereasca tara din mijlocul continentului, aveam[ENTER]pamant pentru toti si tuturor ne mergea bine.[ENTER]Acum mai vand doar conducatorilor breslelor, care[ENTER]il folosesc ca pamant al breslei.[ENTER]Vrei sa cumperi acest teren?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask), "the offer");
+    alice.send_record(&client_script_answer(0));
+    let mut price = titled_page(
+        b"Administratorul terenului :",
+        &[b"Pentru a cumpara acest teren, nivelul breslei[ENTER]trebuie sa fie peste 10. Pretul este 65000000Yang: %d."],
+        b"",
+    );
+    price.extend_from_slice(&titled_page(
+        b"Administratorul terenului :",
+        &[b"Doresti sa cumperi acest pamant?"],
+        b"[QUESTION 1;Da|2;Nu]",
+    ));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &price),
+        "the price and the second ask"
+    );
+    alice.send_record(&client_script_answer(0));
+    let paid = alice.read_game();
+    assert_eq!(
+        paid,
+        gold_change_of(&entered.add, 135_000_000),
+        "the price leaves"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Breasla a cumparat locul!"),
+        "the buy notice"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the picked dialog ends"
+    );
+    let fan = alice.read_game();
+    assert_eq!(fan[0], GC_LAND_LIST, "the claimed land's list: {fan:02x?}");
+    assert_eq!(fan.len(), 3 + LAND_LIST_ELEMENT_LEN);
+    assert_eq!(&fan[3..7], &4u32.to_le_bytes(), "land 4");
+    assert_eq!(&fan[23..27], &7u32.to_le_bytes(), "guild 7");
+    alice.quiet("the buy step ends");
+    wait_for(
+        &database,
+        "(SELECT guild_id FROM guild_land WHERE land_id = 4) = 7 AND (SELECT gold FROM \
+         player WHERE name = 'Alpha') = 135000000",
+    );
+}
+
 /// The Meley probe: one click quest on the sub map's NPC (20419) that chats the
 /// registered pair, the requirements, the register's pair, then the enter's pair
 /// on the same menus the owner's quest reads.
