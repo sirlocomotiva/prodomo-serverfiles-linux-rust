@@ -976,6 +976,8 @@ impl GameState {
                 self.restart_at_same_pos(vid);
                 self.set_pc_hp(vid, RESTART_HP, false);
                 self.death_penalty(vid, false, mover);
+                // `CheckPet` (`G/cmd_general.cpp:709-711`), ungated, before the revive.
+                self.check_pet(vid);
                 self.revive_invisible(vid);
             }
             RestartKind::Town => {

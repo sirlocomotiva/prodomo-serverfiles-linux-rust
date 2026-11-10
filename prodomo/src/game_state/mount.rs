@@ -600,14 +600,15 @@ impl GameState {
     }
 
     /// The last-attacked position write of `Show` (`G/char.cpp:1878-1883`), which moves
-    /// the position only and leaves the time.
-    fn last_attacked_at(&mut self, stood: u32, to: (i32, i32)) {
+    /// the position only and leaves the time. The pet's re-stand writes the same.
+    pub(super) fn last_attacked_at(&mut self, stood: u32, to: (i32, i32)) {
         self.npc_combat.entry(stood).or_default().last_attacked.at = to;
     }
 
-    /// `CMountActor::Follow` (`G/MountSystem.cpp:262-292`): within 200 nothing moves;
-    /// else the follower faces the rider and goes the distance past 200, then waits.
-    fn follow_actor(&mut self, stood: u32, rider: Vid) {
+    /// The shared `Follow` (`CMountActor::Follow`, `G/MountSystem.cpp:262-292`, and its
+    /// twin `CPetActor::Follow`, `G/PetSystem.cpp:236-270`): within 200 nothing moves;
+    /// else the follower faces its owner and goes the distance past 200, then waits.
+    pub(super) fn follow_actor(&mut self, stood: u32, rider: Vid) {
         let (Some(at), Some(spot)) = (self.npc_spot(stood), self.spot_of(rider.raw())) else {
             return;
         };

@@ -12,7 +12,7 @@
 //! # What is refused as not ported
 //!
 //! Before its first change, an equip refuses an item whose wearing starts a system this build
-//! does not have ([`WornSystem`]): a dragon soul stone, an aura, mount or pet costume, an
+//! does not have ([`WornSystem`]): a dragon soul stone or an aura costume, an
 //! `ITEM_UNIQUE` or `WEARABLE_UNIQUE` item, a timed item, an accessory with stones, an item
 //! with immunities, and a bonus type whose point is not ported. The item load refuses the same
 //! items in a wear cell, so everything worn can be taken off.
@@ -175,8 +175,6 @@ pub enum WornSystem {
     DragonSoul,
     /// An aura costume: its drain, its armour and its booster timer.
     Aura,
-    /// A pet costume: `EquipTo` summons the pet.
-    Pet,
     /// An `ITEM_UNIQUE` or `WEARABLE_UNIQUE` item: its expiry timer, its special group and the
     /// alignment title it can hide.
     Unique,
@@ -196,7 +194,6 @@ impl core::fmt::Display for WornSystem {
         match self {
             Self::DragonSoul => formatter.write_str("the dragon soul deck"),
             Self::Aura => formatter.write_str("the aura costume"),
-            Self::Pet => formatter.write_str("the pet costume"),
             Self::Unique => formatter.write_str("the unique item expiry"),
             Self::Timer => formatter.write_str("the item timers"),
             Self::AccessoryTimer => formatter.write_str("the accessory stone timer"),
@@ -209,8 +206,8 @@ impl core::fmt::Display for WornSystem {
 /// The first system `EquipTo` would start for this item that the Rewrite has not ported.
 ///
 /// `EquipTo` activates a dragon soul stone, applies the item's bonuses (`ModifyPoints`), starts
-/// the unique, wear-timer, accessory and aura-booster timers, and summons a pet costume
-/// (`G/item.cpp:1458-1487`); the mount costume's summon is the world's (`MountSummon`);
+/// the unique, wear-timer, accessory and aura-booster timers (`G/item.cpp:1458-1487`);
+/// the mount and pet costumes' summons are the world's (`MountSummon`, `PetSummon`);
 /// `OnAfterCreatedItem` starts the real-time timer (`:2775-2781`).
 /// `BuffOnAttr_AddBuffsFromItem` runs beside the wear
 /// ([`Points::energy_buff_add`](super::points::Points::energy_buff_add)): only the costume-attr
@@ -229,12 +226,8 @@ pub fn worn_system_not_ported(
     protos: &ItemProtos,
     groups: &gamedata::special_item_group::SpecialItemGroups,
 ) -> Option<WornSystem> {
-    if proto.item_type == ITEM_COSTUME {
-        match proto.sub_type {
-            COSTUME_AURA => return Some(WornSystem::Aura),
-            COSTUME_PET => return Some(WornSystem::Pet),
-            _ => {}
-        }
+    if proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_AURA {
+        return Some(WornSystem::Aura);
     }
     if proto.item_type == ITEM_UNIQUE {
         return Some(WornSystem::Unique);

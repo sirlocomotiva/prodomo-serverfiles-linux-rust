@@ -128,6 +128,7 @@ mod observer;
 mod party;
 mod pc_heal;
 pub(crate) mod pc_skill;
+mod pet;
 mod pickup;
 mod pk_mode;
 mod polymorph;
@@ -787,6 +788,9 @@ pub struct GameState {
     /// Each summoned costume mount standing, by its VID (its rider, its summon item
     /// and its mob, `CMountSystem::m_mountActorMap`).
     mount_npcs: HashMap<u32, mount::MountNpc>,
+    /// Each summoned costume pet standing, by its VID (its owner, its summon item
+    /// and its mob, `CPetSystem::m_petActorMap`).
+    pet_npcs: HashMap<u32, pet::PetNpc>,
     /// `CHorseNameManager::m_mapHorseNames` (`G/horsename_manager.h:10`): each rider's
     /// horse name by its player id, empty for a rider the store read nameless. The
     /// summon and the compute read it; the enter-game load installs it, `horse.set_name`
@@ -2881,6 +2885,7 @@ impl GameState {
             self.enter_arena(vid);
             // `CheckMount` (`G/input_login.cpp:932-936`), gated on map 113 and the
             // arenas, before the ranks close `Entergame`.
+            self.enter_pet(vid);
             self.enter_mount(vid);
             // `RankGlobal_send_players` and `RankGlobal_send_items` close `Entergame`
             // (`G/input_login.cpp:946-949`).
@@ -3721,6 +3726,9 @@ impl GameState {
         // `CMountSystem::Destroy` in `CHARACTER::Destroy` (`G/char.cpp:719`): the
         // followers go with the character.
         self.leave_mounts(vid);
+        // `CPetSystem::Destroy` in `CHARACTER::Destroy` (`G/char.cpp:609-612`): the
+        // pets go with the character, after the mounts.
+        self.leave_pets(vid);
         // `m_sortInventoryPulse` is the `CHARACTER`'s: the next login starts at 0.
         let _sorted = self.sort_inventory_until.remove(&vid);
         self.stop_browsing(vid);
@@ -5851,6 +5859,13 @@ impl GameState {
                 common::enums::EWearPositions::CostumeMount as u16,
             ))
             .map(|item| item.id);
+        // The pet cell's occupant before the step, for the summon sync after it.
+        let pet_before = character
+            .items()
+            .item_at(world::character::wear_pos(
+                common::enums::EWearPositions::CostumePet as u16,
+            ))
+            .map(|item| item.id);
         let secured = character
             .points()
             .is_some_and(world::character::Points::is_secured);
@@ -5884,6 +5899,9 @@ impl GameState {
         // (`G/item.cpp:1478-1482`, `:1524-1527`): a step that changed the mount cell
         // resyncs it, after the answer is built.
         self.sync_mount_costume(vid, mount_before);
+        // `CItem::Equip` and `CItem::Unequip` summon and unsummon the pet costume
+        // (`G/item.cpp:1484-1487`, `:1529-1532`), after the mount's.
+        self.sync_pet_costume(vid, pet_before);
         Ok(moved)
     }
 
@@ -6015,6 +6033,7 @@ impl PulseProcessor for GameState {
         self.run_horse_timers(pulse);
         self.run_horse_dead_events(pulse);
         self.run_mount_ticks(pulse);
+        self.run_pet_ticks(pulse);
         self.run_blend_ticks(pulse);
         self.run_switchbot_ticks(pulse);
         self.run_real_time_expiry(pulse);

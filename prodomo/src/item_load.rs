@@ -1034,14 +1034,17 @@ mod tests {
         .into_iter()
         .collect();
         let load = plan_item_load(&rows, &protos, &GROUPS, 0, 1);
-        // The mount costume's summon is ported, so its row loads where the row says;
-        // every other row still refuses.
+        // The mount and pet costumes' summons are ported, so their rows load where the
+        // rows say; every other row still refuses.
         let placed: Vec<(u32, u16)> = load
             .placed
             .iter()
             .map(|placed| (placed.item.id, placed.pos.cell))
             .collect();
-        assert_eq!(placed, [(2, INVENTORY_MAX_NUM + 2)]);
+        assert_eq!(
+            placed,
+            [(2, INVENTORY_MAX_NUM + 2), (3, INVENTORY_MAX_NUM + 3)]
+        );
         let refused: Vec<(u32, Refused)> = load
             .refused
             .iter()
@@ -1049,7 +1052,6 @@ mod tests {
             .collect();
         let expected = [
             (1, WornSystem::Aura),
-            (3, WornSystem::Pet),
             (4, WornSystem::Unique),
             (5, WornSystem::Timer),
             (6, WornSystem::Timer),

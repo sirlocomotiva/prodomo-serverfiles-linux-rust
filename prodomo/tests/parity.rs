@@ -47930,6 +47930,100 @@ fn give_alpha_a_mount_costume(database: &ScratchDatabase) {
          1, 52001 FROM player WHERE name = 'Alpha'",
     );
 }
+/// The owner's 53001 is a real-time pet costume for 34001; give Alpha one row of it
+/// at cell 0.
+fn give_alpha_a_pet_costume(database: &ScratchDatabase) {
+    let protos = owners_protos();
+    let proto = protos.get(53_001).expect("the owner's data has it");
+    assert_eq!(
+        (proto.item_type, proto.sub_type, proto.values[1]),
+        (
+            gamedata::item_kind::ITEM_COSTUME,
+            gamedata::item_kind::COSTUME_PET,
+            34_001
+        )
+    );
+    // The real-time clock runs from creation, so the seeded row carries a live one:
+    // the insert's `socket0` is stamped, like a drop's.
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 71, id, 1, 0, \
+         1, 53001, EXTRACT(EPOCH FROM NOW())::BIGINT + 100000 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// The pet costume's wear cell on the wire: `INVENTORY_MAX_NUM + WEAR_COSTUME_PET`.
+fn pet_wear_cell() -> u16 {
+    common::item_slots::INVENTORY_MAX_NUM + common::enums::EWearPositions::CostumePet as u16
+}
+
+/// Reads until a record of `header` lands, answering everything read.
+fn read_until_pet_header(alice: &mut Keyed, header: u8) -> Vec<Vec<u8>> {
+    let mut read: Vec<Vec<u8>> = Vec::new();
+    while read.iter().filter(|record| record[0] == header).count() < 1 {
+        read.push(alice.read_game());
+    }
+    read
+}
+
+/// Using the costume at cell 0 wears it on `pet_cell` and stands 34001 within 100
+/// with the 150 speed; the store holds the worn row. Answers the pet's VID.
+fn use_summons_the_pet(alice: &mut Keyed, database: &ScratchDatabase, pet_cell: u16) -> u32 {
+    alice.send_record(&client_item_use(0));
+    let mut read = read_until_pet_header(alice, GC_CHARACTER_ADD);
+    read.extend(read_until_pet_header(alice, GC_CHAR_ADDITIONAL_INFO));
+    let sets: Vec<(u8, u16, u32, u16)> = read
+        .iter()
+        .filter(|record| record[0] == ITEM_SET)
+        .map(|record| set_fields(record))
+        .collect();
+    assert!(sets.contains(&(1, 0, 0, 0)), "cell 0 clears: {sets:?}");
+    assert!(
+        sets.iter()
+            .any(|&(window, cell, vnum, _)| window == 1 && cell == pet_cell && vnum == 53_001),
+        "the costume wears: {sets:?}"
+    );
+    let (stood, at) = added_pet_named(&read, 34_001);
+    for offset in [at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1] {
+        assert!(offset.abs() <= 100, "within 100: {at:?}");
+    }
+    check(
+        database,
+        "(SELECT (window_type, pos) = (2, 28) FROM item WHERE id = 71)",
+    );
+    stood
+}
+
+/// Using the worn costume takes it off to cell 0 and the pet `stood` goes; the
+/// store holds the inventory row.
+fn use_takes_the_pet_costume_off(
+    alice: &mut Keyed,
+    database: &ScratchDatabase,
+    pet_cell: u16,
+    stood: u32,
+) {
+    alice.send_record(&client_item_use(pet_cell));
+    let read = read_until_pet_header(alice, GC_CHARACTER_DEL);
+    assert!(
+        read.contains(&header_and_vid_record(GC_CHARACTER_DEL, stood)),
+        "the pet goes: {read:02x?}"
+    );
+    let sets: Vec<(u8, u16, u32, u16)> = read
+        .iter()
+        .filter(|record| record[0] == ITEM_SET)
+        .map(|record| set_fields(record))
+        .collect();
+    assert!(
+        sets.iter()
+            .any(|&(window, cell, vnum, _)| window == 1 && cell == 0 && vnum == 53_001),
+        "the costume comes off: {sets:?}"
+    );
+    check(
+        database,
+        "(SELECT (window_type, pos) = (1, 0) FROM item WHERE id = 71)",
+    );
+}
+
 /// The mount costume's wear cell on the wire: `INVENTORY_MAX_NUM + WEAR_COSTUME_MOUNT`.
 fn mount_wear_cell() -> u16 {
     common::item_slots::INVENTORY_MAX_NUM + common::enums::EWearPositions::CostumeMount as u16
@@ -48101,4 +48195,45 @@ fn added_mount_named(records: &[Vec<u8>], want: &[u8]) -> (u32, (i32, i32)) {
     assert_eq!(&info[5..5 + want.len()], want, "the mount's name");
     let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
     (vid, inserted_at(add))
+}
+
+/// The VID and point of the `GC_CHARACTER_ADD` of race `race` among `records`,
+/// asserting the 150 moving speed every pet insert carries.
+fn added_pet_named(records: &[Vec<u8>], race: u16) -> (u32, (i32, i32)) {
+    let adds: Vec<&Vec<u8>> = records
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_ADD && record[22..24] == race.to_le_bytes())
+        .collect();
+    let [add] = adds[..] else {
+        panic!("one pet added, not {adds:02x?}");
+    };
+    assert_eq!(add[24], 150, "the pet's moving speed");
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    (vid, inserted_at(add))
+}
+
+/// `sys.custom.pets`: a used pet costume wears and stands its follower with the
+/// mob's own name and the 150 speed; using the worn costume takes it off and the
+/// follower goes. The owner's 53001 is real-time with `VALUE1` 34001.
+#[test]
+fn a_pet_costume_summons_and_comes_off() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    give_alpha_a_pet_costume(&database);
+    let (mut alice, _character, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items.len(), 1);
+    let add = enter_game_burst(&mut alice);
+    let _vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    // `EquipItem` refuses a wear within 1.5 s of the select.
+    std::thread::sleep(std::time::Duration::from_millis(1600));
+
+    let pet_cell = pet_wear_cell();
+    let stood = use_summons_the_pet(&mut alice, &database, pet_cell);
+
+    use_takes_the_pet_costume_off(&mut alice, &database, pet_cell, stood);
+    drop(alice);
 }

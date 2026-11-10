@@ -51219,3 +51219,81 @@ clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
 `RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+
+## 515. The costume pet
+
+`sys.custom.pets` is `ported`: the follower a worn pet costume summons and its follow
+(`ENABLE_PET_COSTUME_SYSTEM`, `G/PetSystem.cpp`, `G/char.cpp:11281-11324`). New module
+`prodomo/src/game_state/pet.rs` holds the system; `GameState.pet_npcs` is the actor map
+(owner, summon item, mob by pet VID). The mount port (ledger 514) is the template, and
+the two differ where legacy differs.
+
+The port, in legacy order:
+
+- `PetSummon` (`G/char.cpp:11281-11293`): no gates at all — no morph line, no OX/arena
+  check, the horse rides on — and the `VALUE1` mob stands within 100 of the owner, of
+  the owner's empire, facing the owner's heading turned half round, with the owner's
+  observer flag. The pet keeps its own name (`SetName` is declared in
+  `G/PetSystem.h:61` but defined nowhere) and inserts at moving speed 150
+  (`G/char.cpp:1083-1086`), on the row and on the live move point the insert reads.
+  A mob the spawn refuses stands nothing, as legacy's null `SpawnMob` does past its
+  `sys_err`. No transmutation read: `PetSummon` reads the worn item's `VALUE1` only.
+- `PetUnsummon` (`:11295-11307`): the owner's follower of that mob goes.
+- `CheckPet` (`:11309-11324`) is ungated; the login gates it on 113 and the arenas
+  (`G/input_login.cpp:927-931`, before the mount's) and the plain restart-here arm
+  calls it bare (`G/cmd_general.cpp:709-711`, before the revive — where the mount has
+  none). The war-map and threeway arms are unreached here, and restart-now and
+  restart-town never called it (against the mount's restart-now arm), so they are
+  unchanged.
+- The pet tick runs every 12 Pulses (the 6-Pulse event with the 400 ms gate): a pet
+  whose summon item is gone, dropped, or held by another goes. No death arm:
+  `CPetActor::Update` reads no `IsDead`, unlike the mount's; the unit test pins a dead
+  owner keeping its pet.
+- The follow runs past 300 to 200 of the owner — walking, and running past 900
+  (`START_RUN_DISTANCE`, which the mount computes and never uses); past 4500 the pet
+  re-stands 200 behind the owner's heading on the owner's map; nearer it waits. The
+  `Follow` step is shared with the mount's ([`GameState::follow_actor`]): the two
+  bodies are identical. `m_originalMoveSpeed` and `m_dwLastActionTime` are write-only
+  and stay out.
+- `IsPet` reads the pet's map: the insert speed, the state machine's skip
+  (`G/char_state.cpp:516-520`), `do_purge`'s spare (`G/cmd_gm.cpp:843`); the dungeon's
+  `DeadCharacter` skip (`G/char_manager.cpp:139`) has no port to extend (no dungeons),
+  and neither do the chase estimator's pet arm (`G/char.cpp:6939`, a non-pursuit the
+  port's chase never had) and the two quest filters (`G/questlua_dungeon.cpp:685`,
+  `G/questlua_global.cpp:1109`).
+- The pet's proto applies land through the worn loop (`ComputePoints`,
+  `G/char.cpp:3070-3080`), which already runs here: the pet costume is no longer a
+  `WornSystem` (the variant is gone with it), the summon's recompute and the
+  unsummon's `ClearBuff` are that loop's own, and the owner's 53001 grants its
+  `APPLY_ATTBONUS_MONSTER` 20 while worn.
+
+Staying out, with the sweeps behind each: the declared-never-defined `SetName`,
+`GiveBuff` (`G/PetSystem.h:78`; the only other `GiveBuff` is the party's functor) and
+`AddPet` (`:122`); the unreferenced `PET_COUNT_LIMIT` (`G/PetSystem.cpp:41`) and
+`SetUpdatePeriod` (`G/PetSystem.h:114`); `_UpdatAloneActionAI` (`G/PetSystem.cpp:132`),
+which nothing calls (only the buff NPC's same-named member runs); the second
+`Unsummon` and `DeletePet` overloads (called nowhere); and `UpdateObserver`
+(`G/PetSystem.cpp:531-547`), which has no call site — the summon's own propagation is
+the only one. The `pet.*` quest calls stay `unused` (ledger 401, question 37).
+
+Reachability: the owner's 53001+ are real-time `COSTUME_PET` protos with `VALUE1`
+34001, so the scenario seeds a live socket-0 clock (a plain 0-clock row expires on
+entry, as the world's tick removes it).
+
+Tests: three unit tests (wear summons, the purge spares, take-off unsummons, the
+restart stands again; the re-stand, the walk/run split, the kept-on-death, the
+dropped-item unsummon; the login gate) and the scenario
+`a_pet_costume_summons_and_comes_off` (use wears and stands 34001 within 100 with the
+150 speed byte, the worn use takes it off and the pet goes, the store follows each
+step).
+
+The scenario hunts: a 150-to-151 speed mutant fails on the speed-byte assert, and
+it passed 8 parallel runs against the pristine build (7 flake slots plus the
+post-restore rerun; the eighth flake slot's output file never appeared, so the
+rerun took its place).
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace`
+clean; the suite 5252 passed, 0 failed in 46 targets; `cargo test --workspace --doc`
+clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
+`RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.
