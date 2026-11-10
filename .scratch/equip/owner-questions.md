@@ -643,3 +643,10 @@ owner answers.
  effect file, but your one special-item group is type NORMAL with no `effect` line —
  supply a SPECIAL group and the row revives — and the pet arm needs
  `pet.spawn_effect`, which no quest names. Waits on it: confirm the two rows `unused`.
+69. **The last two `codec` rows are `unused` (ledger 550).** `gc.skill_level` (72): the
+ enumerator is `HEADER_GC_SKILL_LEVEL_OLD`, with no send — the live levels are byte 76.
+ `gc.event_reload` (156): `ReloadEvent`'s only caller is the `bReload` arm of
+ `CEventManager::Initialize`, whose only caller passes the default `false`, so the
+ whole chain is dead code in the checked-in server; the Rewrite answers the board
+ afresh on every ask, so no reload notice is needed either. Waits on it: confirm the
+ two rows `unused`.

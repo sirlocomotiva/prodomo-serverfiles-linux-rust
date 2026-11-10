@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 549 (the gated pickup and the effect without a file).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 550
+Last reviewed: 2026-11-10, after ledger section 550 (the table with no codec left).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 551
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -601,8 +601,9 @@ Since 544 `gc.change_skill_group` and `gc.request_make_guild` are `ported`: `/se
 Since 545 `gc.item_set` and `gc.item_update` are `ported`: the letters trade pins the six clears, and the move/split/merge pins the UPDATEs. The
 Since 546 `gc.add_fly_targeting` and `gc.auto_shaman_skill` are `ported`: the assassin scenario pins the extra relay, and the toggle scenario the buff cast. The
 Since 547 `gc.main_character`, `gc.login_key` and `gc.bindudp` are `unused`: byte 15 is the dead `_OLD` generation, byte 118 has no sender, and byte 254's only sender is unreachable behind commented-out UDP input and `__UDP_BLOCK__`. The
-Since 548 eight more `codec` rows are `unused`: the enumerator-only speed, the callerless motion, the three enumeratorless bytes (73, 117, 213), the struct-only safebox money, and the lover pair that waits on the unreachable marriage. The
+Since 548 eight more `codec` rows are `unused`: the enumerator-only speed, the callerless motion, the three enumeratorless bytes (73, 117, 213), the struct-only safebox money, and the lover pair that waits on the unreachable marriage. Ledger 550 corrects its event-reload aside: the `bReload` guard is never true, so `gc.event_reload` is `unused` too, not a port. The
 Since 549 `gc.pickup_item_sc` and `gc.specific_effect` are `unused`: the pickup's switch is never defined, and the effect's wear arm wants a SPECIAL group the owner's file lacks while its pet arm wants a quest call no quest makes. The
+Since 550 the server-records table has no `codec` left: `gc.skill_level` is the dead `_OLD` generation (byte 76 is live) and `gc.event_reload`'s whole chain is dead code, so both are `unused`. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

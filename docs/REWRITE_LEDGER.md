@@ -52241,3 +52241,30 @@ owner's data. Supply a SPECIAL group and the row revives. The pet arm
 Both rows move to `unused`, pending the owner's confirmation (question 68). No code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets (the full suite's one failure was a load flake — a stray record under parallel load — green alone and in the parity re-run's 408 passed); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 550. The table with no codec left
+
+Two `codec` rows stood after ledger 549, and both are unreachable. The server-records
+table now reads 109 `ported`, 23 `unused`, 2 `partial` — no `codec`, no `missing`.
+
+`gc.skill_level` (72): the enumerator is `HEADER_GC_SKILL_LEVEL_OLD` (`packet.h:160`),
+and no `SKILL_LEVEL_OLD` line exists anywhere else in `server/` or `legacy/` in any
+case. No send writes a literal 72, and the only `abSkillLevels` line in `server/` is a
+comment (`char_skill.cpp:2441`). The live skill levels are byte 76, sent from
+`char_skill.cpp:178`, which the client decodes as `TPacketGCSkillLevelNew`
+(`gc.skill_level_new` is `ported`).
+
+`gc.event_reload` (156): `BroadcastEventReload` (`cmd_gm.cpp:1610`) has two callers:
+`ReloadEvent` (`cmd_gm.cpp:1623`) and the P2P `HEADER_GG_EVENT_RELOAD` arm
+(`input_p2p.cpp:697`). `ReloadEvent`'s only caller is the `bReload` arm of
+`CEventManager::Initialize` (`event_manager.cpp:557-558`), and `Initialize`'s only caller
+passes the default `false` (`input_db.cpp:746`) — so in the checked-in server the send
+chain is dead code from end to end, and the P2P hop it would need is retired anyway
+(ADR-0001). The Rewrite answers the event board afresh on every ask (`send_event_info`
+reads the installed calendar per request), so a reload notice has nothing to refresh; not
+sending one is a Divergence from the dead send, recorded here. The ledger-548 claim that
+"the Rewrite must port it" was wrong: the arm's guard is never true.
+
+Both rows move to `unused`, pending the owner's confirmation (question 69). No code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
