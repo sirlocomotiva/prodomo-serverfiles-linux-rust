@@ -40672,6 +40672,16 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 539's mode probe: the skill teacher (vnum 20300, bound but questless)
+/// says whether the server runs in test mode.
+const MODE_PROBE: &[u8] = b"quest mode_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('test='..tostring(is_test_server()))\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 538's playtime probe: the skill teacher (vnum 20300, bound but questless)
 /// says the playtime under both spellings.
 const PLAYTIME_PROBE: &[u8] = b"quest playtime_probe begin\n\
@@ -41287,6 +41297,44 @@ fn a_click_says_the_playtime_twice() {
         "seconds since the login: {short}"
     );
     alice.quiet("the step ends");
+}
+
+/// `lua.is_test_server`: Beta clicks the skill teacher on a default boot and hears
+/// test mode on; on a `test_server = false` boot she hears it off.
+#[test]
+fn a_click_says_the_test_mode_on_both_boots() {
+    for (config, want) in [
+        ("no_wander = true", "test=true"),
+        ("no_wander = true\ntest_server = false", "test=false"),
+    ] {
+        let Some(database) = ScratchDatabase::create() else {
+            return;
+        };
+        create_account_before_boot(&database, "alice");
+        add_characters(&database);
+        sql(
+            &database,
+            "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+        );
+        let (server, _data) = Server::start_with_files_channels(
+            binary(),
+            database.url(),
+            &[("locale/europe/quest/zz_probe/mode_probe.lua", MODE_PROBE)],
+            &default_channels(),
+            config,
+        );
+        let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+        let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+        alice.send_record(&client_click(teacher));
+        let mut page = want.as_bytes().to_vec();
+        page.extend_from_slice(b"[ENTER][DONE]");
+        assert_eq!(
+            alice.read_game(),
+            server_script(1, &page),
+            "the mode on `{config}`"
+        );
+        alice.quiet("the step ends");
+    }
 }
 
 /// The probe quest the land scenario adds: the claim stone reports the land under
