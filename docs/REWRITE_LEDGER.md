@@ -51686,3 +51686,47 @@ behind a quest runtime that answers the points flag. Both order mutants
 (empty rows) kill their tests.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5296 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean (1 passed in 9 targets); `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. The mutation sweep kills 4 of 4: the swapped reward vnum, the emptied OX rows, the emptied pass-tier rows, and the swapped answer halves. The scenario passes 8 of 8 parallel runs. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 524. The Ochao temple
+
+`TempleOchao.cpp` is 260 lines with exactly two hooks and one quest function, and
+the port now covers all of it. `Prepare` arms the eleven rooms from map 209's base
+(offsets `* 100`, the drawn room, the guardian's stand); `Spawn`/`RandomRoom` draws
+another room, stands the guardian, destroys the old one on 209 and starts the
+activity arm; `ClearPrepare` cancels the portal arm, spawns, and destroys the old
+portal; `ChangeRoom` holds a guardian with a victim and otherwise re-spawns; and
+`GuardianAttacked` pushes the idle line to 600 s on the first attack. The two timed
+arms run as Pulses: the activity check every 30 s past the 180 s line, the portal
+clear 60 s after the kill. The hooks sit where legacy puts them: the attack gate
+(`pkVictim` a monster, vnum 6400, map 209) inside the fight's hit path
+(`G/char_battle.cpp:309`), and the kill gate (guardian, killer on 209) inside the
+monster's `Dead` (`:1655`), the portal rising where the killer stands.
+
+The quest's four events all run: the 209 `login` calls
+`temple_ochao.initialize()` (bridged since 413, scenario-covered there), the 20408
+chat warps to the temple (274), the 20415 chat writes
+`enchanted_forest.limit_activity` 0 and warps to (816700, 1505000), and the 6311
+kill draws its ten chances and drops what passes owned for 300 s. The 6311 script
+is the only caller of `game.drop_item_with_ownership` on the owner's data, so this
+slice ports that API too: the kill path lays each passing row at the killer's feet,
+and the no-proto row (21075) and the unported row (70043, `ITEM_UNIQUE`) lay
+nothing, as legacy's `NULL` `CreateItem` does.
+
+Coverage: `a_yes_to_the_temple_portal_writes_the_limit_and_warps_to_the_forest`
+stands 20415 on 209 over the wire (the click menu, the "Da" page, the silent flag
+delete, the own removal and the `GC_WARP` to the Channel hosting 210, with both
+store rows behind it). The kill drops are unit-tested twice: the manager test runs
+the script past its level gate at 94 and 95, and the world test kills a 1-HP
+bodyguard with two punches and pins the eight passing rows, each owned for 300 s.
+A binary scenario would punch a 218k-HP boss with STUN immunity — the siege
+stone's precedent (ledger 522) applies — and no scenario waits out the 3-to-10
+minute activity arms (owner decision, 2026-10-14).
+
+Two traps, each worth its line: the forest warp needs a Channel hosting map 210,
+which the first draft forgot, so the order went nowhere while the call answered
+true (legacy's failed `CMapLocation::Get` behaves exactly so); and on 209 no login
+mark exists, so the scenario's first draft read a `GC_TARGET_CREATE` that never
+came — on the temple map the sash's mark finds no Theowahdan, and only the letter
+pass sends its letters.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean (after scoping the test-only `BODYGUARD_VNUM` into the test module, which the lib build flagged as dead); the suite 5299 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean (1 passed in 9 targets); `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. The mutation sweep kills 4 of 4: the 300 s ownership window, a dropped passing row, the world test's level gate, and the manager test's level gate. The scenario passes 8 of 8 parallel runs. The first full run failed only the inventory rule — the drop API's scenario cell named a module path, which the checker does not accept — fixed to the file path and rerun green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

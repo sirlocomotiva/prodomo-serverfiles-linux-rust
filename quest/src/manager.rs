@@ -6464,6 +6464,8 @@ mod tests {
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
         draws: Vec<(i32, i32)>,
+        /// What `number` answers; the top by default, as before.
+        drawn: Option<i32>,
         learned: BTreeSet<u32>,
         guild_calls: Vec<(Vec<u8>, Vec<GuildArg>)>,
         /// What `get_reserve_war_table` answers once.
@@ -6799,7 +6801,7 @@ mod tests {
 
         fn number(&mut self, from: i32, to: i32) -> i32 {
             self.draws.push((from, to));
-            to
+            self.drawn.unwrap_or(to)
         }
         fn ore_refine(&mut self, ore: u32, cost: i32, pct: i32, stone: Option<u32>) -> bool {
             self.melts.push((ore, cost, pct, stone));
@@ -8226,6 +8228,49 @@ mod tests {
             "the no-target kill quest runs"
         );
         assert_eq!(game.take(), Vec::new(), "the silent end sends nothing");
+    }
+    /// `temple_of_the_ochao`'s `6311.kill` (`when ... with pc.get_level() >= 95`): at 95
+    /// the script runs its ten chance draws and drops what passes, each owned for 300 s
+    /// (`game.drop_item_with_ownership`); at 94 the level gate holds and nothing drops.
+    /// The fake's `number` answers 1 here, so every chance passes; by default it answers
+    /// the top, as before.
+    #[test]
+    fn a_bodyguard_kill_drops_the_temples_table_past_its_level() {
+        let mut manager = manager().lock().unwrap();
+        manager.disconnect(PID);
+        manager.load_flags(PID, []);
+        let mut game = Fake {
+            level: 95,
+            drawn: Some(1),
+            ..Fake::default()
+        };
+        assert!(
+            manager.kill(PID, 6311, None, &mut game),
+            "the bodyguard's kill scripts run"
+        );
+        let vnums: Vec<u32> = game.drops.iter().map(|(vnum, _, _)| *vnum).collect();
+        assert_eq!(
+            vnums,
+            [2145, 11295, 11495, 11695, 11895, 21075, 70043, 30609, 30612, 30523],
+            "every chance passes at the bottom draw"
+        );
+        assert!(
+            game.drops
+                .iter()
+                .all(|(_, count, secs)| *count == 1 && *secs == Some(300)),
+            "one of each, owned for 300 s: {:?}",
+            game.drops
+        );
+        assert_eq!(game.draws, [(1, 100); 10], "one 1-100 draw per row");
+        manager.disconnect(PID);
+        manager.load_flags(PID, []);
+        let mut game = Fake {
+            level: 94,
+            ..Fake::default()
+        };
+        manager.kill(PID, 6311, None, &mut game);
+        assert!(game.drops.is_empty(), "the level gate holds at 94");
+        manager.disconnect(PID);
     }
 
     #[test]

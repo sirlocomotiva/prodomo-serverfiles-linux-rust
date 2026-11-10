@@ -229,7 +229,7 @@ impl GameState {
 #[cfg(test)]
 mod tests {
     use super::{GUARDIAN_VNUM, PORTAL_VNUM, TEMPLE_MAP};
-    use crate::game_state::fixtures::{a_world, enter_on, TestClock};
+    use crate::game_state::fixtures::{a_fighter, a_world, enter_on, hit, points_at, TestClock};
     use common::vid::Vid;
     use gamedata::map_atlas::MapRegion;
     use gamedata::mob_proto::{MobProto, MobProtos};
@@ -240,6 +240,8 @@ mod tests {
 
     /// The owner's map 209 base (`Setting.txt`).
     const BASE: (i32, i32) = (844_800, 1_408_000);
+    /// The bodyguard whose kill drops the temple's table (`temple_of_the_ochao.lua:7`).
+    const BODYGUARD_VNUM: u32 = 6311;
 
     /// A world hosting map 209 on Channel 1 as twelve sectrees square from the owner's
     /// base, all cells open, whose respawner knows the guardian and the portal.
@@ -398,5 +400,110 @@ mod tests {
         world.run_temple_ochao(due);
         assert!(standing(&world, PORTAL_VNUM).is_empty());
         while inbox.try_recv().is_ok() {}
+    }
+
+    /// A level-95 killer's punches stun and kill a 1-HP bodyguard stood beside it on
+    /// 209: the kill's quest event runs the temple's table and lays what passes at
+    /// the killer's feet, each owned by the killer for 300 s
+    /// (`G/questlua_game.cpp:205-206`). Seed 5636 (found offline): both punches' chats miss,
+    /// the ten script draws pass eight rows (not 21075's no-proto row or 70043's
+    /// unported unique), and each laid row draws two scatter legs.
+    #[test]
+    fn a_bodyguard_kill_on_the_temple_lays_the_scripts_passing_rows() {
+        use gamedata::mob_locale_names::MobNamesByLanguage;
+        use quest::manager::Manager;
+        use world::character::Pcg32;
+        use world::item::ItemIdRange;
+        use world::npc::Npc;
+        const BODYGUARD: u32 = FIRST_NPC_VID;
+        const KILLER: u32 = 0x6001;
+        const AT: (i32, i32) = (BASE.0 + 19_400, BASE.1 + 14_600);
+        let clock = TestClock::default();
+        let mut world = temple_world(&clock);
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        let quests = crate::game_state::quests::Quests::new(
+            manager,
+            Arc::default(),
+            MobNamesByLanguage::default(),
+        );
+        world = world.with_quests(quests);
+        world
+            .install_item_ids(ItemIdRange::new(1, 1_000_000, 1).expect("a usable range"))
+            .expect("the first install");
+        let mut bodyguard: Npc = a_fighter(BODYGUARD, BODYGUARD_VNUM, 0, (175, 0), 0, AT, 1);
+        bodyguard.exp = 10;
+        bodyguard.fight.level = 108;
+        let region = gamedata::map_atlas::MapRegion {
+            index: TEMPLE_MAP,
+            name: b"test".to_vec(),
+            sx: BASE.0,
+            sy: BASE.1,
+            ex: BASE.0 + 12 * 6_400,
+            ey: BASE.1 + 12 * 6_400,
+            spawn: (0, 0),
+            empire_spawns: None,
+        };
+        world.stand_npcs(
+            1,
+            &region,
+            MapNpcs {
+                npcs: vec![bodyguard],
+                positions: Vec::new(),
+                regens: Vec::new(),
+            },
+        );
+        let mut inbox = enter_on(&mut world, (1, TEMPLE_MAP), KILLER, AT, 0);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(KILLER))
+            .expect("the killer stands")
+            .set_points(Some(points_at(95, 0, 0)));
+        world
+            .quests
+            .as_mut()
+            .expect("quests loaded")
+            .manager_mut()
+            .load_flags(KILLER, Vec::new());
+        world.dice = Pcg32::new(5636, 0);
+        world.target(Vid::new(KILLER), BODYGUARD);
+        hit(&mut world, KILLER, BODYGUARD);
+        while inbox.try_recv().is_ok() {}
+        hit(&mut world, KILLER, BODYGUARD);
+        while inbox.try_recv().is_ok() {}
+        let mut laid: Vec<(u32, u32)> = world
+            .ground
+            .values()
+            .map(|lying| {
+                (
+                    lying.ground.item.vnum,
+                    lying.owner.as_ref().map_or(0, |owner| owner.pid),
+                )
+            })
+            .collect();
+        laid.sort_unstable();
+        assert_eq!(
+            laid,
+            [
+                (2145, KILLER),
+                (11295, KILLER),
+                (11495, KILLER),
+                (11695, KILLER),
+                (11895, KILLER),
+                (30523, KILLER),
+                (30609, KILLER),
+                (30612, KILLER),
+            ],
+            "eight rows pass; the no-proto and unported rows lay nothing"
+        );
+        for lying in world.ground.values() {
+            assert_eq!(lying.ground.item.count(), 1, "one of each");
+            assert_eq!(
+                lying.owner.as_ref().map(|owner| owner.due),
+                Some(300 * u64::from(crate::save::PASSES_PER_SEC)),
+                "owned for 300 s"
+            );
+        }
     }
 }

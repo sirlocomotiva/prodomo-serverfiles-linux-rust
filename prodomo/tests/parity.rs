@@ -49706,3 +49706,95 @@ fn a_click_starts_the_ox_event_and_the_herald_seats_the_entrant() {
     );
     bob.quiet("the warp is the step's last word");
 }
+
+/// `quest.temple_of_the_ochao`'s second chat: Alpha idles on 209 beside the portal (vnum
+/// 20415, stood by `npc.txt`), clicks it, and says "Da": the step writes
+/// `enchanted_forest.limit_activity` 0 and orders the warp to (816700, 1505000), whose
+/// `GC_WARP` the scenario reads with the store row behind it. The first chat stays with
+/// the guardian scenario.
+#[test]
+fn a_yes_to_the_temple_portal_writes_the_limit_and_warps_to_the_forest() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let npc = "locale/europe/map/metin2_map_mt_th_dungeon_01/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(b"m\t100\t100\t0\t0\t0\t1\t1s\t100\t1\t20415\n");
+    let mut channels = default_channels();
+    channels[0].maps.push(209);
+    channels[0].maps.push(210);
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(npc, &npc_text)],
+        &channels,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 854900, y = 1418100 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let (own, portal) = enter_beside_shown(&mut alice, 20415);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    read_sash_and_yohara_letters(&mut alice, "change");
+    read_sash_and_yohara_letters(&mut alice, "letter");
+    read_login_update(&mut alice);
+    alice.still("nothing follows");
+
+    alice.send_record(&client_click(portal));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Calatoreste in Padurea Fermecata|2;Inchide]"
+        ),
+        "the one chat whose level and map hold, and the close"
+    );
+    alice.send_record(&client_script_answer(0));
+    let ask = titled_page(
+        b"Portal",
+        &[
+            b"",
+            b"Doriti sa calatoriti \xc3\xaen Padurea Fermecata a",
+            b"Zorilor?",
+        ],
+        b"[QUESTION 1;Da|2;Nu]",
+    );
+    assert_eq!(alice.read_game(), server_script(1, &ask));
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&own.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((816_700, 1_505_000), port),
+        "the quest's warp names the forest and Channel 1"
+    );
+    alice.still("nothing follows");
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 816700 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 1505000",
+    );
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM quest_flag q JOIN player p ON p.id = q.player_id WHERE \
+         p.name = 'Alpha' AND q.name = 'enchanted_forest.limit_activity'::bytea)",
+    );
+}
