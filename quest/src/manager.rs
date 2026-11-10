@@ -1970,6 +1970,7 @@ impl Manager {
             event_flags,
             npc_ids,
             quest_indices,
+            quests: host.quests(),
             npc_vid,
             timer_arg: *timer_arg,
             selected: *selected,
@@ -2003,10 +2004,16 @@ impl Manager {
         *selected = cx.selected;
         let unsent = cx.output.script.clone();
         // The borrowed maps are the live ones: the bridge's writes landed there, and
-        // every `pc.flags` stood empty meanwhile — except `execute`'s `__status`,
-        // which wrote the root's empty map and is merged back on top.
+        // every `pc.flags` stood empty meanwhile — except `execute`'s `__status`, which
+        // wrote the root's empty map before the script ran. Its entries fill only what the
+        // script did not write: a `set_state` or `setqf` during the script is newer, as
+        // legacy's `SetFlag` during the script overwrites `SetQuest`'s.
         for (name, value) in std::mem::take(&mut pc.flags) {
-            borrowed.entry(pid).or_default().insert(name, value);
+            borrowed
+                .entry(pid)
+                .or_default()
+                .entry(name)
+                .or_insert(value);
         }
         for (pid, pc) in pcs.iter_mut() {
             if let Some(map) = borrowed.remove(pid) {
@@ -2647,6 +2654,9 @@ struct Cx<'g> {
     /// The number of every quest, by name (`m_hmQuestName`,
     /// `G/questmanager.cpp:1284-1289`), which `q.getcurrentquestindex` answers.
     quest_indices: &'g BTreeMap<Vec<u8>, u32>,
+    /// The quests the host numbered, which `set_state` reads the named state's number from
+    /// (`GetQuestStateIndex`, `G/questmanager.cpp:1172-1191`).
+    quests: &'g [host::Quest],
     npc_vid: u32,
     /// `m_dwServerTimerArg`, which `get_server_timer_arg` pushes.
     timer_arg: u32,
@@ -5671,6 +5681,46 @@ fn named_thing(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], first: Value) -> mlua::R
     Ok(text.unwrap_or_default())
 }
 
+/// `quest_setstate` (`G/questlua_quest.cpp:112-146`): the running state's number and the
+/// `__status` flag both change at once (`SetCurrentQuestStateName`, `G/questpc.cpp:115-119`),
+/// while the `leave`/`enter`/`letter` scripts wait for the script's end (`EndRunning`,
+/// `G/questpc.cpp:352-371`). A script that reads its own `__status` after the call sees the
+/// new state, not the old one. A state the quest does not have is state 0, which deletes the
+/// flag, as `SetFlag` does for a zero value.
+fn set_quest_state_name(lua: &Lua, cx: &mut Cx<'_>, last: Value) -> mlua::Result<()> {
+    let Some(state) = host::c_string(lua, last)? else {
+        tracing::warn!("QUEST state name is empty");
+        return Ok(());
+    };
+    if state.is_empty() {
+        tracing::warn!("QUEST state name is empty");
+        return Ok(());
+    }
+    let quest = cx.flag_quest().to_vec();
+    let number = cx
+        .quest_indices
+        .get(&quest)
+        .copied()
+        .and_then(|index| {
+            usize::try_from(index.saturating_sub(1))
+                .ok()
+                .and_then(|at| cx.quests.get(at))
+        })
+        .and_then(|quest| quest.states.get(&state))
+        .copied()
+        .unwrap_or(0);
+    let status = [quest.as_slice(), b".__status"].concat();
+    if let Some(flags) = cx.flags() {
+        if number == 0 {
+            flags.remove(&status);
+        } else {
+            flags.insert(status, number);
+        }
+    }
+    cx.pending_state = Some(state);
+    Ok(())
+}
+
 fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
     let first = args.front().cloned().unwrap_or(Value::Nil);
     let last = args.back().cloned().unwrap_or(Value::Nil);
@@ -5747,12 +5797,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             return game_npc_api(lua, cx, name, args, first);
         }
         b"set_state" | b"q.setstate" | b"q.set_state" => {
-            match host::c_string(lua, last)? {
-                Some(state) if !state.is_empty() => {
-                    cx.pending_state = Some(state);
-                }
-                _ => tracing::warn!("QUEST state name is empty"),
-            }
+            set_quest_state_name(lua, cx, last)?;
             None
         }
         // The quiet globals (see `quiet_api`).
@@ -8213,6 +8258,7 @@ mod tests {
     /// ends the script, one after it lands too, and a refusal ends the script with the state
     /// it asked for.
     #[test]
+
     fn a_set_state_lands_when_the_script_ends_whichever_step_asked() {
         let mut manager = manager().lock().unwrap();
         manager.disconnect(PID);
@@ -8239,10 +8285,12 @@ mod tests {
         run(&mut manager, b"set_state('talk') wait()", 0, &mut game);
         // A bare `[NEXT]` goes in the no-window skin (`SendScript`).
         assert_eq!(game.take(), [(0, "[NEXT]".to_owned())]);
+        // The flag changes at once (`SetCurrentQuestStateName`), though the `leave` script
+        // still waits for the script's end.
         assert_eq!(
             manager.quest_flag(PID, status),
-            Some(0),
-            "the script still waits"
+            Some(talk),
+            "the flag is new while the script still waits"
         );
         manager.answer(PID, 254, &mut game);
         assert_eq!(game.take(), [(0, "[DONE]".to_owned())]);
@@ -8694,6 +8742,7 @@ mod tests {
                 event_flags: &self.manager.event_flags,
                 npc_ids: &self.manager.npc_ids,
                 quest_indices: self.manager.host.quest_indices(),
+                quests: self.manager.host.quests(),
                 npc_vid: VID,
                 timer_arg: 0,
                 selected: None,

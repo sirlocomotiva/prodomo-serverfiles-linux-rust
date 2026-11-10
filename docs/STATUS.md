@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 541 (the seeded arenas).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 542
+Last reviewed: 2026-11-10, after ledger section 542 (the flag at once).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 543
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -595,6 +595,7 @@ Since 538 `lua.pc.getplaytime` and `lua.q.done` are `ported`: the playtime probe
 Since 539 `lua.is_test_server` is `ported`: the mode probe says it on a default boot (true) and a `test_server = false` boot (false) — a negated bridge dies on the first click. The
 Since 540 the loading burst sends the map's music: `gc.main_character3_bgm`, `gc.main_character4_bgm_vol`, `lua.add_bgm_info` and `lua.set_bgm_volume_enable` are `ported` — a map-1 select hears 138 with `enter_the_east.mp3` at 0.5, map 72 hears 113, and a flag-off boot hears 137. The
 Since 541 `lua.arena.add_map` is `ported`: the ledger-227 note was stale — `with_quests` seeds the world from `settings.arenas`, and the duel scenario's list names the four map-112 arenas (an unseeded world dies there). One API partial left: `set_state`. The
+Since 542 `lua.set_state` is `ported` and the quest-API table has no partial left: the `__status` flag changes at once (`SetCurrentQuestStateName`), and the flag probe's `getqf` reads 0 before the call and non-zero right after it. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

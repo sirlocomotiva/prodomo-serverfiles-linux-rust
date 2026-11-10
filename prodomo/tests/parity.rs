@@ -40708,6 +40708,30 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 542's flag probe: the skill teacher (vnum 20300, bound but questless) says
+/// whether the `__status` flag changed at once: 0 before the call (`start` is state 0) and
+/// non-zero right after it. The literal `away` number cannot be named: `qc` refuses a number
+/// it would print as `1.50368e+09`; the unit test pins the exact CRC.
+const FLAG_PROBE: &[u8] = b"quest flag_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    local before = pc.getqf('__status')\n\
+    set_state('away')\n\
+    local after = pc.getqf('__status')\n\
+    if before == 0 and after ~= 0 then\n\
+    say('at-once')\n\
+    else\n\
+    say('deferred')\n\
+    end\n\
+    end\n\
+    end\n\
+    state away begin\n\
+    when 20300.click begin\n\
+    say('away')\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 539's mode probe: the skill teacher (vnum 20300, bound but questless)
 /// says whether the server runs in test mode.
 const MODE_PROBE: &[u8] = b"quest mode_probe begin\n\
@@ -41432,6 +41456,36 @@ fn select_screen_on_beta(server: &Server) -> (Keyed, Vec<u8>) {
 fn legacy_settings() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../legacy/gamedata/locale/europe/settings.lua")
+}
+
+/// `lua.set_state`: Beta clicks the skill teacher; the probe's flag reads the old state
+/// before the call and the new state right after it, in the same script
+/// (`SetCurrentQuestStateName`, `G/questpc.cpp:115-119`).
+#[test]
+fn a_click_sees_the_new_state_at_once() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/flag_probe.lua", FLAG_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let mut page = b"at-once".to_vec();
+    page.extend_from_slice(b"[ENTER][DONE]");
+    assert_eq!(alice.read_game(), server_script(1, &page));
+    alice.quiet("the step ends");
 }
 
 /// `lua.is_test_server`: Beta clicks the skill teacher on a default boot and hears

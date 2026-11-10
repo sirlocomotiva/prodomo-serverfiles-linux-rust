@@ -52061,3 +52061,25 @@ list. The mutant check is an unseeded world, which comes back empty and dies the
 changed; the row points at the scenario now. One API partial left: `set_state`.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5314 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 542. The flag at once
+
+The last API partial was `set_state`'s nuance: legacy writes the `__status` flag at once
+(`SetCurrentQuestStateName`, `G/questpc.cpp:115-119`) while the `leave`/`enter`/`letter`
+scripts wait for the script's end, but the Rewrite held the old flag until the end. Now the
+bridge resolves the named state's number and writes the flag into the live map when the call
+runs, deleting it for state 0 as `SetFlag` does, while `pending_state` still carries the
+scripts to `end_running`.
+
+Two things made it a port rather than a line: the bridge needed the host's state numbers
+(a new `Cx.quests` borrow), and the step's writeback merged `execute`'s stale `__status`
+over the script's newer write — it now fills only what the script did not write, as legacy's
+order does. The stale unit assert (`Some(0)` while waiting) now expects the new state.
+
+`a_click_sees_the_new_state_at_once` pins the wire: the flag probe reads 0 before the call
+(`start` is state 0) and non-zero right after it. A skipped write says `deferred` and dies
+there. The probe cannot name `away`'s number: `qc` refuses a literal it would print as
+`1.50368e+09`, so the exact CRC stays pinned by the unit test. The quest-API table has no
+partial left: 337 ported, 362 unused.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5315 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
