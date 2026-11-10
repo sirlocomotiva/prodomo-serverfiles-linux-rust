@@ -51477,3 +51477,53 @@ fn an_autogive_nobody_picks_up_is_destroyed_on_its_own_lifetime() {
         "NOT EXISTS (SELECT 1 FROM item WHERE vnum = 1000)",
     );
 }
+
+/// `event.item.item_destroy_event`'s gold arm (`CHARACTER::DropGold`, `G/char_item.cpp:7554-7591`):
+/// with a two-second `item_destroy_time_dropgold`, the pile Alpha drops lies under ground VID 1
+/// for both clients in view and is destroyed on time. The row turns `ported`: every lifetime —
+/// drop, gold and auto-give — now has its scenario.
+#[test]
+fn a_dropped_gold_pile_nobody_picks_up_is_destroyed_on_its_own_lifetime() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "item_destroy_time_dropgold = 2",
+    );
+    seat_alpha_and_zulu(&server, &database, &[]);
+    sql(
+        &database,
+        "UPDATE player SET gold = 5000000 WHERE name = 'Alpha'",
+    );
+    let elk = owners_protos()
+        .rows()
+        .iter()
+        .find(|row| row.item_type == gamedata::item_kind::ITEM_ELK)
+        .map(|row| row.vnum)
+        .expect("the owner's data has a gold pile");
+    let (mut alpha, alpha_listed) = enter_world(&server, b"alice", 0);
+    let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
+    alpha.sees_enter(zulu_listed.id, false, None);
+    let cell = protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
+    alpha.send_record(&protocol::cg_item_drop::CgItemDrop::new(cell, 1000).encode());
+    let dropped_at = std::time::Instant::now();
+    assert_eq!(
+        alpha.read_game(),
+        gold_change(alpha_listed.id, 0, 5_000_000 - 1000),
+        "a thousand leaves"
+    );
+    assert_eq!(alpha.read_game(), a_ground_add(1, elk));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1057;2]"));
+    assert_eq!(zulu.read_game(), a_ground_add(1, elk));
+    assert_eq!(alpha.read_game(), a_ground_del(1));
+    assert_eq!(zulu.read_game(), a_ground_del(1));
+    assert!(
+        dropped_at.elapsed() >= Duration::from_millis(1900),
+        "destroyed after {:?}",
+        dropped_at.elapsed()
+    );
+    alpha.still("nothing follows the destruction");
+}

@@ -52363,3 +52363,22 @@ is `unused`, no owner quest names it — so the probe must call `pc.give_item2`,
 call aborts the quest with no dialog.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5319 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after lifting `GIVE_PROBE` to a module const and re-running the scenario green; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 555. The gold's own clock
+
+Ledger 554 left `event.item.item_destroy_event` `partial` with one arm unwired at the
+scenario level: the gold lifetime. The wire existed (`with_gold_lifetime`, `drop_gold`
+uses it); the proof did not. It does now, and the row is `ported`.
+
+The scenario boots with a two-second `item_destroy_time_dropgold`, Alpha drops a thousand
+of her five million, both clients see the `ITEM_ELK` pile lie under ground VID 1, and two
+seconds on both see it go. The dropitem-for-dropgold mutant kills it. All three destroy
+clocks — drop (ledger 217), auto-give (554) and gold — now have their two-second proofs.
+
+Two record facts the scenario tripped on: the drop answers `GC_CHARACTER_GOLD_CHANGE`
+(225), not `GC_CHARACTER_GOLD`, and its amount is 0 with the value in the purse
+(`MoveRecord::Gold { amount: 0, value: left }`), as the world's drop lays it.
+
+No game code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5320 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after separating the literal and dropping the unused `mut`, re-running the scenario green; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
