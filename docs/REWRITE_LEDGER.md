@@ -51994,3 +51994,16 @@ the long spelling moves back, each landing when its script ends. One mutant died
 the short spelling the second click still says `here`.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5309 passed, 1 failed in 46 targets (`a_grade_refine_spends_the_stones_and_lands_a_new_one`, a load flake, green alone); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 537. The dungeon's channel
+
+Two rows sat `partial` behind stale notes: `in_dungeon` claimed no dungeon was ported,
+`get_channel_id` waited for the forest's leader branch. Both are live — the forest dungeon
+lives on 210 — and the forest scenario proves both. The probe's login gate
+(`if pc.in_dungeon() then`) arms the report timers: a dungeon-0 mutant never reports and
+dies at the report read. The channel needed more: `evt 1` alone cannot pin the value,
+because a channel-0 mutant moves the flag's write and read together and survives. Per
+the equivalent-mutant rule the report now notices `ch 1`, which the mutant breaks. Two
+mutants died.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5310 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

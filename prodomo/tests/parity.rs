@@ -23684,6 +23684,11 @@ fn forest_report_names_the_dungeon(party: ForestParty) -> ForestParty {
             chat_packet(CHAT_TYPE_NOTICE, 1, b"evt 1"),
             "{what} hears the set event flag"
         );
+        assert_eq!(
+            who.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, 1, b"ch 1"),
+            "{what} hears the dungeon's channel"
+        );
     }
     ForestParty {
         alice,
@@ -37480,6 +37485,7 @@ const DUNGEON_PROBE: &[u8] = b"quest dungeon_probe begin\n\
     d.notice(\"flag \" .. d.getf(\"frt_party_leader_pid\"))\n\
     d.notice(\"byidx \" .. d.getf_from_map_index(\"frt_party_leader_pid\", d.get_map_index()))\n\
     d.notice(\"evt \" .. (game.get_event_flag(\"frt_dungeon_status_\" .. pc.get_channel_id()) > 0 and 1 or 0))\n\
+    d.notice(\"ch \" .. pc.get_channel_id())\n\
     end\n\
     end\n\
     when probe_exit1.server_timer begin\n\
