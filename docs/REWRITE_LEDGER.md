@@ -51951,3 +51951,14 @@ pins the lines, the sets, the potion's quickslot fill and the socket write's upd
 and 7 after, vnum 27001. One mutant died: `get_count` reading the type breaks the page.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5306 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 533. The framed line
+
+Four dialog rows sat `partial` with unit tests only. `FRAME_PROBE` covers them in one
+click: `a_click_frames_the_dialog_and_names_the_npc_and_the_base` hears `npc=20300`
+(`skill_group1_1` in `questnpc.txt`), `npcnone=0`, the `base=` line naming the server's
+temporary gamedata copy (pinned by its `locale/europe` suffix, the temp prefix varying),
+and `framed` carrying both image tags in order. One mutant died: swapped left/top tags
+break the suffix.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5306 passed, 1 failed in 46 targets (`a_gm_aggregates_and_forgets_the_dogs_around`, the known load flake, green alone); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

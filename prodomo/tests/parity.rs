@@ -40666,6 +40666,21 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 533's frame probe: the skill teacher (vnum 20300, bound but questless)
+/// says the NPC id pair and the locale base, then frames a line with both images.
+const FRAME_PROBE: &[u8] = b"quest frame_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('npc='..getnpcid('skill_group1_1'))\n\
+    say('npcnone='..getnpcid('no_such_npc'))\n\
+    say('base='..get_locale_base_path())\n\
+    setleftimage('l.tga')\n\
+    settopimage('t.tga')\n\
+    say('framed')\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 532's satchel probe: the skill teacher (vnum 20300, bound but questless)
 /// gives two red potions and selects them, then says the quest item's readings.
 /// The socket write and the vnum close the page.
@@ -40948,6 +40963,49 @@ fn a_click_fills_the_satchel_and_says_the_stacks_readings() {
             b"count=2[ENTER]type=3[ENTER]subtype=0[ENTER]cell=1[ENTER]socket0=0[ENTER]socket0set=7[ENTER]vnum=27001[ENTER][DONE]"
         ),
         "the stack's readings"
+    );
+    alice.quiet("the step ends");
+}
+
+/// `lua.getnpcid`, `lua.get_locale_base_path`, `lua.setleftimage` and
+/// `lua.settopimage`: Beta clicks the skill teacher and hears the teacher's NPC id
+/// (20300), 0 for an unknown name, the locale base the server runs from, and a line
+/// framed by both image tags.
+#[test]
+fn a_click_frames_the_dialog_and_names_the_npc_and_the_base() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/frame_probe.lua", FRAME_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let page = alice.read_game();
+    assert_eq!(page[0], GC_SCRIPT, "a dialog: {page:02x?}");
+    let body = &page[6..];
+    // The base is the server's temporary gamedata copy, so only its shape pins:
+    // the `base=` prefix, then a path ending in `locale/europe`.
+    assert!(
+        body.starts_with(b"npc=20300[ENTER]npcnone=0[ENTER]base="),
+        "the ids and the base prefix: {body:?}"
+    );
+    assert!(
+        body.ends_with(
+            b"/locale/europe[ENTER][LEFTIMAGE src;l.tga][TOPIMAGE src;t.tga]framed[ENTER][DONE]"
+        ),
+        "the base suffix and the framed line: {body:?}"
     );
     alice.quiet("the step ends");
 }
