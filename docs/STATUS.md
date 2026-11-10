@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 520 (the buff follower).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 521
+Last reviewed: 2026-11-10, after ledger section 521 (the marriage sweep).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 522
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -574,6 +574,8 @@ Since 517 `sys.skill.extra` is `partial`: the 164-166 new passives climb through
 Since 518 `sys.item.costume` is `ported`: the weapon cover, its `/hide_costume 5` unhide, and the take-off-first cascade run under the fan-fit and stamped-clock checks; `sys.item.skin` is `unused` (`__SKIN_SYSTEM__` is defined but no game source names it).
 Since 519 `sys.npc.shop` is `ported`: keeper 9001 opens `START_EX` with its `shopex` tab and a buy follows the row's price selector, stamping the row's sockets and attributes; `sys.trade.item_shop` is `unused` (the shop lives in the retired DB server only, and no game source, record, quest or locale file reaches it).
 Since 520 `sys.skill.buff_npc` is `ported`: the 69700 toggle flips its socket-3 bit (unstacking past 1) and stands 20114 within 100 with the name `Buff` and the armour and weapon parts, the follower walks and runs to 250 of its owner and re-stands 200 behind past 4500, the five buffs cast in order past the 3 s stamp for the hour with `GC_AUTO_SHAMAN_SKILL`, the books train past the read-time gate, and 69699 chats the success line and is kept, as its training arm is commented out. The TEST chats stay out as Defects.
+The
+Since 521 `sys.marriage` is `unused`: a marriage forms only through `marriage.engage_to`, which no quest names, and the DB peer that carried the add is retired, so the wedding map never stands and `GC_LOVER_INFO` is never sent; the live hook is ported (71069-71074 refuse with `[LS;467]`).
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

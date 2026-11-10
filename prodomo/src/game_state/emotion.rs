@@ -8,8 +8,8 @@
 //! is `ACMD(do_emotion_allow)` (`:112-128`): the arena gate, then the `(VID, number)` consent
 //! insert.
 //!
-//! What legacy reads that this build does not track: marriage (no character is married).
-//! The wedding map
+//! What legacy reads that this build does not track: marriage (no character is married:
+//! `sys.marriage` is `unused`, as no quest calls `marriage.engage_to`). The wedding map
 //! (81) and the two mask uniques (71011, 71033) are read for real; the owner's config sets
 //! `disable_emotion_mask`, so the mask gate passes by default. `NEED_TARGET` never appears
 //! in the table, the disarm flags are never checked, and the consent set is never cleared:

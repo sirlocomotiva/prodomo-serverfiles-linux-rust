@@ -607,3 +607,12 @@ owner answers.
  so nothing in your deployment could ever speak to it, and the Rewrite closes on
  byte 64 like an unknown header. There is no adminpage config in `prodomo.toml`
  and none planned. Waits on it: confirm the row `unused`.
+65. **`sys.marriage` is `unused` (ledger 521).** A marriage forms only through
+ `marriage.engage_to` (`RequestAdd`, `G/questlua_marriage.cpp:25` — the sweep finds
+ no other caller in `server/`), which no quest names (all 15 `lua.marriage.*` rows
+ are `unused`, ledger 401, question 37), and the DB peer that carried the add is
+ retired (ADR-0001). With no marriage, the wedding map never stands, `GC_LOVER_INFO`
+ is never sent (both send sites need a `TMarriage`), and the emotion and login arms
+ read their unmarried branches, as the Rewrite does. The one live hook is ported:
+ wearing 71069-71074 refuses with `[LS;467]` (`G/char_item.cpp:10156-10161`).
+ Waits on it: confirm the row `unused`.

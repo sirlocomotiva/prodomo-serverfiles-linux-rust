@@ -642,6 +642,12 @@ impl<'s, 'g> Equipper<'s, 'g> {
                 return Err(refused);
             }
         }
+        // `G/char_item.cpp:10155-10161`, before the same-special-group arm the
+        // unique system owns: a marriage unique on an unmarried wearer refuses.
+        // No character of this build is married (`sys.marriage` is `unused`).
+        if matches!(item.vnum, 71_069..=71_074) {
+            return Err(MoveRefused::UnmarriedUnique);
+        }
         if proto.wear_flags & WEARABLE_UNIQUE != 0 {
             return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique)));
         }
@@ -1338,6 +1344,8 @@ mod tests {
     const TIMED_MOUNT: u32 = 52_002;
     const MALE_ONLY: u32 = 11_230;
     const UNIQUE: u32 = 71_001;
+    /// A marriage unique (`G/marriage.cpp:24-29`): worn, it needs a married wearer.
+    const MARRIAGE_UNIQUE: u32 = 71_069;
     const RING: u32 = 70_001;
     const LEVEL_TEN_SWORD: u32 = 31;
     const UNIQUE_FLAGGED: u32 = 11_240;
@@ -1459,6 +1467,7 @@ mod tests {
             proto(WEDDING, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY),
             male_only,
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
+            proto(MARRIAGE_UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
             proto(RING, ITEM_RING, 0, 0),
             level_ten,
             proto(UNIQUE_FLAGGED, ITEM_ARMOR, ARMOR_BODY, WEARABLE_UNIQUE),
@@ -1687,6 +1696,21 @@ mod tests {
             case.use_refused(inv(3)),
             MoveRefused::NotPorted(Unported::UseSubType(10))
         );
+    }
+
+    /// A marriage unique refuses with `[LS;467]`: no character of this build is
+    /// married (`sys.marriage` is `unused`), and the gate sits before the unique
+    /// system's own arm (`G/char_item.cpp:10155-10161`).
+    #[test]
+    fn a_marriage_unique_refuses_its_unmarried_wearer() {
+        let unique = Item::new(7, MARRIAGE_UNIQUE);
+        let mut case = Case::new(&[(inv(3), unique)]);
+        let unique_cell = wear_pos(EWearPositions::Unique1 as u16);
+        assert_eq!(
+            case.refused(inv(3), unique_cell),
+            MoveRefused::UnmarriedUnique
+        );
+        assert_eq!(MoveRefused::UnmarriedUnique.notice(), Some("[LS;467]"));
     }
 
     #[test]

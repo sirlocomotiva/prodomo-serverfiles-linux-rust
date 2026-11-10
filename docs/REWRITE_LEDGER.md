@@ -51547,3 +51547,30 @@ one names a constant that does not exist). Both now resolve; the `ITEM` one read
 as code, since there is no such constant.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5277 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 521. The marriage sweep
+
+`sys.marriage` is `unused`.
+
+A marriage forms only through `marriage.engage_to` (`RequestAdd`,
+`G/questlua_marriage.cpp:25`): the sweep of `server/` finds no other caller of
+`RequestAdd` besides its declaration and its header. No quest names it — all 15
+`lua.marriage.*` rows are `unused` (ledger 401, owner question 37) — and the DB peer
+that carried the add (`HEADER_GD_MARRIAGE_ADD`, answered with `HEADER_DG_MARRIAGE_ADD`
+into `CManager::Add`) is retired (ADR-0001). The controls: the positive control is
+`questlua_marriage.cpp` itself, which names `marriage` 54 times, and the negative
+control is `input_main.cpp`, which never names `marriage::CManager`.
+
+With no marriage, the wedding map never stands (`WeddingManager::Request` runs only
+from `WeddingRequest`, which `CManager::Add` arms when both partners are online, and
+map 81 on the Shared Channel hosts nothing without it), so `GC_LOVER_INFO` is never
+sent — both send sites (`TMarriage::Login`, `SetMarried`) need a `TMarriage` — and
+the near-check and wedding-end timers stay `unused` (ledger 432). The emotion arms
+read their unmarried branches, as the Rewrite does (the `[LS;481]` refusal without
+the consent pair, the wedding-map mask skip on map 81), and so does the login's
+war-map arm. The one live hook is ported: wearing a marriage unique (71069-71074,
+all `ITEM_UNIQUE` on the owner's data) refuses with `[LS;467]`
+(`G/char_item.cpp:10156-10161`), through `MoveRefused::UnmarriedUnique`, unit-tested
+in the world. Owner to confirm (question 65).
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5278 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets` clean; `cargo doc` clean. Afterwards no `prodomo\_%` database remained. No ADR changed.
