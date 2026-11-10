@@ -51891,3 +51891,37 @@ proven by passing scenarios, and the mutants confirm the two with live gates.
   `a_kill_scores_the_killer_and_the_season_awards_and_empties`.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5301 passed, 1 failed in 46 targets — `a_gm_flags_a_stray_dog_aggressive_and_coward` tripped on a stray `GC_OWNERSHIP` past a swing, then passed twice alone (a load flake; the slice touches no code); `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.
+
+## 530. The war's edges
+
+The event manager started and ended its wars in silence. Legacy's `UpdateGameFlag`
+(`G/event_manager.cpp:788-800`) notifies every connected character on each flag change —
+`SendEventBeginNotification`/`SendEventEndNotification` (`G/cmd_gm.cpp:1584-1596`) run the
+no-target `event_begin`/`event_end` scripts on each — and the Rewrite's `start_game_event`/
+`end_game_event` never did. So no war ever lettered, and `quest.kingdom_war_event` sat
+`partial`.
+
+`Manager::event_begin`/`event_end` (`quest/src/manager.rs:1483`) mirror `levelup` over
+`QUEST_NO_NPC`'s scripts: an unknown character misses, as legacy's `GetPC` returns NULL.
+`GameState::fire_event_edge` (`prodomo/src/game_state/quest_quiet.rs:467`) fans out in VID
+order, each PC hearing its own records; it sits inside the start/end arms (beside the flag
+write, where `UpdateGameFlag` sits), including the siege, kingdom and OX early returns.
+The quest `set_event_flag` path stays quiet, as `RequestSetEventFlag` never notifies.
+
+`quest.kingdom_war_event` is `ported`: `a_kingdom_war_letters_joins_and_clears` starts the
+war on the probe's chat, reads the start notice, the quest-16 letter and its title, ends
+the war (the scoreless pays, the loot, the end line, then the twelve `q.done` clears in
+quest order, skipping the panel), restarts it, re-reads the letter, presses the button —
+No refuses with the 130 line, Yes closes the dialog and warps to the war map's corner
+(0, 25600) — and hears nothing after. `send_letter` is `questlib.lua:142`,
+`clear_letter` is `q.done` (`questlib.lua:143`), and the dialog's options are
+`translate.locale.yes`/`no` ("Yes "/"No ", `translate.lua:9141-9142`); the `_120_sayReward`
+suffix is only a key name, and `say_reward` plays no part. One mutant died: the kingdom
+arm firing the end edge answers no letter. The login arm is a manager test
+(`an_event_begin_letters_and_its_end_clears`), since the login letter pass already covers
+the `login` trigger. The 522 and exp scenarios now read the same traffic: the stacked
+begins re-letter the siege (both `with` guards hold), and the siege end clears eleven,
+quest 16 keeping its letter while its flag holds. The OX, siege-unfought and kingdom-kill
+scenarios now read their start letters and end clears too, each watcher hearing its own.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5304 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

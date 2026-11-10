@@ -464,6 +464,58 @@ impl GameState {
         })
     }
 
+    /// `SendEventBeginNotification`/`SendEventEndNotification` (`G/cmd_gm.cpp:1584-1596`):
+    /// every connected character runs the no-target `event_begin` (or `event_end`) scripts,
+    /// in VID order, each hearing its own records. `UpdateGameFlag` fires it whenever an
+    /// event's flag changes (`G/event_manager.cpp:788-800`); the quest `set_event_flag`
+    /// path (`RequestSetEventFlag`) never does. Without quests nothing runs.
+    fn fire_event_edge(&mut self, begin: bool) {
+        let mut vids: Vec<Vid> = self.bodies.keys().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            let Some(mover) = self.own_mover(vid) else {
+                continue;
+            };
+            let Ok(character) = self.characters.find_by_vid(vid) else {
+                continue;
+            };
+            let pid = character.player_id();
+            let level = character
+                .points()
+                .map_or(1, world::character::Points::level);
+            let Some((channel, map)) = self.place_of(vid.raw()) else {
+                continue;
+            };
+            let (x, y) = self
+                .spot_of(vid.raw())
+                .map_or((0, 0), |spot| (spot.x, spot.y));
+            let place = crate::game_loop_messages::GroundPlace { channel, map, x, y };
+            let landed = self.run_quests(
+                place,
+                mover,
+                level,
+                pid,
+                &crate::game_loop_messages::QuestAccount::default(),
+                |manager, game| {
+                    if begin {
+                        manager.event_begin(pid, game)
+                    } else {
+                        manager.event_end(pid, game)
+                    }
+                },
+            );
+            let Some((_, (records, _, _, block_mode, _, _, _, _, _, _, _))) = landed else {
+                continue;
+            };
+            if let Some(mode) = block_mode {
+                self.block_modes.insert(vid, mode);
+            }
+            for record in records {
+                let _sent = self.write_to_client(vid, record);
+            }
+        }
+    }
+
     /// `_start_event` (`G/questlua_global.cpp:1636-1665`,
     /// `CEventManager::SetEventState`, `G/event_manager.cpp:719-779`) after the step:
     /// an index no event has is quiet, as `GetEventString` answers `EVENT_TYPE_NONE`
@@ -482,14 +534,17 @@ impl GameState {
         }
         if index == 11 {
             self.start_ox_event();
+            self.fire_event_edge(true);
             return;
         }
         if index == 13 {
             self.start_siege_war();
+            self.fire_event_edge(true);
             return;
         }
         if index == 14 {
             self.start_kingdom_war();
+            self.fire_event_edge(true);
             return;
         }
         self.set_event_flag(flag, 1);
@@ -500,6 +555,7 @@ impl GameState {
             self.grant_event_priv(1, value0);
             self.broadcast_notice_text(b"Item-Drop Boost Event has started. Enjoy the grinding.");
         }
+        self.fire_event_edge(true);
     }
 
     /// `_end_event` (`G/questlua_global.cpp:1668-1686`) after the step: an index no
@@ -515,14 +571,17 @@ impl GameState {
         }
         if index == 11 {
             self.end_ox_event();
+            self.fire_event_edge(false);
             return;
         }
         if index == 13 {
             self.end_siege_war();
+            self.fire_event_edge(false);
             return;
         }
         if index == 14 {
             self.end_kingdom_war();
+            self.fire_event_edge(false);
             return;
         }
         self.set_event_flag(flag, 0);
@@ -531,6 +590,7 @@ impl GameState {
         } else if index == 2 {
             self.broadcast_notice_text(b"Item-Drop Boost Event has ended.");
         }
+        self.fire_event_edge(false);
     }
 
     /// The manager's event flag `flag` (`GetEventState`'s read,

@@ -5887,6 +5887,19 @@ fn server_quest_title(index: u16, title: &[u8]) -> Vec<u8> {
     record
 }
 
+/// `HEADER_GC_QUEST_INFO` clearing the begin bit of quest `index` (`q.done`,
+/// `questlib.lua:143`): the size word counts the whole record, and the one byte behind
+/// the `QUEST_SEND_ISBEGIN` flag carries the cleared value.
+fn quest_begin_clear(index: u16) -> Vec<u8> {
+    let mut record = vec![GC_QUEST_INFO];
+    record.extend_from_slice(&9_u16.to_le_bytes());
+    record.extend_from_slice(&index.to_le_bytes());
+    record.extend_from_slice(&0_u16.to_le_bytes());
+    record.push(1);
+    record.push(0);
+    record
+}
+
 /// `HEADER_GC_QUEST_INFO` with the clock and the counter the script set: the 17-byte
 /// names and the 4-byte values behind the 8-byte head, in flag-bit order.
 fn server_quest_clock(
@@ -40558,7 +40571,218 @@ fn a_click_opens_windows_and_runs_the_exp_event() {
         chat_packet(CHAT_TYPE_NOTICE, 1, b"Experience Boost Event has ended."),
         "the exp end"
     );
+    read_event_clears(&mut alice, &EVENT_CLEAR_QUESTS, "exp end");
     alice.quiet("the step ends");
+}
+
+/// Answer the war probe's `answer`th chat: the menu first, then the choice.
+fn answer_probe_chat(keyed: &mut Keyed, teacher: u32, answer: u8, note: &str) {
+    keyed.send_record(&client_click(teacher));
+    assert_eq!(
+        keyed.read_game(),
+        server_script(1, b"[QUESTION 1;probe start|2;probe end|3;Inchide]",),
+        "the probe's chats, {note}"
+    );
+    keyed.send_record(&client_script_answer(answer));
+}
+
+/// Read the kingdom war's scoreless end: the three pays in empire order, the winner's
+/// loot, and the end line.
+fn read_scoreless_kingdom_end(keyed: &mut Keyed) {
+    for (empire, value) in [
+        (b"[LS;793]".as_slice(), b"25".as_slice()),
+        (b"[LS;794]".as_slice(), b"50".as_slice()),
+        (b"[LS;795]".as_slice(), b"100".as_slice()),
+    ] {
+        let mut exp = b"[LS;724;".to_vec();
+        exp.extend_from_slice(empire);
+        exp.extend_from_slice(b";[LS;1040];");
+        exp.extend_from_slice(value);
+        exp.extend_from_slice(b"]");
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, 1, &exp),
+            "the scoreless pay for {empire:?}"
+        );
+    }
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"[LS;724;[LS;795];[LS;1038];50]"),
+        "the winner's loot"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Kingdom War Event has ended. Thank you for participating!"
+        ),
+        "the war end"
+    );
+}
+
+/// The kingdom quest's join dialog: the titled page with the bloody-war says and the
+/// Yes/No question.
+fn kingdom_join_ask() -> Vec<u8> {
+    titled_page(
+        b"Kingdom War Event ",
+        &[
+            b"",
+            b"",
+            b"Join the bloody war and help your kingdom to[ENTER]be victorius.",
+            b"",
+            b"Would you like to join the Kingdom War? ",
+        ],
+        b"[QUESTION 1;Yes |2;No ]",
+    )
+}
+
+/// The twelve event quests an `event_end` clears (`q.done` in quest order, skipping the
+/// panel, which has no `event_end` script).
+const EVENT_CLEAR_QUESTS: [u16; 12] = [4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+/// Read the war letter the `event_begin` edge sends: the button in skin 0 naming `quest`,
+/// then the window's title.
+fn read_war_letter(keyed: &mut Keyed, quest: u32, note: &str) {
+    let letter = keyed.read_game();
+    assert_eq!(letter[0], GC_SCRIPT, "the {note} letter: {letter:02x?}");
+    assert_eq!(
+        the_letter_button(&letter[6..]),
+        Some(quest),
+        "the {note} quest"
+    );
+    let info = keyed.read_game();
+    assert_eq!(info[0], GC_QUEST_INFO, "the {note} title: {info:02x?}");
+}
+
+/// Read the `q.done` clears the `event_end` edge sends for `quests`, in order.
+fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
+    for quest in quests {
+        assert_eq!(
+            keyed.read_game(),
+            quest_begin_clear(*quest),
+            "the {note} clears quest {quest}"
+        );
+    }
+}
+
+/// Ledger 530's war probe: the skill teacher (vnum 20300, bound but questless)
+/// starts and ends the kingdom war on its two chats.
+const WAR_PROBE_DIALOG: &[u8] = b"quest war_probe begin\n\
+    state start begin\n\
+    when 20300.chat.\"probe start\" begin\n\
+    start_event(14, 0, 0)\n\
+    say('begun')\n\
+    end\n\
+    when 20300.chat.\"probe end\" begin\n\
+    end_event(14)\n\
+    say('ended')\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `quest.kingdom_war_event`, `lua.q.done`: the probe's start raises the kingdom war —
+/// the start chats and every online character's `event_begin` letters the war — and
+/// the quest window's button joins: Yes warps to the war map's corner. The probe's
+/// end clears the letter through `event_end`.
+#[test]
+fn a_kingdom_war_letters_joins_and_clears() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/war_probe.lua",
+            WAR_PROBE_DIALOG,
+        )],
+        &war_103_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    answer_probe_chat(&mut alice, teacher, 0, "and the close");
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"begun[ENTER][DONE]"),
+        "the start says so"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Kingdom War Event has started. Sharpen your weapons and join the battlefield."
+        ),
+        "the war start"
+    );
+    read_war_letter(&mut alice, 16, "war");
+    let quest = 16;
+    alice.quiet("the start step ends");
+    answer_probe_chat(&mut alice, teacher, 1, "again");
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"ended[ENTER][DONE]"),
+        "the end says so"
+    );
+    read_scoreless_kingdom_end(&mut alice);
+    read_event_clears(&mut alice, &EVENT_CLEAR_QUESTS, "end");
+    alice.quiet("the end step ends");
+    answer_probe_chat(&mut alice, teacher, 0, "a third time");
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"begun[ENTER][DONE]"),
+        "the restart says so"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Kingdom War Event has started. Sharpen your weapons and join the battlefield."
+        ),
+        "the war restart"
+    );
+    read_war_letter(&mut alice, quest, "war re");
+    alice.quiet("the restart step ends");
+    alice.send_record(&client_script_button(quest));
+    let ask = kingdom_join_ask();
+    assert_eq!(alice.read_game(), server_script(1, &ask), "the join dialog");
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[ENTER]Then go pick up your weapons and hurry up. [ENTER][ENTER][DONE]"
+        ),
+        "the refusal"
+    );
+    alice.send_record(&client_script_button(quest));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &ask),
+        "the dialog again"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the answer closes the dialog"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&entered.add[1..5]);
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((0, 25_600), port),
+        "the war map's corner on Channel 1"
+    );
+    alice.still("nothing follows the warp");
 }
 
 /// The probe quest the land scenario adds: the claim stone reports the land under
@@ -49273,6 +49497,7 @@ fn a_click_starts_and_ends_the_siege_and_kingdom_wars() {
         ),
         "the siege start"
     );
+    read_war_letter(&mut alice, 15, "siege");
     assert_eq!(
         alice.read_game(),
         chat_packet(
@@ -49282,6 +49507,8 @@ fn a_click_starts_and_ends_the_siege_and_kingdom_wars() {
         ),
         "the kingdom start"
     );
+    read_war_letter(&mut alice, 15, "siege re");
+    read_war_letter(&mut alice, 16, "kingdom");
     // No stone died, so every empire's score is 0 and each takes the
     // `m_bSiegeScore + 1` fallback rank 1: 25 exp, Shinsoo first, then Chunjo,
     // then Jinno.
@@ -49304,6 +49531,8 @@ fn a_click_starts_and_ends_the_siege_and_kingdom_wars() {
         ),
         "the siege end"
     );
+    // The kingdom flag still holds, so quest 16's end guard fails and it keeps its letter.
+    read_event_clears(&mut alice, &EVENT_CLEAR_QUESTS[..11], "siege end");
     // Nobody stands on 103, so the siege's teleport line has no hearer.
     // All four rows hold 0, so the stable sort keeps empire order: all-empires
     // first (skipped), then Shinsoo, Chunjo and Jinno take positions 1-3.
@@ -49338,6 +49567,7 @@ fn a_click_starts_and_ends_the_siege_and_kingdom_wars() {
         ),
         "the kingdom end"
     );
+    read_event_clears(&mut alice, &EVENT_CLEAR_QUESTS, "kingdom end");
     alice.quiet("the step ends");
 }
 
@@ -49420,6 +49650,7 @@ fn read_kingdom_end(carol: &mut Keyed, alice: &mut Keyed, bob: &mut Keyed) {
             assert_eq!(got, *pay, "pay {at} on {note}");
         }
     }
+    read_event_clears(carol, &EVENT_CLEAR_QUESTS, "end on carol");
     carol.quiet_allowing_farm("map 1 hears no teleport line");
     for (watcher, note, hue) in [(alice, "alice", 1), (bob, "bob", 2)] {
         assert_eq!(
@@ -49431,6 +49662,7 @@ fn read_kingdom_end(carol: &mut Keyed, alice: &mut Keyed, bob: &mut Keyed) {
             ),
             "the teleport line on {note}"
         );
+        read_event_clears(watcher, &EVENT_CLEAR_QUESTS, &format!("end on {note}"));
         watcher.quiet_allowing_farm("the step ends");
     }
 }
@@ -49518,6 +49750,7 @@ fn a_kingdom_kill_on_the_war_map_fans_the_score() {
         ),
         "the kingdom start"
     );
+    read_war_letter(&mut carol, 16, "war");
     carol.quiet("the start ends the step");
     let (mut alice, alpha, _quickslots, _items) =
         load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
@@ -49634,6 +49867,7 @@ fn read_siege_end(carol: &mut Keyed, teacher: u32, watchers: [(&mut Keyed, &[u8;
         ),
         "the siege end"
     );
+    read_event_clears(carol, &EVENT_CLEAR_QUESTS, "end on carol");
     carol.quiet_allowing_farm("map 1 hears no teleport line");
     for (watcher, stone_vid) in watchers {
         for empire in [b"[LS;793]", b"[LS;794]", b"[LS;795]"] {
@@ -49700,6 +49934,7 @@ fn read_siege_end(carol: &mut Keyed, teacher: u32, watchers: [(&mut Keyed, &[u8;
             saw_stone |= vid == *stone_vid;
         }
         assert!(saw_stone, "its own stone dies in view");
+        read_event_clears(watcher, &EVENT_CLEAR_QUESTS, "end on a watcher");
         watcher.quiet_allowing_farm("the step ends");
     }
 }
@@ -49776,6 +50011,7 @@ fn a_click_starts_the_siege_and_a_second_ends_it_unfought() {
         ),
         "the siege start"
     );
+    read_war_letter(&mut carol, 15, "siege");
     carol.quiet("the start ends the step");
     // Each watcher enters beside its stone and reads its insert's feet.
     let (mut alice, _, _, _) = load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
@@ -49947,6 +50183,7 @@ fn a_click_starts_the_ox_event_and_the_herald_seats_the_entrant() {
         ),
         "the start line"
     );
+    read_war_letter(&mut alice, 13, "OX");
     alice.quiet("the step ends");
     let (mut bob, _yankee, list) = select_screen(&server, b"bob");
     let _bob_row = listed(&list, 0);

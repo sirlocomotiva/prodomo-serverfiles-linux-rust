@@ -1482,6 +1482,36 @@ impl Manager {
         })
     }
 
+    /// `CQuestManager::EventBegin` (`G/questmanager.cpp:1925-1938`): the event manager
+    /// started an event, so character `pid`'s no-target `event_begin` scripts run
+    /// (`NPC::OnEventBegin`, `HandleEvent`, `G/questnpc.cpp:599-602`). A character the
+    /// manager never saw misses, as legacy's `GetPC` returns NULL for it.
+    pub fn event_begin(&mut self, pid: u32, game: &mut dyn Game) -> bool {
+        if !self.pcs.contains_key(&pid) {
+            tracing::warn!("QUEST no such pc id : {pid}");
+            return false;
+        }
+        self.operate(pid, game, |run, pc, npcs| match npcs.get(&QUEST_NO_NPC) {
+            Some(npc) => run.handle_event(pc, npc, "event_begin"),
+            None => false,
+        })
+    }
+
+    /// `CQuestManager::EventEnd` (`G/questmanager.cpp:1940-1953`): the event manager
+    /// ended an event, so character `pid`'s no-target `event_end` scripts run
+    /// (`NPC::OnEventEnd`, `HandleEvent`, `G/questnpc.cpp:604-607`). A character the
+    /// manager never saw misses, as legacy's `GetPC` returns NULL for it.
+    pub fn event_end(&mut self, pid: u32, game: &mut dyn Game) -> bool {
+        if !self.pcs.contains_key(&pid) {
+            tracing::warn!("QUEST no such pc id : {pid}");
+            return false;
+        }
+        self.operate(pid, game, |run, pc, npcs| match npcs.get(&QUEST_NO_NPC) {
+            Some(npc) => run.handle_event(pc, npc, "event_end"),
+            None => false,
+        })
+    }
+
     /// `CQuestManager::Target` (`G/questmanager.cpp:723-736`): the `verb` (`arrive`, `die`) of
     /// character `pid`'s target of quest `quest` named `name`, which `target_event` reports,
     /// runs that quest's script for it (`Run::on_target`). Returns whether one ran or a
@@ -11187,6 +11217,36 @@ mod tests {
         assert_eq!(game.take(), [sash_script, yohara_script]);
         assert_eq!(game.infos, [sash_info, yohara_info]);
         assert!(game.created.is_empty() && game.deleted.is_empty());
+        manager.disconnect(PID);
+    }
+
+    /// The kingdom war's begin and end (`G/questmanager.cpp:1925-1953`): with the flag up,
+    /// `event_begin` sends the war letter; with the flag down, `event_end` clears it. An
+    /// unknown character misses both, as legacy's `GetPC` returns NULL for it.
+    #[test]
+    fn an_event_begin_letters_and_its_end_clears() {
+        let mut manager = manager().lock().unwrap();
+        let war = manager
+            .host()
+            .quest_index(b"kingdom_war_event")
+            .expect("kingdom");
+        manager.disconnect(PID);
+        let mut stranger = Fake::default();
+        assert!(!manager.event_begin(PID, &mut stranger));
+        assert!(!manager.event_end(PID, &mut stranger));
+        manager.pcs.entry(PID).or_default();
+        manager.set_event_flag(b"kingdom_war_event", 1);
+        let mut game = Fake::default();
+        assert!(manager.event_begin(PID, &mut game));
+        let button = format!("[QUESTBUTTON idx;{war}|name;Kingdom War Event ][DONE]");
+        assert_eq!(game.take(), [(QUEST_SKIN_NOWINDOW, button.clone())]);
+        manager.set_event_flag(b"kingdom_war_event", 0);
+        assert!(manager.event_end(PID, &mut game));
+        assert!(game.take().is_empty(), "the clear sends no dialog");
+        manager.set_event_flag(b"kingdom_war_event", 1);
+        assert!(manager.login(PID, &mut game));
+        assert_eq!(game.take(), [(QUEST_SKIN_NOWINDOW, button)]);
+        manager.set_event_flag(b"kingdom_war_event", 0);
         manager.disconnect(PID);
     }
 
