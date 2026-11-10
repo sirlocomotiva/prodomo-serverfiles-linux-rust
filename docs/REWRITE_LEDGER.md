@@ -52007,3 +52007,15 @@ the equivalent-mutant rule the report now notices `ch 1`, which the mutant break
 mutants died.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5310 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 538. The playtime twice
+
+The short playtime spelling sat `partial` with no caller and a racy value. `PLAYTIME_PROBE`
+says both spellings seconds after the login: `a_click_says_the_playtime_twice` parses both
+and pins their agreement under 120 seconds. One mutant died: the short spelling reading
+`max_hp` breaks the agreement. `q.done` joins it as a re-read — ledger 530's twelve clears
+already prove the bridge (a wrong-quest mutant dies there), and `restart_quest`,
+`complete_quest`, `giveup_quest` and `complete_quest_state` are callerless questlib Lua,
+not the `quest_done` row.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5311 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

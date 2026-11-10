@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 537 (the dungeon's channel).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 538
+Last reviewed: 2026-11-10, after ledger section 538 (the playtime twice).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 539
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -591,6 +591,7 @@ Since 534 `lua.target.npc`, `lua.target.pc`, `lua.target.id` and `lua.target.cle
 Since 535 `lua.pc.remove_item`, `lua.pc.countitem` and `lua.pc.removeitem` are `ported`: the take-back probe gives five red potions, counts 5, takes 2 under the long spelling, counts 3, takes the rest under the short spelling, and counts 0 — a short-count mutant dies on the page. The
 Since 536 `lua.q.setstate` and `lua.q.set_state` are `ported`: three clicks walk the state probe from `start` to `away` under the short spelling and back under the long one — a dropped short spelling dies on the second click. The
 Since 537 `lua.pc.in_dungeon` and `lua.pc.get_channel_id` are `ported`: both ledger notes were stale — the forest dungeon lives — and the forest report proves both, the login gate leaning on the first and a new `ch 1` notice pinning the second after `evt 1` let a channel-0 mutant survive. The
+Since 538 `lua.pc.getplaytime` and `lua.q.done` are `ported`: the playtime probe says both spellings seconds after the login and they agree, while `q.done` is a re-read — the 530 clears already prove the bridge, and the callerless helpers are questlib Lua, not the row. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

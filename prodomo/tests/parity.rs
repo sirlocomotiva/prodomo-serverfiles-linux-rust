@@ -40672,6 +40672,17 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 538's playtime probe: the skill teacher (vnum 20300, bound but questless)
+/// says the playtime under both spellings.
+const PLAYTIME_PROBE: &[u8] = b"quest playtime_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('short='..pc.getplaytime())\n\
+    say('long='..pc.get_playtime())\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 536's state probe: the skill teacher (vnum 20300, bound but questless)
 /// says `here` in `start` and moves to `away` under the short spelling, then says
 /// `away` there and moves back under the long spelling.
@@ -41229,6 +41240,51 @@ fn three_clicks_walk_the_probe_there_and_back_again() {
         alice.read_game(),
         server_script(1, b"here[ENTER][DONE]"),
         "the long spelling moved back"
+    );
+    alice.quiet("the step ends");
+}
+
+/// `lua.pc.getplaytime`: Beta, minutes fresh, clicks the skill teacher; both
+/// spellings say the same small playtime, seconds since the login.
+#[test]
+fn a_click_says_the_playtime_twice() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/playtime_probe.lua",
+            PLAYTIME_PROBE,
+        )],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let page = alice.read_game();
+    assert_eq!(page[0], GC_SCRIPT, "a dialog: {page:02x?}");
+    let body = String::from_utf8_lossy(&page[6..]).into_owned();
+    let (short, long) = body
+        .strip_suffix("[DONE]")
+        .and_then(|text| text.strip_prefix("short="))
+        .and_then(|text| text.split_once("[ENTER]long="))
+        .and_then(|(short, long)| long.strip_suffix("[ENTER]").map(|long| (short, long)))
+        .expect("two readings");
+    let short: i32 = short.parse().expect("a number");
+    let long: i32 = long.parse().expect("a number");
+    assert_eq!(short, long, "both spellings agree");
+    assert!(
+        (0..120).contains(&short),
+        "seconds since the login: {short}"
     );
     alice.quiet("the step ends");
 }
