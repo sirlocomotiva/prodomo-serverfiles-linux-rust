@@ -51925,3 +51925,17 @@ quest 16 keeping its letter while its flag holds. The OX, siege-unfought and kin
 scenarios now read their start letters and end clears too, each watcher hearing its own.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5304 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 531. Every gauge
+
+Twenty-four `pc.get_*` rows sat `partial` with the same note: backed, unit test only, no
+scenario. No owner script calls any of them (the `.quest` and `.lua` sweep finds only
+`npc.get_race`, ported in ledger 529), so only a probe can cover them. One probe does:
+`GAUGE_PROBE` says every reading on a click, and `a_click_beside_the_teacher_says_every_gauge`
+enters naked level-1 Beta beside the skill teacher and pins the page — 650 HP and 200 SP
+under both spellings, exp 0 with 300 to level 2, race 1, alignment and leadership 0, the
+local cells (622, 556), nil wear, bare weapon and armor, the name twice, and the VID the
+enter showed. One mutant died: `max_hp` reading `sp` breaks the page. `pc.getplaytime`
+stays `partial`: its value races the login clock, and no quest calls it.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5305 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

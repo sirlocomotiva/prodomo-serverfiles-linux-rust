@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 530 (the war's edges).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 531
+Last reviewed: 2026-11-10, after ledger section 531 (every gauge).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 532
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -584,6 +584,7 @@ Since 527 `lua.get_time`, `lua.get_global_time` and `lua.pc.getf` are `ported`: 
 Since 528 `lua.number` and `lua.setskin` are `ported`: the temple's kill table draws ten times in the world test (a wire kill of the 218k-HP boss is out of reach), and the attr67 dialog's `setskin(NOWINDOW)` ends `[DONE]` in skin 0 — each proven by a killing mutant. `setleftimage` and `settopimage` stay `partial`: no owner quest calls them. The
 Since 529 `lua.npc.getrace`, `lua.pc.enough_inventory` and `lua.pc.get_gm_level` are `ported`: the race alias shares its arm, the attr67 collect's gate reads room, and the implementor's login passes the panel letter's gate — the two gates each proven by a killing mutant. The
 Since 530 `quest.kingdom_war_event` is `ported`: every event flag's change runs the no-target `event_begin`/`event_end` scripts on every online character, the war letters quest 16, the button joins (No refuses, Yes warps to the war map's corner), and the end clears all twelve event letters; the 522, exp, OX, siege-unfought and kingdom-kill scenarios now read the same traffic. The
+Since 531 the twenty-four `pc.get_*` gauges are `ported`: one probe says them all on a naked level-1 warrior — 650 HP, 200 SP, 300 to level 2, race 1, the local cells, nil wear, bare weapon and armor, the name, and the enter's VID — and a max-HP mutant dies on the page. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

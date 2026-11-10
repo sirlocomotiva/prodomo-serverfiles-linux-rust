@@ -40666,6 +40666,39 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 531's gauge probe: the skill teacher (vnum 20300, bound but questless)
+/// says every `pc.get_*` reading on a click.
+const GAUGE_PROBE: &[u8] = b"quest gauge_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    say('hp='..pc.gethp())\n\
+    say('hp2='..pc.get_hp())\n\
+    say('maxhp='..pc.getmaxhp())\n\
+    say('maxhp2='..pc.get_max_hp())\n\
+    say('sp='..pc.getsp())\n\
+    say('sp2='..pc.get_sp())\n\
+    say('maxsp='..pc.getmaxsp())\n\
+    say('maxsp2='..pc.get_max_sp())\n\
+    say('exp='..pc.get_exp())\n\
+    say('nextexp='..pc.get_next_exp())\n\
+    say('race='..pc.get_race())\n\
+    say('align='..pc.get_alignment())\n\
+    say('lead='..pc.getleadership())\n\
+    say('lead2='..pc.get_leadership())\n\
+    say('lx='..pc.get_local_x())\n\
+    say('ly='..pc.get_local_y())\n\
+    say('wear0='..tostring(pc.get_wear(0)))\n\
+    say('weapon='..pc.getweapon())\n\
+    say('weapon2='..pc.get_weapon())\n\
+    say('armor='..pc.getarmor())\n\
+    say('armor2='..pc.get_armor())\n\
+    say('name='..pc.getname())\n\
+    say('name2='..pc.get_name())\n\
+    say('vid='..pc.get_vid())\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 530's war probe: the skill teacher (vnum 20300, bound but questless)
 /// starts and ends the kingdom war on its two chats.
 const WAR_PROBE_DIALOG: &[u8] = b"quest war_probe begin\n\
@@ -40783,6 +40816,43 @@ fn a_kingdom_war_letters_joins_and_clears() {
         "the war map's corner on Channel 1"
     );
     alice.still("nothing follows the warp");
+}
+
+/// The `pc.get_*` gauges (`G/questlua_pc.cpp`): Beta, level 1 and naked beside the skill
+/// teacher, clicks and hears every reading — the vitals under both spellings, the exp
+/// pair, the race, the alignment, the leadership pair, the local point, the empty wear
+/// (nil), the bare weapon and armor (0), the name pair, and the VID the enter showed.
+#[test]
+fn a_click_beside_the_teacher_says_every_gauge() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/gauge_probe.lua", GAUGE_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_click(teacher));
+    // A level-1 warrior: 650 HP, 200 SP, no exp, 300 to level 2, race 1, no
+    // alignment or leadership, the spawn's local cells, nothing worn, and the VID
+    // the enter showed.
+    let mut page = b"hp=650[ENTER]hp2=650[ENTER]maxhp=650[ENTER]maxhp2=650[ENTER]sp=200[ENTER]sp2=200[ENTER]maxsp=200[ENTER]maxsp2=200[ENTER]exp=0[ENTER]nextexp=300[ENTER]race=1[ENTER]align=0[ENTER]lead=0[ENTER]lead2=0[ENTER]lx=622[ENTER]ly=556[ENTER]wear0=nil[ENTER]weapon=0[ENTER]weapon2=0[ENTER]armor=0[ENTER]armor2=0[ENTER]name=Beta[ENTER]name2=Beta[ENTER]vid="
+        .to_vec();
+    page.extend_from_slice(vid.to_string().as_bytes());
+    page.extend_from_slice(b"[ENTER][DONE]");
+    assert_eq!(alice.read_game(), server_script(1, &page), "every gauge");
+    alice.quiet("the step ends");
 }
 
 /// The probe quest the land scenario adds: the claim stone reports the land under
