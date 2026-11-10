@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 533 (the framed line).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 534
+Last reviewed: 2026-11-10, after ledger section 534 (both target spellings).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 535
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -587,6 +587,7 @@ Since 530 `quest.kingdom_war_event` is `ported`: every event flag's change runs 
 Since 531 the twenty-four `pc.get_*` gauges are `ported`: one probe says them all on a naked level-1 warrior — 650 HP, 200 SP, 300 to level 2, race 1, the local cells, nil wear, bare weapon and armor, the name, and the enter's VID — and a max-HP mutant dies on the page. The
 Since 532 `lua.pc.give_item2_select`, `lua.item.get_cell`, `lua.item.get_socket`, `lua.item.set_socket`, `lua.item.get_count`, `lua.item.get_type` and `lua.item.get_sub_type` are `ported`: the satchel probe gives two red potions into cell 1, says the stack's count, type pair, cell and socket, writes socket 0, and a count mutant dies on the page. The
 Since 533 `lua.setleftimage`, `lua.settopimage`, `lua.getnpcid` and `lua.get_locale_base_path` are `ported`: the frame probe names the teacher's NPC id, misses an unknown name, shows the temp locale base, and frames a line with both image tags — a swapped-tags mutant dies on the suffix. The
+Since 534 `lua.target.npc`, `lua.target.pc`, `lua.target.id` and `lua.target.clear` are `ported`: the mark probe marks the clicker's VID under both spellings, says both ids, clears both marks, and says 0 twice — a wrong-quest mutant dies on the page. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

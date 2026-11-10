@@ -51962,3 +51962,14 @@ and `framed` carrying both image tags in order. One mutant died: swapped left/to
 break the suffix.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5306 passed, 1 failed in 46 targets (`a_gm_aggregates_and_forgets_the_dogs_around`, the known load flake, green alone); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 534. Both target spellings
+
+Four target rows sat `partial`: the `npc` and `pc` spellings of `target_vid` that no
+loaded script calls, the id read, and the clear. `MARK_PROBE` covers all four:
+`a_click_marks_says_and_clears_both_target_spellings` marks the clicker's own VID under
+each spelling with a shown name (targets 1 and 2), says both ids from the page, clears,
+and says 0 twice. One mutant died: `target_id` reading a neighbouring quest answers 0
+early and breaks the page.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5308 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean (after dropping a stray `mut`); `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

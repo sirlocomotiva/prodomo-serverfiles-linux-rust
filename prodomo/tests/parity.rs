@@ -40666,6 +40666,23 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 534's mark probe: the skill teacher (vnum 20300, bound but questless)
+/// marks the clicker under both `target_vid` spellings, says both ids, clears, and
+/// says both again.
+const MARK_PROBE: &[u8] = b"quest mark_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    target.npc('hero', pc.get_vid(), 'Hero', 1)\n\
+    say('id='..target.id('hero'))\n\
+    target.pc('sidekick', pc.get_vid(), 'Side', 1)\n\
+    say('side='..target.id('sidekick'))\n\
+    target.clear()\n\
+    say('gone='..target.id('hero'))\n\
+    say('sidegone='..target.id('sidekick'))\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 533's frame probe: the skill teacher (vnum 20300, bound but questless)
 /// says the NPC id pair and the locale base, then frames a line with both images.
 const FRAME_PROBE: &[u8] = b"quest frame_probe begin\n\
@@ -41006,6 +41023,60 @@ fn a_click_frames_the_dialog_and_names_the_npc_and_the_base() {
             b"/locale/europe[ENTER][LEFTIMAGE src;l.tga][TOPIMAGE src;t.tga]framed[ENTER][DONE]"
         ),
         "the base suffix and the framed line: {body:?}"
+    );
+    alice.quiet("the step ends");
+}
+
+/// `lua.target.npc`, `lua.target.pc`, `lua.target.id` and `lua.target.clear`: Beta
+/// clicks the skill teacher; both spellings mark her own VID with a shown name, the
+/// page says both ids, the clear deletes both marks, and the page says 0 twice.
+#[test]
+fn a_click_marks_says_and_clears_both_target_spellings() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/mark_probe.lua", MARK_PROBE)],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(1, b"Hero", vid),
+        "the npc spelling marks"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(2, b"Side", vid),
+        "the pc spelling marks"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_delete(1),
+        "the clear deletes the first"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_delete(2),
+        "the clear deletes the second"
+    );
+    let page = format!("id={vid}[ENTER]side={vid}[ENTER]gone=0[ENTER]sidegone=0[ENTER][DONE]");
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, page.as_bytes()),
+        "the ids, then the zeros"
     );
     alice.quiet("the step ends");
 }
