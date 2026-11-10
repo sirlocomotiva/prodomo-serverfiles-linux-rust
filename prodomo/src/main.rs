@@ -10453,6 +10453,8 @@ struct GameData {
     npcs: NpcData,
     /// The shops a keeper opens, which the game thread holds.
     shops: Arc<NpcShops>,
+    /// The renewal tabs a keeper opens, which the game thread holds.
+    renewal_shops: Arc<NpcShops>,
     /// The drop tables, which the game thread holds.
     drops: Arc<gamedata::drop::DropTables>,
     /// The `item_attr` rows, which a dropped item's magic rolls against.
@@ -10528,6 +10530,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let npcs = load_npc_data(config, &atlas)?;
     let cells = load_map_cells(config, &atlas)?;
     let shops = load_npc_shops(config, &protos)?;
+    let renewal_shops = load_renewal_shops(config, &protos)?;
     let drops = load_drop_tables(config, &protos)?;
     let (attrs, rare_attrs) = load_item_attrs(config)?;
     let masks = load_item_masks(config)?;
@@ -10562,6 +10565,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         quest_translate,
         npcs,
         shops,
+        renewal_shops,
         drops,
         attrs,
         rare_attrs,
@@ -10619,6 +10623,38 @@ fn load_npc_shops(config: &ServerConfig, protos: &ItemProtos) -> Result<Arc<NpcS
         shops = shops.shops().len(),
         skipped = shops.skipped().len(),
         "NPC shops loaded"
+    );
+    Ok(Arc::new(shops))
+}
+
+/// Load the renewal shops: the `shopex` and `shopex_item` rows of the Game data tables,
+/// laid out as `CShopManager::InitializeShopEX` lays them out (`G/shop_manager.cpp:773-820`).
+///
+/// An item that cannot be laid out is left out of its tab and warned about, as a base
+/// shop's is.
+fn load_renewal_shops(config: &ServerConfig, protos: &ItemProtos) -> Result<Arc<NpcShops>, String> {
+    let dump_path = config.game_tables.join("player.sql");
+    let dump = std::fs::read(&dump_path)
+        .map_err(|error| format!("Failed to read {}: {error}", dump_path.display()))?;
+    let table = gamedata::npc_shop::renewal_shops_from_dump(&dump).map_err(|error| {
+        format!(
+            "Failed to read the renewal shops in {}: {error}",
+            dump_path.display()
+        )
+    })?;
+    let shops = NpcShops::lay_out_renewal(&table, protos);
+    for skipped in shops.skipped() {
+        warn!(
+            shop = skipped.shop_vnum,
+            vnum = skipped.vnum,
+            skip = ?skipped.skip,
+            "A renewal-shop item cannot be laid out; it is left out of its tab"
+        );
+    }
+    info!(
+        shops = shops.shops().len(),
+        skipped = shops.skipped().len(),
+        "Renewal shops loaded"
     );
     Ok(Arc::new(shops))
 }
@@ -11419,6 +11455,7 @@ fn build_world(
     let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_npc_shops(Arc::clone(&data.shops))
+        .with_renewal_shops(Arc::clone(&data.renewal_shops))
         .with_drop_tables(Arc::clone(&data.drops))
         .with_item_attrs(Arc::clone(&data.attrs))
         .with_item_rare_attrs(Arc::clone(&data.rare_attrs))

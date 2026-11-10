@@ -45,7 +45,9 @@ use gamedata::item_kind::{
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::npc_shop::{ShopSlot, ITEM_FLAG_COUNT_PER_1GOLD};
 use protocol::gc_shop::{
-    SHOP_SUBHEADER_GC_INVENTORY_FULL, SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY,
+    SHOPEX_EXP, SHOPEX_GOLD, SHOPEX_ITEM, SHOPEX_SECONDARY, SHOP_SUBHEADER_GC_INVENTORY_FULL,
+    SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP, SHOP_SUBHEADER_GC_NOT_ENOUGH_ITEM,
+    SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY, SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY_EX,
     SHOP_SUBHEADER_GC_SOLD_OUT,
 };
 use protocol::item_pos::ItemPos;
@@ -106,6 +108,15 @@ pub enum UnportedCreation {
 pub enum ShopRefused {
     /// The slot's price is 0, or the buyer holds less gold than it.
     NotEnoughMoney,
+    /// The buyer holds fewer secondary coins than the price.
+    NotEnoughMoneyEx,
+    /// The buyer holds fewer of the price item than the price.
+    NotEnoughItem,
+    /// The buyer holds less experience than the price.
+    NotEnoughExp,
+    /// The slot's selector is none of the four a buy pays (`G/shopEx.cpp:172-190`):
+    /// anything past `SHOPEX_EXP` (4) pays as gold but refuses as nothing.
+    BadPriceType(u8),
     /// `CreateItem` answered nothing: the vnum has no proto.
     SoldOut,
     /// The item would take a path of `CreateItem` the Rewrite does not port.
@@ -145,10 +156,15 @@ impl ShopRefused {
     pub const fn subheader(&self) -> Option<u8> {
         match self {
             Self::NotEnoughMoney => Some(SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY),
+            Self::NotEnoughMoneyEx => Some(SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY_EX),
+            Self::NotEnoughItem => Some(SHOP_SUBHEADER_GC_NOT_ENOUGH_ITEM),
+            Self::NotEnoughExp => Some(SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP),
             Self::SoldOut | Self::NotPorted(_) | Self::IdsExhausted => {
                 Some(SHOP_SUBHEADER_GC_SOLD_OUT)
             }
             Self::InventoryFull => Some(SHOP_SUBHEADER_GC_INVENTORY_FULL),
+            // An unknown selector answers nothing (`G/shopEx.cpp:172-190` falls through),
+            // as do the sale-only refusals a buy never raises.
             _ => None,
         }
     }
@@ -167,6 +183,10 @@ impl core::fmt::Display for ShopRefused {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotEnoughMoney => write!(f, "not enough gold"),
+            Self::NotEnoughMoneyEx => write!(f, "not enough secondary coins"),
+            Self::NotEnoughItem => write!(f, "not enough of the price item"),
+            Self::NotEnoughExp => write!(f, "not enough experience"),
+            Self::BadPriceType(selector) => write!(f, "no price selector {selector}"),
             Self::SoldOut => write!(f, "the item has no proto"),
             Self::NotPorted(path) => write!(f, "making the item takes an unported path: {path:?}"),
             Self::InventoryFull => write!(f, "no free cell"),
@@ -227,8 +247,36 @@ pub fn buy_item(
     protos: &ItemProtos,
     rules: &MoveRules,
 ) -> Result<(MoveDone, u64), ShopRefused> {
-    if offer.price == 0 || gold < offer.price {
-        return Err(ShopRefused::NotEnoughMoney);
+    match offer.price_type {
+        SHOPEX_GOLD => {
+            if offer.price == 0 || gold < offer.price {
+                return Err(ShopRefused::NotEnoughMoney);
+            }
+        }
+        SHOPEX_SECONDARY => {
+            if offer.price == 0
+                || crate::character::count_specify_type_item(
+                    items,
+                    protos,
+                    rules.usable_cells,
+                    gamedata::item_kind::ITEM_SECONDARY_COIN,
+                ) < price_as_i32(offer.price)
+            {
+                return Err(ShopRefused::NotEnoughMoneyEx);
+            }
+        }
+        SHOPEX_ITEM => {
+            if offer.price == 0
+                || crate::character::count_specify_item(items, rules.usable_cells, offer.price_vnum)
+                    < price_as_i32(offer.price)
+            {
+                return Err(ShopRefused::NotEnoughItem);
+            }
+        }
+        // The experience check needs the caller's pools: it runs in the state's buy after
+        // this refuses the unknown selectors. This arm only passes it through.
+        SHOPEX_EXP => {}
+        selector => return Err(ShopRefused::BadPriceType(selector)),
     }
     let proto = protos.get(offer.vnum).ok_or(ShopRefused::SoldOut)?;
     if let Some(path) = unported_creation(offer.vnum, proto) {
@@ -262,10 +310,26 @@ pub fn buy_item(
     {
         *socket = 1;
     }
+    // A renewal buy stamps the row's sockets and attributes on the made item
+    // (`G/shopEx.cpp:258-269`): the sockets after the gain roll, which overwrite it, and the
+    // attributes whole. A base slot holds zeros, which stamp nothing.
+    for (attr, value) in item.attributes.iter_mut().zip(offer.attrs) {
+        *attr = protocol::gc_item_window::ItemAttribute::new(value.attr_type, value.value);
+    }
+    for (socket, value) in item.sockets.iter_mut().zip(offer.sockets) {
+        if value != 0 {
+            *socket = value;
+        }
+    }
     let pos = ItemPos::new(EWindows::Inventory as u8, cell);
     item.pos = pos;
     items.set(pos, &item).map_err(ShopRefused::Storage)?;
-    let left = gold - offer.price;
+    // No gold moves on a secondary-coin or an item price: the state's buy spends the
+    // stacks itself, after this has made sure they cover it.
+    let left = match offer.price_type {
+        SHOPEX_SECONDARY | SHOPEX_ITEM => gold,
+        _ => gold - offer.price,
+    };
     let done = MoveDone {
         kind: MoveKind::Bought,
         records: vec![
@@ -279,6 +343,12 @@ pub fn buy_item(
         changes: vec![ItemChange::Created(item)],
     };
     Ok((done, left))
+}
+
+/// The price as the count comparisons read it: an `int` saturated at the top
+/// (`static_cast<int>(dwPrice)`, `G/shopEx.cpp:181,185`).
+fn price_as_i32(price: u64) -> i32 {
+    i32::try_from(price).unwrap_or(i32::MAX)
 }
 
 /// The gold a sale of `count` of an item made from `proto` pays, after the tax
@@ -423,7 +493,24 @@ mod tests {
     }
 
     fn offer(vnum: u32, count: u16, price: u64) -> ShopSlot {
-        ShopSlot { vnum, count, price }
+        let mut slot = ShopSlot::empty();
+        slot.vnum = vnum;
+        slot.count = count;
+        slot.price = price;
+        slot
+    }
+
+    fn renewal_offer(
+        vnum: u32,
+        count: u16,
+        price: u64,
+        price_type: u8,
+        price_vnum: u32,
+    ) -> ShopSlot {
+        let mut slot = offer(vnum, count, price);
+        slot.price_type = price_type;
+        slot.price_vnum = price_vnum;
+        slot
     }
 
     fn holding(placed: &[(u16, Item)]) -> CharacterItems {
@@ -508,6 +595,101 @@ mod tests {
             panic!("one item made");
         };
         assert_eq!(item.sockets, [1; SOCKETS], "300 is 44 as a byte, then six");
+    }
+
+    #[test]
+    fn a_renewal_buy_follows_the_price_selector() {
+        // `SHOPEX_ITEM`: three arrows are not five, and five are.
+        let mut items = holding(&[(0, arrows(7, 3))]);
+        assert_eq!(
+            buy(
+                &mut items,
+                10_000,
+                renewal_offer(SWORD, 1, 5, SHOPEX_ITEM, ARROW)
+            ),
+            Err(ShopRefused::NotEnoughItem)
+        );
+        let (_, left) = buy(
+            &mut items,
+            10_000,
+            renewal_offer(SWORD, 1, 3, SHOPEX_ITEM, ARROW),
+        )
+        .expect("the count covers the price");
+        assert_eq!(left, 10_000, "no gold moves on an item price");
+        // `SHOPEX_SECONDARY`: nothing on the data has the type, so any price refuses.
+        assert_eq!(
+            buy(
+                &mut items,
+                10_000,
+                renewal_offer(SWORD, 1, 1, SHOPEX_SECONDARY, 0)
+            ),
+            Err(ShopRefused::NotEnoughMoneyEx)
+        );
+        // A 0 price refuses under every selector but experience, whose check runs above.
+        for selector in [SHOPEX_GOLD, SHOPEX_SECONDARY, SHOPEX_ITEM] {
+            assert!(
+                buy(
+                    &mut items,
+                    10_000,
+                    renewal_offer(SWORD, 1, 0, selector, ARROW)
+                )
+                .is_err(),
+                "a 0 price refuses under {selector}"
+            );
+        }
+        // Past `SHOPEX_EXP` (4): nothing, and nothing changes. The one buy above
+        // landed at cell 1, so the refusal must leave the cells as they are.
+        assert_eq!(
+            buy(&mut items, 10_000, renewal_offer(SWORD, 1, 10, 9, 0)),
+            Err(ShopRefused::BadPriceType(9))
+        );
+        assert_eq!(items.item_at(inv(1)).map(|item| item.vnum), Some(SWORD));
+        assert_eq!(items.item_at(inv(3)), None);
+        // A price past `i32::MAX` reads saturated: three arrows are fewer than it.
+        assert_eq!(
+            buy(
+                &mut items,
+                10_000,
+                renewal_offer(
+                    SWORD,
+                    1,
+                    u64::from(u32::from(u16::MAX)) * 131_072,
+                    SHOPEX_ITEM,
+                    ARROW
+                )
+            ),
+            Err(ShopRefused::NotEnoughItem)
+        );
+    }
+
+    #[test]
+    fn a_renewal_buy_stamps_the_row_s_sockets_and_attributes() {
+        let mut slot = renewal_offer(SWORD, 1, 1, SHOPEX_GOLD, 0);
+        slot.sockets = [7, 0, 8, 0, 0, 0];
+        slot.attrs[0] = gamedata::records::ShopItemAttribute {
+            attr_type: 1,
+            value: 20,
+        };
+        let mut items = CharacterItems::new();
+        let (done, _) = buy(&mut items, 10, slot).expect("buys");
+        let [ItemChange::Created(item)] = done.changes.as_slice() else {
+            panic!("one item made: {:?}", done.changes);
+        };
+        assert_eq!(
+            item.sockets[0], 7,
+            "a stamped socket overwrites the gain roll"
+        );
+        assert_eq!(item.sockets[2], 8, "a stamped socket survives the roll");
+        assert_eq!(item.sockets[4], 0, "a zero row socket stamps nothing");
+        assert_eq!(
+            item.attributes[0],
+            protocol::gc_item_window::ItemAttribute::new(1, 20)
+        );
+        assert_eq!(
+            item.attributes[1],
+            protocol::gc_item_window::ItemAttribute::new(0, 0),
+            "a zero row attribute stamps nothing"
+        );
     }
 
     #[test]

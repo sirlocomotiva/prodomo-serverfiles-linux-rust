@@ -59,6 +59,9 @@ pub const ITEM_COSTUME: i32 = 28;
 pub const ITEM_DS: i32 = 29;
 /// `ITEM_SPECIAL_DS`.
 pub const ITEM_SPECIAL_DS: i32 = 30;
+/// `ITEM_SECONDARY_COIN` (32): the secondary-coin items a renewal buy with a
+/// `SHOPEX_SECONDARY` price spends (`G/shopEx.cpp:180-182`).
+pub const ITEM_SECONDARY_COIN: i32 = 32;
 /// `ITEM_RING`.
 pub const ITEM_RING: i32 = 33;
 /// `ITEM_BELT`.

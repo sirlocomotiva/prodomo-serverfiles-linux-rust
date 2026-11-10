@@ -22,6 +22,10 @@ use std::fmt;
 
 use crate::item_proto::{ItemProto, ItemProtos};
 use crate::records::{ShopItemRecord, ShopTableRecord};
+use crate::renewal_shop::{
+    build_renewal_shop_table_legacy, RenewalShopLimits, RenewalShopQueryRow, RenewalShopQueryValue,
+    RenewalShopTableError,
+};
 use crate::shop::{
     build_shop_table_legacy, ShopLimits, ShopQueryValue, ShopTableError, ShopTableQueryRow,
     SHOP_ITEM_MAX_NUM,
@@ -47,8 +51,17 @@ pub struct ShopSlot {
     pub vnum: u32,
     /// `count`, the `shop_item.count` column.
     pub count: u16,
-    /// `price`, from [`shop_price`].
+    /// `price`, from [`shop_price`], or the `shopex_item.price` column for a renewal item.
     pub price: u64,
+    /// `price_type`, the renewal price selector (`SHOPEX_*`, `C/tables.h:786-793`).
+    /// A base item is always [`SHOP_PRICE_TYPE_GOLD`].
+    pub price_type: u8,
+    /// `price_vnum`, the price item of a [`SHOP_PRICE_TYPE_ITEM`] renewal item.
+    pub price_vnum: u32,
+    /// `alSockets`: the renewal item's sockets, which a buy stamps on the bought item.
+    pub sockets: [i32; crate::records::SHOP_ITEM_SOCKET_MAX_NUM],
+    /// `aAttr`: the renewal item's attributes, stamped the same way.
+    pub attrs: [crate::records::ShopItemAttribute; crate::records::SHOP_ITEM_ATTRIBUTE_MAX_NUM],
 }
 
 /// One NPC shop, laid out.
@@ -58,8 +71,37 @@ pub struct NpcShop {
     pub vnum: u32,
     /// `m_dwNPCVnum`, the `shop.npc_vnum` column.
     pub npc_vnum: u32,
+    /// `name`, the `shopex.name` tab bytes. A base shop holds no tab name.
+    pub tab_name: Option<[u8; crate::records::SHOP_SIGN_BYTES]>,
     /// `m_itemVector`, by slot. `None` is a slot no item was placed in.
     pub slots: [Option<ShopSlot>; SHOP_ITEM_MAX_NUM],
+}
+
+impl ShopSlot {
+    /// An empty slot as `CShop::Buy` prices it: 0 of nothing for 0 gold.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            vnum: 0,
+            count: 0,
+            price: 0,
+            price_type: crate::records::SHOP_PRICE_TYPE_GOLD,
+            price_vnum: 0,
+            sockets: [0; crate::records::SHOP_ITEM_SOCKET_MAX_NUM],
+            attrs: [crate::records::ShopItemAttribute {
+                attr_type: 0,
+                value: 0,
+            }; crate::records::SHOP_ITEM_ATTRIBUTE_MAX_NUM],
+        }
+    }
+}
+
+impl NpcShop {
+    /// Whether this is a renewal (`shopex`) tab: a base shop holds no tab name.
+    #[must_use]
+    pub const fn is_renewal(&self) -> bool {
+        self.tab_name.is_some()
+    }
 }
 
 /// Why an item of a shop's table was left out of the shop.
@@ -119,6 +161,32 @@ impl NpcShops {
         shops
     }
 
+    /// Lay out every renewal tab of the table, in the table's order
+    /// (`CShopManager::InitializeShopEX`, `G/shop_manager.cpp:773-820`). Each record is
+    /// one tab: the name is the record's, the coin type is gold, and the items are
+    /// placed like a base shop's, but the price, the selector, the sockets and the
+    /// attributes come from the row, not the proto.
+    #[must_use]
+    pub fn lay_out_renewal(records: &[ShopTableRecord], protos: &ItemProtos) -> Self {
+        let mut shops = Self::default();
+        for record in records {
+            let shop = lay_out_renewal_shop(record, protos, &mut shops.skipped);
+            let index = shops.shops.len();
+            shops.by_npc.entry(shop.npc_vnum).or_insert(index);
+            shops.shops.push(shop);
+        }
+        shops
+    }
+
+    /// Every renewal tab a keeper of this race opens, in the table's order.
+    #[must_use]
+    pub fn tabs_for_npc(&self, npc_vnum: u32) -> Vec<&NpcShop> {
+        self.shops
+            .iter()
+            .filter(|shop| shop.npc_vnum == npc_vnum)
+            .collect()
+    }
+
     /// `CShopManager::GetByNPCVnum` (`shop_manager.cpp:100-108`): the shop a keeper of this
     /// race opens.
     #[must_use]
@@ -164,6 +232,7 @@ fn lay_out_shop(
     let mut shop = NpcShop {
         vnum: record.vnum,
         npc_vnum: record.npc_vnum,
+        tab_name: None,
         slots: [None; SHOP_ITEM_MAX_NUM],
     };
     let mut grid = [false; SHOP_GRID_CELLS];
@@ -179,6 +248,61 @@ fn lay_out_shop(
         }
     }
     shop
+}
+
+fn lay_out_renewal_shop(
+    record: &ShopTableRecord,
+    protos: &ItemProtos,
+    skipped: &mut Vec<SkippedShopItem>,
+) -> NpcShop {
+    let mut shop = NpcShop {
+        vnum: record.vnum,
+        npc_vnum: record.npc_vnum,
+        tab_name: Some(record.shop_name),
+        slots: [None; SHOP_ITEM_MAX_NUM],
+    };
+    let mut grid = [false; SHOP_GRID_CELLS];
+    for item in record.items.iter().take_while(|item| item.vnum != 0) {
+        match place_renewal(&mut grid, item, protos) {
+            Ok((slot, placed)) => shop.slots[slot] = Some(placed),
+            Err(skip) => skipped.push(SkippedShopItem {
+                shop_vnum: record.vnum,
+                vnum: item.vnum,
+                skip,
+            }),
+        }
+    }
+    shop
+}
+
+fn place_renewal(
+    grid: &mut [bool; SHOP_GRID_CELLS],
+    item: &ShopItemRecord,
+    protos: &ItemProtos,
+) -> Result<(usize, ShopSlot), ShopSkip> {
+    let proto = protos.get(item.vnum).ok_or(ShopSkip::NoProto)?;
+    let size = proto.size.to_le_bytes()[0];
+    if size == 0 {
+        return Err(ShopSkip::NoSize);
+    }
+    let height = usize::from(size);
+    let cell = find_blank(grid, height).ok_or(ShopSkip::NoRoom { size })?;
+    for row in 0..height {
+        grid[cell + row * SHOP_GRID_WIDTH] = true;
+    }
+    if cell >= SHOP_ITEM_MAX_NUM {
+        return Err(ShopSkip::PastTheSlots { cell });
+    }
+    let slot = ShopSlot {
+        vnum: item.vnum,
+        count: item.count,
+        price: item.price,
+        price_type: item.price_type,
+        price_vnum: item.price_vnum,
+        sockets: item.sockets,
+        attrs: item.attrs,
+    };
+    Ok((cell, slot))
 }
 
 fn place(
@@ -205,6 +329,13 @@ fn place(
         vnum: item.vnum,
         count: item.count,
         price: shop_price(proto, item.count),
+        price_type: crate::records::SHOP_PRICE_TYPE_GOLD,
+        price_vnum: 0,
+        sockets: [0; crate::records::SHOP_ITEM_SOCKET_MAX_NUM],
+        attrs: [crate::records::ShopItemAttribute {
+            attr_type: 0,
+            value: 0,
+        }; crate::records::SHOP_ITEM_ATTRIBUTE_MAX_NUM],
     };
     Ok((cell, slot))
 }
@@ -241,6 +372,15 @@ pub enum ShopDumpError {
     },
     /// The joined rows do not build a shop table.
     Table(ShopTableError),
+    /// The joined renewal rows do not build a renewal table.
+    RenewalTable(RenewalShopTableError),
+    /// A `shopex_item` row's `price_type` names no enum member.
+    BadPriceType {
+        /// The zero-based row of the table.
+        row: usize,
+        /// The bytes the cell held.
+        value: Vec<u8>,
+    },
 }
 
 impl fmt::Display for ShopDumpError {
@@ -257,6 +397,11 @@ impl fmt::Display for ShopDumpError {
                 )
             }
             Self::Table(error) => error.fmt(formatter),
+            Self::RenewalTable(error) => error.fmt(formatter),
+            Self::BadPriceType { row, value } => write!(
+                formatter,
+                "`shopex_item` row {row} has a `price_type` that is none of GOLD, SECONDCOIN, ITEM, EXP: {value:?}"
+            ),
         }
     }
 }
@@ -315,6 +460,232 @@ pub fn shops_from_dump(dump: &[u8]) -> Result<Vec<ShopTableRecord>, ShopDumpErro
         })
         .collect();
     build_shop_table_legacy(&rows, ShopLimits::default()).map_err(ShopDumpError::Table)
+}
+
+/// Build the renewal (`shopex`) table from the `shopex` and `shopex_item` rows of the
+/// owner's `player.sql` dump.
+///
+/// The join and the sort are the boot query's (`InitializeShopEXTable`,
+/// `D/ClientManagerBoot.cpp:384-466`): each `shopex` row with every `shopex_item` row of
+/// its vnum, or with one row of `NULL`s when it has none, sorted by shop vnum and then by
+/// item vnum, `NULL` first. The joined rows are decoded with the legacy policy. The one
+/// column the query transforms is handed over transformed: `price_type+0` maps the enum
+/// to its 1-based index (`player.sql:1296`, `enum('GOLD','SECONDCOIN','ITEM','EXP')`),
+/// which is the `SHOPEX_*` selector, so the decoder is given the index bytes (`b"1"` for
+/// the owner's row) rather than the word.
+///
+/// # Errors
+///
+/// Returns [`ShopDumpError`] when the dump cannot be read, a column is missing or not a
+/// number, a `price_type` names no enum member, or the joined rows are refused by
+/// [`build_renewal_shop_table_legacy`].
+pub fn renewal_shops_from_dump(dump: &[u8]) -> Result<Vec<ShopTableRecord>, ShopDumpError> {
+    let shops = read_table(dump, "shopex").map_err(ShopDumpError::Dump)?;
+    let items = read_table(dump, "shopex_item").map_err(ShopDumpError::Dump)?;
+    let (shop_keys, shop_names) = renewal_shops(&shops)?;
+    let item_rows = renewal_items(&items)?;
+    let mut joined: Vec<(usize, Option<usize>)> = Vec::new();
+    for (shop, keys) in shop_keys.iter().enumerate() {
+        let before = joined.len();
+        for (row, item) in item_rows.iter().enumerate() {
+            if item.keys[0].0 == keys[0].0 {
+                joined.push((shop, Some(row)));
+            }
+        }
+        if joined.len() == before {
+            joined.push((shop, None));
+        }
+    }
+    joined.sort_by_key(|(shop, item)| {
+        (
+            shop_keys[*shop][0].0,
+            item.map(|row| item_rows[row].keys[1].0),
+        )
+    });
+    let columns = renewal_item_columns(&items)?;
+    let mut rows = Vec::with_capacity(joined.len());
+    for (shop, item) in joined {
+        rows.push(renewal_row(
+            &shop_keys,
+            &shop_names,
+            &item_rows,
+            &columns,
+            shop,
+            item,
+        )?);
+    }
+    build_renewal_shop_table_legacy(&rows, RenewalShopLimits::default())
+        .map_err(ShopDumpError::RenewalTable)
+}
+
+/// One `shopex_item` row: the joined numbers and every cell the boot query reads.
+struct RenewalItem {
+    /// `[shop_vnum, item_vnum, count]`, for the join and the sort.
+    keys: [Cell; 3],
+    /// Every value of the row, by column position.
+    values: Vec<SqlValue>,
+}
+
+/// The `vnum`/`npc_vnum` numbers and the `name` bytes of every `shopex` row.
+type RenewalShops = (Vec<[Cell; 2]>, Vec<Vec<u8>>);
+
+/// The `vnum`/`npc_vnum` numbers and the `name` bytes of every `shopex` row.
+fn renewal_shops(table: &SqlTable) -> Result<RenewalShops, ShopDumpError> {
+    let keys = numbers(table, "shopex", ["vnum", "npc_vnum"])?;
+    if table.rows.is_empty() {
+        return Ok((keys, Vec::new()));
+    }
+    let at = table.column("name").ok_or(ShopDumpError::NoColumn {
+        table: "shopex",
+        column: "name",
+    })?;
+    let mut names = Vec::with_capacity(table.rows.len());
+    for values in &table.rows {
+        let SqlValue::Text(bytes) = &values[at] else {
+            return Err(ShopDumpError::NotANumber {
+                table: "shopex",
+                row: names.len(),
+                column: "name",
+            });
+        };
+        names.push(bytes.clone());
+    }
+    Ok((keys, names))
+}
+
+/// The joined numbers and the whole rows of `shopex_item`.
+fn renewal_items(table: &SqlTable) -> Result<Vec<RenewalItem>, ShopDumpError> {
+    let keys = numbers(table, "shopex_item", ["shop_vnum", "item_vnum", "count"])?;
+    Ok(keys
+        .into_iter()
+        .zip(&table.rows)
+        .map(|(keys, values)| RenewalItem {
+            keys,
+            values: values.clone(),
+        })
+        .collect())
+}
+
+/// The column positions the boot query reads from `shopex_item`, in the query's order:
+/// `price`, `price_vnum`, `price_type`, the six sockets, and the seven attribute pairs.
+struct RenewalItemColumns {
+    /// `price`, `price_vnum`, `price_type`.
+    price: [usize; 3],
+    /// `socket0` through `socket5`.
+    sockets: [usize; 6],
+    /// `attrtypeN`, `attrvalueN`.
+    attrs: [(usize, usize); 7],
+}
+
+/// The positions of the boot query's `shopex_item` columns.
+fn renewal_item_columns(table: &SqlTable) -> Result<RenewalItemColumns, ShopDumpError> {
+    if table.rows.is_empty() {
+        return Ok(RenewalItemColumns {
+            price: [0; 3],
+            sockets: [0; 6],
+            attrs: [(0, 0); 7],
+        });
+    }
+    let at = |column: &'static str| {
+        table.column(column).ok_or(ShopDumpError::NoColumn {
+            table: "shopex_item",
+            column,
+        })
+    };
+    Ok(RenewalItemColumns {
+        price: [at("price")?, at("price_vnum")?, at("price_type")?],
+        sockets: [
+            at("socket0")?,
+            at("socket1")?,
+            at("socket2")?,
+            at("socket3")?,
+            at("socket4")?,
+            at("socket5")?,
+        ],
+        attrs: [
+            (at("attrtype0")?, at("attrvalue0")?),
+            (at("attrtype1")?, at("attrvalue1")?),
+            (at("attrtype2")?, at("attrvalue2")?),
+            (at("attrtype3")?, at("attrvalue3")?),
+            (at("attrtype4")?, at("attrvalue4")?),
+            (at("attrtype5")?, at("attrvalue5")?),
+            (at("attrtype6")?, at("attrvalue6")?),
+        ],
+    })
+}
+
+/// One 28-column renewal row, in the boot query's column order.
+fn renewal_row(
+    shops: &[[Cell; 2]],
+    names: &[Vec<u8>],
+    items: &[RenewalItem],
+    columns: &RenewalItemColumns,
+    shop: usize,
+    item: Option<usize>,
+) -> Result<RenewalShopQueryRow, ShopDumpError> {
+    let mut cells = Vec::with_capacity(28);
+    cells.push(RenewalShopQueryValue::bytes(&shops[shop][0].1));
+    cells.push(RenewalShopQueryValue::bytes(&names[shop]));
+    cells.push(RenewalShopQueryValue::bytes(&shops[shop][1].1));
+    let Some(row) = item.map(|row| &items[row]) else {
+        cells.extend((0..25).map(|_| RenewalShopQueryValue::null()));
+        return RenewalShopQueryRow::try_new(cells).map_err(|source| {
+            ShopDumpError::RenewalTable(RenewalShopTableError::Row {
+                index: shop,
+                source,
+            })
+        });
+    };
+    let number = |value: &SqlValue| match value {
+        SqlValue::Bare(bytes) | SqlValue::Text(bytes) => RenewalShopQueryValue::bytes(bytes),
+        SqlValue::Null => RenewalShopQueryValue::null(),
+    };
+    cells.push(number(&SqlValue::Bare(row.keys[1].1.clone())));
+    cells.push(number(&SqlValue::Bare(row.keys[2].1.clone())));
+    for at in [columns.price[0], columns.price[1]] {
+        cells.push(number(&row.values[at]));
+    }
+    cells.push(renewal_price_type(&row.values[columns.price[2]], shop)?);
+    for at in columns.sockets {
+        cells.push(number(&row.values[at]));
+    }
+    for (attr, value) in columns.attrs {
+        cells.push(number(&row.values[attr]));
+        cells.push(number(&row.values[value]));
+    }
+    RenewalShopQueryRow::try_new(cells).map_err(|source| {
+        ShopDumpError::RenewalTable(RenewalShopTableError::Row {
+            index: shop,
+            source,
+        })
+    })
+}
+
+/// The `price_type+0` the boot query hands the decoder: the enum's 1-based index as
+/// decimal bytes (`player.sql:1296`, `enum('GOLD','SECONDCOIN','ITEM','EXP')`), which is
+/// the `SHOPEX_*` selector (`C/tables.h:786-793`).
+fn renewal_price_type(
+    value: &SqlValue,
+    shop: usize,
+) -> Result<RenewalShopQueryValue, ShopDumpError> {
+    let word = match value {
+        SqlValue::Text(bytes) | SqlValue::Bare(bytes) => bytes.as_slice(),
+        SqlValue::Null => b"0",
+    };
+    let index = match word {
+        b"GOLD" => b"1",
+        b"SECONDCOIN" => b"2",
+        b"ITEM" => b"3",
+        b"EXP" => b"4",
+        b"0" => b"0",
+        _ => {
+            return Err(ShopDumpError::BadPriceType {
+                row: shop,
+                value: word.to_vec(),
+            });
+        }
+    };
+    Ok(RenewalShopQueryValue::bytes(index))
 }
 
 /// The named columns of every row, each read as a whole number.
@@ -405,6 +776,30 @@ mod tests {
             ));
         }
         text.into_bytes()
+    }
+
+    #[test]
+    fn the_owner_s_renewal_shop_reads_its_tab_and_its_item() {
+        let records = renewal_shops_from_dump(&owner_dump()).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!((record.vnum, record.npc_vnum), (1, 9001));
+        assert_eq!(record.item_count, 1);
+        assert_eq!(&record.shop_name[..4], b"test");
+        assert_eq!(&record.shop_name[4..], &[0; 29]);
+        let item = &record.items[0];
+        assert_eq!((item.vnum, item.count, item.price), (50011, 1, 0));
+        assert_eq!((item.price_type, item.price_vnum), (1, 0));
+        let laid = NpcShops::lay_out_renewal(&records, &owner_protos());
+        assert_eq!(laid.shops().len(), 1);
+        assert!(laid.skipped().is_empty());
+        let shop = &laid.shops()[0];
+        assert!(shop.is_renewal());
+        assert_eq!(shop.tab_name.unwrap()[..4], *b"test");
+        let slot = shop.slots[0].expect("the size-1 item takes slot 0");
+        assert_eq!((slot.vnum, slot.count, slot.price), (50011, 1, 0));
+        assert_eq!((slot.price_type, slot.price_vnum), (1, 0));
+        assert_eq!(laid.for_npc(9001).map(|shop| shop.vnum), Some(1));
     }
 
     /// A record's `(vnum, npc, [(item, count)])`.

@@ -685,6 +685,8 @@ pub struct GameState {
     npcs: BTreeMap<(u8, i32), Arc<MapNpcs>>,
     /// The NPC shops, by keeper vnum.
     shops: Arc<gamedata::npc_shop::NpcShops>,
+    /// The renewal tabs, by keeper vnum.
+    renewal_shops: Arc<gamedata::npc_shop::NpcShops>,
     /// The player motion clips, which give each race and weapon its walk and run speed.
     /// The player motion clips, which give each race and weapon its walk and run speed.
     motions: Arc<gamedata::pc_motion::PcMotions>,

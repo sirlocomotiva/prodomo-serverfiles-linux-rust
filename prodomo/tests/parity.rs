@@ -6973,6 +6973,105 @@ fn a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored() {
     assert_eq!(items_of(&database, "Alpha"), "none");
 }
 
+/// `sys.npc.shop` (renewal): a click on the renewal keeper 9001 opens its one tab, and a
+/// buy follows the row's price selector.
+///
+/// Alpha stands a few steps from the keeper on map 1, its own empire's. The window is
+/// `START_EX` (10) with one 2953-byte tab: the name `test`, coin type 0, and the gift
+/// box 50011 at slot 0 with a gold price of 0. A buy of slot 0 is refused with
+/// `NOT_ENOUGH_MONEY`, because a 0 price refuses (`CShopEx::Buy`, `G/shopEx.cpp:163-167`);
+/// a buy of slot 40 (the second tab, which the keeper has not) is `INVALID_POS`.
+/// Nothing is stored.
+#[test]
+fn a_click_on_a_renewal_keeper_opens_its_tab_and_a_buy_follows_the_selector() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = server_without_wander(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Given: Alpha on map 1, a few steps from the keeper at (469200, 951700).
+    sql(
+        &database,
+        "UPDATE player SET x = 469500, y = 951900, gold = 5000000 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items, Vec::<Vec<u8>>::new(), "Alpha carries nothing");
+    alice.send_record(&client_enter_game());
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHARACTER_ADD);
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    let keepers: Vec<u32> = shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == 9001u16.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    let [keeper] = keepers[..] else {
+        panic!("map 1 shows one keeper 9001, not {keepers:?}");
+    };
+    read_enter_tail(&mut alice);
+    alice.quiet("the burst is over");
+
+    // When: Alpha clicks the keeper. Then: the renewal window opens, owned by the keeper,
+    // with the one tab's item at slot 0 and nothing else.
+    alice.send_record(&client_click(keeper));
+    let start = alice.read_game();
+    assert_eq!(start.len(), 4 + 4 + 1 + 2953);
+    assert_eq!(
+        &start[..4],
+        &[GC_SHOP, 0x92, 0x0b, 10],
+        "wSize and START_EX"
+    );
+    assert_eq!(&start[4..8], &keeper.to_le_bytes());
+    assert_eq!(start[8], 1, "one tab");
+    assert_eq!(&start[9..13], b"test");
+    assert_eq!(&start[13..41], &[0; 28]);
+    assert_eq!(start[41], 0, "the renewal coin type is gold");
+    assert_eq!(renewal_slot(&start, 0), (50_011, 0, 1, 1, 0));
+    for slot in 1..40 {
+        assert_eq!(
+            renewal_slot(&start, slot),
+            (0, 0, 0, 1, 0),
+            "slot {slot} is empty"
+        );
+    }
+
+    // When: slot 0 is bought. Then: the 0 price refuses, and nothing is stored.
+    alice.send_record(&[CG_SHOP, 1, 0, 0]);
+    assert_eq!(alice.read_game(), shop_answer(5), "NOT_ENOUGH_MONEY");
+    // And: slot 40 (the second tab) is an invalid position.
+    alice.send_record(&[CG_SHOP, 1, 0, 40]);
+    assert_eq!(alice.read_game(), shop_answer(8), "INVALID_POS");
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 5000000 AND NOT EXISTS (SELECT 1 FROM \
+         item)",
+    );
+
+    // When: the window is closed. Then: `SHOP_SUBHEADER_GC_END`.
+    alice.send_record(&[CG_SHOP, 0]);
+    assert_eq!(alice.read_game(), shop_answer(1), "END");
+    drop(alice);
+    drop(server);
+}
+
+/// The vnum, price, count, price type and price vnum of slot `slot` of a renewal
+/// `GC_SHOP` window: the tab starts after the keeper and the count, the slots after the
+/// name and the coin type.
+fn renewal_slot(start: &[u8], slot: usize) -> (u32, u64, u16, u8, u32) {
+    let at = 4 + 4 + 1 + 32 + 1 + slot * SHOP_ITEM_LEN;
+    (
+        u32::from_le_bytes(start[at..at + 4].try_into().expect("four bytes")),
+        u64::from_le_bytes(start[at + 4..at + 12].try_into().expect("eight bytes")),
+        u16::from_le_bytes([start[at + 12], start[at + 13]]),
+        start[at + 68],
+        u32::from_le_bytes(start[at + 69..at + 73].try_into().expect("four bytes")),
+    )
+}
+
 /// Point slot `slot` of a `GC_CHARACTER_POINTS` record: the slots start one byte after the
 /// header, eight bytes each.
 fn point_slot(points: &[u8], slot: usize) -> i64 {

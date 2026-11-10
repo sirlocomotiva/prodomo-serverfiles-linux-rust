@@ -1,5 +1,6 @@
 //! The NPC shops: a click on a keeper opens its shop's window, and the window buys, sells and
-//! closes (`CShopManager`, `G/shop_manager.cpp`, and `CShop`, `G/shop.cpp`).
+//! closes (`CShopManager`, `G/shop_manager.cpp`, and `CShop`, `G/shop.cpp`, with the renewal
+//! `CShopEx`, `G/shopEx.cpp`).
 //!
 //! The world keeps which keeper each character is browsing, as legacy's `CHARACTER` keeps
 //! `m_pkShop` and `m_pkChrShopOwner`. The storage and the gold change in
@@ -23,6 +24,16 @@
 //! away (`G/shop_manager.cpp:385-454`, `:456-594`). A buy of a position past the window answers
 //! `SHOP_SUBHEADER_GC_INVALID_POS`; the rest are the world's. Closing answers
 //! `SHOP_SUBHEADER_GC_END` when a window is open and nothing when none is.
+//!
+//! A keeper the renewal table names opens `START_EX` with its tabs (`CShopEx::AddGuest`,
+//! `G/shopEx.cpp:49-137`): the name, the gold coin type, and the forty slots of each. A buy
+//! numbers its slots across the tabs (the tab is the slot over 40) and follows the slot's
+//! price selector: gold spends gold, secondary coins and items are counted and taken from the
+//! scanned cells, and experience is checked against the held pools and lost (`CShopEx::Buy`,
+//! `:140-304`). A price of 0 refuses, and a selector past `SHOPEX_EXP` (4) answers nothing
+//! and changes nothing. A renewal buy stamps the row's sockets and attributes on the bought
+//! item. A sale to a renewal window runs the base sale path, because legacy routes every sale
+//! through `CShopManager::Sell` (`G/shop_manager.cpp:456`), which knows no tab.
 //!
 //! A buy that passes the distance check and a close of an open window stamp `SetMyShopTime`, the
 //! portal guard a warp NPC's `IsHack` reads (`G/shop_manager.cpp:377`, `:439`). A sale does not,
@@ -58,11 +69,13 @@ use gamedata::npc_shop::{NpcShop, NpcShops, ShopSlot};
 use protocol::cg_shop::CgShop;
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_shop::{
-    GcShop, GcShopItem, GcShopStart, SHOP_HOST_ITEM_MAX_NUM, SHOP_SUBHEADER_GC_END,
+    GcShop, GcShopItem, GcShopStart, GcShopStartEx, GcShopTab, SHOPEX_EXP, SHOPEX_GOLD,
+    SHOPEX_ITEM, SHOPEX_SECONDARY, SHOP_HOST_ITEM_MAX_NUM, SHOP_SUBHEADER_GC_END,
     SHOP_SUBHEADER_GC_INVALID_POS,
 };
 use world::character::{
-    buy_item, sell_item, sync_quickslots, Character, MoveDone, MoveRules, ShopRefused,
+    buy_item, remove_specify_item, remove_specify_type_item, sell_item, sync_quickslots, Character,
+    MoveDone, MoveRecord, MoveRules, ShopRefused,
 };
 use world::npc::Npc;
 
@@ -441,6 +454,12 @@ impl GameState {
         self.shops = shops;
         self
     }
+    /// Share the renewal tabs boot laid out. Without them no keeper has a renewal window.
+    #[must_use]
+    pub fn with_renewal_shops(mut self, shops: Arc<NpcShops>) -> Self {
+        self.renewal_shops = shops;
+        self
+    }
     /// Share the drop tables boot read. Without them no monster's death pays.
     #[must_use]
     pub fn with_drop_tables(mut self, drops: Arc<gamedata::drop::DropTables>) -> Self {
@@ -813,22 +832,34 @@ impl GameState {
         if distance >= SHOP_MAX_DISTANCE {
             return ShopAnswer::silent(ShopDeclined::OutOfReach { distance });
         }
-        let Some(shop) = self.shops.for_npc(npc.vnum) else {
+        let renewal = self.renewal_shops.tabs_for_npc(npc.vnum);
+        let base = self.shops.for_npc(npc.vnum);
+        if renewal.is_empty() && base.is_none() {
             return ShopAnswer::silent(ShopDeclined::NoShop { vnum: npc.vnum });
-        };
+        }
         if let Some(open) = open {
             return ShopAnswer::silent(ShopDeclined::BrowsingAnother {
                 keeper: open.keeper,
             });
         }
+        let tripled = !self.shop_price_3x_disabled && mover.empire != npc.empire;
+        // Both tables never name one keeper (`InitializeShopEX`, `:810-813`); a renewal
+        // tab wins when they do.
+        let window = if renewal.is_empty() {
+            let Some(shop) = base else {
+                return ShopAnswer::silent(ShopDeclined::NoShop { vnum: npc.vnum });
+            };
+            shop_window(target, shop, tripled)
+        } else {
+            renewal_window(target, &renewal, tripled)
+        };
         let browsing = Browsing {
             keeper: target,
             kind: ShopKeeper::Npc { npc_vnum: npc.vnum },
             x: npc.x,
             y: npc.y,
-            tripled: !self.shop_price_3x_disabled && mover.empire != npc.empire,
+            tripled,
         };
-        let window = shop_window(target, shop, browsing.tripled);
         let _replaced = self.browsing.insert(vid, browsing);
         ShopAnswer::Sent(vec![window])
     }
@@ -905,30 +936,29 @@ impl GameState {
             Err(declined) => return Ok(*declined),
         };
         self.set_shop_time(vid);
-        let slot = usize::from(pos);
-        if slot >= SHOP_HOST_ITEM_MAX_NUM {
-            return Ok(ShopAnswer::Declined {
-                reason: ShopDeclined::InvalidPos(pos),
-                records: vec![GcShop::new(SHOP_SUBHEADER_GC_INVALID_POS).encode()],
-            });
-        }
         if browsing.kind == ShopKeeper::Player {
+            let slot = usize::from(pos);
+            if slot >= SHOP_HOST_ITEM_MAX_NUM {
+                return Ok(ShopAnswer::Declined {
+                    reason: ShopDeclined::InvalidPos(pos),
+                    records: vec![GcShop::new(SHOP_SUBHEADER_GC_INVALID_POS).encode()],
+                });
+            }
             return Ok(self.buy_from_player(vid, browsing.keeper, slot, mover));
         }
         let ShopKeeper::Npc { npc_vnum } = browsing.kind else {
             return Ok(ShopAnswer::silent(ShopDeclined::NotBrowsing));
         };
-        // An empty slot costs 0, which `CShop::Buy` answers as too little gold.
-        let mut offer = self
-            .shops
-            .for_npc(npc_vnum)
-            .and_then(|shop| shop.slots[slot])
-            .unwrap_or(ShopSlot {
-                vnum: 0,
-                count: 0,
-                price: 0,
+        let Some((mut offer, renewal)) = self.npc_offer(npc_vnum, pos) else {
+            return Ok(ShopAnswer::Declined {
+                reason: ShopDeclined::InvalidPos(pos),
+                records: vec![GcShop::new(SHOP_SUBHEADER_GC_INVALID_POS).encode()],
             });
-        offer.price = shown_price(offer.price, browsing.tripled);
+        };
+        offer.price = charged_price(&offer, renewal, browsing.tripled);
+        if renewal && offer.price_type == SHOPEX_EXP {
+            return self.buy_for_exp(vid, offer, mover);
+        }
         let questing = self.quest_running(vid);
         let character = self
             .characters
@@ -946,6 +976,100 @@ impl GameState {
             secured: false,
         };
         let gold = character.gold();
+        let bought = buy_item(
+            character.items_mut(),
+            ids,
+            gold,
+            offer,
+            &self.protos,
+            &rules,
+        );
+        match bought {
+            Ok((done, left)) => {
+                let done = if renewal && matches!(offer.price_type, SHOPEX_SECONDARY | SHOPEX_ITEM)
+                {
+                    spend_price_first(character, &self.protos, &offer, done)
+                } else {
+                    done
+                };
+                Ok(ShopAnswer::Moved(paid(
+                    character,
+                    done,
+                    left,
+                    mover,
+                    &self.protos,
+                    &self.locale,
+                )))
+            }
+            Err(refused) => Ok(refusal(refused, mover, &self.locale)),
+        }
+    }
+
+    /// The slot `pos` of the keeper's window and whether it is a renewal window.
+    ///
+    /// A renewal window numbers its slots across its tabs: the tab is the slot over 40,
+    /// the cell the slot within it (`CShopEx::Buy`, `G/shopEx.cpp:144-145`). An empty base
+    /// slot costs 0, which `CShop::Buy` answers as too little gold; a slot past a renewal
+    /// window's tabs is `None`, which the caller refuses as an invalid position.
+    fn npc_offer(&self, npc_vnum: u32, pos: u8) -> Option<(ShopSlot, bool)> {
+        let tabs = self.renewal_shops.tabs_for_npc(npc_vnum);
+        if tabs.is_empty() {
+            let slot = usize::from(pos);
+            if slot >= SHOP_HOST_ITEM_MAX_NUM {
+                return None;
+            }
+            let offer = self
+                .shops
+                .for_npc(npc_vnum)
+                .and_then(|shop| shop.slots[slot])
+                .unwrap_or(ShopSlot::empty());
+            return Some((offer, false));
+        }
+        let tab = usize::from(pos) / SHOP_HOST_ITEM_MAX_NUM;
+        let slot = usize::from(pos) % SHOP_HOST_ITEM_MAX_NUM;
+        tabs.get(tab)
+            .and_then(|tab| tab.slots[slot])
+            .map(|offer| (offer, true))
+    }
+
+    /// `CShopEx::Buy` for a `SHOPEX_EXP` price: the experience check and spend need the
+    /// pools, so they run here around the world's make (`G/shopEx.cpp:186-190`, `:256`).
+    ///
+    /// The check reads the held experience against the price; the spend is
+    /// `PointChange(POINT_EXP, -price)`, which the client hears as its point record.
+    /// The bought item's own records follow it.
+    fn buy_for_exp(
+        &mut self,
+        vid: Vid,
+        offer: ShopSlot,
+        mover: Mover,
+    ) -> Result<ShopAnswer, MoveItemRefused> {
+        let exp = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(0, world::character::Points::exp);
+        let price = i64::try_from(offer.price).unwrap_or(i64::MAX);
+        if offer.price == 0 || exp < price {
+            return Ok(refusal(ShopRefused::NotEnoughExp, mover, &self.locale));
+        }
+        let questing = self.quest_running(vid);
+        let character = self
+            .characters
+            .find_by_vid_mut(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let Some(ids) = self.item_ids.as_mut() else {
+            return Ok(refusal(ShopRefused::IdsExhausted, mover, &self.locale));
+        };
+        let rules = MoveRules {
+            count_limit: self.item_count_limit,
+            usable_cells: usable_inventory_cells(character.inven_point()),
+            belt_grade: None,
+            questing,
+            secured: false,
+        };
+        let gold = character.gold();
         match buy_item(
             character.items_mut(),
             ids,
@@ -954,14 +1078,25 @@ impl GameState {
             &self.protos,
             &rules,
         ) {
-            Ok((done, left)) => Ok(ShopAnswer::Moved(paid(
-                character,
-                done,
-                left,
-                mover,
-                &self.protos,
-                &self.locale,
-            ))),
+            Ok((mut done, left)) => {
+                let (_, points, _) = character.items_points_and_quickslots_mut();
+                if let Some(points) = points {
+                    // The check held, so the spend lands whole: a quarter-held
+                    // top-level character is the one shape `lose_exp` spares, and it
+                    // keeps its experience then.
+                    if let Some(record) = points.lose_exp(price, self.exp_limits.max_level) {
+                        done.records.push(MoveRecord::Point(record));
+                    }
+                }
+                Ok(ShopAnswer::Moved(paid(
+                    character,
+                    done,
+                    left,
+                    mover,
+                    &self.protos,
+                    &self.locale,
+                )))
+            }
             Err(refused) => Ok(refusal(refused, mover, &self.locale)),
         }
     }
@@ -1087,6 +1222,91 @@ const fn shown_price(price: u64, tripled: bool) -> u64 {
     } else {
         price
     }
+}
+
+/// A renewal item price leaves the character before the bought item lands in its
+/// answer: the price stacks are spent first (`CShopEx::Buy` spends, then
+/// `AddToCharacter`, `G/shopEx.cpp:243-276`). The spend's records and row changes stand
+/// ahead of the bought item's.
+fn spend_price_first(
+    character: &mut Character,
+    protos: &ItemProtos,
+    offer: &ShopSlot,
+    mut done: MoveDone,
+) -> MoveDone {
+    let price = u32::try_from(offer.price).unwrap_or(u32::MAX);
+    let usable = usable_inventory_cells(character.inven_point());
+    let (items, _, slots) = character.items_points_and_quickslots_mut();
+    let spent = if offer.price_type == SHOPEX_SECONDARY {
+        remove_specify_type_item(
+            items,
+            slots,
+            protos,
+            usable,
+            (gamedata::item_kind::ITEM_SECONDARY_COIN, price),
+        )
+    } else {
+        remove_specify_item(items, slots, protos, usable, (offer.price_vnum, price))
+    };
+    let mut records = spent.records;
+    records.append(&mut done.records);
+    done.records = records;
+    let mut changes = spent.changes;
+    changes.append(&mut done.changes);
+    done.changes = changes;
+    done
+}
+
+/// The price a buy charges for `offer`: a base slot triples for a stranger, and a
+/// renewal slot triples only its gold arm (`CShopEx::Buy` triples the gold arm alone,
+/// like its window, `G/shopEx.cpp:174-178`).
+const fn charged_price(offer: &ShopSlot, renewal: bool, tripled: bool) -> u64 {
+    if !renewal || offer.price_type == SHOPEX_GOLD {
+        shown_price(offer.price, tripled)
+    } else {
+        offer.price
+    }
+}
+
+/// `SHOP_SUBHEADER_GC_START_EX` with each tab of `tabs` for the keeper `keeper`.
+/// Only a gold price triples for a stranger (`G/shopEx.cpp:97-98`); the other selectors
+/// show the row's price.
+fn renewal_window(keeper: u32, tabs: &[&NpcShop], tripled: bool) -> Vec<u8> {
+    let tabs = tabs
+        .iter()
+        .map(|tab| {
+            let mut items = [GcShopItem::default(); SHOP_HOST_ITEM_MAX_NUM];
+            for (item, slot) in items.iter_mut().zip(&tab.slots) {
+                if let Some(slot) = slot {
+                    let price = if slot.price_type == SHOPEX_GOLD {
+                        shown_price(slot.price, tripled)
+                    } else {
+                        slot.price
+                    };
+                    let mut shown = GcShopItem::new(slot.vnum, price, slot.count);
+                    shown.sockets = slot.sockets;
+                    for (attr, value) in shown.attrs.iter_mut().zip(slot.attrs) {
+                        *attr = protocol::gc_item_window::ItemAttribute::new(
+                            value.attr_type,
+                            value.value,
+                        );
+                    }
+                    shown.price_type = slot.price_type;
+                    shown.price_vnum = slot.price_vnum;
+                    *item = shown;
+                }
+            }
+            // Legacy's `memcpy` copies 32 of the record's 33 name bytes (`G/shopEx.cpp:91`).
+            let mut name = [0; protocol::gc_shop::SHOP_TAB_NAME_MAX];
+            name.copy_from_slice(&tab.tab_name.unwrap_or([0; 33])[..32]);
+            GcShopTab {
+                name,
+                coin_type: 0,
+                items,
+            }
+        })
+        .collect();
+    GcShopStartEx::new(keeper, tabs).encode()
 }
 
 /// `SHOP_SUBHEADER_GC_START` with each slot of `shop` for the keeper `keeper`.
@@ -1228,7 +1448,13 @@ mod tests {
         let protos = ItemProtos::load(&root.join("gamedata/proto")).unwrap();
         let dump = std::fs::read(root.join("sql/gamedata/player.sql")).unwrap();
         let shops = NpcShops::lay_out(&shops_from_dump(&dump).unwrap(), &protos);
-        let mut state = GameState::new(protos).with_npc_shops(Arc::new(shops));
+        let renewal = NpcShops::lay_out_renewal(
+            &gamedata::npc_shop::renewal_shops_from_dump(&dump).unwrap(),
+            &protos,
+        );
+        let mut state = GameState::new(protos)
+            .with_npc_shops(Arc::new(shops))
+            .with_renewal_shops(Arc::new(renewal));
         if ids {
             let _ids = state
                 .install_item_ids(ItemIdRange::new(1, 1_000_000, 1).unwrap())
@@ -1637,6 +1863,169 @@ mod tests {
         let _closed = state.safebox(SHOPPER, SafeboxStep::Close, of(1)).unwrap();
         open_store(&mut state, true);
         let _window = open(&mut state, WEAPONS);
+    }
+
+    #[test]
+    fn a_click_on_a_renewal_keeper_opens_its_tabs_and_a_buy_follows_the_selector() {
+        let mut state = a_market(10_000, &[], true);
+        let renewal = standing(vec![keeper(0x8000_0007, 9001, 1)]);
+        let _renewal = state.npcs.insert((1, 43), renewal);
+        let window = step(
+            &mut state,
+            ShopStep::Click {
+                target: 0x8000_0007,
+            },
+            on(1, 43, 0),
+        );
+        let ShopAnswer::Sent(records) = window else {
+            panic!("the renewal keeper opens a window: {window:?}");
+        };
+        assert_eq!(records.len(), 1);
+        let start = GcShopStartEx::decode(&records[0]).expect("a renewal window");
+        assert_eq!(start.owner_vid, 0x8000_0007);
+        assert_eq!(start.tabs.len(), 1);
+        assert_eq!(&start.tabs[0].name[..4], b"test");
+        assert_eq!(start.tabs[0].coin_type, 0);
+        assert_eq!(start.tabs[0].items[0].vnum, 50011);
+        assert_eq!(start.tabs[0].items[0].price_type, SHOPEX_GOLD);
+        // The owner's row costs 0, which a buy refuses as too little gold.
+        let bought = step(&mut state, ShopStep::Buy { pos: 0 }, on(1, 43, 0));
+        let ShopAnswer::Declined { records, .. } = bought else {
+            panic!("a 0 price refuses");
+        };
+        assert_eq!(
+            records,
+            vec![GcShop::new(protocol::gc_shop::SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY).encode()]
+        );
+        assert_eq!(held(&state, 0), None);
+    }
+
+    #[test]
+    fn a_renewal_buy_numbers_its_slots_across_its_tabs_and_triples_gold_only() {
+        let mut state = a_market(10_000, &[], true);
+        let renewal = standing(vec![keeper(0x8000_0007, 9001, 1)]);
+        let _renewal = state.npcs.insert((1, 43), renewal);
+        let here = on(1, 43, 0);
+        let click = || ShopStep::Click {
+            target: 0x8000_0007,
+        };
+        let _window = step(&mut state, click(), here);
+        // The owner's one tab holds one item; slot 40 is the second tab it has not.
+        let invalid = step(&mut state, ShopStep::Buy { pos: 40 }, here);
+        assert!(
+            matches!(
+                invalid,
+                ShopAnswer::Declined {
+                    reason: ShopDeclined::InvalidPos(40),
+                    ..
+                }
+            ),
+            "slot 40 is the second tab: {invalid:?}"
+        );
+        // A stranger's gold price triples in the window while an item price never does:
+        // one gold slot and one item slot, each 100.
+        let mut gold_tab = NpcShop {
+            vnum: 1,
+            npc_vnum: 9001,
+            tab_name: None,
+            slots: [None; SHOP_HOST_ITEM_MAX_NUM],
+        };
+        let mut gold = ShopSlot::empty();
+        gold.vnum = 19;
+        gold.price = 100;
+        let mut item = ShopSlot::empty();
+        item.vnum = 19;
+        item.price = 100;
+        item.price_type = SHOPEX_ITEM;
+        gold_tab.slots[0] = Some(gold);
+        gold_tab.slots[1] = Some(item);
+        let shown = renewal_window(7, &[&gold_tab], true);
+        let start = GcShopStartEx::decode(&shown).expect("a renewal window");
+        assert_eq!(start.tabs[0].items[0].price, 300, "gold triples");
+        assert_eq!(
+            start.tabs[0].items[1].price, 100,
+            "an item price never triples"
+        );
+        // The buy path triples the same way: `charged_price` is what the window
+        // shows and the buy charges.
+        for (price_type, want) in [(SHOPEX_GOLD, 300), (SHOPEX_ITEM, 100)] {
+            let mut offer = ShopSlot::empty();
+            offer.price = 100;
+            offer.price_type = price_type;
+            assert_eq!(
+                charged_price(&offer, true, true),
+                want,
+                "price type {price_type}"
+            );
+        }
+        let mut base = ShopSlot::empty();
+        base.price = 100;
+        assert_eq!(
+            charged_price(&base, false, true),
+            300,
+            "a base slot triples"
+        );
+        assert_eq!(charged_price(&base, false, false), 100, "no triple at home");
+    }
+
+    #[test]
+    fn an_experience_price_is_checked_against_the_held_pools_and_lost() {
+        use crate::game_state::fixtures::points_at;
+        // Too little experience refuses with `NOT_ENOUGH_EXP` and buys nothing.
+        let mut state = a_market(10_000, &[], true);
+        state
+            .characters
+            .find_by_vid_mut(SHOPPER)
+            .unwrap()
+            .set_points(Some(points_at(10, 820, 50)));
+        let mut offer = ShopSlot::empty();
+        offer.vnum = 19;
+        offer.count = 1;
+        offer.price = 100;
+        offer.price_type = SHOPEX_EXP;
+        let refused = state.buy_for_exp(SHOPPER, offer, of(1)).unwrap();
+        let ShopAnswer::Declined { records, .. } = refused else {
+            panic!("too little experience refuses: {refused:?}");
+        };
+        assert_eq!(
+            records,
+            vec![GcShop::new(protocol::gc_shop::SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP).encode()]
+        );
+        assert_eq!(held(&state, 0), None);
+        // Enough experience buys: the bought item lands and the pools lose the price.
+        state
+            .characters
+            .find_by_vid_mut(SHOPPER)
+            .unwrap()
+            .set_points(Some(points_at(10, 820, 500)));
+        let bought = state.buy_for_exp(SHOPPER, offer, of(1)).unwrap();
+        let moved = match bought {
+            ShopAnswer::Moved(moved) => moved,
+            other => panic!("enough experience buys: {other:?}"),
+        };
+        assert_eq!(held(&state, 0), Some((19, 1)));
+        let points = state
+            .characters
+            .find_by_vid(SHOPPER)
+            .unwrap()
+            .points()
+            .unwrap();
+        assert_eq!(points.exp(), 400, "the price leaves the pools");
+        assert_eq!(moved.records.len(), 3, "gold, item, and the point loss");
+    }
+
+    #[test]
+    fn an_item_price_is_spent_before_the_bought_item_lands() {
+        let mut state = a_market(10_000, &[(inventory(0), potions(HELD, 5))], true);
+        let _window = open(&mut state, WEAPONS);
+        // The renewal spend order, through the world's take: the price stacks go first.
+        let usable =
+            usable_inventory_cells(state.characters.find_by_vid(SHOPPER).unwrap().inven_point());
+        let character = state.characters.find_by_vid_mut(SHOPPER).unwrap();
+        let (items, _, slots) = character.items_points_and_quickslots_mut();
+        let spent = remove_specify_item(items, slots, &state.protos, usable, (POTION, 3));
+        assert_eq!(spent.records.len(), 1, "one stack loses three: {spent:?}");
+        assert_eq!(held(&state, 0), Some((POTION, 2)));
     }
 
     #[test]

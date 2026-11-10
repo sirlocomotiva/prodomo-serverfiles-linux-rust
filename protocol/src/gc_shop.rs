@@ -55,12 +55,22 @@ pub const GC_SHOP_ITEM_WIRE_SIZE: usize = 73;
 /// `SHOP_HOST_ITEM_MAX_NUM`: the slots a shop window shows.
 pub const SHOP_HOST_ITEM_MAX_NUM: usize = 40;
 
+/// `SHOP_TAB_NAME_MAX` (32): the bytes a tab name copies.
+pub const SHOP_TAB_NAME_MAX: usize = 32;
+
+/// `SHOP_TAB_COUNT_MAX` (7): the most tabs a keeper opens.
+pub const SHOP_TAB_COUNT_MAX: usize = 7;
+
 /// The whole start record: the header, the keeper's VID and forty items.
 pub const GC_SHOP_START_WIRE_SIZE: usize =
     GC_SHOP_WIRE_SIZE + 4 + SHOP_HOST_ITEM_MAX_NUM * GC_SHOP_ITEM_WIRE_SIZE;
 
 /// The whole update record: the header, the slot, and the slot's item.
 pub const GC_SHOP_UPDATE_ITEM_WIRE_SIZE: usize = GC_SHOP_WIRE_SIZE + 1 + GC_SHOP_ITEM_WIRE_SIZE;
+
+/// One tab of `TPacketGCShopStartEx`: the 32 name bytes, the coin type, and forty items.
+pub const GC_SHOP_TAB_WIRE_SIZE: usize =
+    SHOP_TAB_NAME_MAX + 1 + SHOP_HOST_ITEM_MAX_NUM * GC_SHOP_ITEM_WIRE_SIZE;
 
 /// `SHOP_SUBHEADER_GC_START` (0): the window opens.
 pub const SHOP_SUBHEADER_GC_START: u8 = 0;
@@ -93,6 +103,12 @@ pub const SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP: u8 = 13;
 
 /// `SHOPEX_GOLD` (1): a price in gold, which every NPC shop slot carries.
 pub const SHOPEX_GOLD: u8 = 1;
+/// `SHOPEX_SECONDARY` (2): a price in secondary-coin items.
+pub const SHOPEX_SECONDARY: u8 = 2;
+/// `SHOPEX_ITEM` (3): a price in `price_vnum` items.
+pub const SHOPEX_ITEM: u8 = 3;
+/// `SHOPEX_EXP` (4): a price in experience.
+pub const SHOPEX_EXP: u8 = 4;
 
 /// Every way a shop record can be refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,6 +391,166 @@ impl GcShopStart {
     }
 }
 
+/// One tab of a renewal window: its name, coin type, and forty slots.
+///
+/// The name is the fixed 32-byte `memcpy` of the tab's bytes, zero-filled past the
+/// source; legacy's `sizeof` sends all 32 (`G/shopEx.cpp:91`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcShopTab {
+    /// `name`: the tab's 32 bytes.
+    pub name: [u8; SHOP_TAB_NAME_MAX],
+    /// `coin_type`: `SHOP_COIN_TYPE_GOLD` (0) for every renewal tab.
+    pub coin_type: u8,
+    /// The forty slots, in window order.
+    pub items: [GcShopItem; SHOP_HOST_ITEM_MAX_NUM],
+}
+
+impl GcShopTab {
+    /// Appends the 2953 packed bytes to `out`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.name);
+        out.push(self.coin_type);
+        for item in &self.items {
+            item.encode_into(out);
+        }
+    }
+
+    /// Reads the 2953 packed bytes from the start of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GcShopError::Truncated`] for fewer than 2953 bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self, GcShopError> {
+        if bytes.len() < GC_SHOP_TAB_WIRE_SIZE {
+            return Err(GcShopError::Truncated {
+                context: "GcShopTab",
+                needed: GC_SHOP_TAB_WIRE_SIZE,
+                actual: bytes.len(),
+            });
+        }
+        let mut at = Reader {
+            bytes,
+            at: SHOP_TAB_NAME_MAX,
+        };
+        let mut name = [0; SHOP_TAB_NAME_MAX];
+        name.copy_from_slice(&bytes[..SHOP_TAB_NAME_MAX]);
+        let [coin_type] = at.take();
+        let mut items = [GcShopItem::default(); SHOP_HOST_ITEM_MAX_NUM];
+        for item in &mut items {
+            let raw = &bytes[at.at..at.at + GcShopItem::WIRE_SIZE];
+            *item = GcShopItem::decode(raw)?;
+            at.at += GcShopItem::WIRE_SIZE;
+        }
+        Ok(Self {
+            name,
+            coin_type,
+            items,
+        })
+    }
+}
+
+/// `TPacketGCShop` with `SHOP_SUBHEADER_GC_START_EX`, then `TPacketGCShopStartEx`:
+/// the keeper's VID, the tab count, and the tabs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcShopStartEx {
+    /// `owner_vid`: the keeper the window belongs to.
+    pub owner_vid: u32,
+    /// The tabs, in table order.
+    pub tabs: Vec<GcShopTab>,
+}
+
+impl GcShopStartEx {
+    /// The fixed header this record always carries.
+    #[must_use]
+    pub const fn header() -> u8 {
+        HEADER_GC_SHOP.value()
+    }
+
+    /// Build the window for a keeper and its tabs.
+    #[must_use]
+    pub const fn new(owner_vid: u32, tabs: Vec<GcShopTab>) -> Self {
+        Self { owner_vid, tabs }
+    }
+
+    /// The record's own width: the header, the VID and count, and the tabs.
+    #[must_use]
+    pub fn wire_size(&self) -> usize {
+        GC_SHOP_WIRE_SIZE + 4 + 1 + self.tabs.len() * GC_SHOP_TAB_WIRE_SIZE
+    }
+
+    /// Appends the packed bytes to `out`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        push_header(out, self.wire_size(), SHOP_SUBHEADER_GC_START_EX);
+        out.extend_from_slice(&self.owner_vid.to_le_bytes());
+        let count = u8::try_from(self.tabs.len()).unwrap_or(u8::MAX);
+        out.push(count);
+        for tab in &self.tabs {
+            tab.encode_into(out);
+        }
+    }
+
+    /// Encode to a fresh buffer.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.wire_size());
+        self.encode_into(&mut out);
+        out
+    }
+
+    /// Reads the whole window from the start of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GcShopError::Truncated`] for fewer than the bytes the leading
+    /// `size` names, [`GcShopError::Header`] when the leading byte is not 38,
+    /// [`GcShopError::Subheader`] when the subheader is not 10, and
+    /// [`GcShopError::Size`] when `size` is not a header, a VID, a count, and
+    /// whole tabs.
+    pub fn decode(bytes: &[u8]) -> Result<Self, GcShopError> {
+        if bytes.len() < GC_SHOP_WIRE_SIZE + 4 + 1 {
+            return Err(GcShopError::Truncated {
+                context: "GcShopStartEx",
+                needed: GC_SHOP_WIRE_SIZE + 4 + 1,
+                actual: bytes.len(),
+            });
+        }
+        if bytes[0] != HEADER_GC_SHOP.value() {
+            return Err(GcShopError::Header { actual: bytes[0] });
+        }
+        if bytes[3] != SHOP_SUBHEADER_GC_START_EX {
+            return Err(GcShopError::Subheader { actual: bytes[3] });
+        }
+        let size = usize::from(u16::from_le_bytes([bytes[1], bytes[2]]));
+        let body = size.checked_sub(GC_SHOP_WIRE_SIZE + 4 + 1);
+        let Some(body) = body.filter(|body| body % GC_SHOP_TAB_WIRE_SIZE == 0) else {
+            return Err(GcShopError::Size {
+                expected: size,
+                actual: size,
+            });
+        };
+        if bytes.len() < size {
+            return Err(GcShopError::Truncated {
+                context: "GcShopStartEx",
+                needed: size,
+                actual: bytes.len(),
+            });
+        }
+        let owner_vid = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let count = usize::from(bytes[8]);
+        if count * GC_SHOP_TAB_WIRE_SIZE != body {
+            return Err(GcShopError::Size {
+                expected: size,
+                actual: size,
+            });
+        }
+        let mut tabs = Vec::with_capacity(count);
+        for tab in bytes[GC_SHOP_WIRE_SIZE + 4 + 1..size].chunks_exact(GC_SHOP_TAB_WIRE_SIZE) {
+            tabs.push(GcShopTab::decode(tab)?);
+        }
+        Ok(Self { owner_vid, tabs })
+    }
+}
+
 /// `TPacketGCShop` with `SHOP_SUBHEADER_GC_UPDATE_ITEM`, then
 /// `TPacketGCShopUpdateItem` (`packet.h:1601-1606`): the slot and the slot's
 /// item, which `CShop::BroadcastUpdateItem` fans to every guest.
@@ -487,14 +663,16 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GcShop, GcShopError, GcShopItem, GcShopStart, GcShopUpdateItem, GC_SHOP_ITEM_WIRE_SIZE,
-        GC_SHOP_START_WIRE_SIZE, GC_SHOP_UPDATE_ITEM_WIRE_SIZE, GC_SHOP_WIRE_SIZE, SHOPEX_GOLD,
-        SHOP_HOST_ITEM_MAX_NUM, SHOP_SUBHEADER_GC_END, SHOP_SUBHEADER_GC_INVALID_POS,
-        SHOP_SUBHEADER_GC_INVENTORY_FULL, SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP,
-        SHOP_SUBHEADER_GC_NOT_ENOUGH_ITEM, SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY,
-        SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY_EX, SHOP_SUBHEADER_GC_OK, SHOP_SUBHEADER_GC_SOLDOUT,
-        SHOP_SUBHEADER_GC_SOLD_OUT, SHOP_SUBHEADER_GC_START, SHOP_SUBHEADER_GC_START_EX,
-        SHOP_SUBHEADER_GC_UPDATE_ITEM, SHOP_SUBHEADER_GC_UPDATE_PRICE,
+        GcShop, GcShopError, GcShopItem, GcShopStart, GcShopStartEx, GcShopTab, GcShopUpdateItem,
+        GC_SHOP_ITEM_WIRE_SIZE, GC_SHOP_START_WIRE_SIZE, GC_SHOP_TAB_WIRE_SIZE,
+        GC_SHOP_UPDATE_ITEM_WIRE_SIZE, GC_SHOP_WIRE_SIZE, SHOPEX_EXP, SHOPEX_GOLD, SHOPEX_ITEM,
+        SHOPEX_SECONDARY, SHOP_HOST_ITEM_MAX_NUM, SHOP_SUBHEADER_GC_END,
+        SHOP_SUBHEADER_GC_INVALID_POS, SHOP_SUBHEADER_GC_INVENTORY_FULL,
+        SHOP_SUBHEADER_GC_NOT_ENOUGH_EXP, SHOP_SUBHEADER_GC_NOT_ENOUGH_ITEM,
+        SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY, SHOP_SUBHEADER_GC_NOT_ENOUGH_MONEY_EX,
+        SHOP_SUBHEADER_GC_OK, SHOP_SUBHEADER_GC_SOLDOUT, SHOP_SUBHEADER_GC_SOLD_OUT,
+        SHOP_SUBHEADER_GC_START, SHOP_SUBHEADER_GC_START_EX, SHOP_SUBHEADER_GC_UPDATE_ITEM,
+        SHOP_SUBHEADER_GC_UPDATE_PRICE, SHOP_TAB_COUNT_MAX, SHOP_TAB_NAME_MAX,
     };
     use crate::gc_item_window::ItemAttribute;
 
@@ -649,6 +827,99 @@ mod tests {
         assert_eq!(&bytes[20..22], &[1, 0]);
         assert_eq!(&bytes[8 + 39 * 73..], marked_bytes().as_slice());
         assert_eq!(GcShopStart::decode(&bytes), Ok(start));
+    }
+
+    #[test]
+    fn the_renewal_window_carries_its_tabs() {
+        assert_eq!(GcShopStartEx::header(), 38);
+        assert_eq!(SHOP_TAB_NAME_MAX, 32);
+        assert_eq!(SHOP_TAB_COUNT_MAX, 7);
+        assert_eq!(GC_SHOP_TAB_WIRE_SIZE, 32 + 1 + 40 * 73);
+        assert_eq!(GC_SHOP_TAB_WIRE_SIZE, 2953);
+        assert_eq!(SHOPEX_SECONDARY, 2);
+        assert_eq!(SHOPEX_ITEM, 3);
+        assert_eq!(SHOPEX_EXP, 4);
+        let mut name = [0; SHOP_TAB_NAME_MAX];
+        name[..4].copy_from_slice(b"test");
+        let mut items = [GcShopItem::default(); SHOP_HOST_ITEM_MAX_NUM];
+        items[0] = GcShopItem::new(50011, 0, 1);
+        let tab = GcShopTab {
+            name,
+            coin_type: 0,
+            items,
+        };
+        let start = GcShopStartEx::new(0x0a0b_0c0d, vec![tab]);
+        assert_eq!(start.wire_size(), 4 + 4 + 1 + 2953);
+        let bytes = start.encode();
+        assert_eq!(bytes.len(), 2962);
+        assert_eq!(
+            &bytes[..9],
+            &[38, 0x92, 0x0b, 10, 0x0d, 0x0c, 0x0b, 0x0a, 1]
+        );
+        assert_eq!(&bytes[9..13], b"test");
+        assert_eq!(&bytes[13..41], &[0; 28]);
+        assert_eq!(bytes[41], 0);
+        assert_eq!(&bytes[42..46], &50011u32.to_le_bytes());
+        assert_eq!(&bytes[46..54], &0u64.to_le_bytes());
+        assert_eq!(&bytes[54..56], &[1, 0]);
+        assert_eq!(bytes[42 + 68], SHOPEX_GOLD);
+        assert_eq!(GcShopStartEx::decode(&bytes), Ok(start));
+    }
+
+    #[test]
+    fn a_renewal_window_is_refused_when_short_foreign_mis_sized_or_not_a_start() {
+        let tab = GcShopTab {
+            name: [0; SHOP_TAB_NAME_MAX],
+            coin_type: 0,
+            items: [GcShopItem::default(); SHOP_HOST_ITEM_MAX_NUM],
+        };
+        let bytes = GcShopStartEx::new(1, vec![tab]).encode();
+        assert_eq!(
+            GcShopStartEx::decode(&bytes[..8]),
+            Err(GcShopError::Truncated {
+                context: "GcShopStartEx",
+                needed: 9,
+                actual: 8
+            })
+        );
+        let mut foreign = bytes.clone();
+        foreign[0] = 37;
+        assert_eq!(
+            GcShopStartEx::decode(&foreign),
+            Err(GcShopError::Header { actual: 37 })
+        );
+        let mut plain = bytes.clone();
+        plain[3] = SHOP_SUBHEADER_GC_START;
+        assert_eq!(
+            GcShopStartEx::decode(&plain),
+            Err(GcShopError::Subheader { actual: 0 })
+        );
+        let mut short = bytes.clone();
+        short[1] = 0x93;
+        assert_eq!(
+            GcShopStartEx::decode(&short),
+            Err(GcShopError::Size {
+                expected: 2963,
+                actual: 2963
+            })
+        );
+        let mut uncounted = bytes.clone();
+        uncounted[8] = 2;
+        assert_eq!(
+            GcShopStartEx::decode(&uncounted),
+            Err(GcShopError::Size {
+                expected: 2962,
+                actual: 2962
+            })
+        );
+        assert_eq!(
+            GcShopStartEx::decode(&bytes[..2961]),
+            Err(GcShopError::Truncated {
+                context: "GcShopStartEx",
+                needed: 2962,
+                actual: 2961
+            })
+        );
     }
 
     #[test]

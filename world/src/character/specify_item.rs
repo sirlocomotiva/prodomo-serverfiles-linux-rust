@@ -36,6 +36,84 @@ pub fn count_specify_item(items: &CharacterItems, usable_cells: u16, vnum: u32) 
         .sum()
 }
 
+/// `CountSpecifyTypeItem(kind)` (`G/char_item.cpp:8957-8983`): the summed count of every
+/// item of type `kind` in the scanned cells.
+#[must_use]
+pub fn count_specify_type_item(
+    items: &CharacterItems,
+    protos: &ItemProtos,
+    usable_cells: u16,
+    kind: i32,
+) -> i32 {
+    scanned_cells(usable_cells)
+        .filter_map(|pos| items.item_at(pos))
+        .filter(|item| {
+            protos
+                .get(item.vnum)
+                .is_some_and(|proto| proto.item_type == kind)
+        })
+        .map(|item| i32::from(item.count))
+        .sum()
+}
+
+/// `RemoveSpecifyTypeItem(kind, count)` (`G/char_item.cpp:8985-9060`): `count` of type
+/// `kind` taken from the scanned cells in order, stack by stack, as
+/// [`remove_specify_item`] takes one vnum. Each stack is answered with its own chain
+/// or delete, which the vnum take answers once for all: no proto on the owner's data
+/// has the secondary-coin type, so the two agree wherever they overlap.
+pub fn remove_specify_type_item(
+    items: &mut CharacterItems,
+    slots: &mut Quickslots,
+    protos: &ItemProtos,
+    usable_cells: u16,
+    (kind, count): (i32, u32),
+) -> MoveDone {
+    let mut done = MoveDone {
+        kind: MoveKind::Removed,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    let mut left = count;
+    for pos in scanned_cells(usable_cells) {
+        if left == 0 {
+            break;
+        }
+        let Some((id, held, chains)) = items
+            .item_at(pos)
+            .filter(|item| {
+                protos
+                    .get(item.vnum)
+                    .is_some_and(|proto| proto.item_type == kind)
+            })
+            .map(|item| {
+                (
+                    item.id,
+                    item.count,
+                    protos.get(item.vnum).is_some_and(chains_when_used_up),
+                )
+            })
+        else {
+            continue;
+        };
+        if left >= u32::from(held) {
+            left -= u32::from(held);
+            use_up(items, slots, &mut done, (id, pos), chains);
+        } else {
+            let keeps = held - u16::try_from(left).unwrap_or(held);
+            left = 0;
+            if items.set_count(id, u32::from(keeps)).is_err() {
+                continue;
+            }
+            if let Some(item) = items.item(id) {
+                let update = ItemRecord::Update(item.gc_item_update());
+                done.records.push(MoveRecord::Item(update));
+            }
+            done.changes.push(ItemChange::Count { id, count: keeps });
+        }
+    }
+    done
+}
+
 /// `RemoveSpecifyItem(vnum, count)` (`G/char_item.cpp:8848-8940`): `count` of `vnum` taken
 /// from the scanned cells in order. Each stack the rest covers is used up, and the first it
 /// does not cover loses the rest. A count of 0 takes nothing, and a count larger than the
@@ -273,6 +351,19 @@ mod tests {
         item.count = count;
         item.flags = ITEM_FLAG_STACKABLE;
         item
+    }
+
+    /// `count_specify_type_item` sums the stacks of one type and no other.
+    #[test]
+    fn the_type_count_sums_only_its_type() {
+        let mut items = CharacterItems::new();
+        let at = |cell| ItemPos::new(INV, cell);
+        items.set(at(0), &stack(1, POTION, 3)).unwrap();
+        items.set(at(1), &stack(2, POTION, 2)).unwrap();
+        items.set(at(2), &stack(3, ORE, 9)).unwrap();
+        assert_eq!(count_specify_type_item(&items, &protos(), 90, ITEM_USE), 5);
+        assert_eq!(count_specify_type_item(&items, &protos(), 90, 1), 9);
+        assert_eq!(count_specify_type_item(&items, &protos(), 1, ITEM_USE), 3);
     }
 
     /// `refine_level` reads the number after the last `+`, 0 with none or no digits.

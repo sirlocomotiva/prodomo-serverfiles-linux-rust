@@ -51437,3 +51437,45 @@ finds only the define. The controls are `ENABLE_NEW_PASSIVE_SKILL` and
 `__ENABLE_ADVANCE_SKILL_SELECT__`, which each hit game sources. Owner to confirm.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5259 passed, 1 failed in 46 targets — the failure is the known load flake `a_gm_aggregates_and_forgets_the_dogs_around` (a read timeout under load; passes alone in 12 s), not this slice; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean after splitting the scenario's revive drain and hide step into helpers (111/100 lines); `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The scenario passes 8 of 8. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 519. The renewal shop and the item-shop sweep
+
+`sys.npc.shop` is `ported` and `sys.trade.item_shop` is `unused`.
+
+The renewal `shopex` (`CShopEx`, `G/shopEx.cpp`) is live. The boot query's table
+(`InitializeShopEXTable`, `D/ClientManagerBoot.cpp:384-466`) reads from the owner's
+`player.sql` (`gamedata::npc_shop::renewal_shops_from_dump`): each `shopex` row with
+every `shopex_item` row of its vnum, sorted by shop and item vnum, decoded with the
+legacy policy. The one column the query transforms is handed over transformed:
+`price_type+0` maps the enum to its 1-based index (`player.sql:1296`,
+`enum('GOLD','SECONDCOIN','ITEM','EXP')`), which is the `SHOPEX_*` selector. Keeper
+9001 — on-click 1, standing on map 1 at (469200, 951700) among others — opens
+`START_EX` (10) with its one tab (`protocol::gc_shop::GcShopStartEx`, 2953 bytes a
+tab: the 32 name bytes, the gold coin type, forty `packet_shop_item`s whose
+`price_type` and `price_vnum` are now live fields). A buy numbers its slots across
+the tabs and follows the selector: gold spends gold (tripled for a stranger, shown
+and charged, unlike the base shop's deliberate Divergence), secondary coins and
+items count the scanned cells and are taken before the bought item lands, and
+experience is checked against the held pools and lost through `lose_exp`. A 0 price
+refuses, and a selector past `SHOPEX_EXP` (4) answers nothing and changes nothing,
+as legacy's fall-through does. The bought item carries the row's sockets and
+attributes. A sale runs the base sale path, because legacy routes every sale through
+`CShopManager::Sell`, which knows no tab.
+
+Coverage: the owner's one row (shop 1, `test`, item 50011 for 0 gold) proves the
+window, the 0-price refusal and the invalid second tab in the scenario
+`a_click_on_a_renewal_keeper_opens_its_tab_and_a_buy_follows_the_selector`; the
+three reachable price arms and the silent fifth selector are unit-tested in world
+and in the state's shop tests. The secondary-coin spend is unreachable on the
+owner's data — no proto has type 32 — but shares the item spend's stack-by-stack
+take, tested through it.
+
+The item shop died on a sweep: `ENABLE_ITEMSHOP` and `ENABLE_ITEMSHOP_TO_INVENTORY`
+are defined (`C/prodomodefines.h:153-154`) but no game source names them, no game
+source names `coins`, no client or GC record carries the shop, and no quest or
+locale file reaches it. The shop lives in the retired DB server only
+(`D/ClientManager.cpp`). The account's `coins` stay an Operator currency. The
+secondary-coin `shopex` arm above is not it: it spends items of type 32, and the
+owner's data has none. Owner to confirm.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace` clean; the suite 5271 passed, 0 failed in 46 targets (an earlier 5267/1 run failed the sort scenario's 14/15-second wait window under load; it passes alone in 7 s and the rerun is green); `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean after a `RenewalShops` alias, merging the dump-value arms, folding the silent selector into the wildcard, splitting `buy`'s slot lookup and price spend into `npc_offer` and `spend_price_first`, and dropping a `mut`; `RUSTDOCFLAGS="-D warnings" cargo doc` clean. The mutation sweep kills 8 of 8: the unknown selector's silence, the goldless item price, the socket stamp (which caught the stamp running before the gain roll instead of after it — fixed), the saturated price, the type count, the tab math, the gold-only tripling (extracted as `charged_price`, tested both arms), and the tab name. The scenario passes 8 of 8. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

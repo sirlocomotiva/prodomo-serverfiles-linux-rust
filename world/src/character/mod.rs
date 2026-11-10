@@ -150,8 +150,8 @@ pub use shop::{
 pub use smith_refine::{refined_item, swap_refined};
 pub use sort_inventory::{sort_inventory, Sorted, SORT_KEPT_WHOLE, SUMMON_ITEMS};
 pub use specify_item::{
-    count_specify_item, force_worn_attribute, refine_level, remove_quest_item, remove_specify_item,
-    set_item_socket,
+    count_specify_item, count_specify_type_item, force_worn_attribute, refine_level,
+    remove_quest_item, remove_specify_item, remove_specify_type_item, set_item_socket,
 };
 pub use state::{Activity, CoreState, Posture};
 pub use tool_refine::{refine_cell, refine_tool, ToolOutcome, ToolRefine};
