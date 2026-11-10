@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 545 (the set and the update).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 546
+Last reviewed: 2026-11-10, after ledger section 546 (the extra target and the buff cast).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 547
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -599,6 +599,7 @@ Since 542 `lua.set_state` is `ported` and the quest-API table has no partial lef
 Since 543 the seven party walk records are `ported` (`gc.party_invite/add/update/link/parameter/unlink/remove`): the request scenario pins the invite and the join walk, the role scenario the unlink and the ADD bodies, the ungroup scenario the REMOVE. The
 Since 544 `gc.change_skill_group` and `gc.request_make_guild` are `ported`: `/setjob` leads with byte 112 and the group, and the guard's yes asks with the bare byte 82. The
 Since 545 `gc.item_set` and `gc.item_update` are `ported`: the letters trade pins the six clears, and the move/split/merge pins the UPDATEs. The
+Since 546 `gc.add_fly_targeting` and `gc.auto_shaman_skill` are `ported`: the assassin scenario pins the extra relay, and the toggle scenario the buff cast. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
