@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 528 (the proven draw and skin).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 529
+Last reviewed: 2026-11-10, after ledger section 529 (three proven gates).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 530
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -582,6 +582,7 @@ Since 525 `quest.guild_manage` is `ported`: the guild man's menu gates both GM c
 Since 526 `quest.guild_building` is `ported`: the staged seller's dialog sells land 4 to a level-10 guild master over the wire (the price leaves, the claim fans, the buy notice chats, the store banks both), porting `pc.changegold`, `notice`, `pc.get_guild`, `pc.get_x` and `pc.get_y` with their aliases. The
 Since 527 `lua.get_time`, `lua.get_global_time` and `lua.pc.getf` are `ported`: the Time Spiral's scenario already runs all three arms, and the mutants prove it — a 0 clock, a 0 flag read, and a swallowed removal each kill it. `pc.remove_item` stays `partial` for its no-store arm (ledger 265). The
 Since 528 `lua.number` and `lua.setskin` are `ported`: the temple's kill table draws ten times in the world test (a wire kill of the 218k-HP boss is out of reach), and the attr67 dialog's `setskin(NOWINDOW)` ends `[DONE]` in skin 0 — each proven by a killing mutant. `setleftimage` and `settopimage` stay `partial`: no owner quest calls them. The
+Since 529 `lua.npc.getrace`, `lua.pc.enough_inventory` and `lua.pc.get_gm_level` are `ported`: the race alias shares its arm, the attr67 collect's gate reads room, and the implementor's login passes the panel letter's gate — the two gates each proven by a killing mutant. The
 The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

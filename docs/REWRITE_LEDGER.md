@@ -51874,3 +51874,20 @@ in skin 0. A bridge answering skin 1 kills `an_attr67_regist_waits_and_collects`
 owner caller (controls: the same sweep finds `setskin` in eight files).
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5302 passed, 0 failed in 46 targets; `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.
+
+## 529. Three proven gates
+
+No code changed and no scenario was written: three `partial` bridges were already
+proven by passing scenarios, and the mutants confirm the two with live gates.
+
+- `lua.npc.getrace`: one arm with the ported `npc.get_race`; it names the same
+  scenario.
+- `lua.pc.enough_inventory`: the attr67 collect's gate reads room for the sword
+  home. An always-false answer says the no-space page and kills
+  `an_attr67_regist_waits_and_collects`.
+- `lua.pc.get_gm_level`: the implementor's second login passes the panel
+  letter's `>= 4` gate (`event_panel.quest:22`). A 0 answer drops the
+  `GM: Event Panel` button and kills
+  `a_kill_scores_the_killer_and_the_season_awards_and_empties`.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` with no warning; the suite 5301 passed, 1 failed in 46 targets — `a_gm_flags_a_stray_dog_aggressive_and_coward` tripped on a stray `GC_OWNERSHIP` past a swing, then passed twice alone (a load flake; the slice touches no code); `--doc` 1 passed, 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` with no warning. Afterwards no `prodomo\_%` database remained. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. No ADR changed.
