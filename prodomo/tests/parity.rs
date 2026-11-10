@@ -40666,6 +40666,22 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
     }
 }
 
+/// Ledger 535's take-back probe: the skill teacher (vnum 20300, bound but questless)
+/// gives five red potions, counts them under the short spelling, takes two under the
+/// long spelling, counts, takes the rest under the short spelling, and counts again.
+const TAKEBACK_PROBE: &[u8] = b"quest takeback_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    pc.give_item2(27001, 5)\n\
+    say('have='..pc.countitem(27001))\n\
+    pc.remove_item(27001, 2)\n\
+    say('left='..pc.countitem(27001))\n\
+    pc.removeitem(27001, 3)\n\
+    say('gone='..pc.countitem(27001))\n\
+    end\n\
+    end\n\
+    end\n";
+
 /// Ledger 534's mark probe: the skill teacher (vnum 20300, bound but questless)
 /// marks the clicker under both `target_vid` spellings, says both ids, clears, and
 /// says both again.
@@ -41077,6 +41093,73 @@ fn a_click_marks_says_and_clears_both_target_spellings() {
         alice.read_game(),
         server_script(1, page.as_bytes()),
         "the ids, then the zeros"
+    );
+    alice.quiet("the step ends");
+}
+
+/// `lua.pc.remove_item`, `lua.pc.countitem` and `lua.pc.removeitem`: Beta clicks the
+/// skill teacher; five red potions land in the first free cell, the short count says
+/// 5, the long spelling takes 2, the count says 3, the short spelling takes the rest,
+/// and the count says 0.
+#[test]
+fn a_click_gives_counts_and_takes_back_the_potions() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Beta'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/takeback_probe.lua",
+            TAKEBACK_PROBE,
+        )],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;444;Licoare Rosie(K)]"),
+        "the give names the stack"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (inventory, 0, 27_001, 5),
+        "five potions in cell 0"
+    );
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_QUICKSLOT_ADD, 0, 1, 0],
+        "the given potion fills the quickslot"
+    );
+    assert_eq!(
+        update_fields(&alice.read_game()),
+        (inventory, 0, 3),
+        "taking two updates the stack"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (inventory, 0, 0, 0),
+        "taking the rest clears the cell"
+    );
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_QUICKSLOT_DEL, 0],
+        "the used-up stack's quickslot sync"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"have=5[ENTER]left=3[ENTER]gone=0[ENTER][DONE]"),
+        "the short counts"
     );
     alice.quiet("the step ends");
 }

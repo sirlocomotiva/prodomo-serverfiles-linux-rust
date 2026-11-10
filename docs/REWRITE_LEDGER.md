@@ -51973,3 +51973,14 @@ and says 0 twice. One mutant died: `target_id` reading a neighbouring quest answ
 early and breaks the page.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5308 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean (after dropping a stray `mut`); `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 535. The take-back
+
+Three take-back rows sat `partial` behind the horse menu and the sash: the long and short
+remove spellings and the short count. A probe reaches them without either. `TAKEBACK_PROBE`
+gives five red potions into cell 0; `a_click_gives_counts_and_takes_back_the_potions` pins
+the line, the set, the potion's quickslot fill, the take-two update, the take-rest clear
+with its quickslot sync, and the short counts 5, 3, 0 on the page. One mutant died: a
+remove one short breaks the counts.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; 5309 passed, 0 failed in 46 targets; doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
