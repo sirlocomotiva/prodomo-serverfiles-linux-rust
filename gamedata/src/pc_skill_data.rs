@@ -38,9 +38,12 @@ const PC_TYPE_MIN: u32 = 1;
 const PC_VNUM_MAX: u32 = 111;
 /// The type-0 rows `/skillup` can reach (`do_skillup`'s switch plus the always
 /// list, `G/cmd_general.cpp:939-971`, `G/char_skill.cpp:4169-4174`): leadership,
-/// combo, mining, the languages, polymorph, the horse rows and the two passives.
-/// 123 (`SKILL_CREATE`) is dead (`ClientManagerPlayer.cpp:804` zeroes it).
-const TYPE_ZERO_KEPT: [u32; 11] = [121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142];
+/// combo, mining, the languages, polymorph, the horse rows and the five passives.
+/// 123 (`SKILL_CREATE`) is dead (`ClientManagerPlayer.cpp:804` zeroes it). 164-166 are
+/// the new passives (`ENABLE_NEW_PASSIVE_SKILL`, `G/skill.h:176-178`).
+const TYPE_ZERO_KEPT: [u32; 14] = [
+    121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142, 164, 165, 166,
+];
 
 /// `SKILL_COUNT` (`G/char_skill.cpp:4107`): six skills per job and group.
 pub const SKILL_COUNT: usize = 6;
@@ -754,13 +757,20 @@ mod tests {
     #[test]
     fn type_zero_rows_and_buff_flags_load() {
         let skills = PcSkills::from_dumps(&dump("player.sql"), &dump("common.sql")).unwrap();
-        // The 11 type-0 rows `/skillup` can reach.
-        for vnum in [121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142] {
+        // The 14 type-0 rows `/skillup` can reach.
+        for vnum in [
+            121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142, 164, 165, 166,
+        ] {
             assert!(skills.get(vnum).is_some(), "{vnum}");
         }
         // 123 is dead; 132-140 and 143-150 stay out.
         assert!(skills.get(123).is_none());
         assert!(skills.get(137).is_none());
+        // 164-166 are the `10 * k` new passives.
+        for vnum in [164, 165, 166] {
+            let row = skills.get(vnum).unwrap();
+            assert_eq!(row.record.skill_type, 0, "{vnum}");
+        }
         // The buff flags are the schema enum index: JEONGWIHON 15 ... MANASHIELD 26.
         assert_eq!(skills.get(3).unwrap().record.affect_flag, 15);
         assert_eq!(skills.get(4).unwrap().record.affect_flag, 16);

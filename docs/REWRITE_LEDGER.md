@@ -51357,3 +51357,56 @@ clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
 `RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+
+## 517. The new passives and the skill window
+
+`sys.skill.extra` is `partial`: the 164-166 new passives (`ENABLE_NEW_PASSIVE_SKILL`)
+climb through their books with the ComputePoints refresh, and the
+`AdvanceSkillSelectWindow` line rides the login burst and the level-up
+(`__ENABLE_ADVANCE_SKILL_SELECT__`).
+
+The hosted rows grow: `TYPE_ZERO_KEPT` holds 164-166, whose `10 * k` point polys load
+from the owner's dump. A climb of one runs `refresh_passive_bonus`, the
+`G/char.cpp:2974-3013` arms: the row's poly at `k = power / 100` refreshes that skill's
+`PassiveBonuses` member (the other two stay as they were), then the compute and the
+records. `Points::passive_bonuses` reads the standing row for the refresh; the three
+members were already wired into `compute_points`. The 50335-50340 books already mapped
+to 164-166 in the passive ladder arm; they now carry the new constant names. A 50335
+read climbs 164 on its 80 % `prob` roll (value2; value0-3 are `0, 20, 80, 15`, so the
+low gate is 0, the high gate 20, the chance 80 and the level gate 15).
+
+The sub-skill list grows with them: legacy's `s_adwSubSkillVnums` holds eighteen with
+the flag on (the old eleven plus 139-142 and 164-166; the Rewrite's eleven predated
+139 as well), so `SUB_SKILLS` is the eighteen in legacy order and both clears keep
+and zero them.
+
+The window line is `AdvanceSkillSelect` (`G/char.cpp:11328-11359`): nothing for a
+grouped caller or one below level 5, else the `AdvanceSkillSelectWindow <JOB>` command
+line with the warrior/assassin/sura/shaman word (an unknown job carries the empty
+word). The login hook rides the burst after the priv lines, where legacy sends it
+after `_send_bonus_info` (`:723-725`); the level-up hook runs in `gain_pc_exp` after
+the records and before the quest raise (`:4042-4044`).
+
+Tests: the hosting test names the fourteen rows, `new_passive_ups_refresh_their_own_bonus`
+(a 164 climb to 20 fills the monster bonus while stone and boss stay 0, then a 165
+climb fills stone without touching monster; level 1 reads 0.5 and narrows to nothing,
+which is why 20), the eighteen-sub-skill test, the scenario
+`a_monster_book_reads_and_climbs_or_misses` (a 50335 read at 20k exp: byte 76 answers
+with slot 164 as it stands, the book clears either way, and a climb banks the row),
+and the select scenario's new tail (a level-10 ungrouped shaman's burst carries the
+window line). `finish_enter_game` drains the priv-window-letters chat run and `Entered`
+carries the window.
+
+Staying out: the 7/8 anti/help functor damage arms (`G/char_skill.cpp:1643-1745`,
+behind `__7AND8TH_SKILLS__`) and `SkillCanUp`.
+
+The first full run failed four scenarios (three forest, one dog-tail): every hand-read
+burst tripped on the new window line. The priv-window-letters chat run is now one
+shared reader (`read_priv_run`), used by `finish_enter_game`, `read_enter_tail` and
+the two `enter_beside` readers; all four pass alone and the rerun is green.
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace`
+clean; the suite 5259 passed, 0 failed in 46 targets; `cargo test --workspace --doc`
+clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
+`RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.

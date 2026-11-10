@@ -3509,12 +3509,17 @@ impl GameState {
         // The lines ride the burst before the time record.
         let land_lines = self.land_list_lines(vid);
         let switchbot_lines = self.switchbot_report(vid);
+        // `ch->AdvanceSkillSelect()` (`G/input_login.cpp:723-725`,
+        // `__ENABLE_ADVANCE_SKILL_SELECT__`): the window line for an ungrouped
+        // entrant past level 4 rides the burst after the priv lines.
+        let advance_window = self.advance_skill_window(vid);
         Shown {
             records,
             update,
             silence,
             hide_lines,
             priv_lines,
+            advance_window,
             letters_event,
             fish_lines,
             land_lines,

@@ -2870,8 +2870,31 @@ fn read_game_phase_tail(keyed: &mut Keyed) -> Vec<u8> {
     keyed.read_game()
 }
 
+/// The priv-notice run of an enter-game burst: the `_send_bonus_info` lines, then the
+/// advance-skill window for an ungrouped entrant past level 4
+/// (`AdvanceSkillSelect`), then the letters line. Reads chats until the letters line
+/// lands and answers the window line when it rode.
+fn read_priv_run(keyed: &mut Keyed) -> Option<Vec<u8>> {
+    let mut window = None;
+    loop {
+        let line = keyed.read_game();
+        assert_eq!(
+            line[0], GC_CHAT,
+            "chats precede the fish report: {line:02x?}"
+        );
+        if line.len() > 34 && line[10..34] == *b"AdvanceSkillSelectWindow" {
+            window = Some(line);
+            continue;
+        }
+        if line.len() > 22 && line[10..].starts_with(b"letters_event") {
+            break;
+        }
+    }
+    window
+}
+
 /// The rest of an enter-game burst whose view the scenario read by hand: the game phase,
-/// the time, the Channel 1 record, the `letters_event` command line, the fish-event
+/// the time, the Channel 1 record, the priv run, the fish-event
 /// report, the war list, then the quest login event.
 fn read_enter_tail(keyed: &mut Keyed) {
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
@@ -2879,7 +2902,7 @@ fn read_enter_tail(keyed: &mut Keyed) {
     let _lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(keyed.read_game()[0], GC_CHAT);
+    let _window = read_priv_run(keyed);
     let _report = read_fish_report(keyed);
     read_switchbot_report(keyed);
     enter_war_list(keyed);
@@ -2906,6 +2929,8 @@ struct Entered {
     /// Its map's guild lands: each owned land's NAME, then the one list — or nothing on
     /// a map with no land.
     lands: Vec<Vec<u8>>,
+    /// The advance-skill window line, for an ungrouped entrant past level 4.
+    window: Option<Vec<u8>>,
 }
 
 /// [`enter_game_records`], answering what the burst showed.
@@ -3073,8 +3098,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
     let lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
-    let notice = keyed.read_game();
-    assert_eq!(notice[0], GC_CHAT);
+    let window = read_priv_run(keyed);
     let report = read_fish_report(keyed);
     read_switchbot_report(keyed);
     enter_war_list(keyed);
@@ -3085,6 +3109,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
         affect,
         report,
         lands,
+        window,
     }
 }
 
@@ -6031,7 +6056,7 @@ fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
     let _lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(keyed.read_game()[0], GC_CHAT);
+    let _window = read_priv_run(keyed);
     let _report = read_fish_report(keyed);
     read_switchbot_report(keyed);
     enter_war_list(keyed);
@@ -6060,7 +6085,7 @@ fn enter_beside_shown(keyed: &mut Keyed, vnum: u16) -> (u32, u32) {
     let _lands = read_land_lines(keyed);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(keyed.read_game()[0], GC_CHAT);
+    let _window = read_priv_run(keyed);
     let _report = read_fish_report(keyed);
     read_switchbot_report(keyed);
     enter_war_list(keyed);
@@ -15969,6 +15994,68 @@ fn party_swing_tail(
         );
     }
 }
+/// `sys.skill.extra`: Alpha holds 20k exp and reads a 50335 book with skill 164 at 0:
+/// the 80 % `prob` roll climbs 164 to 1 or misses, byte 76 answers with slot 164 as it
+/// stands, and the book is spent either way. The passive's own refresh is the unit
+/// test's (`new_passive_ups_refresh_their_own_bonus`), because a level-1 power reads
+/// 0.5 and fills nothing.
+#[test]
+fn a_monster_book_reads_and_climbs_or_misses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET exp = 20000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0,          1, 50335 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    alpha.send_record(&client_item_use(0));
+    // The read's records: a climb's byte 76 with slot 164 at 1 or a miss's two chat
+    // lines, then the book's clear. The book spends either way.
+    let mut climbed = None;
+    let mut cleared = false;
+    for _ in 0..10 {
+        let record = alpha.read_game();
+        if record[0] == GC_SKILL_LEVEL_NEW {
+            assert_eq!(record.len(), SKILL_LEVEL_LEN);
+            assert_eq!(record[1 + 164 * 6], 0, "slot 164's master: {record:02x?}");
+            let level = record[1 + 164 * 6 + 1];
+            assert!(level <= 1, "slot 164 reads 0 or 1: {record:02x?}");
+            assert!(climbed.replace(level == 1).is_none(), "one byte 76");
+        } else if record[0] == ITEM_SET && record[1] == 1 && record[2] == 0 {
+            assert_eq!(record[4..8], [0; 4], "the book clears: {record:02x?}");
+            cleared = true;
+        } else if record[0] == GC_CHAT {
+            // The miss's [LS;952]+[LS;953] read-fail pair.
+        } else {
+            panic!("past a book read, a record nobody accounted for: {record:02x?}");
+        }
+        if climbed.is_some() && cleared {
+            break;
+        }
+    }
+    assert!(climbed.is_some(), "byte 76 answers the read");
+    assert!(cleared, "the book is spent");
+    if climbed == Some(true) {
+        wait_for(
+            &database,
+            &format!(
+                "SELECT level = 1 FROM player_skill WHERE player_id = {} AND vnum = 164",
+                listed.id,
+            ),
+        );
+    }
+}
+
 /// Ledger 230f: `/skillup 109` spends a skill point and sends byte 76 with slot
 /// 109 learned, then `CG_USE_SKILL 109` heals: the SP charge and the HP point
 /// change, with no affect add. Alpha is stored group 2 with 100/100, so 109 is
@@ -44454,7 +44541,9 @@ fn skill_select_rows(database: &ScratchDatabase) {
 /// syntax; a select sets with byte 112, clears with byte 76 (the seeded skill
 /// zeroes, the sub-skill stands), and tells no confirmation; a second select
 /// and a level-1 select hear `YOU_CAN_NOT_DO_THAT`; the click shows the
-/// special window; the group and the cleared counter bank on disconnect.
+/// special window; a level-10 ungrouped entrant's burst carries the
+/// `AdvanceSkillSelectWindow` line (`sys.skill.extra`); the group and the
+/// cleared counter bank on disconnect.
 #[test]
 fn a_skill_select_sets_and_clears_and_a_click_shows_the_special_window() {
     let Some(database) = ScratchDatabase::create() else {
@@ -44511,6 +44600,22 @@ fn a_skill_select_sets_and_clears_and_a_click_shows_the_special_window() {
         a_command_line(b"ShowSpecialInventory"),
         "the click shows the special window"
     );
+    // The login hook: a level-10 ungrouped shaman entrant hears the window line at
+    // enter (shaman, because no queued letter mentions its job word). Bob's Yankee is
+    // level 1, so he hears nothing; Zulu is seeded level 10 ungrouped.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 1, 'Zulu', 3,          10, 350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    let (mut yankee2, _, _, _) = load_with_quickslots_on(&server, 1, b"bob", 1, GERMAN);
+    let entered = enter_game_shown(&mut yankee2);
+    assert_eq!(
+        entered.window,
+        Some(a_command_line(b"AdvanceSkillSelectWindow JOB_SHAMAN")),
+        "the ungrouped entrant's burst carries the window"
+    );
+    read_login_event(&mut yankee2);
+    drop(yankee2);
     drop(alice);
     drop(yankee);
     wait_for(

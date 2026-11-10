@@ -94,6 +94,15 @@ const SKILL_PERFECT_MASTER: u8 = 3;
 pub(super) const SKILL_ADD_HP: u32 = 141;
 /// `SKILL_RESIST_PENETRATE` (`G/skill.h:160`): 142, the resist-penetrate passive.
 pub(super) const SKILL_RESIST_PENETRATE: u32 = 142;
+/// `SKILL_MONSTER_BONUS` (`G/skill.h:176`, `ENABLE_NEW_PASSIVE_SKILL`): 164, the
+/// monster-bonus passive.
+pub(super) const SKILL_MONSTER_BONUS: u32 = 164;
+/// `SKILL_STONE_BONUS` (`G/skill.h:177`, `ENABLE_NEW_PASSIVE_SKILL`): 165, the
+/// stone-bonus passive.
+pub(super) const SKILL_STONE_BONUS: u32 = 165;
+/// `SKILL_BOSS_BONUS` (`G/skill.h:178`, `ENABLE_NEW_PASSIVE_SKILL`): 166, the
+/// boss-bonus passive.
+pub(super) const SKILL_BOSS_BONUS: u32 = 166;
 /// `SKILL_7_A_ANTI_TANHWAN` (`G/skill.h:129`): 112, opening the 7/8 anti range.
 pub(super) const SKILL_ANTI_FIRST: u32 = 112;
 /// `SKILL_8_D_ANTI_BYEURAK` (`G/skill.h:137`): 119, closing it.
@@ -653,6 +662,11 @@ impl GameState {
         self.pc_skill_state(vid.raw()).levels[vnum as usize] = climbed;
         if vnum == SKILL_ADD_HP {
             self.refresh_passive_hp(vid);
+        } else if matches!(
+            vnum,
+            SKILL_MONSTER_BONUS | SKILL_STONE_BONUS | SKILL_BOSS_BONUS
+        ) {
+            self.refresh_passive_bonus(vid, vnum);
         }
         self.send_skill_levels(vid);
         let slot = u8::try_from(vnum).ok()?;
@@ -1007,9 +1021,9 @@ impl GameState {
                     50314..=50316 => SKILL_POLYMORPH,
                     50323..=50324 => SKILL_ADD_HP,
                     50325..=50326 => SKILL_RESIST_PENETRATE,
-                    50335..=50336 => 164,
-                    50337..=50338 => 165,
-                    _ => 166,
+                    50335..=50336 => SKILL_MONSTER_BONUS,
+                    50337..=50338 => SKILL_STONE_BONUS,
+                    _ => SKILL_BOSS_BONUS,
                 };
                 if self.pc_level(vid) < values[3] {
                     self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;350]", &[]);
@@ -1236,7 +1250,7 @@ impl GameState {
     /// `ComputePoints`' `SKILL_ADD_HP` arm (`G/char.cpp:2956-2966`) after a 141
     /// up: the row's point poly at `k = power / 100` refreshes the passive
     /// max-HP bonus, recomputes the points, and sends the records. (142 reads
-    /// at hit time, not from the points; 164-166 are unhosted.)
+    /// at hit time, not from the points.)
     fn refresh_passive_hp(&mut self, vid: Vid) {
         let (job, group) = match self.bodies.get(&vid) {
             Some(body) => (body.card.job, body.card.skill_group),
@@ -1258,6 +1272,40 @@ impl GameState {
             max_hp: bonus,
             ..world::character::PassiveBonuses::default()
         };
+        points.set_passive_bonuses(passive);
+        let records = points.compute_points();
+        self.send_point_records(vid, &records);
+    }
+
+    /// `ComputePoints`' 164-166 arms (`G/char.cpp:2945-3013`, `ENABLE_NEW_PASSIVE_SKILL`)
+    /// after a `vnum` up: the row's point poly at `k = power / 100` refreshes that
+    /// skill's passive bonus (the other two stay as they were), recomputes the points,
+    /// and sends the records. A vnum that is none of the three, or a row the tables
+    /// lack, refreshes nothing.
+    fn refresh_passive_bonus(&mut self, vid: Vid, vnum: u32) {
+        let (job, group) = match self.bodies.get(&vid) {
+            Some(body) => (body.card.job, body.card.skill_group),
+            None => return,
+        };
+        let Some(row) = self.pc_skill_tables.get(vnum).cloned() else {
+            return;
+        };
+        let level = self.pc_skill_level(vid.raw(), vnum);
+        let power = self.pc_skill_tables.power(job, group, level, false);
+        let bonus = f64_to_i32(
+            row.point
+                .eval(&BTreeMap::from([("k", f64::from(power) / 100.0)])),
+        );
+        let Some(points) = self.pc_points_mut(vid.raw()) else {
+            return;
+        };
+        let mut passive = points.passive_bonuses();
+        match vnum {
+            SKILL_MONSTER_BONUS => passive.monster = bonus,
+            SKILL_STONE_BONUS => passive.stone = bonus,
+            SKILL_BOSS_BONUS => passive.boss = bonus,
+            _ => return,
+        }
         points.set_passive_bonuses(passive);
         let records = points.compute_points();
         self.send_point_records(vid, &records);
@@ -5158,6 +5206,30 @@ mod tests {
         assert!(!climbed);
         assert!(climbs.is_empty(), "no climb, no store");
         assert_eq!(texts(&records), [b"[LS;949]".to_vec()]);
+    }
+
+    /// A 164 climb to 20 refreshes the monster-bonus passive (`10 * k` at the skill's
+    /// power) while the stone and boss passives stay 0; a 165 climb then fills the
+    /// stone one without touching the monster one. (At level 1 the power is 5, so the
+    /// poly reads 0.5 and narrows to 0; 20 reads 50 and fills 5.)
+    #[test]
+    fn new_passive_ups_refresh_their_own_bonus() {
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        world.set_pc_skill_level(1, SKILL_MONSTER_BONUS, 20);
+        world.refresh_passive_bonus(me, SKILL_MONSTER_BONUS);
+        let passive = world.pc_points_mut(1).unwrap().passive_bonuses();
+        assert!(passive.monster > 0, "the monster bonus fills");
+        assert_eq!(passive.stone, 0, "the stone bonus stays");
+        assert_eq!(passive.boss, 0, "the boss bonus stays");
+        let monster = passive.monster;
+        world.set_pc_skill_level(1, SKILL_STONE_BONUS, 20);
+        world.refresh_passive_bonus(me, SKILL_STONE_BONUS);
+        let passive = world.pc_points_mut(1).unwrap().passive_bonuses();
+        assert!(passive.stone > 0, "the stone bonus fills");
+        assert_eq!(passive.monster, monster, "the monster bonus keeps");
+        // An unknown vnum refreshes nothing.
+        world.refresh_passive_bonus(me, 200);
     }
 
     /// `/cooltime` sets the flag and a flagged cast charges twice with no

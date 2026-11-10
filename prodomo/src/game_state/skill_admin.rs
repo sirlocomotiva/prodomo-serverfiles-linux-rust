@@ -48,6 +48,7 @@ use super::pc_skill::{
     SKILL_HELP_FIRST, SKILL_HELP_LAST, SKILL_MAX_NUM, SKILL_NEW_FIRST, SKILL_NEW_LAST,
 };
 use super::GameState;
+use crate::chat_line::chat_packet;
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_inventory::HEADER_GC_CHANGE_SKILL_GROUP;
 use protocol::gc_small::GcHeaderAndByte;
@@ -329,6 +330,66 @@ impl GameState {
         }
         let value = str_to_wrapping_int(&word);
         Some(self.set_group_and_clear(vid, mover, value, None))
+    }
+
+    /// `CHARACTER::AdvanceSkillSelect` (`G/char.cpp:11328-11359`,
+    /// `__ENABLE_ADVANCE_SKILL_SELECT__`): a grouped caller or one below level 5
+    /// runs nothing; else the `AdvanceSkillSelectWindow <JOB>` command line goes
+    /// out, with the job word of the caller's job (an unknown job logs nothing
+    /// and the line carries the empty word, as legacy's `sys_err` + empty word).
+    pub(super) fn advance_skill_select(&mut self, vid: Vid) {
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let Some(word) = self.advance_skill_word(vid) else {
+            return;
+        };
+        let mut format = b"AdvanceSkillSelectWindow ".to_vec();
+        format.extend_from_slice(word);
+        self.tell(
+            vid,
+            mover,
+            protocol::gc_chat::CHAT_TYPE_COMMAND,
+            &format,
+            &[],
+        );
+    }
+
+    /// The job word `AdvanceSkillSelect` offers with, or `None` for a grouped caller
+    /// or one below level 5. The burst's frame and the level-up hook share it.
+    fn advance_skill_word(&mut self, vid: Vid) -> Option<&'static [u8]> {
+        let (grouped, job) = self.bodies.get(&vid).map_or((true, 0), |body| {
+            (body.card.skill_group != 0, body.card.job)
+        });
+        if grouped {
+            return None;
+        }
+        let level = self.level_of(vid).unwrap_or(0);
+        if level < 5 {
+            return None;
+        }
+        Some(match job {
+            0 => b"JOB_WARRIOR",
+            1 => b"JOB_ASSASSIN",
+            2 => b"JOB_SURA",
+            3 => b"JOB_SHAMAN",
+            _ => b"",
+        })
+    }
+
+    /// The `AdvanceSkillSelectWindow <JOB>` command frame, or `None` for a grouped
+    /// caller or one below level 5. The login burst carries it.
+    pub(super) fn advance_skill_window(&mut self, vid: Vid) -> Option<Vec<u8>> {
+        let word = self.advance_skill_word(vid)?;
+        let mover = self.own_mover(vid)?;
+        let mut format = b"AdvanceSkillSelectWindow ".to_vec();
+        format.extend_from_slice(word);
+        Some(chat_packet(
+            mover.recipient(&self.locale),
+            protocol::gc_chat::CHAT_TYPE_COMMAND,
+            &format,
+            &[],
+        ))
     }
 
     /// `ACMD(do_click_special_inv)`: the `ShowSpecialInventory` command line.

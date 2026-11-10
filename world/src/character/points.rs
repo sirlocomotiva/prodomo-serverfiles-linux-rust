@@ -1647,6 +1647,12 @@ impl Points {
         self.passive = passive;
     }
 
+    /// The passive-skill bonuses as they stand, for a refresh that changes one of them.
+    #[must_use]
+    pub const fn passive_bonuses(&self) -> PassiveBonuses {
+        self.passive
+    }
+
     /// `PointChange(type, amount, bAmount, bBroadcast)`.
     ///
     /// `show_amount` is `bAmount`: whether the record carries the change or 0. `broadcast`

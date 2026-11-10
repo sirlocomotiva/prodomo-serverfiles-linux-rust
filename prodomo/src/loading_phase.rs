@@ -1396,6 +1396,8 @@ pub struct BurstAfter {
     pub hide_lines: Vec<Vec<u8>>,
     /// The live priv bonus notices, in type order.
     pub priv_lines: Vec<Vec<u8>>,
+    /// The advance-skill window line, when the entrant is ungrouped and past level 4.
+    pub advance_window: Option<Vec<u8>>,
     /// Whether the character is in the letters event: the `letters_event` line reads
     /// 1 then, else 0.
     pub letters_event: bool,
@@ -1485,6 +1487,11 @@ pub fn enter_game_burst(
     // `SendGreetMessage` sends nothing on the owner's data (no `GREET` row), and
     // `_send_bonus_info`'s priv notices follow it (`G/input_login.cpp:694-697`).
     out.extend(after.priv_lines);
+    // `ch->AdvanceSkillSelect()` (`G/input_login.cpp:723-725`) runs after
+    // `_send_bonus_info` and before the waiting lines, so its line rides here.
+    if let Some(line) = after.advance_window {
+        out.push(line);
+    }
     // `SEventLetters` always sends one line: 1 for a character in the event, else 0.
     // Both constants are short, so the length check cannot fail.
     let chat = if after.letters_event {
@@ -2370,6 +2377,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2403,6 +2411,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2490,6 +2499,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2535,6 +2545,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2566,6 +2577,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2599,6 +2611,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2641,6 +2654,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2668,6 +2682,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: true,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2692,6 +2707,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2842,6 +2858,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2871,6 +2888,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2896,6 +2914,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -2975,6 +2994,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -3009,6 +3029,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),
@@ -3039,6 +3060,7 @@ mod tests {
                 silence: Vec::new(),
                 hide_lines: Vec::new(),
                 priv_lines: Vec::new(),
+                advance_window: None,
                 letters_event: false,
                 fish_lines: Vec::new(),
                 land_lines: Vec::new(),

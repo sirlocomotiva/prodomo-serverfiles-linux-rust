@@ -388,6 +388,12 @@ impl GameState {
         };
         let outcome = points.gain_exp(amount, skill_group, limits, dice);
         self.send_point_records(vid, &outcome.records);
+        // `AdvanceSkillSelect` (`G/char.cpp:4042-4044`, `__ENABLE_ADVANCE_SKILL_SELECT__`):
+        // a level-up offers the window to an ungrouped caller past level 4, before
+        // the quest `LevelUp` raise (`:4046-4056`).
+        if outcome.level_after != outcome.level_before {
+            self.advance_skill_select(vid);
+        }
         for _ in 0..outcome.level_ups {
             self.raise_quest_levelup(vid);
         }

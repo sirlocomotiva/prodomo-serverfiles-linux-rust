@@ -44,9 +44,12 @@ use crate::item_move::Mover;
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use world::character::number;
 
-/// The eleven sub-skill vnums `ResetSkill` keeps and `ClearSubSkill` zeroes
-/// (`s_adwSubSkillVnums`, `G/char_skill.cpp:35-49`).
-const SUB_SKILLS: [u8; 11] = [121, 122, 124, 126, 127, 128, 129, 130, 131, 137, 138];
+/// The eighteen sub-skill vnums `ResetSkill` keeps and `ClearSubSkill` zeroes
+/// (`s_adwSubSkillVnums`, `G/char_skill.cpp:35-54`, with the `ENABLE_NEW_PASSIVE_SKILL`
+/// tail: 141 142 and the 164-166 new passives).
+const SUB_SKILLS: [u8; 18] = [
+    121, 122, 124, 126, 127, 128, 129, 130, 131, 137, 138, 139, 140, 141, 142, 164, 165, 166,
+];
 
 /// `TOP_PLAYER_MAX_LEVEL` (`common/prodomodefines.h:127`): the level whose
 /// reaching grants the top-player affect.
@@ -417,7 +420,7 @@ impl GameState {
         cleared
     }
 
-    /// `ClearSubSkill`: the sub-skill counter moves past level 9 and the eleven
+    /// `ClearSubSkill`: the sub-skill counter moves past level 9 and the eighteen
     /// zero, then the compute and byte 76. Answers the vnums the two clears
     /// zeroed that held a level.
     pub(super) fn clear_sub_skills(&mut self, vid: Vid, new: u8) -> Vec<u8> {
@@ -814,12 +817,15 @@ mod tests {
         assert!(!held.reached_top, "the same level raises nothing");
     }
 
-    /// The eleven sub-skills are the ones legacy keeps through `ResetSkill`.
+    /// The eighteen sub-skills are the ones legacy keeps through `ResetSkill`.
     #[test]
-    fn the_sub_skills_are_the_eleven() {
+    fn the_sub_skills_are_the_eighteen() {
         assert_eq!(
             SUB_SKILLS,
-            [121, 122, 124, 126, 127, 128, 129, 130, 131, 137, 138]
+            [
+                121, 122, 124, 126, 127, 128, 129, 130, 131, 137, 138, 139, 140, 141, 142, 164,
+                165, 166,
+            ]
         );
         assert_eq!(TOP_LEVEL, 120);
         let _ = LevelHeld {

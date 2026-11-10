@@ -3284,6 +3284,12 @@ pub struct Shown {
     /// type order. The burst carries them after the Channel record, where legacy sends
     /// them after the greet.
     pub priv_lines: Vec<Vec<u8>>,
+    /// The advance-skill window line (`ch->AdvanceSkillSelect()`,
+    /// `G/input_login.cpp:723-725`, `__ENABLE_ADVANCE_SKILL_SELECT__`): `Some` with
+    /// the `AdvanceSkillSelectWindow <JOB>` command line for an ungrouped entrant
+    /// past level 4, `None` otherwise. The burst carries it after the priv lines,
+    /// where legacy sends it after `_send_bonus_info` and before the waiting lines.
+    pub advance_window: Option<Vec<u8>>,
     /// Whether the character is in the letters event (`SEventLetters`,
     /// `G/input_login.cpp:69-82`): the `letters_event` flag is not 0. The burst's line
     /// reads 1 then, else 0.
