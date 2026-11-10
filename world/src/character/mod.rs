@@ -70,8 +70,9 @@ pub use death_penalty::{death_penalty_loss, exp_loss_percent};
 pub use dice::{number, Dice, FixedDraw, Pcg32};
 pub use drop_item::{
     add_rare_attribute, add_rolled_attribute, attribute_set_index, change_attribute,
-    change_rare_attribute, gauss_random, make_drop_item, sig_vnum_of, unported_drop, DropAsk,
-    DropMade, DropRefused, Gauss, UnportedDrop, ITEM_FLAG_MAKECOUNT,
+    change_attribute_on, change_rare_attribute, gauss_random, golden_change_levels, make_drop_item,
+    sig_vnum_of, unported_drop, DropAsk, DropMade, DropRefused, Gauss, UnportedDrop,
+    ITEM_FLAG_MAKECOUNT,
 };
 pub use equip::{
     find_equip_cell, is_equipable, is_female, is_ride_item, is_skill_book, look_of,
@@ -162,7 +163,11 @@ pub use trade::{
     YANG_LIMIT_NOTICE,
 };
 pub use use_to_item::{
-    clean_sash_attr, clean_transmutation, put_stone, spend_one, use_target, CLEAN_LOCKED_NOTICE,
-    NOT_BODY_STONE_NOTICE, NOT_WEAPON_STONE_NOTICE, NO_SOCKET_NOTICE, SAME_STONE_NOTICE,
-    STONE_SET_NOTICE,
+    change_target_attributes, clean_sash_attr, clean_transmutation, put_stone, spend_one,
+    use_target, ATTR_ADDED_NOTICE, ATTR_ADD_FAILED_NOTICE, ATTR_CHANGED_NOTICE,
+    ATTR_CHANGE_WAIT_NOTICE, ATTR_FIVE_NOTICE, ATTR_FULL_NOTICE, ATTR_NEED_FOUR_NOTICE,
+    ATTR_SHADE_LEVEL_NOTICE, ATTR_SHADE_TYPE_NOTICE, CLEAN_LOCKED_NOTICE, NOT_BODY_STONE_NOTICE,
+    NOT_WEAPON_STONE_NOTICE, NO_ATTR_SET_NOTICE, NO_ATTR_TO_CHANGE_NOTICE, NO_SOCKET_NOTICE,
+    RARE_CHANGE_FAILED_NOTICE, RARE_UNCHANGED_NOTICE, SAME_STONE_NOTICE, STONE_SET_NOTICE,
+    TALISMAN_ADD_NOTICE, TALISMAN_ATTR_NOTICE,
 };

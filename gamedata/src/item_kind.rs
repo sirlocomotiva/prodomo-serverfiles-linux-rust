@@ -123,6 +123,15 @@ pub const USE_POTION_NODELAY: i32 = 11;
 /// `USE_SPECIAL` (`C/item_length.h:264`): 10. The skill books' sub type (all the 230g book
 /// vnums carry it).
 pub const USE_SPECIAL: i32 = 10;
+/// `USE_CHANGE_ATTRIBUTE` (`C/item_length.h:272`): a bonus change scroll.
+pub const USE_CHANGE_ATTRIBUTE: i32 = 18;
+/// `USE_ADD_ATTRIBUTE` (`C/item_length.h:273`): a bonus add scroll.
+pub const USE_ADD_ATTRIBUTE: i32 = 19;
+/// `USE_ADD_ATTRIBUTE2` (`C/item_length.h:276`): a 5th-bonus add scroll.
+pub const USE_ADD_ATTRIBUTE2: i32 = 22;
+/// `USE_CHANGE_ATTRIBUTE2` (`C/item_length.h:278`), behind `__ATTR_6TH_7TH__`: a rare
+/// bonus change scroll.
+pub const USE_CHANGE_ATTRIBUTE2: i32 = 24;
 
 /// `COSTUME_BODY`, which the source pins to `ARMOR_BODY`.
 pub const COSTUME_BODY: i32 = 0;
@@ -312,6 +321,10 @@ mod tests {
             (USE_POTION_NODELAY, "USE_POTION_NODELAY"),
             (USE_BAIT, "USE_BAIT"),
             (USE_SPECIAL, "USE_SPECIAL"),
+            (USE_CHANGE_ATTRIBUTE, "USE_CHANGE_ATTRIBUTE"),
+            (USE_ADD_ATTRIBUTE, "USE_ADD_ATTRIBUTE"),
+            (USE_ADD_ATTRIBUTE2, "USE_ADD_ATTRIBUTE2"),
+            (USE_CHANGE_ATTRIBUTE2, "USE_CHANGE_ATTRIBUTE2"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
         }

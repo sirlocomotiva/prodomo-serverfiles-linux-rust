@@ -560,6 +560,15 @@ pub enum MoveRefused {
     /// `IsSecured`: the lock stands. Each site chats its own popup line; the world
     /// carries the refusal, and the game state sends the line.
     Secured,
+    /// `USE_CHANGE_ATTRIBUTE` before the cycle ends (`G/char_item.cpp:6420-6427`): the
+    /// bonus-change cycle and the seconds left, which the game state chats as
+    /// `[LS;398;%d;%d]`.
+    AttrChangeWait {
+        /// The cycle in seconds.
+        cycle: u32,
+        /// The seconds left.
+        wait: u32,
+    },
 }
 
 impl MoveRefused {
@@ -749,6 +758,9 @@ impl core::fmt::Display for MoveRefused {
             Self::OwnedByOther => f.write_str("another character owns the ground item"),
             Self::GoldOverflow => f.write_str("the gold pile would reach the gold cap"),
             Self::Secured => f.write_str("the inventory is locked"),
+            Self::AttrChangeWait { cycle, wait } => {
+                write!(f, "the bonus change waits {wait} of {cycle} s")
+            }
         }
     }
 }

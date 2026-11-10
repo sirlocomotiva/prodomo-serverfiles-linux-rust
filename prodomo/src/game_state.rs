@@ -833,9 +833,18 @@ pub struct GameState {
     ///
     /// Legacy's defaults are on (`G/config.cpp:72`), and the owner's `CONFIG` files do
     /// not turn it off, so the deployment ran in it. The war's end score is divided by
-    /// ten in it (`G/war_map.cpp:700`), which is the rule that uses it here; the other
-    /// rules wait for the `test_server` audit (owner question 5).
+    /// ten in it (`G/war_map.cpp:700`), and a bonus change runs free in it
+    /// (`G/char_item.cpp:6401`); the other rules wait for the `test_server` audit
+    /// (owner question 5).
     test_server: bool,
+    /// `g_dwItemBonusChangeTime` (`G/config.cpp:42`): the seconds between a mortal's
+    /// bonus changes, from `[game] item_bonus_change_time` (60 both sides).
+    item_bonus_change_time: u32,
+    /// `VRAJESTE_PERMANENT` (`G/config.cpp:89`) and `INTARIRE_PERMANENT` (`:90`): a
+    /// change scroll and an add scroll are never spent, from `[game]
+    /// vrajeste_permanent` and `[game] intarire_permanent` (off both sides). One
+    /// bitfield, because the lint refuses a fifth bool on this struct.
+    permanent_scrolls: PermanentScrolls,
     /// The monarch treasuries (`TMonarchInfo.money`, `C/tables.h:1574-1580`), by empire
     /// slot, installed from the store before the gate opens.
     monarch_money: [i64; 4],
@@ -1036,6 +1045,15 @@ pub struct GameState {
     name_rules: crate::select_phase::NameRules,
 }
 
+/// Which bonus scrolls are never spent (`VRAJESTE_PERMANENT`, `INTARIRE_PERMANENT`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct PermanentScrolls {
+    /// A change scroll is never spent.
+    pub(super) vrajeste: bool,
+    /// An add scroll is never spent.
+    pub(super) intarire: bool,
+}
+
 /// An item the world has taken back, together with whose it was.
 ///
 /// Both halves are needed together and neither can be recovered from the other. The
@@ -1091,6 +1109,8 @@ impl GameState {
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             gold_lifetime: drop_lifetime_pulses(DEFAULT_GOLD_LIFETIME_SECS),
             test_server: true,
+            item_bonus_change_time: 60,
+            permanent_scrolls: PermanentScrolls::default(),
             view_radius: view_radius_of(DEFAULT_VIEW_RANGE),
             exp_limits: DEFAULT_EXP_LIMITS,
             stat_max: DEFAULT_STATUS_POINT_SET_MAX_VALUE,

@@ -6,10 +6,11 @@
 //! Two arms read it here: a stone (`ITEM_METIN`) goes into the target's socket
 //! (`world::character::put_stone`), and a refine scroll (`USE_TUNING`) opens the refine
 //! window for the target (`CHARACTER::RefineItem`, `:1970-2041`), which `CG_REFINE` answers
-//! with `DoRefineWithScroll` (`:1595-1862`). Every other item is used as `CG_ITEM_USE` uses
-//! it: legacy's other arms ignore the second cell, and the arms that read it are not ported
-//! (`USE_DETACHMENT`, the bonus and socket scrolls, the costume and talisman scrolls, the
-//! hair).
+//! with `DoRefineWithScroll` (`:1595-1862`). A bonus scroll redraws or adds the target's
+//! bonuses (`world::character::change_target_attributes`). Every other item is used as
+//! `CG_ITEM_USE` uses it: legacy's other arms ignore the second cell, and the arms that
+//! read it are not ported (the `USE_DETACHMENT` the sash and look cleans do not take, the
+//! socket scrolls, the costume and talisman scrolls, the hair).
 //!
 //! A sash cleaning scroll (`USE_DETACHMENT` with `VALUE0` 7) cleans the sash's absorbed
 //! socket and attributes (`CleanSashAttr`, `G/char.cpp:10481-10500`); a changelook's
@@ -31,7 +32,8 @@ use std::ops::RangeInclusive;
 use common::item_slots::EWindows;
 use common::vid::Vid;
 use gamedata::item_kind::{
-    ITEM_METIN, ITEM_USE, USE_DETACHMENT, USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE,
+    ITEM_METIN, ITEM_USE, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE,
+    USE_CHANGE_ATTRIBUTE2, USE_DETACHMENT, USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE,
     USE_ELEMENT_UPGRADE, USE_TUNING,
 };
 use gamedata::item_proto::ItemProto;
@@ -86,6 +88,9 @@ const MEMO_LEVEL_NOTICE: &[u8] = b"[LS;162]";
 const YONGSIN_PROB: [i32; 9] = [100, 75, 65, 55, 45, 40, 35, 25, 20];
 /// The handbook's chance by refine level (`yagong_prob`, `:1730`).
 const YAGONG_PROB: [i32; 9] = [100, 100, 90, 80, 70, 60, 50, 30, 20];
+/// `CHARACTER::msc_szLastChangeItemAttrFlag` (`G/char_item.cpp:62`): the quest flag a
+/// mortal's last bonus change stamps.
+const LAST_CHANGE_ATTR_FLAG: &[u8] = b"Item.LastChangeItemAttr";
 
 /// `CItem::GetRefineLevel` (`G/item.cpp:1869-1894`): the number after the last `+` of the
 /// proto's base name, read as `str_to_number` (`strtol`) reads it; 0 without a `+`.
@@ -156,6 +161,9 @@ enum Arm {
     /// `USE_ELEMENT_UPGRADE`, `USE_ELEMENT_DOWNGRADE` or `USE_ELEMENT_CHANGE`: an
     /// element scroll, with its sub-type.
     Element(i32),
+    /// `USE_CHANGE_ATTRIBUTE`, `USE_ADD_ATTRIBUTE`, `USE_ADD_ATTRIBUTE2` or
+    /// `USE_CHANGE_ATTRIBUTE2`: a bonus scroll, with its sub-type.
+    Bonus(i32),
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -326,6 +334,9 @@ impl GameState {
             Arm::Element(kind) => {
                 return self.element_step(vid, at, dest, kind, actor);
             }
+            Arm::Bonus(kind) => {
+                return self.bonus_scroll_step(vid, at, dest, kind, actor);
+            }
             Arm::Stone | Arm::CleanSash | Arm::Plain => {
                 return self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
                     let stone = world::character::use_source(items, at)?;
@@ -458,6 +469,117 @@ impl GameState {
         Ok(moved)
     }
 
+    /// The bonus scrolls (`USE_CHANGE_ATTRIBUTE`, `USE_ADD_ATTRIBUTE`,
+    /// `USE_ADD_ATTRIBUTE2`, `USE_CHANGE_ATTRIBUTE2`) of `UseItemEx`
+    /// (`G/char_item.cpp:6291-6688`) on the item at `dest`. The use's checks run first,
+    /// as the scroll arm's do; then the cooldown, the draw and the spend run in the
+    /// world's step.
+    ///
+    /// The cooldown is the world's before the step: only a mortal (`GM_PLAYER`) outside
+    /// the test-server mode with a cycle above 0 (`:6401`) waits on its
+    /// `Item.LastChangeItemAttr` quest flag (`:6414-6428`), and the flag is stamped only
+    /// when the step runs. `get_global_time()` is the wall clock; the GM level is the
+    /// character's own, unmuted by the test-server mode the messenger's helper reads
+    /// (that helper would make every mortal a GM here, and legacy's `GetGMLevel` knows
+    /// no such mode).
+    fn bonus_scroll_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        kind: i32,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let used = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(used.vnum)
+                .ok_or(MoveRefused::UnknownVnum(used.vnum))?;
+            world::character::use_checks(&used, proto, rules, gear.points)?;
+            Ok(MoveDone {
+                kind: MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            })
+        })?;
+        let (pid, mortal) = self
+            .characters
+            .find_by_vid(vid)
+            .map(|character| {
+                let mortal = character
+                    .points()
+                    .is_none_or(|points| points.gm_level() == crate::command::GM_PLAYER);
+                (character.player_id(), mortal)
+            })
+            .unwrap_or((0, true));
+        let cycle = self.item_bonus_change_time;
+        let mut cooldown = (0, 0);
+        let mut stamp = None;
+        if kind == USE_CHANGE_ATTRIBUTE && mortal && !self.test_server && cycle > 0 {
+            let now = Self::global_time();
+            let last = self
+                .quests
+                .as_ref()
+                .and_then(|quests| quests.manager().quest_flag(pid, LAST_CHANGE_ATTR_FLAG))
+                .unwrap_or(0);
+            let wait = last.saturating_add(i32::try_from(cycle).unwrap_or(i32::MAX));
+            if wait > i32::try_from(now).unwrap_or(i32::MAX) {
+                cooldown = (
+                    cycle,
+                    u32::try_from(wait).unwrap_or(u32::MAX).saturating_sub(now),
+                );
+            } else {
+                stamp = Some(i32::try_from(now).unwrap_or(i32::MAX));
+            }
+        }
+        let attrs = self.item_attrs.clone();
+        let rare = self.item_rare_attrs.clone();
+        let vrajeste = self.permanent_scrolls.vrajeste;
+        let intarire = self.permanent_scrolls.intarire;
+        // `mem::take` is sound here: `run_item_step` cannot panic, so the cache is
+        // restored below on every path, and a caller that held a `Gauss` across the
+        // step would see the same draws.
+        let mut gauss = core::mem::take(&mut self.gauss);
+        let step = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let used = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(used.vnum)
+                .ok_or(MoveRefused::UnknownVnum(used.vnum))?;
+            world::character::use_checks(&used, proto, rules, gear.points)?;
+            world::character::change_target_attributes(
+                items,
+                (&used, proto),
+                dest,
+                protos,
+                gear.dice,
+                &mut gauss,
+                &attrs,
+                &rare,
+                cooldown,
+                vrajeste,
+                intarire,
+            )
+        });
+        self.gauss = gauss;
+        let step = step?;
+        let ran = step
+            .changes
+            .iter()
+            .any(|change| matches!(change, db::items::RowChange::Attributes { .. }));
+        if ran {
+            if let (Some(stamp), Some(quests)) = (stamp, self.quests.as_mut()) {
+                quests
+                    .manager_mut()
+                    .set_quest_flag(pid, LAST_CHANGE_ATTR_FLAG, stamp);
+            }
+        }
+        moved.records.extend(step.records);
+        moved.changes.extend(step.changes);
+        Ok(moved)
+    }
+
     fn use_arm(&self, vid: Vid, at: ItemPos) -> Arm {
         let proto = self
             .characters
@@ -495,6 +617,15 @@ impl GameState {
                         || proto.sub_type == USE_ELEMENT_CHANGE) =>
             {
                 Arm::Element(proto.sub_type)
+            }
+            Some(proto)
+                if proto.item_type == ITEM_USE
+                    && (proto.sub_type == USE_CHANGE_ATTRIBUTE
+                        || proto.sub_type == USE_ADD_ATTRIBUTE
+                        || proto.sub_type == USE_ADD_ATTRIBUTE2
+                        || proto.sub_type == USE_CHANGE_ATTRIBUTE2) =>
+            {
+                Arm::Bonus(proto.sub_type)
             }
             _ => Arm::Plain,
         }

@@ -5052,6 +5052,22 @@ impl GameState {
         self
     }
 
+    /// Set the bonus-scroll rules: the change cycle and the two never-spent flags.
+    #[must_use]
+    pub fn with_bonus_scroll_rules(
+        mut self,
+        item_bonus_change_time: u32,
+        vrajeste_permanent: bool,
+        intarire_permanent: bool,
+    ) -> Self {
+        self.item_bonus_change_time = item_bonus_change_time;
+        self.permanent_scrolls = super::PermanentScrolls {
+            vrajeste: vrajeste_permanent,
+            intarire: intarire_permanent,
+        };
+        self
+    }
+
     /// `CWarMap::Timeout` (`G/war_map.cpp:510-578`): the war that waited a minute for a
     /// side that never came ends. A war that has run for less than five minutes is
     /// judged to be a draw; else the side that kept its members on the map wins, and

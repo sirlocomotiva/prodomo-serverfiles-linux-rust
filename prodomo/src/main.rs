@@ -11446,6 +11446,11 @@ fn build_world(
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)
+        .with_bonus_scroll_rules(
+            config.game.item_bonus_change_time,
+            config.game.vrajeste_permanent,
+            config.game.intarire_permanent,
+        )
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_gold_lifetime(config.game.item_destroy_time_dropgold)
         .with_clients(Arc::clone(clients))

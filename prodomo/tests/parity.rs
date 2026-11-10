@@ -46588,6 +46588,71 @@ fn a_switchbot_slot_registers_starts_and_runs() {
     );
 }
 
+/// `sys.item.attr`: Alpha holds a bonus-less bouquet and an add scroll in the base inventory.
+/// Using the scroll on the bouquet lands a bonus with `[LS;400]`, spends the scroll, and stores
+/// both rows; a second add on a costume (a sash skin) chats `[LS;396]` and spends nothing.
+#[test]
+fn a_bonus_scroll_adds_and_a_costume_refuses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0,          1, 50201 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1,          1, 71085 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 62, id, 1, 2,          1, 71085 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 63, id, 1, 3,          1, 85001 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 4);
+    // When: the add scroll is used on the bouquet.
+    alice.send_record(&client_use_to_item(1, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;400]"),
+        "the add chats: {line:02x?}"
+    );
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the bouquet's cell updates: {update:02x?}"
+    );
+    assert_ne!(update[38], 0, "the first bonus type lands: {update:02x?}");
+    let cleared = alice.read_game();
+    assert_eq!(
+        cleared[..4],
+        [ITEM_SET, 1, 1, 0],
+        "the spent scroll clears: {cleared:02x?}"
+    );
+    assert_eq!(cleared[4..8], [0; 4], "the cleared vnum");
+    alice.quiet("the add sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 61");
+    check(&database, "SELECT attrtype0 != 0 FROM item WHERE id = 60");
+    // When: the second scroll is used on the sash.
+    alice.send_record(&client_use_to_item(2, 3));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;396]"),
+        "the costume chats the no-set line: {line:02x?}"
+    );
+    alice.quiet("the refusal sends nothing more");
+    check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 62");
+}
+
 /// `cg.game.myshop` and `cmd.close_shop`: Alpha carries a sword and a paper bundle, builds a
 /// bundle shop selling the sword for 500 yang under the sign `Swords`, and the sign reaches
 /// Yankee, who stands beside it; `/close_shop` clears the sign on both wires.

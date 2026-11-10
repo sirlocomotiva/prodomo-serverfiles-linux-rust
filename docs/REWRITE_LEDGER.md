@@ -51297,3 +51297,63 @@ clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
 `RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
 remained. No ADR changed.
+
+## 516. The bonus scrolls
+
+`sys.item.attr` is `ported`: the four bonus scrolls of `UseItemEx`
+(`G/char_item.cpp:6291-6688`) — `USE_CHANGE_ATTRIBUTE`, `USE_ADD_ATTRIBUTE`,
+`USE_ADD_ATTRIBUTE2` and `USE_CHANGE_ATTRIBUTE2` — through a new `Arm::Bonus` and the
+world's `change_target_attributes` (`world/src/character/use_to_item.rs`). The roll
+rules were already ported (`change_attribute`, `add_rolled_attribute`,
+`change_rare_attribute` in `world/src/character/drop_item.rs`, the GM's attribute lines,
+the switchbot); what this slice ports is the scroll dispatch around them, with the
+socket-scroll case's shared gates (`:6296-6321`): a target `use_target` refuses is
+silent, and a costume or a glove chats `[LS;396]`.
+
+In legacy's order: a change scroll chats `[LS;396]` without a set, `[LS;397]` without an
+attribute, and the talisman line on a talisman; then the mortal cooldown (`GM_PLAYER`,
+outside the test-server mode, with `g_dwItemBonusChangeTime` above 0) waits on the
+`Item.LastChangeItemAttr` quest flag, chatting `[LS;398;%d;%d]` with the cycle and the
+seconds left through a new `MoveRefused::AttrChangeWait` the move family delivers. The
+GM level here is the character's own: the messenger's helper mutes it to implementor in
+the test-server mode, which would free every mortal, and legacy's `GetGMLevel` knows no
+such mode. Else the attributes redraw — 76014's on its golden table
+(`change_attribute_on`, the dead inner-subtype table `[0, 0, 30, 40, 3]` named in the
+doc but passed by no caller) — the shade scrolls only on a weapon or body armour whose
+level limits are at most 40, the change counts itself in socket 3, `[LS;399]` chats,
+and the scroll is spent unless `VRAJESTE_PERMANENT` holds. The rare change (behind
+`__ATTR_6TH_7TH__`, which is defined) wants a rare attribute; 72351 runs on 10 in 100
+and every other vnum always, a miss chats `Imbunatatirea a esuat.`, a redraw that adds
+nothing back chats `Nu exista bonusuri de schimbat`, and the scroll is always spent.
+The add wants fewer than four, keeps the shade gates, lands on the always-100
+`aiItemAttributeAddPercent` (drawn, not assumed, against a later table edit) through
+`add_rolled_attribute`, and spends unless `INTARIRE_PERMANENT` holds. The fifth scroll
+wants four exactly (`[LS;404]` at five, `[LS;405]` below, and past five only logs,
+drawing and spending nothing); on success the scroll's own count sets the adds
+(`abs(2 - count)`), so a plain scroll runs `AddAttribute()` twice — a legacy Defect,
+kept: the second lands nowhere while `[LS;400]` chats. The points the target gives are
+not recomputed, as legacy does not, like the GM's lines.
+
+Staying out: the dead `ENABLE_LEGENDARY_SWITCHERS` arms (the flag is nowhere defined)
+and the dead inner `USE_CHANGE_ATTRIBUTE2`-subtype test of the change case, which the
+`switch` already sorted away. The `item.*attr0` quest calls stay `unused` (ledger 401,
+question 37). The three `[game]` keys (`item_bonus_change_time`, `vrajeste_permanent`,
+`intarire_permanent`) were already configured; they are now wired into the world
+(`with_bonus_scroll_rules`), with the owner's values unchanged (60, off, off).
+
+Tests: four world tests (the change redraws, counts and cools down; the add lands and
+a costume refuses; the fifth wants four; the rare change redraws) and the scenario
+`a_bonus_scroll_adds_and_a_costume_refuses` (an add on a bonus-less bouquet chats
+`[LS;400]`, updates the cell and spends the scroll, both rows stored; a second scroll
+on a sash chats `[LS;396]` and stays).
+
+The scenario hunts: a `[LS;400]`-to-`[LS;401]` notice mutant fails on the add line, and
+it passed 8 parallel runs against the pristine build (7 flake slots plus the
+post-restore rerun; the first flake slot's output file never appeared, so the rerun
+took its place).
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace`
+clean; the suite 5257 passed, 0 failed in 46 targets; `cargo test --workspace --doc`
+clean; `cargo clippy --workspace --all-targets -- -D warnings` clean;
+`RUSTDOCFLAGS="-D warnings" cargo doc` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database
+remained. No ADR changed.

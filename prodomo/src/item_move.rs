@@ -563,6 +563,14 @@ pub fn refusal_notice(refused: &MoveRefused, to: Recipient<'_>) -> Option<Vec<u8
             )],
         ));
     }
+    if let MoveRefused::AttrChangeWait { cycle, wait } = refused {
+        return Some(chat_packet(
+            to,
+            CHAT_TYPE_INFO,
+            b"[LS;398;%d;%d]",
+            &[Arg::Int(i64::from(*cycle)), Arg::Int(i64::from(*wait))],
+        ));
+    }
     refused.notice().map(|text| notice(text, to))
 }
 

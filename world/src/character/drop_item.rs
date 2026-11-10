@@ -75,6 +75,8 @@ const CHANGE_LEVELS: [i32; ATTRIBUTE_LEVELS] = [0, 10, 40, 35, 15];
 /// `aiItemAddAttributePercent` (`G/item_attribute.cpp:269-272`): the level walk of the
 /// attribute `AddAttribute()` adds.
 const ADD_LEVELS: [i32; ATTRIBUTE_LEVELS] = [40, 50, 10, 0, 0];
+/// The 76014 level walk (`G/char_item.cpp:6455-6459`): the golden change scroll.
+const GOLDEN_LEVELS: [i32; ATTRIBUTE_LEVELS] = [0, 10, 50, 39, 1];
 
 /// `MAX_NORM_ATTR_NUM` (`item_length.h:32`): the magic and addon attributes stop here.
 const NORM_ATTRS: usize = 5;
@@ -460,6 +462,11 @@ fn alter_to_magic_item(
 /// is filled back to the count it had, each attribute rolled on `tmpChangeProb`. The two
 /// rare attributes stay.
 ///
+/// [`change_attribute_on`] runs the same body on another level table: the golden change
+/// scroll (76014) rolls [`golden_change_levels`], and the dead `USE_CHANGE_ATTRIBUTE2`-subtype
+/// arm of the change case would roll `[0, 0, 30, 40, 3]` (`:6443-6453`), which no caller
+/// passes (the `switch` already sorted the scrolls, so the test is always false).
+///
 /// Every write after the clear lands at the current count, so the item's states after
 /// each `SetAttribute` are the prefixes of the result. Answers whether the item had any
 /// attribute: only then does legacy go on to count the change in socket 3. A type with no
@@ -471,6 +478,19 @@ pub fn change_attribute(
     proto: &ItemProto,
     attributes: &mut [ItemAttribute],
     attrs: &[ItemAttrRecord],
+) -> bool {
+    change_attribute_on(dice, gauss, proto, attributes, attrs, &CHANGE_LEVELS)
+}
+
+/// `CItem::ChangeAttribute(aiChangeProb)` (`G/item_attribute.cpp:228-265`): the body
+/// [`change_attribute`] documents, rolled on `table` instead of `tmpChangeProb`.
+pub fn change_attribute_on(
+    dice: &mut dyn Dice,
+    gauss: &mut Gauss,
+    proto: &ItemProto,
+    attributes: &mut [ItemAttribute],
+    attrs: &[ItemAttrRecord],
+    table: &[i32; ATTRIBUTE_LEVELS],
 ) -> bool {
     let had = attribute_count(attributes);
     for attribute in attributes.iter_mut().take(NORM_ATTRS) {
@@ -485,13 +505,19 @@ pub fn change_attribute(
     let set = attribute_set_index(proto.item_type, proto.sub_type);
     for _ in attribute_count(attributes)..had {
         match set {
-            Some(set) => put_attribute(dice, proto, attributes, attrs, set, &CHANGE_LEVELS),
+            Some(set) => put_attribute(dice, proto, attributes, attrs, set, table),
             None => {
                 let _ = number(dice, 1, 100);
             }
         }
     }
     true
+}
+
+/// The golden change scroll's own table (76014, `G/char_item.cpp:6455-6459`).
+#[must_use]
+pub fn golden_change_levels() -> [i32; ATTRIBUTE_LEVELS] {
+    GOLDEN_LEVELS
 }
 
 /// `CItem::AddAttribute()` (`G/item_attribute.cpp:267-276`): below five normal
