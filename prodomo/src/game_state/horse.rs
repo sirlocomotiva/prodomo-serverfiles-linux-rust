@@ -384,3 +384,44 @@ impl GameState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use common::vid::Vid;
+
+    use super::super::fixtures::{a_world, enter, TestClock};
+
+    /// `horse_stamina_regen_event` through the Pulse wiring: the entered rider's horse at
+    /// level 11 with 28 of 30 stamina regenerates one point per twelve-minute fire and the
+    /// timer ends at the maximum.
+    #[test]
+    fn the_regen_fire_moves_a_point_per_period_and_ends_at_the_maximum() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _inbox = enter(&mut world, 1, (600, 600), 12_345);
+        let vid = Vid::new(1);
+        let _planted = world.plant_horse_level(vid, 11);
+        world.enter_horse(vid);
+        world
+            .pc_points_mut(1)
+            .expect("points")
+            .horse_mut()
+            .set_stat(18, 28);
+        let period = u64::from(world::character::HORSE_STAMINA_REGEN_INTERVAL)
+            * u64::from(crate::save::PASSES_PER_SEC);
+        let due = world.last_pulse + period;
+        assert_eq!(world.horse_timers.get(&vid), Some(&due), "one period out");
+        world.run_horse_timers(due);
+        let stamina = world.pc_points_mut(1).expect("points").horse().stamina();
+        assert_eq!(stamina, 29);
+        assert_eq!(
+            world.horse_timers.get(&vid),
+            Some(&(due + period)),
+            "runs on"
+        );
+        world.run_horse_timers(due + period);
+        let stamina = world.pc_points_mut(1).expect("points").horse().stamina();
+        assert_eq!(stamina, 30, "at the maximum");
+        assert!(!world.horse_timers.contains_key(&vid), "the timer ends");
+    }
+}

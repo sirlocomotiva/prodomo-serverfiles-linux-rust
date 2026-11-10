@@ -52318,3 +52318,24 @@ scenario — Alice never warps — so the empire filter is what the test holds.
 No game code changed.
 
 Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5317 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after splitting the 130-line scenario (the stone-fall reads moved to `fell_stone_and_read_the_lines`, the bool assert to `assert!`) and re-running it green; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 553. The horse's slow drink
+
+The horse's stamina-regen timer (`event.horse_rider.horse_stamina_regen_event`) was
+`partial` since ledger 392: unit-tested only, the twelve-minute period being too long for
+a scenario. It is `ported` now, on the same legs its consume sibling stands on.
+
+The new world test `the_regen_fire_moves_a_point_per_period_and_ends_at_the_maximum`
+drives the Pulse wiring: a level-11 horse at 28 of 30 stamina regains one point per
+twelve-minute fire and the timer ends at the maximum. The binary rider scenario already
+exercises the start on both its dismounts (`user_ride_stops`, the quest unride), and the
+unit test `the_events_move_the_stamina_and_hand_over` pins the consume-to-regen handover.
+A binary scenario would wait 12 minutes, so the world test proves the fire (owner
+decision, 2026-10-14). The re-arm mutant (`pulse + period` to `pulse`) kills the test.
+
+One ordering fact the test tripped on: `enter_horse` runs the `__FIX_NIVEL_CAL__` refresh,
+which refills both pools, so the stamina must be lowered after the enter, not before.
+
+No game code changed.
+
+Gates (2026-11-10): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` ok; full suite 5318 passed 0 failed in 46 targets; `--doc` 1 passed 0 failed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

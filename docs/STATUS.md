@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 552 (the stone's home warp).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 553
+Last reviewed: 2026-11-10, after ledger section 553 (the horse's slow drink).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 554
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -607,7 +607,9 @@ Since 550 the server-records table has no `codec` left: `gc.skill_level` is the 
 Since 551 `sys.item.special_inventory` is `ported`: a bank-0 book moves from base cell 0 to cell 290, and a plain item is refused from 291 with the line. The
 Since 552 `event.event_manager.warp_all_to_village_event` is `ported`: the stone-fall
 scenario waits out the 3 s fire and proves the empire filter, which the 60 s end-arm
-shares. The
+shares. Since 553 `event.horse_rider.horse_stamina_regen_event` is `ported`: the world test
+fires the twelve-minute timer through the Pulse wiring, the rider scenario already
+dismounts, and the unit test pins the handover. The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
