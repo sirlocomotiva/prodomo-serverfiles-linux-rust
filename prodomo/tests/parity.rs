@@ -54289,3 +54289,62 @@ fn a_town_portal_marks_the_spot_and_recalls_to_town() {
         "(SELECT socket0 = 470100 AND socket1 = 950000 FROM item WHERE id = 30)",
     );
 }
+
+/// `cg.game.item_use`: the 80003 gold bar (`LINGOURI_SURSA`,
+/// `G/char_item.cpp:3328-3370`) pays 500 000 yang. Alpha's two bars sit at cell 0; the
+/// use pays the gold with the `ChangeGold` record, one bar of two goes, and the store
+/// keeps the gold and the bar.
+#[test]
+fn a_gold_bar_pays_its_yang_and_uses_one_up() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         80003 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(80_003).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's bar is USE_SPECIAL");
+    sql(
+        &database,
+        "UPDATE player SET gold = 5000 WHERE name = 'Alpha'",
+    );
+    let (mut alpha, listed) = enter_world(&server, b"alice", 0);
+    let (before, vid) = (5_000, listed.id);
+    // When: Alpha uses. Then: the gold record, and the bar's update.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        gold_change(vid, 500_000, before + 500_000),
+        "the gold pays with the ChangeGold record"
+    );
+    let mut updated = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !updated {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
+                assert_eq!(count, 1, "the use spends one of two");
+                updated = true;
+            }
+        }
+    }
+    assert!(updated, "the bar's update lands");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    check(
+        &database,
+        &format!(
+            "(SELECT gold = {} FROM player WHERE name = 'Alpha')",
+            before + 500_000
+        ),
+    );
+}

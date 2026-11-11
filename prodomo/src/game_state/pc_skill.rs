@@ -91,6 +91,15 @@ const SHOP_PREMIUM_INCREASED_LINE: &[u8] = b"You have increased Premium Personal
 /// The reached-max line (`:12734`), verbatim: trailing space.
 const SHOP_PREMIUM_MAX_LINE: &[u8] =
     b"You have reached maximum premium time for your personal shop. ";
+/// The gold bars' yang (`sGold`, `G/char_item.cpp:3343-3350`): 500 000, 1 000 000,
+/// 500 000, 1 000 000, 2 000 000 and 10 000 000, indexed by `vnum - 80003`.
+const GOLD_BAR_GOLD: [u32; 6] = [
+    500_000, 1_000_000, 500_000, 1_000_000, 2_000_000, 10_000_000,
+];
+/// The gold bar's window refusal (`:3354`), verbatim.
+const GOLD_BAR_WINDOWS_LINE: &[u8] = b"Nu poti folosi lingoul.";
+/// The gold bar's cap refusal (`:3359`), verbatim.
+const GOLD_BAR_CAP_LINE: &[u8] = b"Nu poti detine mai mult de x Yang.";
 /// `SKILL_YEONSA` (`G/skill.h:79`): the shoot arm's arrow-skill list opens here.
 const SKILL_YEONSA: u32 = 46;
 /// `SKILL_KWANKYEOK`: 47, the only hosted arrow-skill row.
@@ -456,6 +465,14 @@ pub(super) fn grand_master_read(
     session.say(CHAT_TYPE_TALKING, b"[LS;955]");
     session.say(CHAT_TYPE_INFO, b"[LS;956]");
     true
+}
+
+/// The yang a gold bar pays, or `None` for any other vnum (`case 80003` ..
+/// `case 80008`, `G/char_item.cpp:3335-3340`).
+fn gold_bar_gold(vnum: u32) -> Option<u32> {
+    vnum.checked_sub(80_003)
+        .and_then(|slot| GOLD_BAR_GOLD.get(usize::try_from(slot).unwrap_or(usize::MAX)))
+        .copied()
 }
 
 impl GameState {
@@ -2152,6 +2169,77 @@ impl GameState {
             return false;
         }
         true
+    }
+
+    /// The gold bar's two refusals (`LINGOURI_SURSA`, `G/char_item.cpp:3352-3360`):
+    /// with the safebox, a trade, the own shop or the cube open the Romanian
+    /// window line tells, and within the bar's gold of the cap the Romanian
+    /// cap line tells; both keep the bar. Anything else passes.
+    pub(super) fn gold_bar_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+
+        let Some(vnum) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map(|item| item.vnum)
+        else {
+            return true;
+        };
+        let Some(pays) = gold_bar_gold(vnum) else {
+            return true;
+        };
+        if self.safebox_open(vid)
+            || self.trading.contains_key(&vid)
+            || self.has_my_shop(vid)
+            || self.cubes.contains_key(&vid)
+        {
+            self.tell(vid, mover, CHAT_TYPE_INFO, GOLD_BAR_WINDOWS_LINE, &[]);
+            return false;
+        }
+        let held = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::gold);
+        if u64::from(pays) > world::character::GOLD_MAX_MAX.saturating_sub(held) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, GOLD_BAR_CAP_LINE, &[]);
+            return false;
+        }
+        true
+    }
+
+    /// The gold bar's pay (`LINGOURI_SURSA`, `G/char_item.cpp:3362-3365`): the bar's
+    /// gold adds to the held gold through `ChangeGold`, whose record rides the moved
+    /// step with the `gold` delta for the store.
+    pub(super) fn land_gold_bar(
+        &mut self,
+        vid: Vid,
+        vnum: u32,
+        moved: &mut crate::item_move::MovedItems,
+    ) {
+        let Some(pays) = gold_bar_gold(vnum) else {
+            return;
+        };
+        let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+            return;
+        };
+        let held = character.gold();
+        let left = held.saturating_add(u64::from(pays));
+        character.set_gold(left);
+        let change = crate::item_move::gold_delta(held, left);
+        moved.gold = Some(change);
+        // `ChangeGold`'s record (`G/char.cpp:3832-3849`): the gain, and the gold
+        // held now.
+        let mut frame = Vec::new();
+        protocol::gc_actors::GcCharacterGoldChange::new(vid.raw(), i64::from(pays), left)
+            .encode_into(&mut frame);
+        moved.records.insert(0, frame);
     }
 
     /// `SetPremiumPrivateShopBonus` (`G/char.cpp:12695-12742`): the duration adds
@@ -6351,6 +6439,81 @@ mod tests {
         assert_eq!(count, 1, "one of the stack goes");
     }
 
+    /// An 80003 use pays 500 000 yang: the gold climbs, the step carries the
+    /// delta, and the `ChangeGold` record leads the answer
+    /// (`LINGOURI_SURSA`, `G/char_item.cpp:3362-3365`).
+    #[test]
+    fn a_gold_bar_use_pays_its_yang_and_uses_one_up() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut bar = Item::new(7, 80_003);
+        bar.set_size(1).expect("a positive footprint");
+        bar.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &bar)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let held = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .gold();
+        let landed = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the use lands");
+        assert_eq!(landed.kind, MoveKind::Barred);
+        assert_eq!(landed.gold, Some(500_000), "the step carries the gain");
+        let left = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .gold();
+        assert_eq!(left, held + 500_000, "the gold climbs");
+        assert_eq!(landed.records.len(), 2, "the gold record and the update");
+        let paid = protocol::gc_actors::GcCharacterGoldChange::decode(&landed.records[0])
+            .expect("the gold record leads");
+        assert_eq!(paid.dw_vid, me.raw());
+        assert_eq!(paid.amount, 500_000);
+        assert_eq!(paid.value, left);
+        let count = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .items()
+            .item(7)
+            .expect("one of two is kept")
+            .count;
+        assert_eq!(count, 1, "one of the stack goes");
+    }
+
     /// A second 507 use within 60 s of the max is refused with the
     /// recently-reached line, the item kept (`G/char.cpp:12704-12710`). The
     /// first 72355 land already maxes (value(3) is the week), so the second
@@ -6417,6 +6580,136 @@ mod tests {
                 .windows(SHOP_PREMIUM_RECENT_LINE.len())
                 .any(|window| window == SHOP_PREMIUM_RECENT_LINE)),
             "the recent line lands: {heard:?}"
+        );
+    }
+
+    /// A gold bar used with the safebox open is refused with the Romanian
+    /// window line, the bar kept (`LINGOURI_SURSA`, `G/char_item.cpp:3352-3356`).
+    #[test]
+    fn an_open_safebox_refuses_the_gold_bar() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, mut inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let bar = Item::new(7, 80_003);
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &bar)
+            .expect("cell 0 is free");
+        let (safebox, _skipped) = world::character::Safebox::open(
+            protocol::gc_safebox::StoreWindow::Safebox,
+            1,
+            7,
+            Vec::new(),
+        );
+        world
+            .storages
+            .entry(me)
+            .or_default()
+            .set_safebox_for_test(safebox);
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let refused = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the refusal is a step, not an error");
+        assert_eq!(refused.kind, MoveKind::Used, "the refusal consumes nothing");
+        assert!(
+            refused.changes.is_empty(),
+            "the refused bar keeps its stack"
+        );
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().any(|record| record
+                .windows(GOLD_BAR_WINDOWS_LINE.len())
+                .any(|window| window == GOLD_BAR_WINDOWS_LINE)),
+            "the window line lands: {heard:?}"
+        );
+    }
+
+    /// A gold bar used within its gold of the cap is refused with the Romanian
+    /// cap line, the bar kept (`LINGOURI_SURSA`, `G/char_item.cpp:3357-3361`).
+    #[test]
+    fn a_full_purse_refuses_the_gold_bar() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, mut inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let bar = Item::new(7, 80_003);
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &bar)
+            .expect("cell 0 is free");
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .set_gold(world::character::GOLD_MAX_MAX - 1);
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let refused = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the refusal is a step, not an error");
+        assert_eq!(refused.kind, MoveKind::Used, "the refusal consumes nothing");
+        assert!(
+            refused.changes.is_empty(),
+            "the refused bar keeps its stack"
+        );
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().any(|record| record
+                .windows(GOLD_BAR_CAP_LINE.len())
+                .any(|window| window == GOLD_BAR_CAP_LINE)),
+            "the cap line lands: {heard:?}"
         );
     }
 

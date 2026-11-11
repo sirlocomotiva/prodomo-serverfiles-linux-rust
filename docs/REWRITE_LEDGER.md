@@ -53614,3 +53614,25 @@ Tests: the consume (`the_recall_pays_thirty_percent_and_keeps_ten`), the grounds
 (`each_portal_ground_answers_its_own_outcome`), the ladder (`the_map_ladder_matches_legacy`),
 the world mark and warp (`a_town_portal_marks_and_warps_to_town`).
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5449 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 589. The gold bars
+
+The `LINGOURI_SURSA` arm (`G/char_item.cpp:3328-3370`): 80003-80008 pay `sGold`'s
+yang (500 000, 1 000 000, 500 000, 1 000 000, 2 000 000, 10 000 000). All six are
+`ITEM_USE`/`USE_SPECIAL` on the owner's data, so they seat in `use_special_kind`
+as a seventh seated arm with the new `MoveKind::Barred`: the step consumes one
+(`a_gold_bar_use_consumes_one_and_names_the_bar`), and the game state pays after
+the refusals (`land_gold_bar`), with a `ChangeGold` record leading the answer
+and the `gold` delta for the store.
+
+The two refusals (`gold_bar_use_allowed`, `:3352-3360`) keep the bar: an open
+safebox, trade, own shop or cube answers `Nu poti folosi lingoul.`, and gold
+within the bar's pay of `GOLD_MAX_MAX` answers `Nu poti detine mai mult de x
+Yang.` — both verbatim. The cap check is legacy's unsigned shape: `held > MAX
+- pays`, so no wrap can slip a bar past the cap. Scenario
+`a_gold_bar_pays_its_yang_and_uses_one_up`: the 80003 use pays 500 000 with the
+gold record first, one bar of two goes, and the store keeps the gold and the
+bar. Unit seats: the land (`a_gold_bar_use_pays_its_yang_and_uses_one_up`), the
+window gate (`an_open_safebox_refuses_the_gold_bar`), the cap gate
+(`a_full_purse_refuses_the_gold_bar`).
+Gates (2026-11-11): full suite 5453 passed, 1 failed in 46 targets — the failure is the known sort-cooldown race (`a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks`, the 14/15 s boundary), green alone and green on the parity-target rerun (436 passed, 0 failed), so 5454 passed across the rerun; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

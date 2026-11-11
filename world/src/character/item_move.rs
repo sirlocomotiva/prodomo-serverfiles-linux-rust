@@ -218,6 +218,9 @@ pub enum MoveKind {
     /// `AFFECT_PREMIUM_PRIVATE_SHOP` branch, `:6835-6843`). The game state runs
     /// the setter: the 507 row, the account expiry, and the lines.
     ShopPremium,
+    /// A gold bar used one of its stack up (`LINGOURI_SURSA`, `G/char_item.cpp:3328-3370`).
+    /// The game state pays the bar's gold with a `ChangeGold` record, after the refusals.
+    Barred,
 }
 
 /// A record the client is sent, in the order legacy sends it.
