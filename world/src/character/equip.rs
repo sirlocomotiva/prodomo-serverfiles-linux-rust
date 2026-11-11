@@ -1088,16 +1088,60 @@ pub fn is_skill_book(proto: &ItemProto) -> bool {
     proto.item_type == ITEM_USE && proto.sub_type == USE_SPECIAL && BOOK_VNUMS.contains(&proto.vnum)
 }
 
+/// The unported-use refusal for the classified proto, or `None` when some arm
+/// answers it: an `ITEM_USE` of no known sub type names the sub type, any other
+/// unanswered type names the type.
+fn use_ported(
+    proto: &ItemProto,
+    potion: bool,
+    book: bool,
+    quest: bool,
+    seated: (bool, bool, bool, bool),
+) -> Option<MoveRefused> {
+    let (clear, cloak, abled, euro) = seated;
+    if !potion
+        && !book
+        && !clear
+        && !cloak
+        && !abled
+        && !euro
+        && proto.item_type == gamedata::item_kind::ITEM_USE
+    {
+        return Some(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
+    }
+    if !potion
+        && !book
+        && !quest
+        && !clear
+        && !cloak
+        && !abled
+        && !euro
+        && !USED_BY_WEARING.contains(&proto.item_type)
+    {
+        return Some(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
+    }
+    None
+}
+
 /// The game-state-seated `ITEM_USE` arms of the proto: the `USE_CLEAR` cure, the
-/// `USE_INVISIBILITY` cloak, and the `USE_ABILITY_UP` potion, in that order.
-fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool) {
-    if proto.item_type != gamedata::item_kind::ITEM_USE {
-        return (false, false, false);
+/// `USE_INVISIBILITY` cloak, the `USE_ABILITY_UP` potion, and the 50801-50820
+/// "additional effect" pair (`G/char_item.cpp:3371-3521`), in that order. The
+/// branch's `USE_POTION_NODELAY` runs the ordinary nodelay arm, and its
+/// `USE_POTION` answers nothing.
+fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool) {
+    use gamedata::item_kind::{ITEM_USE, USE_ABILITY_UP, USE_AFFECT, USE_CLEAR, USE_INVISIBILITY};
+    if proto.item_type != ITEM_USE {
+        return (false, false, false, false);
+    }
+    if (50_801..=50_820).contains(&proto.vnum) {
+        let euro = proto.sub_type == USE_ABILITY_UP || proto.sub_type == USE_AFFECT;
+        return (false, false, false, euro);
     }
     (
-        proto.sub_type == gamedata::item_kind::USE_CLEAR,
-        proto.sub_type == gamedata::item_kind::USE_INVISIBILITY,
-        proto.sub_type == gamedata::item_kind::USE_ABILITY_UP,
+        proto.sub_type == USE_CLEAR,
+        proto.sub_type == USE_INVISIBILITY,
+        proto.sub_type == USE_ABILITY_UP,
+        false,
     )
 }
 
@@ -1165,25 +1209,10 @@ pub fn use_item(
     let potion = super::potion::is_potion(proto);
     let book = is_skill_book(proto);
     let quest = proto.item_type == gamedata::item_kind::ITEM_QUEST;
-    let (clear, cloak, abled) = use_special_kind(proto);
-    if !potion
-        && !book
-        && !clear
-        && !cloak
-        && !abled
-        && proto.item_type == gamedata::item_kind::ITEM_USE
-    {
-        return Err(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
-    }
-    if !potion
-        && !book
-        && !quest
-        && !clear
-        && !cloak
-        && !abled
-        && !USED_BY_WEARING.contains(&proto.item_type)
-    {
-        return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
+    let seated = use_special_kind(proto);
+    let (clear, cloak, abled, euro) = seated;
+    if let Some(refused) = use_ported(proto, potion, book, quest, seated) {
+        return Err(refused);
     }
     use_checks(&item, proto, rules, gear.points)?;
     // `UseItemEx`'s first-use starts (`G/char_item.cpp:2804-2820`): the clock stamps after
@@ -1223,18 +1252,21 @@ pub fn use_item(
         used.changes = changes;
         return Ok(used);
     }
-    if book || clear || cloak || abled {
+    if book || clear || cloak || abled || euro {
         // `case USE_CLEAR` (`G/char_item.cpp:5539-5551`) strips the bad affects and
         // uses one of the stack; the strip runs on the game state (it holds the
         // affects), so this arm answers the consume and the kind names the strip.
         // `case USE_INVISIBILITY` (`:5553-5577`) cloaks for 300 s the same way, and
         // `case USE_ABILITY_UP` (`:5780-5859`) lands the apply's affect the same way.
+        // The 50801-50820 pair (`:3371-3521`) lands 516 the same way.
         let kind = if clear {
             MoveKind::Cleared
         } else if cloak {
             MoveKind::Cloaked
         } else if abled {
             MoveKind::Abled
+        } else if euro {
+            MoveKind::EuroFree
         } else {
             MoveKind::Used
         };
@@ -1439,6 +1471,10 @@ mod tests {
     const CLOAK: u32 = 27_877;
     /// A `USE_ABILITY_UP` potion: the owner's 27053 (attack speed).
     const ABLED: u32 = 27_053;
+    /// A 508xx `USE_ABILITY_UP` potion: the owner's 50820 (attack speed).
+    const EURO_ABLED: u32 = 50_820;
+    /// A 508xx `USE_AFFECT` potion: the owner's 50813 (critical).
+    const EURO_AFFECT: u32 = 50_813;
     const POTION: u32 = 27_101;
     const HIGH_POTION: u32 = 27_102;
     const SURA_REFUSED: u32 = 12;
@@ -1495,6 +1531,9 @@ mod tests {
             proto(CLOAK, 3, 13, 0),
             // `USE_ABILITY_UP`, 7.
             proto(ABLED, 3, 7, 0),
+            // The 50801-50820 pair: `USE_ABILITY_UP` 7 and `USE_AFFECT` 8.
+            proto(EURO_ABLED, 3, 7, 0),
+            proto(EURO_AFFECT, 3, 8, 0),
             potion,
             high_potion,
         ]
@@ -1839,6 +1878,23 @@ mod tests {
         );
         assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
         assert_eq!(case.at(inv(3)), None);
+    }
+    /// A 50801-50820 potion consumes one and answers `EuroFree`, whether
+    /// `USE_ABILITY_UP` or `USE_AFFECT`: the game state lands 516 on the point.
+    #[test]
+    fn a_508xx_use_consumes_one_and_names_the_euro_free() {
+        for vnum in [EURO_ABLED, EURO_AFFECT] {
+            let euro = Item::new(7, vnum);
+            let mut case = Case::new(&[(inv(3), euro)]);
+            let done = case.use_at(inv(3)).expect("a potion is consumed");
+            assert_eq!(done.kind, MoveKind::EuroFree, "vnum {vnum}");
+            assert_eq!(
+                item_records(&done),
+                vec![ItemRecord::Set(gc_item_clear(inv(3)))]
+            );
+            assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
+            assert_eq!(case.at(inv(3)), None);
+        }
     }
 
     /// An `ITEM_USE`/`USE_SPECIAL` outside the read set still refuses: no read ran, so

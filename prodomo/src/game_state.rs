@@ -4298,6 +4298,11 @@ impl GameState {
         if !self.ability_use_allowed(vid, at, actor) {
             return Some(self.arena_item_refused(vid, actor));
         }
+        // The 50801-50820 refusal (`:3388-3392`, `:3429-3432`): a held (516,
+        // point) row refuses with `[LS;99]`, the item kept.
+        if !self.euro_free_use_allowed(vid, at, actor) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
         None
     }
 
@@ -4432,13 +4437,15 @@ impl GameState {
         Ok(moved)
     }
 
-    /// The consumed-kind hooks of `case USE_CLEAR`, `case USE_INVISIBILITY` and `case
-    /// USE_ABILITY_UP`: the step consumed the cure, and the bad affects go now, after
-    /// the quest hook and before the feed (`G/char_item.cpp:5539-5551` through
-    /// `RemoveBadAffect`, `G/char_affect.cpp:951-960`); or the step consumed the
-    /// cloak, and the 300 s affect lands now, in the strip's seat (`:5574-5575`); or
-    /// the step consumed the ability potion, and the apply's affect lands now
-    /// (`:5782-5851`).
+    /// The consumed-kind hooks of `case USE_CLEAR`, `case USE_INVISIBILITY`, `case
+    /// USE_ABILITY_UP` and the 50801-50820 pair: the step consumed the cure, and the
+    /// bad affects go now, after the quest hook and before the feed
+    /// (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`,
+    /// `G/char_affect.cpp:951-960`); or the step consumed the cloak, and the 300 s
+    /// affect lands now, in the strip's seat (`:5574-5575`); or the step consumed
+    /// the ability potion, and the apply's affect lands now (`:5782-5851`); or the
+    /// step consumed the 508xx potion, and 516 lands on the point now
+    /// (`:3394-3411`, `:3434-3438`).
     fn land_item_use_kind(
         &mut self,
         vid: common::vid::Vid,
@@ -4453,6 +4460,9 @@ impl GameState {
         }
         if kind == world::character::MoveKind::Abled {
             self.land_ability_up(vid, used_vnum);
+        }
+        if kind == world::character::MoveKind::EuroFree {
+            self.land_euro_free(vid, used_vnum);
         }
     }
 

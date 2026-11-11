@@ -121,6 +121,9 @@ pub const USE_ELEMENT_CHANGE: i32 = 38;
 pub const USE_BAIT: i32 = 6;
 /// `USE_ABILITY_UP`: a potion that raises a point for a while.
 pub const USE_ABILITY_UP: i32 = 7;
+/// `USE_AFFECT` (`C/item_length.h:262`): a timed affect by value (50813/50814 ride
+/// the 508xx branch; the rest land in the main switch).
+pub const USE_AFFECT: i32 = 8;
 /// `USE_POTION_NODELAY`: a potion whose recovery is immediate.
 pub const USE_POTION_NODELAY: i32 = 11;
 /// `USE_SPECIAL` (`C/item_length.h:264`): 10. The skill books' sub type (all the 230g book

@@ -208,6 +208,9 @@ pub enum MoveKind {
     /// An ability potion used one of its stack up (`case USE_ABILITY_UP`,
     /// `G/char_item.cpp:5780-5859`). The game state lands the apply's affect.
     Abled,
+    /// A 50801-50820 potion used one of its stack up (the "additional effect"
+    /// branch, `G/char_item.cpp:3371-3521`). The game state lands 516 on the point.
+    EuroFree,
 }
 
 /// A record the client is sent, in the order legacy sends it.

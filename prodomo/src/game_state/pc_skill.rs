@@ -1793,6 +1793,7 @@ impl GameState {
             .filter(|proto| {
                 proto.item_type == gamedata::item_kind::ITEM_USE
                     && proto.sub_type == gamedata::item_kind::USE_ABILITY_UP
+                    && !(50_801..=50_820).contains(&proto.vnum)
             })
             .map_or(-1, |proto| proto.values[0]);
         // `APPLY_MOV_SPEED` (8, `C/length.h:505`) and `APPLY_ATT_SPEED` (7, `:504`).
@@ -1853,6 +1854,135 @@ impl GameState {
         self.add_pc_affect(
             vid,
             super::affect::Affect::buff(kind, on, proto.values[2], flag, proto.values[1], 0),
+            true,
+        );
+    }
+
+    /// The 50801-50820 proto at `at`, or `None` for anything else: the
+    /// "additional effect" branch (`G/char_item.cpp:3371-3521`) reads the values.
+    fn euro_free_proto(
+        &self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+    ) -> Option<(u32, [i32; 6])> {
+        let (vnum, sub_type, values) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .map(|proto| (proto.vnum, proto.sub_type, proto.values))?;
+        if !(50_801..=50_820).contains(&vnum) {
+            return None;
+        }
+        (sub_type == gamedata::item_kind::USE_ABILITY_UP
+            || sub_type == gamedata::item_kind::USE_AFFECT)
+            .then_some((vnum, values))
+    }
+
+    /// Whether the character under `vid` holds 516 on `point` (`FindAffect(kind,
+    /// point)`, `G/char_affect.cpp:129-142`): the 508xx refusal reads kind and
+    /// point, not kind alone.
+    fn holds_euro_free(&self, vid: Vid, point: usize) -> bool {
+        let on = u8::try_from(point).unwrap_or(u8::MAX);
+        self.affect_events.get(&vid).is_some_and(|event| {
+            event.affects.iter().any(|affect| {
+                affect.kind == crate::loading_phase::AFFECT_EXP_BONUS_EURO_FREE
+                    && affect.apply_on == on
+            })
+        })
+    }
+
+    /// The 50801-50820 refusal (`G/char_item.cpp:3388-3392`, `:3429-3432`): a use
+    /// whose (516, point) row is already held is refused with `[LS;99]`, the item
+    /// kept. The point is `aApplyInfo` of value(0) for `USE_ABILITY_UP`, value(1)
+    /// for `USE_AFFECT`; anything else passes.
+    pub(super) fn euro_free_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let Some((vnum, values)) = self.euro_free_proto(vid, at) else {
+            return true;
+        };
+        let apply = if self
+            .protos
+            .get(vnum)
+            .is_some_and(|proto| proto.sub_type == gamedata::item_kind::USE_AFFECT)
+        {
+            values[1]
+        } else {
+            values[0]
+        };
+        let point = u8::try_from(apply)
+            .ok()
+            .and_then(world::character::point_type);
+        if point.is_some_and(|point| self.holds_euro_free(vid, point)) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, ABILITY_RENEWAL_REFUSAL, &[]);
+            return false;
+        }
+        true
+    }
+
+    /// The 50801-50820 land (`G/char_item.cpp:3394-3411`, `:3434-3438`): 516 on
+    /// `aApplyInfo` of value(0) (`USE_ABILITY_UP`, `over`, keyed) or value(1)
+    /// (`USE_AFFECT`, appended, keyed), with value(2)'s value for value(1)/value(3)
+    /// seconds. The ability arm names ten applies, `APPLY_RESIST_MAGIC` among
+    /// them; anything else lands nothing, consumed anyway.
+    pub(super) fn land_euro_free(&mut self, vid: Vid, vnum: u32) {
+        use crate::loading_phase::{
+            AFFECT_EXP_BONUS_EURO_FREE, AFF_ATT_SPEED_POTION, AFF_MOV_SPEED_POTION,
+        };
+        let Some(proto) = self.protos.get(vnum) else {
+            return;
+        };
+        if !(50_801..=50_820).contains(&vnum) {
+            return;
+        }
+        let ability = proto.sub_type == gamedata::item_kind::USE_ABILITY_UP;
+        if !ability && proto.sub_type != gamedata::item_kind::USE_AFFECT {
+            return;
+        }
+        let apply = if ability {
+            proto.values[0]
+        } else {
+            proto.values[1]
+        };
+        let point = u8::try_from(apply)
+            .ok()
+            .and_then(world::character::point_type);
+        let Some(on) = point else { return };
+        // The ability arm's ten (`:3396-3410`): move 8 and attack speed 7 carry
+        // their flags; the rest land bare. The affect arm lands whatever the
+        // table names.
+        let flag = if ability {
+            match apply {
+                8 => AFF_MOV_SPEED_POTION,
+                7 => AFF_ATT_SPEED_POTION,
+                5 | 6 | 3 | 4 | 9 | 37 | 53 | 54 => 0,
+                _ => return,
+            }
+        } else {
+            0
+        };
+        let duration = if ability {
+            proto.values[1]
+        } else {
+            proto.values[3]
+        };
+        self.add_pc_affect_keyed(
+            vid,
+            super::affect::Affect::buff(
+                AFFECT_EXP_BONUS_EURO_FREE,
+                on,
+                proto.values[2],
+                flag,
+                duration,
+                0,
+            ),
+            ability,
             true,
         );
     }
@@ -5764,5 +5894,229 @@ mod tests {
                 .any(|window| window == ABILITY_ATT_REFUSAL)),
             "the green line lands: {heard:?}"
         );
+    }
+
+    /// A drinker uses a 50801-50820 potion: one of the stack goes and 516 lands
+    /// on the apply's point, not the plain affect (`G/char_item.cpp:3371-3521`).
+    /// The owner's 50820 is attack speed 3 for 180.
+    #[test]
+    fn a_508xx_potion_lands_516_and_uses_one_up() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        // 50820 wants level 52.
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .set_points(Some(crate::game_state::fixtures::points_at(52, 12_345, 0)));
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut potion = Item::new(7, 50_820);
+        potion.set_size(1).expect("a positive footprint");
+        potion.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &potion)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let euro = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the potion lands");
+        assert_eq!(euro.kind, MoveKind::EuroFree);
+        let held = world
+            .affect_events
+            .get(&me)
+            .map(|event| event.affects.clone())
+            .unwrap_or_default();
+        assert_eq!(held.len(), 1, "the potion lands one affect");
+        assert_eq!(
+            held[0].kind,
+            crate::loading_phase::AFFECT_EXP_BONUS_EURO_FREE
+        );
+        assert_eq!(
+            held[0].apply_on,
+            u8::try_from(common::point_slot::POINT_ATT_SPEED).unwrap(),
+            "value(0) 7 is attack speed"
+        );
+        assert_eq!(held[0].value, 3, "value(2) is the bonus");
+        assert_eq!(held[0].remaining, 180, "value(1) is the duration");
+        let count = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .items()
+            .item(7)
+            .expect("one of two is kept")
+            .count;
+        assert_eq!(count, 1, "one of the stack goes");
+    }
+
+    /// A second 508xx use while its (516, point) row is held is refused with
+    /// `[LS;99]`, the item kept (`G/char_item.cpp:3388-3392`).
+    #[test]
+    fn a_held_516_row_refuses_the_second_508xx() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, mut inbox) = a_cast();
+        let me = Vid::new(1);
+        // 50820 wants level 52.
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .set_points(Some(crate::game_state::fixtures::points_at(52, 12_345, 0)));
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut potion = Item::new(7, 50_820);
+        potion.set_size(1).expect("a positive footprint");
+        potion.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &potion)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the first potion lands");
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let second = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the refusal is a step, not an error");
+        assert_eq!(second.kind, MoveKind::Used, "the refusal consumes nothing");
+        assert!(
+            second.changes.is_empty(),
+            "the refused potion keeps its stack"
+        );
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().any(|record| record
+                .windows(ABILITY_RENEWAL_REFUSAL.len())
+                .any(|window| window == ABILITY_RENEWAL_REFUSAL)),
+            "the [LS;99] lands: {heard:?}"
+        );
+    }
+
+    /// A held plain 201 does not refuse a 508xx use: the 508xx branch checks
+    /// only its (516, point) row (`G/char_item.cpp:3388-3392`), never the main
+    /// switch's renewal or potion affects.
+    #[test]
+    fn a_held_plain_201_does_not_refuse_a_508xx() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .set_points(Some(crate::game_state::fixtures::points_at(52, 12_345, 0)));
+        // The plain 201, as the owner's 27053 lands it.
+        world.add_pc_affect(
+            me,
+            super::super::affect::Affect::buff(
+                crate::loading_phase::AFFECT_ATT_SPEED,
+                common::point_slot::POINT_ATT_SPEED,
+                10,
+                crate::loading_phase::AFF_ATT_SPEED_POTION,
+                600,
+                0,
+            ),
+            true,
+        );
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut potion = Item::new(7, 50_820);
+        potion.set_size(1).expect("a positive footprint");
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &potion)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let euro = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the 508xx lands beside the plain 201");
+        assert_eq!(euro.kind, MoveKind::EuroFree);
+        let held = world
+            .affect_events
+            .get(&me)
+            .map(|event| event.affects.clone())
+            .unwrap_or_default();
+        assert_eq!(held.len(), 2, "both rows stand");
     }
 }

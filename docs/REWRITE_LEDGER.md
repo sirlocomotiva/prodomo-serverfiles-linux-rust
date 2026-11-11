@@ -53488,3 +53488,41 @@ parity run holds `--test-threads=8`.
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5428 passed with 1 load flake in 46 targets, and the parity target re-run at `--test-threads=8` 431 passed, 0 failed (5429 in all); `cargo test --workspace --doc` 1 passed in 9 targets; fmt, clippy (`-D warnings`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 585. The free supplements
+
+Ledger 584 misrouted six vnums. It landed the plain affects for every
+`USE_ABILITY_UP` potion, but `UseItemEx` runs the 50801-50820 "additional effect"
+branch first (`G/char_item.cpp:3371-3521`), which returns before the main switch:
+those vnums never reach `case USE_ABILITY_UP` at `:5780`. The branch lands
+`AFFECT_EXP_BONUS_EURO_FREE` (516) on `aApplyInfo` of value(0) for `USE_ABILITY_UP`
+(`over`, keyed by point — `AddAffect`'s `IsCube`) and of value(1) for `USE_AFFECT`
+(appended, keyed), and a held (516, point) row refuses with `[LS;99]`, the item
+kept (`MoveKind::EuroFree`, the cure's seat; the point map is the existing
+`world::character::point_type`). The ability arm names ten applies, with
+`APPLY_RESIST_MAGIC` (37) among them — so 50819 lands here, and 584's "lands
+nothing" note for it was wrong too. The plain speed guards now skip the range: a
+held 201 never refuses a 508xx use. The branch's `USE_POTION_NODELAY` runs the
+ordinary nodelay arm (already ported; its arena check is dead, since the
+`UseItemEx` head gate refuses 50801-50826 on arena maps first, which the Rewrite
+already does), and its all-zero `USE_POTION` (50805-50812) matches no arm and
+returns true unconsumed, which the existing silent `NotPorted(UseVnum)` already
+is. Scenario `a_508xx_potion_lands_516_and_a_second_is_refused_while_held`: the
+516 add on point 17 with value 3 and 180 s, the spend, and the second use's lone
+`[LS;99]` with the row kept at 1.
+
+Tests: the world consume (`a_508xx_use_consumes_one_and_names_the_euro_free`),
+the land (`a_508xx_potion_lands_516_and_uses_one_up`), the refusal
+(`a_held_516_row_refuses_the_second_508xx`), the guard order
+(`a_held_plain_201_does_not_refuse_a_508xx`). Mutants: the 50819/50820 range edge
+and the landed point both fail.
+Two gate notes. Clippy's line limit folded the euro flag into the use
+classifier's tuple and hoisted the unported-use gates into `use_ported`, asserts
+identical. And the full suite flaked once under load
+(`a_gm_flags_a_stray_dog_aggressive_and_coward`, a coward-escape wait missed
+under parallel servers), green alone; the receipt's parity run holds
+`--test-threads=8`.
+
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5433 passed with 1 load flake in 46 targets, and the parity target re-run at `--test-threads=8` 432 passed, 0 failed (5434 in all); `cargo test --workspace --doc` 1 passed in 9 targets; fmt, clippy (`-D warnings`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
