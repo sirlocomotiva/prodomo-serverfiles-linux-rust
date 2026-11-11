@@ -1096,9 +1096,9 @@ fn use_ported(
     potion: bool,
     book: bool,
     quest: bool,
-    seated: (bool, bool, bool, bool, bool, bool, bool, bool),
+    seated: (bool, bool, bool, bool, bool, bool, bool, bool, bool),
 ) -> Option<MoveRefused> {
-    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped) = seated;
+    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
     if !potion
         && !book
         && !clear
@@ -1109,6 +1109,7 @@ fn use_ported(
         && !shop_premium
         && !barred
         && !caped
+        && !nogged
         && proto.item_type == gamedata::item_kind::ITEM_USE
     {
         return Some(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
@@ -1124,6 +1125,7 @@ fn use_ported(
         && !shop_premium
         && !barred
         && !caped
+        && !nogged
         && !USED_BY_WEARING.contains(&proto.item_type)
     {
         return Some(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
@@ -1135,24 +1137,30 @@ fn use_ported(
 /// `USE_INVISIBILITY` cloak, the `USE_ABILITY_UP` potion, the 50801-50820
 /// "additional effect" pair (`G/char_item.cpp:3371-3521`), the main-switch
 /// `USE_AFFECT` (`:6833-6864`), the 507 premium-shop arm (`:6835-6843`), and the
-/// gold bars (`LINGOURI_SURSA`, `:3328-3370`), and the cape of courage
-/// (`case USE_SPECIAL`'s 70038/70057/76007 arm, `:3879-3888`), in that order.
-/// The branch's `USE_POTION_NODELAY` runs the ordinary nodelay arm, and its
-/// `USE_POTION` answers nothing.
-fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool, bool, bool, bool, bool) {
+/// gold bars (`LINGOURI_SURSA`, `:3328-3370`), the cape of courage
+/// (`case USE_SPECIAL`'s 70038/70057/76007 arm, `:3879-3888`), and the Nog
+/// pocket (50216, `:3787-3811`), in that order. The branch's
+/// `USE_POTION_NODELAY` runs the ordinary nodelay arm, and its `USE_POTION`
+/// answers nothing.
+fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool, bool, bool, bool, bool, bool) {
     use gamedata::item_kind::{ITEM_USE, USE_ABILITY_UP, USE_AFFECT, USE_CLEAR, USE_INVISIBILITY};
     if proto.item_type != ITEM_USE {
-        return (false, false, false, false, false, false, false, false);
+        return (
+            false, false, false, false, false, false, false, false, false,
+        );
     }
     if (GOLD_BAR_LOW..=GOLD_BAR_HIGH).contains(&proto.vnum) {
-        return (false, false, false, false, false, false, true, false);
+        return (false, false, false, false, false, false, true, false, false);
     }
     if CAPE_OF_COURAGE.contains(&proto.vnum) {
-        return (false, false, false, false, false, false, false, true);
+        return (false, false, false, false, false, false, false, true, false);
+    }
+    if proto.vnum == NOG_POCKET {
+        return (false, false, false, false, false, false, false, false, true);
     }
     if (50_801..=50_820).contains(&proto.vnum) {
         let euro = proto.sub_type == USE_ABILITY_UP || proto.sub_type == USE_AFFECT;
-        return (false, false, false, euro, false, false, false, false);
+        return (false, false, false, euro, false, false, false, false, false);
     }
     let shop_premium =
         proto.sub_type == USE_AFFECT && proto.values[0] == AFFECT_PREMIUM_PRIVATE_SHOP_VALUE;
@@ -1166,8 +1174,12 @@ fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool, bool, bool, b
         shop_premium,
         false,
         false,
+        false,
     )
 }
+
+/// The Nog pocket's vnum (`ITEM_NOG_POCKET`, `G/unique_item.h:98`).
+const NOG_POCKET: u32 = 50_216;
 
 /// The cape of courage's three vnums: 70038, 70057 and the reward box's 76007
 /// (`G/char_item.cpp:3879-3882`, `G/unique_item.h:23,107`).
@@ -1247,7 +1259,7 @@ pub fn use_item(
     let book = is_skill_book(proto);
     let quest = proto.item_type == gamedata::item_kind::ITEM_QUEST;
     let seated = use_special_kind(proto);
-    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped) = seated;
+    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
     if let Some(refused) = use_ported(proto, potion, book, quest, seated) {
         return Err(refused);
     }
@@ -1289,7 +1301,8 @@ pub fn use_item(
         used.changes = changes;
         return Ok(used);
     }
-    if book || clear || cloak || abled || euro || timed || shop_premium || barred || caped {
+    if book || clear || cloak || abled || euro || timed || shop_premium || barred || caped || nogged
+    {
         // `case USE_CLEAR` (`G/char_item.cpp:5539-5551`) strips the bad affects and
         // uses one of the stack; the strip runs on the game state (it holds the
         // affects), so this arm answers the consume and the kind names the strip.
@@ -1299,7 +1312,8 @@ pub fn use_item(
         // USE_AFFECT` (`:6833-6864`) lands value(0) the same way, and the 507 arm
         // (`:6835-6843`) runs the setter the same way. The gold bar pays its gold
         // the same way, after the game state's refusals, and the cape of courage
-        // gathers the monsters the same way.
+        // gathers the monsters the same way. The Nog pocket lands its three rows
+        // the same way, after the held refusal.
         let kind = if clear {
             MoveKind::Cleared
         } else if cloak {
@@ -1316,6 +1330,8 @@ pub fn use_item(
             MoveKind::Barred
         } else if caped {
             MoveKind::Caped
+        } else if nogged {
+            MoveKind::Nogged
         } else {
             MoveKind::Used
         };
@@ -1532,6 +1548,8 @@ mod tests {
     const GOLD_BAR: u32 = 80_003;
     /// A cape of courage: the owner's 70038.
     const CAPE: u32 = 70_038;
+    /// A Nog pocket: the owner's 50216.
+    const NOG: u32 = 50_216;
     const POTION: u32 = 27_101;
     const HIGH_POTION: u32 = 27_102;
     const SURA_REFUSED: u32 = 12;
@@ -1586,6 +1604,8 @@ mod tests {
             proto(GOLD_BAR, 3, 10, 0),
             // The cape of courage: `USE_SPECIAL`, 10.
             proto(CAPE, 3, 10, 0),
+            // The Nog pocket: `USE_SPECIAL`, 10.
+            proto(NOG, 3, 10, 0),
             // `USE_CLEAR`, 12.
             proto(CURE, 3, 12, 0),
             // `USE_INVISIBILITY`, 13.
@@ -2025,6 +2045,22 @@ mod tests {
         let mut case = Case::new(&[(inv(3), held)]);
         let done = case.use_at(inv(3)).expect("a cape is consumed");
         assert_eq!(done.kind, MoveKind::Caped);
+        assert_eq!(
+            item_records(&done),
+            vec![ItemRecord::Set(gc_item_clear(inv(3)))]
+        );
+        assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
+        assert_eq!(case.at(inv(3)), None);
+    }
+
+    /// A Nog pocket uses one of its stack up and names the pocket, for the
+    /// game state's three rows.
+    #[test]
+    fn a_nog_use_consumes_one_and_names_the_pocket() {
+        let pocket = Item::new(7, NOG);
+        let mut case = Case::new(&[(inv(3), pocket)]);
+        let done = case.use_at(inv(3)).expect("a pocket is consumed");
+        assert_eq!(done.kind, MoveKind::Nogged);
         assert_eq!(
             item_records(&done),
             vec![ItemRecord::Set(gc_item_clear(inv(3)))]

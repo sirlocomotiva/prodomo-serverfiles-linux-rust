@@ -54388,3 +54388,79 @@ fn a_cape_of_courage_gathers_the_dogs_around() {
     check(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 30)");
     drop(alice);
 }
+
+/// `cg.game.item_use`: the 50216 Nog pocket (`case USE_SPECIAL`,
+/// `G/char_item.cpp:3787-3811`) lands three 302 rows — move speed with the potion
+/// flag, the mall attack bonus and the mall experience bonus, value(1..=3) each
+/// for value(0) s. Alpha uses one of two: the three adds ride, the count falls to
+/// 1, and a second use is refused with `[LS;99]`, the row kept at 1.
+#[test]
+fn a_nog_pocket_lands_302_and_a_second_is_refused_while_held() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         50216 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(50_216).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's pocket is USE_SPECIAL");
+    assert_eq!(proto.values, [1800, 10, 5, 10, 0, 0], "the pocket's rows");
+    // The pocket's `REAL_TIME` limit owns socket 0 as its expiry, so the row
+    // carries a live one; the load keeps the sockets as stored.
+    sql(
+        &database,
+        "UPDATE item SET socket0 = 2147483647 WHERE id = 30",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses. Then: the update, and three 302 adds.
+    alpha.send_record(&client_item_use(0));
+    let mut spent = false;
+    let mut adds: Vec<(u8, i32)> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(spent && adds.len() >= 3) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
+                assert_eq!(count, 1, "the use spends one of two");
+                spent = true;
+            }
+        }
+        if record.first() == Some(&GC_AFFECT_ADD)
+            && record.len() == AFFECT_ADD_LEN
+            && record[1..5] == 302u32.to_le_bytes()
+        {
+            let value = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            let dur = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+            assert_eq!(dur, 1800, "value(0) is the duration");
+            adds.push((record[5], value));
+        }
+    }
+    assert!(spent, "the use lands");
+    let mov = u8::try_from(common::point_slot::POINT_MOV_SPEED).expect("a point byte");
+    let att = u8::try_from(common::point_slot::POINT_MALL_ATTBONUS).expect("a point byte");
+    let exp = u8::try_from(common::point_slot::POINT_MALL_EXPBONUS).expect("a point byte");
+    assert_eq!(
+        adds,
+        [(mov, 10), (att, 5), (exp, 10)],
+        "the three rows land"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // When: the second use, while 302 is held. Then: `[LS;99]`, the row kept.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"[LS;99]"),
+        "the held row refuses"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+}

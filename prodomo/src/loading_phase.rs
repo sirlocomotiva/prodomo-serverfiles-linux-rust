@@ -251,6 +251,9 @@ pub const AFFECT_BLEND: u32 = 531;
 /// against.
 pub const AFFECT_MALL: u32 = 510;
 
+/// `AFFECT_NOG_ABILITY` (`G/affect.h:120`): the Nog pocket's three rows.
+pub const AFFECT_NOG_ABILITY: u32 = 302;
+
 /// `AFFECT_NO_DEATH_PENALTY` (`G/affect.h:74`): death loses nothing while held.
 pub const AFFECT_NO_DEATH_PENALTY: u32 = 511;
 

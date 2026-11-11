@@ -53654,3 +53654,24 @@ gathered dog swings on Alpha, and the store keeps the row's absence. Unit seat:
 the gather (`aggregate_monster_starts_a_victimless_monster_in_reach`, a seed
 sweep over forty).
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5457 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 591. The Nog pocket
+
+`case USE_SPECIAL`'s 50216 arm (`G/char_item.cpp:3787-3811`): the Nog pocket lands
+three 302 rows — move speed with the potion flag, the mall attack bonus, the mall
+experience bonus (value(1..=3), each for value(0) s; the owner's 50216 runs 1800 s
+for 10, 5 and 10) — and a held 302 refuses with `[LS;99]`, the pocket kept. It
+seats in `use_special_kind` as a ninth seated arm with the new `MoveKind::Nogged`:
+the step consumes one (`a_nog_use_consumes_one_and_names_the_pocket`), the guard
+refuses the held row (`nog_use_allowed`), and the land appends the three rows
+(`land_nog_ability`). Appended, not `over`: legacy's `AddAffect` replaces a held
+row of the kind on the first add only when one is held
+(`G/char_affect.cpp:683-722`), and the held refusal means none ever is, so all
+three append. Scenario
+`a_nog_pocket_lands_302_and_a_second_is_refused_while_held`: the three adds ride,
+one of two goes, the second use hears `[LS;99]` and the row stays at 1. The
+scenario seeds socket 0 with a live expiry, because the pocket's `REAL_TIME`
+limit owns that socket. Unit seats: the land
+(`a_nog_use_lands_three_rows_and_uses_one_up`), the held refusal
+(`a_held_302_row_refuses_the_second_pocket`).
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5461 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

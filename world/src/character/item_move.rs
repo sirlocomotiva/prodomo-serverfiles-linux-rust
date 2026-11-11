@@ -225,6 +225,10 @@ pub enum MoveKind {
     /// 70038/70057/76007 arm, `G/char_item.cpp:3879-3888`). The game state runs the
     /// gather after the consume.
     Caped,
+    /// A Nog pocket used one of its stack up (`case USE_SPECIAL`'s 50216 arm,
+    /// `G/char_item.cpp:3787-3811`). The game state lands the three rows after
+    /// the held refusal.
+    Nogged,
 }
 
 /// A record the client is sent, in the order legacy sends it.

@@ -98,6 +98,8 @@ const GOLD_BAR_GOLD: [u32; 6] = [
 ];
 /// The gold bar's window refusal (`:3354`), verbatim.
 const GOLD_BAR_WINDOWS_LINE: &[u8] = b"Nu poti folosi lingoul.";
+/// The Nog pocket's vnum (`ITEM_NOG_POCKET`, `G/unique_item.h:98`).
+const NOG_POCKET_VNUM: u32 = 50_216;
 /// The gold bar's cap refusal (`:3359`), verbatim.
 const GOLD_BAR_CAP_LINE: &[u8] = b"Nu poti detine mai mult de x Yang.";
 /// `SKILL_YEONSA` (`G/skill.h:79`): the shoot arm's arrow-skill list opens here.
@@ -2044,6 +2046,72 @@ impl GameState {
                 .iter()
                 .any(|affect| affect.kind == kind && (point == 0 || affect.apply_on == point))
         })
+    }
+
+    /// The Nog pocket's held refusal (`G/char_item.cpp:3798-3802`): a held 302 row
+    /// refuses with `[LS;99]`, the pocket kept. Anything else passes.
+    pub(super) fn nog_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+
+        let held_pocket = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == NOG_POCKET_VNUM);
+        if !held_pocket {
+            return true;
+        }
+        if self.holds_affect(vid, crate::loading_phase::AFFECT_NOG_ABILITY) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;99]", &[]);
+            return false;
+        }
+        true
+    }
+
+    /// The Nog pocket's three rows (`G/char_item.cpp:3803-3809`): 302 on move speed
+    /// with the potion flag, on the mall attack bonus and on the mall experience
+    /// bonus — value(1..=3), each for value(0) s, all landed `over`.
+    pub(super) fn land_nog_ability(&mut self, vid: Vid, vnum: u32) {
+        use crate::loading_phase::AFF_MOV_SPEED_POTION;
+
+        if vnum != NOG_POCKET_VNUM {
+            return;
+        }
+        let Some(proto) = self.protos.get(vnum) else {
+            return;
+        };
+        if proto.item_type != gamedata::item_kind::ITEM_USE {
+            return;
+        }
+        let time = proto.values[0];
+        for (on, value, flag) in [
+            (
+                point::POINT_MOV_SPEED,
+                proto.values[1],
+                AFF_MOV_SPEED_POTION,
+            ),
+            (point::POINT_MALL_ATTBONUS, proto.values[2], 0),
+            (point::POINT_MALL_EXPBONUS, proto.values[3], 0),
+        ] {
+            self.add_pc_affect(
+                vid,
+                super::affect::Affect::buff(
+                    crate::loading_phase::AFFECT_NOG_ABILITY,
+                    on,
+                    value,
+                    flag,
+                    time,
+                    0,
+                ),
+                false,
+            );
+        }
     }
 
     /// `case USE_AFFECT`'s refusals (`G/char_item.cpp:6844-6857`): a held dragon-god
@@ -6512,6 +6580,155 @@ mod tests {
             .expect("one of two is kept")
             .count;
         assert_eq!(count, 1, "one of the stack goes");
+    }
+
+    /// A Nog pocket lands its three rows: 302 on move speed with the potion flag,
+    /// on the mall attack bonus and on the mall experience bonus — value(1..=3),
+    /// each for value(0) s (`G/char_item.cpp:3803-3809`). The owner's 50216 runs
+    /// 1800 s for 10, 5 and 10.
+    #[test]
+    fn a_nog_use_lands_three_rows_and_uses_one_up() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut pocket = Item::new(7, 50_216);
+        pocket.set_size(1).expect("a positive footprint");
+        pocket.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &pocket)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let landed = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the use lands");
+        assert_eq!(landed.kind, MoveKind::Nogged);
+        let held = world
+            .affect_events
+            .get(&me)
+            .map(|event| event.affects.clone())
+            .unwrap_or_default();
+        assert_eq!(held.len(), 3, "the use lands three rows");
+        let kind = crate::loading_phase::AFFECT_NOG_ABILITY;
+        assert!(held.iter().all(|row| row.kind == kind));
+        let by_point: Vec<(u8, i32)> = held.iter().map(|row| (row.apply_on, row.value)).collect();
+        let mov = u8::try_from(common::point_slot::POINT_MOV_SPEED).expect("a point byte");
+        let att = u8::try_from(common::point_slot::POINT_MALL_ATTBONUS).expect("a point byte");
+        let exp = u8::try_from(common::point_slot::POINT_MALL_EXPBONUS).expect("a point byte");
+        assert_eq!(by_point, [(mov, 10), (att, 5), (exp, 10)]);
+        assert!(
+            held.iter().all(|row| row.remaining == 1800),
+            "each row runs value(0) s"
+        );
+        assert_eq!(
+            held[0].flag,
+            crate::loading_phase::AFF_MOV_SPEED_POTION,
+            "the move row carries the potion flag"
+        );
+        assert_eq!(held[1].flag, 0);
+        assert_eq!(held[2].flag, 0);
+        let count = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .items()
+            .item(7)
+            .expect("one of two is kept")
+            .count;
+        assert_eq!(count, 1, "one of the stack goes");
+    }
+
+    /// A second Nog pocket while 302 is held is refused with `[LS;99]`, the
+    /// pocket kept (`G/char_item.cpp:3798-3802`).
+    #[test]
+    fn a_held_302_row_refuses_the_second_pocket() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, mut inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut pocket = Item::new(7, 50_216);
+        pocket.set_size(1).expect("a positive footprint");
+        pocket.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &pocket)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the first use lands");
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let second = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the refusal is a step, not an error");
+        assert_eq!(second.kind, MoveKind::Used, "the refusal consumes nothing");
+        assert!(
+            second.changes.is_empty(),
+            "the refused pocket keeps its stack"
+        );
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard
+                .iter()
+                .any(|record| record.windows(7).any(|window| window == b"[LS;99]")),
+            "the held line lands: {heard:?}"
+        );
     }
 
     /// A second 507 use within 60 s of the max is refused with the

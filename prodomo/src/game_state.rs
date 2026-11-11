@@ -4328,6 +4328,11 @@ impl GameState {
         if !self.gold_bar_use_allowed(vid, at, actor) {
             return Some(self.arena_item_refused(vid, actor));
         }
+        // The Nog pocket's held refusal (`:3798-3802`): a held 302 row refuses
+        // with `[LS;99]`, the pocket kept.
+        if !self.nog_use_allowed(vid, at, actor) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
         None
     }
 
@@ -4467,7 +4472,7 @@ impl GameState {
     }
 
     /// The consumed-kind hooks of `case USE_CLEAR`, `case USE_INVISIBILITY`, `case
-    /// USE_ABILITY_UP`, the 50801-50820 pair, the 507 arm, the gold bar and the cape: the step consumed the
+    /// USE_ABILITY_UP`, the 50801-50820 pair, the 507 arm, the gold bar, the cape and the pocket: the step consumed the
     /// cure, and the bad affects go now, after the quest hook and before the feed
     /// (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`,
     /// `G/char_affect.cpp:951-960`); or the step consumed the cloak, and the 300 s
@@ -4479,7 +4484,8 @@ impl GameState {
     /// `SetPremiumPrivateShopBonus`, `G/char.cpp:12695-12742`); or the step consumed
     /// the gold bar, and the bar's gold pays now (`LINGOURI_SURSA`, `:3362-3365`); or
     /// the step consumed the cape, and the monsters gather now (`case USE_SPECIAL`'s
-    /// 70038/70057/76007 arm, `:3879-3888`).
+    /// 70038/70057/76007 arm, `:3879-3888`); or the step consumed the pocket, and
+    /// the three rows land now (50216, `:3803-3809`).
     fn land_item_use_kind(
         &mut self,
         vid: common::vid::Vid,
@@ -4511,6 +4517,9 @@ impl GameState {
         }
         if kind == world::character::MoveKind::Caped {
             self.aggregate_monster(vid);
+        }
+        if kind == world::character::MoveKind::Nogged {
+            self.land_nog_ability(vid, used_vnum);
         }
     }
 
