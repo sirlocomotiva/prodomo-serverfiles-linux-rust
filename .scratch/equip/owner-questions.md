@@ -671,3 +671,10 @@ owner answers.
  server too (a `qc` log line at boot would show it), or say if your `qc` somehow
  accepts it. If it is dead, the row stays `unused`; the `pc.change_empire` machinery
  underneath stays ported either way.
+72. **The dungeon-info file manager is compiled out (ledger 564).** All of
+ `CDungeonInfoManager` — the `dungeon_info.txt` load, the window, the warp and the ranks —
+ sits inside `#if defined(__DUNGEON_SYSTEM__)` (`dungeon_info.cpp:20-452`), and that switch
+ is defined nowhere in the checked-in source. The live half is the compiled six rows and
+ the cooldown lines (ledger 512). Waits on it: confirm your build also leaves
+ `__DUNGEON_SYSTEM__` undefined, so the file is dead and the row stays `unused`. If your
+ build defines it, the file manager is a real port.

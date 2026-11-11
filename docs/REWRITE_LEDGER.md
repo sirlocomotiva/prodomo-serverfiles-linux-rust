@@ -52747,3 +52747,27 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 564. The file nobody opens
+
+`data.dungeon_info` is `unused`: the checked-in server never opens
+`locale/europe/dungeon_info.txt`. All of `CDungeonInfoManager` — `Initialize` and `LoadFile`,
+the window packets, the warp and the ranks — sits inside a single
+`#if defined(__DUNGEON_SYSTEM__)` (`server/server/game/dungeon_info.cpp:20-452`, with the
+header's `:18`), and that switch is defined nowhere: not in `prodomodefines.h`, not in any
+other game file. The positive control is the same search finding `__SHIP_DEFENSE__` in
+`prodomodefines.h:38`. The live half of the system is the compiled six rows and the cooldown
+lines, ported in ledger 512. Owner question 72 asks the owner to confirm their build also
+leaves the switch undefined; if it defines it, the file manager is a real port.
+
+No code changed.
+
+Inventory: `data.dungeon_info` missing to unused, naming the guard and the controls.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite564.txt` (5355 passed, 0 failed in 46 targets), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
