@@ -231,14 +231,19 @@ pub fn worn_system_not_ported(
         return Some(WornSystem::Aura);
     }
     // An `ITEM_UNIQUE` starts the unique expiry event (`EquipTo`, `G/item.cpp:1458-1487`,
-    // `StartUniqueExpireEvent`, `G/item.cpp:2165-2194`), still unported — except the cloak
-    // 70048, whose only wear effect is hiding the shown alignment (`ShowAlignment(false)`,
-    // `G/char_item.cpp:8556-8557`): its apply list is empty and it carries no special
-    // group, so wearing it starts nothing else. The wear's own timer is legacy's one
-    // minute (`iSec = 60` when the saved socket is 0); the Rewrite wears the cloak
-    // without the timer, as it wears the medal uniques' reads without theirs. This arm
-    // stays narrow until the expiry event is ported: only the cloak wears.
-    if proto.item_type == ITEM_UNIQUE && item.vnum != 70_048 {
+    // `StartUniqueExpireEvent`, `G/item.cpp:2165-2194`), which the game state's wear sync
+    // arms. Its applies run through `ModifyPoints`'s unique and ring tail (`sig_applies`),
+    // and the tail's apply gate below refuses what is not ported — so a unique wears
+    // unless it is real-time (its expiry is another event) or carries a special group
+    // the owner's data never fills for one (every group vnum sits above the 30000 gate,
+    // `G/item_manager_read_tables.cpp:278-282`).
+    if proto.item_type == ITEM_UNIQUE
+        && (proto
+            .limits
+            .iter()
+            .any(|limit| limit.kind == gamedata::item_kind::LIMIT_REAL_TIME)
+            || item.sig_vnum != 0)
+    {
         return Some(WornSystem::Unique);
     }
     if proto.timer_based_on_wear.is_some() {
@@ -658,9 +663,15 @@ impl<'s, 'g> Equipper<'s, 'g> {
             return Err(MoveRefused::UnmarriedUnique);
         }
         // A `WEARABLE_UNIQUE` item starts the unique expiry event (`EquipTo`,
-        // `G/item.cpp:1458-1487`) — except the cloak 70048, whose only wear effect is
-        // hiding the shown alignment; see `worn_system_not_ported`.
-        if proto.wear_flags & WEARABLE_UNIQUE != 0 && item.vnum != 70_048 {
+        // `G/item.cpp:1458-1487`), which the game state's wear sync arms; the same
+        // real-time and special-group uniques refuse here as in `worn_system_not_ported`.
+        if proto.wear_flags & WEARABLE_UNIQUE != 0
+            && (proto
+                .limits
+                .iter()
+                .any(|limit| limit.kind == gamedata::item_kind::LIMIT_REAL_TIME)
+                || item.sig_vnum != 0)
+        {
             return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique)));
         }
         if proto.item_type == ITEM_RING {
@@ -1356,6 +1367,8 @@ mod tests {
     const TIMED_MOUNT: u32 = 52_002;
     const MALE_ONLY: u32 = 11_230;
     const UNIQUE: u32 = 71_001;
+    /// A real-time unique: its expiry is another event, so it still refuses.
+    const REAL_TIME_UNIQUE: u32 = 71_002;
     /// The hide-alignment cloak (`G/unique_item.h:28`): the one unique that wears.
     const HIDE_ALIGNMENT_CLOAK: u32 = 70_048;
     /// A marriage unique (`G/marriage.cpp:24-29`): worn, it needs a married wearer.
@@ -1465,6 +1478,11 @@ mod tests {
             kind: LIMIT_LEVEL,
             value: 30,
         };
+        let mut real_time_unique = proto(REAL_TIME_UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE);
+        real_time_unique.limits[0] = ItemValue {
+            kind: gamedata::item_kind::LIMIT_REAL_TIME,
+            value: 3600,
+        };
         ItemProtos::from_rows(vec![
             proto(SWORD, ITEM_WEAPON, 0, WEARABLE_WEAPON),
             proto(QUEST_BOOK, gamedata::item_kind::ITEM_QUEST, 0, 0),
@@ -1481,6 +1499,7 @@ mod tests {
             proto(WEDDING, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY),
             male_only,
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
+            real_time_unique,
             proto(HIDE_ALIGNMENT_CLOAK, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
             proto(MARRIAGE_UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
             proto(RING, ITEM_RING, 0, 0),
@@ -2065,14 +2084,23 @@ mod tests {
     }
 
     #[test]
-    fn a_unique_item_is_refused_as_not_ported() {
+    fn a_real_time_or_grouped_unique_is_refused_as_not_ported() {
         let mut case = Case::new(&[(inv(3), Item::new(7, UNIQUE))]);
+        // A plain unique wears now: the game state's wear sync arms its expiry.
+        let done = case
+            .run(inv(3), wear_pos(EWearPositions::Unique1 as u16))
+            .expect("the unique wears");
+        assert_eq!(done.kind, MoveKind::Equipped);
+        // A real-time unique still refuses: its expiry is another event.
+        let mut case = Case::new(&[(inv(3), Item::new(7, REAL_TIME_UNIQUE))]);
         assert_eq!(
             case.refused(inv(3), wear_pos(EWearPositions::Unique1 as u16)),
             MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique))
         );
-        // `WEARABLE_UNIQUE` on an item of another type is refused by `CanEquipNow` too.
-        let mut case = Case::new(&[(inv(3), Item::new(7, UNIQUE_FLAGGED))]);
+        // A unique carrying a special group still refuses.
+        let mut grouped = Item::new(7, UNIQUE);
+        grouped.sig_vnum = 50011;
+        let mut case = Case::new(&[(inv(3), grouped)]);
         assert_eq!(
             case.refused(inv(3), wear_pos(EWearPositions::Unique1 as u16)),
             MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique))
@@ -2080,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hide_alignment_cloak_wears_while_other_uniques_refuse() {
+    fn the_hide_alignment_cloak_wears() {
         let mut case = Case::new(&[(inv(3), Item::new(7, HIDE_ALIGNMENT_CLOAK))]);
         // `CG_ITEM_USE` knows no unique arm (`USED_BY_WEARING` has no `ITEM_UNIQUE`),
         // so the wear goes through the move path, as the scenario's does.

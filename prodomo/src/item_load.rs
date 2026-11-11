@@ -1008,11 +1008,12 @@ mod tests {
             kind: i32::from(APPLY_COSTUME_ATTR_BONUS),
             value: 5,
         };
+        let unique = limited(shaped(104, ITEM_UNIQUE, 0), LIMIT_REAL_TIME, 3600);
         let protos = ItemProtos::from_rows(vec![
             shaped(101, ITEM_COSTUME, COSTUME_AURA),
             shaped(102, ITEM_COSTUME, COSTUME_MOUNT),
             shaped(103, ITEM_COSTUME, COSTUME_PET),
-            shaped(104, ITEM_UNIQUE, 0),
+            unique,
             first_use,
             timer,
             immune,

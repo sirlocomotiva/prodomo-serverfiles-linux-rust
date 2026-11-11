@@ -53322,3 +53322,49 @@ green to `/tmp/suite578b.txt` (5413 passed, 0 failed in 46 targets; the first ru
 which `read_war_end_past_pings` now pumps past).
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 579. The unique's hour
+
+`sys.char.pk`'s tail was the unique expiry event: ledger 577 wore the cloak
+without its timer, and every other unique refused at equip and at load. The
+event is ported now, on `Due::Unique`, one due entry per worn unique.
+
+`sync_unique_expire` runs after every equip and use step, beside the cloak's
+`sync_hide_alignment`: every worn unique with no due entry is started, every due
+entry whose item is no longer worn is stopped. The start reads the saved socket
+4 seconds (capped at 60, 60 when 0), clears the socket, and arms the fire; the
+stop banks the seconds left back into socket 4 — unless value 2 is set, which
+keeps ticking unworn, as legacy's stop refuses those (`G/item.cpp:2227-2243`).
+The fire runs the countdown arm (remove at remain 1 or less, else tick down and
+re-arm 60 s) and the value-2 absolute arm (remove when passed, else re-arm the
+seconds left capped at 600). The removal is `RemoveItem` with the owner logged
+on: the quickslot delete, the worn points, the release, the clear, the destroy
+row, and the cloak's `ShowAlignment(true)`. A missing item, proto or wearer ends
+the event silently. Real-time uniques still refuse (their expiry is the
+real-time event), and so do special-grouped ones (the owner's only group sits
+above the 30000 gate, so `m_ItemToSpecialGroup` never fills one); the
+premium-shop arm stays out (no shop window holds a unique here).
+
+The wear gates opened with it: `worn_system_not_ported` and the `CanEquipNow`
+`WEARABLE_UNIQUE` arm now refuse only the real-time and the grouped uniques.
+The load follows through the same gate.
+
+Tests: `a_worn_cloak_arms_and_its_fire_removes_it` (60 s arm, removal, the
+re-shown alignment), `a_remain_above_one_ticks_down_and_rearms`,
+`a_takeoff_banks_the_seconds_left_and_a_rewear_spends_them` (bank 60, re-arm
+from the bank, clear on start), `a_remain_of_one_removes_at_the_fire`, and the
+re-aimed `world`/`prodomo` gate tests (`a_real_time_or_grouped_unique_is_refused_as_not_ported`,
+the cloak's wear, the load's real-time unique). Scenario
+`a_worn_cloaks_saved_seconds_fire_and_remove_it`: the cloak banked at 2 s arms
+2 s on, and the fire clears wear cell 187, re-shows 432, and deletes the row.
+The stop's bank and the start's clear ride the step that owns them: their update
+record and their `Sockets` row change are folded into the wear's or take-off's own
+`MovedItems`, behind the wear cell's records, so one transaction stores them with the
+step and one burst sends them (the suite caught the first cut, which wrote the
+record straight to the socket and stored nothing). The cloak's hide scenario gained
+the take-off's `Count(0, 1)` and the banked-socket store check. Mutants: the first
+gap, the remain bound, the tick, the re-arm and the value-2 split all fail.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5418 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks. The first suite run found the take-off bank's unsent store row (5417 passed, 1 failed; the fix folded the stop into the step).
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

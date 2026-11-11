@@ -162,6 +162,16 @@ pub(super) enum Due {
         /// 0 for a monster.
         killer: u32,
     },
+    /// `unique_expire_event` of the item under this id, worn by the player under this
+    /// VID (`G/item.cpp:1900-1983`). It sorts last: at an equal Pulse it fires after
+    /// every other event (a Divergence — legacy's heap order at equal priority is
+    /// heap-shape dependent, as the other arms note).
+    Unique {
+        /// The wearer's VID.
+        vid: u32,
+        /// The item's id.
+        id: u32,
+    },
 }
 
 /// The regen events and the ore veins' ends, with what a regen spawns from.
@@ -362,6 +372,7 @@ impl GameState {
                 Due::PcDead(vid) => self.pc_dead_event(vid),
                 Due::PcRecovery(vid) => self.pc_recovery_event(vid),
                 Due::PcPoison { vid, count, killer } => self.pc_poison_event(vid, count, killer),
+                Due::Unique { vid, id } => self.fire_unique_expire(Vid::new(vid), id, pulse),
             }
         }
     }

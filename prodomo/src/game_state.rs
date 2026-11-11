@@ -171,6 +171,7 @@ mod temple_ochao;
 mod threeway;
 mod timed_exit;
 mod trade;
+mod unique_expire;
 mod use_to_item;
 mod view;
 mod view_encode;
@@ -4044,6 +4045,7 @@ impl GameState {
         })?;
         self.switchbot_follow_move(vid, request.from, request.to, &mut moved);
         self.sync_hide_alignment(vid, &mut moved);
+        self.sync_unique_expire(vid, &mut moved);
         Ok(moved)
     }
 
@@ -4415,6 +4417,7 @@ impl GameState {
         // as the premium arm does, so only a run step reaches here.
         self.stack_on_use(vid, actor, used_vnum, &mut moved);
         moved.climbed = climbed;
+        self.sync_unique_expire(vid, &mut moved);
         Ok(moved)
     }
 

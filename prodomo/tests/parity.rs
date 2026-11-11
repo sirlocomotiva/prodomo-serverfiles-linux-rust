@@ -53522,6 +53522,104 @@ fn a_revenge_hit_on_a_negative_player_lands_and_a_like_aligned_one_is_refused() 
     );
 }
 
+/// `sys.char.pk`, `event.item.unique_expire_event`: a worn unique's event fires and
+/// removes it (`G/item.cpp:1900-1983`). Alpha is given the cloak (70048) at cell 0 with
+/// the saved socket 4 banked at 2 seconds; wearing it onto the first unique cell (187)
+/// clears the bank and arms the event 2 s on, and the fire removes the worn cloak —
+/// the wear cell clears, the shown alignment returns to 432, and the item row is gone.
+#[test]
+fn a_worn_cloaks_saved_seconds_fire_and_remove_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET alignment = 4321 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket4) \
+         SELECT 30, id, 1, 0, 1, 70048, 2 FROM player WHERE name = 'Alpha'",
+    );
+    let entered_at = std::time::Instant::now();
+    let (keyed, character, quickslots, load_sets) =
+        load_with_quickslots_in(&server, b"alice", 0, ENGLISH);
+    assert_eq!(character.name, b"Alpha");
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    assert_eq!(load_sets.len(), 1, "the load sets the cloak");
+    let mut alpha = keyed;
+    let entered = enter_game_view(&mut alpha);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    std::thread::sleep(Duration::from_millis(1600).saturating_sub(entered_at.elapsed()));
+    drain_revive_end(&mut alpha, entered_at);
+
+    // When: the cloak is moved onto the first unique cell.
+    alpha.send_record(&client_item_move(0, 187, 0));
+    // The wear's burst, the socket clear's `GC_ITEM_UPDATE` (25) among it: the wear
+    // cell sets with the hide behind it. Read raw, because the move reader knows no
+    // update record.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut set = false;
+    let mut looks = Vec::new();
+    let mut cleared_bank = false;
+    while std::time::Instant::now() < deadline && (!set || looks.len() < 2 || !cleared_bank) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_SET) {
+            let (window, cell, vnum, _count) = set_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8
+                && cell == 187
+                && vnum == 70_048
+            {
+                set = true;
+            }
+        }
+        if record.first() == Some(&GC_CHARACTER_UPDATE) {
+            let update = protocol::gc_actors::GcCharacterUpdate::decode(&record)
+                .expect("a character update");
+            if update.dw_vid == vid {
+                looks.push(update.s_alignment);
+            }
+        }
+        if record.first() == Some(&ITEM_UPDATE) {
+            cleared_bank = true;
+        }
+    }
+    assert!(set, "the wear cell sets");
+    assert_eq!(looks, [432, 0], "the wear step's look, then the hide");
+    assert!(cleared_bank, "the start clears the socket-4 bank");
+    // Then: 2 s on, the banked seconds fire and the worn cloak is removed — the
+    // wear cell clears and the shown alignment returns to 432.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut cleared = false;
+    let mut reshown = false;
+    while std::time::Instant::now() < deadline && !(cleared && reshown) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_SET) {
+            let (window, cell, vnum, _count) = set_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 187 && vnum == 0 {
+                cleared = true;
+            }
+        }
+        if record.first() == Some(&GC_CHARACTER_UPDATE) {
+            let update = protocol::gc_actors::GcCharacterUpdate::decode(&record)
+                .expect("a character update");
+            if update.dw_vid == vid && update.s_alignment == 432 {
+                reshown = true;
+            }
+        }
+    }
+    assert!(cleared, "the fire clears the wear cell");
+    assert!(reshown, "the expiry shows the real alignment again");
+    check(&database, "(SELECT count(*) = 0 FROM item WHERE id = 30)");
+}
+
 /// `sys.char.pk`: the hide-alignment cloak (70048) is worn and taken off through
 /// `CG_ITEM_MOVE`, and the shown alignment follows it while the stored one stays.
 ///
@@ -53575,7 +53673,8 @@ fn a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it() {
     // When: the cloak is moved onto the first unique cell.
     alpha.send_record(&client_item_move(0, 187, 0));
     // Then: the cell clears, the wear cell sets, the battle points recompute, and the
-    // wear step's look carries 432 with the hide's look carrying 0 behind it.
+    // wear step's look carries 432 with the hide's look carrying 0 behind it. No
+    // update record lands: the banked socket 4 is 0, and the start clears nothing.
     let (seen, updates) = read_a_move_with_updates(&mut alpha, vid);
     let seen = seen
         .into_iter()
@@ -53602,7 +53701,8 @@ fn a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it() {
 
     // When: it is taken off again.
     alpha.send_record(&client_item_move(187, 0, 0));
-    // Then: the wear cell clears, the points recompute, the cell sets, the step's
+    // Then: the wear cell clears, the points recompute, the cell sets, the unique
+    // stop banks the seconds left into socket 4 with an update record, the step's
     // own look carries the still-hidden 0, and the show's look behind it carries 432.
     let (seen, updates) = read_a_move_with_updates(&mut alpha, vid);
     let seen = seen
@@ -53620,6 +53720,7 @@ fn a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it() {
             Seen::Point(22, 348),
             Seen::Point(23, 180),
             Seen::Set(0, 70_048),
+            Seen::Count(0, 1),
         ]
     );
     let shown = updates
@@ -53631,6 +53732,8 @@ fn a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it() {
         &database,
         "(SELECT alignment = 4321 FROM player WHERE name = 'Alpha')",
     );
+    // The stop banked the ~60 seconds left into socket 4 and saved the row.
+    check(&database, "(SELECT socket4 > 0 FROM item WHERE id = 30)");
 }
 
 /// [`read_a_move`], with the decoded `GC_CHARACTER_UPDATE` records of `vid` beside it,
@@ -53656,6 +53759,11 @@ fn read_a_move_with_updates(
                 let (window, cell, vnum, _count) = set_fields(record);
                 assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
                 Seen::Set(cell, vnum)
+            }
+            ITEM_UPDATE => {
+                let (window, cell, count) = update_fields(record);
+                assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
+                Seen::Count(cell, count)
             }
             GC_POINT_CHANGE => {
                 assert_eq!(&record[4..8], &vid.to_le_bytes(), "the mover's VID");
