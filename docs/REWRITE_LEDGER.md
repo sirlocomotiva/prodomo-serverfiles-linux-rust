@@ -53368,3 +53368,25 @@ gap, the remain bound, the tick, the re-arm and the value-2 split all fail.
 Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5418 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks. The first suite run found the take-off bank's unsent store row (5417 passed, 1 failed; the fix folded the stop into the step).
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 580. No other flood
+
+`sys.net.flood` waited on a "packet flood limit" that was never named. The sweep
+finds no such limit: `flood` matches six files tree-wide — `G/char.cpp`,
+`G/char.h`, `G/char_item.cpp`, `G/cmd.cpp`, `G/item_stack_attribute.cpp` and
+`C/prodomodefines.h` — and besides the ported command count (`cmd.cpp:612-625`,
+`prodomo::command::interpret` with its tenth-line disconnect in the safebox
+scenario) they hold only two things. The stack-attribute use stamp
+(`m_dwUseItemStackAttrFlood`, the `CG_ITEM_USE` gate at `char_item.cpp:7180-7185`
+and the feed's stamp at `item_stack_attribute.cpp:164`) is ported (`stack_flood`,
+`stack_use_allowed`/`tell_stack_flood`, the feed in `stack_attr.rs:261`). And
+`ENABLE_FLOOD_PRETECTION` (`C/prodomodefines.h:67`, sic) is defined once and used
+nowhere — one tree-wide hit, its own line (controls: the define line itself is
+found; `ENABLE_NO_SUCH_FLAG_XYZ` matches nothing).
+
+No code change. The row is `ported` on the safebox scenario that closes the
+tenth line.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5418 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
