@@ -53432,3 +53432,25 @@ the strip gate both fail.
 Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5421 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 583. The cloak's ten minutes
+
+`case USE_INVISIBILITY` (`G/char_item.cpp:5553-5577`): both owner cloaks (27877,
+70026) land the 300 s `AFFECT_INVISIBILITY` (`over`, as legacy passes `true`) and
+use one of the stack, in the cure's seat (`MoveKind::Cloaked`, the strip's hook
+pattern). The mirror's ten-minute `mirror_of_disapper.last_use_time` cooldown
+(sic, `:5562,5570`) runs as a pre-step guard: a use within 600 s of the stamp is
+refused with `[#Unk]You cannot use this item yet.` before the consume, else the
+flag stamps now. A character whose quest row never ran passes, as legacy's `NULL`
+PC does. Scenario `a_cloak_cloaks_and_a_mirror_refuses_within_ten_minutes`: the
+cloak's clear and 203 add with 300 s, the mirror's spend and over-write re-land,
+and the second mirror's lone wait line with the row kept at 1.
+
+Tests: the world consume (`a_cloak_use_consumes_one_and_names_the_cloak`), the
+land (`a_cloak_cloaks_for_300_seconds_and_uses_one_up`), the cooldown
+(`a_mirror_refuses_within_ten_minutes_and_stamps_after`). Mutants: the cloak
+kind swap and the 300/301 duration both fail.
+
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5425 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed in 9 targets; fmt, clippy (`-D warnings`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

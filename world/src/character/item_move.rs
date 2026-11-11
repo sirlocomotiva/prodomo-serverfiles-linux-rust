@@ -202,6 +202,9 @@ pub enum MoveKind {
     /// A cure used one of its stack up (`case USE_CLEAR`, `G/char_item.cpp:5539-5551`).
     /// The world's step answers the consume; the game state strips the bad affects.
     Cleared,
+    /// A cloak used one of its stack up (`case USE_INVISIBILITY`, `:5553-5577`).
+    /// The game state lands the 300 s affect, after the mirror's cooldown.
+    Cloaked,
 }
 
 /// A record the client is sent, in the order legacy sends it.

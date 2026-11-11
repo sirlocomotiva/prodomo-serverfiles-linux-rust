@@ -1132,10 +1132,13 @@ pub fn use_item(
     let quest = proto.item_type == gamedata::item_kind::ITEM_QUEST;
     let clear = proto.item_type == gamedata::item_kind::ITEM_USE
         && proto.sub_type == gamedata::item_kind::USE_CLEAR;
-    if !potion && !book && !clear && proto.item_type == gamedata::item_kind::ITEM_USE {
+    let cloak = proto.item_type == gamedata::item_kind::ITEM_USE
+        && proto.sub_type == gamedata::item_kind::USE_INVISIBILITY;
+    if !potion && !book && !clear && !cloak && proto.item_type == gamedata::item_kind::ITEM_USE {
         return Err(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
     }
-    if !potion && !book && !quest && !clear && !USED_BY_WEARING.contains(&proto.item_type) {
+    if !potion && !book && !quest && !clear && !cloak && !USED_BY_WEARING.contains(&proto.item_type)
+    {
         return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
     use_checks(&item, proto, rules, gear.points)?;
@@ -1176,7 +1179,7 @@ pub fn use_item(
         used.changes = changes;
         return Ok(used);
     }
-    if book || clear {
+    if book || clear || cloak {
         let mut trail = Trail::default();
         super::potion::use_one(
             items,
@@ -1189,8 +1192,11 @@ pub fn use_item(
         // `case USE_CLEAR` (`G/char_item.cpp:5539-5551`) strips the bad affects and
         // uses one of the stack; the strip runs on the game state (it holds the
         // affects), so this arm answers the consume and the kind names the strip.
+        // `case USE_INVISIBILITY` (`:5553-5577`) cloaks for 300 s the same way.
         let kind = if clear {
             MoveKind::Cleared
+        } else if cloak {
+            MoveKind::Cloaked
         } else {
             MoveKind::Used
         };
@@ -1391,6 +1397,8 @@ mod tests {
     const BOOK: u32 = 50_061;
     /// A `USE_CLEAR` cure: the owner's 27124.
     const CURE: u32 = 27_124;
+    /// A `USE_INVISIBILITY` cloak: the owner's 27877.
+    const CLOAK: u32 = 27_877;
     const POTION: u32 = 27_101;
     const HIGH_POTION: u32 = 27_102;
     const SURA_REFUSED: u32 = 12;
@@ -1522,6 +1530,8 @@ mod tests {
             proto(BOOK, 3, 10, 0),
             // `USE_CLEAR`, 12.
             proto(CURE, 3, 12, 0),
+            // `USE_INVISIBILITY`, 13.
+            proto(CLOAK, 3, 13, 0),
             potion,
             high_potion,
             sura_refused,
@@ -1741,6 +1751,21 @@ mod tests {
         let mut case = Case::new(&[(inv(3), cure)]);
         let done = case.use_at(inv(3)).expect("a cure is consumed");
         assert_eq!(done.kind, MoveKind::Cleared);
+        assert_eq!(
+            item_records(&done),
+            vec![ItemRecord::Set(gc_item_clear(inv(3)))]
+        );
+        assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
+        assert_eq!(case.at(inv(3)), None);
+    }
+    /// A `USE_INVISIBILITY` cloak consumes one and answers `Cloaked`: the game state
+    /// lands the 300 s affect, because the affects live there, not in the storage.
+    #[test]
+    fn a_cloak_use_consumes_one_and_names_the_cloak() {
+        let cloak = Item::new(7, CLOAK);
+        let mut case = Case::new(&[(inv(3), cloak)]);
+        let done = case.use_at(inv(3)).expect("a cloak is consumed");
+        assert_eq!(done.kind, MoveKind::Cloaked);
         assert_eq!(
             item_records(&done),
             vec![ItemRecord::Set(gc_item_clear(inv(3)))]

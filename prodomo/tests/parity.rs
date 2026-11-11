@@ -27590,6 +27590,102 @@ fn read_kill_poison_misses(alice: &mut Keyed, yankee: &mut Keyed) {
     yankee.quiet_allowing_farm("an unlanded line reaches nobody");
 }
 
+/// `cg.game.item_use`: a `USE_INVISIBILITY` cloak (27877) cloaks for 300 s, and the
+/// mirror (70026) cloaks once and refuses within ten minutes. Alpha uses the cloak
+/// at cell 0: the single goes (the clear), the `GC_AFFECT_ADD` of kind 203 lands
+/// with 300 s, and the row is gone. Then the mirror at cell 1, twice: the first
+/// use spends one of two and re-lands 203, the second is refused with the wait line
+/// and the row keeps count 1.
+#[test]
+fn a_cloak_cloaks_and_a_mirror_refuses_within_ten_minutes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
+         27877 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 31, id, 1, 1, 2, \
+         70026 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    for vnum in [27_877, 70_026] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, 13, "the owner's cloak is USE_INVISIBILITY");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses the cloak. Then: the clear, and the 203 add with 300 s.
+    alpha.send_record(&client_item_use(0));
+    let mut cleared = false;
+    let mut cloaked = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(cleared && cloaked) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_SET) {
+            let (window, cell, vnum, _count) = set_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 && vnum == 0 {
+                cleared = true;
+            }
+        }
+        if record.first() == Some(&GC_AFFECT_ADD)
+            && record.len() == AFFECT_ADD_LEN
+            && record[1..5] == 203u32.to_le_bytes()
+        {
+            let dur = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+            assert_eq!(dur, 300, "the cloak lasts 300 s");
+            cloaked = true;
+        }
+    }
+    assert!(cleared, "the single cloak goes");
+    assert!(cloaked, "the 300 s invisibility lands");
+    check(&database, "(SELECT count(*) = 0 FROM item WHERE id = 30)");
+    // When: the mirror, twice. Then: the first spends one of two and re-lands 203
+    // over the cloak's (the remove, the add, the flag update), the second hears the
+    // wait line and the row stays at 1.
+    alpha.send_record(&client_item_use(1));
+    let mut spent = false;
+    let mut relanded = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(spent && relanded) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 1 {
+                assert_eq!(count, 1, "the first mirror spends one of two");
+                spent = true;
+            }
+        }
+        if record.first() == Some(&GC_AFFECT_ADD)
+            && record.len() == AFFECT_ADD_LEN
+            && record[1..5] == 203u32.to_le_bytes()
+        {
+            relanded = true;
+        }
+    }
+    assert!(spent, "the first mirror lands");
+    assert!(relanded, "the first mirror re-lands 203 over the cloak's");
+    alpha.send_record(&client_item_use(1));
+    // The refusal sends only the wait line: the guard stops the step before the
+    // consume, so no remove or add follows.
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"[#Unk]You cannot use this item yet."),
+        "the second mirror hears the wait line"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+}
+
 /// `cg.game.item_use`: a `USE_CLEAR` cure (27124) strips a landed poison. Yankee is
 /// poisoned by `/poison` (the flag update, the `GC_AFFECT_ADD` of kind 209), then
 /// uses the cure at cell 0: one of the two goes (the update record), the poison's

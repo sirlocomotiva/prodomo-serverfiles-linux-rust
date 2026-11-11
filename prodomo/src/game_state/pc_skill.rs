@@ -63,6 +63,14 @@ use crate::chat_line::Arg;
 use crate::item_move::Mover;
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
 
+/// The mirror of disappearing (sic, `G/char_item.cpp:5555`): 70026.
+const MIRROR_OF_DISAPPER: u32 = 70_026;
+/// Its cooldown flag (`:5562,5570`), sic.
+const MIRROR_LAST_USE_FLAG: &[u8] = b"mirror_of_disapper.last_use_time";
+/// Its cooldown (`:5564`): ten minutes.
+const MIRROR_COOLDOWN_SECS: i32 = 10 * 60;
+/// Its wait line (`:5566`).
+const MIRROR_WAIT_LINE: &[u8] = b"[#Unk]You cannot use this item yet.";
 /// `SKILL_YEONSA` (`G/skill.h:79`): the shoot arm's arrow-skill list opens here.
 const SKILL_YEONSA: u32 = 46;
 /// `SKILL_KWANKYEOK`: 47, the only hosted arrow-skill row.
@@ -1696,6 +1704,54 @@ impl GameState {
         let _stun = self.remove_pc_affect(vid, AFFECT_STUN);
         let _slow = self.remove_pc_affect(vid, AFFECT_SLOW);
         let _tusok = self.remove_pc_affect(vid, SKILL_TUSOK);
+    }
+    /// `case USE_INVISIBILITY`'s land (`G/char_item.cpp:5574`): the 300 s
+    /// `AFFECT_INVISIBILITY`, `over` as legacy passes `true`.
+    pub(super) fn cloak_invisible(&mut self, vid: Vid) {
+        use crate::loading_phase::{AFFECT_INVISIBILITY, AFF_INVISIBILITY};
+        self.add_pc_affect(
+            vid,
+            super::affect::Affect::buff(AFFECT_INVISIBILITY, 0, 0, AFF_INVISIBILITY, 300, 0),
+            true,
+        );
+    }
+    /// The mirror's cooldown (`G/char_item.cpp:5555-5572`): a 70026 use within ten
+    /// minutes of the last one is refused with the wait line, the item kept; else
+    /// the flag stamps now and the use goes on. Any other vnum passes, and a
+    /// character whose quest row never ran passes, as legacy's `NULL` PC does.
+    pub(super) fn mirror_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return true;
+        };
+        let Some(item) = character.items().item_at(at) else {
+            return true;
+        };
+        if item.vnum != MIRROR_OF_DISAPPER {
+            return true;
+        }
+        let pid = character.player_id();
+        let Some(quests) = self.quests.as_mut() else {
+            return true;
+        };
+        let last = quests
+            .manager()
+            .quest_flag(pid, MIRROR_LAST_USE_FLAG)
+            .unwrap_or(0);
+        let now = i32::try_from(Self::global_time()).unwrap_or(i32::MAX);
+        if now.wrapping_sub(last) < MIRROR_COOLDOWN_SECS {
+            use protocol::gc_chat::CHAT_TYPE_INFO;
+            self.tell(vid, mover, CHAT_TYPE_INFO, MIRROR_WAIT_LINE, &[]);
+            return false;
+        }
+        quests
+            .manager_mut()
+            .set_quest_flag(pid, MIRROR_LAST_USE_FLAG, now);
+        true
     }
 
     /// `CHARACTER::OnMove(true)` (`G/char.cpp:6148-6179`): the last move and
@@ -5330,5 +5386,146 @@ mod tests {
             .expect("one of two is kept")
             .count;
         assert_eq!(count, 1, "one of the stack goes");
+    }
+    /// A drinker uses a `USE_INVISIBILITY` cloak: one of the stack goes and the 300 s
+    /// invisibility lands (`G/char_item.cpp:5553-5577`).
+    #[test]
+    fn a_cloak_cloaks_for_300_seconds_and_uses_one_up() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut cloak = Item::new(7, 27_877);
+        cloak.set_size(1).expect("a positive footprint");
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &cloak)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let cloaked = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the cloak lands");
+        assert_eq!(cloaked.kind, MoveKind::Cloaked);
+        let held = world
+            .affect_events
+            .get(&me)
+            .map(|event| event.affects.clone())
+            .unwrap_or_default();
+        assert_eq!(held.len(), 1, "the cloak lands one affect");
+        assert_eq!(held[0].kind, crate::loading_phase::AFFECT_INVISIBILITY);
+        assert_eq!(held[0].remaining, 300, "the cloak lasts 300 s");
+        assert!(
+            world
+                .characters()
+                .find_by_vid(me)
+                .expect("the caster is online")
+                .items()
+                .item(7)
+                .is_none(),
+            "the single cloak goes"
+        );
+    }
+
+    /// A second mirror use within ten minutes is refused with the wait line, the
+    /// item kept; a use after the cooldown stamps again (`G/char_item.cpp:5555-5572`).
+    #[test]
+    fn a_mirror_refuses_within_ten_minutes_and_stamps_after() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, mut inbox) = a_cast();
+        // The real locale's quests: the mirror's cooldown is a quest flag.
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager =
+            quest::manager::Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        world.quests = Some(super::super::quests::Quests::new(
+            manager,
+            std::sync::Arc::default(),
+            gamedata::mob_locale_names::MobNamesByLanguage::default(),
+        ));
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut mirror = Item::new(7, 70_026);
+        mirror.set_size(1).expect("a positive footprint");
+        mirror.count = 3;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &mirror)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let first = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the first mirror lands");
+        assert_eq!(first.kind, MoveKind::Cloaked);
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let second = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the refusal is a step, not an error");
+        assert_eq!(second.kind, MoveKind::Used, "the refusal consumes nothing");
+        assert!(
+            second.changes.is_empty(),
+            "the refused mirror keeps its stack"
+        );
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().any(|record| record
+                .windows(MIRROR_WAIT_LINE.len())
+                .any(|window| window == MIRROR_WAIT_LINE)),
+            "the wait line lands: {heard:?}"
+        );
     }
 }

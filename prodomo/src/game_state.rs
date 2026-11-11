@@ -4287,6 +4287,12 @@ impl GameState {
         if !self.arena_item_use_allowed(vid, at) {
             return Some(self.arena_item_refused(vid, actor));
         }
+        // The mirror's cooldown (`G/char_item.cpp:5555-5572`): a 70026 use within ten
+        // minutes of the last one is refused with the wait line, the item kept; else
+        // the flag stamps now. Any other vnum passes.
+        if !self.mirror_use_allowed(vid, at, actor) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
         None
     }
 
@@ -4403,12 +4409,7 @@ impl GameState {
             self.arena_consumed_potion(vid, vnum, sub_type, &moved);
         }
         self.run_quest_used(vid, at, actor, account, &mut moved);
-        // `case USE_CLEAR`'s strip (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`,
-        // `G/char_affect.cpp:951-960`): the step consumed the cure, and the bad
-        // affects go now, after the quest hook and before the feed.
-        if moved.kind == world::character::MoveKind::Cleared {
-            self.remove_bad_affect(vid);
-        }
+        self.land_item_use_kind(vid, moved.kind);
         // unless it already runs.
         if moved
             .points
@@ -4424,6 +4425,20 @@ impl GameState {
         moved.climbed = climbed;
         self.sync_unique_expire(vid, &mut moved);
         Ok(moved)
+    }
+
+    /// The consumed-kind hooks of `case USE_CLEAR` and `case USE_INVISIBILITY`: the
+    /// step consumed the cure, and the bad affects go now, after the quest hook and
+    /// before the feed (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`,
+    /// `G/char_affect.cpp:951-960`); or the step consumed the cloak, and the 300 s
+    /// affect lands now, in the strip's seat (`G/char_item.cpp:5574-5575`).
+    fn land_item_use_kind(&mut self, vid: common::vid::Vid, kind: world::character::MoveKind) {
+        if kind == world::character::MoveKind::Cleared {
+            self.remove_bad_affect(vid);
+        }
+        if kind == world::character::MoveKind::Cloaked {
+            self.cloak_invisible(vid);
+        }
     }
 
     /// The `QuestUsed` tail: the pick-up ticket starts the pick-up, another quest item
