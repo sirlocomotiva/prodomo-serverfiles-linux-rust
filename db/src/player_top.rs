@@ -41,3 +41,20 @@ pub async fn stand(store: &Store, player: u32, level: u8) -> Result<(), AccountE
     .await?;
     Ok(())
 }
+
+/// Fell the row of `player` (`QUERY_REMOVE_TOP_PLAYER_INFO`,
+/// `D/ClientManagerPlayer.cpp:1599-1606`): the delete by player ID. A missing
+/// row is no error, as the async delete never answers.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for a player ID above `i32::MAX`, and
+/// [`AccountError::Database`] otherwise.
+pub async fn fell(store: &Store, player: u32) -> Result<(), AccountError> {
+    let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
+    sqlx::query("DELETE FROM player_top WHERE player_id = $1")
+        .bind(player_id)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}

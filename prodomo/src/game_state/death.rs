@@ -1475,7 +1475,7 @@ impl GameState {
             return;
         }
         for affect in &cleared {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let frame = affect_remove_frame(affect);
             let _cleared = self.write_to_client(vid, frame);
         }

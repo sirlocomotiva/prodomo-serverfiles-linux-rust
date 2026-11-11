@@ -132,7 +132,7 @@ impl GameState {
                 super::affect::take_affects_of_kind(&mut event.affects, kind)
             });
         for affect in &removed {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let frame = super::affect::affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
         }

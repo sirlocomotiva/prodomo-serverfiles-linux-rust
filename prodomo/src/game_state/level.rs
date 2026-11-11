@@ -52,8 +52,9 @@ const SUB_SKILLS: [u8; 18] = [
 ];
 
 /// `TOP_PLAYER_MAX_LEVEL` (`common/prodomodefines.h:127`): the level whose
-/// reaching grants the top-player affect.
-const TOP_LEVEL: u8 = 120;
+/// reaching grants the top-player affect, and below which the held rows fall.
+/// Shared with the strip in `affect.rs`.
+pub(super) const TOP_LEVEL: u8 = 120;
 
 /// What the line reset: the held numbers the save writes, the skills the step
 /// deletes, and whether the caller reached the top.
@@ -94,6 +95,11 @@ pub struct LevelHeld {
     /// The level moved and landed on 120 (`TOP_PLAYER_MAX_LEVEL`): the step
     /// grants the top-player affect past the store's rows.
     pub reached_top: bool,
+    /// The player IDs whose `player_top` rows fell: the level moved off 120 and
+    /// the strip below took their held top rows (`ComputeAffect`,
+    /// `G/char_affect.cpp:811-826`), one per kind in kind order. The step
+    /// deletes them from the store.
+    pub fell_top: Vec<u32>,
 }
 
 /// What `/reset` refilled: the filled pools the held row takes.
@@ -181,7 +187,20 @@ impl GameState {
             body.card.level = new;
         }
         cleared_skills.extend(self.clear_sub_skills(target, new));
-        let held = self.level_held(target, new != old && new == TOP_LEVEL, cleared_skills);
+        // Below the top a held top row falls with the move (`ComputeAffect`,
+        // `G/char_affect.cpp:811-826`); the strip's answer names the store rows
+        // the step deletes.
+        let fell_top = if new != old && new != TOP_LEVEL {
+            self.strip_top_affects(target)
+        } else {
+            Vec::new()
+        };
+        let held = self.level_held(
+            target,
+            new != old && new == TOP_LEVEL,
+            cleared_skills,
+            fell_top,
+        );
         let shown = self
             .characters
             .find_by_vid(target)
@@ -238,7 +257,17 @@ impl GameState {
             body.card.level = new;
         }
         cleared_skills.extend(self.clear_sub_skills(vid, new));
-        Some(self.level_held(vid, new != old && new == TOP_LEVEL, cleared_skills))
+        let fell_top = if new != old && new != TOP_LEVEL {
+            self.strip_top_affects(vid)
+        } else {
+            Vec::new()
+        };
+        Some(self.level_held(
+            vid,
+            new != old && new == TOP_LEVEL,
+            cleared_skills,
+            fell_top,
+        ))
     }
 
     /// `ACMD(do_reset)`: the caller's hit and spell pools refill, the filled
@@ -488,7 +517,13 @@ impl GameState {
     }
 
     /// The held numbers of the player under `vid` after the reset.
-    fn level_held(&mut self, vid: Vid, reached_top: bool, cleared: Vec<u8>) -> LevelHeld {
+    fn level_held(
+        &mut self,
+        vid: Vid,
+        reached_top: bool,
+        cleared: Vec<u8>,
+        fell_top: Vec<u32>,
+    ) -> LevelHeld {
         let points = self.pc_points_mut(vid.raw());
         let Some(points) = points else {
             return LevelHeld {
@@ -509,6 +544,7 @@ impl GameState {
                 sungma: [0; 4],
                 cleared_skills: cleared,
                 reached_top,
+                fell_top: Vec::new(),
             };
         };
         LevelHeld {
@@ -534,6 +570,7 @@ impl GameState {
             ],
             cleared_skills: cleared,
             reached_top,
+            fell_top,
         }
     }
 }
@@ -817,6 +854,37 @@ mod tests {
         assert!(!held.reached_top, "the same level raises nothing");
     }
 
+    /// A move off 120 fells the held top row (`ComputeAffect`,
+    /// `G/char_affect.cpp:811-826`): the 321 row's remove rides and the held
+    /// answer names the fallen player for the store.
+    #[test]
+    fn a_move_off_120_fells_the_held_top_row() {
+        use crate::loading_phase::AFFECT_PLAYER_TOP_1;
+        use protocol::gc_vid::HEADER_GC_AFFECT_REMOVE;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock).with_max_level(120);
+        let mut inbox = entered(&mut world);
+        let mover = world.own_mover(Vid::new(VID)).expect("the entrant moves");
+        world
+            .run_level(Vid::new(VID), b"120", mover, 0, 0)
+            .expect("120 runs");
+        world.grant_top_affect(Vid::new(VID), 1);
+        while inbox.try_recv().is_ok() {}
+        let mover = world.own_mover(Vid::new(VID)).expect("the entrant moves");
+        let held = world
+            .run_level(Vid::new(VID), b"119", mover, 0, 0)
+            .expect("119 runs");
+        assert!(!held.reached_top, "below the top");
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        let removes: Vec<u32> = heard
+            .iter()
+            .filter(|frame| frame.first() == Some(&HEADER_GC_AFFECT_REMOVE))
+            .map(|frame| u32::from_le_bytes(frame[1..5].try_into().unwrap()))
+            .collect();
+        assert_eq!(removes, [AFFECT_PLAYER_TOP_1]);
+        assert_eq!(held.fell_top.len(), 1, "one row fell");
+    }
+
     /// The eighteen sub-skills are the ones legacy keeps through `ResetSkill`.
     #[test]
     fn the_sub_skills_are_the_eighteen() {
@@ -846,6 +914,7 @@ mod tests {
             sungma: [0; 4],
             cleared_skills: Vec::new(),
             reached_top: false,
+            fell_top: Vec::new(),
         };
     }
 

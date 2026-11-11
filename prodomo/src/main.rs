@@ -14034,8 +14034,9 @@ async fn goto_step(
 }
 
 /// `do_level` (`G/cmd_gm.cpp:2740-2758`): the world runs the line, the held row
-/// takes what it reset, the cleared skills' store rows go, and a reaching 120
-/// stands its `player_top` row and takes its top-player affect.
+/// takes what it reset, the cleared skills' store rows go, a reaching 120
+/// stands its `player_top` row and takes its top-player affect, and a move off
+/// 120 fells the `player_top` rows the strip below took.
 async fn level_step(
     addr: SocketAddr,
     context: &ConnectionContext,
@@ -14110,14 +14111,22 @@ async fn level_step(
             }
         }
     }
+    for fallen in &leveled.fell_top {
+        if let Err(error) = db::player_top::fell(&context.store, *fallen).await {
+            warn!(%addr, %error, "The top row could not fall; closing");
+            return false;
+        }
+    }
     info!(%addr, "Level reset");
     true
 }
 
 /// `do_advance`: the world runs the `/advance` line on the named character,
 /// and the reset is written straight to the target's row, whose claim this
-/// descriptor never held. The cleared skills' rows go with it, and a move to
-/// 120 stands the top row and grants the affect on the target's VID.
+/// descriptor never held. The cleared skills' rows go with it. A move to or
+/// off 120 neither stands nor fells a `player_top` row: only the caller's own
+/// `/level` carries the top-player hook, and the target's world VID never
+/// crosses back for a grant.
 async fn advance_step(
     addr: SocketAddr,
     context: &ConnectionContext,

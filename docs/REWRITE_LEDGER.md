@@ -53700,3 +53700,35 @@ potion's pass, and the flag-down pass
 pinned against the arena list in the legacy-list sweep.
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5463 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
 
+
+## 593. The top-player fall
+
+`sys.char.top_players` is `ported`. The grant half already stood (`grant_top_affect`,
+`db::player_top::stand`, the `/level` step); this slice wires the fall.
+`ComputeAffect`'s top-player strip (`G/char_affect.cpp:811-826`) seats in the
+port's `compute_affect` (`affect.rs`): below 120 each held top row (321-323)
+goes, uncomputed through `RemoveAffect` with its remove packet sent, the flags
+updated once at the end, and its `player_top` row named for the store. The
+strip nests once through the remove's own `ComputeAffect`, which finds no row
+and stops — the port calls the point arm directly and skips the empty second
+pass. Every `compute_affect` caller keeps its behavior: the nine remove-path
+callers outside `affect.rs` and the seven inside ignore the strip's answer
+(their own strips run through the same gate), and the add path folds the one
+nested strip in. `/level` and `/advance` run the strip on a move off 120 and
+carry the fallen IDs in `LevelHeld::fell_top`; `level_step` deletes them
+through `db::player_top::fell` (`QUERY_REMOVE_TOP_PLAYER_INFO`,
+`D/ClientManagerPlayer.cpp:1599-1606`). `/advance`'s target carries no hook:
+its world VID never crosses back for a grant, and the doc said otherwise until
+now. The `ClearAffect` line's kept-top row now falls through the first
+uncompute below 120, as legacy's does, and its test pins the order. The
+`TopPlayerAffLog` row is `sys.log`'s, still waiting on the owner's answer
+(question 73). Scenario
+`a_level_to_120_grants_the_top_row_and_a_move_off_fells_it`: `/level 120`
+lands 321 with flag 44 and stands the store row, `/level 119` takes the row
+off with its remove packet and fells the store row. The server runs at max
+level 120, as the owner's config sets it (the test default stops at 99).
+Unit seat: `a_move_off_120_fells_the_held_top_row`.
+The full suite flaked once under load (`a_gaya_craft_spends_and_a_market_opens`, a mid-run read under parallel servers — the same signature as ledger 557), green alone and in the parity rerun; the receipt's parity run holds `--test-threads=8`.
+
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5464 passed with 1 load flake in 46 targets, and the parity target re-run at `--test-threads=8` 440 passed, 0 failed; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+

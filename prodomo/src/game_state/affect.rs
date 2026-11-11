@@ -279,8 +279,13 @@ impl GameState {
     /// `CHARACTER::ComputeAffect`'s point arm (`G/char_affect.cpp:799-802`) for the player
     /// under `vid`: `affect` joins (`add`) or leaves the list `RefreshAffect` reads first,
     /// as legacy's list changes before its `ComputeAffect` runs, then its value goes onto
-    /// or comes off its point.
-    pub(super) fn compute_affect(&mut self, vid: Vid, affect: &Affect, add: bool) {
+    /// or comes off its point. Then the top-player strip (`:811-826`): below 120 a held
+    /// top row goes, each uncomputed through `RemoveAffect` with its remove packet sent,
+    /// and its `player_top` row falls with it. Each strip answers the player IDs whose
+    /// rows fell, for the store, in kind order. Only the `/level` and `/advance`
+    /// lines carry the answer out (`LevelHeld::fell_top`); every other caller runs
+    /// below the top by construction or at a level the strip reads as standing.
+    pub(super) fn compute_affect(&mut self, vid: Vid, affect: &Affect, add: bool) -> Vec<u32> {
         if let Some(points) = self.pc_points_mut(vid.raw()) {
             if add {
                 points.affect_point_added(affect.apply_on, affect.value);
@@ -290,6 +295,60 @@ impl GameState {
         }
         let amount = if add { affect.value } else { -affect.value };
         self.change_pc_point(vid, usize::from(affect.apply_on), amount, false);
+        self.strip_top_affects(vid)
+    }
+
+    /// The top-player strip (`ComputeAffect`, `G/char_affect.cpp:811-826`): below 120
+    /// each held top row goes, uncomputed through `RemoveAffect` with its remove
+    /// packet sent, and its `player_top` row falls with it. Answers the player IDs
+    /// whose rows fell, one per kind in kind order, for the store. At 120 nothing
+    /// goes. The strip calls `RemoveAffect`, whose own `ComputeAffect` strips again,
+    /// but the second pass finds no row and stops; the recursion nests once.
+    pub(super) fn strip_top_affects(&mut self, vid: Vid) -> Vec<u32> {
+        let below_top = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .is_some_and(|points| points.level() != super::level::TOP_LEVEL);
+        if !below_top {
+            return Vec::new();
+        }
+        let kinds = [
+            AFFECT_PLAYER_TOP_1,
+            crate::loading_phase::AFFECT_PLAYER_TOP_2,
+            AFFECT_PLAYER_TOP_3,
+        ];
+        let mut stripped = Vec::new();
+        if let Some(event) = self.affect_events.get_mut(&vid) {
+            for kind in kinds {
+                stripped.extend(take_affects_of_kind(&mut event.affects, kind));
+            }
+        }
+        if stripped.is_empty() {
+            return Vec::new();
+        }
+        let flags_before = self.affect_flags_of(vid);
+        for affect in &stripped {
+            // `RemoveAffect`'s point arm, not the full remove: the row already left
+            // the list, and the full path would strip again for nothing.
+            let _nested: Vec<u32> = self.compute_affect(vid, affect, false);
+            let frame = affect_remove_frame(affect);
+            let _retired = self.write_to_client(vid, frame);
+        }
+        let flags_after = self.affect_flags_of(vid);
+        if flags_after != flags_before {
+            self.send_affect_update(vid, flags_after);
+        }
+        let Some(player) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .map(world::character::Character::player_id)
+        else {
+            return Vec::new();
+        };
+        vec![player; stripped.len()]
     }
 
     /// `CHARACTER::AddAffect` on the player under `vid` (`G/char_affect.cpp:668-760`): a
@@ -343,7 +402,7 @@ impl GameState {
         });
         let placed = retired.is_some();
         if let Some(retired) = retired {
-            self.compute_affect(vid, &retired, false);
+            let _stripped = self.compute_affect(vid, &retired, false);
             let frame = affect_remove_frame(&retired);
             let _retired = self.write_to_client(vid, frame);
         }
@@ -551,7 +610,7 @@ impl GameState {
             return;
         }
         for affect in &removed {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let frame = affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
         }
@@ -586,7 +645,7 @@ impl GameState {
             None => Vec::new(),
         };
         for affect in &removed {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let frame = affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
         }
@@ -686,7 +745,7 @@ impl GameState {
             return;
         }
         for affect in &removed {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let frame = affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
         }
@@ -708,8 +767,8 @@ impl GameState {
     /// each other row answers its remove packet, then uncomputes its point. Then one
     /// update goes out when the flags or either raw speed moved, the hit and spell
     /// points clamp to their maxima, and the event ends with its last row.
-    /// `ComputeAffect`'s MUYEONG and top-player arms wait for those systems; the DB
-    /// packet is the retired peer's.
+    /// `ComputeAffect`'s MUYEONG arm waits for that system; its top-player arm runs
+    /// through the uncompute below, and the DB packet is the retired peer's.
     pub(super) fn run_clear_affect(&mut self, vid: Vid) {
         let flags_before = self.affect_flags_of(vid);
         let mov_before = self.raw_point_of(vid, point::POINT_MOV_SPEED);
@@ -731,7 +790,7 @@ impl GameState {
         for affect in &taken {
             let frame = affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
         }
         let flags_after = self.affect_flags_of(vid);
         if flags_after != flags_before
@@ -809,7 +868,7 @@ impl GameState {
             None => Vec::new(),
         };
         for affect in &stripped {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
         }
         !stripped.is_empty()
@@ -848,7 +907,7 @@ impl GameState {
                 crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP,
             );
             for affect in &stripped {
-                self.compute_affect(vid, affect, false);
+                let _stripped = self.compute_affect(vid, affect, false);
                 let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
             }
             return;
@@ -975,7 +1034,7 @@ impl GameState {
         // remove packet); the drain spends after them, so a starved SP row cannot
         // cover itself.
         for affect in starved.iter().chain(expired.iter()) {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
         }
         if drained > 0 {
@@ -1911,10 +1970,11 @@ mod tests {
     }
 
     /// `/do_clear_affect` keeps the silence, the premium span with the war flag and
-    /// the entry invisibility, and every other listed row; each other row answers its
-    /// remove packet, then uncomputes — invisibility among them, since the call passes
-    /// no owner. One update goes out for the flag move, and the hit points clamp to
-    /// the lowered maximum.
+    /// the entry invisibility, and every other listed row but the top row, which the
+    /// first uncompute strips below 120; each other row answers its remove packet,
+    /// then uncomputes — invisibility among them, since the call passes no owner.
+    /// One update goes out for the flag move, and the hit points clamp to the
+    /// lowered maximum.
     #[test]
     fn the_clear_affect_line_keeps_the_listed_rows_and_takes_the_rest() {
         use crate::loading_phase::{
@@ -1975,7 +2035,18 @@ mod tests {
             .filter(|frame| frame.first() == Some(&HEADER_GC_AFFECT_REMOVE))
             .map(|frame| u32::from_le_bytes(frame[1..5].try_into().unwrap()))
             .collect();
-        assert_eq!(removes, [AFFECT_INVISIBILITY, AFFECT_STUN, AFFECT_POISON]);
+        // The clear uncomputes each taken row, and each uncompute strips the held
+        // top row below 120 (`ComputeAffect`, `G/char_affect.cpp:811-826`), so the
+        // top row's remove rides with the first taken row's.
+        assert_eq!(
+            removes,
+            [
+                AFFECT_INVISIBILITY,
+                AFFECT_PLAYER_TOP_3,
+                AFFECT_STUN,
+                AFFECT_POISON
+            ]
+        );
         assert!(
             heard
                 .iter()
@@ -1986,6 +2057,10 @@ mod tests {
             .affects
             .iter()
             .map(|affect| affect.kind)
+            .collect();
+        let kept: Vec<u32> = kept
+            .into_iter()
+            .filter(|kind| *kind != AFFECT_PLAYER_TOP_3)
             .collect();
         assert_eq!(left, kept);
         let points = world.characters.find_by_vid(vid).unwrap().points().unwrap();

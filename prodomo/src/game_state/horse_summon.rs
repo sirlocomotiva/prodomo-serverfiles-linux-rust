@@ -580,7 +580,7 @@ impl GameState {
             crate::loading_phase::AFFECT_HORSE_NAME,
         );
         for affect in &removed {
-            self.compute_affect(vid, affect, false);
+            let _stripped = self.compute_affect(vid, affect, false);
             let frame = super::affect::affect_remove_frame(affect);
             let _gone = self.write_to_client(vid, frame);
         }

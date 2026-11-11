@@ -54584,3 +54584,134 @@ fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
     drop(alice);
     drop(yankee);
 }
+
+/// The cast for the top-player fall: Alpha the `LOW_WIZARD` and Yankee, both on
+/// Channel 1's map 1, on a server at max level 120, as the owner's config sets
+/// it (the test default stops at 99, below the top). Yankee enters first while
+/// Alpha is offline, so his own team list names her with the offline byte; her
+/// enter then fans him `TEAM_LOGIN` ahead of her view.
+fn top_fall_cast() -> Option<(ScratchDatabase, Server, Keyed, Keyed)> {
+    let database = ScratchDatabase::create()?;
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "max_level = 120",
+    );
+    // The enter helper only reads the online team shape, so Yankee's enter is
+    // manual: his list names Alpha with the offline byte, inside his login
+    // event, ahead of the board's line.
+    let (mut yankee, _, yankee_list) = select_screen_on(&server, 1, b"bob", ENGLISH);
+    let (_yankee_character, _yankee_quickslots, _yankee_items) =
+        load_selected(&mut yankee, &yankee_list, 0);
+    let _yankee_entered = enter_game_shown(&mut yankee);
+    assert_eq!(
+        yankee.read_game(),
+        messenger_team_list_many(&[(b"Alpha".as_slice(), false)]),
+        "Yankee hears the offline team"
+    );
+    read_login_event(&mut yankee);
+    yankee.still("nothing follows");
+    let (mut alice, _character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut alice);
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(1, b"Alpha"),
+        "Yankee hears Alpha's team login"
+    );
+    let yankee_sees_alice = yankee.read_game();
+    assert_eq!(
+        yankee_sees_alice[0], GC_CHARACTER_ADD,
+        "Alice's view reaches Yankee"
+    );
+    let yankee_sees_info = yankee.read_game();
+    assert_eq!(
+        yankee_sees_info[0], GC_CHAR_ADDITIONAL_INFO,
+        "Alice's summary reaches Yankee"
+    );
+    let update = yankee.read_game();
+    assert_eq!(
+        update[0], GC_CHARACTER_UPDATE,
+        "Alice's login hides reach Yankee's view"
+    );
+    // Alice's own grant names her, so she hears no team list of her own: the
+    // list names every GM but the entrant.
+    read_login_event(&mut alice);
+    alice.still("nothing follows");
+    yankee.still("nothing follows");
+    Some((database, server, alice, yankee))
+}
+
+/// `/level` to and off 120 (`SetTopPlayerEffect`, `G/char.cpp:11255-11284`, and the
+/// `ComputeAffect` strip, `G/char_affect.cpp:811-826`): the first arrival stands its
+/// `player_top` row and takes the 321 row with flag 44; a move to 119 takes the
+/// row off with its remove packet and fells the store row.
+#[test]
+fn a_level_to_120_grants_the_top_row_and_a_move_off_fells_it() {
+    let Some((database, _server, mut alice, yankee)) = top_fall_cast() else {
+        return;
+    };
+    // When: `/level 120`. Then: the reset rides, the 321 row lands with its
+    // update, and the store row stands.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/level 120"));
+    // The reset rides with the quest `levelup` lines; read until the grant.
+    let mut adds: Vec<Vec<u8>> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && adds.is_empty() {
+        let Some(record) = alice.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&GC_AFFECT_ADD) {
+            adds.push(record);
+        }
+    }
+    assert_eq!(adds.len(), 1, "the grant lands one row");
+    assert_eq!(
+        u32::from_le_bytes(adds[0][1..5].try_into().expect("a kind")),
+        321,
+        "the first arrival takes the first row"
+    );
+    assert_eq!(
+        u32::from_le_bytes(adds[0][10..14].try_into().expect("a flag")),
+        44,
+        "the row carries flag 44"
+    );
+    check(&database, "(SELECT COUNT(*) FROM player_top) = 1");
+    // When: `/level 119`. Then: the 321 row's remove rides, and the store row
+    // falls.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/level 119"));
+    let mut removes: Vec<Vec<u8>> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && removes.is_empty() {
+        let Some(record) = alice.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&GC_AFFECT_REMOVE) {
+            removes.push(record);
+        }
+    }
+    assert_eq!(removes.len(), 1, "the strip takes one row");
+    assert_eq!(
+        u32::from_le_bytes(removes[0][1..5].try_into().expect("a kind")),
+        321,
+        "the fallen row is the granted one"
+    );
+    check(&database, "(SELECT COUNT(*) FROM player_top) = 0");
+    drop(alice);
+    drop(yankee);
+}
