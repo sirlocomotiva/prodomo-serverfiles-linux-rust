@@ -54155,3 +54155,86 @@ fn a_timed_use_lands_510_and_a_second_is_refused_while_held() {
     );
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
 }
+
+/// `cg.game.item_use`: the 72355 premium item lands the 507 row, holds the
+/// account expiry, and a second maxed use is refused. Alpha uses the item at
+/// cell 0: one of two goes (the update record), the `GC_AFFECT_ADD` of kind 507
+/// lands on point 0 with 604800 s, the increased line tells, and the account
+/// row reads an expiry a week out. The first use's max line queued behind the
+/// add, then the second use hears the recently-reached line and the row stays at 1.
+#[test]
+fn a_shop_premium_use_lands_507_stores_the_expiry_and_refuses_the_second() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         72355 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(72_355).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 8, "the owner's item is USE_AFFECT");
+    assert_eq!(proto.values[0], 507, "the item is the shop premium");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses. Then: the update, the 507 add on 0 for 604800, the line.
+    alpha.send_record(&client_item_use(0));
+    let mut spent = false;
+    let mut premium = false;
+    let mut increased = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(spent && premium && increased) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
+                assert_eq!(count, 1, "the use spends one of two");
+                spent = true;
+            }
+        }
+        if record.first() == Some(&GC_AFFECT_ADD)
+            && record.len() == AFFECT_ADD_LEN
+            && record[1..5] == 507u32.to_le_bytes()
+        {
+            assert_eq!(record[5], 0, "the row lands on POINT_NONE");
+            let dur = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+            assert_eq!(dur, 604_800, "value(3) is the duration");
+            premium = true;
+        }
+        if record == an_info_line(b"You have increased Premium Personal Shop duration.") {
+            increased = true;
+        }
+    }
+    assert!(spent, "the use lands");
+    assert!(premium, "the 507 affect lands");
+    assert!(increased, "the increased line tells");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    check(
+        &database,
+        "(SELECT private_shop_premium_expire BETWEEN \
+         EXTRACT(EPOCH FROM now())::bigint + 604799 AND \
+         EXTRACT(EPOCH FROM now())::bigint + 604805 FROM account WHERE login = 'alice')",
+    );
+    // When: the second use, maxed. Then: the reached-max line first (it queued
+    // behind the 507 add), then the recently-reached line; the row stays at 1.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"You have reached maximum premium time for your personal shop. "),
+        "the first use's max line queued behind the add"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(
+            b"You have just recently reached maximum premium time for your personal shop. "
+        ),
+        "the second use hears the recent line"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+}

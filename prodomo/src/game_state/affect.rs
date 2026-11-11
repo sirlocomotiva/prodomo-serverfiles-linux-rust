@@ -814,6 +814,55 @@ impl GameState {
         }
         !stripped.is_empty()
     }
+
+    /// The 507 sync (`ProcessAffect`'s premium arm, `G/char_affect.cpp:343-363`):
+    /// a held 507 row with `expiry - now < 0` goes, uncomputed with its remove
+    /// packet; else its `remaining` rewrites to `remain + 1`. Only index 7: the
+    /// other premium kinds have no stored expiry, so a whole-array port would
+    /// rewrite durations it must not touch. Index 9's off-by-one (the `0..=`
+    /// loop reads past the array) is a Defect, not reproduced.
+    fn sync_shop_premium_affect(&mut self, vid: Vid) {
+        let Some(event) = self.affect_events.get_mut(&vid) else {
+            return;
+        };
+        if !event
+            .affects
+            .iter()
+            .any(|affect| affect.kind == crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP)
+        {
+            return;
+        }
+        let remain = self
+            .shop_premium_expiry
+            .get(&vid)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(i64::from(wall_now()));
+        if remain < 0 {
+            let stripped = take_affects_of_kind(
+                &mut self
+                    .affect_events
+                    .get_mut(&vid)
+                    .expect("the event holds the row")
+                    .affects,
+                crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP,
+            );
+            for affect in &stripped {
+                self.compute_affect(vid, affect, false);
+                let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
+            }
+            return;
+        }
+        let remain = i32::try_from(remain.saturating_add(1)).unwrap_or(i32::MAX);
+        if let Some(event) = self.affect_events.get_mut(&vid) {
+            for affect in &mut event.affects {
+                if affect.kind == crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP {
+                    affect.remaining = remain;
+                }
+            }
+        }
+    }
+
     /// Runs the affect events due by `pulse`, in the order they were started.
     pub(super) fn run_affect_events(&mut self, pulse: u64) {
         let mut due: Vec<(u64, u64, Vid)> = self
@@ -870,6 +919,9 @@ impl GameState {
         // `CHorseNameManager::Validate` (`G/horsename_manager.cpp:58-75`) runs before the
         // countdown, like `ProcessAffect` runs it on its hair arm's heels.
         self.validate_horse_name(vid);
+        // The premium sync runs before the strip, as `ProcessAffect` syncs the
+        // premium rows before anything else (`G/char_affect.cpp:343-363`).
+        self.sync_shop_premium_affect(vid);
         // The guild-skill strip runs before the drain, as legacy checks each affect's
         // guild band before its SP cost.
         let _stripped = self.strip_peacetime_guild_affects(vid);
@@ -2059,6 +2111,63 @@ mod tests {
             }
         }
         assert_eq!(removes, 3, "each stripped band row answers its remove");
+    }
+
+    /// The tick syncs a live 507 row to `expiry - now + 1` and removes a lapsed
+    /// one with its remove packet (`ProcessAffect`'s premium arm,
+    /// `G/char_affect.cpp:343-363`).
+    #[test]
+    fn the_tick_syncs_a_live_507_and_removes_a_lapsed_one() {
+        use crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let live = Vid::new(1);
+        let mut live_inbox = enter_on(&mut world, PLACE, 1, (5, 5), 10);
+        let dead = Vid::new(2);
+        let mut dead_inbox = enter_on(&mut world, PLACE, 2, (6, 6), 10);
+        let now = i64::from(super::wall_now());
+        let _live_expiry = world.shop_premium_expiry.insert(live, now + 100);
+        let _dead_expiry = world.shop_premium_expiry.insert(dead, now - 10);
+        for vid in [live, dead] {
+            world.add_pc_affect(
+                vid,
+                Affect::buff(
+                    AFFECT_PREMIUM_PRIVATE_SHOP,
+                    common::point_slot::POINT_NONE,
+                    0,
+                    0,
+                    60,
+                    0,
+                ),
+                false,
+            );
+        }
+        while live_inbox.try_recv().is_ok() {}
+        while dead_inbox.try_recv().is_ok() {}
+        world.run_affect_events(25);
+        let synced = world.affect_events[&live]
+            .affects
+            .iter()
+            .find(|affect| affect.kind == AFFECT_PREMIUM_PRIVATE_SHOP)
+            .map_or(0, |affect| affect.remaining);
+        assert!(
+            (99..=102).contains(&synced),
+            "a live row rewrites to remain + 1: {synced}"
+        );
+        assert!(
+            world.affect_events.get(&dead).is_none_or(|event| event
+                .affects
+                .iter()
+                .all(|affect| affect.kind != AFFECT_PREMIUM_PRIVATE_SHOP)),
+            "a lapsed row goes"
+        );
+        let mut saw_remove = false;
+        while let Ok(frame) = dead_inbox.try_recv() {
+            if frame.first() == Some(&protocol::gc_vid::HEADER_GC_AFFECT_REMOVE) {
+                saw_remove = true;
+            }
+        }
+        assert!(saw_remove, "the lapsed row answers its remove");
     }
 
     #[test]

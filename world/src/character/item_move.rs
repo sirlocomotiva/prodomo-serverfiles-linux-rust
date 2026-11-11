@@ -214,6 +214,10 @@ pub enum MoveKind {
     /// A `USE_AFFECT` item used one of its stack up (`case USE_AFFECT`,
     /// `G/char_item.cpp:6833-6864`). The game state lands value(0) on the point.
     Timed,
+    /// A 507 premium-shop item used one of its stack up (the `USE_AFFECT` arm's
+    /// `AFFECT_PREMIUM_PRIVATE_SHOP` branch, `:6835-6843`). The game state runs
+    /// the setter: the 507 row, the account expiry, and the lines.
+    ShopPremium,
 }
 
 /// A record the client is sent, in the order legacy sends it.

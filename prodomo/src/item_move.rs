@@ -139,6 +139,10 @@ pub struct MovedItems {
     /// the descriptor to store before it sends: the GRAND climbs, the `guild.*` stores,
     /// and the empire a `pc.change_empire` call landed, if one did.
     pub quest: QuestLanded,
+    /// The account id and expiry a 507 use landed, for the descriptor to store
+    /// before it sends (`UPDATE account SET premium_privateshop_expire`,
+    /// `D/ClientManagerPrivateShop.cpp:2345`). `None` while the step landed none.
+    pub shop_premium: Option<(u32, i64)>,
 }
 
 /// What a used quest item's scripts landed besides the step's records and rows: the GRAND
@@ -245,6 +249,7 @@ impl MovedItems {
             climbed: None,
             store_order: StoreOrder::default(),
             quest: (Vec::new(), Vec::new(), None),
+            shop_premium: None,
         }
     }
 
@@ -333,6 +338,7 @@ impl MovedItems {
             climbed: None,
             store_order: StoreOrder::default(),
             quest: (Vec::new(), Vec::new(), None),
+            shop_premium: None,
         }
     }
 

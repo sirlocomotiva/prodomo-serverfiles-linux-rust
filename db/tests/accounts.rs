@@ -442,3 +442,66 @@ async fn the_schema_refuses_what_the_rust_types_refuse() {
             .unwrap_or_else(|error| panic!("{statement} should succeed: {error}"));
     }
 }
+
+#[tokio::test]
+async fn the_shop_premium_expiry_reads_zero_writes_and_retimes_the_shops() {
+    use db::accounts::{private_shop_premium_expire, set_private_shop_premium_expire};
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let id = create(store, "alice", b"password1").await;
+    assert_eq!(
+        private_shop_premium_expire(store, id).await.unwrap(),
+        0,
+        "never bought reads 0"
+    );
+    // A shop row of the account's character, and one of another account's.
+    let other = create(store, "bob", b"password2").await;
+    let pid: i32 = sqlx::query_scalar(
+        "INSERT INTO player (account_id, slot, name, job) VALUES ($1, 0, 'Alpha', 0) \
+         RETURNING id",
+    )
+    .bind(i32::try_from(id.get()).unwrap())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let foreign: i32 = sqlx::query_scalar(
+        "INSERT INTO player (account_id, slot, name, job) VALUES ($1, 0, 'Beta', 0) \
+         RETURNING id",
+    )
+    .bind(i32::try_from(other.get()).unwrap())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    for owner in [pid, foreign] {
+        sqlx::query(
+            "INSERT INTO private_shop (owner_id, title, owner_name, state, vnum, title_type, \
+             map_index, x, y, channel, gold, cheque, page_count, premium_time, unlocked_slots) \
+             VALUES ($1, 't', 'n', 2, 30000, 0, 1, 0, 0, 1, 0, 0, 1, 5, 0)",
+        )
+        .bind(owner)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+    set_private_shop_premium_expire(store, id, 1_800_000_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        private_shop_premium_expire(store, id).await.unwrap(),
+        1_800_000_000
+    );
+    let own: i64 = sqlx::query_scalar("SELECT premium_time FROM private_shop WHERE owner_id = $1")
+        .bind(pid)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(own, 1_800_000_000, "the account's shops retime");
+    let kept: i64 = sqlx::query_scalar("SELECT premium_time FROM private_shop WHERE owner_id = $1")
+        .bind(foreign)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, 5, "another account's shops keep their time");
+}

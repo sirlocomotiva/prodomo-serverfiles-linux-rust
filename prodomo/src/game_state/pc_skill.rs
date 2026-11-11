@@ -78,6 +78,19 @@ const ABILITY_RENEWAL_REFUSAL: &[u8] = b"[LS;99]";
 const ABILITY_MOV_REFUSAL: &[u8] = b"Folosesti deja licoare violet";
 /// Its green refusal (`:5813`).
 const ABILITY_ATT_REFUSAL: &[u8] = b"Folosesti deja licoare verde";
+/// `PRIVATE_SHOP_MAX_PREMIUM_TIME` (`C/length.h:139`): the longest premium the 507
+/// setter holds, a week in seconds.
+const SHOP_PREMIUM_MAX_SECS: i32 = 604_800;
+/// The seconds from the max at which the setter refuses (`G/char.cpp:12706`).
+const SHOP_PREMIUM_REFUSE_WITHIN_SECS: i32 = 60;
+/// The near-max refusal (`:12708`), `LC_TEXT` verbatim: trailing space.
+const SHOP_PREMIUM_RECENT_LINE: &[u8] =
+    b"You have just recently reached maximum premium time for your personal shop. ";
+/// The increased line (`:12730`), verbatim: no trailing space.
+const SHOP_PREMIUM_INCREASED_LINE: &[u8] = b"You have increased Premium Personal Shop duration.";
+/// The reached-max line (`:12734`), verbatim: trailing space.
+const SHOP_PREMIUM_MAX_LINE: &[u8] =
+    b"You have reached maximum premium time for your personal shop. ";
 /// `SKILL_YEONSA` (`G/skill.h:79`): the shoot arm's arrow-skill list opens here.
 const SKILL_YEONSA: u32 = 46;
 /// `SKILL_KWANKYEOK`: 47, the only hosted arrow-skill row.
@@ -2082,6 +2095,123 @@ impl GameState {
             super::affect::Affect::buff(kind, on, proto.values[2], 0, proto.values[3], 0),
             false,
         );
+    }
+
+    /// The 507 values at `at`, or `None` for anything else
+    /// (`G/char_item.cpp:6835-6843`): `USE_AFFECT` with value(0) 507, outside the
+    /// 508xx range like the timed arm's.
+    fn shop_premium_values(&self, vid: Vid, at: protocol::item_pos::ItemPos) -> Option<[i32; 6]> {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .filter(|proto| {
+                proto.item_type == gamedata::item_kind::ITEM_USE
+                    && proto.sub_type == gamedata::item_kind::USE_AFFECT
+                    && !(50_801..=50_820).contains(&proto.vnum)
+                    && proto.values[0]
+                        == i32::try_from(crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP)
+                            .unwrap_or(i32::MAX)
+            })
+            .map(|proto| proto.values)
+    }
+
+    /// The held 507 row's seconds, or 0 with no row (`FindAffect(507)`).
+    fn shop_premium_held(&self, vid: Vid) -> i32 {
+        self.affect_events
+            .get(&vid)
+            .and_then(|event| {
+                event
+                    .affects
+                    .iter()
+                    .find(|affect| affect.kind == crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP)
+                    .map(|affect| affect.remaining)
+            })
+            .unwrap_or(0)
+    }
+
+    /// The 507 arm's near-max refusal (`G/char.cpp:12704-12710`): within 60 s of
+    /// the max the setter tells its line and the item is kept. Anything else passes.
+    pub(super) fn shop_premium_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+
+        if self.shop_premium_values(vid, at).is_none() {
+            return true;
+        }
+        let none = u8::try_from(point::POINT_NONE).unwrap_or(u8::MAX);
+        if self.holds_affect_on(vid, crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP, none)
+            && SHOP_PREMIUM_MAX_SECS - self.shop_premium_held(vid) < SHOP_PREMIUM_REFUSE_WITHIN_SECS
+        {
+            self.tell(vid, mover, CHAT_TYPE_INFO, SHOP_PREMIUM_RECENT_LINE, &[]);
+            return false;
+        }
+        true
+    }
+
+    /// `SetPremiumPrivateShopBonus` (`G/char.cpp:12695-12742`): the duration adds
+    /// to the held row's, clamped to the week; the 507 row lands `over` on
+    /// `POINT_NONE`; the held expiry becomes `duration + now`; the moved step
+    /// carries the account id and expiry for the store; and the lines tell.
+    pub(super) fn land_shop_premium(
+        &mut self,
+        vid: Vid,
+        vnum: u32,
+        account: &crate::game_loop_messages::QuestAccount,
+        moved: &mut crate::item_move::MovedItems,
+    ) {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+
+        let Some(proto) = self.protos.get(vnum) else {
+            return;
+        };
+        if proto.item_type != gamedata::item_kind::ITEM_USE
+            || proto.sub_type != gamedata::item_kind::USE_AFFECT
+            || (50_801..=50_820).contains(&vnum)
+            || proto.values[0]
+                != i32::try_from(crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP)
+                    .unwrap_or(i32::MAX)
+        {
+            return;
+        }
+        let duration = proto.values[3]
+            .saturating_add(self.shop_premium_held(vid))
+            .min(SHOP_PREMIUM_MAX_SECS);
+        self.add_pc_affect(
+            vid,
+            super::affect::Affect::buff(
+                crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP,
+                point::POINT_NONE,
+                0,
+                0,
+                duration,
+                0,
+            ),
+            true,
+        );
+        let expire = i64::from(duration).saturating_add(Self::private_now());
+        let _expiry = self.shop_premium_expiry.insert(vid, expire);
+        if account.id != 0 {
+            moved.shop_premium = Some((account.id, expire));
+        }
+        if let Some(mover) = self.own_mover(vid) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, SHOP_PREMIUM_INCREASED_LINE, &[]);
+            if duration == SHOP_PREMIUM_MAX_SECS {
+                self.tell(vid, mover, CHAT_TYPE_INFO, SHOP_PREMIUM_MAX_LINE, &[]);
+            }
+        }
+        if let Ok(character) = self.characters.find_by_vid(vid) {
+            tracing::info!(
+                pid = character.player_id(),
+                duration,
+                "PRIVATE SHOP PREMIUM TIME"
+            );
+        }
     }
 
     /// `CHARACTER::OnMove(true)` (`G/char.cpp:6148-6179`): the last move and
@@ -6143,6 +6273,151 @@ mod tests {
             .expect("one of two is kept")
             .count;
         assert_eq!(count, 1, "one of the stack goes");
+    }
+
+    /// A user uses the 72355 premium item: one of the stack goes, the 507 row
+    /// lands on `POINT_NONE` with value(3)'s duration (`G/char.cpp:12714`), the
+    /// held expiry becomes `duration + now` (`:12716`), and the moved step
+    /// carries the account id and expiry for the store.
+    #[test]
+    fn a_shop_premium_use_lands_507_and_holds_the_expiry() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut premium = Item::new(7, 72_355);
+        premium.set_size(1).expect("a positive footprint");
+        premium.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &premium)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let account = crate::game_loop_messages::QuestAccount {
+            id: 9,
+            ..crate::game_loop_messages::QuestAccount::default()
+        };
+        let before = GameState::private_now();
+        let landed = world
+            .use_item(me, cell, mover, &account)
+            .expect("the use lands");
+        assert_eq!(landed.kind, MoveKind::ShopPremium);
+        let held = world
+            .affect_events
+            .get(&me)
+            .map(|event| event.affects.clone())
+            .unwrap_or_default();
+        assert_eq!(held.len(), 1, "the use lands one affect");
+        assert_eq!(
+            held[0].kind,
+            crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP
+        );
+        assert_eq!(held[0].apply_on, 0, "the row lands on POINT_NONE");
+        assert_eq!(held[0].remaining, 604_800, "value(3) is the duration");
+        let expiry = world.shop_premium_expiry.get(&me).copied().unwrap_or(0);
+        assert!(
+            (before + 604_800..=before + 604_800 + 5).contains(&expiry),
+            "the expiry is duration + now: {expiry}"
+        );
+        assert_eq!(landed.shop_premium, Some((9, expiry)));
+        let count = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .items()
+            .item(7)
+            .expect("one of two is kept")
+            .count;
+        assert_eq!(count, 1, "one of the stack goes");
+    }
+
+    /// A second 507 use within 60 s of the max is refused with the
+    /// recently-reached line, the item kept (`G/char.cpp:12704-12710`). The
+    /// first 72355 land already maxes (value(3) is the week), so the second
+    /// use refuses.
+    #[test]
+    fn a_near_max_premium_use_refuses_with_the_recent_line() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, mut inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut premium = Item::new(7, 72_355);
+        premium.set_size(1).expect("a positive footprint");
+        premium.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &premium)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the first use lands");
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let second = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the refusal is a step, not an error");
+        assert_eq!(second.kind, MoveKind::Used, "the refusal consumes nothing");
+        assert!(
+            second.changes.is_empty(),
+            "the refused item keeps its stack"
+        );
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().any(|record| record
+                .windows(SHOP_PREMIUM_RECENT_LINE.len())
+                .any(|window| window == SHOP_PREMIUM_RECENT_LINE)),
+            "the recent line lands: {heard:?}"
+        );
     }
 
     /// A second 508xx use while its (516, point) row is held is refused with

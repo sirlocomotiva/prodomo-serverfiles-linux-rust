@@ -398,6 +398,59 @@ pub async fn set_language(store: &Store, id: AccountId, language: u8) -> Result<
     Ok(())
 }
 
+/// Read an account's premium private-shop expiry: the unix time the 507 use
+/// wrote (`private_shop_premium_expire`), 0 when never bought.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`].
+pub async fn private_shop_premium_expire(
+    store: &Store,
+    id: AccountId,
+) -> Result<i64, AccountError> {
+    sqlx::query_scalar("SELECT private_shop_premium_expire FROM account WHERE id = $1")
+        .bind(id.to_column()?)
+        .fetch_optional(store.pool())
+        .await?
+        .ok_or(AccountError::NoSuchAccountId(id))
+}
+
+/// Write an account's premium private-shop expiry and retime its shops' rows
+/// (`UPDATE account SET premium_privateshop_expire`, then the cached shops'
+/// `UpdatePremiumTime`, `D/ClientManagerPrivateShop.cpp:2336-2348`): legacy
+/// retimes only cached shops, a store detail, while the Rewrite retimes the
+/// rows, which is what it has. One transaction, as the build is.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`].
+pub async fn set_private_shop_premium_expire(
+    store: &Store,
+    id: AccountId,
+    expire: i64,
+) -> Result<(), AccountError> {
+    let mut tx = store.pool().begin().await?;
+    let updated = sqlx::query("UPDATE account SET private_shop_premium_expire = $2 WHERE id = $1")
+        .bind(id.to_column()?)
+        .bind(expire)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Err(AccountError::NoSuchAccountId(id));
+    }
+    sqlx::query(
+        "UPDATE private_shop SET premium_time = $2 WHERE owner_id IN (SELECT id FROM player \
+         WHERE account_id = $1)",
+    )
+    .bind(id.to_column()?)
+    .bind(expire)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Add `delta` to a balance, which may be negative, and return the new balance.
 ///
 /// The row is locked for the change, so concurrent changes add up.

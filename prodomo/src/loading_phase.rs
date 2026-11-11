@@ -224,6 +224,10 @@ pub const AFFECT_PREMIUM_START: u32 = 500;
 /// `AFFECT_PREMIUM_END` (`G/affect.h:71`): the last premium affect.
 pub const AFFECT_PREMIUM_END: u32 = 509;
 
+/// `AFFECT_PREMIUM_PRIVATE_SHOP` (`G/affect.h:66`): the private-shop premium
+/// affect the 72355 use lays, synced to the account expiry on the affect tick.
+pub const AFFECT_PREMIUM_PRIVATE_SHOP: u32 = 507;
+
 /// `AFFECT_PREMIUM_PLAYERS_01` (`G/affect.h:150`): the premium-players max-HP affect.
 pub const AFFECT_PREMIUM_PLAYERS_01: u32 = 549;
 

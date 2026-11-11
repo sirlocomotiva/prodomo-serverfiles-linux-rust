@@ -683,6 +683,10 @@ pub struct GameState {
     /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
     /// recovery, the stamina refill and the timed affects. See [`affect`].
     affect_events: HashMap<common::vid::Vid, affect::AffectEvent>,
+    /// The account's premium private-shop expiry each online character holds
+    /// (`m_aiPremiumTimes[PREMIUM_PRIVATE_SHOP]`): the unix time the 507 use
+    /// wrote, 0 when never bought. Seeded at admission, cleared on leave.
+    shop_premium_expiry: HashMap<common::vid::Vid, i64>,
     /// The number of the last affect event started, which orders two events due on one Pulse.
     affect_sequence: u64,
     /// The affect event of each non-player that has one: the timed affects only, no
@@ -3505,6 +3509,11 @@ impl GameState {
         // `HEADER_GD_REQ_HORSE_NAME`'s answer (`G/input_login.cpp:891-892`): the stored
         // horse name is what the manager holds for the rider from the admission on.
         let _installed = self.horse_names.insert(player_id, loaded.horse_name);
+        // The account's premium expiry rides the admission too, as `aiPremiumTimes`
+        // rides the player table (`G/char.cpp:2386`): the character holds it from now on.
+        let _expiry = self
+            .shop_premium_expiry
+            .insert(vid, loaded.shop_premium_expire);
         // `GetBattlePass` (`G/char.cpp:2434-2436`): the stored missions split into
         // the buckets, then both refresh.
         self.install_pass_loaded(vid, &loaded.battle_pass);
@@ -3821,6 +3830,7 @@ impl GameState {
         // `CHARACTER::Save`, before `Disconnect` ends the character's events).
         let affects = self.saved_affects_of(vid);
         let _event = self.affect_events.remove(&vid);
+        let _expiry = self.shop_premium_expiry.remove(&vid);
         // `event_cancel(&m_pkFishingEvent)` and `event_cancel(&m_pkMiningEvent)` in
         // `CHARACTER::Destroy` (`G/char.cpp:719`, `:733`): silent, unlike `mining_cancel`.
         let _fishing = self.fishing_events.remove(&vid);
@@ -4308,6 +4318,11 @@ impl GameState {
         if !self.timed_use_allowed(vid, at, actor) {
             return Some(self.arena_item_refused(vid, actor));
         }
+        // The 507 arm's near-max refusal (`:12704-12710`): within 60 s of the max
+        // the setter refuses with its line, the item kept.
+        if !self.shop_premium_use_allowed(vid, at, actor) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
         None
     }
 
@@ -4424,7 +4439,8 @@ impl GameState {
             self.arena_consumed_potion(vid, vnum, sub_type, &moved);
         }
         self.run_quest_used(vid, at, actor, account, &mut moved);
-        self.land_item_use_kind(vid, moved.kind, used_vnum);
+        let kind = moved.kind;
+        self.land_item_use_kind(vid, kind, used_vnum, account, &mut moved);
         // unless it already runs.
         if moved
             .points
@@ -4443,19 +4459,23 @@ impl GameState {
     }
 
     /// The consumed-kind hooks of `case USE_CLEAR`, `case USE_INVISIBILITY`, `case
-    /// USE_ABILITY_UP` and the 50801-50820 pair: the step consumed the cure, and the
-    /// bad affects go now, after the quest hook and before the feed
+    /// USE_ABILITY_UP`, the 50801-50820 pair and the 507 arm: the step consumed the
+    /// cure, and the bad affects go now, after the quest hook and before the feed
     /// (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`,
     /// `G/char_affect.cpp:951-960`); or the step consumed the cloak, and the 300 s
     /// affect lands now, in the strip's seat (`:5574-5575`); or the step consumed
     /// the ability potion, and the apply's affect lands now (`:5782-5851`); or the
     /// step consumed the 508xx potion, and 516 lands on the point now
-    /// (`:3394-3411`, `:3434-3438`).
+    /// (`:3394-3411`, `:3434-3438`); or the step consumed the 507 item, and the
+    /// setter lands the row, the expiry and the lines now (`:6835-6843` through
+    /// `SetPremiumPrivateShopBonus`, `G/char.cpp:12695-12742`).
     fn land_item_use_kind(
         &mut self,
         vid: common::vid::Vid,
         kind: world::character::MoveKind,
         used_vnum: u32,
+        account: &crate::game_loop_messages::QuestAccount,
+        moved: &mut MovedItems,
     ) {
         if kind == world::character::MoveKind::Cleared {
             self.remove_bad_affect(vid);
@@ -4471,6 +4491,9 @@ impl GameState {
         }
         if kind == world::character::MoveKind::Timed {
             self.land_timed_affect(vid, used_vnum);
+        }
+        if kind == world::character::MoveKind::ShopPremium {
+            self.land_shop_premium(vid, used_vnum, account, moved);
         }
     }
 
@@ -8737,6 +8760,7 @@ mod tests {
                 battle_pass: Vec::new(),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
+                shop_premium_expire: 0,
                 addr: String::new(),
             }),
             outbox,
@@ -8804,6 +8828,7 @@ mod tests {
                 battle_pass: Vec::new(),
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
+                shop_premium_expire: 0,
                 addr: String::new(),
             }),
             outbox,

@@ -701,13 +701,13 @@ async fn handle_connection(
         handle,
         channel_number,
     };
-    pump_descriptor(
+    Box::pin(pump_descriptor(
         &mut session,
         &context,
         &mut descriptor,
         &mut shutdown_rx,
         &mut held,
-    )
+    ))
     .await;
     // `DESC::SetPlayer(NULL)` on a disconnect (`G/input_db.cpp`, `PlayerDestroy`) removes
     // the character from the world, and it runs **before** the save below. That order
@@ -1323,6 +1323,19 @@ where
                 return false;
             }
             info!(%addr, vnum, level, "Skill read from a book");
+        }
+        // A 507 use landed the account's premium expiry: store it as the DB write
+        // does (`D/ClientManagerPrivateShop.cpp:2345`), before the item rows, so a
+        // failure closes without a half-written step.
+        if let Some((account_id, expire)) = moved.shop_premium {
+            let id = db::accounts::AccountId::new(account_id);
+            if let Err(error) =
+                db::accounts::set_private_shop_premium_expire(&context.store, id, expire).await
+            {
+                warn!(%addr, %error, expire, "The premium expiry could not be stored; closing");
+                return false;
+            }
+            info!(%addr, expire, "Private-shop premium extended");
         }
         // A used quest item's scripts: their GRAND climbs, `guild.*` stores and landed
         // empire, as a click's are stored. Their item rows are among the step's own.
@@ -8590,7 +8603,23 @@ where
         return false;
     };
     let account = quest_account(context, addr, held).await.unwrap_or_default();
-    let loaded = loaded_state(addr, held, Some(show), messenger, account);
+    // The account's premium expiry rides the admission, as `aiPremiumTimes` rides
+    // the auth answer (`G/input_auth.cpp:145`): a refused read closes, as a refused
+    // load does, and no account table reads 0, as no row does.
+    let shop_premium_expire = match held.account.as_ref() {
+        Some(account) => {
+            match db::accounts::private_shop_premium_expire(&context.store, account.id).await {
+                Ok(expire) => expire,
+                Err(error) => {
+                    warn!(%addr, %error, "Premium expiry load failed; closing");
+                    return false;
+                }
+            }
+        }
+        None => 0,
+    };
+    let mut loaded = loaded_state(addr, held, Some(show), messenger, account);
+    loaded.shop_premium_expire = shop_premium_expire;
     let Some((world_vid, shown)) =
         join_the_world(context, addr, character, vid, (items, loaded), outbox).await
     else {
@@ -8825,6 +8854,7 @@ fn loaded_state(
             .as_ref()
             .map_or_else(Vec::new, |character| character.horse.name.clone()),
         account,
+        shop_premium_expire: 0,
         addr: addr.ip().to_string(),
     }
 }

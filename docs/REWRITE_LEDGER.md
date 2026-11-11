@@ -53536,3 +53536,42 @@ appended (`over` false) — the timed mall items: 510 (mall), 511 (no-death-pena
 
 Tests: the world consume (`a_timed_use_consumes_one_and_names_the_timed`), the land (`a_timed_use_lands_value0_on_the_point_and_uses_one_up`).
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5437 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 587. The premium shop
+
+The 507 arm `UseItemEx` runs before the renewal loop (`G/char_item.cpp:6835-6843`):
+`SetPremiumPrivateShopBonus(value(3))` (`G/char.cpp:12695-12742`), and true consumes
+one of the stack. The setter adds the duration to the held 507 row's, clamped to the
+week (`PRIVATE_SHOP_MAX_PREMIUM_TIME`, 604800); within 60 s of the max it refuses
+with the verbatim recently-reached line (trailing space) and the item is kept. Else
+the 507 row lands `over` on `POINT_NONE`, the held expiry becomes `duration + now`,
+the increased line tells (no trailing space), and at exactly the max the reached-max
+line tells too (trailing space) — all three `LC_TEXT` verbatim, since `locale_find`
+with `LOCALE_YMIR` returns its input (`G/locale.cpp:71-89`). The account expiry is
+the new `account.private_shop_premium_expire` column (migration 43, a unix time like
+`private_shop.premium_time`): the descriptor stores it before the item rows, with the
+account's shops' rows retimed in the same transaction (legacy retimes only cached
+shops, a store detail; the Rewrite retimes rows, which is what it has). The world
+holds the expiry per online `Vid`, seeded at admission (a `Character` names no
+account, so the map keys on `Vid` like `affect_events`) and cleared on leave. The
+two readers port: the build writes the held expiry verbatim as `premium_time`
+(`remain + now` is the expiry, `G/private_shop_manager.cpp:171`), and the affect
+tick syncs the 507 row to `remain + 1` or removes it past expiry
+(`G/char_affect.cpp:343-363`), before the guild strip. Out of scope, recorded: the
+other six premium indices (no stored expiry, no ported reader), the respawn and
+despawn sweeps the Rewrite has no seat for (the value is stored but unread), the
+index-9 off-by-one (a Defect: the `0..=` loop reads past the array), and the affect
+row itself on relog (no-save 500-509, already filtered). Scenario
+`a_shop_premium_use_lands_507_stores_the_expiry_and_refuses_the_second`: the 507 add
+on point 0 with 604800 s, the spend, the increased line, the account row a week out,
+the queued max line, and the second use's recent line with the row kept at 1.
+
+Tests: the world consume (`a_shop_premium_use_consumes_one_and_names_the_shop_premium`),
+the land (`a_shop_premium_use_lands_507_and_holds_the_expiry`), the refusal
+(`a_near_max_premium_use_refuses_with_the_recent_line`), the build
+(`a_build_with_a_held_expiry_stores_it_verbatim`), the sync
+(`the_tick_syncs_a_live_507_and_removes_a_lapsed_one`), the store
+(`the_shop_premium_expiry_reads_zero_writes_and_retimes_the_shops`).
+A gate note: the expiry store grew the descriptor future past Clippy's limit, so
+`pump_descriptor`'s await is boxed; asserts identical.
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5444 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

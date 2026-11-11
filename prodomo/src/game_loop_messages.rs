@@ -3612,6 +3612,11 @@ pub struct Loaded {
     /// scripts judge by. The descriptor reads them before it sends the admission, as
     /// the dialog steps do before theirs.
     pub account: QuestAccount,
+    /// The account's premium private-shop expiry (`private_shop_premium_expire`),
+    /// which the world holds as the character's `m_aiPremiumTimes[7]` from the
+    /// admission on. The descriptor reads it before it sends the admission, as
+    /// the auth query reads it with the login (`G/input_auth.cpp:145`).
+    pub shop_premium_expire: i64,
     /// The descriptor's host address, which the multi-farm registry keys on
     /// (`GetHostName`, `G/desc.h:55`).
     pub addr: String,

@@ -904,7 +904,10 @@ impl GameState {
             gold: 0,
             cheque: 0,
             page_count: stood.page_count,
-            premium_time: now,
+            // The held expiry, verbatim: `GetPremiumRemainSeconds(7) + time(0)` is
+            // `expiry - now + now` (`G/private_shop_manager.cpp:171`). 0 when never
+            // bought, already past like legacy's fresh `CURRENT_TIMESTAMP`.
+            premium_time: self.shop_premium_expiry.get(&vid).copied().unwrap_or(0),
             unlocked_slots: 0,
         };
         let load = GcPrivateShopLoad {
@@ -3683,7 +3686,7 @@ impl GameState {
     }
 
     /// `time(0)`, which the checkin times and the premium expiry are.
-    fn private_now() -> i64 {
+    pub(super) fn private_now() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(0))
@@ -3980,11 +3983,40 @@ mod tests {
             protocol::gc_private_shop::SUBHEADER_GC_PRIVATE_SHOP_ADD_ENTITY
         );
         assert_eq!(&built.entity[24..27], b"P11", "the owner's name");
+        assert_eq!(
+            built.shop.premium_time, 0,
+            "no premium bought: the row reads 0"
+        );
         let heard = drained(&mut inbox);
         assert!(
             heard.is_empty(),
             "the records wait for the store: {heard:02x?}"
         );
+    }
+
+    /// A build with a held premium expiry stores it verbatim as the row's
+    /// `premium_time` (`G/private_shop_manager.cpp:171`): remain + now is the
+    /// expiry.
+    #[test]
+    fn a_build_with_a_held_expiry_stores_it_verbatim() {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        drained(&mut inbox);
+        let _expiry = state.shop_premium_expiry.insert(SELLER, 1_800_000_000);
+        let built = state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 1,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(built.shop.premium_time, 1_800_000_000);
     }
 
     /// A title under three bytes refuses, and a banned word refuses with its line.
