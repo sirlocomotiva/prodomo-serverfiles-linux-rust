@@ -121,7 +121,7 @@ impl GameState {
         };
         let word = usize::try_from((AFF_SPAWN - 1) / 32).unwrap_or(0);
         body.base_affect_flags[word] |= 1 << ((AFF_SPAWN - 1) % 32);
-        body.add_spawn = true;
+        body.add_state.spawn = true;
         let mut effects = Vec::new();
         if let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) {
             if let Some(index) = self.maps.get_mut(&place) {
@@ -136,7 +136,7 @@ impl GameState {
         }
         self.deliver(&effects, None);
         if let Some(body) = self.bodies.get_mut(&vid) {
-            body.add_spawn = false;
+            body.add_state.spawn = false;
         }
     }
 }

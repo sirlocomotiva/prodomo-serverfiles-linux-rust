@@ -506,7 +506,7 @@ impl GameState {
     /// has them.
     #[must_use]
     pub const fn with_shop_price_3x_disabled(mut self, disabled: bool) -> Self {
-        self.shop_price_3x_disabled = disabled;
+        self.shop_toggles.price_3x = disabled;
         self
     }
 
@@ -736,6 +736,7 @@ impl GameState {
             pk_mode: self.pk_mode_of(vid.raw()),
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
+            killer_mode: false,
             alignment: self.alignment_of(vid.raw()),
             view_guild: self.view_guild_of_vid(vid.raw()),
             ..mover
@@ -842,7 +843,7 @@ impl GameState {
                 keeper: open.keeper,
             });
         }
-        let tripled = !self.shop_price_3x_disabled && mover.empire != npc.empire;
+        let tripled = !self.shop_toggles.price_3x && mover.empire != npc.empire;
         // Both tables never name one keeper (`InitializeShopEX`, `:810-813`); a renewal
         // tab wins when they do.
         let window = if renewal.is_empty() {
@@ -1517,6 +1518,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),

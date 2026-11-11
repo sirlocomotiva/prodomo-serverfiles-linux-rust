@@ -668,6 +668,7 @@ mod tests {
             pk_mode: 2,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),

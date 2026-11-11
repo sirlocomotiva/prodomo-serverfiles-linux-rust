@@ -130,13 +130,13 @@ impl GameState {
     /// Until this is called the mask is required, as legacy's compiled-in `false` has it.
     #[must_use]
     pub const fn with_emotion_mask_disabled(mut self, disabled: bool) -> Self {
-        self.emotion_mask_disabled = disabled;
+        self.shop_toggles.emotion_mask = disabled;
         self
     }
 
     /// `g_bDisableEmotionMask`.
     const fn emotion_mask_disabled(&self) -> bool {
-        self.emotion_mask_disabled
+        self.shop_toggles.emotion_mask
     }
 
     /// `ACMD(do_emotion_allow)`: the arena gate, then the consent insert.

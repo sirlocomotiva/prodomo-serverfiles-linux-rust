@@ -85,7 +85,8 @@ use super::{GameState, MarkUploadAnswer};
 use crate::game_loop_messages::{AttackAnswer, GameCommand, MARK_PIXELS};
 use crate::loading_phase::{
     point_changes, AFFECT_POISON, AFFECT_SLOW, AFFECT_STUN, AFF_POISON, AFF_SLOW, AFF_STUN,
-    PK_MODE_PROTECT, POISON_DAMAGE_RATE, POISON_TICKS, SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS_NPC,
+    PK_MODE_FREE, PK_MODE_GUILD, PK_MODE_PROTECT, PK_MODE_REVENGE, POISON_DAMAGE_RATE,
+    POISON_TICKS, SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS_NPC,
 };
 use crate::sync_position::{
     distance_approx, judge_sync_ownership, ownership_record, SyncOwnershipOutcome,
@@ -924,11 +925,14 @@ impl GameState {
                     .get(&target)
                     .is_some_and(|combat| combat.dead),
             );
-            if !matches!(
-                pk_eligibility(attacker, Some(target_actor), false),
-                PkEligibility::Allowed { .. }
-            ) {
+            let allowed = pk_eligibility(attacker, Some(target_actor), self.protect_normal);
+            let PkEligibility::Allowed { enter_killer_mode } = allowed else {
                 return AttackAnswer::default();
+            };
+            // The policy's killer arm (`G/pvp.cpp:453-500`): a same-empire hit on a
+            // blameless player marks the attacker before the swing lands.
+            if enter_killer_mode {
+                self.set_killer_mode(vid, true);
             }
         }
         // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`G/char_battle.cpp:219-223`).
@@ -991,23 +995,30 @@ impl GameState {
     }
 
     /// The `PkActor` of a player (`world/src/character/combat/pk.rs`): the facts the PK
-    /// policy reads. The PK mode and the map's empire are read; the alignment, the party,
-    /// the guild and the duels are not ported, so the policy runs in its peaceful form: a
-    /// player may hit a player of another empire, and one of its own empire never, as a
-    /// duel does not exist here.
+    /// policy reads — the mode, the alignment, the killer flag, the party and the guild —
+    /// with the empire's map and the observer flag. The consensual fight is the caller's:
+    /// the attack stamps it after reading the duel.
     fn pk_actor(&self, vid: Vid, empire: u8, dead: bool) -> PkActor {
-        // `GetPKMode` (`G/char.h:348-356`): the mode the load gave the player, which is
-        // `PK_MODE_PROTECT` below the protect level and `PK_MODE_PEACE` above it.
-        let mode = if self.pk_mode_of(vid.raw()) == PK_MODE_PROTECT {
-            PkMode::Protect
-        } else {
-            PkMode::Peace
+        // `GetPKMode` (`G/char.h:348-356`): the mode the load or `/pkmode` gave the
+        // player. `SetPKMode` refuses at and above `MAX_NUM`, so an out-of-range card
+        // reads `PEACE`.
+        let mode = match self.pk_mode_of(vid.raw()) {
+            PK_MODE_REVENGE => PkMode::Revenge,
+            PK_MODE_FREE => PkMode::Free,
+            PK_MODE_PROTECT => PkMode::Protect,
+            PK_MODE_GUILD => PkMode::Guild,
+            _ => PkMode::Peace,
         };
         // `SECTREE_MANAGER::GetEmpireFromMapIndex` (`G/pvp.cpp:425`): the empire that owns
         // the map the player stands on, 0 for a map no empire owns.
         let map_empire = self
             .place_of(vid.raw())
             .map_or(0, |place| world::npc::map_empire(place.1));
+        let body = self.bodies.get(&vid);
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
         PkActor {
             id: vid.raw(),
             kind: CharacterKind::Player,
@@ -1023,10 +1034,10 @@ impl GameState {
             empire,
             map_empire,
             mode,
-            alignment: 0,
-            killer_mode: false,
-            party_id: None,
-            guild_id: None,
+            alignment: body.map_or(0, |body| body.card.alignment),
+            killer_mode: body.is_some_and(|body| body.add_state.killer),
+            party_id: self.party_of_vid(vid),
+            guild_id: self.guild_of(pid),
             consensual_fight: false,
         }
     }
@@ -3035,6 +3046,7 @@ mod tests {
                     pk_mode: crate::loading_phase::PK_MODE_PEACE,
                     affect_flags: [0; 2],
                     dead: false,
+                    killer_mode: false,
                     alignment: 0,
                     view_guild: (0, 0),
                     premium: (0, 0),

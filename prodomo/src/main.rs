@@ -2543,6 +2543,7 @@ fn item_actor(held: &Held) -> Mover {
         // its fight, before a step runs.
         affect_flags: [0; 2],
         dead: false,
+        killer_mode: false,
         // The world sets it from the body's card, as the PK mode.
         alignment: 0,
         // The world sets it from the character's guild, as the PK mode.
@@ -11535,6 +11536,7 @@ fn build_world(
         .with_status_point_get_level_limit(config.game.status_point_get_level_limit)
         .with_status_point_set_max_value(config.game.status_point_set_max_value)
         .with_protect_level(config.game.pk_protect_level)
+        .with_protect_normal(config.game.protect_normal_player)
         .with_recall(Arc::clone(&data.atlas), &channel_maps, &shared);
     stand_up_npcs(&mut game_state, &data.npcs, &data.cells, &data.mob_clips)?;
     Ok(game_state)

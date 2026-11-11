@@ -32,9 +32,9 @@
 //!
 //! # Divergences
 //!
-//! - **The PK policy** (`G/pvp.cpp:378-529`): the Rewrite has no PK mode, no consent duel
-//!   and no alignment, so two players of the same empire never fight
-//!   ([`pk_eligibility`]). Two of another empire do.
+//! - **The PK policy** (`G/pvp.cpp:378-529`) runs in `attack_player` before the swing
+//!   ([`pk_eligibility`]): the modes, the alignment, the killer flag, the party and the
+//!   guild feed it, and a same-empire hit on a blameless player marks the attacker.
 //! - **The marriage bonus** the critical and the penetrate share for a non-player victim
 //!   never applies: the victim is a player.
 //! - **The death's PvP steps** wait for a later slice: the consent duel's end

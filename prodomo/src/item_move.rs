@@ -73,6 +73,10 @@ pub struct Mover {
     /// (`G/char.cpp:1310`): legacy's `CanHandleItem` lets a dead player move items. The world
     /// sets it before an item step runs.
     pub dead: bool,
+    /// Whether the character is in killer mode, which `UpdatePacket` sends in
+    /// `bStateFlag`'s `ADD_CHARACTER_STATE_KILLER` bit (`G/char.cpp:1310`). The world
+    /// sets it from the body's flag before an item step runs.
+    pub killer_mode: bool,
     /// `GetRealAlignment() / 10` (`G/char.cpp:1320`), which `UpdatePacket` sends.
     pub alignment: i16,
     /// `dwGuildID` and `dwNewIsGuildName`, which `UpdatePacket` sends
@@ -331,7 +335,12 @@ pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> 
         aw_part: look.parts,
         b_moving_speed: look.moving_speed,
         b_attack_speed: look.attack_speed,
-        b_state_flag: crate::loading_phase::state_flag(mover.dead),
+        b_state_flag: crate::loading_phase::state_flag(mover.dead)
+            | if mover.killer_mode {
+                crate::loading_phase::ADD_CHARACTER_STATE_KILLER
+            } else {
+                0
+            },
         dw_affect_flag: mover.affect_flags,
         dw_guild_id: mover.view_guild.0,
         s_alignment: mover.alignment,
@@ -814,6 +823,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),
@@ -868,6 +878,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),
@@ -906,6 +917,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),
@@ -963,6 +975,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),

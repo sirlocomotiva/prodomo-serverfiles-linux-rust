@@ -3651,6 +3651,7 @@ impl GameState {
             pk_mode: self.pk_mode_of(vid.raw()),
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
+            killer_mode: false,
             alignment: self.alignment_of(vid.raw()),
             view_guild: self.view_guild_of_vid(vid.raw()),
             ..mover
@@ -5330,6 +5331,7 @@ mod test_place {
         pk_mode: crate::loading_phase::PK_MODE_PEACE,
         affect_flags: [0; 2],
         dead: false,
+        killer_mode: false,
         alignment: 0,
         view_guild: (0, 0),
         premium: (0, 0),

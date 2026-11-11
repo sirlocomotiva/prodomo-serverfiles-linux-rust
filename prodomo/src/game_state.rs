@@ -825,10 +825,10 @@ pub struct GameState {
     stack_attributes: Arc<gamedata::stack_attribute::StackAttributes>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
     gauss: world::character::Gauss,
-    /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
-    shop_price_3x_disabled: bool,
-    /// `g_bDisableEmotionMask`: emotions need no mask.
-    emotion_mask_disabled: bool,
+    /// `g_bEmpireShopPriceTripleDisable` and `g_bDisableEmotionMask`: a stranger's
+    /// prices are not tripled, and emotions need no mask. One struct, because the
+    /// lint refuses a fifth bool on this struct.
+    shop_toggles: ShopToggles,
     /// `s_emotion_set`: the consent pairs `/emotion_allow` and a `NEED_PC` emotion insert.
     /// Never cleared, as legacy never clears it — not even on logout.
     emotion_consents: emotion::EmotionConsents,
@@ -1037,6 +1037,9 @@ pub struct GameState {
     /// `PK_PROTECT_LEVEL` (`[game] pk_protect_level`): below it a character is in the
     /// protect PK mode, and a level-up that reaches it switches the mode to peace.
     protect_level: u8,
+    /// `g_protectNormalPlayer` (`[game] protect_normal_player`, `G/config.cpp:140`):
+    /// a player of negative alignment may not strike a blameless player in peace mode.
+    protect_normal: bool,
     /// The guilds and their member index. See [`guild`].
     guilds: guild::Guilds,
     /// The guilds whose Meley run lives, by guild id (`MeleyLair::CMgr::m_RegGuilds`,
@@ -1072,6 +1075,16 @@ pub(super) struct PermanentScrolls {
     pub(super) vrajeste: bool,
     /// An add scroll is never spent.
     pub(super) intarire: bool,
+}
+
+/// The shop and emotion toggles (`g_bEmpireShopPriceTripleDisable`,
+/// `g_bDisableEmotionMask`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct ShopToggles {
+    /// A stranger's prices are not tripled.
+    pub(super) price_3x: bool,
+    /// Emotions need no mask.
+    pub(super) emotion_mask: bool,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -5971,6 +5984,7 @@ impl GameState {
             pk_mode: self.pk_mode_of(vid.raw()),
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
+            killer_mode: self.killer_mode_of(vid.raw()),
             alignment: self.alignment_of(vid.raw()),
             view_guild: self.view_guild_of_vid(vid.raw()),
             premium: self.premium_of(vid.raw()),
@@ -7216,6 +7230,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),

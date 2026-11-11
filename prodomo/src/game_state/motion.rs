@@ -194,9 +194,26 @@ pub(super) struct Body {
     /// `m_dwUseItemStackAttrFlood` (`G/char.h:2415`): the Pulse of the last stack feed,
     /// which refuses a use within a second (`G/char_item.cpp:7180-7185`).
     pub(super) stack_flood: Option<u64>,
-    /// `m_bAddChrState`'s `ADD_CHARACTER_STATE_SPAWN`, held only while `SetPolymorph`
-    /// reencodes (`G/char.cpp:7700-7705`), so only that reencode's inserts carry it.
-    pub(super) add_spawn: bool,
+    /// `m_bAddChrState`'s held bits (`G/packet.h:862-865`): the spawn bit while
+    /// `SetPolymorph` reencodes, the killer bit while killer mode is on. One struct,
+    /// because the lint refuses a fifth bool on this struct.
+    pub(super) add_state: AddState,
+    /// `m_iKillerModePulse` (`G/char.h:1447`): the Pulse of the last `SetKillerMode`,
+    /// which `UpdateKillerMode` counts 30 seconds from. Stamped on every set and every
+    /// clear, as legacy stamps both.
+    pub(super) killer_pulse: u64,
+}
+
+/// The held bits of `m_bAddChrState` (`G/packet.h:862-865`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct AddState {
+    /// `ADD_CHARACTER_STATE_SPAWN`, held only while `SetPolymorph` reencodes
+    /// (`G/char.cpp:7700-7705`), so only that reencode's inserts carry it.
+    pub(super) spawn: bool,
+    /// `ADD_CHARACTER_STATE_KILLER` (`G/char_battle.cpp:3568-3588`): set by a
+    /// same-empire hit on a blameless player, cleared on death and 30 seconds after
+    /// the last set (`UpdateKillerMode`). While set, anyone may strike the player.
+    pub(super) killer: bool,
 }
 
 impl Body {
@@ -234,7 +251,11 @@ impl Body {
             active_deck: -1,
             base_affect_flags: [0; 2],
             stack_flood: None,
-            add_spawn: false,
+            add_state: AddState {
+                spawn: false,
+                killer: false,
+            },
+            killer_pulse: 0,
         }
     }
 }
@@ -363,6 +384,14 @@ impl GameState {
         self.bodies
             .get(&Vid::new(vid))
             .map_or(PK_MODE_PEACE, |body| body.card.pk_mode)
+    }
+
+    /// `CHARACTER::IsKillerMode` (`G/char_battle.cpp:3583-3586`): whether the body
+    /// under `vid` holds `ADD_CHARACTER_STATE_KILLER`, or false with no body.
+    pub(super) fn killer_mode_of(&self, vid: u32) -> bool {
+        self.bodies
+            .get(&Vid::new(vid))
+            .is_some_and(|body| body.add_state.killer)
     }
 
     /// What `UpdatePacket` sends of the alignment of the body under `vid`

@@ -929,6 +929,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),

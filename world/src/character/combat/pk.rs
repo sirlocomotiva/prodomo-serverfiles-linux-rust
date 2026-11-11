@@ -176,3 +176,138 @@ const fn protected_on_map(actor: PkActor) -> bool {
 const fn allowed(enter_killer_mode: bool) -> PkEligibility {
     PkEligibility::Allowed { enter_killer_mode }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The peaceful same-empire pair: both blameless, in peace, no party, no guild.
+    fn pair() -> (PkActor, PkActor) {
+        let side = |id: u32| PkActor {
+            id,
+            kind: CharacterKind::Player,
+            posture: Posture::Standing,
+            observer: false,
+            ban_pk: false,
+            empire: 1,
+            map_empire: 1,
+            mode: PkMode::Peace,
+            alignment: 0,
+            killer_mode: false,
+            party_id: None,
+            guild_id: None,
+            consensual_fight: false,
+        };
+        (side(1), side(2))
+    }
+
+    /// Peace refuses a same-empire hit, free lands it and marks the killer, and a
+    /// killer may be struck by anyone.
+    #[test]
+    fn peace_refuses_free_marks_and_a_killer_is_fair_game() {
+        let (attacker, target) = pair();
+        assert_eq!(
+            pk_eligibility(attacker, Some(target), false),
+            PkEligibility::Denied(PkDenial::PkMode)
+        );
+        let mut free = attacker;
+        free.mode = PkMode::Free;
+        assert_eq!(
+            pk_eligibility(free, Some(target), false),
+            PkEligibility::Allowed {
+                enter_killer_mode: true
+            }
+        );
+        let mut marked = target;
+        marked.killer_mode = true;
+        assert_eq!(
+            pk_eligibility(attacker, Some(marked), false),
+            PkEligibility::Allowed {
+                enter_killer_mode: false
+            }
+        );
+    }
+
+    /// Revenge lets the wronged strike the wrongdoer, either way round, and refuses
+    /// the like-aligned; guild refuses its own and marks past it.
+    #[test]
+    fn revenge_and_guild_follow_the_alignments() {
+        let (attacker, target) = pair();
+        let mut avenger = attacker;
+        avenger.mode = PkMode::Revenge;
+        let mut wronged = target;
+        wronged.alignment = -100;
+        // The blameless avenger strikes the negative target, unmarked.
+        assert_eq!(
+            pk_eligibility(avenger, Some(wronged), false),
+            PkEligibility::Allowed {
+                enter_killer_mode: false
+            }
+        );
+        // The negative avenger strikes the blameless target, marked.
+        let mut dark = attacker;
+        dark.mode = PkMode::Revenge;
+        dark.alignment = -100;
+        assert_eq!(
+            pk_eligibility(dark, Some(target), false),
+            PkEligibility::Allowed {
+                enter_killer_mode: true
+            }
+        );
+        // Like-aligned: refused.
+        assert_eq!(
+            pk_eligibility(avenger, Some(target), false),
+            PkEligibility::Denied(PkDenial::PkMode)
+        );
+        // Guild: its own refused, another marked.
+        let mut chief = attacker;
+        chief.mode = PkMode::Guild;
+        chief.guild_id = Some(7);
+        let mut mate = target;
+        mate.guild_id = Some(7);
+        assert_eq!(
+            pk_eligibility(chief, Some(mate), false),
+            PkEligibility::Denied(PkDenial::PkMode)
+        );
+        assert_eq!(
+            pk_eligibility(chief, Some(target), false),
+            PkEligibility::Allowed {
+                enter_killer_mode: true
+            }
+        );
+    }
+
+    /// The same party never fights, a consent fight lands in peace, and the protect
+    /// flag keeps a negative attacker off a blameless target in peace.
+    #[test]
+    fn party_duel_and_protect_gate_the_swing() {
+        let (attacker, target) = pair();
+        let mut grouped = attacker;
+        grouped.party_id = Some(3);
+        let mut mate = target;
+        mate.party_id = Some(3);
+        assert_eq!(
+            pk_eligibility(grouped, Some(mate), false),
+            PkEligibility::Denied(PkDenial::SameParty)
+        );
+        let mut duellist = attacker;
+        duellist.consensual_fight = true;
+        assert_eq!(
+            pk_eligibility(duellist, Some(target), false),
+            PkEligibility::Allowed {
+                enter_killer_mode: false
+            }
+        );
+        let mut dark = attacker;
+        dark.alignment = -100;
+        assert_eq!(
+            pk_eligibility(dark, Some(target), true),
+            PkEligibility::Denied(PkDenial::PkMode)
+        );
+        assert_eq!(
+            pk_eligibility(dark, Some(target), false),
+            PkEligibility::Denied(PkDenial::PkMode),
+            "peace still refuses without the flag"
+        );
+    }
+}

@@ -23,6 +23,7 @@ use crate::game_state::GameState;
 use crate::loading_phase::{
     PK_MODE_FREE, PK_MODE_GUILD, PK_MODE_MAX_NUM, PK_MODE_PEACE, PK_MODE_PROTECT,
 };
+use crate::save::PASSES_PER_SEC;
 
 /// `(unsigned char)strtoul(word)` (`common/utils.h:20-26`): the unsigned walk's low
 /// byte. A `-` negates into the wrap, so `-1` reads 255. The walk is a `u8`
@@ -96,6 +97,42 @@ impl GameState {
         }
         let flags = self.affect_flags_of(vid);
         self.send_affect_update(vid, flags);
+    }
+
+    /// `CHARACTER::SetKillerMode` (`G/char_battle.cpp:3568-3581`): the killer bit moves
+    /// and the update fans, stamping the Pulse either way. A set that changes nothing
+    /// (already on, or already off) runs nothing, not even the stamp.
+    pub(super) fn set_killer_mode(&mut self, vid: Vid, on: bool) {
+        let pulse = self.last_pulse;
+        let changed = self.bodies.get_mut(&vid).is_some_and(|body| {
+            if body.add_state.killer == on {
+                return false;
+            }
+            body.add_state.killer = on;
+            true
+        });
+        if !changed {
+            return;
+        }
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.killer_pulse = pulse;
+        }
+        let flags = self.affect_flags_of(vid);
+        self.send_affect_update(vid, flags);
+    }
+
+    /// `CHARACTER::UpdateKillerMode` (`G/char_battle.cpp:3588-3594`), from the recovery
+    /// event (`G/char.cpp:3252`): 30 seconds after the last set the flag clears, with
+    /// its update.
+    pub(super) fn update_killer_mode(&mut self, vid: Vid) {
+        let pulse = self.last_pulse;
+        let wait = u64::from(30 * PASSES_PER_SEC);
+        let due = self.bodies.get(&vid).is_some_and(|body| {
+            body.add_state.killer && pulse.saturating_sub(body.killer_pulse) >= wait
+        });
+        if due {
+            self.set_killer_mode(vid, false);
+        }
     }
 }
 
@@ -205,5 +242,40 @@ mod tests {
         grown(&mut world);
         world.run_pkmode(Vid::new(VID), b"4");
         assert_eq!(mode_of(&mut inbox), Some(PK_MODE_FREE));
+    }
+
+    /// The state flag of one set: the update's bit, or `None` when silent.
+    fn killer_of(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Option<u8> {
+        let frame = inbox.try_recv().ok()?;
+        let update = GcCharacterUpdate::decode(&frame).expect("an update");
+        assert!(inbox.try_recv().is_err(), "one set, one update");
+        Some(update.b_state_flag)
+    }
+
+    /// A set raises the killer bit with an update, a repeat sets nothing, and the
+    /// clear drops the bit; 30 seconds after the set the recovery's update clears.
+    #[test]
+    fn a_killer_set_raises_the_bit_and_the_decay_clears_it() {
+        use crate::loading_phase::ADD_CHARACTER_STATE_KILLER;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, VID, (3200, 3200), 0);
+        world.set_killer_mode(Vid::new(VID), true);
+        assert_eq!(killer_of(&mut inbox), Some(ADD_CHARACTER_STATE_KILLER));
+        assert!(world.killer_mode_of(VID));
+        world.set_killer_mode(Vid::new(VID), true);
+        assert_eq!(killer_of(&mut inbox), None, "the repeat sets nothing");
+        world.set_killer_mode(Vid::new(VID), false);
+        assert_eq!(killer_of(&mut inbox), Some(0), "the clear drops the bit");
+        // The decay: a set at pulse 0 clears at pulse 750, not at 749.
+        world.set_killer_mode(Vid::new(VID), true);
+        assert_eq!(killer_of(&mut inbox), Some(ADD_CHARACTER_STATE_KILLER));
+        world.last_pulse = 749;
+        world.update_killer_mode(Vid::new(VID));
+        assert!(world.killer_mode_of(VID), "749 keeps the bit");
+        world.last_pulse = 750;
+        world.update_killer_mode(Vid::new(VID));
+        assert!(!world.killer_mode_of(VID), "750 clears the bit");
+        assert_eq!(killer_of(&mut inbox), Some(0));
     }
 }

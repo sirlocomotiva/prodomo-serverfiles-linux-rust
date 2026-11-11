@@ -563,6 +563,7 @@ impl super::GameState {
             pk_mode: 0,
             affect_flags: [0, 0],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),

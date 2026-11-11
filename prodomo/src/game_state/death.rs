@@ -340,6 +340,14 @@ impl GameState {
         self
     }
 
+    /// Set `g_protectNormalPlayer`, which the PK policy reads. Off until set, as
+    /// legacy's compiled-in default is (`G/config.cpp:140`).
+    #[must_use]
+    pub const fn with_protect_normal(mut self, on: bool) -> Self {
+        self.protect_normal = on;
+        self
+    }
+
     /// `IsStun() || IsDead()` of the player under `vid`.
     pub(super) fn is_down(&self, vid: u32) -> bool {
         self.pc_combat.get(&vid).is_some_and(PcCombat::down)
@@ -546,6 +554,7 @@ impl GameState {
             pk_mode: body.card.pk_mode,
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
+            killer_mode: body.add_state.killer,
             alignment: i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX),
             view_guild: self.view_guild_of_vid(vid.raw()),
             premium: self.premium_of(vid.raw()),
@@ -838,7 +847,8 @@ impl GameState {
         let combat = self.pc_combat.entry(raw).or_default();
         self.regens.cancel(&mut combat.stun_due, Due::PcStun(raw));
         self.cancel_pc_poison(vid);
-        // `GetDesc()->SetPhase(PHASE_DEAD)` (`:1470`).
+        // `SetKillerMode(false)` (`:1469`), then `GetDesc()->SetPhase(PHASE_DEAD)` (`:1470`).
+        self.set_killer_mode(vid, false);
         self.write_phase(vid, PHASE_DEAD);
         self.packet_around(
             EntityKey::Character(raw),
@@ -1248,8 +1258,8 @@ impl GameState {
             .schedule(&mut combat.recovery_due, when, Due::PcRecovery(raw));
     }
 
-    /// A player's `recovery_event` (`G/char.cpp:3245-3284`): `CheckTarget`, then the heal,
-    /// then again 3 seconds on. `UpdateKillerMode` is not ported (no PK decay).
+    /// A player's `recovery_event` (`G/char.cpp:3245-3284`): `CheckTarget`,
+    /// `UpdateKillerMode`, then the heal, then again 3 seconds on.
     pub(super) fn pc_recovery_event(&mut self, vid: u32) {
         let Some(combat) = self.pc_combat.get_mut(&vid) else {
             return;
@@ -1259,6 +1269,7 @@ impl GameState {
         }
         let player = Vid::new(vid);
         self.check_target(player);
+        self.update_killer_mode(player);
         let now = self.clock.now();
         let Some(body) = self.bodies.get(&player) else {
             let when = self.last_pulse.saturating_add(pulses(RECOVERY_SECONDS));
@@ -1826,6 +1837,7 @@ mod tests {
             pk_mode: PK_MODE_PROTECT,
             affect_flags: [0; 2],
             dead: false,
+            killer_mode: false,
             alignment: 0,
             view_guild: (0, 0),
             premium: (0, 0),

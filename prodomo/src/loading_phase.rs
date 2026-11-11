@@ -516,6 +516,10 @@ pub const BASE_SPEED: u8 = 100;
 /// every character (`G/char.cpp:323`).
 pub const PK_MODE_PEACE: u8 = 0;
 
+/// `PK_MODE_REVENGE` (`EPKModes`, `G/char.h:348-356`): `/pkmode 1` lets a wronged
+/// player strike its wrongdoer (`G/pvp.cpp:476-491`).
+pub const PK_MODE_REVENGE: u8 = 1;
+
 /// `PK_MODE_FREE` (`EPKModes`, `G/char.h:348-356`), the mode `CHARACTER::SetProto` gives every
 /// mob (`G/char.cpp:2474`).
 pub const PK_MODE_FREE: u8 = 2;
@@ -1153,6 +1157,11 @@ pub fn character_add(
                 ADD_CHARACTER_STATE_SPAWN
             } else {
                 0
+            }
+            | if insert.killer_mode {
+                ADD_CHARACTER_STATE_KILLER
+            } else {
+                0
             },
         insert.flags,
     )
@@ -1165,6 +1174,10 @@ pub const ADD_CHARACTER_STATE_DEAD: u8 = 1;
 /// `ADD_CHARACTER_STATE_SPAWN` (`G/packet.h:863`): the bit of `m_bAddChrState` `SetPolymorph`
 /// holds for its reencode alone (`G/char.cpp:7700-7705`).
 pub const ADD_CHARACTER_STATE_SPAWN: u8 = 1 << 1;
+
+/// `ADD_CHARACTER_STATE_KILLER` (`G/packet.h:865`): the bit of `m_bAddChrState`
+/// `SetKillerMode` sets and clears (`G/char_battle.cpp:3568-3581`).
+pub const ADD_CHARACTER_STATE_KILLER: u8 = 1 << 3;
 
 /// `m_bAddChrState`'s dead bit, which an insert (`G/char.cpp:1095`) and an update (`:1310`)
 /// carry in `bStateFlag`. The spawn bit is held only for `SetPolymorph`'s reencode, so only
@@ -1188,6 +1201,8 @@ pub struct InsertState {
     pub dead: bool,
     /// Whether the spawn state bit is held, which sets [`ADD_CHARACTER_STATE_SPAWN`].
     pub spawn: bool,
+    /// Whether killer mode is on, which sets [`ADD_CHARACTER_STATE_KILLER`].
+    pub killer_mode: bool,
 }
 
 impl From<[u32; 2]> for InsertState {

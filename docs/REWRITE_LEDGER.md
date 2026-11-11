@@ -53102,3 +53102,43 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 573. The killer mark
+
+`sys.char.pk` runs the killer mode. `pk_actor` used to feed the policy a peaceful
+fiction — every mode but protect read as peace, alignment 0, no killer, no party, no
+guild. It now reads the card's mode (all five, `SetPKMode`'s range behind it), the
+stored alignment, the killer flag, the party leader and the guild, with the duel
+stamping the consensual fight as before. `attack_player` reads the policy's answer
+instead of its shape: a same-empire hit on a blameless player marks the attacker
+before the swing lands (`SetKillerMode`, `G/char_battle.cpp:3568-3581`), and the flag
+`g_protectNormalPlayer` (`[game] protect_normal_player`, default off both sides)
+keeps a negative attacker off a blameless target in peace.
+
+The mark lives on the body (`AddState::killer`, beside the spawn bit it shares the
+`m_bAddChrState` byte with), rides the insert and the update (`character_add`,
+`character_update`), clears on death (`Dead`, `:1469`) and 30 seconds after the set
+(`UpdateKillerMode` from the recovery event, `G/char.cpp:3252`, in Pulses). A repeat
+set stamps nothing, as legacy's early return stamps nothing.
+
+Scenario `a_free_hit_on_a_player_of_his_own_empire_marks_the_killer`: Dave of empire 1
+goes free, hits Alpha of empire 1, and the swing lands (140, Dave's own attack
+against Alpha's defence) with the killer bit raised on Dave's update for both.
+Unit pins: the set's bit, the repeat's silence, the clear, and the 749/750 decay
+boundary; the policy's peace refusal, free mark, killer fair game, revenge and
+guild alignments, and the party/duel/protect gates. Mutants (free never marks, a
+31-second decay) both killed. Inventory: `sys.char.pk` stays `partial`; the
+alignment's revenge and the item drop penalty wait.
+
+Refactors (Clippy, no behaviour): `GameState`'s shop and emotion bools fold into
+`ShopToggles`, the body's add-state bits into `AddState`, and the warp NPC's hack
+check reads `own_mover` instead of building its own.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite573.txt` (5397 passed, 0 failed in 46 targets),
+`cargo test --workspace --doc --locked --offline` (1 passed in 9 targets),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

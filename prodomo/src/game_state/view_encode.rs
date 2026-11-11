@@ -338,7 +338,8 @@ impl GameState {
                     InsertState {
                         flags: self.affect_flags_of(Vid::new(of)),
                         dead: self.is_dead(of),
-                        spawn: body.add_spawn,
+                        spawn: body.add_state.spawn,
+                        killer_mode: body.add_state.killer,
                     },
                     guild,
                 );
