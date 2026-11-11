@@ -135,6 +135,33 @@ pub fn f64_to_i32(value: f64) -> i32 {
     i32::try_from(signed).unwrap_or(if signed < 0 { i32::MIN } else { i32::MAX })
 }
 
+/// `(DWORD)value` of a `double`: the `f64` with its fraction dropped toward zero.
+///
+/// The same rules as [`f32_to_u32`]: a value at or above 2^32 is `u32::MAX`, a
+/// negative value or a NaN is 0. The dragon-stone snapshot reaches it, where a
+/// `BlueDragonSetting` number arrives as a Lua float.
+#[must_use]
+pub fn f64_to_u32(value: f64) -> u32 {
+    const TWO_POW_32: f64 = 4_294_967_296.0;
+    if value.is_nan() || value <= 0.0 {
+        return 0;
+    }
+    if value >= TWO_POW_32 {
+        return u32::MAX;
+    }
+    let bits = value.to_bits();
+    let exponent = (bits >> 52) & 0x7ff;
+    if exponent < 1023 {
+        // The magnitude is below 1, so the fraction is all there is.
+        return 0;
+    }
+    // The range test above keeps the magnitude below 2^32, so the shift is at most 31.
+    let shift = exponent - 1023;
+    let mantissa = (bits & 0x000f_ffff_ffff_ffff) | 0x0010_0000_0000_0000;
+    let magnitude = mantissa >> (52 - shift);
+    u32::try_from(magnitude).unwrap_or(u32::MAX)
+}
+
 /// `(float)value` of a `double`: the nearest `f32` to `value`, ties to even.
 ///
 /// C casts a `double` to a `float` by rounding to the nearest `f32`, ties to even. The
@@ -510,6 +537,49 @@ mod tests {
         assert_eq!(f32_to_u32(-1.0), 0);
         assert_eq!(f32_to_u32(f32::NEG_INFINITY), 0);
         assert_eq!(f32_to_u32(f32::NAN), 0);
+    }
+
+    #[test]
+    fn a_double_truncates_toward_zero_for_a_dword() {
+        for (value, expected) in [
+            (0.0_f64, 0),
+            (-0.0, 0),
+            (0.999_999, 0),
+            (1.0, 1),
+            (1.5, 1),
+            (2.5, 2),
+            (123.75, 123),
+            (8031.0, 8031),
+            (4_294_967_040.0, 4_294_967_040),
+            (f64::MIN_POSITIVE, 0),
+            (-1.5, 0),
+            (-123.75, 0),
+        ] {
+            assert_eq!(f64_to_u32(value), expected, "{value}");
+        }
+        let mut state = 0x2545_f491_u64;
+        for _ in 0..4096 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let value = f64::from_bits(state);
+            if value.is_nan() || !(0.0..4_294_967_296.0).contains(&value) {
+                continue;
+            }
+            let expected = value.trunc().max(0.0);
+            let got = f64::from(f64_to_u32(value));
+            assert_eq!(got.to_bits(), expected.to_bits(), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_double_outside_the_dword_range_saturates_and_nan_is_zero() {
+        assert_eq!(f64_to_u32(4_294_967_296.0), u32::MAX);
+        assert_eq!(f64_to_u32(1.0e20), u32::MAX);
+        assert_eq!(f64_to_u32(f64::INFINITY), u32::MAX);
+        assert_eq!(f64_to_u32(-1.0), 0);
+        assert_eq!(f64_to_u32(f64::NEG_INFINITY), 0);
+        assert_eq!(f64_to_u32(f64::NAN), 0);
     }
 
     /// `f64_to_f32` rounds to nearest, ties to even, over the speeds and distances (U18).

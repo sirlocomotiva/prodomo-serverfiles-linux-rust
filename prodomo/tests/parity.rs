@@ -14875,6 +14875,8 @@ const DAMAGE_POISON: u8 = 1 << 1;
 
 /// The stray dog's `MAX_HP` (vnum 101).
 const DOG_HP: i32 = 126;
+/// The Blue Dragon's hit points (`mob_proto.txt` 2493).
+const DRAGON_HP: i32 = 5_000_000;
 /// The damage Alpha's bare fist deals the stray dog. `CalcMeleeDamage`'s only draw is the
 /// unarmed `number(0, 0)`, so the hit is exact: Alpha's attack grade is 344 and the dog's
 /// defence grade 10 (`G/char.cpp:2716-2767`, `:2850-2858`); the hit rating, 274/300 less the
@@ -52556,4 +52558,127 @@ fn a_revived_dog_stands_back_up_once_and_dies_for_good_the_second_time() {
         "the stun ends again",
     );
     revive_destroy(&mut alpha, victim, alpha_vid);
+}
+
+/// Ledger 561: a blow on the Blue Dragon shrinks per live defence stone, and the
+/// dragon's own blow grows per live attack stone (`BlueDragon_Damage`,
+/// `G/BlueDragon.cpp:139-196`). Map 1 holds only the two stones (8031 defends,
+/// 8032 attacks) and the dragon (2493), all on the proven cell beside Alpha's
+/// entry; its punch lands the pinned shrunk number, and the dragon's first
+/// swing lands the pinned grown one. The file swap clears the town's idle churn and
+/// the patched proto leaves no value-feeding draw on either path. The stones never spawn on
+/// the owner's data (no map regen, no quest spawn, the boss-event map 230
+/// unhosted), so the arms fire here only because the files stood them.
+///
+/// The dragon's regen lines, as the dog's: `m`, the cell, no scatter, `1000s`.
+const DRAGON_LINES: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t8031\n\
+     m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t8032\n\
+     m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t2493\n";
+
+/// The owner's mob proto with the dragon's damage flattened to 200, its defence
+/// to 0 and its critical and penetrate enchants to 0: the punch rates past the
+/// `battle_damage_floor` draw, and the swing's only draws left feed nothing the
+/// head asserts, so both numbers pin (the dice seed is random per boot).
+fn dragon_proto(owner: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in owner.split_inclusive(|&byte| byte == b'\n') {
+        if line.starts_with(b"2493\t") {
+            let mut cells: Vec<&[u8]> = line
+                .strip_suffix(b"\r\n")
+                .expect("the owner's CRLF")
+                .split(|&byte| byte == b'\t')
+                .collect();
+            assert_eq!(cells.len(), 72, "the 2493 line keeps its columns");
+            cells[18] = b"200";
+            cells[19] = b"200";
+            cells[26] = b"0";
+            cells[38] = b"0";
+            cells[39] = b"0";
+            out.extend_from_slice(&cells.join(&b'\t'));
+            out.extend_from_slice(b"\r\n");
+        } else {
+            out.extend_from_slice(line);
+        }
+    }
+    out
+}
+#[test]
+fn the_dragon_stones_scale_the_dragons_blows_both_ways() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata");
+    let proto = dragon_proto(
+        &std::fs::read(root.join("proto/mob_proto.txt")).expect("the owner's mob proto"),
+    );
+    let (server, _data) = Server::start_with_files(
+        binary(),
+        database.url(),
+        &[
+            ("proto/mob_proto.txt", &proto),
+            (
+                "locale/europe/map/metin2_map_a1/npc.txt",
+                DRAGON_LINES.as_bytes(),
+            ),
+            ("locale/europe/map/metin2_map_a1/regen.txt", b""),
+            ("locale/europe/map/metin2_map_a1/stone.txt", b""),
+            ("locale/europe/map/metin2_map_a1/boss.txt", b""),
+        ],
+    );
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    let defence = vids_of_race(&entered.shown, 8031);
+    let attack = vids_of_race(&entered.shown, 8032);
+    let dragon = vids_of_race(&entered.shown, 2493);
+    assert_eq!(defence.len(), 1, "one defence stone stands");
+    assert_eq!(attack.len(), 1, "one attack stone stands");
+    assert_eq!(dragon.len(), 1, "one dragon stands");
+    let (defence, dragon) = (defence[0], dragon[0]);
+
+    // Given: the files stood all three; nothing else idles on the map.
+
+    // When: Alpha punches the dragon with the defence stone live.
+    alice.send_record(&client_target(dragon));
+    assert_eq!(
+        alice.read_game(),
+        target_of(dragon, 100, DRAGON_HP, DRAGON_HP, 1),
+        "the dragon targets whole"
+    );
+    alice.send_record(&client_attack(dragon));
+    let sp = u8::try_from(common::point_slot::POINT_SP).expect("a point byte");
+    assert_eq!(
+        alice.read_fight(),
+        point_change(listed.id, sp, 0, 500),
+        "the dragon drains 100 spell points"
+    );
+    // 172 rated, minus a quarter for the one live 8031: 172 - 43 = 129.
+    assert_eq!(
+        alice.read_fight(),
+        damage_info(dragon, DAMAGE_NORMAL, 129),
+        "the punch shrinks a quarter"
+    );
+    assert_eq!(
+        alice.read_fight(),
+        target_of(dragon, 99, DRAGON_HP - 129, DRAGON_HP, 0),
+        "the broadcast carries no element"
+    );
+    assert_eq!(
+        alice.read_fight(),
+        ownership_of(listed.id, dragon),
+        "the punch claims the dragon"
+    );
+    // Then: the dragon's first swing, with the attack stone live: 1244 rated,
+    // plus a quarter for the one live 8032: 1244 + 311 = 1555.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let (damage, flag, effects) = read_swing_head(&mut alice, dragon, listed.id, deadline);
+    assert_eq!(
+        (damage, flag, effects),
+        (1555, DAMAGE_NORMAL, Vec::new()),
+        "the swing grows a quarter"
+    );
+    let _ = defence;
+    drop(alice);
 }

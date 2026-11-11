@@ -21,7 +21,7 @@
 //! * a monster's proto leaves the steal, recovery, mana-burn, `MALL_ATTBONUS` and marriage
 //!   points at 0, so those arms draw nothing and multiply by one;
 //! * the `SKILL_RESIST_PENETRATE` poly is 0 for a victim with no skill;
-//! * reflect, the monarch and `BlueDragon_Damage` wait for later work;
+//! * reflect and the monarch wait for later work;
 //! * `attMul` and `damMul` are 1.0, `cannot_dead` is false, and the user damage rate is 100;
 //! * the functor's per-victim `k`-poly draws (`PENETRATE`, `IGNORE_TARGET_RATING`) and all
 //!   arms past the CRUSH slide are dead for hosted rows, so the functor's `point2` is
@@ -49,6 +49,10 @@ pub struct MobStriker<'a> {
     pub npc: &'a Npc,
     /// Whether berserk holds, which doubles `GetMobDamageMultiply` (`G/char.cpp:2605-2612`).
     pub berserk: bool,
+    /// The Blue Dragon's stone rows, which `BlueDragon_Damage` reads per hit.
+    pub dragon_stones: [common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS],
+    /// The live stones of each row's vnum on the attacker's map.
+    pub dragon_counts: [usize; common::dragon::DRAGON_STONE_ROWS],
 }
 
 /// The player it swings at, as `Damage` reads it.
@@ -188,6 +192,32 @@ pub fn strike_npc_by_npc(
     }
 }
 
+/// `BlueDragon_Damage` (`G/char_battle.cpp:2298`) of a monster attacker's hit on a
+/// player: the victim is a player, so only the attacker arm can fire. Monsters ride
+/// nothing, so the mount arm never fires here either.
+fn mob_scaled(
+    stones: &[common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS],
+    counts: [usize; common::dragon::DRAGON_STONE_ROWS],
+    mob: &Npc,
+    damage: i32,
+) -> i32 {
+    super::dragon::blue_dragon_damage(
+        stones,
+        super::dragon::DragonAttacker {
+            is_dragon: super::dragon::is_blue_dragon(mob.vnum)
+                && mob.char_type == CHAR_TYPE_MONSTER,
+            mount_vnum: 0,
+        },
+        super::dragon::DragonVictim {
+            is_dragon: false,
+            vnum: 0,
+            is_stone: false,
+        },
+        counts,
+        damage,
+    )
+}
+
 /// `battle_hit` of a melee monster on a player, from `CalcMeleeDamage` through `Damage`'s
 /// flag: the damage roll, the `+0.5` of `attMul` 1.0, the block, critical and penetrate
 /// chances, the bonuses, the down check, the death blow, and the `+0.5` of `damMul` 1.0.
@@ -223,6 +253,12 @@ pub fn strike_pc(
         };
     }
     let damage = death_blow(dice, striker.npc, victim.points, damage);
+    let damage = mob_scaled(
+        &striker.dragon_stones,
+        striker.dragon_counts,
+        striker.npc,
+        damage,
+    );
     // `dam = (float)dam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
     PcStrike {
@@ -244,11 +280,12 @@ pub fn strike_pc(
 #[must_use]
 pub fn skill_damage_pc(
     dice: &mut dyn Dice,
-    mob: &Npc,
+    striker: MobStriker<'_>,
     victim: &PcVictim<'_>,
     attack: i32,
     ignore_defence: bool,
 ) -> PcStrike {
+    let mob = striker.npc;
     let mut effects = Vec::new();
     let mut damage = if ignore_defence {
         attack
@@ -320,6 +357,7 @@ pub fn skill_damage_pc(
         };
     }
     let damage = death_blow(dice, mob, victim.points, damage);
+    let damage = mob_scaled(&striker.dragon_stones, striker.dragon_counts, mob, damage);
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
     PcStrike {
         effects,
@@ -364,7 +402,7 @@ pub fn shoot_pc(
         f32_to_i32(i32_to_f32(damage) + 0.5)
     };
     if magic {
-        return magic_damage(dice, striker.npc, &victim, damage, effects, affect);
+        return magic_damage(dice, striker, &victim, damage, effects, affect);
     }
     if pc_dodges(dice, victim.points) {
         return PcStrike {
@@ -376,23 +414,24 @@ pub fn shoot_pc(
     }
     let (damage, flag) = pc_chances(dice, striker.npc, victim.points, damage, &mut effects);
     let damage = pc_bonuses(striker.npc, victim.points, damage);
-    finish_shot(dice, striker.npc, &victim, damage, flag, effects, affect)
+    finish_shot(dice, striker, &victim, damage, flag, effects, affect)
 }
 
 /// `Damage`'s `DAMAGE_TYPE_MAGIC` path on a player (`G/char_battle.cpp:1773-1776`,
 /// `:1858-1946`, `:2145-2156`): the attacker's magic percent, the halved critical and
 /// penetrating chances (with no marriage and no `RESIST_PENETRATE` skill), and the skill
 /// bonuses. The terror gate draws nothing (no terror), the manashield, reflect, steal,
-/// marriage, monarch, `BlueDragon` and empire arms never fire, and `cannot_dead` is false.
+/// marriage, monarch and empire arms never fire, and `cannot_dead` is false.
 /// A `Down` end takes the blocked record, as `Dead(pAttacker)` shows.
 fn magic_damage(
     dice: &mut dyn Dice,
-    mob: &Npc,
+    striker: MobStriker<'_>,
     shot: &PcVictim<'_>,
     damage: i32,
     mut effects: Vec<u8>,
     affect: AttackAffect,
 ) -> PcStrike {
+    let mob = striker.npc;
     let victim = shot.points;
     // `(int)((float)dam * (100 + per + melee) / 100.f + 0.5f)`: the multiply, then the
     // divide, then the `+0.5`, each in `float`, and the cast truncates.
@@ -456,7 +495,7 @@ fn magic_damage(
         damage = damage.wrapping_sub((damage.wrapping_mul(mall).wrapping_div(100)).min(200));
     }
     let damage = damage.max(0);
-    finish_shot(dice, mob, shot, damage, flag, effects, affect)
+    finish_shot(dice, striker, shot, damage, flag, effects, affect)
 }
 
 /// `Damage`'s dodge: `POINT_DODGE && number(1, 100) <= DODGE` (`:1953-1967`).
@@ -467,7 +506,7 @@ fn pc_dodges(dice: &mut dyn Dice, victim: &Points) -> bool {
 
 fn finish_shot(
     dice: &mut dyn Dice,
-    mob: &Npc,
+    striker: MobStriker<'_>,
     victim: &PcVictim<'_>,
     damage: i32,
     flag: u8,
@@ -482,7 +521,9 @@ fn finish_shot(
             reflected_base: None,
         };
     }
+    let mob = striker.npc;
     let damage = death_blow(dice, mob, victim.points, damage);
+    let damage = mob_scaled(&striker.dragon_stones, striker.dragon_counts, mob, damage);
     // `dam = (float)dam * damMul + 0.5f`, with `damMul` 1.0, as `strike_pc` rounds it.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
     PcStrike {
@@ -1213,6 +1254,9 @@ mod tests {
             MobStriker {
                 npc: mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points,
@@ -1237,6 +1281,9 @@ mod tests {
             MobStriker {
                 npc: mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points,
@@ -1254,6 +1301,9 @@ mod tests {
             MobStriker {
                 npc: mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points,
@@ -1310,6 +1360,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -1325,6 +1378,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: true,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -1803,6 +1859,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -2028,6 +2087,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -2057,6 +2119,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -2084,6 +2149,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -2118,6 +2186,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -2144,6 +2215,9 @@ mod tests {
             MobStriker {
                 npc: &mob,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             PcVictim {
                 points: &points,
@@ -2173,6 +2247,9 @@ mod tests {
                 MobStriker {
                     npc: &mob,
                     berserk: false,
+                    dragon_stones: [common::dragon::DragonStone::default();
+                        common::dragon::DRAGON_STONE_ROWS],
+                    dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
                 },
                 PcVictim {
                     points: &points,
@@ -2236,6 +2313,9 @@ mod tests {
             MobStriker {
                 npc: &guard,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             NpcVictim { npc: &victim },
         );
@@ -2260,6 +2340,9 @@ mod tests {
             MobStriker {
                 npc: &guard,
                 berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             },
             NpcVictim { npc: &victim },
         );
@@ -2359,7 +2442,19 @@ mod tests {
             immune_flag: 0,
         };
         let mut dice = Script::new(&[]);
-        let strike = skill_damage_pc(&mut dice, &mob, &victim, 200, false);
+        let strike = skill_damage_pc(
+            &mut dice,
+            MobStriker {
+                npc: &mob,
+                berserk: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
+            },
+            &victim,
+            200,
+            false,
+        );
         assert_eq!(strike.reflected_base, None);
     }
 }

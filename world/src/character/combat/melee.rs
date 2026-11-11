@@ -16,9 +16,9 @@
 //!   `NormalAttackAffect` is never already poisoned, stunned or slowed;
 //! * no proto column or apply gives a non-player `POINT_BLOCK` or `POINT_REFLECT_MELEE`, so there
 //!   is no block draw and no reflected damage;
-//! * the quest-set multipliers `attMul` and `damMul` are 1.0, the user
-//!   damage rate is 100 and `BlueDragon_Damage` is the identity for every race the Rewrite stands
-//!   up. The gold steal draws its amount and returns it on [`Strike::stolen_gold`]; the caller
+//! * the quest-set multipliers `attMul` and `damMul` are 1.0 and the user
+//!   damage rate is 100. The gold steal draws its amount and returns it on [`Strike::stolen_gold`];
+//!   the caller
 //!   applies `ChangeGold` (the cap refusal, the purse, the gold record).
 
 use std::ops::RangeInclusive;
@@ -154,6 +154,10 @@ pub struct Striker<'a> {
     /// The statue floor (`:2379-2381`): the caller guards a Meley statue, whose
     /// lethal hit stops at 1 HP. Defaults off.
     pub meley_statue: bool,
+    /// The Blue Dragon's stone rows, which `BlueDragon_Damage` reads per hit.
+    pub dragon_stones: [common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS],
+    /// The live stones of each row's vnum on the victim's map.
+    pub dragon_counts: [usize; common::dragon::DRAGON_STONE_ROWS],
 }
 
 /// What a hit shows, in the order legacy sends it.
@@ -817,6 +821,26 @@ fn attacker_change(points: &mut Points, kind: usize, amount: i32, events: &mut V
     }
 }
 
+/// `BlueDragon_Damage` (`G/char_battle.cpp:2298`) of a player attacker's hit: the
+/// attacker is a player, so only the victim arms can fire.
+fn dragon_scaled(striker: &Striker, victim: &Npc, damage: i32) -> i32 {
+    super::dragon::blue_dragon_damage(
+        &striker.dragon_stones,
+        super::dragon::DragonAttacker {
+            is_dragon: false,
+            mount_vnum: striker.points.mount_vnum(),
+        },
+        super::dragon::DragonVictim {
+            is_dragon: super::dragon::is_blue_dragon(victim.vnum)
+                && victim.char_type == CHAR_TYPE_MONSTER,
+            vnum: victim.vnum,
+            is_stone: victim.char_type == CHAR_TYPE_STONE,
+        },
+        striker.dragon_counts,
+        damage,
+    )
+}
+
 /// `CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_NORMAL)` of a non-player.
 fn damage_normal(
     dice: &mut dyn Dice,
@@ -871,6 +895,7 @@ fn damage_normal(
     {
         damage /= 2;
     }
+    damage = dragon_scaled(striker, victim, damage);
     // `dam = tempDam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
     events.push(HitEvent::DamageInfo { damage, flag });
@@ -899,10 +924,10 @@ fn damage_normal(
 /// the monarch power-up (off — no monarch is ported, `:2224-2228`), the attacker's
 /// empire tenth (`:2213-2222`), the victim's SP drain (`:2204-2217`), the user rate
 /// (`:2263-2267`), the stoneskin (`:2268-2272`), the `+0.5` of `damMul` 1.0, the damage
-/// packet, and the hit-point change. The manashield, mall, defence-up, death-blow and
-/// `BlueDragon` arms never fire for a monster victim of a player attacker (no shield,
-/// no mall points, a non-player victim, a player attacker, vnum 2493 unhosted). The
-/// BANPK refusal was checked by the swing, so `banned` is always false here. The
+/// packet, and the hit-point change. The manashield, mall, defence-up and death-blow
+/// arms never fire for a monster victim of a player attacker (no shield, no mall
+/// points, a non-player victim, a player attacker). The BANPK refusal was checked by
+/// the swing, so `banned` is always false here. The
 /// caller fills the damage map with the SPECIAL aggro kind and stuns at 0, as
 /// `after_damage` does for a normal hit.
 pub fn damage_special(
@@ -950,6 +975,7 @@ pub fn damage_special(
     {
         damage /= 2;
     }
+    damage = dragon_scaled(striker, victim, damage);
     // `dam = tempDam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
     // A negative (fixture-only: a negative reflect point) is clamped at 0, as 229s
     // clamps a negative skill hit — legacy would heal, and the Rewrite never ports a
@@ -1034,6 +1060,7 @@ pub fn damage_melee(
     {
         damage /= 2;
     }
+    damage = dragon_scaled(striker, victim, damage);
     // `dam = tempDam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
     // A negative skill hit is clamped at 0 (as 229s clamps a negative one) —
     // legacy would heal, and the Rewrite never ports a heal-by-damage.
@@ -1152,6 +1179,7 @@ pub fn damage_normal_range(
     {
         damage /= 2;
     }
+    damage = dragon_scaled(striker, victim, damage);
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
     events.push(HitEvent::DamageInfo { damage, flag });
     // `cannot_dead` (`:2376-2392`): the armada lands the hit but moves nothing.
@@ -1622,6 +1650,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         strike_npc(dice, &mut striker, victim, false)
     }
@@ -1728,6 +1759,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut victim = dog();
         let hit = strike_npc(&mut Script::new(&[]), &mut striker, &mut victim, false);
@@ -2253,6 +2287,9 @@ mod tests {
                 meley_blocked: false,
                 cannot_dead: false,
                 meley_statue: false,
+                dragon_stones: [common::dragon::DragonStone::default();
+                    common::dragon::DRAGON_STONE_ROWS],
+                dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
             };
             let hit = strike_npc(&mut Script::new(&[0, 1]), &mut striker, &mut victim, false);
             assert_eq!(hit.events[0], HitEvent::DamageInfo { damage, flag: 1 });
@@ -2266,6 +2303,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         victim.hp = 1000;
         let hit = strike_npc(&mut Script::new(&[0, 1]), &mut striker, &mut victim, false);
@@ -2365,6 +2405,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut dice = Script::new(&[0]);
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, true);
@@ -2515,6 +2558,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         damage_special(dice, &mut striker, victim, damage)
     }
@@ -2629,6 +2675,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         // 322 doubles to 644; the dog has 126.
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
@@ -2745,6 +2794,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut dice = Script::new(&[]);
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
@@ -2786,6 +2838,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut dice = Script::new(&[50, 50, 5, 60]);
         let (struck, events) = damage_melee(&mut dice, &mut striker, &mut victim, 20);
@@ -2910,6 +2965,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut dice = Script::new(&[50, 50, 5, 60]);
         let (struck, _events) = damage_range(&mut dice, &mut striker, &mut victim, 20);
@@ -2932,6 +2990,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut dice = Script::new(&[50, 50, 5, 60]);
         let (struck, events) = damage_magic(&mut dice, &mut striker, &mut victim, 20);
@@ -2966,6 +3027,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut dice = Script::new(&[30]);
         let (struck, stolen, events) =
@@ -2997,6 +3061,9 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
         let mut dice = Script::new(&[99, 7, 3, 60]);
         let (struck, stolen, events) =

@@ -41,6 +41,8 @@ pub mod item_slots;
 
 /// The C `int` to `float` conversions that legacy point arithmetic relies on
 pub mod cfloat;
+/// The Blue Dragon's stone table: four rows of `BlueDragonSetting.DragonStone`.
+pub mod dragon;
 /// The skill formula evaluator: the hosted `CPoly` subset.
 pub mod skill_poly;
 

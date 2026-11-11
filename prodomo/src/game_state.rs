@@ -905,6 +905,8 @@ pub struct GameState {
     /// The forked maps (`ForkedMaps`), which the three-way lines and the death hook
     /// read for the event's SungZi and pass indices.
     forked_maps: Arc<gamedata::forked::ForkedMaps>,
+    /// The Blue Dragon's stone rows, which the damage hook reads per hit.
+    dragon_stones: Arc<[common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS]>,
     /// The blend table (`CBlendItem::blend_`), which the blend use and the
     /// creation roll read.
     blend_table: Arc<gamedata::blend::BlendTable>,
@@ -1225,6 +1227,16 @@ impl GameState {
     #[must_use]
     pub fn with_forked_maps(mut self, maps: Arc<gamedata::forked::ForkedMaps>) -> Self {
         self.forked_maps = maps;
+        self
+    }
+
+    /// Share the Blue Dragon's stone rows, which the damage hook reads per hit.
+    #[must_use]
+    pub fn with_dragon_stones(
+        mut self,
+        stones: Arc<[common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS]>,
+    ) -> Self {
+        self.dragon_stones = stones;
         self
     }
 

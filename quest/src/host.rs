@@ -613,6 +613,10 @@ pub struct Settings {
     pub goto_info: Vec<GotoInfo>,
     /// The arenas, in order.
     pub arenas: Vec<Arena>,
+    /// The Blue Dragon's stone rows (`BlueDragonSetting.DragonStone[1..4]`), read after
+    /// the libraries load. A missing table, row or number reads 0, as the binder's
+    /// miss arms do (`G/BlueDragon_Binder.cpp:166-213`).
+    pub dragon_stones: [common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS],
 }
 
 /// A quest the host numbered.
@@ -700,6 +704,9 @@ impl Host {
         let lua = new_state(locale_dir)?;
         for library in LIBRARIES {
             run_file(&lua, &locale_dir.join(library))?;
+        }
+        if let Some(mut settings) = lua.app_data_mut::<Settings>() {
+            settings.dragon_stones = dragon_stones(&lua);
         }
         let quest_dir = locale_dir.join("quest");
         let order = sources::load_order(&quest_dir)
@@ -933,6 +940,50 @@ fn index_states(lua: &Lua, quest: &[u8]) -> mlua::Result<BTreeMap<Vec<u8>, i32>>
         table.raw_set(value, key)?;
     }
     Ok(states)
+}
+
+/// The Blue Dragon's stone rows from the loaded libraries:
+/// `BlueDragonSetting.DragonStone[1..4]`'s `vnum`, `effect_type`, `val`, `enemy` and
+/// `enemy_val`, as `BlueDragon_GetIndexFactor` reads them
+/// (`G/BlueDragon_Binder.cpp:166-213`). A missing table, row or number reads 0, as its
+/// miss arms do. Infallible: legacy logs `sys_err` and continues with 0.
+fn dragon_stones(lua: &Lua) -> [common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS] {
+    fn number(value: &Value) -> u32 {
+        match value {
+            // The binder's `static_cast<unsigned int>` wraps; a negative or
+            // unrepresentable Lua number instead reads the miss arm's 0 — no
+            // hosted row holds one.
+            Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
+            Value::Number(f) => common::cfloat::f64_to_u32(*f),
+            _ => 0,
+        }
+    }
+    let mut stones = [common::dragon::DragonStone::default(); common::dragon::DRAGON_STONE_ROWS];
+    let Value::Table(setting) = lua
+        .globals()
+        .get::<Value>("BlueDragonSetting")
+        .unwrap_or(Value::Nil)
+    else {
+        return stones;
+    };
+    let Value::Table(table) = setting.get::<Value>("DragonStone").unwrap_or(Value::Nil) else {
+        return stones;
+    };
+    for (index, stone) in stones.iter_mut().enumerate() {
+        let Value::Table(row) = table.get::<Value>(index + 1).unwrap_or(Value::Nil) else {
+            continue;
+        };
+        for (slot, key) in [
+            (&mut stone.vnum, "vnum"),
+            (&mut stone.effect, "effect_type"),
+            (&mut stone.val, "val"),
+            (&mut stone.enemy, "enemy"),
+            (&mut stone.enemy_val, "enemy_val"),
+        ] {
+            *slot = number(&row.get::<Value>(key).unwrap_or(Value::Nil));
+        }
+    }
+    stones
 }
 
 fn new_state(locale_dir: &Path) -> Result<Lua, HostError> {
@@ -1442,6 +1493,46 @@ mod tests {
             }]
         );
         assert!(settings.bgm_volume_enable);
+    }
+
+    #[test]
+    fn the_dragon_stones_snapshot_reads_four_rows_and_zeroes_the_missing() {
+        use common::dragon::{DragonStone, DRAGON_STONE_ROWS};
+        let lua = Lua::new();
+        // No table at all: the binder's miss arm, all zeroes.
+        assert_eq!(
+            super::dragon_stones(&lua),
+            [DragonStone::default(); DRAGON_STONE_ROWS]
+        );
+        lua.load(
+            "BlueDragonSetting = { DragonStone = {              [1] = { vnum = 8031, effect_type = 1, val = 25, enemy = 20110, enemy_val = 3 },              [2] = { vnum = 8032 },              [3] = 7 } }",
+        )
+        .exec()
+        .unwrap();
+        let stones = super::dragon_stones(&lua);
+        assert_eq!(
+            stones[0],
+            DragonStone {
+                vnum: 8031,
+                effect: 1,
+                val: 25,
+                enemy: 20110,
+                enemy_val: 3,
+            }
+        );
+        assert_eq!(
+            stones[1],
+            DragonStone {
+                vnum: 8032,
+                effect: 0,
+                val: 0,
+                enemy: 0,
+                enemy_val: 0,
+            }
+        );
+        // A non-table row and a missing row read zero.
+        assert_eq!(stones[2], DragonStone::default());
+        assert_eq!(stones[3], DragonStone::default());
     }
 
     #[test]

@@ -52635,3 +52635,56 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 561. The dragon's scaled blows
+
+`BlueDragon_Damage` (`G/BlueDragon.cpp:139-196`) is ported: the three stone arms that scale a
+rated hit after the death-blow multiple and before the flag (`G/char_battle.cpp:2298`).
+
+The host snapshots `BlueDragonSetting.DragonStone[1..4]` once after the libraries load
+(`quest/src/host.rs`, mirroring `BlueDragon_GetIndexFactor`'s miss arms:
+`G/BlueDragon_Binder.cpp:166-213` — a missing table, row or number reads 0), the snapshot rides
+`GameData.settings` into `GameState.dragon_stones`, and the pure `blue_dragon_damage`
+(`world/src/character/combat/dragon.rs`, fed by the shared row in `common/src/dragon.rs`) runs
+the arms: the monster 2493's hit grows by the first `ATK_BONUS` row's percent times its live
+stones on the attacker's map, a hit on it shrinks by the first `DEF_BONUS` row's percent times
+its live stones on the victim's map (at least 1), and a hit on a stone by a rider whose mount is
+the row's feared `enemy` multiplies by `enemy_val`. The counts are the caller's
+(`GameState::dragon_counts`, `fight.rs`): live stones only, as `FCountSpecifiedMonster` requires
+`IsStone` and the dead leave the sectree (`G/sectree_manager.cpp:1595-1617`). Every melee mirror
+(`damage_normal`, `damage_special`, `damage_melee` with its `damage_range`/`damage_magic`
+delegates, `damage_normal_range`) hooks it through `dragon_scaled`, and every mob mirror
+(`strike_pc`, `skill_damage_pc`, `shoot_pc` through `finish_shot`) through `mob_scaled`; legacy
+counts once per side and combat never crosses maps, so each path counts on the map the arms that
+can fire share. The guard path (`strike_npc_by_npc`) stuns with no Damage body, so its arms never
+run. `skill_damage_pc`, `magic_damage` and `finish_shot` now take the `MobStriker` they already
+had a caller for.
+
+The scenario stands map 1 with only the two stones and the dragon on the dog's proven cell and
+pins both count arms: the punch rates 172 and lands 129 past one live 8031, the dragon's first
+swing rates 1244 and lands 1555 past one live 8032 (`the_dragon_stones_scale_the_dragons_blows_
+both_ways`, 8/8 green). Two things make the numbers pin although the dice seed is random per
+boot: the file swap (the map's `npc.txt` holds only the three lines, `regen`/`stone`/`boss` are
+empty, so nothing else idles) and the patched proto (the dragon's damage flattened to 200, its
+defence to 0 so the punch rates past the `battle_damage_floor` draw, its critical and penetrate
+enchants to 0). The mount arm is unit-pinned (a feared 20110 triples a hit on 8031; any other
+mount is the identity), as are the floor-at-1 and the default-snapshot identity. Both hook
+mutants are killed with the exact unscaled values (172, 1244).
+
+Reachability, by the ledger-466 rule: 2493 and 8031-8034 never spawn on the owner's data. No map
+regen names them (sweep of `locale/europe/map/`), no quest names 2493 and only `BlueDragon.lua`
+itself names 8031 (positive control: 6408 is found in `enchanted_forest_zone.lua`), the boss
+event's regen names 2493 but its map 230 is not in the owner's index, and nothing in `server/`
+names the `templul_dragonului` regen files. `sys.dungeon.dragon_lair` is `partial`:
+`UseBlueDragonSkill`, `BlueDragon_StateBattle`, the skill/range binders and `DragonLair.cpp` are
+next.
+
+Inventory: `sys.dungeon.dragon_lair` missing to partial, naming the damage arms' coverage.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite561c.txt` (5353 passed, 0 failed in 46 targets; one run flaked `a_gm_purges_the_near_dog_and_all_sweeps_the_view` on a quest-target delete in the respawn window, a later one `a_gm_flags_a_stray_dog_aggressive_and_coward` on a 5111 overlong coward escape 11 past the 5100 bound (both pass alone)), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

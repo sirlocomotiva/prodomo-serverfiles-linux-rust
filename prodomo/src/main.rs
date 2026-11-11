@@ -11503,6 +11503,7 @@ fn build_world(
         .with_stack_attributes(Arc::clone(&data.stack_attributes))
         .with_sungzi_maps(Arc::clone(&data.sungzi_maps))
         .with_forked_maps(Arc::clone(&data.forked_maps))
+        .with_dragon_stones(Arc::new(data.settings.dragon_stones))
         .with_blend_table(Arc::clone(&data.blend_table))
         .with_lands(Arc::clone(&data.lands))
         .with_object_protos(Arc::clone(&data.object_protos))

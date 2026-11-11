@@ -1,3 +1,4 @@
+mod dragon;
 mod melee;
 mod mob_melee;
 mod pk;

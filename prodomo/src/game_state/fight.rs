@@ -777,9 +777,57 @@ impl GameState {
         })
     }
 
+    /// The live stones of each dragon-stone row's vnum on the map, as
+    /// `GetMonsterCountInMap` counts them for `BlueDragon_Damage`
+    /// (`G/sectree_manager.cpp:1673-1693`): stones only
+    /// (`FCountSpecifiedMonster` requires `IsStone`, `:1595-1617`) and never the
+    /// dead, which the sectree no longer holds.
+    pub(super) fn dragon_counts(
+        &self,
+        channel: u8,
+        map: i32,
+    ) -> [usize; common::dragon::DRAGON_STONE_ROWS] {
+        let mut counts = [0; common::dragon::DRAGON_STONE_ROWS];
+        let Some(list) = self.npcs.get(&(channel, map)) else {
+            return counts;
+        };
+        for npc in &list.npcs {
+            if npc.dead || npc.char_type != CHAR_TYPE_STONE {
+                continue;
+            }
+            for (index, stone) in self.dragon_stones.iter().enumerate() {
+                if stone.vnum != 0 && stone.vnum == npc.vnum {
+                    counts[index] += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    /// The snapshot and the live-stone counts on the non-player `mob`'s map, for a blow
+    /// it strikes or takes: zeroes when it stands nowhere. The map is the counting map both
+    /// ways — legacy counts on the attacker's map for the attacker arm and the victim's for
+    /// the victim arm, and the non-player end is the arm that can fire.
+    pub(super) fn dragon_strike_facts(
+        &self,
+        mob: u32,
+    ) -> (
+        [common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS],
+        [usize; common::dragon::DRAGON_STONE_ROWS],
+    ) {
+        let stones = *self.dragon_stones;
+        let counts = self.npc_of.get(&mob).map_or(
+            [0; common::dragon::DRAGON_STONE_ROWS],
+            |&(channel, map, _)| self.dragon_counts(channel, map),
+        );
+        (stones, counts)
+    }
+
     /// `battle_hit` of the player under `vid` on the non-player under `target`.
     fn strike(&mut self, vid: Vid, target: u32) -> Option<Strike> {
         let &(channel, map, at) = self.npc_of.get(&target)?;
+        let dragon_stones = *self.dragon_stones;
+        let dragon_counts = self.dragon_counts(channel, map);
         let empire = self.bodies.get(&vid)?.card.empire;
         let user_rate = self.user_damage_rate();
         // `Damage`'s Meley gate runs before the swing's damage: the step's heal,
@@ -807,6 +855,8 @@ impl GameState {
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
+            dragon_stones,
+            dragon_counts,
         };
         // `battle_is_attackable` refused a victim on an `ATTR_BANPK` cell, and a standing
         // non-player has a sectree, so `Damage` never refuses it here.
@@ -1019,6 +1069,8 @@ impl GameState {
             return;
         };
         let (channel, map, at) = (channel, map, at);
+        let dragon_stones = *self.dragon_stones;
+        let dragon_counts = self.dragon_counts(channel, map);
         let Some(empire) = self.bodies.get(&victim).map(|body| body.card.empire) else {
             return;
         };
@@ -1053,6 +1105,8 @@ impl GameState {
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
+            dragon_stones,
+            dragon_counts,
         };
         let (struck, events) = damage_special(&mut self.dice, &mut striker, npc, damage);
         self.show_strike(victim, mob, events);

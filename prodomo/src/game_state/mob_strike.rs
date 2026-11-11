@@ -82,6 +82,7 @@ impl GameState {
         let Some(&(channel, map, at)) = self.npc_of.get(&mob) else {
             return false;
         };
+        let (dragon_stones, dragon_counts) = self.dragon_strike_facts(mob);
         let characters = &self.characters;
         let Ok(character) = characters.find_by_vid(victim) else {
             return false;
@@ -97,31 +98,22 @@ impl GameState {
             return false;
         };
         let magic = armed.is_some_and(|magic| magic);
+        let striker = MobStriker {
+            npc,
+            berserk,
+            dragon_stones,
+            dragon_counts,
+        };
+        let pc = PcVictim {
+            points,
+            affect_flags: affects,
+            down,
+            immune_flag: points.immune_flag(),
+        };
         let strike = if shot {
-            shoot_pc(
-                dice,
-                MobStriker { npc, berserk },
-                PcVictim {
-                    points,
-                    affect_flags: affects,
-                    down,
-                    immune_flag: points.immune_flag(),
-                },
-                magic,
-                mob_rate,
-            )
+            shoot_pc(dice, striker, pc, magic, mob_rate)
         } else {
-            strike_pc(
-                dice,
-                MobStriker { npc, berserk },
-                PcVictim {
-                    points,
-                    affect_flags: affects,
-                    down,
-                    immune_flag: points.immune_flag(),
-                },
-                mob_rate,
-            )
+            strike_pc(dice, striker, pc, mob_rate)
         };
         self.show_mob_strike(mob, victim, &strike, shot);
         // The claim, `SetSyncOwner(mob)` on the player (`:299-302`). The NOMOVE arm reads the
@@ -236,6 +228,10 @@ impl GameState {
                 MobStriker {
                     npc: striker,
                     berserk,
+                    // The guard's swing stuns with no Damage body: the arms never run.
+                    dragon_stones: [common::dragon::DragonStone::default();
+                        common::dragon::DRAGON_STONE_ROWS],
+                    dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
                 },
                 NpcVictim { npc: victim_npc },
             )

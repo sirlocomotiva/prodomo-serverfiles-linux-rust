@@ -816,17 +816,23 @@ impl GameState {
                 reflected_base: None,
             };
         };
+        let (dragon_stones, dragon_counts) = self.dragon_strike_facts(mob);
         let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
         let affects = self.affect_flags_of(victim);
         let down = self.is_down(victim.raw());
-        let striker = MobStriker { npc: &npc, berserk };
+        let striker = MobStriker {
+            npc: &npc,
+            berserk,
+            dragon_stones,
+            dragon_counts,
+        };
         let target = PcVictim {
             points: &points,
             affect_flags: affects,
             down,
             immune_flag: points.immune_flag(),
         };
-        skill_damage_pc(&mut self.dice, striker.npc, &target, amount, ignore_defence)
+        skill_damage_pc(&mut self.dice, striker, &target, amount, ignore_defence)
     }
 
     /// What the skill's hit on a player showed: `BeginFight` first (legacy runs it before

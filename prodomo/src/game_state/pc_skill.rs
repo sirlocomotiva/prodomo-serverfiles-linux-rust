@@ -2867,6 +2867,8 @@ impl GameState {
             .npc_of
             .get(&target_vid)
             .expect("the victim stood above");
+        let dragon_stones = *self.dragon_stones;
+        let dragon_counts = self.dragon_counts(channel, nmap);
         let blocked = self.meley_blocks_hit(vid, target_vid);
         let armada = self.meley_cannot_dead.contains(&target_vid);
         let statue = self
@@ -2889,6 +2891,8 @@ impl GameState {
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
+            dragon_stones,
+            dragon_counts,
         };
         let npcs = self
             .npcs
@@ -2934,6 +2938,8 @@ impl GameState {
                 Equipment::of(character.items(), &self.protos).wear(EWearPositions::Weapon as u16)
             })
             .map(|worn| worn.proto.clone());
+        let dragon_stones = *self.dragon_stones;
+        let dragon_counts = self.dragon_counts(channel, nmap);
         let blocked = self.meley_blocks_hit(vid, target_vid);
         let armada = self.meley_cannot_dead.contains(&target_vid);
         let statue = self
@@ -2956,6 +2962,8 @@ impl GameState {
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
+            dragon_stones,
+            dragon_counts,
         };
         let npcs = self
             .npcs
