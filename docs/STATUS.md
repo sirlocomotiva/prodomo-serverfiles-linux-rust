@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-11, after ledger section 574 (the killer's cost).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 575
+Last reviewed: 2026-11-11, after ledger section 575 (the revenge proved).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 576
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -621,7 +621,7 @@ switch walks the flag at 0 and restores the mode line's point off it, the refill
 through the switch, and the consume gauge starts and stops with its lines; the uninitialized
 walk stamp is a recorded Defect, and the dead-pool gate stays a pre-existing 229d gap. Since 570 `sys.dungeon.ship_defense` is `partial` (no `missing` row remains anywhere): the wave monsters retarget the mast, swing on it through `Damage`'s NORMAL path with its SPECIAL reflect, and the mast broadcasts its HP — while the fake hydras refuse every striker. Since 571 the detachment scroll breaks the live stones out of the first three sockets and gives each back (`sys.item.sockets` stays `partial`; the socket-adding scrolls wait).
 Since 572 `sys.item.sockets` is `ported`: the socket-adding scroll rolls its 50 in 100 and opens one of three, and the jewels fit by `CanPutInto`'s table and ladder and set with the downgrade countdown (the expiry timer stays `unused`; a graded accessory refuses the wear). The next slice the forest's leader branch is ported, the sash
-Since 573 `sys.char.pk` runs the killer mode: a same-empire hit on a blameless player marks the attacker with the killer bit, cleared on death and 30 seconds after the set, and `g_protectNormalPlayer` keeps a negative attacker off a blameless target in peace. Since 574 it costs the same-empire killer 20 000 alignment past the agreed, war, marked, duel and forked gates, with the 33/20 spare draw, the `[LS;910]` line and the party split.
+Since 573 `sys.char.pk` runs the killer mode: a same-empire hit on a blameless player marks the attacker with the killer bit, cleared on death and 30 seconds after the set, and `g_protectNormalPlayer` keeps a negative attacker off a blameless target in peace. Since 574 it costs the same-empire killer 20 000 alignment past the agreed, war, marked, duel and forked gates, with the 33/20 spare draw, the `[LS;910]` line and the party split. Since 575 the revenge arm is proved live: a blameless player in revenge strikes a negative player of its own empire unmarked.
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
 

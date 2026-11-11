@@ -53173,3 +53173,26 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 575. The revenge proved
+
+`sys.char.pk` proves its revenge arm live. The policy has carried all five modes since
+ledger 573 (ledger 574's "alignment's revenge" was its revenge mode, `G/pvp.cpp:470-490`,
+with the `world` unit pins), but no binary scenario ever struck in revenge — only the
+peace refusal and the free mark. No code changed: the arm was already there.
+
+Scenario `a_revenge_hit_on_a_negative_player_lands_and_a_like_aligned_one_is_refused`:
+Alpha of empire 1 goes revenge and hits Dave of empire 1 standing negative, and the
+swing lands (178, the cross-empire number) with no killer bit on any update either side
+sees. 8× green. Inventory: `sys.char.pk` stays `partial`; the item drop penalty's table
+is the last gap the note names, and `sys.combat.penalty` already ports it — that note
+is the next reconciliation.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite575.txt` (5402 passed, 0 failed in 46 targets),
+`cargo test --workspace --doc --locked --offline` (1 passed in 9 targets),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

@@ -53391,3 +53391,85 @@ fn a_same_empire_kill_costs_the_killer_20000_alignment() {
     }
     assert!(cost || spared, "the penalty ran, paid or spared");
 }
+
+/// `G/pvp.cpp:470-490`: revenge lets the wronged strike the wrongdoer. Alpha goes
+/// revenge while Dave stands negative, and the swing lands unmarked; then Dave is
+/// blameless no more the other way — Alpha at 0 refuses the like-aligned Dave at 0.
+#[test]
+fn a_revenge_hit_on_a_negative_player_lands_and_a_like_aligned_one_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "dave");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Dave', 1, \
+         154, 470100, 950100 FROM account WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET stamina = 12345 WHERE name = 'Dave'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET alignment = -100 WHERE name = 'Dave'",
+    );
+    let (mut alpha, alpha_listed, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut dave, dave_listed, _dave_entered) = enter_world_seeing(&server, b"dave", 0);
+    alpha.sees_enter(dave_listed.id, false, None);
+
+    // Alpha goes revenge: her own update carries the mode, and Dave sees it too.
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/pkmode 1"));
+    assert_eq!(read_update_mode(&mut alpha, alpha_listed.id), 1);
+    assert_eq!(read_update_mode(&mut dave, alpha_listed.id), 1);
+    alpha.quiet("the switch ends");
+    dave.quiet("the switch ends");
+
+    // When: Alpha hits the negative Dave. Then: the damage and the claim to Alpha, the
+    // damage, the hit points and the claim to Dave — and no update on either side
+    // raises the killer bit.
+    alpha.send_record(&client_attack(dave_listed.id));
+    for (side, client) in [("Alpha", &mut alpha), ("Dave", &mut dave)] {
+        let mut damage = false;
+        while !damage {
+            let record = client.read_game();
+            if record[0] == GC_CHARACTER_UPDATE {
+                assert_eq!(record[19] & (1 << 3), 0, "{side}: no killer bit raises");
+                continue;
+            }
+            assert_eq!(
+                record,
+                damage_info(dave_listed.id, DAMAGE_NORMAL, PVP_DAMAGE),
+                "{side}: the damage"
+            );
+            damage = true;
+        }
+    }
+    assert_eq!(
+        alpha.read_hit(),
+        ownership_of(alpha_listed.id, dave_listed.id),
+        "Alpha: the claim"
+    );
+    assert_eq!(
+        dave.read_hit(),
+        point_change(
+            dave_listed.id,
+            u8::try_from(common::point_slot::POINT_HP).expect("a point byte"),
+            0,
+            PVP_HP_AFTER
+        ),
+        "Dave: the hit points"
+    );
+    assert_eq!(
+        dave.read_hit(),
+        ownership_of(alpha_listed.id, dave_listed.id),
+        "Dave: the claim"
+    );
+}
