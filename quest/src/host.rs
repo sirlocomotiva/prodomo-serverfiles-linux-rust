@@ -1530,6 +1530,23 @@ mod tests {
         );
     }
 
+    /// The owner's 51 scripts load all but the broken one: `change_empire.lua` is the
+    /// only refusal (ledger 562), and the 50 that load number into 49 quests —
+    /// `guild_manage.lua` opens a second `quest guild_building` beside
+    /// `guild_building.lua`, so the two scripts share one number.
+    #[test]
+    fn the_owner_sources_load_all_but_the_broken_quest() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe");
+        let host = Host::load(&root).unwrap_or_else(|error| panic!("{error}"));
+        let refused: Vec<&str> = host
+            .refused()
+            .iter()
+            .map(|refused| refused.path.to_str().expect("a UTF-8 path"))
+            .collect();
+        assert_eq!(refused, ["_basic/change_empire.lua"]);
+        assert_eq!(host.quests().len(), 49);
+    }
+
     /// A library that breaks, or one that is missing, fails the load, as legacy's
     /// `return false` did (`G/questlua.cpp:741-745`, `:778-782`).
     #[test]

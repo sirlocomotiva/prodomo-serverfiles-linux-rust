@@ -52771,3 +52771,25 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 565. The fifty quests
+
+`data.quest.sources` is `ported`: the `qc` port, the `quest_list`-then-path load order and
+numbering (ADR-0006), and the refuse-and-continue load all stand, witnessed over the wire by
+the burst's letters from three quests
+(`the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again`). A unit test pins
+the owner's tree: 50 of the 51 scripts load into 49 quests, the only refusal
+`change_empire.lua` (ledger 562), and `guild_manage.lua` sharing its `guild_building` number
+with `guild_building.lua` (`the_owner_sources_load_all_but_the_broken_quest`; the dedup
+mutant is killed). ADR-0004's "all 51 are live" is corrected here — 50 load — without
+changing the ADR, whose decision (Lua 5.1, shims not source edits) stands.
+
+Inventory: `data.quest.sources` missing to ported, naming the letter scenario.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite565.txt` (5356 passed, 0 failed in 46 targets), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
