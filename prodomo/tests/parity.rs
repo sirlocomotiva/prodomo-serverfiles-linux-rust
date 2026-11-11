@@ -15465,8 +15465,14 @@ fn npc_move_of(
             // A move that never came: the caller takes the swing instead.
             return Vec::new();
         }
+        // The victim's own heal ticks, between moves (ledger 559): the aggressive half
+        // wounds Alpha, and a regen tick can land inside the coward half's wait.
+        let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+        let is_heal = record.first() == Some(&GC_POINT_CHANGE)
+            && record.get(4..8) == Some(&victim.to_le_bytes())
+            && record.get(8) == Some(&hp_kind);
         assert!(
-            is_npc_chatter(&record),
+            is_heal || is_npc_chatter(&record),
             "past a move, a record nobody accounted for: {record:02x?}"
         );
     }
@@ -29419,7 +29425,7 @@ fn a_gm_flags_a_stray_dog_aggressive_and_coward() {
     sql(
         &database,
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
-         470200, 950200 FROM account WHERE login = 'bob'",
+         480000, 960000 FROM account WHERE login = 'bob'",
     );
     sql(
         &database,
@@ -29435,9 +29441,12 @@ fn a_gm_flags_a_stray_dog_aggressive_and_coward() {
     let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alice);
     read_god_login_event(&mut alice);
-    let (mut yankee, yankee_listed) =
+    let (mut yankee, _yankee_listed) =
         enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
-    alice.sees_enter(yankee_listed.id, true, None);
+    // Yankee parks out of sight (ledger 559): with both PCs in the dog's sight the
+    // summon's spawn dice picked the nearer, and the hunt of Yankee flaked the swing
+    // read. Nothing below needs Yankee in view — only its own refusal lines.
+    alice.quiet_allowing_farm("yankee enters out of view");
 
     yankee.send_record(&client_chat(CHAT_TALKING, b"/ma"));
     assert_eq!(

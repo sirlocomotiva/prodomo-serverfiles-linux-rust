@@ -52511,3 +52511,54 @@ Gates (2026-11-10): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 559. The ownership record
+
+The ledger-229p note on `gc.item_ownership` said no scenario reaches the record, because no
+hosted kill drops an item. That was true when written, and it is still true of kills; but
+the mining dig has been laying owned ore since ledger 556's neighbours, and two scenarios
+already pin the record on the wire. The row's blocker was a kill-drop system that never
+arrived, not the record itself, so this slice re-reads the send paths and flips the row.
+
+The wire matches legacy exactly: header 0x1f, the ground VID, the 25-byte name
+(`TPacketGCItemOwnership`, `G/packet.h:1495-1500`, `CHARACTER_NAME_MAX_LEN` 24), encoded by
+`view_encode::ground_ownership` through `GcNamed` with `GC_NAME_FIELD_SIZE` 25. All four
+send paths exist: the named set in `set_ground_ownership` (with the `<= 10` seconds-become-30
+rule, `G/item.cpp:1733-1775`), the empty-name clear (`SetOwnership(NULL)`, `:1735-1749`),
+the empty-name expiry in `release_expired_ownership` (`ownership_event`, `:1704-1728`), and
+the insert's ownership while the event runs (`EncodeInsertPacket`, `:192-199`; the insert
+flow at `view_encode.rs:382-386` sends it after the ground add). Scenario
+`a_vein_dug_with_a_pick_drops_its_ore_or_fails_and_trains_the_pick` pins the named set on
+the digger's wire, and `a_dug_ore_loses_its_diggers_name_fifteen_seconds_on` pins the
+empty-name lapse; both were re-run green.
+
+The kill path needed care before the flip. The distribution is ported:
+`reward_drops` lays one item for the killer and several round-robin over `drop_owner_list`
+(the 10% damage qualifiers, ties by lower VID where legacy ties by pointer — a recorded
+Defect), and `set_drop_owner` stores each owner's store id and 25-byte name; the owner
+list has its unit test, and no live scenario can pin a kill's dice (the same reason
+`sys.combat.drop` is ported but unit-tested, ledger 230ab). The gold piles looked wrong at
+first — `lay_monster_gold` lays them with `owner: None` — but legacy's `RewardGold`
+(`G/char_battle.cpp:558-750`) never calls `SetOwnership` either: it only creates and adds
+to ground. The port matches.
+
+No product code changed. Inventory: `gc.item_ownership` partial to ported, naming the dig
+scenario; one `partial` server record remains (`gc.walk_mode`, V3).
+
+The suite caught a flake in `a_gm_flags_a_stray_dog_aggressive_and_coward`, and the slice
+fixes it. First failure: the summoned dog claimed Yankee (victim 4) instead of Alpha. Both
+PCs stand 141 apart inside the dog's 2000 sight, and `find_victim` keeps the strictly
+nearer, so the summon's spawn dice picks the hunt; the swing reader only accepts the claim
+on Alpha. Yankee now parks at 480000,960000 (same map, ~14000 away, out of sight and out
+of view), its `sees_enter` replaced by a `quiet_allowing_farm`. Second failure (1 in 10
+after the first fix): a regen tick restored Alpha's HP mid-wait, and `npc_move_of` knew no
+heal rule — `read_swing_head` has always skipped the victim's `POINT_HP` change, the move
+reader did not. It skips it now. 8/8 green after both.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite559b.txt` (5345 passed, 0 failed in 46 targets), `cargo test --workspace --doc --locked
+--offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

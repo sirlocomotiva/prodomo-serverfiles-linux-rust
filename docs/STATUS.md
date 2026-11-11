@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-10, after ledger section 558 (the automatic potions).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 559
+Last reviewed: 2026-11-11, after ledger section 559 (the ownership record).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 560
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -615,7 +615,7 @@ scenario lays a sword from a full inventory and watches it go 2 s on. Since 555 
 last unwired lifetime, and every configured destroy clock now has its two-second proof. Since 556 `event.item.ownership_event` is `ported`: the dug ore's 15 s claim lapses
 in view, ending ledger 229p's D5 wait without a kill. Since 557 `event.char_battle.dead_event` is `ported`: the party reviver's 3 s/1 s
 pair finally has its scenario, and `IsRevive`'s `Reward(false)` is shown pre-empted by the
-spent exp. One `partial` timer remains (`affect_event`). Since 558 `cg.game.item_use` covers the automatic potions' toggle and `event.char_affect.affect_event` their tick (both still `partial`); the PvP gate's live-duel composition is review-only. The
+spent exp. One `partial` timer remains (`affect_event`). Since 558 `cg.game.item_use` covers the automatic potions' toggle and `event.char_affect.affect_event` their tick (both still `partial`); the PvP gate's live-duel composition is review-only. Since 559 `gc.item_ownership` is `ported`: the mining dig pins the named set and the dug ore's 15 s lapse pins the empty-name clear, while a kill's item drops carry ownership by unit-tested code and its gold piles are unowned in legacy too, and the stray-dog GM scenario's two flakes are fixed (Yankee parks out of the dog's sight; the move reader skips heal ticks). The
 next slice is the owner's call: the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
