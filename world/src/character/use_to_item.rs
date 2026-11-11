@@ -4,9 +4,11 @@
 //! `G/` = `server/server/game/`.
 
 use gamedata::item_kind::{
-    ARMOR_BODY, ARMOR_GLOVE, COSTUME_SASH, ITEM_ARMOR, ITEM_COSTUME, ITEM_PICK, ITEM_ROD,
-    ITEM_TALISMAN, ITEM_WEAPON, LIMIT_LEVEL, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
-    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, WEARABLE_BODY, WEARABLE_WEAPON,
+    ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_SASH, ITEM_ARMOR,
+    ITEM_BELT, ITEM_COSTUME, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON,
+    LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
+    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_PUT_INTO_ACCESSORY_SOCKET,
+    USE_PUT_INTO_BELT_SOCKET, WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -19,6 +21,7 @@ use super::drop_item::{
     golden_change_levels, Gauss,
 };
 use super::equip::Trail;
+use super::equipment::is_accessory_for_socket;
 use super::item_move::{done, MoveDone, MoveKind, MoveRecord};
 use super::items::CharacterItems;
 use super::{ItemChange, ItemRecord, MoveRefused};
@@ -72,6 +75,28 @@ pub const ATTR_NEED_FOUR_NOTICE: &str = "[LS;405]";
 pub const ATTR_SHADE_LEVEL_NOTICE: &str = "[LS;1064]";
 /// A shade scroll on a non-weapon, non-body target (`:6461`, `:6602`).
 pub const ATTR_SHADE_TYPE_NOTICE: &str = "[LS;1065]";
+/// The socket-adding scroll's success (`:6702`): the socket grade rose.
+pub const SOCKET_ADDED_NOTICE: &str = "[LS;406]";
+/// The socket-adding scroll's missed 50-in-100 (`:6707`, with
+/// `ENABLE_ADDSTONE_FAILURE` defined): the grade stays.
+pub const SOCKET_ADD_FAILED_NOTICE: &str = "[LS;407]";
+/// The socket-adding scroll on an accessory whose grade is already full (`:6716`).
+pub const SOCKET_FULL_NOTICE: &str = "[LS;408]";
+/// The socket scroll on a target that takes no accessory socket (`:6721`, `:6758`).
+pub const NO_ACCESSORY_SOCKET_NOTICE: &str = "[LS;409]";
+/// The jewel sits in the accessory's socket (`:6740`).
+pub const JEWEL_SET_NOTICE: &str = "[LS;410]";
+/// The jewel's missed roll (`:6746`).
+pub const JEWEL_SET_FAILED_NOTICE: &str = "[LS;411]";
+/// The jewel on an accessory with no socket opened yet (max grade 0, `:6754`).
+pub const NO_OPEN_SOCKET_NOTICE: &str = "[LS;412]";
+/// The jewel on an accessory whose sockets are all full but more could open
+/// (`:6756-6757`).
+pub const OPEN_MORE_FIRST_NOTICES: [&str; 2] = ["[LS;413]", "[LS;415]"];
+/// The jewel on a fully opened, fully set accessory (`:6760`).
+pub const JEWELS_FULL_NOTICE: &str = "[LS;416]";
+/// The jewel for another accessory (`CanPutInto`, `:6765`).
+pub const WRONG_JEWEL_NOTICE: &str = "[LS;417]";
 /// A talisman under a normal bonus scroll (`:6396`, `:6562`).
 pub const TALISMAN_ATTR_NOTICE: &str = "You cannot change attribute with this item.";
 /// A talisman under a bonus add scroll (`:6562`).
@@ -528,6 +553,12 @@ pub fn change_target_attributes(
             dice,
             attrs,
         ),
+        USE_ADD_ACCESSORY_SOCKET => {
+            add_accessory_socket(items, (scroll, scroll_proto), &target, target_proto, dice)
+        }
+        USE_PUT_INTO_ACCESSORY_SOCKET | USE_PUT_INTO_BELT_SOCKET => {
+            put_into_socket(items, (scroll, scroll_proto), &target, target_proto, dice)
+        }
         _ => silent(),
     }
 }
@@ -790,9 +821,203 @@ fn add_fifth_target_attribute(
     spend_scroll(items, scroll, scroll_proto, &mut trail)?;
     Ok(done(MoveKind::Used, trail))
 }
+/// `aiAccessorySocketPutPct` (`constants.cpp:1172-1175`): the jewel's chance by the
+/// accessory's current grade.
+const PUT_SOCKET_PCT: [i32; 4] = [90, 80, 70, 0];
+/// `aiAccessorySocketDegradeTime` (`constants.cpp:1166-1169`): the downgrade countdown
+/// a set grade starts, in seconds.
+const DEGRADE_TIME: [i32; 4] = [0, 86_400, 43_200, 21_600];
+/// The jewel-accessory rows of `CanPutInto` (`G/item.cpp:2539-2546`): the jewel vnum
+/// with the wrist, neck and ear vnum bases it fits.
+const JEWEL_TABLE: [(u32, [u32; 3]); 6] = [
+    (50_634, [14_420, 16_220, 17_220]),
+    (50_635, [14_500, 16_500, 17_500]),
+    (50_636, [14_520, 16_520, 17_520]),
+    (50_637, [14_540, 16_540, 17_540]),
+    (50_638, [14_560, 16_560, 17_560]),
+    (50_639, [14_570, 16_570, 17_570]),
+];
+/// The first jewel of the fallback ladder (`:2611`, `:2629`).
+const FIRST_FALLBACK_JEWEL: u32 = 50_623;
+/// The two necklace runs with a fixed jewel (`:2613-2627`).
+const FIXED_NECKLACES: [(u32, u32); 2] = [(50_625, 16_210), (50_626, 16_230)];
+
+/// The `USE_ADD_ACCESSORY_SOCKET` arm of `UseItemEx` (`G/char_item.cpp:6687-6724`):
+/// the scroll opens one more of the accessory's three sockets, and is spent. A
+/// non-accessory chats [`NO_ACCESSORY_SOCKET_NOTICE`], a full one
+/// [`SOCKET_FULL_NOTICE`]; the roll is 50 in 100 (`ENABLE_ADDSTONE_FAILURE` is
+/// defined, `G/char_item.cpp:2717`), chatting [`SOCKET_ADDED_NOTICE`] or
+/// [`SOCKET_ADD_FAILED_NOTICE`]. The caller ran the outer costume and glove gate.
+fn add_accessory_socket(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    target: &Item,
+    target_proto: &ItemProto,
+    dice: &mut dyn Dice,
+) -> Result<MoveDone, MoveRefused> {
+    let refused = |text: &'static str| {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(text));
+        Ok(done(MoveKind::Used, trail))
+    };
+    if !is_accessory_for_socket(target_proto) {
+        return refused(NO_ACCESSORY_SOCKET_NOTICE);
+    }
+    if target.sockets[1].clamp(0, 3) >= 3 {
+        return refused(SOCKET_FULL_NOTICE);
+    }
+    let mut trail = Trail::default();
+    if number(dice, 1, 100) <= 50 {
+        let sockets = items
+            .set_socket(target.id, 1, target.sockets[1].clamp(0, 3) + 1)
+            .map_err(|_| MoveRefused::Empty)?;
+        let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+        trail.records.push(MoveRecord::Notice(SOCKET_ADDED_NOTICE));
+        trail.records.push(MoveRecord::Item(ItemRecord::Update(
+            stored.gc_item_update(),
+        )));
+        trail.changes.push(ItemChange::Sockets {
+            id: target.id,
+            sockets,
+        });
+    } else {
+        trail
+            .records
+            .push(MoveRecord::Notice(SOCKET_ADD_FAILED_NOTICE));
+    }
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+/// The `USE_PUT_INTO_BELT_SOCKET` and `USE_PUT_INTO_ACCESSORY_SOCKET` arm of
+/// `UseItemEx` (`G/char_item.cpp:6725-6766`): the jewel sets one more of the
+/// accessory's opened sockets, and is spent. A non-accessory or a jewel for another
+/// accessory (`CanPutInto`, `G/item.cpp:2514-2631`) chats [`WRONG_JEWEL_NOTICE`].
+/// Else the grade climbs only below its maximum: with no socket opened
+/// [`NO_OPEN_SOCKET_NOTICE`] chats, with all set but more to open the two
+/// [`OPEN_MORE_FIRST_NOTICES`], and on a full accessory [`JEWELS_FULL_NOTICE`]. A
+/// set rolls [`PUT_SOCKET_PCT`] by the current grade (`SetAccessorySocketGrade`,
+/// `G/item.cpp:2279-2289`), chatting [`JEWEL_SET_NOTICE`] or
+/// [`JEWEL_SET_FAILED_NOTICE`]. The downgrade countdown is socket 2; the expiry
+/// timer that spends it (`accessory_socket_expire_event`) stays `unused`, and a
+/// graded accessory refuses the wear (`WornSystem::AccessoryTimer`).
+fn put_into_socket(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    target: &Item,
+    target_proto: &ItemProto,
+    dice: &mut dyn Dice,
+) -> Result<MoveDone, MoveRefused> {
+    let refused = |text: &'static str| {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(text));
+        Ok(done(MoveKind::Used, trail))
+    };
+    if !is_accessory_for_socket(target_proto)
+        || !can_put_into(scroll, scroll_proto, target, target_proto)
+    {
+        return refused(WRONG_JEWEL_NOTICE);
+    }
+    let max_grade = target.sockets[1].clamp(0, 3);
+    let grade = target.sockets[0].clamp(0, max_grade);
+    if grade >= max_grade {
+        if max_grade == 0 {
+            return refused(NO_OPEN_SOCKET_NOTICE);
+        }
+        if max_grade < 3 {
+            let mut trail = Trail::default();
+            for line in OPEN_MORE_FIRST_NOTICES {
+                trail.records.push(MoveRecord::Notice(line));
+            }
+            return Ok(done(MoveKind::Used, trail));
+        }
+        return refused(JEWELS_FULL_NOTICE);
+    }
+    let mut trail = Trail::default();
+    let pct = PUT_SOCKET_PCT[usize::try_from(grade).unwrap_or(3)];
+    if number(dice, 1, 100) <= pct {
+        let grade = grade + 1;
+        items
+            .set_socket(target.id, 0, grade)
+            .map_err(|_| MoveRefused::Empty)?;
+        let countdown = DEGRADE_TIME[usize::try_from(grade).unwrap_or(0)];
+        let sockets = items
+            .set_socket(target.id, 2, countdown)
+            .map_err(|_| MoveRefused::Empty)?;
+        let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+        trail.records.push(MoveRecord::Notice(JEWEL_SET_NOTICE));
+        trail.records.push(MoveRecord::Item(ItemRecord::Update(
+            stored.gc_item_update(),
+        )));
+        trail.changes.push(ItemChange::Sockets {
+            id: target.id,
+            sockets,
+        });
+    } else {
+        trail
+            .records
+            .push(MoveRecord::Notice(JEWEL_SET_FAILED_NOTICE));
+    }
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+/// `CItem::CanPutInto` (`G/item.cpp:2514-2631`): whether the `jewel` fits the
+/// `target`. A belt takes a belt jewel (`USE_PUT_INTO_BELT_SOCKET`); a ring never
+/// takes one (`CanPutIntoRing` always fails); an aura's arm is its system's, and any
+/// other non-armour refuses. On a bracelet, necklace or earring the jewel table
+/// decides first (the target's vnum rounded down to ten picks the row, and a wrong
+/// jewel for a row refuses before the ladder runs), then the fallback ladder: the
+/// target's offset from its kind's base over 20 picks the jewel past
+/// [`FIRST_FALLBACK_JEWEL`], the two necklace runs take their fixed jewels, and an
+/// offset past 11 (`type < 0`, which `u32` never reaches, or past 11) shifts by 170
+/// first.
+fn can_put_into(
+    jewel: &Item,
+    jewel_proto: &ItemProto,
+    target: &Item,
+    target_proto: &ItemProto,
+) -> bool {
+    if target_proto.item_type == ITEM_BELT {
+        return jewel_proto.sub_type == USE_PUT_INTO_BELT_SOCKET;
+    }
+    if target_proto.item_type == ITEM_RING {
+        return false;
+    }
+    if target_proto.item_type != ITEM_ARMOR {
+        return false;
+    }
+    let slot = match target_proto.sub_type {
+        ARMOR_WRIST => 0,
+        ARMOR_NECK => 1,
+        ARMOR_EAR => 2,
+        _ => return false,
+    };
+    let base = target.vnum / 10 * 10;
+    for (fitted, bases) in JEWEL_TABLE {
+        if bases[slot] == base {
+            return fitted == jewel.vnum;
+        }
+    }
+    let kind_base = [14_000, 16_000, 17_000][slot];
+    let Some(offset) = target.vnum.checked_sub(kind_base) else {
+        return false;
+    };
+    let shifted = offset.saturating_sub(170);
+    let ladder = |step: u32| FIRST_FALLBACK_JEWEL.saturating_add(step) == jewel.vnum;
+    let kind = offset / 20;
+    if kind > 11 {
+        return ladder(shifted / 20);
+    }
+    for (fitted, run) in FIXED_NECKLACES {
+        if (run..run + 10).contains(&target.vnum) {
+            return fitted == jewel.vnum;
+        }
+    }
+    ladder(kind)
+}
 
 /// `CItem::GetAttributeCount` (`G/item_attribute.cpp:287-298`): the set normal
-/// attributes from slot 0.
 fn normal_count(attributes: &[ItemAttribute]) -> i32 {
     let count = attributes
         .iter()
@@ -1409,5 +1634,346 @@ mod tests {
             "the no-attribute line chats"
         );
         assert!(items.item(10).is_some(), "the refused scroll stays");
+    }
+
+    const ADD_SOCKET: u32 = 50_621;
+    const JEWEL: u32 = 50_635;
+    const WRONG_JEWEL: u32 = 50_636;
+    const BRACELET: u32 = 14_502;
+    const BELT: u32 = 18_900;
+    const BELT_JEWEL: u32 = 18_901;
+
+    fn socket_protos() -> ItemProtos {
+        let add = ItemProto::for_category_rule(ADD_SOCKET, ITEM_USE, USE_ADD_ACCESSORY_SOCKET);
+        let jewel = ItemProto::for_category_rule(JEWEL, ITEM_USE, USE_PUT_INTO_ACCESSORY_SOCKET);
+        let wrong =
+            ItemProto::for_category_rule(WRONG_JEWEL, ITEM_USE, USE_PUT_INTO_ACCESSORY_SOCKET);
+        let bracelet = ItemProto::for_category_rule(BRACELET, ITEM_ARMOR, ARMOR_WRIST);
+        let sword = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        let belt = ItemProto::for_category_rule(BELT, ITEM_BELT, 0);
+        let belt_proto =
+            ItemProto::for_category_rule(BELT_JEWEL, ITEM_USE, USE_PUT_INTO_BELT_SOCKET);
+        ItemProtos::from_rows(vec![add, jewel, wrong, bracelet, sword, belt, belt_proto])
+    }
+
+    fn bracelet(id: u32, grade: i32, max_grade: i32) -> Item {
+        let mut item = Item::new(id, BRACELET);
+        item.sockets[0] = grade;
+        item.sockets[1] = max_grade;
+        item
+    }
+
+    fn socket_scroll(
+        items: &CharacterItems,
+        cell: u16,
+        vnum: u32,
+        protos: &ItemProtos,
+    ) -> (Item, ItemProto) {
+        let scroll = items.item_at(inv(cell)).expect("the scroll").clone();
+        let proto = protos.get(vnum).expect("the scroll proto").clone();
+        (scroll, proto)
+    }
+
+    /// A socket scroll on a bracelet with two sockets opened rolls its 50 in 100: a
+    /// hit opens the third and spends the scroll, a miss keeps two and spends it; a
+    /// full bracelet and a sword refuse without drawing.
+    #[test]
+    fn a_socket_scroll_opens_one_more_unless_full() {
+        let protos = socket_protos();
+        let (attrs, rare) = attr_rows();
+        let mut gauss = Gauss::new();
+        let mut dice = Script::new(vec![49, 50]);
+        let mut items = holding(&[(0, bracelet(9, 0, 2)), (1, Item::new(10, ADD_SOCKET))]);
+        let (scroll, proto) = socket_scroll(&items, 1, ADD_SOCKET, &protos);
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &rare,
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the add runs");
+        let kept = items.item(9).expect("the bracelet stays");
+        assert_eq!(kept.sockets[1], 3, "the third socket opens");
+        assert!(items.item(10).is_none(), "the scroll is spent");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(SOCKET_ADDED_NOTICE))),
+            "the success chats"
+        );
+    }
+
+    /// The add arm's other three answers: a miss spends the scroll and keeps the two
+    /// sockets, a full bracelet chats the full line, and a sword (no accessory)
+    /// chats the no-socket line; neither refusal spends.
+    #[test]
+    fn a_socket_scroll_fails_spent_and_refuses_the_full_and_the_sword() {
+        let protos = socket_protos();
+        let (attrs, rare) = attr_rows();
+        // A miss: draw 51 against the 50-in-100.
+        let mut gauss = Gauss::new();
+        let mut dice = Script::new(vec![50]);
+        let mut items = holding(&[(0, bracelet(9, 0, 2)), (1, Item::new(10, ADD_SOCKET))]);
+        let (scroll, proto) = socket_scroll(&items, 1, ADD_SOCKET, &protos);
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &rare,
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the miss runs");
+        assert_eq!(items.item(9).expect("the bracelet stays").sockets[1], 2);
+        assert!(items.item(10).is_none(), "the missed scroll is spent");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(SOCKET_ADD_FAILED_NOTICE))),
+            "the miss chats"
+        );
+        // A full bracelet: no draw, no spend.
+        let mut items = holding(&[(0, bracelet(9, 0, 3)), (1, Item::new(10, ADD_SOCKET))]);
+        let (scroll, proto) = socket_scroll(&items, 1, ADD_SOCKET, &protos);
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &rare,
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the full refusal runs");
+        assert_eq!(dice.at, 1, "the full bracelet draws nothing");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(SOCKET_FULL_NOTICE))),
+            "the full line chats"
+        );
+        assert!(items.item(10).is_some(), "the refused scroll stays");
+        // A sword is no accessory.
+        let mut sword = Item::new(9, SWORD);
+        sword.sockets[1] = 0;
+        let mut items = holding(&[(0, sword), (1, Item::new(10, ADD_SOCKET))]);
+        let (scroll, proto) = socket_scroll(&items, 1, ADD_SOCKET, &protos);
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &rare,
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the sword refusal runs");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(NO_ACCESSORY_SOCKET_NOTICE))),
+            "the no-socket line chats"
+        );
+        assert!(items.item(10).is_some(), "the refused scroll stays");
+    }
+
+    /// A fitted jewel on a bracelet with two sockets opened and none set rolls 90 in
+    /// 100: a hit sets the first, starts the 24-hour countdown and spends the jewel.
+    #[test]
+    fn a_fitted_jewel_sets_the_first_socket() {
+        let protos = socket_protos();
+        let (attrs, rare) = attr_rows();
+        let mut gauss = Gauss::new();
+        let mut dice = Script::new(vec![89]);
+        let mut items = holding(&[(0, bracelet(9, 0, 2)), (1, Item::new(10, JEWEL))]);
+        let (scroll, proto) = socket_scroll(&items, 1, JEWEL, &protos);
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &rare,
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the set runs");
+        let kept = items.item(9).expect("the bracelet stays");
+        assert_eq!(kept.sockets[0], 1, "the first socket sets");
+        assert_eq!(kept.sockets[2], 86_400, "the countdown starts");
+        assert!(items.item(10).is_none(), "the jewel is spent");
+        assert!(
+            done.changes.iter().any(|change| matches!(
+                change,
+                ItemChange::Sockets { id: 9, sockets } if sockets[0] == 1
+            )),
+            "the grade stores"
+        );
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(JEWEL_SET_NOTICE))),
+            "the success chats"
+        );
+    }
+
+    /// The jewel arm's refusals: a wrong jewel for the row, an unopened accessory,
+    /// a set-full one with more to open, a full one, and a missed roll; only the
+    /// miss spends.
+    #[test]
+    fn a_jewel_refuses_the_wrong_the_unopened_and_the_full() {
+        let protos = socket_protos();
+        let (attrs, rare) = attr_rows();
+        let mut gauss = Gauss::new();
+        let mut dice = Script::new(vec![90]);
+        let run = |items: &mut CharacterItems,
+                   scroll: &Item,
+                   proto: &ItemProto,
+                   dice: &mut Script,
+                   gauss: &mut Gauss,
+                   attrs: &[ItemAttrRecord],
+                   rare: &[ItemAttrRecord]| {
+            change_target_attributes(
+                items,
+                (scroll, proto),
+                inv(0),
+                &protos,
+                dice,
+                gauss,
+                attrs,
+                rare,
+                (0, 0),
+                false,
+                false,
+            )
+            .expect("the jewel arm runs")
+        };
+        // A jewel for another row (50636 against the 14500 base).
+        let mut items = holding(&[(0, bracelet(9, 0, 2)), (1, Item::new(10, WRONG_JEWEL))]);
+        let (scroll, proto) = socket_scroll(&items, 1, WRONG_JEWEL, &protos);
+        let done = run(
+            &mut items, &scroll, &proto, &mut dice, &mut gauss, &attrs, &rare,
+        );
+        assert_eq!(dice.at, 0, "the wrong jewel draws nothing");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(WRONG_JEWEL_NOTICE))),
+            "the wrong line chats"
+        );
+        assert!(items.item(10).is_some(), "the wrong jewel stays");
+        // No socket opened yet.
+        let mut items = holding(&[(0, bracelet(9, 0, 0)), (1, Item::new(10, JEWEL))]);
+        let (scroll, proto) = socket_scroll(&items, 1, JEWEL, &protos);
+        let done = run(
+            &mut items, &scroll, &proto, &mut dice, &mut gauss, &attrs, &rare,
+        );
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(NO_OPEN_SOCKET_NOTICE))),
+            "the unopened line chats"
+        );
+        assert!(items.item(10).is_some(), "the jewel stays");
+        // Both opened sockets set, a third still to open: the two lines.
+        let mut items = holding(&[(0, bracelet(9, 2, 2)), (1, Item::new(10, JEWEL))]);
+        let (scroll, proto) = socket_scroll(&items, 1, JEWEL, &protos);
+        let done = run(
+            &mut items, &scroll, &proto, &mut dice, &mut gauss, &attrs, &rare,
+        );
+        for line in OPEN_MORE_FIRST_NOTICES {
+            assert!(
+                done.records
+                    .iter()
+                    .any(|record| matches!(record, MoveRecord::Notice(found) if *found == line)),
+                "the open-more line {line} chats"
+            );
+        }
+        assert!(items.item(10).is_some(), "the jewel stays");
+        // Three set on three opened: full.
+        let mut items = holding(&[(0, bracelet(9, 3, 3)), (1, Item::new(10, JEWEL))]);
+        let (scroll, proto) = socket_scroll(&items, 1, JEWEL, &protos);
+        let done = run(
+            &mut items, &scroll, &proto, &mut dice, &mut gauss, &attrs, &rare,
+        );
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(JEWELS_FULL_NOTICE))),
+            "the full line chats"
+        );
+        assert!(items.item(10).is_some(), "the jewel stays");
+        // A missed 90 in 100 spends the jewel and sets nothing.
+        let mut items = holding(&[(0, bracelet(9, 0, 2)), (1, Item::new(10, JEWEL))]);
+        let (scroll, proto) = socket_scroll(&items, 1, JEWEL, &protos);
+        let done = run(
+            &mut items, &scroll, &proto, &mut dice, &mut gauss, &attrs, &rare,
+        );
+        assert_eq!(items.item(9).expect("the bracelet stays").sockets[0], 0);
+        assert!(items.item(10).is_none(), "the missed jewel is spent");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(JEWEL_SET_FAILED_NOTICE))),
+            "the miss chats"
+        );
+    }
+
+    /// The `CanPutInto` ladder past the jewel table: a belt takes a belt jewel and
+    /// refuses an accessory one, and the fallback ladder pairs a bracelet below the
+    /// table's rows with its computed jewel.
+    #[test]
+    fn a_belt_and_the_ladder_take_their_jewels() {
+        let protos = socket_protos();
+        let belt_proto = protos.get(BELT).expect("the belt proto");
+        assert!(is_accessory_for_socket(belt_proto));
+        let mut belt = Item::new(9, BELT);
+        belt.sockets[1] = 1;
+        let belt_jewel = Item::new(10, BELT_JEWEL);
+        let belt_jewel_proto = protos.get(BELT_JEWEL).expect("the belt jewel proto");
+        assert!(can_put_into(
+            &belt_jewel,
+            belt_jewel_proto,
+            &belt,
+            belt_proto
+        ));
+        let jewel = Item::new(11, JEWEL);
+        let jewel_proto = protos.get(JEWEL).expect("the jewel proto");
+        assert!(!can_put_into(&jewel, jewel_proto, &belt, belt_proto));
+        // Below the table: 14020 rounds to the 14020 base, no row matches, and the
+        // offset (20) over 20 is 1, so 50624 fits and 50623 does not.
+        let low = Item::new(12, 14_020);
+        let low_proto = ItemProto::for_category_rule(14_020, ITEM_ARMOR, ARMOR_WRIST);
+        let fitted = Item::new(13, 50_624);
+        let fitted_proto =
+            ItemProto::for_category_rule(50_624, ITEM_USE, USE_PUT_INTO_ACCESSORY_SOCKET);
+        assert!(can_put_into(&fitted, &fitted_proto, &low, &low_proto));
+        let other = Item::new(14, 50_623);
+        let other_proto =
+            ItemProto::for_category_rule(50_623, ITEM_USE, USE_PUT_INTO_ACCESSORY_SOCKET);
+        assert!(!can_put_into(&other, &other_proto, &low, &low_proto));
     }
 }

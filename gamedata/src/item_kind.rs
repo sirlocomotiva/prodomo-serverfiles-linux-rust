@@ -130,11 +130,18 @@ pub const USE_SPECIAL: i32 = 10;
 pub const USE_CHANGE_ATTRIBUTE: i32 = 18;
 /// `USE_ADD_ATTRIBUTE` (`C/item_length.h:273`): a bonus add scroll.
 pub const USE_ADD_ATTRIBUTE: i32 = 19;
+/// `USE_ADD_ACCESSORY_SOCKET` (`C/item_length.h:274`): a socket-adding scroll.
+pub const USE_ADD_ACCESSORY_SOCKET: i32 = 20;
+/// `USE_PUT_INTO_ACCESSORY_SOCKET` (`C/item_length.h:275`): a jewel for an
+/// accessory's socket.
+pub const USE_PUT_INTO_ACCESSORY_SOCKET: i32 = 21;
 /// `USE_ADD_ATTRIBUTE2` (`C/item_length.h:276`): a 5th-bonus add scroll.
 pub const USE_ADD_ATTRIBUTE2: i32 = 22;
 /// `USE_CHANGE_ATTRIBUTE2` (`C/item_length.h:278`), behind `__ATTR_6TH_7TH__`: a rare
 /// bonus change scroll.
 pub const USE_CHANGE_ATTRIBUTE2: i32 = 24;
+/// `USE_PUT_INTO_BELT_SOCKET` (`C/item_length.h:283`): a jewel for a belt's socket.
+pub const USE_PUT_INTO_BELT_SOCKET: i32 = 29;
 /// `USE_UNLOCK_SHAMAN` (`C/item_length.h:306`): 47. The buff-premium item (69699), which
 /// legacy answers with the success line and keeps (520: its training arm is commented out).
 pub const USE_UNLOCK_SHAMAN: i32 = 47;
@@ -332,8 +339,14 @@ mod tests {
             (USE_SPECIAL, "USE_SPECIAL"),
             (USE_CHANGE_ATTRIBUTE, "USE_CHANGE_ATTRIBUTE"),
             (USE_ADD_ATTRIBUTE, "USE_ADD_ATTRIBUTE"),
+            (USE_ADD_ACCESSORY_SOCKET, "USE_ADD_ACCESSORY_SOCKET"),
+            (
+                USE_PUT_INTO_ACCESSORY_SOCKET,
+                "USE_PUT_INTO_ACCESSORY_SOCKET",
+            ),
             (USE_ADD_ATTRIBUTE2, "USE_ADD_ATTRIBUTE2"),
             (USE_CHANGE_ATTRIBUTE2, "USE_CHANGE_ATTRIBUTE2"),
+            (USE_PUT_INTO_BELT_SOCKET, "USE_PUT_INTO_BELT_SOCKET"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
         }

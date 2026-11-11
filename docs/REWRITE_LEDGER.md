@@ -53059,3 +53059,46 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 572. The socket scrolls
+
+`sys.item.sockets` is `ported`: the `USE_ADD_ACCESSORY_SOCKET` and `USE_PUT_INTO_*`
+arms of `UseItemEx` (`G/char_item.cpp:6687-6766`) run through the bonus scrolls' step.
+The add rolls 50 in 100 (`ENABLE_ADDSTONE_FAILURE` is defined, `:2717`), chats
+`[LS;406]` on a hit and `[LS;407]` on a miss, opens socket 1 by one of three, and is
+spent either way; a non-accessory chats `[LS;409]` and a full one `[LS;408]`, without
+drawing or spending. The jewel fits by `CanPutInto` (`G/item.cpp:2514-2631`): a belt
+takes a belt jewel, a ring never takes one, the six jewel rows match the target's
+vnum rounded down to ten (a wrong jewel for a row refuses before the ladder runs),
+and the fallback ladder pairs the offset from the kind's base over 20 with the jewel
+past 50623 (the two necklace runs fixed, an offset past 11 shifted by 170). A wrong
+fit chats `[LS;417]`; with none opened `[LS;412]`, with all set but more to open the
+two `[LS;413]` and `[LS;415]`, and on a full accessory `[LS;416]`. A set rolls
+`aiAccessorySocketPutPct` by grade (`[90, 80, 70, 0]`), chats `[LS;410]` or `[LS;411]`,
+raises socket 0 with socket 2's `aiAccessorySocketDegradeTime` countdown, and is spent
+either way.
+
+The countdown's timer (`accessory_socket_expire_event`) stays `unused`, as the ledger
+that marked it said: a graded accessory refuses the wear (`WornSystem::AccessoryTimer`),
+so the countdown never ticks and `AccessorySocketDegrade` never runs. The ring arm
+does not run either (`CanPutIntoRing` always fails, and the owner's protos hold no
+ring jewel), and the aura arm is its system's.
+
+Scenario `a_socket_scroll_and_a_jewel_are_used_on_a_bracelet`: Alpha's 14000 (one
+socket opened) takes the 50621 either by opening the second or by chatting the miss,
+spends it, and refuses a second on the full bracelet with `[LS;408]`; the fitted
+50623 (the ladder's jewel for the base) sets the first stone with its 24-hour
+countdown or chats the miss, spends, and the wrong 50624 chats `[LS;417]` and stays.
+Unit pins: the add's hit/miss/full/sword answers, the set with its countdown and
+stored sockets, the jewel's four refusals with the miss spending, and the belt with
+the ladder below the table. Mutants (add always hits, any jewel fits) both killed.
+Inventory: `sys.item.sockets` is `ported`; `cg.game.item_use_to_item` stays `partial`.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite572.txt` (5392 passed, 0 failed in 46 targets),
+`cargo test --workspace --doc --locked --offline` (1 passed in 9 targets),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

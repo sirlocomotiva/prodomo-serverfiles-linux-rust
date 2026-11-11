@@ -7,11 +7,12 @@
 //! (`world::character::put_stone`), and a refine scroll (`USE_TUNING`) opens the refine
 //! window for the target (`CHARACTER::RefineItem`, `:1970-2041`), which `CG_REFINE` answers
 //! with `DoRefineWithScroll` (`:1595-1862`). A bonus scroll redraws or adds the target's
-//! bonuses (`world::character::change_target_attributes`), and a detachment scroll breaks
+//! bonuses, a socket scroll opens one more socket, and a jewel sets one
+//! (`world::character::change_target_attributes`), and a detachment scroll breaks
 //! the target's stones out (`world::character::detach_stones`, with each stone back by
 //! `AutoGiveItem`). Every other item is used as `CG_ITEM_USE` uses it: legacy's other arms
-//! ignore the second cell, and the arms that read it are not ported (the socket scrolls,
-//! the costume and talisman scrolls, the hair).
+//! ignore the second cell, and the arms that read it are not ported (the costume and
+//! talisman scrolls, the hair).
 //!
 //! A sash cleaning scroll (`USE_DETACHMENT` with `VALUE0` 7) cleans the sash's absorbed
 //! socket and attributes (`CleanSashAttr`, `G/char.cpp:10481-10500`); a changelook's
@@ -33,9 +34,10 @@ use std::ops::RangeInclusive;
 use common::item_slots::EWindows;
 use common::vid::Vid;
 use gamedata::item_kind::{
-    ITEM_METIN, ITEM_USE, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE,
-    USE_CHANGE_ATTRIBUTE2, USE_DETACHMENT, USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE,
-    USE_ELEMENT_UPGRADE, USE_TUNING,
+    ITEM_METIN, ITEM_USE, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
+    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_DETACHMENT, USE_ELEMENT_CHANGE,
+    USE_ELEMENT_DOWNGRADE, USE_ELEMENT_UPGRADE, USE_PUT_INTO_ACCESSORY_SOCKET,
+    USE_PUT_INTO_BELT_SOCKET, USE_TUNING,
 };
 use gamedata::item_proto::ItemProto;
 use protocol::gc_chat::CHAT_TYPE_INFO;
@@ -165,8 +167,10 @@ enum Arm {
     /// `USE_ELEMENT_UPGRADE`, `USE_ELEMENT_DOWNGRADE` or `USE_ELEMENT_CHANGE`: an
     /// element scroll, with its sub-type.
     Element(i32),
-    /// `USE_CHANGE_ATTRIBUTE`, `USE_ADD_ATTRIBUTE`, `USE_ADD_ATTRIBUTE2` or
-    /// `USE_CHANGE_ATTRIBUTE2`: a bonus scroll, with its sub-type.
+    /// `USE_CHANGE_ATTRIBUTE`, `USE_ADD_ATTRIBUTE`, `USE_ADD_ATTRIBUTE2`,
+    /// `USE_CHANGE_ATTRIBUTE2`, `USE_ADD_ACCESSORY_SOCKET`,
+    /// `USE_PUT_INTO_ACCESSORY_SOCKET` or `USE_PUT_INTO_BELT_SOCKET`: a bonus or
+    /// socket scroll, with its sub-type.
     Bonus(i32),
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
@@ -543,11 +547,12 @@ impl GameState {
         Ok(moved)
     }
 
-    /// The bonus scrolls (`USE_CHANGE_ATTRIBUTE`, `USE_ADD_ATTRIBUTE`,
-    /// `USE_ADD_ATTRIBUTE2`, `USE_CHANGE_ATTRIBUTE2`) of `UseItemEx`
-    /// (`G/char_item.cpp:6291-6688`) on the item at `dest`. The use's checks run first,
+    /// The bonus and socket scrolls (`USE_CHANGE_ATTRIBUTE`, `USE_ADD_ATTRIBUTE`,
+    /// `USE_ADD_ATTRIBUTE2`, `USE_CHANGE_ATTRIBUTE2`, `USE_ADD_ACCESSORY_SOCKET`,
+    /// `USE_PUT_INTO_ACCESSORY_SOCKET`, `USE_PUT_INTO_BELT_SOCKET`) of `UseItemEx`
+    /// (`G/char_item.cpp:6291-6766`) on the item at `dest`. The use's checks run first,
     /// as the scroll arm's do; then the cooldown, the draw and the spend run in the
-    /// world's step.
+    /// world's step. The cooldown stamps only what the change scroll runs.
     ///
     /// The cooldown is the world's before the step: only a mortal (`GM_PLAYER`) outside
     /// the test-server mode with a cycle above 0 (`:6401`) waits on its
@@ -700,7 +705,10 @@ impl GameState {
                     && (proto.sub_type == USE_CHANGE_ATTRIBUTE
                         || proto.sub_type == USE_ADD_ATTRIBUTE
                         || proto.sub_type == USE_ADD_ATTRIBUTE2
-                        || proto.sub_type == USE_CHANGE_ATTRIBUTE2) =>
+                        || proto.sub_type == USE_CHANGE_ATTRIBUTE2
+                        || proto.sub_type == USE_ADD_ACCESSORY_SOCKET
+                        || proto.sub_type == USE_PUT_INTO_ACCESSORY_SOCKET
+                        || proto.sub_type == USE_PUT_INTO_BELT_SOCKET) =>
             {
                 Arm::Bonus(proto.sub_type)
             }

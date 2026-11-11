@@ -680,7 +680,7 @@ pub fn accessory_socket_grade(item: &Item, proto: &ItemProto) -> i32 {
 }
 
 /// `IsAccessoryForSocket` (`item.cpp:2273-2277`): a bracelet, necklace or earring, or a belt.
-fn is_accessory_for_socket(proto: &ItemProto) -> bool {
+pub fn is_accessory_for_socket(proto: &ItemProto) -> bool {
     (proto.item_type == ITEM_ARMOR
         && [ARMOR_WRIST, ARMOR_NECK, ARMOR_EAR].contains(&proto.sub_type))
         || proto.item_type == ITEM_BELT

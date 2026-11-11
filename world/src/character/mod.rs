@@ -82,8 +82,8 @@ pub use equip::{
     wear_pos, worn_system_not_ported, CharacterLook, Gear, WornSystem, PICKUP_AFFECT_ITEM,
 };
 pub use equipment::{
-    accessory_socket_grade, counted_attrs, energy_worn_attrs, is_energy_wear, is_set_item,
-    item_applies, removal_applies, Equipment, PartChange, Worn, PARTS,
+    accessory_socket_grade, counted_attrs, energy_worn_attrs, is_accessory_for_socket,
+    is_energy_wear, is_set_item, item_applies, removal_applies, Equipment, PartChange, Worn, PARTS,
 };
 pub use give::{
     can_receive, unported_of, GiveAnswer, GiveUnported, ALCHEMIST_MOB, BLACKSMITH2_MOB,

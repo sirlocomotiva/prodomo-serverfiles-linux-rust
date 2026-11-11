@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-11, after ledger section 571 (the detachment scroll).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 572
+Last reviewed: 2026-11-11, after ledger section 572 (the socket scrolls).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 573
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -620,7 +620,7 @@ in the fight window and restores a walking player's past five seconds, `PointCha
 switch walks the flag at 0 and restores the mode line's point off it, the refill runs
 through the switch, and the consume gauge starts and stops with its lines; the uninitialized
 walk stamp is a recorded Defect, and the dead-pool gate stays a pre-existing 229d gap. Since 570 `sys.dungeon.ship_defense` is `partial` (no `missing` row remains anywhere): the wave monsters retarget the mast, swing on it through `Damage`'s NORMAL path with its SPECIAL reflect, and the mast broadcasts its HP — while the fake hydras refuse every striker. Since 571 the detachment scroll breaks the live stones out of the first three sockets and gives each back (`sys.item.sockets` stays `partial`; the socket-adding scrolls wait).
-The next slice the forest's leader branch is ported, the sash
+Since 572 `sys.item.sockets` is `ported`: the socket-adding scroll rolls its 50 in 100 and opens one of three, and the jewels fit by `CanPutInto`'s table and ladder and set with the downgrade countdown (the expiry timer stays `unused`; a graded accessory refuses the wear). The next slice the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
 

@@ -37400,6 +37400,113 @@ fn a_detachment_scroll_breaks_the_stones_out_of_a_sword() {
     );
 }
 
+/// `cg.game.item_use_to_item`: a socket scroll (50621) on a bracelet (14000, one
+/// socket opened) opens the second or misses its 50 in 100, and is spent either way.
+/// A socket scroll on a full (three opened) bracelet chats `[LS;408]` and stays. A
+/// fitted jewel (50623 for the 14000 base) on the bracelet sets the first stone and
+/// stays spent; a wrong jewel (50624) chats `[LS;417]` and stays.
+#[test]
+fn a_socket_scroll_and_a_jewel_are_used_on_a_bracelet() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, cell, vnum, socket0, socket1) in [
+        (41, 0, 14_000, 0, 1),
+        (42, 1, 14_000, 0, 3),
+        (43, 2, 50_621, 0, 0),
+        (44, 3, 50_621, 0, 0),
+        (45, 4, 50_623, 0, 0),
+        (46, 5, 50_624, 0, 0),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, \
+                 socket1) SELECT {id}, id, 1, {cell}, 1, {vnum}, {socket0}, {socket1} \
+                 FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+
+    // When: Alpha uses the first socket scroll on the bracelet. Then: the scroll
+    // clears, and the bracelet gains a socket or the miss chats.
+    alpha.send_record(&client_use_to_item(2, 0));
+    let first = alpha.read_game();
+    let opened = first == an_info_line(b"[LS;406]");
+    if opened {
+        let bracelet = alpha.read_game();
+        assert_eq!(
+            bracelet[..4],
+            [ITEM_UPDATE, 1, 0, 0],
+            "the bracelet: {bracelet:02x?}"
+        );
+        assert_eq!(bracelet[18..22], 2_i32.to_le_bytes(), "socket 1 opens");
+    } else {
+        assert_eq!(first, an_info_line(b"[LS;407]"), "the miss chats");
+    }
+    let scroll = alpha.read_game();
+    assert_eq!(
+        scroll[..8],
+        [ITEM_SET, 1, 2, 0, 0, 0, 0, 0],
+        "the scroll clears"
+    );
+    alpha.quiet("the add's records end with the cleared scroll");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 43");
+
+    // And: a socket scroll on the full bracelet chats `[LS;408]` and stays.
+    alpha.send_record(&client_use_to_item(3, 1));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;408]"));
+    alpha.quiet("the refused scroll changes nothing");
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE id = 44 AND count = 1",
+    );
+
+    // When: Alpha uses the fitted jewel on the bracelet. Then: the first stone sets
+    // or the miss chats, and the jewel is spent either way.
+    alpha.send_record(&client_use_to_item(4, 0));
+    let jewel = alpha.read_game();
+    if jewel == an_info_line(b"[LS;410]") {
+        let bracelet = alpha.read_game();
+        assert_eq!(
+            bracelet[..4],
+            [ITEM_UPDATE, 1, 0, 0],
+            "the bracelet: {bracelet:02x?}"
+        );
+        assert_eq!(bracelet[14..18], 1_i32.to_le_bytes(), "socket 0 sets");
+        assert_eq!(
+            bracelet[22..26],
+            86_400_i32.to_le_bytes(),
+            "the countdown starts"
+        );
+    } else {
+        assert_eq!(jewel, an_info_line(b"[LS;411]"), "the miss chats");
+    }
+    let spent = alpha.read_game();
+    assert_eq!(
+        spent[..8],
+        [ITEM_SET, 1, 4, 0, 0, 0, 0, 0],
+        "the jewel clears"
+    );
+    alpha.quiet("the jewel's records end with the cleared jewel");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 45");
+
+    // And: the wrong jewel chats `[LS;417]` and stays.
+    alpha.send_record(&client_use_to_item(5, 0));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;417]"));
+    alpha.quiet("the wrong jewel changes nothing");
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE id = 46 AND count = 1",
+    );
+}
+
 /// `cg.game.refine_element`, `gc.window.refine_element`: an element scroll (56004, lightning)
 /// used on the +7 sword (17) stands the upgrade window for it; `CG_REFINE_ELEMENT` with a
 /// change's element lands the upgrade, spending the scroll and the 3,000,000 fee; a hex
