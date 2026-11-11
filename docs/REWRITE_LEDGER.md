@@ -52824,3 +52824,29 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 567. The unread regens
+
+`data.regen.dungeon` is `partial`: the format loads, but no ported path reads it.
+
+All 119 files under `data/dungeon/` and `data/event/` parse with the shared map-regen
+reader (`gamedata::regen::parse`, `ga` group lines included), 0 faults — a throwaway probe
+over both trees, since removed. The readers are all unported: `data/dungeon/**` is read
+only by `CDungeon::SpawnRegen`, whose callers are `d.regen_file`/`d.set_regen_file` (both
+`unused` — no quest calls them) and Hydra's wave spawns (`ShipDefense.cpp`,
+`sys.dungeon.ship_defense`, missing); `data/event/**` is read only by the five unported
+event-manager state arms (boss, metin, mining, frog and tanaka,
+`event_manager.cpp:999-1354`). The row flips to `ported` with the first of those callers.
+
+No code changed.
+
+Inventory: `data.regen.dungeon` missing to partial, naming the parse proof and the pending
+callers.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite567.txt` (5356 passed, 0 failed in 46 targets), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.
