@@ -53390,3 +53390,22 @@ tenth line.
 Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5418 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 581. The guild's whole door
+
+`cg.game.guild` waited on "notices". The arm audit finds there is no separate
+notice wire arm to wait on: all 15 `GUILD_SUBHEADER_CG_*` of `G/packet.h:2169-2183`
+are cased in `CInputMain::Guild` (`G/input_main.cpp:2828-3154`) and named in the
+Rewrite's routing (`prodomo/src/main.rs:3994-4068`) — the invite, the answer, the
+removal, the rename, the re-auth, the re-grade, the general flag, the offer, the
+charge, the post, the delete, the refresh, the cast, and the two money arms, which
+stay quiet past the frame check as legacy's early returns do
+(`main.rs:4058-4062`). The `NOTICE` text is a grade bit (`GUILD_AUTH_NOTICE`) and
+a comment convention (a `!`-first post needs the bit, `:3068-3070`), both ported
+with the comment arms (`guild.rs:2922-2926`, the 230q scenario).
+
+No code change. The row is `ported` on `a_guild_ups_and_casts_its_skills`.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5418 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.
