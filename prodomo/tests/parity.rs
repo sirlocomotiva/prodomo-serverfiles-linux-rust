@@ -53473,3 +53473,160 @@ fn a_revenge_hit_on_a_negative_player_lands_and_a_like_aligned_one_is_refused() 
         "Dave: the claim"
     );
 }
+
+/// `sys.char.pk`: the hide-alignment cloak (70048) is worn and taken off through
+/// `CG_ITEM_MOVE`, and the shown alignment follows it while the stored one stays.
+///
+/// Alpha is stored with alignment 4321 and given the cloak at cell 0. Wearing it onto
+/// the first unique cell (187) sends the equip records and then the look with `sAlignment` 0
+/// (`ShowAlignment(false)`, `G/char_item.cpp:8556-8557`); the client's own additional
+/// info at entry showed 432. Taking it off again sends the look with 432
+/// (`ShowAlignment(true)`, `:8287-8288`), and the stored row still says 4321.
+#[test]
+fn a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET alignment = 4321 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, \
+         1, 0, 1, 70048 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    assert_eq!(
+        protos
+            .get(70_048)
+            .expect("the owner's data has it")
+            .item_type,
+        gamedata::item_kind::ITEM_UNIQUE,
+        "the cloak is a unique of the owner's data"
+    );
+    let entered_at = std::time::Instant::now();
+    let (keyed, character, quickslots, load_sets) =
+        load_with_quickslots_in(&server, b"alice", 0, ENGLISH);
+    assert_eq!(character.name, b"Alpha");
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    assert_eq!(load_sets.len(), 1, "the load sets the cloak");
+    let mut alpha = keyed;
+    let entered = enter_game_view(&mut alpha);
+    let add = entered.add;
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    // Past the equip's 1.5 s window (the entry itself took most of it) and the
+    // revive's five seconds, so the affect end's pair lands here and not in a
+    // move's window.
+    std::thread::sleep(Duration::from_millis(1600).saturating_sub(entered_at.elapsed()));
+    drain_revive_end(&mut alpha, entered_at);
+
+    // When: the cloak is moved onto the first unique cell.
+    alpha.send_record(&client_item_move(0, 187, 0));
+    // Then: the cell clears, the wear cell sets, the battle points recompute, and the
+    // wear step's look carries 432 with the hide's look carrying 0 behind it.
+    let (seen, updates) = read_a_move_with_updates(&mut alpha, vid);
+    let seen = seen
+        .into_iter()
+        .filter(|seen| !matches!(seen, Seen::Look(..)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seen,
+        [
+            Seen::Set(0, 0),
+            Seen::Set(187, 70_048),
+            Seen::Point(18, 344),
+            Seen::Point(20, 168),
+            Seen::Point(16, 168),
+            Seen::Point(20, 172),
+            Seen::Point(22, 348),
+            Seen::Point(23, 180),
+        ]
+    );
+    let shown = updates
+        .iter()
+        .map(|update| update.s_alignment)
+        .collect::<Vec<_>>();
+    assert_eq!(shown, [432, 0], "the wear step's look, then the hide");
+
+    // When: it is taken off again.
+    alpha.send_record(&client_item_move(187, 0, 0));
+    // Then: the wear cell clears, the points recompute, the cell sets, the step's
+    // own look carries the still-hidden 0, and the show's look behind it carries 432.
+    let (seen, updates) = read_a_move_with_updates(&mut alpha, vid);
+    let seen = seen
+        .into_iter()
+        .filter(|seen| !matches!(seen, Seen::Look(..)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seen,
+        [
+            Seen::Set(187, 0),
+            Seen::Point(18, 344),
+            Seen::Point(20, 168),
+            Seen::Point(16, 168),
+            Seen::Point(20, 172),
+            Seen::Point(22, 348),
+            Seen::Point(23, 180),
+            Seen::Set(0, 70_048),
+        ]
+    );
+    let shown = updates
+        .iter()
+        .map(|update| update.s_alignment)
+        .collect::<Vec<_>>();
+    assert_eq!(shown, [0, 432], "the take-off step's look, then the show");
+    check(
+        &database,
+        "(SELECT alignment = 4321 FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// [`read_a_move`], with the decoded `GC_CHARACTER_UPDATE` records of `vid` beside it,
+/// in order.
+fn read_a_move_with_updates(
+    keyed: &mut Keyed,
+    vid: u32,
+) -> (Vec<Seen>, Vec<protocol::gc_actors::GcCharacterUpdate>) {
+    use protocol::gc_actors::GcCharacterUpdate;
+    let language = keyed.language;
+    let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    let mut updates = Vec::new();
+    let seen = records
+        .iter()
+        .filter(|record| !is_revive_end(record))
+        .map(|record| match record.first().copied().unwrap_or_default() {
+            ITEM_SET => {
+                let (window, cell, vnum, _count) = set_fields(record);
+                assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
+                Seen::Set(cell, vnum)
+            }
+            GC_POINT_CHANGE => {
+                assert_eq!(&record[4..8], &vid.to_le_bytes(), "the mover's VID");
+                let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+                Seen::Point(record[8], value)
+            }
+            GC_SPECIAL_EFFECT => {
+                assert_eq!(&record[2..6], &vid.to_le_bytes(), "the mover's VID");
+                Seen::Effect(record[1])
+            }
+            GC_CHARACTER_UPDATE => {
+                let update = GcCharacterUpdate::decode(record).expect("a character update decodes");
+                assert_eq!(update.dw_vid, vid, "the mover's VID");
+                assert_eq!(update.b_language, language, "the mover's language");
+                updates.push(update);
+                Seen::Look(update.aw_part, update.b_moving_speed, update.b_attack_speed)
+            }
+            other => panic!("a record nobody accounted for in a move: header {other}"),
+        })
+        .collect();
+    (seen, updates)
+}

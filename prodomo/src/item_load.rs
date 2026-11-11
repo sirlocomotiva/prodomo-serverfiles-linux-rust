@@ -56,9 +56,10 @@
 //!   [`Refused::WindowNotPorted`](crate::item_load::Refused::WindowNotPorted) and left in the
 //!   store.
 //! - **A worn item that starts a system not ported is refused, not worn.** A dragon soul stone,
-//!   an aura, mount or pet costume, a unique item, an item with a running timer, an accessory
-//!   with stones, an item with immunity flags, and an item with a bonus type whose point is not
-//!   ported are each a [`Refused::WornNotPorted`](crate::item_load::Refused::WornNotPorted). A
+//!   an aura, mount or pet costume, a unique item other than the hide-alignment cloak 70048,
+//!   an item with a running timer, an accessory with stones, an item with immunity flags, and
+//!   an item with a bonus type whose point is not ported are each a
+//!   [`Refused::WornNotPorted`](crate::item_load::Refused::WornNotPorted). A
 //!   dragon soul stone is refused before its cell is read, because its deck is not ported.
 //! - **An `EQUIPMENT` cell is read whole.** `EquipTo` and `GetWear` take a `BYTE`, so legacy
 //!   wears a row at cell 256 in cell 0. Here any cell from `WEAR_MAX_NUM` up is set aside.

@@ -3725,7 +3725,9 @@ mod tests {
     fn a_kill_raises_alignment_and_a_tenth_crossing_sends_the_update() {
         for (start, crossed) in [(8_i32, true), (0_i32, false)] {
             let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
-            world.bodies.get_mut(&Vid::new(1)).unwrap().card.alignment = start;
+            let body = world.bodies.get_mut(&Vid::new(1)).unwrap();
+            body.card.alignment = start;
+            body.shown_alignment = Some(start);
             world.target(Vid::new(1), ME);
             hit(&mut world, 1, ME);
             drained(&mut alpha);
@@ -3792,7 +3794,9 @@ mod tests {
             }
             let (mut alpha, _shown) = enter_seeing_with(&mut world, PLACE, 1, NEAR, 12_345, &items);
             world.process_pulse(P0);
-            world.bodies.get_mut(&Vid::new(1)).unwrap().card.alignment = -8;
+            let seeded = world.bodies.get_mut(&Vid::new(1)).unwrap();
+            seeded.card.alignment = -8;
+            seeded.shown_alignment = Some(-8);
             world.target(Vid::new(1), ME);
             hit(&mut world, 1, ME);
             drained(&mut alpha);

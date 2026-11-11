@@ -709,6 +709,10 @@ pub(super) struct Session<'s> {
     /// `GetRealAlignment()` of the character the script runs for, as `pc.change_alignment`
     /// leaves it: the value the script reads back, applied to the world after the step.
     pub(super) alignment: i32,
+    /// `GetAlignment()` of the character the script runs for: the shown value, 0 while
+    /// the hide-alignment unique holds it. Scripts never change it; `pc.get_alignment`
+    /// reads it.
+    pub(super) shown_alignment: i32,
     /// Every `pc.change_alignment` amount, in order, for [`GameState::update_alignment`] after
     /// the step (legacy runs it in the script).
     pub(super) alignment_changes: Vec<i32>,
@@ -1976,6 +1980,12 @@ impl Game for Session<'_> {
     /// later read in the same script sees the value the earlier change made.
     fn real_alignment(&self) -> i32 {
         self.alignment
+    }
+
+    /// `GetAlignment()` (`G/char_battle.cpp:3457`), as the world holds it: the shown
+    /// value, 0 while the hide-alignment unique holds it.
+    fn shown_alignment(&self) -> i32 {
+        self.shown_alignment
     }
 
     /// `UpdateAlignment(amount)` (`G/char_battle.cpp:3477-3565`): the script's change joins the
@@ -6137,6 +6147,9 @@ fn session_literal<'s>(
         online: roster.1,
         affects: affects.get_mut(&reader),
         alignment: bodies.get(&reader).map_or(0, |body| body.card.alignment),
+        shown_alignment: bodies.get(&reader).map_or(0, |body| {
+            body.shown_alignment.unwrap_or(body.card.alignment)
+        }),
         horse_name: context.horse_name,
         name_rules,
         alignment_changes: Vec::new(),
@@ -6488,6 +6501,7 @@ mod tests {
             slots: params.slots,
             affects: params.affects,
             alignment: 0,
+            shown_alignment: 0,
             alignment_changes: Vec::new(),
             gold_changes: Vec::new(),
             hides: Vec::new(),
@@ -6692,6 +6706,23 @@ mod tests {
             giver: None,
         });
         f(&mut session)
+    }
+
+    /// `pc.get_alignment` reads the session's shown value, not the real one: 0 while the
+    /// hide-alignment unique holds it, even as `pc.get_real_alignment` answers the stored.
+    #[test]
+    fn the_session_reads_the_shown_alignment_beside_the_real() {
+        use quest::manager::Game;
+        let (protos, names) = (MobProtos::default(), MobNamesByLanguage::default());
+        let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            session.alignment = 10_005;
+            session.shown_alignment = 0;
+            assert_eq!(session.real_alignment(), 10_005);
+            assert_eq!(session.shown_alignment(), 0);
+            session.shown_alignment = 10_005;
+            assert_eq!(session.shown_alignment(), 10_005);
+        });
     }
 
     /// `pc.get_skill_group` reads the card's group, and with no character in the world the

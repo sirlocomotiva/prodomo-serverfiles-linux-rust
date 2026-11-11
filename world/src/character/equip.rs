@@ -13,9 +13,10 @@
 //!
 //! Before its first change, an equip refuses an item whose wearing starts a system this build
 //! does not have ([`WornSystem`]): a dragon soul stone or an aura costume, an
-//! `ITEM_UNIQUE` or `WEARABLE_UNIQUE` item, a timed item, an accessory with stones, an item
-//! with immunities, and a bonus type whose point is not ported. The item load refuses the same
-//! items in a wear cell, so everything worn can be taken off.
+//! `ITEM_UNIQUE` or `WEARABLE_UNIQUE` item other than the hide-alignment cloak 70048, a
+//! timed item, an accessory with stones, an item with immunities, and a bonus type whose
+//! point is not ported. The item load refuses the same items in a wear cell, so everything
+//! worn can be taken off.
 //!
 //! # One Defect this does not reproduce
 //!
@@ -229,7 +230,15 @@ pub fn worn_system_not_ported(
     if proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_AURA {
         return Some(WornSystem::Aura);
     }
-    if proto.item_type == ITEM_UNIQUE {
+    // An `ITEM_UNIQUE` starts the unique expiry event (`EquipTo`, `G/item.cpp:1458-1487`,
+    // `StartUniqueExpireEvent`, `G/item.cpp:2165-2194`), still unported — except the cloak
+    // 70048, whose only wear effect is hiding the shown alignment (`ShowAlignment(false)`,
+    // `G/char_item.cpp:8556-8557`): its apply list is empty and it carries no special
+    // group, so wearing it starts nothing else. The wear's own timer is legacy's one
+    // minute (`iSec = 60` when the saved socket is 0); the Rewrite wears the cloak
+    // without the timer, as it wears the medal uniques' reads without theirs. This arm
+    // stays narrow until the expiry event is ported: only the cloak wears.
+    if proto.item_type == ITEM_UNIQUE && item.vnum != 70_048 {
         return Some(WornSystem::Unique);
     }
     if proto.timer_based_on_wear.is_some() {
@@ -648,7 +657,10 @@ impl<'s, 'g> Equipper<'s, 'g> {
         if matches!(item.vnum, 71_069..=71_074) {
             return Err(MoveRefused::UnmarriedUnique);
         }
-        if proto.wear_flags & WEARABLE_UNIQUE != 0 {
+        // A `WEARABLE_UNIQUE` item starts the unique expiry event (`EquipTo`,
+        // `G/item.cpp:1458-1487`) — except the cloak 70048, whose only wear effect is
+        // hiding the shown alignment; see `worn_system_not_ported`.
+        if proto.wear_flags & WEARABLE_UNIQUE != 0 && item.vnum != 70_048 {
             return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique)));
         }
         if proto.item_type == ITEM_RING {
@@ -1344,6 +1356,8 @@ mod tests {
     const TIMED_MOUNT: u32 = 52_002;
     const MALE_ONLY: u32 = 11_230;
     const UNIQUE: u32 = 71_001;
+    /// The hide-alignment cloak (`G/unique_item.h:28`): the one unique that wears.
+    const HIDE_ALIGNMENT_CLOAK: u32 = 70_048;
     /// A marriage unique (`G/marriage.cpp:24-29`): worn, it needs a married wearer.
     const MARRIAGE_UNIQUE: u32 = 71_069;
     const RING: u32 = 70_001;
@@ -1467,6 +1481,7 @@ mod tests {
             proto(WEDDING, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY),
             male_only,
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
+            proto(HIDE_ALIGNMENT_CLOAK, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
             proto(MARRIAGE_UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
             proto(RING, ITEM_RING, 0, 0),
             level_ten,
@@ -2062,6 +2077,18 @@ mod tests {
             case.refused(inv(3), wear_pos(EWearPositions::Unique1 as u16)),
             MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique))
         );
+    }
+
+    #[test]
+    fn the_hide_alignment_cloak_wears_while_other_uniques_refuse() {
+        let mut case = Case::new(&[(inv(3), Item::new(7, HIDE_ALIGNMENT_CLOAK))]);
+        // `CG_ITEM_USE` knows no unique arm (`USED_BY_WEARING` has no `ITEM_UNIQUE`),
+        // so the wear goes through the move path, as the scenario's does.
+        let done = case
+            .run(inv(3), wear_pos(EWearPositions::Unique1 as u16))
+            .expect("the cloak wears");
+        assert_eq!(done.kind, MoveKind::Equipped);
+        assert_eq!(case.at(wear_pos(EWearPositions::Unique1 as u16)), Some(7));
     }
 
     #[test]

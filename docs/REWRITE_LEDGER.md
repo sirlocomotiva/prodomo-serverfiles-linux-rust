@@ -53226,3 +53226,55 @@ the clean tree. The fourth run skips those five and is green to `/tmp/suite576d.
 (5398 passed, 0 failed in 46 targets). `rustfmt` and `cargo-clippy` are the `/usr/bin`
 pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No
 ADR changed.
+
+## 577. The hidden alignment
+
+`sys.char.pk` closes ledger 234's named gap: the hide-alignment unique's second value is
+ported. Legacy keeps `m_iAlignment` and `m_iRealAlignment` as two values
+(`G/char_battle.cpp:3452-3475`); the Rewrite kept one. Now the card holds the real one
+and the body the shown one (`Body::shown_alignment`, seeded equal at entry per
+`SetPlayerProto`, `G/char.cpp:2244-2245`). `UpdateAlignment`'s `bShow` arm
+(`:3479-3481`) moves the shown and sends the update only when the two agree; while the
+cloak holds the shown at 0, kills and quest changes move the real in silence. The wear
+and take-off run `ShowAlignment` (`:3457-3475`, `G/char_item.cpp:8287-8288,8556-8557`),
+and `pc.get_alignment` reads the shown while `pc.get_real_alignment` reads the real
+(`G/questlua_pc.cpp:1081-1091`).
+
+Three findings shaped the slice. First, the cloak 70048 is `WEAR_SHIELD` in its proto,
+but the file cell reads as `WEARABLE_UNIQUE` (the reader's name table crosses the two
+pins, `ProtoReader.cpp:426`), so `FindEquipCell` puts it on the first unique cell —
+and the port's `wears_vnum` check reads every worn cell, so it lands wherever the
+proto puts it. Second, the wear's own look carries the old shown (its `Mover` is built
+before the step), so the hide's update joins the step's own records behind it, fanned
+to the view with the look; a direct send would race the store-first ordering the
+descriptor keeps. Third, the take-off answers `Moved`, not `Unequipped` (the worn cell
+clears, then the grid path sets the destination), so the sync runs on every kind but
+the refusal and lets `ShowAlignment`'s equality silence the rest.
+
+The cloak is the one unique that wears: `worn_system_not_ported` and the `CanEquipNow`
+`WEARABLE_UNIQUE` arm except it, and every other unique still refuses
+(`world::character::equip::the_hide_alignment_cloak_wears_while_other_uniques_refuse`).
+The unique expiry event with its `Start/StopUniqueExpireEvent` arms is still unported,
+so the cloak never expires — a named wait, not a silent drop. `CG_ITEM_USE` knows no
+unique arm (`USED_BY_WEARING` has no `ITEM_UNIQUE`), so the wear goes through the move
+path; legacy's `UseItem` routes the same way through `EquipItem`.
+
+Proved by `a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it`: Alpha
+stored at 4321 wears the cloak onto cell 187 — the sets, the recompute, the step's
+look at 432 and the hide's look at 0 — takes it off — the step's look at 0 and the
+show's look at 432 — and the stored row still says 4321. The unit pins are
+`show_alignment_hides_restores_and_silences_the_crossing` (hide, re-hide silent,
+hidden crossing silent, show, re-show silent), `the_cloaks_wear_and_takeoff_hide_and_show`
+(the sync joins and fans exactly one update each way), and the quest `Game`
+`shown_alignment` reads (probe, session, and the seeded `Session` field). Three
+mutants killed: the sync skipping `Moved` (scenario fails), the inverted `show` arm
+(unit fails), and the world gate un-narrowed (world test fails).
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite (see below), `cargo test --workspace --doc --locked --offline`,
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. The full suite is
+green to `/tmp/suite577.txt` (5408 passed, 0 failed in 46 targets).
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

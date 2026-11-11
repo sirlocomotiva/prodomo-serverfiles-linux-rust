@@ -1073,7 +1073,10 @@ pub struct PcCard {
     pub pk_mode: u8,
     /// `GetSkillGroup()`: the heal and the shaman shares read it in the world.
     pub skill_group: u8,
-    /// `GetAlignment()`: the stored alignment, which the kills raise.
+    /// `GetRealAlignment()`: the stored alignment, which the kills raise and the rules
+    /// read. The value the client is shown lives on the world's body beside this card
+    /// (`Body::shown_alignment`), and leaves this one only while the hide-alignment
+    /// unique (70048) holds it at 0 (`ShowAlignment`, `G/char_battle.cpp:3457-3475`).
     pub alignment: i32,
     /// `POINT_VOICE`, which a mid-game points record carries.
     pub voice: u8,

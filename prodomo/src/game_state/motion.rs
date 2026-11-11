@@ -198,6 +198,11 @@ pub(super) struct Body {
     /// `SetPolymorph` reencodes, the killer bit while killer mode is on. One struct,
     /// because the lint refuses a fifth bool on this struct.
     pub(super) add_state: AddState,
+    /// `m_iAlignment` (`G/char.h:1444`): the value the client is shown, in full units
+    /// (the wire divides by 10). It follows the card's real one except while the
+    /// hide-alignment unique (70048) holds it at 0 (`ShowAlignment`,
+    /// `G/char_battle.cpp:3457-3475`). `None` until the entry seeds it from the card.
+    pub(super) shown_alignment: Option<i32>,
     /// `m_iKillerModePulse` (`G/char.h:1447`): the Pulse of the last `SetKillerMode`,
     /// which `UpdateKillerMode` counts 30 seconds from. Stamped on every set and every
     /// clear, as legacy stamps both.
@@ -255,6 +260,7 @@ impl Body {
                 spawn: false,
                 killer: false,
             },
+            shown_alignment: None,
             killer_pulse: 0,
         }
     }
@@ -395,10 +401,12 @@ impl GameState {
     }
 
     /// What `UpdatePacket` sends of the alignment of the body under `vid`
-    /// (`GetRealAlignment() / 10`, `G/char.cpp:1320`), or 0 with no body.
+    /// (`m_iAlignment / 10`, `G/char.cpp:1314`): the shown value, 0 while the
+    /// hide-alignment unique holds it, or 0 with no body.
     pub(super) fn alignment_of(&self, vid: u32) -> i16 {
         self.bodies.get(&Vid::new(vid)).map_or(0, |body| {
-            i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX)
+            i16::try_from(body.shown_alignment.unwrap_or(body.card.alignment) / 10)
+                .unwrap_or(i16::MAX)
         })
     }
 
@@ -504,17 +512,19 @@ impl GameState {
         self.maps.entry(key).or_insert_with(MapIndex::treeless);
         // `Show`: the move time starts at the entering clock (`G/char.cpp:261`).
         let now = self.clock.now();
-        self.bodies.insert(
-            vid,
-            Body::new(
-                place.channel,
-                place.map,
-                (place.x, place.y),
-                card,
-                self.last_pulse,
-                now,
-            ),
+        // `SetPlayerProto` (`G/char.cpp:2244-2245`): the shown alignment starts at the
+        // stored one.
+        let shown = card.alignment;
+        let mut body = Body::new(
+            place.channel,
+            place.map,
+            (place.x, place.y),
+            card,
+            self.last_pulse,
+            now,
         );
+        body.shown_alignment = Some(shown);
+        self.bodies.insert(vid, body);
         // `CWarMapManager::Find(GetMapIndex())` (`G/input_login.cpp:780`): a character
         // that enters a war map joins it.
         self.join_war_map(vid, place.map);

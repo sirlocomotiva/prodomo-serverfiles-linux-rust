@@ -5083,6 +5083,9 @@ mod tests {
             slots: pc_skills.entry(reader.raw()).or_default(),
             affects: affect_events.get_mut(&reader),
             alignment: bodies.get(&reader).map_or(0, |body| body.card.alignment),
+            shown_alignment: bodies.get(&reader).map_or(0, |body| {
+                body.shown_alignment.unwrap_or(body.card.alignment)
+            }),
             horse_name: Vec::new(),
             name_rules: crate::select_phase::NameRules::default(),
             alignment_changes: Vec::new(),

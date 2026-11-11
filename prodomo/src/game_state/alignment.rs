@@ -3,14 +3,15 @@
 //! Legacy keeps `m_iAlignment` and `m_iRealAlignment` as two values; the shown one leaves the
 //! real one only while the hide-alignment unique (70048) holds it at 0 through
 //! `ShowAlignment(false)` (`G/char_battle.cpp:3457-3475`, `G/char_item.cpp:8287-8288,8556-8557`,
-//! `G/item.cpp:2177-2178,2236-2237`). No ported path grants that unique, so this build keeps one
-//! value and the client-visible one always follows it.
+//! `G/item.cpp:2177-2178,2236-2237`). This build keeps both: the card holds the real one,
+//! the body the shown one (`Body::shown_alignment`), seeded equal at entry.
 //!
 //! # What legacy does
 //!
 //! `UpdateAlignment(iAmount)` takes the /10 the shown value last had, clamps the real value,
-//! and — since shown and real agree — copies it to the shown one and sends `UpdatePacket`
-//! when the /10 moved. Then it tests
+//! and — when shown and real agree — copies it to the shown one and sends `UpdatePacket`
+//! when the /10 moved. While the unique holds the shown at 0 they disagree, so neither
+//! the copy nor the update happens. Then it tests
 //! the eight bonus affects in its own order — 570, 573, 572, 571, 574, 575, 576, 577 — and
 //! removes each one the new value no longer keeps. Finally the band that holds the value
 //! adds its two affects with `bOverride`: band 1 (10000-39999) gives 570
@@ -65,6 +66,9 @@ pub(super) const ALIGNMENT_BONUS_6: u32 = 575;
 pub(super) const ALIGNMENT_BONUS_7: u32 = 576;
 /// `ALIGNMENT_BONUS_8` (`G/affect.h:115`): band 4's max-HP bonus.
 pub(super) const ALIGNMENT_BONUS_8: u32 = 577;
+/// `UNIQUE_ITEM_HIDE_ALIGNMENT_TITLE` (`G/unique_item.h:28`): worn, the shown alignment
+/// is 0 (`ShowAlignment(false)`); taken off, it returns to the real one.
+pub(super) const HIDE_ALIGNMENT_UNIQUE: u32 = 70_048;
 
 /// The order `UpdateAlignment` tests the bonus affects in (`G/char_battle.cpp:3495-3541`):
 /// 570, 573, 572, 571, 574, 575, 576, 577.
@@ -149,19 +153,28 @@ pub(super) fn alignment_bonus(kind: u32, slot: usize, value: i32) -> Affect {
 
 impl GameState {
     /// `CHARACTER::UpdateAlignment` (`G/char_battle.cpp:3477-3565`) on the player under
-    /// `vid`: clamp the real alignment, send the update when its /10 moved (before the
-    /// band changes, with the flags the character still holds), remove each bonus the new
-    /// value no longer keeps in legacy's order, then add the band's two affects.
+    /// `vid`: clamp the real alignment; when the shown and the real agree, the shown
+    /// follows it and the update goes out on a /10 move (before the band changes, with
+    /// the flags the character still holds); then remove each bonus the new value no
+    /// longer keeps in legacy's order, and add the band's two affects. While the
+    /// hide-alignment unique holds the shown at 0, no update goes out here — the wear
+    /// and the take-off send their own (`ShowAlignment`, `:3457-3475`).
     pub(super) fn update_alignment(&mut self, vid: Vid, amount: i32) {
         let Some(body) = self.bodies.get(&vid) else {
             return;
         };
-        let before = body.card.alignment / 10;
+        // `bShow` (`:3479-3481`): the shown follows only when it agrees with the real.
+        let shown = body.shown_alignment.unwrap_or(body.card.alignment);
+        let show = shown == body.card.alignment;
+        let before = shown / 10;
         let after = clamped_alignment(body.card.alignment, amount);
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.card.alignment = after;
+            if show {
+                body.shown_alignment = Some(after);
+            }
         }
-        if before != after / 10 {
+        if show && before != after / 10 {
             let flags = self.affect_flags_of(vid);
             self.send_affect_update(vid, flags);
         }
@@ -178,6 +191,60 @@ impl GameState {
             for (kind, slot, value) in bonuses {
                 self.add_pc_affect(vid, alignment_bonus(kind, slot, value), true);
             }
+        }
+    }
+
+    /// `CHARACTER::ShowAlignment` (`G/char_battle.cpp:3457-3475`): the shown value becomes
+    /// the real one when `show`, else 0. Answers the update when it moved, for the caller
+    /// to carry — the wear carries it behind its step's own records (`EquipItem`'s
+    /// `UpdatePacket` at `:8584` runs before the `ShowAlignment` at `:8556-8557` only in
+    /// line order; on the wire both reach the client, the step's first). Legacy's only
+    /// callers are the hide-alignment unique's wear, take-off and unique-expire arms.
+    pub(super) fn show_alignment(&mut self, vid: Vid, show: bool) -> Option<Vec<u8>> {
+        let real = self.real_alignment_of(vid.raw());
+        let shown = self
+            .bodies
+            .get(&vid)
+            .map(|body| body.shown_alignment.unwrap_or(body.card.alignment));
+        let want = if show { real } else { 0 };
+        if shown.is_some_and(|shown| shown == want) {
+            return None;
+        }
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.shown_alignment = Some(want);
+        }
+        let flags = self.affect_flags_of(vid);
+        self.update_frame(vid, flags)
+    }
+
+    /// The hide-alignment unique's wear and take-off (`G/char_item.cpp:8287-8288` and
+    /// `:8556-8557`): after an equip step the shown follows whether the unique is worn.
+    /// A step that wore or removed it sends the update; any other step is silent, as
+    /// legacy's `ShowAlignment` sends only on a move. Read from the worn cells, so the
+    /// swap and the take-off land alike.
+    pub(super) fn sync_hide_alignment(
+        &mut self,
+        vid: Vid,
+        moved: &mut crate::item_move::MovedItems,
+    ) {
+        use world::character::MoveKind;
+        // The wear answers `Equipped` or `Swapped`; the take-off answers `Moved` (the
+        // worn cell clears, then the grid path sets the destination). `Moved` also
+        // covers grid moves, use-offs and destroys, on which the cloak's presence can
+        // change too, so the sync runs on every kind but the refusal and lets
+        // `show_alignment`'s equality silence the steps that change nothing.
+        if matches!(moved.kind, MoveKind::Declined) {
+            return;
+        }
+        // Read from the worn cells, so the swap and the take-off land alike. The update
+        // joins the step's own records, behind them, as legacy's second `UpdatePacket`
+        // follows the first on the wire; it fans to the view with the step's look.
+        let hidden = self.wears_vnum(vid, HIDE_ALIGNMENT_UNIQUE);
+        if let Some(frame) = self.show_alignment(vid, !hidden) {
+            moved.records.push(frame.clone());
+            moved
+                .around
+                .push((crate::game_loop_messages::RelayScope::ViewExceptSelf, frame));
         }
     }
 
@@ -204,7 +271,8 @@ mod tests {
         alignment_bonuses, clamped_alignment, stale_alignment_bonus, ALIGNMENT_BONUS_1,
         ALIGNMENT_BONUS_2, ALIGNMENT_BONUS_3, ALIGNMENT_BONUS_4, ALIGNMENT_BONUS_5,
         ALIGNMENT_BONUS_6, ALIGNMENT_BONUS_7, ALIGNMENT_BONUS_8, ALIGNMENT_CLAMP, ALIGNMENT_TIME,
-        NAME_ALIGNMENT_1, NAME_ALIGNMENT_2, NAME_ALIGNMENT_3, NAME_ALIGNMENT_4,
+        HIDE_ALIGNMENT_UNIQUE, NAME_ALIGNMENT_1, NAME_ALIGNMENT_2, NAME_ALIGNMENT_3,
+        NAME_ALIGNMENT_4,
     };
     use crate::game_state::fixtures::{a_world, enter, TestClock};
     use crate::game_state::GameState;
@@ -303,6 +371,7 @@ mod tests {
         let hp_before = points_of(&world, vid, point::POINT_MAX_HP);
         if let Some(body) = world.bodies.get_mut(&vid) {
             body.card.alignment = 9_995;
+            body.shown_alignment = Some(9_995);
         }
         while inbox.try_recv().is_ok() {}
 
@@ -344,6 +413,7 @@ mod tests {
         while inbox.try_recv().is_ok() {}
         if let Some(body) = world.bodies.get_mut(&vid) {
             body.card.alignment = 40_000;
+            body.shown_alignment = Some(40_000);
         }
         world.update_alignment(vid, 0);
         assert_eq!(
@@ -388,10 +458,11 @@ mod tests {
             })
     }
 
-    /// The quest session's four GRAND names on the live world: `pc.get_real_alignment` reads
-    /// the value an earlier `pc.change_alignment` in the same step left, the step's amounts are
-    /// applied after it exactly as [`GameState::update_alignment`] applies them, and the two
-    /// skill-book calls read and remove the affect the world holds.
+    /// The quest session's GRAND names on the live world: `pc.get_real_alignment` reads the
+    /// value an earlier `pc.change_alignment` in the same step left, `pc.get_alignment`
+    /// reads the shown value (0 while hidden), the step's amounts are applied after it
+    /// exactly as [`GameState::update_alignment`] applies them, and the two skill-book
+    /// calls read and remove the affect the world holds.
     #[test]
     fn the_session_alignment_settles_after_the_step_and_the_book_affect_is_removed() {
         use crate::game_state::GroundPlace;
@@ -711,6 +782,119 @@ mod tests {
             .points()
             .expect("the entrant has points")
             .get_point(slot)
+    }
+
+    /// The cloak's wear and take-off (`G/char_item.cpp:8287-8288`, `:8556-8557`): an equip
+    /// step with the cloak on the shield cell hides a shown 10 000 with the update, and a
+    /// step with it gone shows the real value again. An equip step touching nothing the
+    /// cloak covers is silent.
+    #[test]
+    fn the_cloaks_wear_and_takeoff_hide_and_show() {
+        use common::enums::EWearPositions;
+        use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
+        use protocol::item_pos::ItemPos;
+        use world::item::Item;
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        if let Some(body) = world.bodies.get_mut(&vid) {
+            body.card.alignment = 10_005;
+            body.shown_alignment = Some(10_005);
+        }
+        // The cloak on the first unique cell, as `FindEquipCell` puts it: the file cell
+        // `WEAR_SHIELD` reads as `WEARABLE_UNIQUE`, whose arm takes it (`by_wear_flag`).
+        let mut mantle = Item::new(11, HIDE_ALIGNMENT_UNIQUE);
+        mantle.set_size(1).expect("a positive footprint");
+        let shield = ItemPos::new(
+            EWindows::Inventory as u8,
+            INVENTORY_MAX_NUM + EWearPositions::Unique1 as u16,
+        );
+        world
+            .characters
+            .find_by_vid_mut(vid)
+            .expect("the entrant is in the world")
+            .items_mut()
+            .set(shield, &mantle)
+            .expect("the shield cell takes it");
+        while inbox.try_recv().is_ok() {}
+        let mut step = equip_step();
+        world.sync_hide_alignment(vid, &mut step);
+        assert_eq!(world.bodies[&vid].shown_alignment, Some(0));
+        assert_eq!(world.bodies[&vid].card.alignment, 10_005);
+        assert_eq!(step.records.len(), 1, "the wear joins one update");
+        assert_eq!(step.around.len(), 1, "and fans it to the view");
+        let update = GcCharacterUpdate::decode(&step.records[0]).expect("a character update");
+        assert_eq!(update.s_alignment, 0);
+        // Taking it off shows the real value again; an equip step with no cloak
+        // anywhere is silent.
+        world
+            .characters
+            .find_by_vid_mut(vid)
+            .expect("the entrant is in the world")
+            .items_mut()
+            .remove(shield, &mantle)
+            .expect("the shield cell clears");
+        let mut step = equip_step();
+        world.sync_hide_alignment(vid, &mut step);
+        assert_eq!(world.bodies[&vid].shown_alignment, Some(10_005));
+        assert_eq!(step.records.len(), 1, "the take-off joins one update");
+        let update = GcCharacterUpdate::decode(&step.records[0]).expect("a character update");
+        assert_eq!(update.s_alignment, 1_000);
+        let mut step = equip_step();
+        world.sync_hide_alignment(vid, &mut step);
+        assert!(step.records.is_empty(), "no cloak, no update");
+    }
+
+    /// An `Equipped` step for [`sync_hide_alignment`]: only the kind is read, so the
+    /// rest is the empty move.
+    fn equip_step() -> crate::item_move::MovedItems {
+        use world::character::MoveKind;
+        crate::item_move::MovedItems::for_kind_for_tests(MoveKind::Equipped)
+    }
+
+    /// `ShowAlignment` (`G/char_battle.cpp:3457-3475`): hiding a shown 10 000 answers the
+    /// update with 0, hiding again is silent, and showing restores the real value's
+    /// update; a /10-crossing change while hidden moves the real value and sends no
+    /// update.
+    #[test]
+    fn show_alignment_hides_restores_and_silences_the_crossing() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        if let Some(body) = world.bodies.get_mut(&vid) {
+            body.card.alignment = 10_005;
+            body.shown_alignment = Some(10_005);
+        }
+        while inbox.try_recv().is_ok() {}
+        let hide = world.show_alignment(vid, false).expect("the hide moves");
+        assert_eq!(world.bodies[&vid].shown_alignment, Some(0));
+        assert_eq!(world.bodies[&vid].card.alignment, 10_005);
+        let update = GcCharacterUpdate::decode(&hide).expect("a character update");
+        assert_eq!(update.s_alignment, 0);
+        assert!(
+            world.show_alignment(vid, false).is_none(),
+            "hiding again is silent"
+        );
+        world.update_alignment(vid, 10);
+        assert_eq!(world.bodies[&vid].card.alignment, 10_015);
+        assert_eq!(world.bodies[&vid].shown_alignment, Some(0));
+        // The crossing to band 2 adds its pair, but no update goes out while hidden.
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().all(|frame| frame.first() != Some(&19)),
+            "no update while hidden"
+        );
+        let show = world.show_alignment(vid, true).expect("the show moves");
+        assert_eq!(world.bodies[&vid].shown_alignment, Some(10_015));
+        let update = GcCharacterUpdate::decode(&show).expect("a character update");
+        assert_eq!(update.s_alignment, 1_001);
+        assert!(
+            world.show_alignment(vid, true).is_none(),
+            "showing again is silent"
+        );
     }
 
     /// The position of the `GC_CHARACTER_UPDATE` whose alignment is `alignment`.

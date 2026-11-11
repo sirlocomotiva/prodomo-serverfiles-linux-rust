@@ -569,7 +569,8 @@ impl GameState {
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
             killer_mode: body.add_state.killer,
-            alignment: i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX),
+            alignment: i16::try_from(body.shown_alignment.unwrap_or(body.card.alignment) / 10)
+                .unwrap_or(i16::MAX),
             view_guild: self.view_guild_of_vid(vid.raw()),
             premium: self.premium_of(vid.raw()),
         })

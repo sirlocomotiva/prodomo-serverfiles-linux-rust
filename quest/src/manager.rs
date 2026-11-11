@@ -257,6 +257,14 @@ pub trait Game {
     /// (`G/questlua_pc.cpp:1081-1085`), before the /10 the client sees.
     fn real_alignment(&self) -> i32;
 
+    /// `GetAlignment()` of the character the script runs for
+    /// (`G/questlua_pc.cpp:1087-1091`): the shown value, 0 while the hide-alignment
+    /// unique holds it, before the /10 the client sees. Defaults to the real one,
+    /// which is what every host without the split answers.
+    fn shown_alignment(&self) -> i32 {
+        self.real_alignment()
+    }
+
     /// `UpdateAlignment(amount)` of the character the script runs for
     /// (`G/questlua_pc.cpp:1093-1100`, `G/char_battle.cpp:3477-3565`): the stored
     /// alignment moves by `amount`, the crossing update goes out, and the band affects
@@ -3945,11 +3953,9 @@ fn pc_readers(lua: &Lua, cx: &mut Cx<'_>, name: &[u8]) -> mlua::Result<Option<Va
             Some(Value::Number(f64::from(cx.game.worn_vnum(0).unwrap_or(0))))
         }
         // `pc_get_real_alignment` (`:1081-1085`) and `pc_get_alignment` (`:1087-1091`):
-        // the real and the shown value, each /10. This build keeps one value (the shown
-        // always follows the real), so one arm answers both.
-        b"pc.get_real_alignment" | b"pc.get_alignment" => {
-            Some(Value::Number(f64::from(cx.game.real_alignment() / 10)))
-        }
+        // the real and the shown value, each /10.
+        b"pc.get_real_alignment" => Some(Value::Number(f64::from(cx.game.real_alignment() / 10))),
+        b"pc.get_alignment" => Some(Value::Number(f64::from(cx.game.shown_alignment() / 10))),
         // `pc_hasguild` (`:325-330`) and `pc_isguildmaster` (`:339-350`), each under both
         // names (`:3895-3900`).
         b"pc.has_guild" | b"pc.hasguild" => Some(Value::Boolean(cx.game.guild_id() != 0)),
@@ -6564,6 +6570,9 @@ mod tests {
         set_levels: Vec<(u32, u8)>,
         /// The character's stored alignment, which `change_alignment` moves.
         alignment: i32,
+        /// The character's shown alignment, which `pc.get_alignment` reads; `None`
+        /// keeps the stored one, as without the hide-alignment unique.
+        shown_alignment: Option<i32>,
         /// Every `change_alignment` amount, in order.
         alignment_changes: Vec<i32>,
         /// Whether the character holds the no-delay book affect.
@@ -6938,6 +6947,10 @@ mod tests {
 
         fn real_alignment(&self) -> i32 {
             self.alignment
+        }
+
+        fn shown_alignment(&self) -> i32 {
+            self.shown_alignment.unwrap_or(self.alignment)
         }
 
         fn change_alignment(&mut self, amount: i32) {
@@ -10576,6 +10589,16 @@ mod tests {
             probe.call("pc.get_alignment", &[]).unwrap(),
             number(-1234.0),
             "the shown /10 truncates toward zero"
+        );
+        probe.game.shown_alignment = Some(0);
+        assert_eq!(
+            probe.call("pc.get_alignment", &[]).unwrap(),
+            number(0.0),
+            "hidden, the shown reads 0 while the stored stays"
+        );
+        assert_eq!(
+            probe.call("pc.get_real_alignment", &[]).unwrap(),
+            number(-1234.0)
         );
     }
 

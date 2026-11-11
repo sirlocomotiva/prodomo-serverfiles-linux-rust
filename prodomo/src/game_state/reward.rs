@@ -436,6 +436,19 @@ impl GameState {
         self.mob_rates.user_damage
     }
 
+    /// Whether the player under `vid` wears item `vnum` in any wear cell: `GetWear`'s
+    /// whole row, for items whose proto puts them outside the two Unique cells (the
+    /// hide-alignment cloak sits on the shield cell).
+    pub(super) fn wears_vnum(&self, vid: Vid, vnum: u32) -> bool {
+        use world::character::Equipment;
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return false;
+        };
+        Equipment::of(character.items(), &self.protos)
+            .worn()
+            .any(|(_, worn)| worn.item.vnum == vnum)
+    }
+
     /// Whether the player under `vid` wears unique item `vnum`
     /// (`IsEquipUniqueItem`, `G/char_item.cpp:9519-9540`).
     pub(super) fn wears_unique(&self, vid: Vid, vnum: u32) -> bool {

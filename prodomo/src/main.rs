@@ -2544,7 +2544,7 @@ fn item_actor(held: &Held) -> Mover {
         affect_flags: [0; 2],
         dead: false,
         killer_mode: false,
-        // The world sets it from the body's card, as the PK mode.
+        // The world sets it from the body's shown value, as the PK mode.
         alignment: 0,
         // The world sets it from the character's guild, as the PK mode.
         view_guild: (0, 0),

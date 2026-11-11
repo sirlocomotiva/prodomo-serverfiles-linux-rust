@@ -77,7 +77,8 @@ pub struct Mover {
     /// `bStateFlag`'s `ADD_CHARACTER_STATE_KILLER` bit (`G/char.cpp:1310`). The world
     /// sets it from the body's flag before an item step runs.
     pub killer_mode: bool,
-    /// `GetRealAlignment() / 10` (`G/char.cpp:1320`), which `UpdatePacket` sends.
+    /// `m_iAlignment / 10` (`G/char.cpp:1320`), which `UpdatePacket` sends: the shown
+    /// value, 0 while the hide-alignment unique holds it.
     pub alignment: i16,
     /// `dwGuildID` and `dwNewIsGuildName`, which `UpdatePacket` sends
     /// (`G/char.cpp:1327-1352`): the guild id, and 3 for the master, 2 for a general, 1 for
@@ -227,6 +228,26 @@ pub fn gold_delta(before: u64, after: u64) -> i64 {
 }
 
 impl MovedItems {
+    /// An empty move of `kind`, for tests of syncs that read only the kind.
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_kind_for_tests(kind: MoveKind) -> Self {
+        Self {
+            kind,
+            owner_id: 0,
+            records: Vec::new(),
+            ground_at: None,
+            around: Vec::new(),
+            changes: Vec::new(),
+            points: None,
+            quickslots: None,
+            gold: None,
+            climbed: None,
+            store_order: StoreOrder::default(),
+            quest: (Vec::new(), Vec::new(), None),
+        }
+    }
+
     /// The descriptor's half of a move the world made for `owner_id`, whose VID is `vid`.
     ///
     /// Each notice is looked up in the mover's language in `strings`.
@@ -325,7 +346,8 @@ impl MovedItems {
 }
 
 /// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left, with the
-/// mover's PK mode (`:1315`), alignment (`:1320`), and the descriptor's language (`:1321`).
+/// mover's PK mode (`:1315`), shown alignment (`:1320`), and the descriptor's language
+/// (`:1321`).
 ///
 /// The mount rides in the look. The guild, the affect words, the dead bit of the state
 /// flags and the premium come from the mover.

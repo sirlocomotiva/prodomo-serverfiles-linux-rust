@@ -4029,6 +4029,7 @@ impl GameState {
             })
         })?;
         self.switchbot_follow_move(vid, request.from, request.to, &mut moved);
+        self.sync_hide_alignment(vid, &mut moved);
         Ok(moved)
     }
 
