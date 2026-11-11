@@ -52688,3 +52688,37 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 562. The quest that never loads
+
+Ledger 227 kept `quest.change_empire` `missing` while it waited for the owner to fix the
+source. The wait is over: the row is `unused`, and the fix it waited for is withdrawn.
+
+The file's `move_pc` (`change_empire.lua:57-140`) is unbalanced even textually. The `:133`
+`elseif` comes after the `:117` `else`, so `:137` and `:138` close the `if` and the function
+while `:139` (`return false`) is still ahead: the function-body loop breaks at `:138` and
+`:139` lands in `WhenListOrFunction`, which refuses it with `expecting 'when' or 'function'`.
+Both `qc`s run the identical loop (`while nested >= 3`, the same `Do`/`If`/`Function`-up and
+`End`-down count, the break at 2 — `server/server/quest/qc.cpp:765ff` against
+`quest/src/qc.rs:648ff`), so legacy refuses the file exactly as the Rewrite does: the quest
+never loads on either side. The controls compile (`cards_event.lua`, `changelook.lua`, the
+alphabetical neighbours). Nothing references the quest: the only other `change_empire`
+spellings are the `quest_functions` API names and stale `translate.lua` strings no quest
+reads. The `pc.change_empire` machinery underneath stays ported (ledgers 405, 477); only the
+dialog is dead. Owner question 71 asks the owner to confirm the boot-time refusal on their
+server.
+
+No code changed: a probe scenario stood Heuk-Young (20090) on map 1 and walked the login tail
+(a GM skips the sash's letters through its `not pc.is_gm()` gate; `/eventflag` answers at
+once but the flag lands a request later, so the click needs a `/geteventflag` poll), then
+found the click silent because the quest never loaded. The probe is removed.
+
+Inventory: `quest.change_empire` missing to unused, naming the refusal and the controls.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite562.txt` (5353 passed, 0 failed in 46 targets), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

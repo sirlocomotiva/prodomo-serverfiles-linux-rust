@@ -661,3 +661,13 @@ owner answers.
  middle run on your server today (a relog? another path I missed?), or is it dead there?
  If it is dead, the Rewrite's running middle is a recorded Divergence; if it runs, say
  how and the port is re-audited.
+71. **The empire-exchange quest never loads (ledger 562; replaces 227's wait for a source fix).** Its `move_pc`
+ (`change_empire.lua:57-140`) is unbalanced even textually: the `:133` `elseif` after
+ the `:117` `else` leaves `:137`/`:138` closing the `if` and the function, so `:139`
+ lands in `WhenListOrFunction` and both `qc`s refuse the file with `expecting 'when'
+ or 'function'` (the loops are identical: `qc.cpp:765ff` vs `qc.rs:648ff`). No other
+ quest references `change_empire.*`; the `quest_functions` names are the API list and
+ the `translate.lua` strings are stale. Waits on it: confirm the quest is dead on your
+ server too (a `qc` log line at boot would show it), or say if your `qc` somehow
+ accepts it. If it is dead, the row stays `unused`; the `pc.change_empire` machinery
+ underneath stays ported either way.
