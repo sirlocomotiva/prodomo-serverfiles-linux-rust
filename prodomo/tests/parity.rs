@@ -54348,3 +54348,43 @@ fn a_gold_bar_pays_its_yang_and_uses_one_up() {
         ),
     );
 }
+
+/// `cg.game.item_use`: the 70038 cape of courage (`case USE_SPECIAL`,
+/// `G/char_item.cpp:3879-3888`) gathers the monsters around: at least one of the
+/// five dogs starts on Alpha and swings. The cape is used up, and the store keeps
+/// the row's absence.
+#[test]
+fn a_cape_of_courage_gathers_the_dogs_around() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
+         70038 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(70_038).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's cape is USE_SPECIAL");
+    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t5\t101\n";
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", dogs);
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    // When: Alpha uses the cape. Then: the cape's clear, then a dog swings on
+    // Alpha, and the cape goes.
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        alice.read_game()[..2],
+        [ITEM_SET, common::item_slots::EWindows::Inventory as u8],
+        "the lone cape clears its cell"
+    );
+    let swing = read_first_swing(&mut alice, listed.id);
+    assert!(swing.damage > 0, "a gathered dog swings: {}", swing.damage);
+    check(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 30)");
+    drop(alice);
+}

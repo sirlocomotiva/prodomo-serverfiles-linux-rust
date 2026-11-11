@@ -221,6 +221,10 @@ pub enum MoveKind {
     /// A gold bar used one of its stack up (`LINGOURI_SURSA`, `G/char_item.cpp:3328-3370`).
     /// The game state pays the bar's gold with a `ChangeGold` record, after the refusals.
     Barred,
+    /// A cape of courage used one of its stack up (`case USE_SPECIAL`'s
+    /// 70038/70057/76007 arm, `G/char_item.cpp:3879-3888`). The game state runs the
+    /// gather after the consume.
+    Caped,
 }
 
 /// A record the client is sent, in the order legacy sends it.

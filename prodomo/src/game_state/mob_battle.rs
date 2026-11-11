@@ -2274,6 +2274,50 @@ mod tests {
         let _ = alpha;
     }
 
+    /// The cape of courage's gather: `aggregate_monster` starts a victimless monster
+    /// in reach on the caller with the one-in-two draw
+    /// (`G/char_battle.cpp:3644-3669`).
+    #[test]
+    fn aggregate_monster_starts_a_victimless_monster_in_reach() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let one = a_fighter(ME, 406, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
+        let two = a_fighter(
+            ME + 1,
+            406,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            0,
+            (SPOT.0 + 50, SPOT.1),
+            10_000,
+        );
+        let mut gathered = false;
+        for seed in 0..40u64 {
+            let mut world = stand_field(&clock, vec![one.clone(), two.clone()], open_cells(), true);
+            let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+            world.start_pc_recovery(Vid::new(1));
+            world.process_pulse(P0);
+            drained(&mut alpha);
+            world.dice = world::character::Pcg32::new(seed, 0);
+            world.aggregate_monster(Vid::new(1));
+            let victims: Vec<Option<Vid>> = [ME, ME + 1]
+                .iter()
+                .map(|mob| world.victim_of(*mob))
+                .collect();
+            if victims.iter().any(|victim| *victim == Some(Vid::new(1))) {
+                assert!(
+                    victims
+                        .iter()
+                        .all(|victim| victim.is_none_or(|held| held == Vid::new(1))),
+                    "a gathered monster fights only the caller: {victims:?}"
+                );
+                gathered = true;
+                break;
+            }
+        }
+        assert!(gathered, "one seed in forty gathers a monster");
+    }
+
     /// `forget_my_attacker` calms the monsters around on this player only (G27).
     #[test]
     fn forget_my_attacker_calms_the_monsters_around_on_this_player_only() {

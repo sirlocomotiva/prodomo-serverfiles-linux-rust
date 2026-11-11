@@ -53636,3 +53636,21 @@ bar. Unit seats: the land (`a_gold_bar_use_pays_its_yang_and_uses_one_up`), the
 window gate (`an_open_safebox_refuses_the_gold_bar`), the cap gate
 (`a_full_purse_refuses_the_gold_bar`).
 Gates (2026-11-11): full suite 5453 passed, 1 failed in 46 targets — the failure is the known sort-cooldown race (`a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks`, the 14/15 s boundary), green alone and green on the parity-target rerun (436 passed, 0 failed), so 5454 passed across the rerun; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 590. The cape of courage
+
+`case USE_SPECIAL`'s 70038/70057/76007 arm (`G/char_item.cpp:3879-3888`): the cape of
+courage gathers the victimless monsters in reach with the one-in-two draw
+(`AggregateMonster`, `G/char_battle.cpp:3644-3669`) and uses one up. All three
+vnums are `ITEM_USE`/`USE_SPECIAL` on the owner's data, so they seat in
+`use_special_kind` as an eighth seated arm with the new `MoveKind::Caped`: the
+step consumes one (`a_cape_use_consumes_one_and_names_the_cape`), and the game
+state runs the gather (`land_item_use_kind` → `aggregate_monster`, already
+ported for `/aggregate`). The owner's config never sets `MANTIE_PERMANENT`
+(the checked-in default is false, `G/config.cpp:91`), so the cape always
+spends; no config switch is ported. Scenario
+`a_cape_of_courage_gathers_the_dogs_around`: the 70038 use clears the cell, a
+gathered dog swings on Alpha, and the store keeps the row's absence. Unit seat:
+the gather (`aggregate_monster_starts_a_victimless_monster_in_reach`, a seed
+sweep over forty).
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5457 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
