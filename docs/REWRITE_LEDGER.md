@@ -53142,3 +53142,34 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 574. The killer's cost
+
+`sys.char.pk` costs the same-empire killer its alignment. `Dead`'s same-empire arm
+(`G/char_battle.cpp:1411-1442`) runs in `pc_death_killer_hooks`: past the agreed,
+guild-war, marked-victim, negative-victim, arena-duel and forked gates, the killer loses
+20 000 alignment, spared when `number(1, 100)` falls below 33 (blameless) or 20
+(negative) with the `[LS;910]` line, and split among its party's online members within
+5000 (`FPartyAlignmentCompute`, `:1201-1235`), whole when none is in range. The
+cross-empire arm stays nothing to port (ledger 234). `under_guild_war` is shared with
+the penalty module, and the killer's mark in the gate is the victim's `IsKillerMode`,
+not the killer's.
+
+Scenario `a_same_empire_kill_costs_the_killer_20000_alignment`: Dave of empire 1 goes
+free and kills Alpha of empire 1 at one hit point; the death carries either the -2000
+tenths update on Dave or the spare line, since the live dice pays two draws in three.
+Unit pins (each on its own seed): the paying and spared draws, the cross-empire
+silence, the mark/negative/duel/arena gates, the party split and the out-of-range
+whole, and the 32-spared/33-cost boundary. Mutants (a `<=` spare gate, an unsplit
+party loss) both killed — the first only after the boundary test, which is why it
+exists. Inventory: `sys.char.pk` stays `partial`; the revenge and the penalty table
+wait.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite574.txt` (5401 passed, 0 failed in 46 targets),
+`cargo test --workspace --doc --locked --offline` (1 passed in 9 targets),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

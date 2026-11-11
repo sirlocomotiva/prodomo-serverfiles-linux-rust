@@ -1,6 +1,7 @@
 //! A player's death and restart: the victim's side of `CHARACTER::Damage`
 //! (`G/char_battle.cpp:2248-2433`), `Stun` and `StunEvent` (`:402-459`), the player arms of `Dead`
-//! (`:1238-1696`) and `dead_event` (`:473-525`), `DeathPenalty` (`:330-392`), the restart
+//! (`:1238-1696`) and `dead_event` (`:473-525`), `DeathPenalty` (`:330-392`), the same-empire
+//! killer's alignment penalty (`:1411-1442`), the restart
 //! commands `do_restart_now` and `do_restart` (`G/cmd_general.cpp:471-706`), the player's
 //! `recovery_event` with `CheckTarget` (`G/char.cpp:3245-3314`, `:6663-6670`), and a player's own
 //! `ClearSync` (`G/char.cpp:5549-5575`).
@@ -47,8 +48,13 @@
 //!
 //! # Not yet
 //!
-//! - The quest `die` trigger, siege hooks, the mount, and the same-empire player-killer
-//!   alignment penalty (`G/char_battle.cpp:1412-1442`).
+//! - The quest `die` trigger, siege hooks, and the mount.
+//!
+//! The same-empire killer's alignment penalty (`G/char_battle.cpp:1411-1442`) runs in
+//! `Dead`: a killer of the victim's own empire loses 20 000 alignment past the agreed,
+//! war, marked-victim, negative-victim, duel and forked gates, spared one draw in three
+//! (`[LS;910]`) when blameless and one in five when negative, split among its party in
+//! range; the cross-empire transfer changes nothing (ledger 234).
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
@@ -132,6 +138,14 @@ const CLOSE_RESTART_WINDOW: &[u8] = b"CloseRestartWindow";
 
 /// `[LS;901]`: the death cost no experience.
 const NO_PENALTY_NOTICE: &[u8] = b"[LS;901]";
+
+/// `[LS;910]`: the same-empire killer is spared the alignment penalty
+/// (`G/char_battle.cpp:1422`).
+const KILLER_SPARED_NOTICE: &[u8] = b"[LS;910]";
+
+/// The alignment the same-empire killer loses (`FPartyAlignmentCompute(-20000, ...)`,
+/// `G/char_battle.cpp:1427`), split among its party members in range.
+const KILLER_ALIGNMENT_LOSS: i32 = -20_000;
 
 /// `[LS;516;%d]`: the seconds a restart still waits.
 const RESTART_WAIT_NOTICE: &[u8] = b"[LS;516;%d]";
@@ -895,9 +909,101 @@ impl GameState {
         // The killer's no-NPC `kill` scripts still run during an arena death.
         self.raise_quest_kill(vid.raw(), killer.vid, 0);
         self.guild_war_kill(killer.vid, vid);
-        // The same-empire killer-alignment path (:1412-1442), including its arena
-        // exemption, is not ported; monster-kill alignment is a separate path.
+        // `Dead`'s same-empire arm (`:1411-1442`): the cross-empire transfer is nothing
+        // to port (ledger 234), and the killer here pays the alignment below.
+        self.penalize_same_empire_killer(vid, killer.vid, agreed_pvp, arena_duel);
         (agreed_pvp, arena_duel)
+    }
+
+    /// The same-empire killer's alignment (`G/char_battle.cpp:1411-1442`): a killer of
+    /// the victim's own empire loses 20 000 alignment, unless the death is agreed, a
+    /// war's, the victim's mark ran, the victim was negative, a duel's, or a forked
+    /// road's. A blameless killer is spared one draw in three (`[LS;910]`), a negative
+    /// one one in five; a party in range splits the loss, and a party all out of range
+    /// leaves the killer the whole loss (`FPartyAlignmentCompute`, `:1201-1235`).
+    fn penalize_same_empire_killer(
+        &mut self,
+        victim: Vid,
+        killer: Vid,
+        agreed_pvp: bool,
+        arena_duel: bool,
+    ) {
+        // `GetEmpire() != pkKiller->GetEmpire()` (`:1389`): the other empire is the
+        // empire-point arm, which changes nothing (ledger 234).
+        let empires = (
+            self.bodies.get(&victim).map(|body| body.card.empire),
+            self.bodies.get(&killer).map(|body| body.card.empire),
+        );
+        if empires
+            .0
+            .zip(empires.1)
+            .is_none_or(|(one, other)| one != other)
+        {
+            return;
+        }
+        // `!isAgreedPVP && !isUnderGuildWar && !IsKillerMode() && GetAlignment() >= 0
+        // && !isDuel && !isForked` (`:1412`): the victim's side. `IsKillerMode` is the
+        // victim's mark, and `isDuel` is the arena duel the caller found.
+        let victim_blameless = self
+            .bodies
+            .get(&victim)
+            .is_some_and(|body| !body.add_state.killer && body.card.alignment >= 0);
+        let war = self.under_guild_war(victim, killer);
+        let forked = self
+            .bodies
+            .get(&victim)
+            .is_some_and(|body| self.forked_maps.is_forked(body.map));
+        if agreed_pvp || war || !victim_blameless || arena_duel || forked {
+            return;
+        }
+        // `iNoPenaltyProb` (`:1414-1418`): a blameless killer is spared when the draw
+        // falls below 33, a negative one below 20, and hears `[LS;910]` (`:1422`).
+        let killer_blameless = self
+            .bodies
+            .get(&killer)
+            .is_some_and(|body| body.card.alignment >= 0);
+        let spare = if killer_blameless { 33 } else { 20 };
+        if number(&mut self.dice, 1, 100) < spare {
+            if let Some(mover) = self.own_mover(killer) {
+                self.tell(killer, mover, CHAT_TYPE_INFO, KILLER_SPARED_NOTICE, &[]);
+            }
+            return;
+        }
+        // `GetParty()` (`:1425`): partyless, the killer pays the whole loss.
+        let has_party = self
+            .characters
+            .find_by_vid(killer)
+            .ok()
+            .and_then(|character| self.party_leader_of(character.player_id()))
+            .is_some();
+        if !has_party {
+            self.update_alignment(killer, KILLER_ALIGNMENT_LOSS);
+            return;
+        }
+        // `FPartyAlignmentCompute` (`:1427-1438`): the online members within 5000 of
+        // the killer split the loss; none in range, and the killer pays it whole.
+        let Some(spot) = self.spot_of(killer.raw()) else {
+            self.update_alignment(killer, KILLER_ALIGNMENT_LOSS);
+            return;
+        };
+        let near: Vec<Vid> = self
+            .party_member_vids(killer)
+            .into_iter()
+            .filter(|vid| {
+                self.spot_of(vid.raw()).is_some_and(|at| {
+                    distance_approx(at.x.saturating_sub(spot.x), at.y.saturating_sub(spot.y))
+                        < super::party::PARTY_DEFAULT_RANGE
+                })
+            })
+            .collect();
+        if near.is_empty() {
+            self.update_alignment(killer, KILLER_ALIGNMENT_LOSS);
+            return;
+        }
+        let split = KILLER_ALIGNMENT_LOSS / i32::try_from(near.len()).unwrap_or(1);
+        for vid in near {
+            self.update_alignment(vid, split);
+        }
     }
 
     fn close_pc_death_windows(&mut self, vid: Vid) {
@@ -1851,6 +1957,27 @@ mod tests {
             .expect("a seed")
     }
 
+    /// A seed whose first `number(1, 100)` draw falls below `below`.
+    fn a_spare_seed(below: i32) -> u64 {
+        (0..100_000)
+            .find(|&seed| number(&mut Pcg32::new(seed, 0), 1, 100) < below)
+            .expect("a spare seed")
+    }
+
+    /// A seed whose first `number(1, 100)` draw stands at or above `below`.
+    fn a_pay_seed(below: i32) -> u64 {
+        (0..100_000)
+            .find(|&seed| number(&mut Pcg32::new(seed, 0), 1, 100) >= below)
+            .expect("a pay seed")
+    }
+
+    /// A seed whose first `number(1, 100)` draw is exactly `value`.
+    fn a_roll_seed(value: i32) -> u64 {
+        (0..1_000_000)
+            .find(|&seed| number(&mut Pcg32::new(seed, 0), 1, 100) == value)
+            .expect("a roll seed")
+    }
+
     fn line(world: &GameState, chat_type: u8, text: &[u8], args: &[Arg<'_>]) -> Vec<u8> {
         chat_packet(mover().recipient(&world.locale), chat_type, text, args)
     }
@@ -2186,12 +2313,17 @@ mod tests {
             field.pulse(P0 + 74);
             field.quiet();
 
+            // The death draws the spare roll before the pulse's other draws: seed it,
+            // run the stun event, and expect the spare line with no alignment move.
+            field.world.dice = Pcg32::new(a_spare_seed(33), 0);
             field.pulse(P0 + 75);
-            let mut expected = vec![unowned(ALPHA), dead(ALPHA)];
+            let spared = line(&field.world, CHAT_TYPE_INFO, KILLER_SPARED_NOTICE, &[]);
+            let mut expected = vec![spared, unowned(ALPHA), dead(ALPHA)];
             if targets {
                 expected.insert(0, target_record(0, (0, 0, 0), 0));
             }
             assert_eq!(field.heard(BRAVO), expected, "targets: {targets}");
+            assert_eq!(field.world.bodies[&BRAVO].card.alignment, 0);
             assert_eq!(field.world.targets.of(BRAVO.raw()), None);
             let combat = field.combat(ALPHA);
             assert!(combat.dead && !combat.death_penalty);
@@ -3939,5 +4071,138 @@ mod tests {
         );
         assert!(field.world.regens.holds(Due::PcDead(ALPHA.raw())));
         assert!(!field.combat(ALPHA).death_penalty);
+    }
+    fn killer_of(vid: Vid) -> Attacker {
+        Attacker { vid, pc: true }
+    }
+
+    /// The same-empire killer pays 20 000 alignment when the draw stands, is spared
+    /// with `[LS;910]` when it falls, and costs nothing across empires
+    /// (`G/char_battle.cpp:1389-1424`).
+    #[test]
+    fn a_same_empire_killer_loses_alignment_or_is_spared_with_a_line() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        let killer = killer_of(BRAVO);
+        // The paying draw: Bravo loses the whole 20 000 at once.
+        field.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        field.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(field.world.bodies[&BRAVO].card.alignment, -20_000);
+        // The spared draw: the line goes out and nothing moves.
+        let mut second = a_field(true);
+        let _alpha = second.join(ALPHA, HERE);
+        let _bravo = second.join(BRAVO, BESIDE);
+        second.world.dice = Pcg32::new(a_spare_seed(33), 0);
+        second.quiet();
+        second.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(second.world.bodies[&BRAVO].card.alignment, 0);
+        let spared = line(&second.world, CHAT_TYPE_INFO, KILLER_SPARED_NOTICE, &[]);
+        assert!(second.heard(BRAVO).contains(&spared));
+        // Across empires: the empire-point arm changes nothing, so the killer pays no
+        // alignment.
+        let mut across = a_field(true);
+        let _alpha = across.join(ALPHA, HERE);
+        let _bravo = across.join(BRAVO, BESIDE);
+        across.world.bodies.get_mut(&BRAVO).unwrap().card.empire = 2;
+        across.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        across.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(across.world.bodies[&BRAVO].card.alignment, 0);
+    }
+
+    /// The victim's mark, a negative victim, an agreed duel, a war, an arena duel and
+    /// a forked road all spare the killer; a party in range splits the loss, and a
+    /// party out of range leaves it whole (`G/char_battle.cpp:1412-1442`).
+    #[test]
+    fn a_killer_is_spared_by_the_mark_the_war_the_duel_or_the_fork_and_splits_with_its_party() {
+        let killer = killer_of(BRAVO);
+        // The victim's killer mark spares.
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        field.world.bodies.get_mut(&ALPHA).unwrap().add_state.killer = true;
+        field.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        field.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(field.world.bodies[&BRAVO].card.alignment, 0);
+        // A negative victim spares.
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        field.world.bodies.get_mut(&ALPHA).unwrap().card.alignment = -1;
+        field.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        field.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(field.world.bodies[&BRAVO].card.alignment, 0);
+        // An agreed duel spares.
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        field
+            .world
+            .run_pvp(ALPHA, BRAVO.raw().to_string().as_bytes());
+        field
+            .world
+            .run_pvp(BRAVO, ALPHA.raw().to_string().as_bytes());
+        field.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        field.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(field.world.bodies[&BRAVO].card.alignment, 0);
+        // An arena duel spares.
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        start_death_test_arena(&mut field, 3);
+        field.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        field.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(field.world.bodies[&BRAVO].card.alignment, 0);
+        // A party in range splits the loss: Bravo and Charlie each pay 10 000.
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        let _charlie = field.join(CHARLIE, (HERE.0 + 100, HERE.1));
+        let bravo_pid = field.character(BRAVO).player_id();
+        let charlie_pid = field.character(CHARLIE).player_id();
+        field.world.create_party(bravo_pid);
+        field.world.join_party(bravo_pid, charlie_pid);
+        field.world.link_party(CHARLIE);
+        field.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        field.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(field.world.bodies[&BRAVO].card.alignment, -10_000);
+        assert_eq!(field.world.bodies[&CHARLIE].card.alignment, -10_000);
+        // A party all out of range leaves the killer the whole loss.
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        let _charlie = field.join(CHARLIE, (HERE.0 + 9_000, HERE.1));
+        let bravo_pid = field.character(BRAVO).player_id();
+        let charlie_pid = field.character(CHARLIE).player_id();
+        field.world.create_party(bravo_pid);
+        field.world.join_party(bravo_pid, charlie_pid);
+        field.world.link_party(CHARLIE);
+        field.world.dice = Pcg32::new(a_pay_seed(33), 0);
+        field.world.dead_pc(ALPHA, Some(killer));
+        assert_eq!(field.world.bodies[&BRAVO].card.alignment, -20_000);
+        assert_eq!(field.world.bodies[&CHARLIE].card.alignment, 0);
+    }
+
+    /// The spare draw's boundary (`number(1, 100) < iNoPenaltyProb`, `:1421`): a roll
+    /// of 32 spares a blameless killer, a roll of 33 costs it.
+    #[test]
+    fn a_spare_roll_of_32_spares_and_33_costs() {
+        for (roll, cost) in [(32, 0), (33, -20_000)] {
+            let mut field = a_field(true);
+            let _alpha = field.join(ALPHA, HERE);
+            let _bravo = field.join(BRAVO, BESIDE);
+            field.world.dice = Pcg32::new(a_roll_seed(roll), 0);
+            field.world.dead_pc(
+                ALPHA,
+                Some(Attacker {
+                    vid: BRAVO,
+                    pc: true,
+                }),
+            );
+            assert_eq!(
+                field.world.bodies[&BRAVO].card.alignment, cost,
+                "a roll of {roll}"
+            );
+        }
     }
 }

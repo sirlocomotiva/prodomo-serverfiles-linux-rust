@@ -390,7 +390,7 @@ impl GameState {
 
     /// Whether the victim's guild is at war with the killer's (`isUnderGuildWar`,
     /// `G/char_battle.cpp:1304-1306`).
-    fn under_guild_war(&self, victim: Vid, killer: Vid) -> bool {
+    pub(super) fn under_guild_war(&self, victim: Vid, killer: Vid) -> bool {
         let guild_of = |vid: Vid| {
             self.characters
                 .find_by_vid(vid)

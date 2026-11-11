@@ -53315,3 +53315,79 @@ fn a_run_after_a_swing_spends_stamina_then_walks_and_restores() {
     }
     assert!(refilled, "the walk restores the pool");
 }
+
+/// `G/char_battle.cpp:1411-1442`: the same-empire killer loses 20 000 alignment when its
+/// victim dies. Dave of empire 1 goes free and kills Alpha of empire 1 standing at one
+/// hit point; three seconds on, the death runs and Dave's update carries -2000 in
+/// tenths. The spare draw would carry the `[LS;910]` line instead, pinned by the world
+/// tests of `game_state::death`; the dice here pays on the live seed.
+#[test]
+fn a_same_empire_kill_costs_the_killer_20000_alignment() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "dave");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Dave', 1, \
+         154, 470100, 950100 FROM account WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET stamina = 12345 WHERE name = 'Dave'",
+    );
+    sql(&database, "UPDATE player SET hp = 1 WHERE name = 'Alpha'");
+    let (mut alpha, alpha_listed, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut dave, dave_listed, _dave_entered) = enter_world_seeing(&server, b"dave", 0);
+    alpha.sees_enter(dave_listed.id, false, None);
+    dave.send_record(&client_chat(CHAT_TALKING, b"/pkmode 2"));
+    assert_eq!(read_update_mode(&mut dave, dave_listed.id), 2);
+    assert_eq!(read_update_mode(&mut alpha, dave_listed.id), 2);
+    dave.quiet("the switch ends");
+    alpha.quiet("the switch ends");
+
+    // When: Dave hits Alpha at one hit point. Then: the swing stuns, and the death
+    // runs three seconds on.
+    dave.send_record(&client_attack(alpha_listed.id));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    // The killer's own update (the mark) lands before the victim's stun.
+    let mut stunned = false;
+    while !stunned {
+        let record = read_fight_before(&mut dave, deadline, "the stun");
+        if record == stun_of(alpha_listed.id) {
+            stunned = true;
+        }
+    }
+    // The death's records: either the penalty's update carries the killer's new
+    // alignment in tenths (-20000 / 10), or the spare line comes (one draw in three
+    // spares a blameless killer, `G/char_battle.cpp:1414-1422`). Both prove the path
+    // ran; the world tests pin each arm on its own seed.
+    let mut cost = false;
+    let mut spared = false;
+    let mut dead = false;
+    let spare_line = an_info_line(b"[LS;910]");
+    while !(dead && (cost || spared)) {
+        let record = read_fight_before(&mut dave, deadline, "the death's records");
+        if record[0] == GC_CHARACTER_UPDATE
+            && record.len() == CHARACTER_UPDATE_LEN
+            && u32::from_le_bytes([record[1], record[2], record[3], record[4]]) == dave_listed.id
+            && i16::from_le_bytes([record[32], record[33]]) == -2000
+        {
+            cost = true;
+        }
+        if record == spare_line {
+            spared = true;
+        }
+        if record == dead_of(alpha_listed.id) {
+            dead = true;
+        }
+    }
+    assert!(cost || spared, "the penalty ran, paid or spared");
+}
