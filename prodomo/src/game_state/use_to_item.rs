@@ -7,10 +7,11 @@
 //! (`world::character::put_stone`), and a refine scroll (`USE_TUNING`) opens the refine
 //! window for the target (`CHARACTER::RefineItem`, `:1970-2041`), which `CG_REFINE` answers
 //! with `DoRefineWithScroll` (`:1595-1862`). A bonus scroll redraws or adds the target's
-//! bonuses (`world::character::change_target_attributes`). Every other item is used as
-//! `CG_ITEM_USE` uses it: legacy's other arms ignore the second cell, and the arms that
-//! read it are not ported (the `USE_DETACHMENT` the sash and look cleans do not take, the
-//! socket scrolls, the costume and talisman scrolls, the hair).
+//! bonuses (`world::character::change_target_attributes`), and a detachment scroll breaks
+//! the target's stones out (`world::character::detach_stones`, with each stone back by
+//! `AutoGiveItem`). Every other item is used as `CG_ITEM_USE` uses it: legacy's other arms
+//! ignore the second cell, and the arms that read it are not ported (the socket scrolls,
+//! the costume and talisman scrolls, the hair).
 //!
 //! A sash cleaning scroll (`USE_DETACHMENT` with `VALUE0` 7) cleans the sash's absorbed
 //! socket and attributes (`CleanSashAttr`, `G/char.cpp:10481-10500`); a changelook's
@@ -158,6 +159,9 @@ enum Arm {
     CleanSash,
     /// `USE_DETACHMENT` with `VALUE0` 8: a transmutation cleaning scroll.
     CleanLook,
+    /// Any other `USE_DETACHMENT` scroll: a stone detachment (`RefineItem`,
+    /// `G/char_item.cpp:1996-2040`).
+    Detach,
     /// `USE_ELEMENT_UPGRADE`, `USE_ELEMENT_DOWNGRADE` or `USE_ELEMENT_CHANGE`: an
     /// element scroll, with its sub-type.
     Element(i32),
@@ -331,6 +335,9 @@ impl GameState {
             Arm::CleanLook => {
                 return self.clean_look_step(vid, at, dest, actor);
             }
+            Arm::Detach => {
+                return self.detach_step(vid, at, dest, actor);
+            }
             Arm::Element(kind) => {
                 return self.element_step(vid, at, dest, kind, actor);
             }
@@ -372,6 +379,64 @@ impl GameState {
         })?;
         let window = self.scroll_window(vid, (at, dest), scroll, actor);
         moved.records.extend(window);
+        Ok(moved)
+    }
+
+    /// The `USE_DETACHMENT` arm of `CHARACTER::RefineItem` (`G/char_item.cpp:1996-2040`):
+    /// the scroll at `at` breaks the live stones out of the item at `dest` and each
+    /// comes back by `AutoGiveItem`, in socket order. The use's checks run first, as
+    /// the stone arm's do; a stone that would not fit is laid at the caller's feet,
+    /// as `AutoGiveItem` lays it. The questing flag is the step's: legacy gives with
+    /// the same character state the use ran under.
+    fn detach_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let questing = self.quest_running(vid);
+        let stones = std::cell::RefCell::new(world::character::DetachedStones::new());
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let scroll = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(scroll.vnum)
+                .ok_or(MoveRefused::UnknownVnum(scroll.vnum))?;
+            world::character::use_checks(&scroll, proto, rules, gear.points)?;
+            let (done, found) =
+                world::character::detach_stones(items, (&scroll, proto), dest, protos)?;
+            *stones.borrow_mut() = found;
+            Ok(done)
+        })?;
+        for (_, vnum) in stones.borrow().iter().copied() {
+            let Some((given, done)) = self.auto_give(vid, (vnum, 1), 0, questing) else {
+                continue;
+            };
+            if let world::character::AutoGiven::Unplaced(item) = given {
+                self.lay_auto_given(vid, item);
+            }
+            let gave = MovedItems::new(
+                moved.owner_id,
+                vid.raw(),
+                done,
+                actor,
+                &self.protos,
+                &self.locale,
+            );
+            moved.records.extend(gave.records);
+            moved.changes.extend(gave.changes);
+            moved.around.extend(gave.around);
+            if gave.ground_at.is_some() {
+                moved.ground_at = gave.ground_at;
+            }
+            if gave.points.is_some() {
+                moved.points = gave.points;
+            }
+            if gave.quickslots.is_some() {
+                moved.quickslots = gave.quickslots;
+            }
+        }
         Ok(moved)
     }
 
@@ -618,6 +683,9 @@ impl GameState {
                     && proto.values[0] == CL_CLEAN_ATTR_VALUE0 =>
             {
                 Arm::CleanLook
+            }
+            Some(proto) if proto.item_type == ITEM_USE && proto.sub_type == USE_DETACHMENT => {
+                Arm::Detach
             }
             Some(proto)
                 if proto.item_type == ITEM_USE

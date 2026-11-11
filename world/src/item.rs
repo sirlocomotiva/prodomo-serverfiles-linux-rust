@@ -76,6 +76,11 @@ pub const SOCKETS: usize = common::constants::ITEM_SOCKET_MAX_NUM as usize;
 /// 5 + 2 and not a free choice.
 pub const ATTRIBUTES: usize = common::constants::ITEM_ATTRIBUTE_MAX_NUM as usize;
 
+/// `ITEM_FLAG_REFINEABLE` (`item_length.h:359`, named `ITEM_TUNABLE` in the text
+/// protos' `FLAG` column): the target of a `USE_DETACHMENT` scroll must carry it
+/// (`G/char_item.cpp:1996`).
+pub const ITEM_FLAG_REFINEABLE: u32 = 1 << 0;
+
 /// `ITEM_FLAG_STACKABLE` (`item_length.h:361`): the proto flag that lets two stacks of one
 /// vnum merge and one stack split. Legacy's `CItem::IsStackable` (`item.h:38`) reads it.
 pub const ITEM_FLAG_STACKABLE: u32 = 1 << 2;

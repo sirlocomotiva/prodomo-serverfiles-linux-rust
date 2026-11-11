@@ -53023,3 +53023,39 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 571. The detachment scroll
+
+The `USE_DETACHMENT` scroll the sash and look cleans do not take now breaks stones out.
+`CHARACTER::RefineItem`'s arm (`G/char_item.cpp:1996-2040`): a target without
+`ITEM_FLAG_REFINEABLE` falls through silently, a target with no live stone chats
+`[LS;1108]` and spends nothing, and otherwise every live stone in the first three
+sockets (`ITEM_STONES_MAX_NUM` with `ENABLE_EXTENDED_SOCKETS`, `C/item_length.h:13-15`)
+comes back by `AutoGiveItem` in socket order while its socket keeps the broken stone
+(28960, `G/char_item.cpp:59`), and one scroll is spent. The owner's scroll is 25100
+(`VALUE0` 3, so neither clean takes it); the flag bit is `ITEM_TUNABLE` in the text
+protos' `FLAG` column, which every weapon and armour carries.
+
+The world names the stones (`world::character::detach_stones`, pure: the sockets, the
+update, the spend) and the step gives each back (`detach_step`, through `auto_give`
+with the step's questing flag, laying what would not fit at the caller's feet). The
+stone predicate — past 2 and not the broken stone — is the refine's keep predicate, so
+a broken socket stays broken and a fourth-socket stone is out of reach.
+
+Scenario `a_detachment_scroll_breaks_the_stones_out_of_a_sword`: Alpha's sword holds
+28030 and 28031; the scroll breaks both sockets, clears itself, and each stone is named
+(`[LS;444;%s]`) and set in socket order (cells 470 and 471, the stone bank); a second
+scroll on the broken sword chats `[LS;1108]` and the scroll stays. Unit pins: the
+socket-order names with the fourth socket out of reach, and the stoneless chat beside
+the unflagged silence. Mutants (six sockets, inverted flag gate) both killed.
+Inventory: `sys.item.sockets` and `cg.game.item_use_to_item` stay `partial`; the
+socket-adding scrolls are the sockets row's last gap.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite571.txt` (5386 passed, 0 failed in 46 targets),
+`cargo test --workspace --doc --locked --offline` (1 passed in 9 targets),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

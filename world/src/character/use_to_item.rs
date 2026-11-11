@@ -22,7 +22,7 @@ use super::equip::Trail;
 use super::item_move::{done, MoveDone, MoveKind, MoveRecord};
 use super::items::CharacterItems;
 use super::{ItemChange, ItemRecord, MoveRefused};
-use crate::item::{Item, ItemId, SOCKETS};
+use crate::item::{Item, ItemId, ITEM_FLAG_REFINEABLE, SOCKETS};
 
 /// The locked target of a transmutation clean (`CleanTransmutation`, `G/char.cpp:10756-10760`).
 pub const CLEAN_LOCKED_NOTICE: &str = "You can't remove the transmute because item is locked";
@@ -37,6 +37,14 @@ pub const NOT_WEAPON_STONE_NOTICE: &str = "[LS;428]";
 pub const NO_SOCKET_NOTICE: &str = "[LS;431]";
 /// The stone sits in its socket (`ENABLE_ADDSTONE_FAILURE` is off, so it always does).
 pub const STONE_SET_NOTICE: &str = "[LS;1613]";
+/// No stone sits in the target (`CHARACTER::RefineItem`, `G/char_item.cpp:2037`).
+pub const NO_STONE_NOTICE: &str = "[LS;1108]";
+/// `ITEM_BROKEN_METIN_VNUM` (`G/char_item.cpp:59`): what a detached stone's socket
+/// keeps.
+pub const BROKEN_STONE_SOCKET: i32 = 28_960;
+/// `ITEM_STONES_MAX_NUM` with `ENABLE_EXTENDED_SOCKETS` (`C/item_length.h:13-15`):
+/// the sockets a detachment scroll reads.
+pub const STONE_SOCKETS: usize = 3;
 /// `SASH_ABSORBED_SOCKET` (`C/item_length.h:505`): socket 1.
 const ABSORBED_SOCKET: usize = 1;
 /// No attribute set touches this target (`G/char_item.cpp:6383`): a costume or a glove,
@@ -205,6 +213,79 @@ pub fn put_stone(
         &mut trail,
     )?;
     Ok(done(MoveKind::Used, trail))
+}
+
+/// What [`detach_stones`] found to give back: the socket index and the stone vnum
+/// each held, in socket order.
+pub type DetachedStones = Vec<(usize, u32)>;
+
+/// The `USE_DETACHMENT` arm of `CHARACTER::RefineItem` (`G/char_item.cpp:1996-2040`)
+/// once the use's checks passed: every live stone in the first [`STONE_SOCKETS`]
+/// sockets of the item at `dest` is named for the give-back, its socket keeps
+/// [`BROKEN_STONE_SOCKET`], and one scroll is spent. A stone is a socket past 2
+/// that is not the broken stone — the same predicate the refine's keep uses.
+///
+/// A target [`use_target`] refuses, one without [`ITEM_FLAG_REFINEABLE`], and one
+/// whose proto is unknown are refused without a line, as legacy's `else if` falls
+/// through. A target with no live stone chats [`NO_STONE_NOTICE`] and spends
+/// nothing. The caller gives each named stone back with `AutoGiveItem` and lays
+/// what would not fit, in socket order, as legacy gives inside its own loop.
+///
+/// # Errors
+///
+/// A storage refusal, which changes nothing.
+pub fn detach_stones(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    dest: ItemPos,
+    protos: &ItemProtos,
+) -> Result<(MoveDone, DetachedStones), MoveRefused> {
+    let silent = || Ok((done(MoveKind::Used, Trail::default()), Vec::new()));
+    let Some(target) = use_target(items, dest) else {
+        return silent();
+    };
+    let Some(target_proto) = protos.get(target.vnum) else {
+        return silent();
+    };
+    if target_proto.flags & ITEM_FLAG_REFINEABLE == 0 {
+        return silent();
+    }
+    let mut stones = DetachedStones::new();
+    for (index, socket) in target.sockets.iter().enumerate().take(STONE_SOCKETS) {
+        if *socket > 2 && *socket != BROKEN_STONE_SOCKET {
+            let Ok(vnum) = u32::try_from(*socket) else {
+                continue;
+            };
+            stones.push((index, vnum));
+        }
+    }
+    if stones.is_empty() {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(NO_STONE_NOTICE));
+        return Ok((done(MoveKind::Used, trail), Vec::new()));
+    }
+    let mut trail = Trail::default();
+    let mut sockets = target.sockets;
+    for (index, _) in &stones {
+        sockets = items
+            .set_socket(target.id, *index, BROKEN_STONE_SOCKET)
+            .map_err(|_| MoveRefused::Empty)?;
+    }
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets,
+    });
+    super::potion::use_one(
+        items,
+        scroll,
+        super::quickslot::chains_when_used_up(scroll_proto),
+        &mut trail,
+    )?;
+    Ok((done(MoveKind::Used, trail), stones))
 }
 
 /// `CleanSashAttr` (`G/char.cpp:10481-10500`): the detachment scroll cleans the absorbed
@@ -1043,6 +1124,77 @@ mod tests {
         );
     }
 
+    /// The scroll on a stoned sword names each live stone in socket order, breaks
+    /// each socket, and spends one scroll. A fourth-socket stone is out of the
+    /// scroll's reach, and a broken socket stays broken.
+    #[test]
+    fn a_detachment_scroll_names_the_stones_and_breaks_their_sockets() {
+        let mut sword_proto = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        sword_proto.flags = ITEM_FLAG_REFINEABLE;
+        let scroll_proto = ItemProto::for_category_rule(SCROLL, ITEM_USE, USE_DETACHMENT);
+        let protos = ItemProtos::from_rows(vec![sword_proto, scroll_proto]);
+        let mut sword = Item::new(20, SWORD);
+        sword.sockets[0] = 28_030;
+        sword.sockets[1] = BROKEN_STONE_SOCKET;
+        sword.sockets[2] = 28_031;
+        sword.sockets[3] = 28_032;
+        let mut items = holding(&[(0, sword), (1, Item::new(10, SCROLL))]);
+        let scroll = items.item_at(inv(1)).expect("the scroll").clone();
+        let proto = protos.get(SCROLL).expect("the scroll proto").clone();
+        let (done, stones) = detach_stones(&mut items, (&scroll, &proto), inv(0), &protos)
+            .expect("the detach lands");
+        assert_eq!(stones, vec![(0, 28_030), (2, 28_031)]);
+        let kept = items.item(20).expect("the sword stays");
+        assert_eq!(
+            kept.sockets[0], BROKEN_STONE_SOCKET,
+            "the first socket breaks"
+        );
+        assert_eq!(
+            kept.sockets[2], BROKEN_STONE_SOCKET,
+            "the third socket breaks"
+        );
+        assert_eq!(kept.sockets[3], 28_032, "the fourth socket is out of reach");
+        assert!(items.item(10).is_none(), "the last scroll leaves");
+        assert!(
+            done.changes
+                .iter()
+                .any(|change| matches!(change, ItemChange::Sockets { id: 20, .. })),
+            "the sockets store"
+        );
+    }
+
+    /// No live stone chats `[LS;1108]` and spends nothing; a target without the
+    /// refineable flag refuses silently, as the `else if` falls through.
+    #[test]
+    fn a_stoneless_sword_chats_and_an_unflagged_one_is_silent() {
+        let mut sword_proto = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        sword_proto.flags = ITEM_FLAG_REFINEABLE;
+        let scroll_proto = ItemProto::for_category_rule(SCROLL, ITEM_USE, USE_DETACHMENT);
+        let plain_proto = ItemProto::for_category_rule(3001, ITEM_WEAPON, 0);
+        let protos = ItemProtos::from_rows(vec![sword_proto, scroll_proto, plain_proto]);
+        let mut items = holding(&[
+            (0, Item::new(20, SWORD)),
+            (1, Item::new(10, SCROLL)),
+            (2, Item::new(21, 3001)),
+        ]);
+        let scroll = items.item_at(inv(1)).expect("the scroll").clone();
+        let proto = protos.get(SCROLL).expect("the scroll proto").clone();
+        let (done, stones) = detach_stones(&mut items, (&scroll, &proto), inv(0), &protos)
+            .expect("the refusal chats");
+        assert!(stones.is_empty(), "nothing to give back");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(NO_STONE_NOTICE))),
+            "the stoneless sword chats"
+        );
+        assert!(items.item(10).is_some(), "the scroll stays");
+        let (done, stones) = detach_stones(&mut items, (&scroll, &proto), inv(2), &protos)
+            .expect("a silent refusal");
+        assert!(stones.is_empty());
+        assert!(done.records.is_empty(), "no record for an unflagged target");
+        assert!(done.changes.is_empty(), "no change for an unflagged target");
+    }
     /// A transmuted weapon cleans back to none: the update record, the `Transmuted`
     /// change, and one scroll spent. A locked target refuses through `Locked`; an
     /// untransmuted weapon and a non-weapon/armour/costume refuse silently.

@@ -37317,6 +37317,89 @@ fn a_stone_and_a_blessing_are_used_on_a_sword() {
     );
 }
 
+/// `cg.game.item_use_to_item`: a detachment scroll (25100) used on the stoned sword
+/// breaks both stones out — the sword's sockets keep the broken stone (28960), each
+/// stone comes back by `AutoGiveItem` (the line naming it, then its set), and the
+/// scroll is spent. A second scroll on the broken sword chats `[LS;1108]` and spends
+/// nothing.
+#[test]
+fn a_detachment_scroll_breaks_the_stones_out_of_a_sword() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, cell, count, vnum, socket0, socket1) in [
+        (41, 0, 1, 10, 28_030, 28_031),
+        (42, 2, 1, 25_100, 0, 0),
+        (43, 3, 1, 25_100, 0, 0),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, \
+                 socket1) SELECT {id}, id, 1, {cell}, {count}, {vnum}, {socket0}, {socket1} \
+                 FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+
+    // When: Alpha uses the scroll on the stoned sword. Then: the sword breaks both
+    // sockets, the scroll clears, and each stone is named and set in socket order.
+    alpha.send_record(&client_use_to_item(2, 0));
+    let sword = alpha.read_game();
+    assert_eq!(
+        sword[..4],
+        [ITEM_UPDATE, 1, 0, 0],
+        "the sword: {sword:02x?}"
+    );
+    assert_eq!(sword[14..18], 28_960_i32.to_le_bytes(), "socket 0 breaks");
+    assert_eq!(sword[18..22], 28_960_i32.to_le_bytes(), "socket 1 breaks");
+    let scroll = alpha.read_game();
+    assert_eq!(
+        scroll[..8],
+        [ITEM_SET, 1, 2, 0, 0, 0, 0, 0],
+        "the scroll clears"
+    );
+    let mut first = b"[LS;444;".to_vec();
+    first.extend_from_slice(b"Piatra p\xe3trunderii+0");
+    first.push(b']');
+    assert_eq!(alpha.read_game(), an_info_line(&first));
+    assert_eq!(set_fields(&alpha.read_game()), (1, 470, 28_030, 1));
+    let mut second = b"[LS;444;".to_vec();
+    second.extend_from_slice(b"Piatra lovitur\xe3-fatal\xe3+0");
+    second.push(b']');
+    assert_eq!(alpha.read_game(), an_info_line(&second));
+    assert_eq!(set_fields(&alpha.read_game()), (1, 471, 28_031, 1));
+    alpha.quiet("the detach's records end with the second stone");
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE window_type = 1 AND pos = 0 AND vnum = 10 AND \
+         socket0 = 28960 AND socket1 = 28960",
+    );
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE window_type = 1 AND vnum = 28030",
+    );
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE window_type = 1 AND vnum = 28031",
+    );
+
+    // And: a second scroll on the broken sword chats `[LS;1108]` and spends nothing.
+    alpha.send_record(&client_use_to_item(3, 0));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1108]"));
+    alpha.quiet("the refused scroll changes nothing");
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE id = 43 AND count = 1",
+    );
+}
+
 /// `cg.game.refine_element`, `gc.window.refine_element`: an element scroll (56004, lightning)
 /// used on the +7 sword (17) stands the upgrade window for it; `CG_REFINE_ELEMENT` with a
 /// change's element lands the upgrade, spending the scroll and the 3,000,000 fee; a hex
