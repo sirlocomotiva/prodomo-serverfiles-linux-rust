@@ -52793,3 +52793,34 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 566. The log audit
+
+`sys.log` is `partial`: the sink decisions are made, the per-call tracing waits on the
+owner (question 73).
+
+Legacy's `LogManager` writes 25 log kinds through one MySQL sink (`Connect`, `Query`,
+`EscapeString` — `server/server/game/log.h`, all switches on, default level `MAX`). The
+schema is ours (ADR-0001), so the sink is refused outright: no log table comes back. Its
+`dev_log` — a test-server-only, level-masked file log — is already `common::logging`'s
+`EnvFilter` plus daily rolling file appender, so nothing there needs porting. Five of the
+25 methods are dead: `HackCRCLog`, `PCBangLoginLog`, `CubeLog`, `ChatLog` and
+`InvalidServerLog` have no callers in `game/`, `db/` or `common/` (the positive control is
+the same sweep finding the other 20, e.g. `ItemLog` in 21 files, `CharLog` in 18). The 20
+live ones span per-drop spam (`ItemLog`, `MoneyLog` on every drop) and security rows
+(`HackLog`, `GMCommandLog`, `SpeedHackLog`): tracing all of them is dozens of sites, so the
+owner picks the kept set before the calls are added. What exists today stays: `CHAR_LOG`,
+one `ITEM_LOG`, one `HACK_LOG` and one `MONEY_LOG` site.
+
+No code changed.
+
+Inventory: `sys.log` missing to partial, naming the refused sink, the dead five and the
+question.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite566.txt` (5356 passed, 0 failed in 46 targets), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

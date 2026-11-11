@@ -678,3 +678,13 @@ owner answers.
  the cooldown lines (ledger 512). Waits on it: confirm your build also leaves
  `__DUNGEON_SYSTEM__` undefined, so the file is dead and the row stays `unused`. If your
  build defines it, the file manager is a real port.
+73. **Which game logs must the operator keep (ledger 566)?** Legacy's `LogManager`
+ writes 25 log kinds to MySQL (`log.cpp`), from per-drop `ItemLog`/`MoneyLog` rows (tens of
+ files call them) to security rows (`HackLog`, `GMCommandLog`, `SpeedHackLog`). The schema is
+ ours (ADR-0001), so no MySQL log table comes back; the question is what the tracing log
+ keeps. Today the Rewrite traces `CHAR_LOG` (quest `char_log`), one `ITEM_LOG`, one
+ `HACK_LOG` and one `MONEY_LOG` site. Waits on it: trace every legacy log call (dozens of
+ sites, including per-drop spam), or trace only the security and operator rows (`HackLog`,
+ `GMCommandLog`, `SpeedHackLog`, `LoginLog`, `BootLog`, `LevelLog`, `ChangeNameLog`,
+ `ShoutLog`) and drop the per-item spam? Five methods are dead either way (no callers:
+ `HackCRCLog`, `PCBangLoginLog`, `CubeLog`, `ChatLog`, `InvalidServerLog`).
