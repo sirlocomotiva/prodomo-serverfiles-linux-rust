@@ -53278,3 +53278,47 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 green to `/tmp/suite577.txt` (5408 passed, 0 failed in 46 targets).
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 578. The bank's alignment
+
+`sys.char.save`'s last `Not ported` was the alignment a bank's minutes earn
+(`G/char.cpp:1529-1539`): outside a `BANPK` cell each banked minute earns 5, or 60
+(120 with `UNIQUE_ITEM_FASTER_ALIGNMENT_UP_BY_TIME`, 70050) while the real
+alignment is negative. It runs inside `CreatePlayerProto`, before `tab.playtime`
+and `tab.lAlignment` are read (`:1545-1546`), so the saved row holds the earned
+value.
+
+`GameState::answer_kept` is the bank: it already set the points' playtime before
+reading the kept alignment, so `earn_alignment_for_playtime` runs there, between
+the two. The minutes are only the fresh ones — the banked minus the points'
+last — because a logout re-banks the session's whole minutes (ledger 261) and a
+re-bank must earn nothing twice. The `BANPK` read is the body's own cell through
+`is_banpk`; the unique read is `wears_unique`'s two unique cells, as
+`IsEquipUniqueItem` reads them (`G/char_item.cpp:9519-9540`). Zero or negative
+minutes earn nothing, and the move goes through `update_alignment`, so the shown
+follows, the /10 update goes out, and the band affects move with it.
+
+Tests: `the_banks_minutes_earn_five_each`, `a_negative_bank_earns_sixty_or_one_twenty_but_never_twice`
+(the 60, the 120, the no-twice silence, and the zero bank at a band edge that
+kills the `<=`/`<` mutant), `a_bank_on_a_banpk_cell_earns_nothing`, and
+`a_kept_save_banks_the_playtime_then_earns_its_minutes` (the kept row reads the
+earned alignment, the re-bank earns nothing). A body with a place but no spot
+earns nothing, as legacy's null-sectree arm skips (`GetSectree()` null).
+`read_war_end_past_pings` pumps past a stray `GC_CHARACTER_UPDATE`: the war
+outlasts a bank, and the bank's /10 crossing sends the `UpdatePacket` legacy
+sends too. Scenario
+`a_save_past_a_minute_of_play_writes_the_alignment_the_minute_earned`: Alpha's
+row holds 300 minutes and alignment 0, and the logout writes 301 and 5. Mutants:
+the three per-minute rates, the `BANPK` gate, the unique vnum, and the zero
+guard all fail.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite (see below), `cargo test --workspace --doc --locked --offline`,
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. The full suite is
+green to `/tmp/suite578b.txt` (5413 passed, 0 failed in 46 targets; the first run failed
+`a_war_without_a_side_ends_when_the_map_times_out` on the bank's own /10 `UpdatePacket`,
+which `read_war_end_past_pings` now pumps past).
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

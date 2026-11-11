@@ -9941,6 +9941,46 @@ fn a_logout_writes_where_the_character_stands() {
     drop(again);
 }
 
+/// `sys.char.save`: the save past a minute of play writes the alignment the minute
+/// earned, not only the playtime (`G/char.cpp:1529-1539`). Alpha's row holds 300 minutes
+/// and an alignment of 0; 62 seconds after the entry the first bank earns 5, and the
+/// logout writes an alignment of 5 beside the 301 minutes. The ping cycle is set past
+/// the wait, so the silent client is not closed.
+#[test]
+fn a_save_past_a_minute_of_play_writes_the_alignment_the_minute_earned() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "save_event_second_cycle = 1\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET playtime_minutes = 300, alignment = 0 WHERE name = 'Alpha'",
+    );
+    let (alice, _alpha) = enter_world(&server, b"alice", 0);
+    let entered = std::time::Instant::now();
+    // A save strictly past 60 000 ms banks the minute, and the cycle saves every second.
+    std::thread::sleep(Duration::from_secs(62).saturating_sub(entered.elapsed()));
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    let earned = support::rows(
+        database.url(),
+        "SELECT playtime_minutes, alignment FROM player WHERE name = 'Alpha'",
+        2,
+    );
+    assert_eq!(
+        earned,
+        vec![vec![301, 5]],
+        "the bank wrote the minute and the alignment it earned"
+    );
+}
+
 /// `sys.char.save`: the row is written by the save event too, not only at logout. This is
 /// ADR-0003's "in the background at most a few seconds late", with the cycle shortened to a
 /// second so a scenario can watch it.
@@ -21020,9 +21060,17 @@ fn read_war_end_past_pings(
     war_type: u8,
     deadline: std::time::Instant,
 ) {
-    let end = client
+    // The war outlasts a save bank, and a bank's alignment crosses a /10 boundary
+    // (`G/char.cpp:1529-1539`), whose `UpdatePacket` legacy sends too — so a stray
+    // `GC_CHARACTER_UPDATE` is pumped past, while anything else still fails.
+    let mut end = client
         .read_game_until(deadline)
         .expect("a record before the deadline ran out");
+    while end.first() == Some(&GC_CHARACTER_UPDATE) {
+        end = client
+            .read_game_until(deadline)
+            .expect("a record before the deadline ran out");
+    }
     assert_eq!(
         guild_subheader(&end),
         GUILD_SUBHEADER_GC_WAR,

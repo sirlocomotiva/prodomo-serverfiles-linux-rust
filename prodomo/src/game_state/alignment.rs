@@ -69,6 +69,9 @@ pub(super) const ALIGNMENT_BONUS_8: u32 = 577;
 /// `UNIQUE_ITEM_HIDE_ALIGNMENT_TITLE` (`G/unique_item.h:28`): worn, the shown alignment
 /// is 0 (`ShowAlignment(false)`); taken off, it returns to the real one.
 pub(super) const HIDE_ALIGNMENT_UNIQUE: u32 = 70_048;
+/// `UNIQUE_ITEM_FASTER_ALIGNMENT_UP_BY_TIME` (`G/unique_item.h:30`): worn in a unique
+/// cell, a bank's negative-alignment minutes earn 120 each instead of 60.
+pub(super) const FASTER_ALIGNMENT_UP_BY_TIME: u32 = 70_050;
 
 /// The order `UpdateAlignment` tests the bonus affects in (`G/char_battle.cpp:3495-3541`):
 /// 570, 573, 572, 571, 574, 575, 576, 577.
@@ -192,6 +195,38 @@ impl GameState {
                 self.add_pc_affect(vid, alignment_bonus(kind, slot, value), true);
             }
         }
+    }
+
+    /// The save bank's alignment (`G/char.cpp:1529-1539`): each minute new since the
+    /// last bank earns 5 outside a `BANPK` cell, or 60 (120 with the 70050 unique)
+    /// while the real alignment is negative. Zero or negative minutes earn nothing —
+    /// a logout re-banks the session's whole minutes (ledger 261), so the earned ones
+    /// are only the ones the points do not hold yet.
+    pub(super) fn earn_alignment_for_playtime(&mut self, vid: Vid, minutes: i32) {
+        if minutes <= 0 {
+            return;
+        }
+        let Some((_, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        // No spot is no sectree (`GetSectree()` null skips the arm): nothing is earned.
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return;
+        };
+        if self.is_banpk(map, spot.x, spot.y) {
+            return;
+        }
+        let negative = self.real_alignment_of(vid.raw()) < 0;
+        let per_minute: i32 = if negative {
+            if self.wears_unique(vid, FASTER_ALIGNMENT_UP_BY_TIME) {
+                120
+            } else {
+                60
+            }
+        } else {
+            5
+        };
+        self.update_alignment(vid, per_minute.saturating_mul(minutes));
     }
 
     /// `CHARACTER::ShowAlignment` (`G/char_battle.cpp:3457-3475`): the shown value becomes
@@ -894,6 +929,201 @@ mod tests {
         assert!(
             world.show_alignment(vid, true).is_none(),
             "showing again is silent"
+        );
+    }
+    /// The bank's minutes earn 5 each, and the kept alignment reads the earned value.
+    #[test]
+    fn the_banks_minutes_earn_five_each() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _inbox = enter(&mut world, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        if let Some(body) = world.bodies.get_mut(&vid) {
+            body.card.alignment = 100;
+            body.shown_alignment = Some(100);
+        }
+        world.earn_alignment_for_playtime(vid, 2);
+        assert_eq!(world.bodies[&vid].card.alignment, 110);
+        assert_eq!(
+            world.bodies[&vid].shown_alignment,
+            Some(110),
+            "the shown follows without the cloak"
+        );
+    }
+    /// The kept save reads the earned alignment: a `KeptOf` with minutes past the
+    /// points' playtime banks the playtime first, earns 5 a fresh minute, and answers
+    /// the kept row with the earned alignment. A second `KeptOf` of the same minutes
+    /// earns nothing again.
+    #[test]
+    fn a_kept_save_banks_the_playtime_then_earns_its_minutes() {
+        use crate::game_loop_messages::GameCommand;
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _inbox = enter(&mut world, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        if let Some(body) = world.bodies.get_mut(&vid) {
+            body.card.alignment = 0;
+            body.shown_alignment = Some(0);
+        }
+        // The row's 300 minutes, as a load seeds them, so only 301's minute is fresh.
+        world
+            .characters_mut()
+            .find_by_vid_mut(vid)
+            .expect("the entrant is in the world")
+            .items_and_points_mut()
+            .1
+            .expect("the entrant has points")
+            .set_playtime(300);
+        let kept = |world: &mut GameState, minutes: i32| {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            world.apply(GameCommand::KeptOf {
+                vid,
+                playtime: Some(minutes),
+                reply,
+            });
+            answer
+                .blocking_recv()
+                .expect("the world answers")
+                .expect("the entrant is online")
+        };
+        let first = kept(&mut world, 301);
+        assert_eq!(world.bodies[&vid].card.alignment, 5, "one fresh minute");
+        assert_eq!(first.alignment, 5, "the saved row earns it too");
+        assert_eq!(
+            first
+                .points
+                .expect("the entrant has points")
+                .real_point(point::POINT_PLAYTIME),
+            301
+        );
+        let again = kept(&mut world, 301);
+        assert_eq!(
+            world.bodies[&vid].card.alignment, 5,
+            "the re-bank earns nothing"
+        );
+        assert_eq!(again.alignment, 5);
+    }
+    /// A bank on an `ATTR_BANPK` cell earns nothing, while the same bank off it earns.
+    #[test]
+    fn a_bank_on_a_banpk_cell_earns_nothing() {
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::MobProtos;
+        use gamedata::server_attr::{
+            CellBlock, SectreeGrid, ServerAttr, ATTR_BANPK, CELL_SIZE, SECTREE_CELLS,
+        };
+        use std::sync::Arc;
+        use world::cells::{HostedCells, MapCells};
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        use crate::game_state::fixtures::{region, PLACE};
+
+        // [`PLACE`]'s cells, `ATTR_BANPK` in the cell columns left of 100.
+        let side = SECTREE_CELLS;
+        let cells: Vec<u32> = (0..side * side)
+            .map(|at| {
+                let x = i32::try_from(at % side).unwrap() * CELL_SIZE;
+                if x < 100 {
+                    ATTR_BANPK
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let attr = ServerAttr::from_blocks(1, 1, vec![CellBlock::from_cells(&cells)]).unwrap();
+        let grid = SectreeGrid::of(&region()).unwrap();
+        let mut hosted = HostedCells::default();
+        hosted.insert(PLACE.1, MapCells::new(grid, Arc::new(attr)));
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world.install_respawner(
+            Respawner::new(
+                Arc::new(MobProtos::from_rows(Vec::new())),
+                Arc::new(MobGroups::default()),
+                Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+                NpcVids::starting_at(FIRST_NPC_VID + 100),
+            ),
+            Arc::new(hosted),
+        );
+        let _inbox = enter(&mut world, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        if let Some(body) = world.bodies.get_mut(&vid) {
+            body.card.alignment = 0;
+            body.shown_alignment = Some(0);
+        }
+        world.earn_alignment_for_playtime(vid, 1);
+        assert_eq!(
+            world.bodies[&vid].card.alignment, 0,
+            "the cell refuses the minute"
+        );
+    }
+
+    /// Negative alignment earns 60 a minute, 120 with the 70050 unique in a unique
+    /// cell; a re-banked minute earns nothing twice.
+    #[test]
+    fn a_negative_bank_earns_sixty_or_one_twenty_but_never_twice() {
+        use common::enums::EWearPositions;
+        use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
+        use protocol::item_pos::ItemPos;
+        use world::item::Item;
+
+        use super::FASTER_ALIGNMENT_UP_BY_TIME;
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        if let Some(body) = world.bodies.get_mut(&vid) {
+            body.card.alignment = -100;
+            body.shown_alignment = Some(-100);
+        }
+        world.earn_alignment_for_playtime(vid, 1);
+        assert_eq!(world.bodies[&vid].card.alignment, -40);
+
+        let mut token = Item::new(12, FASTER_ALIGNMENT_UP_BY_TIME);
+        token.set_size(1).expect("a positive footprint");
+        let cell = ItemPos::new(
+            EWindows::Inventory as u8,
+            INVENTORY_MAX_NUM + EWearPositions::Unique1 as u16,
+        );
+        world
+            .characters
+            .find_by_vid_mut(vid)
+            .expect("the entrant is in the world")
+            .items_mut()
+            .set(cell, &token)
+            .expect("the unique cell takes it");
+        world.earn_alignment_for_playtime(vid, 1);
+        assert_eq!(world.bodies[&vid].card.alignment, 80);
+
+        while inbox.try_recv().is_ok() {}
+        world.earn_alignment_for_playtime(vid, 0);
+        world.earn_alignment_for_playtime(vid, -3);
+        assert_eq!(
+            world.bodies[&vid].card.alignment, 80,
+            "a re-bank earns nothing twice"
+        );
+        assert!(
+            inbox.try_recv().is_err(),
+            "a re-bank writes no update and no band affect"
+        );
+        // At a band edge the guard matters: an `earn(0)` that ran `update_alignment`
+        // would re-add the band's pair, which the inbox would hear.
+        if let Some(body) = world.bodies.get_mut(&vid) {
+            body.card.alignment = 10_005;
+            body.shown_alignment = Some(10_005);
+        }
+        world.update_alignment(vid, 0);
+        assert_eq!(
+            affect_kinds(&world, vid),
+            [ALIGNMENT_BONUS_1, ALIGNMENT_BONUS_3]
+        );
+        while inbox.try_recv().is_ok() {}
+        world.earn_alignment_for_playtime(vid, 0);
+        assert!(
+            inbox.try_recv().is_err(),
+            "a zero bank at a band edge re-adds nothing"
         );
     }
 

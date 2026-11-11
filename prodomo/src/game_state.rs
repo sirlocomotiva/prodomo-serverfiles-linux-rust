@@ -3037,13 +3037,20 @@ impl GameState {
     /// quickslots, its quest flags and where its body stands, or `None` when it is not
     /// online. The minutes the save banks land in its points first, as `CreatePlayerProto`
     /// banks them before it reads the points (`G/char.cpp:1519-1545`), so a quest's
-    /// `pc.get_playtime` reads them from then on.
+    /// `pc.get_playtime` reads them from then on — and the bank's alignment lands with
+    /// them (`:1529-1539`), before the kept alignment is read below.
     fn answer_kept(
         &mut self,
         vid: common::vid::Vid,
         playtime: Option<i32>,
         reply: oneshot::Sender<Option<Kept>>,
     ) {
+        let before = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map(|points| points.real_point(common::point_slot::POINT_PLAYTIME));
         let points = self
             .characters
             .find_by_vid_mut(vid)
@@ -3051,6 +3058,13 @@ impl GameState {
             .and_then(|character| character.items_and_points_mut().1);
         if let (Some(minutes), Some(points)) = (playtime, points) {
             points.set_playtime(minutes);
+        }
+        // The bank's alignment (`G/char.cpp:1529-1539`): the minutes new since the last
+        // bank earn 5 each outside a `BANPK` cell, or 60 (120 with the 70050 unique)
+        // each while the real alignment is negative.
+        if let (Some(minutes), Some(banked)) = (playtime, before) {
+            let fresh = minutes.saturating_sub(banked);
+            self.earn_alignment_for_playtime(vid, fresh);
         }
         let place = self.kept_place(vid);
         let affects = self.saved_affects_of(vid);
