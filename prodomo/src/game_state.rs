@@ -4403,7 +4403,12 @@ impl GameState {
             self.arena_consumed_potion(vid, vnum, sub_type, &moved);
         }
         self.run_quest_used(vid, at, actor, account, &mut moved);
-        // `StartAffectEvent`: a potion that left recovery starts the event, one second out,
+        // `case USE_CLEAR`'s strip (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`,
+        // `G/char_affect.cpp:951-960`): the step consumed the cure, and the bad
+        // affects go now, after the quest hook and before the feed.
+        if moved.kind == world::character::MoveKind::Cleared {
+            self.remove_bad_affect(vid);
+        }
         // unless it already runs.
         if moved
             .points

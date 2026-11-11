@@ -53409,3 +53409,26 @@ No code change. The row is `ported` on `a_guild_ups_and_casts_its_skills`.
 Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5418 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 582. The cure's strip
+
+`case USE_CLEAR` (`G/char_item.cpp:5539-5551`): both owner cures (27124, 27874)
+strip through `RemoveBadAffect` and use one of the stack. The world's step answers
+the consume as `MoveKind::Cleared` (the book arm's consume, which refuses nothing
+a cure can carry), and `use_item` strips after the quest hook, before the feed.
+Scenario `a_cure_used_on_a_poison_strips_it_and_uses_one_up`: a `/poison`'d
+Yankee uses a two-stack cure — the update to count 1, the 209 `GC_AFFECT_REMOVE`,
+the flag update, and the stored row.
+
+The scenario caught the strip's poison arm: `remove_bad_affect` cancelled the
+poison event but never took the 209 affect off, so the cure left the poison's
+add on the client. Legacy's `RemovePoison` removes the affect first, then cancels
+the event (`G/char_resist.cpp:229-233`); the port does that now, which also
+mends the arena, war-end and cure-roll callers. Tests: the world consume
+(`a_cure_use_consumes_one_and_names_the_strip`), the game-state strip
+(`a_cure_strips_the_bad_affect_and_uses_one_up`). Mutants: the kind split and
+the strip gate both fail.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, the full suite (5421 passed, 0 failed in 46 targets), the doc suite (1 passed, 0 failed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and the store/legacy checks.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

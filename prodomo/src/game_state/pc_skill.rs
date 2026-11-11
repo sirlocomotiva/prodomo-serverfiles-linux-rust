@@ -1685,11 +1685,12 @@ impl GameState {
         true
     }
     /// `CHARACTER::RemoveBadAffect` (`G/char_affect.cpp:951-960`): the poison
-    /// (with its event, `RemovePoison`), the fire, the stun, the slow, and 80 go
-    /// — in that order. No player fire event is ported, so the fire's cancel is
-    /// vacuous.
+    /// (the affect, then its event — `RemovePoison`, `G/char_resist.cpp:229-233`),
+    /// the fire, the stun, the slow, and 80 go — in that order. No player fire
+    /// event is ported, so the fire's cancel is vacuous.
     pub(super) fn remove_bad_affect(&mut self, vid: Vid) {
-        use crate::loading_phase::{AFFECT_SLOW, AFFECT_STUN};
+        use crate::loading_phase::{AFFECT_POISON, AFFECT_SLOW, AFFECT_STUN};
+        let _poison = self.remove_pc_affect(vid, AFFECT_POISON);
         self.remove_pc_poison(vid);
         let _fire = self.remove_pc_affect(vid, AFFECT_FIRE);
         let _stun = self.remove_pc_affect(vid, AFFECT_STUN);
@@ -5264,5 +5265,70 @@ mod tests {
         );
         assert!(world.use_skill(Vid::new(1), 1, ME));
         assert_eq!(sp_of(&world, 1), before - 90);
+    }
+    /// A stunned drinker uses a `USE_CLEAR` cure: one of the stack goes and the stun
+    /// goes with it (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`).
+    #[test]
+    fn a_cure_strips_the_bad_affect_and_uses_one_up() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        world.add_pc_affect(
+            me,
+            super::super::affect::Affect::buff(crate::loading_phase::AFFECT_STUN, 0, 0, 0, 100, 0),
+            false,
+        );
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut cure = Item::new(7, 27_124);
+        cure.set_size(1).expect("a positive footprint");
+        cure.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &cure)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let cured = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the cure lands");
+        assert_eq!(cured.kind, MoveKind::Cleared);
+        let left = world
+            .affect_events
+            .get(&me)
+            .map_or(0, |event| event.affects.len());
+        assert_eq!(left, 0, "the strip took the stun");
+        let count = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .items()
+            .item(7)
+            .expect("one of two is kept")
+            .count;
+        assert_eq!(count, 1, "one of the stack goes");
     }
 }

@@ -142,6 +142,8 @@ pub const USE_ADD_ATTRIBUTE2: i32 = 22;
 pub const USE_CHANGE_ATTRIBUTE2: i32 = 24;
 /// `USE_PUT_INTO_BELT_SOCKET` (`C/item_length.h:283`): a jewel for a belt's socket.
 pub const USE_PUT_INTO_BELT_SOCKET: i32 = 29;
+/// `USE_CLEAR` (`C/item_length.h:266`): a bad-affect cure (27124, 27874).
+pub const USE_CLEAR: i32 = 12;
 /// `USE_UNLOCK_SHAMAN` (`C/item_length.h:306`): 47. The buff-premium item (69699), which
 /// legacy answers with the success line and keeps (520: its training arm is commented out).
 pub const USE_UNLOCK_SHAMAN: i32 = 47;

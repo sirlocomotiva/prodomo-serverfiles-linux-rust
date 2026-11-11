@@ -199,6 +199,9 @@ pub enum MoveKind {
     /// The switchbot changed a slotted item's attributes (`CSwitchbot::SwitchItems`,
     /// `G/refactorized_switchbot.cpp:242-388`).
     Switched,
+    /// A cure used one of its stack up (`case USE_CLEAR`, `G/char_item.cpp:5539-5551`).
+    /// The world's step answers the consume; the game state strips the bad affects.
+    Cleared,
 }
 
 /// A record the client is sent, in the order legacy sends it.

@@ -27590,6 +27590,85 @@ fn read_kill_poison_misses(alice: &mut Keyed, yankee: &mut Keyed) {
     yankee.quiet_allowing_farm("an unlanded line reaches nobody");
 }
 
+/// `cg.game.item_use`: a `USE_CLEAR` cure (27124) strips a landed poison. Yankee is
+/// poisoned by `/poison` (the flag update, the `GC_AFFECT_ADD` of kind 209), then
+/// uses the cure at cell 0: one of the two goes (the update record), the poison's
+/// `GC_AFFECT_REMOVE` lands with its flag update, and the row reads count 1.
+#[test]
+fn a_cure_used_on_a_poison_strips_it_and_uses_one_up() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         469000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         27124 FROM player WHERE name = 'Yankee'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(27_124).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 12, "the owner's cure is USE_CLEAR");
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    // When: Alpha poisons Yankee. Then: the flag update and the poison's add.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/poison Yankee"));
+    assert_eq!(
+        yankee.read_game()[0],
+        GC_CHARACTER_UPDATE,
+        "the poison's flag update"
+    );
+    let added = yankee.read_game();
+    assert_eq!(added[0], GC_AFFECT_ADD);
+    assert_eq!(&added[1..5], &209u32.to_le_bytes(), "the poison's kind");
+    // When: Yankee uses the cure. Then: one of two goes, and the poison's remove
+    // lands with its flag update.
+    yankee.send_record(&client_item_use(0));
+    let mut updated = false;
+    let mut removed = false;
+    let mut reshown = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(updated && removed && reshown) {
+        let Some(record) = yankee.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
+                assert_eq!(count, 1, "one of two goes");
+                updated = true;
+            }
+        }
+        if record == affect_remove_of(209) {
+            removed = true;
+        }
+        if record.first() == Some(&GC_CHARACTER_UPDATE) {
+            reshown = true;
+        }
+    }
+    assert!(updated, "the use spends one of the stack");
+    assert!(removed, "the strip removes the poison");
+    assert!(reshown, "the strip re-shows the flags");
+    alice.quiet("the cure reaches nobody's caller");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+}
+
 /// `cmd.kill` and `cmd.poison` (`do_kill` and `do_poison`,
 /// `G/cmd_gm.cpp:1784-1829`). The GM gates are the dispatcher's: a player
 /// hears the dispatch refusal, and a `HIGH_WIZARD` runs `/kill` but not
