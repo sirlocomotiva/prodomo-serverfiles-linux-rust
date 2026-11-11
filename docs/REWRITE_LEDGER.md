@@ -52897,3 +52897,70 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 569. The stamina in StateMove
+
+V3 is closed. `StateMove`'s stamina arm (`G/char_state.cpp:812-851`) runs on every step
+(`step_stamina`, called from `step_motion`): a run within twenty seconds of a fight spends
+a point a step (every other step with the half-stamina unique 70040 worn, on the Pulse's
+odd half), and a walk past five seconds restores the pool to its maximum, below the
+maximum only (`:814` — on a full pool legacy sends nothing). `PointChange`'s
+switch (`G/char.cpp:4286-4296`) lives in `change_pc_point`: an emptied pool walks the flag
+at once, a pool that climbs off 0 restores the mode line's point, and the dead and the
+locked run no switch. The switch fans before the point record, as legacy's `SetNowWalking`
+runs before the packet is written. The walk stamp is `Option<u32>` (`Body::walk_start_ms`):
+the mode lines stamp it on a walk, and the first walking step stamps it when no line did.
+
+The consume gauge (`StartStaminaConsume`/`StopStaminaConsume`, `G/char.cpp:7383-7402`) runs
+with it: the first spend sends a zero-change record and the start line with the drain rate
+(25 a second, 12 with the unique worn) and the pool, each once. The stop runs its
+zero-change record and line on the emptying step, on a step past the fight window, on
+arrival (`:897-904`), and on a non-`MOVE` function (`G/input_main.cpp:1872-1876`), each
+guarded by the flag. The drain calls `StartAffectEvent` (`:826`), whose refill covers the
+pool three idle seconds on; the walk arm's own five-second restore covers chained moves,
+whose accepts keep the idle count short. The emptying step sends, in order: the walk fan,
+the spend's zero, the start's zero and line, the stop's zero and line.
+
+The refill is rerouted through the switch: `run_affect_event` computes the recovery
+records as before, runs the potions, then refills through `change_pc_point` (legacy's
+order, `:213-222`), and the `again` gate reads the pool after it. A refill that climbs
+off 0 now restores the mode line's point with its fan, as legacy's `PointChange` does.
+
+A Defect, recorded in `docs/STATUS.md`: the constructor never initializes
+`m_dwWalkStartTime` (`G/char.cpp:280-312` sets every neighbour but it), while the walk
+arm reads it whenever a body walks (`G/char_state.cpp:813-820`), so a body walking on an
+empty pool — `IsWalking` through `GetStamina() <= 0` with the line never flipped —
+restores from a garbage clock on its first steps. The Rewrite stamps the first walking
+step. Pre-existing and untouched: the refill moves a dead player's pool, where legacy's
+arm returns on `IsDead` (`:4279`); the 229d refill never gated it, steps never run for
+the dead, and no revive path spends stamina there, so the arm cannot observe it.
+
+Scenario `a_run_after_a_swing_spends_stamina_then_walks_and_restores`: Alpha stores
+stamina 3, swings, and runs 1600 south while Yankee watches. The collected stream pins
+the start's zero and `StartStaminaConsume 25 2`, the walk fan before the spend's zero,
+and the stop's zero and `StopStaminaConsume 0`; Yankee's watching stream (no inserts)
+pins the walk fan and, mid-walk, the refill's climb and the run fan, and Alpha's own
+stream pins the 890 restore. Unit pins: the five-second boundary (5000 holds, 5001
+restores), the full-pool silence past five seconds, the first-step stamp, the window
+end (a step at 20001 past the fight stops the gauge and spends nothing), the arrival
+stop, the half-stamina skip, the gauge's once each, and the climb off 0 for both line
+points. Mutants (restore threshold 4999, half-stamina parity flipped, full rate
+halved) all killed by the unit pins.
+Inventory: `sys.world.move` stays `partial` (the mount and polymorph arms of the move
+choice stay out); `event.char_affect.affect_event`'s note drops the open-V3 tail.
+
+Three older scenarios learned the gauge: the move-view test reads the combo-stamped
+run's start pair, `read_game` and `read_game_until` skip the gauge lines as ambient
+(like the refill), `quiet` allows them, and the flag war's two notice reads skip a
+stop that lands first.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite569c.txt` (5374 passed, 0 failed in 46 targets;
+an earlier run failed three scenarios whose expectations predate the gauge, all updated
+in this slice), `cargo test --workspace --doc --locked --offline` (1 passed in 9 targets),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0, after dropping eight stale scratch databases a cancelled suite run
+left behind) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

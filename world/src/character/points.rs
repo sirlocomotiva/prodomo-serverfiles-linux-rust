@@ -80,8 +80,8 @@
 //! `:4279`); the world sets the lock with [`Points::set_down`]. Experience is stored, but only
 //! the death penalty's loss changes it ([`Points::lose_exp`]): a gain is the level-up chain.
 //!
-//! Also not ported: the party broadcast after a hit-point change, the walking switch
-//! after a stamina change, the polymorph arm of the battle points (the mount arms are
+//! Also not ported: the party broadcast after a hit-point change, the polymorph arm of
+//! the battle points (the mount arms are
 //! ported: the stat floor in [`Points::compute_points_with`] and the attack floor and
 //! horse bonus in [`Points::compute_battle_points`]), and the parts of `ComputePoints`
 //! that read skills and the dragon-soul deck. The skill
@@ -1165,6 +1165,12 @@ impl Points {
         self.down = down;
     }
 
+    /// Whether the pools are locked: the world set the stun/dead lock.
+    #[must_use]
+    pub fn is_down(&self) -> bool {
+        self.down
+    }
+
     /// `PointChange(POINT_EXP, -loss, true)`, the death penalty's loss (`char.cpp:4078-4191`).
     ///
     /// A loss larger than the experience takes all of it, and the record shows what was taken.
@@ -1422,6 +1428,12 @@ impl Points {
     #[must_use]
     pub fn stamina(&self) -> i32 {
         self.stamina
+    }
+
+    /// `SetStamina` (`G/char.h:796`): the pool, directly, with no record. `StateMove`
+    /// clamps an emptied pool through it (`G/char_state.cpp:840`).
+    pub fn set_stamina_now(&mut self, value: i32) {
+        self.stamina = value;
     }
 
     /// `GetMaxHP`: the maximum hit points, halved when the map's hit-point will exceeds the

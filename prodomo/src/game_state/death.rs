@@ -481,6 +481,8 @@ impl GameState {
         let (items, Some(points)) = character.items_and_points_mut() else {
             return;
         };
+        let stamina_before =
+            (kind == point::POINT_STAMINA).then(|| (points.stamina(), points.is_down()));
         let mut records = points
             .point_change(kind, amount, show_amount, false)
             .unwrap_or_default();
@@ -499,13 +501,27 @@ impl GameState {
             }
         }
         let mount = (kind == point::POINT_MOUNT).then(|| points.get_point(point::POINT_MOUNT));
+        let stamina_after = stamina_before.map(|_| points.stamina());
+        // `POINT_STAMINA`'s walking switch (`G/char.cpp:4286-4296`): an emptied pool
+        // walks the flag at once, and a pool that climbs off 0 restores the mode
+        // line's point. The dead and the locked (stunned) run no switch, as legacy
+        // returns before it. The switch fans before the point record, as legacy's
+        // `SetNowWalking` runs before the packet is written.
+        if let (Some((before, down)), Some(after)) = (stamina_before, stamina_after) {
+            if !down && !self.is_dead(vid.raw()) {
+                if after == 0 {
+                    self.set_pc_now_walking(vid, true);
+                } else if before == 0 {
+                    self.reset_walking(vid);
+                }
+            }
+        }
         self.send_point_records(vid, &records);
         // `POINT_MOUNT`'s arm (`G/char.cpp:4711-4715`): `MountVnum` with the new total.
         if let Some(mount) = mount {
             self.mount_vnum(vid, u32::from_ne_bytes(mount.to_ne_bytes()));
         }
     }
-
     /// `PointChange(POINT_HP, hp - GetHP())`: sets the hit points of the player under `vid`.
     fn set_pc_hp(&mut self, vid: Vid, hp: i32, show_amount: bool) {
         let Some(current) = self.pc_points_mut(vid.raw()).map(|points| points.hp()) else {

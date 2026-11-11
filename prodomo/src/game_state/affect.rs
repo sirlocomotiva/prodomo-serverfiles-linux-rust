@@ -856,17 +856,14 @@ impl GameState {
             let _gone = self.affect_events.remove(&vid);
             return;
         };
-        let mut records = update_recovery(points);
+        let records = update_recovery(points);
         let recovering = is_recovering(points);
+        // The stamina refill sits after the potions and runs through the switch, as
+        // legacy's `PointChange(POINT_STAMINA, ...)` (`:216-222`) fans the mode line
+        // when the pool climbs off 0; the `again` gate below reads the pool after it.
         let stamina_max = points.max_stamina();
-        if points.stamina() < stamina_max && idle.is_some_and(|idle| idle >= STAMINA_REST_PULSES) {
-            records.extend(
-                points
-                    .point_change(point::POINT_STAMINA, stamina_max, false, false)
-                    .unwrap_or_default(),
-            );
-        }
-        let stamina_full = points.stamina() == points.max_stamina();
+        let refill =
+            points.stamina() < stamina_max && idle.is_some_and(|idle| idle >= STAMINA_REST_PULSES);
         let sp = points.sp();
         // `CHorseNameManager::Validate` (`G/horsename_manager.cpp:58-75`) runs before the
         // countdown, like `ProcessAffect` runs it on its hair arm's heels.
@@ -902,8 +899,18 @@ impl GameState {
         // `G/char_item.cpp:9892-10020`), HP then SP, after the recovery drain
         // (`UpdateAffect`, `G/char_affect.cpp:213-214`).
         self.run_auto_recovery(vid);
+        if refill {
+            self.change_pc_point(vid, point::POINT_STAMINA, stamina_max, false);
+        }
         // After the process, as legacy ends the event only when the list the process
-        // may have stripped is empty (`UpdateAffect`, `:226-231`).
+        // may have stripped is empty (`UpdateAffect`, `:226-231`); the pool reads
+        // after the refill, as legacy reads it after `PointChange`.
+        let stamina_full = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .is_some_and(|points| points.stamina() == points.max_stamina());
         let again = recovering
             || !self
                 .affect_events

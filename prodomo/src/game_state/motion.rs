@@ -134,6 +134,17 @@ impl Motion {
     }
 }
 
+/// The walk mode line's point and the live flag (`G/char.h:1031-1032`): the two mode
+/// lines set both together, the stamina switch walks the flag at 0, and
+/// `ResetWalking` restores the flag to the line's point when the pool climbs off 0.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct WalkFlags {
+    /// `m_bWalking`: the restore point.
+    pub(super) walking: bool,
+    /// `m_bNowWalking`: what the walk-mode record and the `IsWalking` move clip read.
+    pub(super) now_walking: bool,
+}
+
 /// A player's body: what the world knows of a player standing on a map, apart from its spot,
 /// which lives in the map's index.
 #[derive(Debug)]
@@ -160,10 +171,16 @@ pub(super) struct Body {
     pub(super) sync: SyncOwnershipState,
     /// What its insert records say that walking does not change.
     pub(super) card: PcCard,
-    /// `m_bNowWalking` (`G/char.h:1031`): what the walk-mode record and the `IsWalking`
-    /// move clip read. `m_bWalking`, the restore point, changes only on the two mode
-    /// lines and the stamina refill, both of which set the two flags together.
-    pub(super) now_walking: bool,
+    /// The walk mode line's point and the live flag.
+    pub(super) walk: WalkFlags,
+    /// `m_dwWalkStartTime` (`G/char.h:1028`): the world clock `SetNowWalking` stamps on a
+    /// walk, which the stamina restore counts five seconds from. `None` until a walk
+    /// stamps it: legacy never initializes it, so a stamina-0 walker reads garbage
+    /// (a Defect, recorded in `docs/STATUS.md`); the first walking step stamps here.
+    pub(super) walk_start_ms: Option<u32>,
+    /// `m_bStaminaConsume` (`G/char.h:1033`): set while a run consumes, stopped past the
+    /// twenty-second fight window or at an emptied pool.
+    pub(super) stamina_consume: bool,
     /// The Pulse the body last stopped moving on, which the stamina refill counts three seconds
     /// from (`m_dwStopTime`, in Pulses; see [`crate::game_state::affect`]).
     pub(super) stop_pulse: u64,
@@ -207,7 +224,12 @@ impl Body {
                 claimed_at: None,
             },
             card,
-            now_walking: false,
+            walk: WalkFlags {
+                walking: false,
+                now_walking: false,
+            },
+            walk_start_ms: None,
+            stamina_consume: false,
             stop_pulse,
             active_deck: -1,
             base_affect_flags: [0; 2],
@@ -281,9 +303,8 @@ pub(super) fn rotation_to_xy(dx: i32, dy: i32) -> f32 {
 }
 
 /// `IsWalking()` for a player: `m_bNowWalking || GetStamina() <= 0` (`G/char.h:951`).
-/// The flag rode with the two mode lines (ledger 295); the stamina drain and refill
-/// are not ported, so a player walks when its flag is set or its stamina is spent
-/// (V3). A player with no points runs.
+/// The flag rode with the two mode lines (ledger 295); the step's drain and the
+/// switch feed it now. A player with no points runs.
 pub(super) fn is_walking(character: &Character, now_walking: bool) -> bool {
     now_walking
         || character
@@ -399,7 +420,7 @@ impl GameState {
         let flag = self
             .bodies
             .get(&Vid::new(vid))
-            .is_some_and(|body| body.now_walking);
+            .is_some_and(|body| body.walk.now_walking);
         let weapon =
             Equipment::of(character.items(), &self.protos).wear(EWearPositions::Weapon as u16);
         let mode = motion_mode_of(weapon.as_ref());
@@ -652,8 +673,11 @@ impl GameState {
                         let _set = self.goto(raw, x, y);
                     }
                     MoveDisposition::Step { x, y } => {
+                        // `Move` + `Stop` + `StopStaminaConsume`, for a non-`MOVE`
+                        // function (`G/input_main.cpp:1872-1876`).
                         let _moved = self.move_to(raw, x, y);
                         self.stop(raw);
+                        self.stop_stamina_consume(vid);
                     }
                 }
                 // `GetCurrentMoveDuration()` after the `Goto`, stale when the destination did
@@ -758,10 +782,10 @@ impl GameState {
         self.movers.remove(&vid);
     }
 
-    /// `StateMove`'s arrival (`G/char_state.cpp:897-904`): Idle, with nothing else changed.
-    /// `StopStaminaConsume` is not ported (V3).
+    /// `StateMove`'s arrival (`G/char_state.cpp:897-904`): Idle, and the consume stops.
     fn arrive(&mut self, vid: u32) {
         self.leave_move(vid);
+        self.stop_stamina_consume(Vid::new(vid));
     }
 
     /// Leaves `m_stateMove`: not moving, out of `movers`, start, destination and duration kept.
@@ -786,6 +810,8 @@ impl GameState {
             if let Some((point, _)) = step {
                 // `Move(x, y)` (`:793`); a not-a-number rate skips only this (D1).
                 let _moved = self.move_to(vid, point.0, point.1);
+                // `StateMove`'s stamina arm (`G/char_state.cpp:812-851`), on the step.
+                self.step_stamina(Vid::new(vid), pulse);
             }
             if sample {
                 self.sample_view(vid);
@@ -1445,13 +1471,13 @@ mod tests {
             let flag = world
                 .bodies
                 .get(&Vid::new(vid))
-                .is_some_and(|body| body.now_walking);
+                .is_some_and(|body| body.walk.now_walking);
             is_walking(character, flag)
         };
         assert!(walking(&world, 7));
         assert!(!walking(&world, 8));
         assert!(walking(&world, 9));
-        world.bodies.get_mut(&Vid::new(8)).unwrap().now_walking = true;
+        world.bodies.get_mut(&Vid::new(8)).unwrap().walk.now_walking = true;
         assert!(walking(&world, 8), "the flag walks a rested body");
     }
 
@@ -1465,7 +1491,7 @@ mod tests {
             let flag = world
                 .bodies
                 .get(&Vid::new(7))
-                .is_some_and(|body| body.now_walking);
+                .is_some_and(|body| body.walk.now_walking);
             is_walking(character, flag)
         };
         assert!(walking(&world));

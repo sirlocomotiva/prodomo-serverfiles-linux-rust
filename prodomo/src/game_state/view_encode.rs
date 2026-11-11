@@ -140,7 +140,7 @@ pub(super) fn encode_pc_insert(
         framed(|out| character_add(points, vid, at, insert).encode_into(out)),
         framed(|out| character_additional(&body.card, points, vid, guild).encode_into(out)),
     ];
-    let mode = if body.now_walking {
+    let mode = if body.walk.now_walking {
         WALKMODE_WALK
     } else {
         WALKMODE_RUN
@@ -264,7 +264,7 @@ impl GameState {
         let flag = self
             .bodies
             .get(&Vid::new(vid))
-            .is_some_and(|body| body.now_walking);
+            .is_some_and(|body| body.walk.now_walking);
         self.characters
             .find_by_vid(Vid::new(vid))
             .is_ok_and(|character| is_walking(character, flag))
@@ -327,7 +327,7 @@ impl GameState {
                 let flag = self
                     .bodies
                     .get(&Vid::new(to))
-                    .is_some_and(|body| body.now_walking);
+                    .is_some_and(|body| body.walk.now_walking);
                 let encoded = encode_pc_insert(
                     of,
                     body,

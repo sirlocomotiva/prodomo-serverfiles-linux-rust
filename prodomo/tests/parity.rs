@@ -3901,6 +3901,7 @@ impl Keyed {
                     || self.timer_record(record)
                     || self.timer_restate(record)
                     || is_stamina_refill(record)
+                    || is_stamina_gauge(record)
                     || is_mark_update(record)
                     || is_npc_chatter(record)
                     || (farm && is_farm_line(record)),
@@ -4110,6 +4111,7 @@ impl Keyed {
             if !self.monster_record(&record)
                 && !self.timer_record(&record)
                 && !is_stamina_refill(&record)
+                && !is_stamina_gauge(&record)
                 && (farm || !is_farm_line(&record))
             {
                 return record;
@@ -4132,6 +4134,7 @@ impl Keyed {
             if !self.monster_record(&record)
                 && !self.timer_record(&record)
                 && !is_stamina_refill(&record)
+                && !is_stamina_gauge(&record)
                 && !is_farm_line(&record)
             {
                 return Some(record);
@@ -9043,6 +9046,7 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     let walk = client_move(1, 0, 0, 470_200, 950_200, 0x5eee);
     alice.send_record(&walk);
     assert_eq!(yankee.read_game(), relayed_move(&walk, alpha.id, 314));
+    read_gauge_start(&mut alice, alpha.id);
     alice.quiet("the mover is still excluded");
 
     // The distance test compares against 999 units of 100, so 200000 is refused.
@@ -13871,6 +13875,13 @@ fn is_npc_chatter(record: &[u8]) -> bool {
 fn is_stamina_refill(record: &[u8]) -> bool {
     record.first() == Some(&GC_POINT_CHANGE)
         && record.get(8).map(|&kind| usize::from(kind)) == Some(POINT_STAMINA)
+}
+
+/// The consume gauge's command lines, which any fight-then-run may send (ledger 569).
+fn is_stamina_gauge(record: &[u8]) -> bool {
+    record.first() == Some(&GC_CHAT)
+        && (record.windows(19).any(|w| w == b"StartStaminaConsume")
+            || record.windows(18).any(|w| w == b"StopStaminaConsume"))
 }
 
 /// The next record that is not a `GC_PING`, which arrives on its own timer and says nothing
@@ -20466,12 +20477,19 @@ fn the_flag_is_taken(alice: &mut Keyed, other_flag: u32) {
     let (skipped, removal) = read_until_record_keeping(alice, &flag_gone, deadline);
     assert_eq!(removal, flag_gone, "the flag leaves the view");
     assert!(
-        !skipped.iter().any(|record| record[0] == GC_CHAT),
+        !skipped
+            .iter()
+            .any(|record| record[0] == GC_CHAT && !is_stamina_gauge(record)),
         "the notice follows the flag's removal: {skipped:?}"
     );
     // The line the take says (`G/char_state.cpp:1213`) names the flag's guild and the
-    // carrier.
-    let (_skipped, notice) = read_until_header(alice, GC_CHAT, deadline);
+    // carrier. The carrier's arrival may stop its gauge first (ledger 569).
+    let notice = loop {
+        let (_skipped, chat) = read_until_header(alice, GC_CHAT, deadline);
+        if !is_stamina_gauge(&chat) {
+            break chat;
+        }
+    };
     let text = String::from_utf8_lossy(&notice[10..]);
     assert!(
         text.contains("Wolves"),
@@ -20499,12 +20517,19 @@ fn the_base_scores(alice: &mut Keyed, own_flag: u32) {
     let (skipped, removal) = read_until_record_keeping(alice, &own_flag_gone, deadline);
     assert_eq!(removal, own_flag_gone, "her own flag leaves the view");
     assert!(
-        !skipped.iter().any(|record| record[0] == GC_CHAT),
+        !skipped
+            .iter()
+            .any(|record| record[0] == GC_CHAT && !is_stamina_gauge(record)),
         "the notice follows the reset: {skipped:?}"
     );
     // The line the score says (`G/char_state.cpp:158`) names the base's guild and the
-    // flag's guild.
-    let (_skipped, notice) = read_until_header(alice, GC_CHAT, deadline);
+    // flag's guild. The scorer's arrival may stop its gauge first (ledger 569).
+    let notice = loop {
+        let (_skipped, chat) = read_until_header(alice, GC_CHAT, deadline);
+        if !is_stamina_gauge(&chat) {
+            break chat;
+        }
+    };
     let text = String::from_utf8_lossy(&notice[10..]);
     assert!(
         text.contains("MyGuild"),
@@ -52760,4 +52785,196 @@ fn a_naked_aura_is_stripped_on_the_next_tick() {
         [95, 100],
         "the next tick strips the naked aura's rows"
     );
+}
+
+/// The gauge's start pair on the runner's stream: the zero-change record and the
+/// command line with the rate and the pool it carries (ledger 569).
+fn read_gauge_start(runner: &mut Keyed, vid: u32) {
+    let zero = read_past_pings(runner);
+    let pool = point_value(&zero, vid, 9).expect("the start's zero");
+    let line = read_past_pings(runner);
+    assert_eq!(
+        line[3..9],
+        [CHAT_TYPE_COMMAND, 0, 0, 0, 0, line[8]],
+        "a command line"
+    );
+    assert!(
+        line.ends_with(format!("StartStaminaConsume 25 {pool}").as_bytes()),
+        "the gauge starts with the rate and the pool: {line:02x?}"
+    );
+}
+
+/// The swing that stamps the fight, as the swinger and its viewer read it: the
+/// revive-ending update, the remove, and the relayed swing (ledger 569's stage).
+fn alpha_swings_before_yankee(alpha: &mut Keyed, yankee: &mut Keyed, vid: u32) {
+    let swing = client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    );
+    alpha.send_record(&swing);
+    let update = read_past_pings(alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(read_past_pings(alpha), [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]);
+    alpha.quiet("the swing is not relayed to the swinger");
+    let seen = read_past_pings(yankee);
+    assert_eq!(seen[0], GC_CHARACTER_UPDATE, "{seen:02x?}");
+    assert!(yankee.timer_record(&seen), "the viewer sees the revive end");
+    assert_eq!(
+        read_past_pings(yankee),
+        relayed_move(&swing, vid, 0),
+        "the viewer sees the swing"
+    );
+}
+
+/// The widths of a watching stream: the relay, the fans, the revive records, and pings.
+fn watch_width(header: u8) -> usize {
+    match header {
+        GC_PING => 1,
+        GC_MOVE => GC_MOVE_LEN,
+        GC_WALK_MODE => 6,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        other => panic!("on the watching stream, a record nobody accounted for: {other}"),
+    }
+}
+
+/// Whether `want` fans on the watching stream within `rounds` one-second drains.
+fn wait_for_fan(yankee: &mut Keyed, want: &[u8], rounds: u32) -> bool {
+    for _ in 0..rounds {
+        let (records, _) = yankee.drain_game(Duration::from_secs(1), watch_width);
+        if records.iter().any(|record| record == want) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The consume arc's six records on the runner's stream: the start's zero and line, the
+/// walk fan, the spend's zero, and the stop's zero and line, past the inserts.
+fn collect_consume(alpha: &mut Keyed, vid: u32, walk: &[u8]) -> Vec<Vec<u8>> {
+    let mut consumed: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..64 {
+        let record = read_past_pings(alpha);
+        if record[0] == GC_POINT_CHANGE && point_value(&record, vid, 9).is_some()
+            || record[0] == GC_CHAT
+            || record == walk
+        {
+            consumed.push(record);
+            if consumed.len() == 6 {
+                break;
+            }
+        }
+    }
+    consumed
+}
+
+/// Ledger 569 (V3): a run after a fight spends stamina a point a step, the drain silent,
+/// until the pool empties and the flag walks with a mode record; a walk past five seconds
+/// restores the pool to 890 (800 + 5 * 18 vitality) and the climb off 0 restores the mode
+/// line's run, the switch fanning before the point record. Alpha stores stamina 3, swings
+/// (the attack stamps the fight), and runs 1600 south; Yankee stands and watches the fans,
+/// whose stream stays free of inserts. The refill's three idle seconds elapse mid-walk, so
+/// the refill (ledger 229d) sends the restore; the walk arm's own five-second restore, for
+/// chained moves whose accepts keep the idle count short, is pinned by unit tests. The
+/// first spend starts the client's gauge and the emptying step stops it, each with a
+/// zero-change record and a command line (V4).
+#[test]
+fn a_run_after_a_swing_spends_stamina_then_walks_and_restores() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+    stamina(&database, "Alpha", 3);
+    let (mut alpha, listed, _) = enter_world_seeing(&server, b"alice", 0);
+    let vid = listed.id;
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let (_, _, yankee_info, _) = alpha.sees_enter(yankee_listed.id, false, None);
+    assert_eq!(
+        yankee_info, yankee_entered.info,
+        "the summary Yankee got of itself"
+    );
+    alpha_swings_before_yankee(&mut alpha, &mut yankee, vid);
+    let south = client_move(FUNC_MOVE, 0, 0, 470_100, 951_700, 0x5eee);
+    alpha.send_record(&south);
+    let relay = read_past_pings(&mut yankee);
+    assert_eq!(relay[0], GC_MOVE, "the viewer sees the run");
+    assert_eq!(&relay[1..4], &south[1..4], "the run's echo");
+    let walk = [
+        GC_WALK_MODE,
+        vid.to_le_bytes()[0],
+        vid.to_le_bytes()[1],
+        vid.to_le_bytes()[2],
+        vid.to_le_bytes()[3],
+        1,
+    ];
+    assert!(
+        wait_for_fan(&mut yankee, &walk, 5),
+        "the emptied pool walks the flag"
+    );
+    // Re-target mid-flight, while the run still runs: the flag now walks at the walk
+    // clip, so the motion outlasts the refill's three idle seconds.
+    alpha.send_record(&client_move(FUNC_MOVE, 0, 0, 470_100, 951_700, 0x5eef));
+    let consumed = collect_consume(&mut alpha, vid, &walk);
+    assert_eq!(
+        consumed.len(),
+        6,
+        "the start, the drain and the stop: {consumed:02x?}"
+    );
+    assert_eq!(
+        consumed[0],
+        point_change(vid, 9, 0, 2),
+        "the start sends its zero"
+    );
+    let empire = consumed[1][8];
+    assert_eq!(
+        consumed[1],
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"StartStaminaConsume 25 2"),
+        "the gauge starts with the rate and the pool"
+    );
+    assert_eq!(consumed[2], walk, "the switch fans before the zero");
+    assert_eq!(
+        consumed[3],
+        point_change(vid, 9, 0, 0),
+        "the emptying step sends its zero"
+    );
+    assert_eq!(
+        consumed[4],
+        point_change(vid, 9, 0, 0),
+        "the stop sends its zero"
+    );
+    assert_eq!(
+        consumed[5],
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"StopStaminaConsume 0"),
+        "the gauge stops with the pool"
+    );
+    let run = [
+        GC_WALK_MODE,
+        vid.to_le_bytes()[0],
+        vid.to_le_bytes()[1],
+        vid.to_le_bytes()[2],
+        vid.to_le_bytes()[3],
+        0,
+    ];
+    assert!(
+        wait_for_fan(&mut yankee, &run, 14),
+        "the climb off 0 restores the run"
+    );
+    let mut refilled = false;
+    for _ in 0..300 {
+        let record = read_past_pings(&mut alpha);
+        if record == point_change(vid, 9, 0, 890) {
+            refilled = true;
+            break;
+        }
+    }
+    assert!(refilled, "the walk restores the pool");
 }
