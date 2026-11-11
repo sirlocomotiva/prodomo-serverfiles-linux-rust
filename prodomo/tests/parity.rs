@@ -27590,6 +27590,70 @@ fn read_kill_poison_misses(alice: &mut Keyed, yankee: &mut Keyed) {
     yankee.quiet_allowing_farm("an unlanded line reaches nobody");
 }
 
+/// `cg.game.item_use`: a `USE_ABILITY_UP` potion (27053) lands attack speed 10 for
+/// 600 s, and a second use while it is held is refused. Alpha uses the potion at
+/// cell 0: one of two goes (the update record), the `GC_AFFECT_ADD` of kind 201
+/// lands with value 10 and 600 s, and the row reads count 1. The second use hears
+/// the green line and the row stays at 1.
+#[test]
+fn an_ability_potion_lands_and_a_second_is_refused_while_held() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         27053 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(27_053).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 7, "the owner's potion is USE_ABILITY_UP");
+    assert_eq!(proto.values[0], 7, "the potion is attack speed");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha drinks. Then: the update, and the 201 add with 10 for 600 s.
+    alpha.send_record(&client_item_use(0));
+    let mut spent = false;
+    let mut abled = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(spent && abled) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
+                assert_eq!(count, 1, "the potion spends one of two");
+                spent = true;
+            }
+        }
+        if record.first() == Some(&GC_AFFECT_ADD)
+            && record.len() == AFFECT_ADD_LEN
+            && record[1..5] == 201u32.to_le_bytes()
+        {
+            let value = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            let dur = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+            assert_eq!(value, 10, "value(2) is the bonus");
+            assert_eq!(dur, 600, "value(1) is the duration");
+            abled = true;
+        }
+    }
+    assert!(spent, "the potion lands");
+    assert!(abled, "the 201 affect lands");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // When: the second drink, while 201 is held. Then: the green line, the row kept.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"Folosesti deja licoare verde"),
+        "the second potion hears the green line"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+}
+
 /// `cg.game.item_use`: a `USE_INVISIBILITY` cloak (27877) cloaks for 300 s, and the
 /// mirror (70026) cloaks once and refuses within ten minutes. Alpha uses the cloak
 /// at cell 0: the single goes (the clear), the `GC_AFFECT_ADD` of kind 203 lands

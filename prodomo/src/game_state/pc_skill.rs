@@ -71,6 +71,13 @@ const MIRROR_LAST_USE_FLAG: &[u8] = b"mirror_of_disapper.last_use_time";
 const MIRROR_COOLDOWN_SECS: i32 = 10 * 60;
 /// Its wait line (`:5566`).
 const MIRROR_WAIT_LINE: &[u8] = b"[#Unk]You cannot use this item yet.";
+/// `case USE_ABILITY_UP`'s renewal refusal (`G/char_item.cpp:5786,5806`): `[LS;99]`,
+/// sent raw, as the refusal keys are.
+const ABILITY_RENEWAL_REFUSAL: &[u8] = b"[LS;99]";
+/// Its violet refusal (`:5794`), `LC_TEXT` verbatim (`locale_find` with `LOCALE_YMIR`).
+const ABILITY_MOV_REFUSAL: &[u8] = b"Folosesti deja licoare violet";
+/// Its green refusal (`:5813`).
+const ABILITY_ATT_REFUSAL: &[u8] = b"Folosesti deja licoare verde";
 /// `SKILL_YEONSA` (`G/skill.h:79`): the shoot arm's arrow-skill list opens here.
 const SKILL_YEONSA: u32 = 46;
 /// `SKILL_KWANKYEOK`: 47, the only hosted arrow-skill row.
@@ -1752,6 +1759,102 @@ impl GameState {
             .manager_mut()
             .set_quest_flag(pid, MIRROR_LAST_USE_FLAG, now);
         true
+    }
+
+    /// Whether the character under `vid` holds an affect of `kind` (`FindAffect`,
+    /// `G/char_affect.cpp:129-142`).
+    fn holds_affect(&self, vid: Vid, kind: u32) -> bool {
+        self.affect_events
+            .get(&vid)
+            .is_some_and(|event| event.affects.iter().any(|affect| affect.kind == kind))
+    }
+
+    /// `case USE_ABILITY_UP`'s speed refusals (`G/char_item.cpp:5783-5819`): a moving
+    /// potion refused when the renewal or the potion affect is already held, an
+    /// attack-speed one the same, each with legacy's line, the item kept. Any other
+    /// apply passes; the step consumes even what lands nothing.
+    pub(super) fn ability_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+
+        use crate::loading_phase::{
+            AFFECT_ATTACK_SPEED, AFFECT_ATT_SPEED, AFFECT_MOVE_SPEED, AFFECT_MOV_SPEED,
+        };
+        let apply = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .filter(|proto| {
+                proto.item_type == gamedata::item_kind::ITEM_USE
+                    && proto.sub_type == gamedata::item_kind::USE_ABILITY_UP
+            })
+            .map_or(-1, |proto| proto.values[0]);
+        // `APPLY_MOV_SPEED` (8, `C/length.h:505`) and `APPLY_ATT_SPEED` (7, `:504`).
+        let (renewal, held, refusal) = if apply == 8 {
+            (AFFECT_MOVE_SPEED, AFFECT_MOV_SPEED, ABILITY_MOV_REFUSAL)
+        } else if apply == 7 {
+            (AFFECT_ATTACK_SPEED, AFFECT_ATT_SPEED, ABILITY_ATT_REFUSAL)
+        } else {
+            return true;
+        };
+        if self.holds_affect(vid, renewal) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, ABILITY_RENEWAL_REFUSAL, &[]);
+            return false;
+        }
+        if self.holds_affect(vid, held) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, refusal, &[]);
+            return false;
+        }
+        true
+    }
+
+    /// `case USE_ABILITY_UP`'s land (`G/char_item.cpp:5782-5851`): the apply's affect
+    /// with value(2)'s value for value(1) seconds, `over`, as legacy passes `true`.
+    /// An apply the switch does not name lands nothing; the step consumed anyway.
+    pub(super) fn land_ability_up(&mut self, vid: Vid, vnum: u32) {
+        use common::point_slot as point;
+
+        use crate::loading_phase::{
+            AFFECT_ATT_GRADE, AFFECT_ATT_SPEED, AFFECT_CAST_SPEED, AFFECT_CON, AFFECT_DEF_GRADE,
+            AFFECT_DEX, AFFECT_INT, AFFECT_MOV_SPEED, AFFECT_STR, AFF_ATT_SPEED_POTION,
+            AFF_MOV_SPEED_POTION,
+        };
+        let Some(proto) = self.protos.get(vnum) else {
+            return;
+        };
+        // `APPLY_*` (`C/length.h:500-555`): move 8, attack speed 7, STR 5, DEX 6,
+        // CON 3, INT 4, cast speed 9, attack grade 53, defence grade 54.
+        let (kind, on, flag) = match proto.values[0] {
+            8 => (
+                AFFECT_MOV_SPEED,
+                point::POINT_MOV_SPEED,
+                AFF_MOV_SPEED_POTION,
+            ),
+            7 => (
+                AFFECT_ATT_SPEED,
+                point::POINT_ATT_SPEED,
+                AFF_ATT_SPEED_POTION,
+            ),
+            5 => (AFFECT_STR, point::POINT_ST, 0),
+            6 => (AFFECT_DEX, point::POINT_DX, 0),
+            3 => (AFFECT_CON, point::POINT_HT, 0),
+            4 => (AFFECT_INT, point::POINT_IQ, 0),
+            9 => (AFFECT_CAST_SPEED, point::POINT_CASTING_SPEED, 0),
+            53 => (AFFECT_ATT_GRADE, point::POINT_ATT_GRADE_BONUS, 0),
+            54 => (AFFECT_DEF_GRADE, point::POINT_DEF_GRADE_BONUS, 0),
+            _ => return,
+        };
+        self.add_pc_affect(
+            vid,
+            super::affect::Affect::buff(kind, on, proto.values[2], flag, proto.values[1], 0),
+            true,
+        );
     }
 
     /// `CHARACTER::OnMove(true)` (`G/char.cpp:6148-6179`): the last move and
@@ -5526,6 +5629,140 @@ mod tests {
                 .windows(MIRROR_WAIT_LINE.len())
                 .any(|window| window == MIRROR_WAIT_LINE)),
             "the wait line lands: {heard:?}"
+        );
+    }
+
+    /// A drinker uses a `USE_ABILITY_UP` potion: one of the stack goes and the
+    /// apply's affect lands with value(2)'s value for value(1) seconds
+    /// (`G/char_item.cpp:5780-5859`). The owner's 27053 is attack speed 10 for 600.
+    #[test]
+    fn an_ability_potion_lands_its_apply_and_uses_one_up() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut potion = Item::new(7, 27_053);
+        potion.set_size(1).expect("a positive footprint");
+        potion.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &potion)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let abled = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the potion lands");
+        assert_eq!(abled.kind, MoveKind::Abled);
+        let held = world
+            .affect_events
+            .get(&me)
+            .map(|event| event.affects.clone())
+            .unwrap_or_default();
+        assert_eq!(held.len(), 1, "the potion lands one affect");
+        assert_eq!(held[0].kind, crate::loading_phase::AFFECT_ATT_SPEED);
+        assert_eq!(held[0].value, 10, "value(2) is the bonus");
+        assert_eq!(held[0].remaining, 600, "value(1) is the duration");
+        let count = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .items()
+            .item(7)
+            .expect("one of two is kept")
+            .count;
+        assert_eq!(count, 1, "one of the stack goes");
+    }
+
+    /// A second speed potion while the affect is held is refused with legacy's
+    /// line, the item kept; the renewal affect refuses first with `[LS;99]`
+    /// (`G/char_item.cpp:5783-5819`).
+    #[test]
+    fn a_held_speed_affect_refuses_the_second_potion() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, mut inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut potion = Item::new(7, 27_053);
+        potion.set_size(1).expect("a positive footprint");
+        potion.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &potion)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the first potion lands");
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let second = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the refusal is a step, not an error");
+        assert_eq!(second.kind, MoveKind::Used, "the refusal consumes nothing");
+        assert!(
+            second.changes.is_empty(),
+            "the refused potion keeps its stack"
+        );
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().any(|record| record
+                .windows(ABILITY_ATT_REFUSAL.len())
+                .any(|window| window == ABILITY_ATT_REFUSAL)),
+            "the green line lands: {heard:?}"
         );
     }
 }

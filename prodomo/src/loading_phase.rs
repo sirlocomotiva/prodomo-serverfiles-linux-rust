@@ -135,6 +135,27 @@ pub const AFFECT_MOV_SPEED: u32 = 200;
 /// use refuses against.
 pub const AFFECT_ATT_SPEED: u32 = 201;
 
+/// `AFFECT_ATT_GRADE` (`G/affect.h:25`): the green-potion attack affect.
+pub const AFFECT_ATT_GRADE: u32 = 202;
+
+/// `AFFECT_STR` (`G/affect.h:27`): the strength potion's affect.
+pub const AFFECT_STR: u32 = 204;
+
+/// `AFFECT_DEX` (`G/affect.h:28`): the dexterity potion's affect.
+pub const AFFECT_DEX: u32 = 205;
+
+/// `AFFECT_CON` (`G/affect.h:29`): the constitution potion's affect.
+pub const AFFECT_CON: u32 = 206;
+
+/// `AFFECT_INT` (`G/affect.h:30`): the intelligence potion's affect.
+pub const AFFECT_INT: u32 = 207;
+
+/// `AFFECT_CAST_SPEED` (`G/affect.h:42`): the casting-speed potion's affect.
+pub const AFFECT_CAST_SPEED: u32 = 217;
+
+/// `AFFECT_DEF_GRADE` (`G/affect.h:55`): the defence potion's affect.
+pub const AFFECT_DEF_GRADE: u32 = 226;
+
 /// The kinds `CHARACTER::RemoveGoodAffect` removes (`G/char_affect.cpp:892-916`): the six
 /// potion affects and `CHINA_FIREWORK`, then the fourteen skill affects.
 pub const GOOD_AFFECT_KINDS: [u32; 21] = [
@@ -410,6 +431,12 @@ pub const AFF_SLOW: u32 = 6;
 
 /// `AFF_STUN` (`G/affect.h:216`), numbered from 1.
 pub const AFF_STUN: u32 = 7;
+
+/// `AFF_MOV_SPEED_POTION` (`G/affect.h:225`), numbered from 1.
+pub const AFF_MOV_SPEED_POTION: u32 = 13;
+
+/// `AFF_ATT_SPEED_POTION` (`G/affect.h:226`), numbered from 1.
+pub const AFF_ATT_SPEED_POTION: u32 = 14;
 
 /// `AFF_BITS_MAX` (`G/affect.h:275`): 43 plain bits, 3 top-player bits, 4 statue bits
 /// and the laser bit, all gated on (`G/prodomodefines.h:38`, `:43-50`, `:125`).

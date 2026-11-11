@@ -53454,3 +53454,37 @@ kind swap and the 300/301 duration both fail.
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5425 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed in 9 targets; fmt, clippy (`-D warnings`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 584. The violet and the green
+
+`case USE_ABILITY_UP` (`G/char_item.cpp:5780-5859`): the apply's affect lands with
+value(2)'s value for value(1) seconds, `over`, as legacy passes `true`
+(`MoveKind::Abled`, the cure's seat). All nine owner applies port (move 8, attack
+speed 7, STR/DEX/CON/INT, cast speed 9, attack/defence grade 53/54), read from
+the real protos by value(0). The speed arms refuse before the consume: a held
+renewal affect (`AFFECT_MOVE_SPEED`/`AFFECT_ATTACK_SPEED`) with `[LS;99]` (raw,
+`ENABLE_AFFECT_RENEWAL` is on), a held potion affect with the violet/green
+Romanian lines verbatim (`LC_TEXT` is `locale_find` with `LOCALE_YMIR`).
+`ENABLE_EFFECT_EXTRAPOT` is off, so no speed `EffectPacket`. The switch names no
+other apply: 27125 (apply 0) and 50819 (apply 37) consume and land nothing, which
+falls out of the match's default return. Scenario
+`an_ability_potion_lands_and_a_second_is_refused_while_held`: the 201 add with
+value 10 and 600 s, the spend, and the second use's lone green line with the row
+kept at 1.
+
+Tests: the world consume (`an_ability_use_consumes_one_and_names_the_ability`),
+the land (`an_ability_potion_lands_its_apply_and_uses_one_up`), the refusal
+(`a_held_speed_affect_refuses_the_second_potion`). Mutants: the value/duration
+swap and the 201/200 kind swap both fail.
+Two gate notes. Clippy's line limit split `world::use_item`'s consume arm and
+classifier out and the test protos' `ITEM_USE` rows into `use_rows`, asserts
+identical. And the full suite flaked twice under load, two different unrelated
+singles (`a_grade_refine_spends_the_stones_and_lands_a_new_one`, a mid-run
+database read under parallel servers — the same signature as ledger 557 — and
+`an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off`, a throttle window
+missed under load), each green alone and absent from the other run; the receipt's
+parity run holds `--test-threads=8`.
+
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5428 passed with 1 load flake in 46 targets, and the parity target re-run at `--test-threads=8` 431 passed, 0 failed (5429 in all); `cargo test --workspace --doc` 1 passed in 9 targets; fmt, clippy (`-D warnings`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

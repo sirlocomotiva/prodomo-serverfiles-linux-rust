@@ -1088,10 +1088,45 @@ pub fn is_skill_book(proto: &ItemProto) -> bool {
     proto.item_type == ITEM_USE && proto.sub_type == USE_SPECIAL && BOOK_VNUMS.contains(&proto.vnum)
 }
 
+/// The game-state-seated `ITEM_USE` arms of the proto: the `USE_CLEAR` cure, the
+/// `USE_INVISIBILITY` cloak, and the `USE_ABILITY_UP` potion, in that order.
+fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool) {
+    if proto.item_type != gamedata::item_kind::ITEM_USE {
+        return (false, false, false);
+    }
+    (
+        proto.sub_type == gamedata::item_kind::USE_CLEAR,
+        proto.sub_type == gamedata::item_kind::USE_INVISIBILITY,
+        proto.sub_type == gamedata::item_kind::USE_ABILITY_UP,
+    )
+}
+
 /// The `ITEM_QUEST` the `RENEWAL_PICKUP_AFFECT` arm of `UseItemEx` takes
 /// (`G/char_item.cpp:2852-2872`). It leaves here as any quest item does, and the caller runs
 /// the arm in place of the item's quest.
 pub const PICKUP_AFFECT_ITEM: u32 = 70_002;
+
+/// Use one of the stack and answer `kind`: the shared consume of the skill books,
+/// the `USE_CLEAR` cure, the `USE_INVISIBILITY` cloak and the `USE_ABILITY_UP`
+/// potion, whose effects run on the game state.
+fn consume_one_use(
+    items: &mut CharacterItems,
+    item: &Item,
+    proto: &ItemProto,
+    kind: super::item_move::MoveKind,
+    stamped: &mut super::item_move::MoveDone,
+) -> Result<super::item_move::MoveDone, MoveRefused> {
+    let mut trail = Trail::default();
+    super::potion::use_one(
+        items,
+        item,
+        super::quickslot::chains_when_used_up(proto),
+        &mut trail,
+    )?;
+    trail.records.splice(0..0, stamped.records.drain(..));
+    trail.changes.splice(0..0, stamped.changes.drain(..));
+    Ok(super::item_move::done(kind, trail))
+}
 
 /// Run one `CG_ITEM_USE` on an item that is worn by using it: `CHARACTER::UseItem` and the
 /// equip arm of `UseItemEx` (`G/char_item.cpp:7168-7400`, `:2718-3053`). An item that is
@@ -1130,14 +1165,23 @@ pub fn use_item(
     let potion = super::potion::is_potion(proto);
     let book = is_skill_book(proto);
     let quest = proto.item_type == gamedata::item_kind::ITEM_QUEST;
-    let clear = proto.item_type == gamedata::item_kind::ITEM_USE
-        && proto.sub_type == gamedata::item_kind::USE_CLEAR;
-    let cloak = proto.item_type == gamedata::item_kind::ITEM_USE
-        && proto.sub_type == gamedata::item_kind::USE_INVISIBILITY;
-    if !potion && !book && !clear && !cloak && proto.item_type == gamedata::item_kind::ITEM_USE {
+    let (clear, cloak, abled) = use_special_kind(proto);
+    if !potion
+        && !book
+        && !clear
+        && !cloak
+        && !abled
+        && proto.item_type == gamedata::item_kind::ITEM_USE
+    {
         return Err(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
     }
-    if !potion && !book && !quest && !clear && !cloak && !USED_BY_WEARING.contains(&proto.item_type)
+    if !potion
+        && !book
+        && !quest
+        && !clear
+        && !cloak
+        && !abled
+        && !USED_BY_WEARING.contains(&proto.item_type)
     {
         return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
@@ -1179,28 +1223,22 @@ pub fn use_item(
         used.changes = changes;
         return Ok(used);
     }
-    if book || clear || cloak {
-        let mut trail = Trail::default();
-        super::potion::use_one(
-            items,
-            &item,
-            super::quickslot::chains_when_used_up(proto),
-            &mut trail,
-        )?;
-        trail.records.splice(0..0, stamped.records.drain(..));
-        trail.changes.splice(0..0, stamped.changes.drain(..));
+    if book || clear || cloak || abled {
         // `case USE_CLEAR` (`G/char_item.cpp:5539-5551`) strips the bad affects and
         // uses one of the stack; the strip runs on the game state (it holds the
         // affects), so this arm answers the consume and the kind names the strip.
-        // `case USE_INVISIBILITY` (`:5553-5577`) cloaks for 300 s the same way.
+        // `case USE_INVISIBILITY` (`:5553-5577`) cloaks for 300 s the same way, and
+        // `case USE_ABILITY_UP` (`:5780-5859`) lands the apply's affect the same way.
         let kind = if clear {
             MoveKind::Cleared
         } else if cloak {
             MoveKind::Cloaked
+        } else if abled {
+            MoveKind::Abled
         } else {
             MoveKind::Used
         };
-        return Ok(done(kind, trail));
+        return consume_one_use(items, &item, proto, kind, &mut stamped);
     }
     let mut equipper = Equipper::new(items, gear, rules.usable_cells);
     let outcome = if super::inventory::is_equip_position(item.pos) {
@@ -1399,6 +1437,8 @@ mod tests {
     const CURE: u32 = 27_124;
     /// A `USE_INVISIBILITY` cloak: the owner's 27877.
     const CLOAK: u32 = 27_877;
+    /// A `USE_ABILITY_UP` potion: the owner's 27053 (attack speed).
+    const ABLED: u32 = 27_053;
     const POTION: u32 = 27_101;
     const HIGH_POTION: u32 = 27_102;
     const SURA_REFUSED: u32 = 12;
@@ -1431,6 +1471,33 @@ mod tests {
         let mut proto = ItemProto::for_category_rule(vnum, item_type, sub_type);
         proto.wear_flags = wear_flags;
         proto
+    }
+
+    /// The `ITEM_USE` consumables of the test protos: the special, the cure, the
+    /// cloak, the ability potion, and the two nodelay potions.
+    fn use_rows() -> Vec<ItemProto> {
+        // `USE_POTION_NODELAY`, 11: 100 hit points at once.
+        let mut potion = proto(POTION, 3, 11, 0);
+        potion.values[0] = 100;
+        let mut high_potion = potion.clone();
+        high_potion.vnum = HIGH_POTION;
+        high_potion.limits[0] = ItemValue {
+            kind: LIMIT_LEVEL,
+            value: 30,
+        };
+        vec![
+            // `ITEM_USE`, 3, `USE_SPECIAL`, 10.
+            proto(SPECIAL, 3, 10, 0),
+            proto(BOOK, 3, 10, 0),
+            // `USE_CLEAR`, 12.
+            proto(CURE, 3, 12, 0),
+            // `USE_INVISIBILITY`, 13.
+            proto(CLOAK, 3, 13, 0),
+            // `USE_ABILITY_UP`, 7.
+            proto(ABLED, 3, 7, 0),
+            potion,
+            high_potion,
+        ]
     }
 
     fn protos() -> ItemProtos {
@@ -1481,15 +1548,7 @@ mod tests {
             kind: LIMIT_LEVEL,
             value: 30,
         };
-        // `USE_POTION_NODELAY`, 11: 100 hit points at once.
-        let mut potion = proto(POTION, 3, 11, 0);
-        potion.values[0] = 100;
-        let mut high_potion = potion.clone();
-        high_potion.vnum = HIGH_POTION;
-        high_potion.limits[0] = ItemValue {
-            kind: LIMIT_LEVEL,
-            value: 30,
-        };
+        let mut rows = use_rows();
         // A costume weapon for a weapon sub type other than the sword's 0.
         let mut costume_blade = proto(COSTUME_BLADE, ITEM_COSTUME, COSTUME_WEAPON, 0);
         costume_blade.values[3] = 1;
@@ -1503,7 +1562,7 @@ mod tests {
             kind: gamedata::item_kind::LIMIT_REAL_TIME,
             value: 3600,
         };
-        ItemProtos::from_rows(vec![
+        let mut all = vec![
             proto(SWORD, ITEM_WEAPON, 0, WEARABLE_WEAPON),
             proto(QUEST_BOOK, gamedata::item_kind::ITEM_QUEST, 0, 0),
             proto(PICKUP_AFFECT_ITEM, gamedata::item_kind::ITEM_QUEST, 0, 0),
@@ -1525,21 +1584,14 @@ mod tests {
             proto(RING, ITEM_RING, 0, 0),
             level_ten,
             proto(UNIQUE_FLAGGED, ITEM_ARMOR, ARMOR_BODY, WEARABLE_UNIQUE),
-            // `ITEM_USE`, 3, `USE_SPECIAL`, 10.
-            proto(SPECIAL, 3, 10, 0),
-            proto(BOOK, 3, 10, 0),
-            // `USE_CLEAR`, 12.
-            proto(CURE, 3, 12, 0),
-            // `USE_INVISIBILITY`, 13.
-            proto(CLOAK, 3, 13, 0),
-            potion,
-            high_potion,
             sura_refused,
             champion,
             timed,
             male_only_high,
             costume_blade,
-        ])
+        ];
+        all.append(&mut rows);
+        ItemProtos::from_rows(all)
     }
 
     fn warrior() -> Points {
@@ -1766,6 +1818,21 @@ mod tests {
         let mut case = Case::new(&[(inv(3), cloak)]);
         let done = case.use_at(inv(3)).expect("a cloak is consumed");
         assert_eq!(done.kind, MoveKind::Cloaked);
+        assert_eq!(
+            item_records(&done),
+            vec![ItemRecord::Set(gc_item_clear(inv(3)))]
+        );
+        assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
+        assert_eq!(case.at(inv(3)), None);
+    }
+    /// A `USE_ABILITY_UP` potion consumes one and answers `Abled`: the game state
+    /// lands the apply's affect, because the affects live there, not in the storage.
+    #[test]
+    fn an_ability_use_consumes_one_and_names_the_ability() {
+        let abled = Item::new(7, ABLED);
+        let mut case = Case::new(&[(inv(3), abled)]);
+        let done = case.use_at(inv(3)).expect("a potion is consumed");
+        assert_eq!(done.kind, MoveKind::Abled);
         assert_eq!(
             item_records(&done),
             vec![ItemRecord::Set(gc_item_clear(inv(3)))]

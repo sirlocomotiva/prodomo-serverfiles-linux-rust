@@ -205,6 +205,9 @@ pub enum MoveKind {
     /// A cloak used one of its stack up (`case USE_INVISIBILITY`, `:5553-5577`).
     /// The game state lands the 300 s affect, after the mirror's cooldown.
     Cloaked,
+    /// An ability potion used one of its stack up (`case USE_ABILITY_UP`,
+    /// `G/char_item.cpp:5780-5859`). The game state lands the apply's affect.
+    Abled,
 }
 
 /// A record the client is sent, in the order legacy sends it.

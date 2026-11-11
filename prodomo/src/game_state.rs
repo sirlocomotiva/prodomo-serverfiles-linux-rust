@@ -4293,6 +4293,11 @@ impl GameState {
         if !self.mirror_use_allowed(vid, at, actor) {
             return Some(self.arena_item_refused(vid, actor));
         }
+        // The ability potion's speed refusals (`:5783-5819`): a held renewal or
+        // potion affect refuses with legacy's line, the item kept.
+        if !self.ability_use_allowed(vid, at, actor) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
         None
     }
 
@@ -4409,7 +4414,7 @@ impl GameState {
             self.arena_consumed_potion(vid, vnum, sub_type, &moved);
         }
         self.run_quest_used(vid, at, actor, account, &mut moved);
-        self.land_item_use_kind(vid, moved.kind);
+        self.land_item_use_kind(vid, moved.kind, used_vnum);
         // unless it already runs.
         if moved
             .points
@@ -4427,17 +4432,27 @@ impl GameState {
         Ok(moved)
     }
 
-    /// The consumed-kind hooks of `case USE_CLEAR` and `case USE_INVISIBILITY`: the
-    /// step consumed the cure, and the bad affects go now, after the quest hook and
-    /// before the feed (`G/char_item.cpp:5539-5551` through `RemoveBadAffect`,
-    /// `G/char_affect.cpp:951-960`); or the step consumed the cloak, and the 300 s
-    /// affect lands now, in the strip's seat (`G/char_item.cpp:5574-5575`).
-    fn land_item_use_kind(&mut self, vid: common::vid::Vid, kind: world::character::MoveKind) {
+    /// The consumed-kind hooks of `case USE_CLEAR`, `case USE_INVISIBILITY` and `case
+    /// USE_ABILITY_UP`: the step consumed the cure, and the bad affects go now, after
+    /// the quest hook and before the feed (`G/char_item.cpp:5539-5551` through
+    /// `RemoveBadAffect`, `G/char_affect.cpp:951-960`); or the step consumed the
+    /// cloak, and the 300 s affect lands now, in the strip's seat (`:5574-5575`); or
+    /// the step consumed the ability potion, and the apply's affect lands now
+    /// (`:5782-5851`).
+    fn land_item_use_kind(
+        &mut self,
+        vid: common::vid::Vid,
+        kind: world::character::MoveKind,
+        used_vnum: u32,
+    ) {
         if kind == world::character::MoveKind::Cleared {
             self.remove_bad_affect(vid);
         }
         if kind == world::character::MoveKind::Cloaked {
             self.cloak_invisible(vid);
+        }
+        if kind == world::character::MoveKind::Abled {
+            self.land_ability_up(vid, used_vnum);
         }
     }
 
