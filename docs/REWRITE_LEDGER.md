@@ -53196,3 +53196,33 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 576. The shop's refusal
+
+`sys.combat.penalty` closes its last real gap and reconciles its note. Ledger 235's
+note named five unported refusals — the private shop, the protected inventory, the
+agreed duel, the arena duel and the forked road — but four of them landed since (the
+agreed duel with 362, the forked road with 465, the arena skip at the call site, the
+`IsSecured` item gate), and only the note never caught up. The bundle shop was the
+one true gap: `item_drop_penalty` now refuses a victim with its shop open (`GetMyShop`,
+`G/char_battle.cpp:1019-1021`). Unreachable through the stunned path — `Stun` closes
+the shop first (`:440`), as the port does — but reachable when the stun is skipped,
+so the gate is ported, not dropped.
+
+Unit pin `a_character_with_its_shop_open_drops_nothing` (eleven `item_penalty` tests);
+the inverted-gate mutant is killed. Both inventory rows updated: `sys.combat.penalty`
+stays `ported` with the reconciliation, and `sys.char.pk`'s last "Not yet" dissolves —
+the penalty it names is `sys.combat.penalty`, ported with its table and all five gates.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite (see below), `cargo test --workspace --doc --locked --offline`
+(1 passed in 9 targets), `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline`, the `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow.
+The full suite flaked three times under load, each time on a different pair — the forest
+timer, then the gaya craft with the grade refine, then the sort with the auto potion —
+and every one of the five passes alone and all five pass together, on this slice and on
+the clean tree. The fourth run skips those five and is green to `/tmp/suite576d.txt`
+(5398 passed, 0 failed in 46 targets). `rustfmt` and `cargo-clippy` are the `/usr/bin`
+pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No
+ADR changed.

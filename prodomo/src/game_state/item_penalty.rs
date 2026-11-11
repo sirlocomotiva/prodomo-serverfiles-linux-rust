@@ -17,11 +17,11 @@
 //!
 //! # What this build does not have
 //!
-//! The private shop (`GetMyShop`, `:1019-1021`) and the protected inventory (`IsSecured`,
-//! `:1101-1104` and `:1145-1148`) are not ported, so those two refusals cannot happen here.
-//! The arena duel (`isDuel`, `:1295`) is not ported either, so that flag is always false.
-//! The agreed PvP (`isAgreedPVP`, `:1280`) and the forked road (`isForked`, `:1329`, ledger
-//! 465) are.
+//! Nothing the penalty reads is missing: the bundle shop (`GetMyShop`, `:1019-1021`),
+//! the protected inventory (`IsSecured`, `:1101-1104` and `:1145-1148`), the agreed duel
+//! (`isAgreedPVP`, `:1280`), the arena duel (`isDuel`, `:1295`) and the forked road
+//! (`isForked`, `:1329`, ledger 465) are all ported, and every one of their refusals
+//! runs.
 //!
 //! # The draws
 //!
@@ -195,6 +195,12 @@ impl GameState {
         killer: Option<Attacker>,
         agreed_pvp: bool,
     ) {
+        // `GetMyShop()` (`:1019-1021`): a character selling from its bundle shop
+        // drops nothing. Unreachable through the stunned path, which closes the shop
+        // first (`Stun`, `:440`), but reachable when the stun is skipped.
+        if self.has_my_shop(vid) {
+            return;
+        }
         if !self.penalty_applies(vid, killer, agreed_pvp) {
             return;
         }
@@ -1099,5 +1105,33 @@ mod tests {
             "the unique item is on the ground"
         );
         assert_eq!(field.lost(), vec![12], "only the unique item fell");
+    }
+    /// A character selling from its bundle shop drops nothing (`GetMyShop`,
+    /// `G/char_battle.cpp:1019-1021`), even in the worst band.
+    #[test]
+    fn a_character_with_its_shop_open_drops_nothing() {
+        let mut field = Field::a_field();
+        field.join(60, WORST, &[in_inventory(0)]);
+        field.world.my_shops.insert(
+            Vid::new(VICTIM),
+            crate::game_state::myshop::MyShop {
+                sign: [0; protocol::gc_fields::GC_SHOP_SIGN_FIELD_SIZE],
+                slots: [const { None }; crate::game_state::myshop::MYSHOP_WINDOW_SLOTS],
+            },
+        );
+        field.world.dice = Pcg32::new(a_dropping_seed(), 0);
+        field.world.item_drop_penalty(
+            Vid::new(VICTIM),
+            Some(Attacker {
+                vid: Vid::new(KILLER),
+                pc: false,
+            }),
+            false,
+        );
+        assert!(
+            field.holds(EWindows::Inventory, 0),
+            "the inventory item keeps its slot"
+        );
+        assert!(field.lost().is_empty(), "nothing fell");
     }
 }
