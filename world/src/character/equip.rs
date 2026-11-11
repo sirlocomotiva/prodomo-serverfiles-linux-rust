@@ -1096,15 +1096,16 @@ fn use_ported(
     potion: bool,
     book: bool,
     quest: bool,
-    seated: (bool, bool, bool, bool),
+    seated: (bool, bool, bool, bool, bool),
 ) -> Option<MoveRefused> {
-    let (clear, cloak, abled, euro) = seated;
+    let (clear, cloak, abled, euro, timed) = seated;
     if !potion
         && !book
         && !clear
         && !cloak
         && !abled
         && !euro
+        && !timed
         && proto.item_type == gamedata::item_kind::ITEM_USE
     {
         return Some(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
@@ -1116,6 +1117,7 @@ fn use_ported(
         && !cloak
         && !abled
         && !euro
+        && !timed
         && !USED_BY_WEARING.contains(&proto.item_type)
     {
         return Some(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
@@ -1124,26 +1126,34 @@ fn use_ported(
 }
 
 /// The game-state-seated `ITEM_USE` arms of the proto: the `USE_CLEAR` cure, the
-/// `USE_INVISIBILITY` cloak, the `USE_ABILITY_UP` potion, and the 50801-50820
-/// "additional effect" pair (`G/char_item.cpp:3371-3521`), in that order. The
-/// branch's `USE_POTION_NODELAY` runs the ordinary nodelay arm, and its
-/// `USE_POTION` answers nothing.
-fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool) {
+/// `USE_INVISIBILITY` cloak, the `USE_ABILITY_UP` potion, the 50801-50820
+/// "additional effect" pair (`G/char_item.cpp:3371-3521`), and the main-switch
+/// `USE_AFFECT` (`:6833-6864`), in that order. The branch's `USE_POTION_NODELAY`
+/// runs the ordinary nodelay arm, and its `USE_POTION` answers nothing. The 507
+/// premium-shop arm is not ported yet, so it answers nothing here.
+fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool, bool) {
     use gamedata::item_kind::{ITEM_USE, USE_ABILITY_UP, USE_AFFECT, USE_CLEAR, USE_INVISIBILITY};
     if proto.item_type != ITEM_USE {
-        return (false, false, false, false);
+        return (false, false, false, false, false);
     }
     if (50_801..=50_820).contains(&proto.vnum) {
         let euro = proto.sub_type == USE_ABILITY_UP || proto.sub_type == USE_AFFECT;
-        return (false, false, false, euro);
+        return (false, false, false, euro, false);
     }
+    let timed =
+        proto.sub_type == USE_AFFECT && proto.values[0] != AFFECT_PREMIUM_PRIVATE_SHOP_VALUE;
     (
         proto.sub_type == USE_CLEAR,
         proto.sub_type == USE_INVISIBILITY,
         proto.sub_type == USE_ABILITY_UP,
         false,
+        timed,
     )
 }
+
+/// `AFFECT_PREMIUM_PRIVATE_SHOP` (`G/affect.h:66`): 507, whose arm needs the
+/// account premium-time store and is not ported yet.
+const AFFECT_PREMIUM_PRIVATE_SHOP_VALUE: i32 = 507;
 
 /// The `ITEM_QUEST` the `RENEWAL_PICKUP_AFFECT` arm of `UseItemEx` takes
 /// (`G/char_item.cpp:2852-2872`). It leaves here as any quest item does, and the caller runs
@@ -1210,7 +1220,7 @@ pub fn use_item(
     let book = is_skill_book(proto);
     let quest = proto.item_type == gamedata::item_kind::ITEM_QUEST;
     let seated = use_special_kind(proto);
-    let (clear, cloak, abled, euro) = seated;
+    let (clear, cloak, abled, euro, timed) = seated;
     if let Some(refused) = use_ported(proto, potion, book, quest, seated) {
         return Err(refused);
     }
@@ -1252,13 +1262,14 @@ pub fn use_item(
         used.changes = changes;
         return Ok(used);
     }
-    if book || clear || cloak || abled || euro {
+    if book || clear || cloak || abled || euro || timed {
         // `case USE_CLEAR` (`G/char_item.cpp:5539-5551`) strips the bad affects and
         // uses one of the stack; the strip runs on the game state (it holds the
         // affects), so this arm answers the consume and the kind names the strip.
         // `case USE_INVISIBILITY` (`:5553-5577`) cloaks for 300 s the same way, and
         // `case USE_ABILITY_UP` (`:5780-5859`) lands the apply's affect the same way.
-        // The 50801-50820 pair (`:3371-3521`) lands 516 the same way.
+        // The 50801-50820 pair (`:3371-3521`) lands 516 the same way, and `case
+        // USE_AFFECT` (`:6833-6864`) lands value(0) the same way.
         let kind = if clear {
             MoveKind::Cleared
         } else if cloak {
@@ -1267,6 +1278,8 @@ pub fn use_item(
             MoveKind::Abled
         } else if euro {
             MoveKind::EuroFree
+        } else if timed {
+            MoveKind::Timed
         } else {
             MoveKind::Used
         };
@@ -1475,6 +1488,8 @@ mod tests {
     const EURO_ABLED: u32 = 50_820;
     /// A 508xx `USE_AFFECT` potion: the owner's 50813 (critical).
     const EURO_AFFECT: u32 = 50_813;
+    /// A main-switch `USE_AFFECT` item: the owner's 39010 (mall attack speed).
+    const TIMED: u32 = 39_010;
     const POTION: u32 = 27_101;
     const HIGH_POTION: u32 = 27_102;
     const SURA_REFUSED: u32 = 12;
@@ -1534,6 +1549,8 @@ mod tests {
             // The 50801-50820 pair: `USE_ABILITY_UP` 7 and `USE_AFFECT` 8.
             proto(EURO_ABLED, 3, 7, 0),
             proto(EURO_AFFECT, 3, 8, 0),
+            // The main-switch `USE_AFFECT`, 8.
+            proto(TIMED, 3, 8, 0),
             potion,
             high_potion,
         ]
@@ -1895,6 +1912,23 @@ mod tests {
             assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
             assert_eq!(case.at(inv(3)), None);
         }
+    }
+
+    /// A main-switch `USE_AFFECT` item consumes one and answers `Timed`, even
+    /// though its subtype is 8 like the 508xx pair's: the game state lands
+    /// value(0) on the point.
+    #[test]
+    fn a_timed_use_consumes_one_and_names_the_timed() {
+        let timed = Item::new(7, TIMED);
+        let mut case = Case::new(&[(inv(3), timed)]);
+        let done = case.use_at(inv(3)).expect("a use-affect item is consumed");
+        assert_eq!(done.kind, MoveKind::Timed);
+        assert_eq!(
+            item_records(&done),
+            vec![ItemRecord::Set(gc_item_clear(inv(3)))]
+        );
+        assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
+        assert_eq!(case.at(inv(3)), None);
     }
 
     /// An `ITEM_USE`/`USE_SPECIAL` outside the read set still refuses: no read ran, so

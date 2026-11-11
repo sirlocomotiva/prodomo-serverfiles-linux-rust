@@ -53526,3 +53526,13 @@ under parallel servers), green alone; the receipt's parity run holds
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5433 passed with 1 load flake in 46 targets, and the parity target re-run at `--test-threads=8` 432 passed, 0 failed (5434 in all); `cargo test --workspace --doc` 1 passed in 9 targets; fmt, clippy (`-D warnings`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 586. The timed mall
+
+`case USE_AFFECT` in `UseItemEx`'s main switch (`G/char_item.cpp:6833-6864`) lands
+value(0) on `aApplyInfo` of value(1) with value(2)'s value for value(3) seconds,
+appended (`over` false) — the timed mall items: 510 (mall), 511 (no-death-penalty),
+512 (book bonus), 513 (no book delay). Before the land, the renewal loop (on: `ENABLE_AFFECT_RENEWAL`) refuses a held dragon-god row (312-315) on the point with `[LS;99]`, and a held row of the kind itself refuses with the same line; both keep the item (`MoveKind::Timed`, the cure's seat; the lookup is the new `holds_affect_on`, point 0 matching any point per `FindAffect`, `G/char_affect.cpp:129-142`). 507's premium-shop arm stays unported: it needs the account premium-time store, which is the next slice. Scenario `a_timed_use_lands_510_and_a_second_is_refused_while_held`: the 510 add on point 17 with value 10 and 1800 s, the spend, and the second use's lone `[LS;99]` with the row kept at 1. A table note: the comment labels on `aApplyInfo` rows past 74 read two high (row 76's comment says 78), but the positions match `world`'s existing table, so nothing moves.
+
+Tests: the world consume (`a_timed_use_consumes_one_and_names_the_timed`), the land (`a_timed_use_lands_value0_on_the_point_and_uses_one_up`).
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5437 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

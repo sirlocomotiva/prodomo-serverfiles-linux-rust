@@ -4303,6 +4303,11 @@ impl GameState {
         if !self.euro_free_use_allowed(vid, at, actor) {
             return Some(self.arena_item_refused(vid, actor));
         }
+        // `case USE_AFFECT`'s refusals (`:6844-6857`): a held dragon-god or kind
+        // row refuses with `[LS;99]`, the item kept.
+        if !self.timed_use_allowed(vid, at, actor) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
         None
     }
 
@@ -4463,6 +4468,9 @@ impl GameState {
         }
         if kind == world::character::MoveKind::EuroFree {
             self.land_euro_free(vid, used_vnum);
+        }
+        if kind == world::character::MoveKind::Timed {
+            self.land_timed_affect(vid, used_vnum);
         }
     }
 

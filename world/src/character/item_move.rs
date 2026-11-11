@@ -211,6 +211,9 @@ pub enum MoveKind {
     /// A 50801-50820 potion used one of its stack up (the "additional effect"
     /// branch, `G/char_item.cpp:3371-3521`). The game state lands 516 on the point.
     EuroFree,
+    /// A `USE_AFFECT` item used one of its stack up (`case USE_AFFECT`,
+    /// `G/char_item.cpp:6833-6864`). The game state lands value(0) on the point.
+    Timed,
 }
 
 /// A record the client is sent, in the order legacy sends it.

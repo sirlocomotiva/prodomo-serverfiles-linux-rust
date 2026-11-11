@@ -247,6 +247,15 @@ pub const AFFECT_BLEND: u32 = 531;
 /// against.
 pub const AFFECT_MALL: u32 = 510;
 
+/// `AFFECT_NO_DEATH_PENALTY` (`G/affect.h:74`): death loses nothing while held.
+pub const AFFECT_NO_DEATH_PENALTY: u32 = 511;
+
+/// `AFFECT_SKILL_BOOK_BONUS` (`G/affect.h:75`): the book-read bonus affect.
+pub const AFFECT_SKILL_BOOK_BONUS: u32 = 512;
+
+/// `AFFECT_SKILL_NO_BOOK_DELAY` (`G/affect.h:76`): the book-delay skip affect.
+pub const AFFECT_SKILL_NO_BOOK_DELAY: u32 = 513;
+
 /// `AFFECT_EXP_BONUS_EURO_FREE` (`G/affect.h:80`): the free-experience affect a
 /// blend use refuses against.
 pub const AFFECT_EXP_BONUS_EURO_FREE: u32 = 516;

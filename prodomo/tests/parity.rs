@@ -54090,3 +54090,68 @@ fn read_a_move_with_updates(
         .collect();
     (seen, updates)
 }
+
+/// `cg.game.item_use`: a main-switch `USE_AFFECT` item (39010) lands value(0) on
+/// `aApplyInfo` of value(1), and a second use while it is held is refused. Alpha
+/// uses the item at cell 0: one of two goes (the update record), the
+/// `GC_AFFECT_ADD` of kind 510 lands on point 17 with value 10 and 1800 s, and
+/// the row reads count 1. The second use hears `[LS;99]` and the row stays at 1.
+#[test]
+fn a_timed_use_lands_510_and_a_second_is_refused_while_held() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         39010 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(39_010).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 8, "the owner's item is USE_AFFECT");
+    assert_eq!(proto.values[0], 510, "the item is the mall affect");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses. Then: the update, and the 510 add on 17 with 10 for 1800.
+    alpha.send_record(&client_item_use(0));
+    let mut spent = false;
+    let mut timed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(spent && timed) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
+                assert_eq!(count, 1, "the use spends one of two");
+                spent = true;
+            }
+        }
+        if record.first() == Some(&GC_AFFECT_ADD)
+            && record.len() == AFFECT_ADD_LEN
+            && record[1..5] == 510u32.to_le_bytes()
+        {
+            assert_eq!(record[5], 17, "value(1) 7 is attack speed");
+            let value = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            let dur = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+            assert_eq!(value, 10, "value(2) is the bonus");
+            assert_eq!(dur, 1800, "value(3) is the duration");
+            timed = true;
+        }
+    }
+    assert!(spent, "the use lands");
+    assert!(timed, "the 510 affect lands");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // When: the second use, while (510, 17) is held. Then: `[LS;99]`, the row kept.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"[LS;99]"),
+        "the second use hears the renewal line"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+}

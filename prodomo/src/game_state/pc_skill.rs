@@ -1987,6 +1987,103 @@ impl GameState {
         );
     }
 
+    /// The main-switch `USE_AFFECT` values at `at`, or `None` for anything else
+    /// (`G/char_item.cpp:6833-6864`): outside the 508xx range, and never 507,
+    /// whose premium-shop arm waits on the account store.
+    fn timed_affect_values(&self, vid: Vid, at: protocol::item_pos::ItemPos) -> Option<[i32; 6]> {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .filter(|proto| {
+                proto.item_type == gamedata::item_kind::ITEM_USE
+                    && proto.sub_type == gamedata::item_kind::USE_AFFECT
+                    && !(50_801..=50_820).contains(&proto.vnum)
+                    && proto.values[0] != 507
+            })
+            .map(|proto| proto.values)
+    }
+
+    /// Whether the character under `vid` holds `kind` on `point`, with point 0
+    /// matching any point (`FindAffect(kind, point)`, `G/char_affect.cpp:129-142`).
+    fn holds_affect_on(&self, vid: Vid, kind: u32, point: u8) -> bool {
+        self.affect_events.get(&vid).is_some_and(|event| {
+            event
+                .affects
+                .iter()
+                .any(|affect| affect.kind == kind && (point == 0 || affect.apply_on == point))
+        })
+    }
+
+    /// `case USE_AFFECT`'s refusals (`G/char_item.cpp:6844-6857`): a held dragon-god
+    /// row on the point refuses hard with `[LS;99]`, and a held row of the kind
+    /// itself refuses soft with the same line — both tell, both keep the item. The
+    /// renewal loop runs because `ENABLE_AFFECT_RENEWAL` is on. Anything else passes.
+    pub(super) fn timed_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+
+        use crate::loading_phase::{
+            AFFECT_DRAGON_GOD_1, AFFECT_DRAGON_GOD_2, AFFECT_DRAGON_GOD_3, AFFECT_DRAGON_GOD_4,
+        };
+        let Some(values) = self.timed_affect_values(vid, at) else {
+            return true;
+        };
+        let point = u8::try_from(values[1])
+            .ok()
+            .and_then(world::character::point_type)
+            .and_then(|point| u8::try_from(point).ok())
+            .unwrap_or(0);
+        for dragon in [
+            AFFECT_DRAGON_GOD_1,
+            AFFECT_DRAGON_GOD_2,
+            AFFECT_DRAGON_GOD_3,
+            AFFECT_DRAGON_GOD_4,
+        ] {
+            if self.holds_affect_on(vid, dragon, point) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, ABILITY_RENEWAL_REFUSAL, &[]);
+                return false;
+            }
+        }
+        let kind = u32::try_from(values[0]).unwrap_or(u32::MAX);
+        if self.holds_affect_on(vid, kind, point) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, ABILITY_RENEWAL_REFUSAL, &[]);
+            return false;
+        }
+        true
+    }
+
+    /// `case USE_AFFECT`'s land (`G/char_item.cpp:6858-6862`): value(0) on
+    /// `aApplyInfo` of value(1) with value(2)'s value for value(3) seconds,
+    /// appended — legacy passes `over` false.
+    pub(super) fn land_timed_affect(&mut self, vid: Vid, vnum: u32) {
+        let Some(proto) = self.protos.get(vnum) else {
+            return;
+        };
+        if proto.item_type != gamedata::item_kind::ITEM_USE
+            || proto.sub_type != gamedata::item_kind::USE_AFFECT
+            || (50_801..=50_820).contains(&vnum)
+            || proto.values[0] == 507
+        {
+            return;
+        }
+        let point = u8::try_from(proto.values[1])
+            .ok()
+            .and_then(world::character::point_type);
+        let Some(on) = point else { return };
+        let kind = u32::try_from(proto.values[0]).unwrap_or(u32::MAX);
+        self.add_pc_affect(
+            vid,
+            super::affect::Affect::buff(kind, on, proto.values[2], 0, proto.values[3], 0),
+            false,
+        );
+    }
+
     /// `CHARACTER::OnMove(true)` (`G/char.cpp:6148-6179`): the last move and
     /// attack times stamp, revive-invisible, if held, goes, the Eunhyung flag arm
     /// fires, and a running dig is cancelled.
@@ -5965,6 +6062,78 @@ mod tests {
         );
         assert_eq!(held[0].value, 3, "value(2) is the bonus");
         assert_eq!(held[0].remaining, 180, "value(1) is the duration");
+        let count = world
+            .characters()
+            .find_by_vid(me)
+            .expect("the caster is online")
+            .items()
+            .item(7)
+            .expect("one of two is kept")
+            .count;
+        assert_eq!(count, 1, "one of the stack goes");
+    }
+
+    /// A drinker uses a main-switch `USE_AFFECT` item: one of the stack goes
+    /// and value(0) lands on `aApplyInfo` of value(1) (`G/char_item.cpp:6833-6864`).
+    /// The owner's 39010 is mall affect 510 on apply 7 (attack speed) for 10,
+    /// 1800 s.
+    #[test]
+    fn a_timed_use_lands_value0_on_the_point_and_uses_one_up() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::MoveKind;
+        use world::item::Item;
+
+        use crate::item_move::Mover;
+
+        let (_clock, mut world, _inbox) = a_cast();
+        let me = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut timed = Item::new(7, 39_010);
+        timed.set_size(1).expect("a positive footprint");
+        timed.count = 2;
+        world
+            .characters
+            .find_by_vid_mut(me)
+            .expect("the caster is online")
+            .items_mut()
+            .set(cell, &timed)
+            .expect("cell 0 is free");
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: 4,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let landed = world
+            .use_item(
+                me,
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            )
+            .expect("the use lands");
+        assert_eq!(landed.kind, MoveKind::Timed);
+        let held = world
+            .affect_events
+            .get(&me)
+            .map(|event| event.affects.clone())
+            .unwrap_or_default();
+        assert_eq!(held.len(), 1, "the use lands one affect");
+        assert_eq!(held[0].kind, crate::loading_phase::AFFECT_MALL);
+        assert_eq!(
+            held[0].apply_on,
+            u8::try_from(common::point_slot::POINT_ATT_SPEED).unwrap(),
+            "value(1) 7 is attack speed"
+        );
+        assert_eq!(held[0].value, 10, "value(2) is the bonus");
+        assert_eq!(held[0].remaining, 1800, "value(3) is the duration");
         let count = world
             .characters()
             .find_by_vid(me)
