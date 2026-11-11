@@ -54238,3 +54238,54 @@ fn a_shop_premium_use_lands_507_stores_the_expiry_and_refuses_the_second() {
     );
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
 }
+
+/// `cg.game.item_use`: a town portal (22000) marks its user's spot on its own sockets
+/// and recalls to the empire's town. Alpha uses the lone portal at cell 0: the two
+/// socket updates stamp (470100, 950000), the row keeps them, the life pays 30%, and
+/// `GC_WARP` names map 1's town spawn (469300, 964200) on Channel 1.
+#[test]
+fn a_town_portal_marks_the_spot_and_recalls_to_town() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
+         22000 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(22_000).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 1, "the owner's item is USE_TALISMAN");
+    assert_eq!(proto.values[0], 1, "the item is the town portal");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses. Then: the two updates, and the warp to town.
+    alpha.send_record(&client_item_use(0));
+    let mut updates = 0;
+    let mut warped = false;
+    let port = server.channel(1).port();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(updates >= 2 && warped) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_UPDATE) {
+            let (window, cell, _count) = update_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
+                updates += 1;
+            }
+        }
+        if record == a_warp_record((469_300, 964_200), port) {
+            warped = true;
+        }
+    }
+    assert_eq!(updates, 2, "the mark stamps both sockets");
+    assert!(warped, "the recall warps to town");
+    check(
+        &database,
+        "(SELECT socket0 = 470100 AND socket1 = 950000 FROM item WHERE id = 30)",
+    );
+}

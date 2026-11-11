@@ -256,7 +256,7 @@ pub(super) struct Recall {
 impl Recall {
     /// Whether a client on `channel` can be sent to map `index`: its Channel serves it, or the
     /// Shared Channel does (`MapLocations::get`).
-    fn serves(&self, channel: u8, index: i32) -> bool {
+    pub(super) fn serves(&self, channel: u8, index: i32) -> bool {
         let Some(index) = u32::try_from(index).ok().filter(|&index| index != 0) else {
             return false;
         };

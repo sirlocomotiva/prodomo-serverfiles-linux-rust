@@ -4355,6 +4355,9 @@ impl GameState {
         if self.bait_at(vid, at) {
             return self.use_bait(vid, at, actor);
         }
+        if self.portal_at(vid, at) {
+            return self.use_portal_item(vid, at, actor);
+        }
         if self.blend_at(vid, at) {
             return self.use_blend_item(vid, at, actor);
         }

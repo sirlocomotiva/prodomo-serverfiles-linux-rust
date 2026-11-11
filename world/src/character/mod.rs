@@ -24,6 +24,7 @@ mod manager;
 mod model;
 mod points;
 mod polymorph;
+mod portal;
 mod potion;
 mod premium;
 mod purge;
@@ -128,6 +129,11 @@ pub use points::{
 };
 pub use polymorph::{
     polymorph_power, POLYMORPH_MAX_LEVEL, POLYMORPH_POWER_BY_LEVEL, SKILL_POLYMORPH,
+};
+pub use portal::{
+    calculate_consume, empire_of_map_index, is_portal, use_portal, PortalGround, Portaled,
+    BARRED_MAPS, MEMORY_PORTAL, PVP_ALLOWED, TOWN_PORTAL, WARP_MIN_LIFE_PERCENT,
+    WARP_NEED_LIFE_PERCENT,
 };
 pub use potion::{
     is_recovering, toggle_auto_potion, update_recovery, AutoBranch, SE_HPUP_RED, SE_SPUP_BLUE,

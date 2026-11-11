@@ -53575,3 +53575,42 @@ the land (`a_shop_premium_use_lands_507_and_holds_the_expiry`), the refusal
 A gate note: the expiry store grew the descriptor future past Clippy's limit, so
 `pump_descriptor`'s await is boxed; asserts identical.
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5444 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 588. The recall portals
+
+`case USE_TALISMAN` (`G/char_item.cpp:5862-5958`): the town portal (value(0) 1, the
+owner's 22000/22001) and the memory portal (value(0) 2, 22010/22011/22020/22030).
+The arm runs as an early-use seat beside the bait (`portal_at`, `use_portal_item`),
+with the item half in the new `world::character::portal` (`use_portal`), which answers
+a `Portaled` outcome the caller pays, warps, and lines.
+
+The gates run in legacy's order: maps 200 and 113 refuse with `[LS;388]`, an arena map
+or a consent-duel fight with `no_potions_on_pvp` up and a vnum off the allow list with
+`[LS;1205]` (`ENABLE_NEWSTUFF`, `G/arena.cpp:1105-1124`), and under 30% of maximum hit
+points with `[LS;1152]` (`CalculateConsume`, `:2667-2698`: 30% paid, trimmed so 10%
+stays). The warp-event gate (`:5888`) never refuses: legacy never arms `m_pkWarpEvent`
+(its only writes are the `NULL` construction and the destructor's cancel), so
+`IsWarping` is always false. A value(0) that is neither portal answers nothing, as
+legacy's arm falls through.
+
+`GiveRecallItem` (`:2067-2122`): the standing map's empire gate (`[LS;1119]`, shared
+`empire_of_map_index`: 1/2/3 under 20/40/60, none on 66/216, 0 under 10000, -1 past;
+`-1` and 0 pass), then the stamp — a lone portal takes the spot on its own sockets 0
+and 1, a stacked one splits a marked single into the first free base-inventory cell
+(`[LS;1130]` with none). A memory mark inside a living dungeon refuses with `[LS;391]`
+with the item's name; a town mark inside one skips the stamp and still warps.
+`ProcessRecallItem` (`:2124-2182`): a mark on no map answers nothing; maps 301-304
+refuse under level 90 with `[LS;1013]`; a mark of another empire refuses with
+`[LS;1141]` and clears the sockets (a second step, so its updates ride); else the
+recall pays the consume and warps to the mark. The town warp sends the empire's town
+(`recall_position`, falling back to `go_home`), paying before the order; with no
+served recall point the use answers `sys_err`'s silence, as legacy's failed lookup
+does. The test-server line tells on a marked recall. The spend is `use_one`'s, so the
+records match every other use. Scenario
+`a_town_portal_marks_the_spot_and_recalls_to_town`: the lone 22000's two updates stamp
+(470100, 950000), the row keeps them, and `GC_WARP` names (469300, 964200) on Channel 1.
+
+Tests: the consume (`the_recall_pays_thirty_percent_and_keeps_ten`), the grounds
+(`each_portal_ground_answers_its_own_outcome`), the ladder (`the_map_ladder_matches_legacy`),
+the world mark and warp (`a_town_portal_marks_and_warps_to_town`).
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5449 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

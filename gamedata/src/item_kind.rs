@@ -107,6 +107,9 @@ pub const WEAPON_MOUNT_SPEAR: i32 = 7;
 
 /// `USE_POTION`: a potion whose recovery runs over the following seconds.
 pub const USE_POTION: i32 = 0;
+/// `USE_TALISMAN` (`C/item_length.h:255`): 1. A town or memory portal, which marks
+/// or recalls (the owner's 22000/22001 mark town, 22010/22011/22020/22030 memory).
+pub const USE_TALISMAN: i32 = 1;
 /// `USE_TUNING`: a refine scroll, which the smith refuses to refine.
 pub const USE_TUNING: i32 = 2;
 /// `USE_DETACHMENT` (`C/item_length.h:268`): a stone or sash detachment scroll.
@@ -338,6 +341,7 @@ mod tests {
         let usable = SUB_TYPE[usize::try_from(ITEM_USE).expect("a small index")];
         for (value, name) in [
             (USE_POTION, "USE_POTION"),
+            (USE_TALISMAN, "USE_TALISMAN"),
             (USE_TUNING, "USE_TUNING"),
             (USE_DETACHMENT, "USE_DETACHMENT"),
             (USE_ABILITY_UP, "USE_ABILITY_UP"),

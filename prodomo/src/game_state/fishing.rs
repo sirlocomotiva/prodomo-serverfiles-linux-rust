@@ -60,9 +60,9 @@ use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_vid::{GcFishing, GcFishingSubheader};
 use protocol::item_pos::ItemPos;
 use world::character::{
-    is_campfire, number, set_item_socket, use_bait, use_campfire, AutoGiven, Baited,
-    CampfireGround, Dice, Fired, MoveDone, MoveKind, MoveRecord, CAMPFIRE_MOB, ROD_BAIT_SOCKET,
-    WEAPON_CELL,
+    empire_of_map_index, is_campfire, is_portal, number, set_item_socket, use_bait, use_campfire,
+    use_portal, AutoGiven, Baited, CampfireGround, Dice, Fired, MoveDone, MoveKind, MoveRecord,
+    PortalGround, Portaled, CAMPFIRE_MOB, ROD_BAIT_SOCKET, WEAPON_CELL,
 };
 use world::item::Item;
 
@@ -71,6 +71,19 @@ use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover, StoreOrder};
 use crate::save::PASSES_PER_SEC;
+/// What a marked recall carries past the spend: the life it pays, the mark's sockets
+/// as the spend read them, the cell the empire refusal clears, and the test-server flag.
+#[derive(Debug, Clone, Copy)]
+struct PortalRecall {
+    /// The life the recall pays.
+    consume: i32,
+    /// The mark's sockets.
+    sockets: [i32; 6],
+    /// The portal's cell.
+    at: ItemPos,
+    /// Whether the test-server line tells.
+    test_server: bool,
+}
 
 /// `kill_campfire_event`'s delay (`G/char_item.cpp:2933`): 40 s.
 const CAMPFIRE_LIFETIME: u32 = 40;
@@ -609,6 +622,16 @@ impl GameState {
             .is_some_and(world::character::is_bait)
     }
 
+    /// Whether the item at `at` of the character under `vid` is a recall portal.
+    pub(super) fn portal_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .is_some_and(is_portal)
+    }
+
     /// Whether the item at `at` of the character under `vid` is a campfire.
     pub(super) fn campfire_at(&self, vid: Vid, at: ItemPos) -> bool {
         self.characters
@@ -740,6 +763,213 @@ impl GameState {
         moved.records.insert(0, line);
         Ok(moved)
     }
+
+    /// `CG_ITEM_USE` of a recall portal (`case USE_TALISMAN`, `G/char_item.cpp:5862-5958`):
+    /// the use checks, then the arm's own gates, each with its line first. A town mark
+    /// stamps the spot and recalls to the empire's town; a memory mark stamps alone; a
+    /// marked portal recalls to its mark. The recall pays the consume and spends one.
+    pub(super) fn use_portal_item(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let Some((_, map)) = self.place_of(vid.raw()) else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let (empire, pid) = self
+            .characters
+            .find_by_vid(vid)
+            .map_or((0, 0), |character| {
+                let empire = self.bodies.get(&vid).map_or(0, |body| body.card.empire);
+                (empire, character.player_id())
+            });
+        let (hp, max_hp) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or((0, 0), |points| (points.hp(), points.max_hp()));
+        let pvp_gated = self
+            .quests
+            .as_ref()
+            .is_some_and(|quests| quests.manager().event_flag(b"no_potions_on_pvp") != 0)
+            && self.pvp_is_fighting(pid);
+        let ground = PortalGround {
+            map,
+            empire,
+            arena_map: self.is_arena_map(map),
+            in_dungeon: self.dungeons.lives(u32::try_from(map).unwrap_or(0)),
+            pvp_gated,
+            hp: (hp, max_hp),
+            spot: (spot.x, spot.y),
+        };
+        let test_server = self.test_server;
+        let mut outcome = (Portaled::Plain, 0, [0; 6]);
+        let mut moved = self.run_item_step(vid, actor, |items, ids, rules, gear, _protos| {
+            let held = items.item_at(at).map(|item| (item.vnum, item.sockets));
+            use_portal(items, ids, at, rules, gear, ground).map(|(done, portaled)| {
+                if let Some((vnum, sockets)) = held {
+                    outcome = (portaled, vnum, sockets);
+                }
+                done
+            })
+        })?;
+        let (portaled, vnum, sockets) = outcome;
+        let to = actor.recipient(&self.locale);
+        let name = self.item_get_name(vnum);
+        let line = match portaled {
+            Portaled::Barred => Some(chat_packet(to, CHAT_TYPE_INFO, b"[LS;388]", &[])),
+            Portaled::NoPortal => Some(chat_packet(to, CHAT_TYPE_INFO, b"[LS;1205]", &[])),
+            Portaled::TooWeak => Some(chat_packet(to, CHAT_TYPE_INFO, b"[LS;1152]", &[])),
+            Portaled::WrongMap => Some(chat_packet(to, CHAT_TYPE_INFO, b"[LS;1119]", &[])),
+            Portaled::NoRoom => Some(chat_packet(to, CHAT_TYPE_INFO, b"[LS;1130]", &[])),
+            Portaled::DungeonMark => Some(chat_packet(
+                to,
+                CHAT_TYPE_INFO,
+                b"[LS;391;%s;%s]",
+                &[Arg::Text(&name), Arg::Text(b"")],
+            )),
+            Portaled::Marked | Portaled::Plain => None,
+            Portaled::TownWarp { consume, .. } => {
+                return Ok(self.portal_town_warp(vid, moved, consume));
+            }
+            Portaled::Recall { consume } => {
+                let recall = PortalRecall {
+                    consume,
+                    sockets,
+                    at,
+                    test_server,
+                };
+                return self.portal_mark_recall(vid, actor, moved, recall);
+            }
+        };
+        if let Some(line) = line {
+            moved.records.insert(0, line);
+        }
+        Ok(moved)
+    }
+
+    /// The town warp of a town portal's use: the recall pays `consume` life, then
+    /// `WarpSet` to the empire's town. With no recall point the use answers
+    /// `sys_err`'s silence, as legacy's failed lookup does (`:5917-5920`).
+    fn portal_town_warp(&mut self, vid: Vid, moved: MovedItems, consume: i32) -> MovedItems {
+        let body = self.bodies.get(&vid).map(|body| (body.channel, body.map));
+        let Some((channel, map)) = body else {
+            return moved;
+        };
+        let atlas = self.recall.atlas().cloned();
+        let empire = self.bodies.get(&vid).map_or(0, |body| body.card.empire);
+        let point = atlas.as_ref().and_then(|atlas| {
+            crate::warp::recall_position(atlas, map, empire)
+                .or_else(|| crate::warp::go_home(empire))
+                .filter(|(x, y)| {
+                    atlas
+                        .index_at(*x, *y)
+                        .is_some_and(|index| self.recall.serves(channel, index))
+                })
+        });
+        let Some(point) = point else {
+            return moved;
+        };
+        self.change_pc_point(vid, common::point_slot::POINT_HP, -consume, false);
+        self.order_warp(vid, point);
+        moved
+    }
+
+    /// The marked recall of a portal's use (`ProcessRecallItem`, `G/char_item.cpp:2124-2182`):
+    /// a mark on no map answers nothing; maps 301-304 refuse under level 90 with
+    /// `[LS;1013]`; a mark of another empire refuses with `[LS;1141]` and clears the
+    /// sockets. Else the recall pays `consume` life and warps to the mark.
+    fn portal_mark_recall(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        mut moved: MovedItems,
+        recall: PortalRecall,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let PortalRecall {
+            consume,
+            sockets,
+            at,
+            test_server,
+        } = recall;
+        if test_server {
+            let to = actor.recipient(&self.locale);
+            moved.records.insert(
+                0,
+                chat_packet(
+                    to,
+                    CHAT_TYPE_INFO,
+                    b"You will be brought back to the original place.",
+                    &[],
+                ),
+            );
+        }
+        let point = (sockets[0], sockets[1]);
+        let atlas = self.recall.atlas().cloned();
+        let Some(index) = atlas
+            .as_ref()
+            .and_then(|atlas| atlas.index_at(point.0, point.1))
+        else {
+            return Ok(moved);
+        };
+        let level = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(0, world::character::Points::level);
+        if matches!(index, 301..=304) && level < 90 {
+            let to = actor.recipient(&self.locale);
+            moved
+                .records
+                .insert(0, chat_packet(to, CHAT_TYPE_INFO, b"[LS;1013]", &[]));
+            return Ok(moved);
+        }
+        let empire = self.bodies.get(&vid).map_or(0, |body| body.card.empire);
+        let wanted = empire_of_map_index(index);
+        if wanted > 0 && i32::from(empire) != wanted {
+            // `[LS;1141]`, and the sockets clear (`:2173-2175`). The clear runs as a
+            // second step so its updates and row changes ride the answer.
+            let mut cleared = self.run_item_step(vid, actor, |items, _ids, _, _, _| {
+                let Some(id) = items.item_at(at).map(|item| item.id) else {
+                    return Ok(MoveDone {
+                        kind: MoveKind::Used,
+                        records: Vec::new(),
+                        changes: Vec::new(),
+                    });
+                };
+                let first = set_item_socket(items, id, (0, 0));
+                let second = set_item_socket(items, id, (1, 0));
+                let mut records = first.records;
+                records.extend(second.records);
+                let mut changes = first.changes;
+                changes.extend(second.changes);
+                Ok(MoveDone {
+                    kind: MoveKind::Used,
+                    records,
+                    changes,
+                })
+            })?;
+            let mut records = Vec::with_capacity(moved.records.len() + 2);
+            records.append(&mut moved.records);
+            records.append(&mut cleared.records);
+            moved.records = records;
+            moved.changes.append(&mut cleared.changes);
+            let to = actor.recipient(&self.locale);
+            moved
+                .records
+                .insert(0, chat_packet(to, CHAT_TYPE_INFO, b"[LS;1141]", &[]));
+            return Ok(moved);
+        }
+        self.change_pc_point(vid, common::point_slot::POINT_HP, -consume, false);
+        self.order_warp(vid, point);
+        Ok(moved)
+    }
 }
 
 #[cfg(test)]
@@ -825,5 +1055,174 @@ mod tests {
         // A source of 0: `number(0, 99)` is 0, the extra size, and `asin(0)` keeps the
         // range's top.
         assert_eq!(fish_length(&mut FixedDraw::new(1), &one), 2500);
+    }
+}
+
+#[cfg(test)]
+mod portal_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common::item_slots::EWindows;
+    use common::vid::Vid;
+    use gamedata::map_atlas::MapAtlas;
+    use protocol::item_pos::ItemPos;
+    use world::item::Item;
+
+    use super::super::fixtures::{a_world, points_at, region, TestClock};
+    use super::super::GameState;
+    use crate::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease};
+    use crate::game_loop_messages::EnterPlace;
+    use crate::loading_phase::{PcCard, PK_MODE_PROTECT};
+
+    const PLACE: (u8, i32) = (1, 1);
+    const ALPHA: Vid = Vid::new(7);
+    const HOME: (i32, i32) = (3200, 3200);
+    const TOWN: (i32, i32) = (1000, 2000);
+    const AT: ItemPos = ItemPos {
+        window_type: EWindows::Inventory as u8,
+        cell: 3,
+    };
+
+    fn portal(count: u16, sockets: [i32; 6]) -> Item {
+        let mut item = Item::new(9, 22_000);
+        item.count = count;
+        item.sockets = sockets;
+        item
+    }
+
+    fn field() -> (GameState, TestClock, Arc<ChannelClients>) {
+        let clock = TestClock::default();
+        let clients = Arc::new(ChannelClients::new());
+        let mut town = region();
+        town.index = PLACE.1;
+        town.spawn = TOWN;
+        let atlas = Arc::new(MapAtlas::from_regions(vec![town]));
+        let maps = HashMap::from([(PLACE.0, vec![u32::try_from(PLACE.1).unwrap()])]);
+        let world = a_world(&clock)
+            .with_clients(Arc::clone(&clients))
+            .with_recall(atlas, &maps, &[]);
+        (world, clock, clients)
+    }
+
+    fn join(world: &mut GameState, clients: &Arc<ChannelClients>, item: Item) -> Lease {
+        let mut lease = clients.join(ClientEntry {
+            channel: PLACE.0,
+            map: PLACE.1,
+            name: "P7".to_string(),
+            vid: ALPHA.raw(),
+            empire: 1,
+            language: 0,
+        });
+        let _inbox = lease.take_receiver().expect("the inbox is home");
+        world
+            .enter_world_with_items("", ALPHA, ALPHA.raw(), "P7", &[(AT, item)], lease.outbox())
+            .expect("the player enters");
+        world
+            .characters
+            .find_by_vid_mut(ALPHA)
+            .expect("the player is online")
+            .set_points(Some(points_at(10, 12_345, 5_000)));
+        let card = PcCard {
+            name: "P7".to_string(),
+            job: 0,
+            empire: 1,
+            level: 10,
+            conqueror_level: 0,
+            language: 0,
+            pk_mode: PK_MODE_PROTECT,
+            skill_group: 0,
+            alignment: 0,
+            voice: 0,
+            premium: 0,
+            premium_time: 0,
+        };
+        world.place_body(
+            ALPHA,
+            EnterPlace {
+                channel: PLACE.0,
+                map: PLACE.1,
+                x: HOME.0,
+                y: HOME.1,
+                z: 0,
+            },
+            card,
+        );
+        lease
+    }
+
+    fn ordered(lease: &mut Lease) -> Vec<ClientOrder> {
+        let mut orders = lease.take_orders().expect("the queue is home");
+        let got = std::iter::from_fn(|| orders.try_recv().ok()).collect();
+        lease.put_orders(orders);
+        got
+    }
+
+    /// A lone town portal marks its own sockets and warps its user to town; the
+    /// recall pays 30% of the maximum life.
+    #[test]
+    fn a_town_portal_marks_and_warps_to_town() {
+        let (mut world, _clock, clients) = field();
+        let mut lease = join(&mut world, &clients, portal(1, [0; 6]));
+        let mover = world.own_mover(ALPHA).expect("the body is placed");
+        let before = world
+            .characters
+            .find_by_vid(ALPHA)
+            .expect("online")
+            .points()
+            .expect("points")
+            .hp();
+        let max = world
+            .characters
+            .find_by_vid(ALPHA)
+            .expect("online")
+            .points()
+            .expect("points")
+            .max_hp();
+        let answer = world
+            .use_portal_item(ALPHA, AT, mover)
+            .expect("the use runs");
+        let marked = world
+            .characters
+            .find_by_vid(ALPHA)
+            .expect("online")
+            .items()
+            .item_at(AT)
+            .expect("the portal stays");
+        let spot = world.spot_of(ALPHA.raw()).expect("the body stands");
+        assert_eq!([marked.sockets[0], marked.sockets[1]], [spot.x, spot.y]);
+        let after = world
+            .characters
+            .find_by_vid(ALPHA)
+            .expect("online")
+            .points()
+            .expect("points")
+            .hp();
+        let need = max * 30 / 100;
+        let floor = max * 10 / 100;
+        let want = if before - need < floor {
+            before - floor.max(0)
+        } else {
+            need
+        }
+        .max(0);
+        assert_eq!(before - after, want, "the recall pays 30%, keeping 10%");
+        assert!(
+            answer.records.len() >= 2,
+            "the two socket updates ride: {}",
+            answer.records.len()
+        );
+        assert_eq!(
+            ordered(&mut lease),
+            vec![ClientOrder::Warp {
+                x: TOWN.0,
+                y: TOWN.1,
+                private_map_index: 0,
+                channel: None,
+                exit: None,
+                sorted_until: 0,
+            }],
+            "the recall orders the town warp"
+        );
     }
 }
