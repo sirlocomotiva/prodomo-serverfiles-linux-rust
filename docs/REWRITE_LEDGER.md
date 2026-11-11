@@ -52722,3 +52722,28 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 563. The library chain
+
+`data.lua.settings` is `ported`: the host loads legacy's four libraries in legacy's order —
+`settings.lua`, `quest/questlib.lua`, `translate.lua`, `quest/locale.lua`
+(`G/questlua.cpp:737-790` against `quest/src/host.rs:223-227`) — and a broken or missing
+library fails the load as legacy's `return false` did. Two unit tests pin it: the owner's
+chain records the four map-112 arenas in `settings.lua:93-96` order, and a synthetic locale
+with a broken `settings.lua` or a missing `translate.lua` fails
+(`the_owner_chain_loads_its_four_libraries_in_order`,
+`a_broken_or_missing_library_fails_the_load`; both hook mutants killed — a reversed arena
+record and a swallowed `run_file` error). Each file is wire-observed: `settings.lua`'s rows
+list in the duel scenario, `questlib.lua`'s `say_title` titles the OX pages, and
+`translate.lua`'s `gameforge.locale.*` through `locale.lua`'s `locale.*` aliases name the
+guild observer's menu (`Lista razboaielor dintre bresle`).
+
+Inventory: `data.lua.settings` missing to ported, naming the duel scenario and the witnesses.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite563.txt` (5355 passed, 0 failed in 46 targets), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

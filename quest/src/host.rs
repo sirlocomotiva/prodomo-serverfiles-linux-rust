@@ -1495,6 +1495,66 @@ mod tests {
         assert!(settings.bgm_volume_enable);
     }
 
+    /// The owner's library chain loads in legacy's order (`G/questlua.cpp:737-790`):
+    /// `settings.lua`'s four map-112 arenas record in file order. The load's success
+    /// means all four ran; `translate.lua` and `quest/locale.lua` are wire-observed
+    /// through the guild observer's menu (ledger 563).
+    #[test]
+    fn the_owner_chain_loads_its_four_libraries_in_order() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe");
+        let host = Host::load(&root).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            host.settings().arenas,
+            [
+                Arena {
+                    map_index: 112,
+                    start_a: (8534, 101),
+                    start_b: (8564, 101)
+                },
+                Arena {
+                    map_index: 112,
+                    start_a: (8584, 101),
+                    start_b: (8614, 101)
+                },
+                Arena {
+                    map_index: 112,
+                    start_a: (8534, 155),
+                    start_b: (8564, 155)
+                },
+                Arena {
+                    map_index: 112,
+                    start_a: (8584, 155),
+                    start_b: (8614, 155)
+                },
+            ]
+        );
+    }
+
+    /// A library that breaks, or one that is missing, fails the load, as legacy's
+    /// `return false` did (`G/questlua.cpp:741-745`, `:778-782`).
+    #[test]
+    fn a_broken_or_missing_library_fails_the_load() {
+        let root = std::env::temp_dir().join(format!("quest-chain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let files = [
+            ("settings.lua", "this is not lua ("),
+            ("translate.lua", ""),
+            ("quest/questlib.lua", ""),
+            ("quest/locale.lua", ""),
+            ("quest/quest_list", ""),
+        ];
+        for (path, text) in files {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        assert!(Host::load(&root).is_err(), "broken settings.lua fails");
+        fs::write(root.join("settings.lua"), "").unwrap();
+        fs::remove_file(root.join("translate.lua")).unwrap();
+        assert!(Host::load(&root).is_err(), "missing translate.lua fails");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn the_dragon_stones_snapshot_reads_four_rows_and_zeroes_the_missing() {
         use common::dragon::{DragonStone, DRAGON_STONE_ROWS};
