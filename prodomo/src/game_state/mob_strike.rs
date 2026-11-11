@@ -10,14 +10,17 @@ use std::time::Duration;
 
 use common::point_slot as point;
 use common::vid::Vid;
-use gamedata::mob_proto::{BATTLE_TYPE_MAGIC, BATTLE_TYPE_RANGE, BATTLE_TYPE_SPECIAL};
+use gamedata::mob_proto::{
+    BATTLE_TYPE_MAGIC, BATTLE_TYPE_RANGE, BATTLE_TYPE_SPECIAL, CHAR_TYPE_MONSTER,
+};
 use protocol::gc::HEADER_GC_FLY_TARGETING;
 use protocol::gc_nested::GcFlyTargeting;
 use protocol::gc_vid::GcSpecialEffect;
 use tracing::warn;
 use world::character::{
-    mob_reach, shoot_pc, strike_npc_by_npc, strike_pc, AttackAffect, MobStriker, NpcVictim,
-    PcHitEnd, PcStrike, PcVictim, DAMAGE_DODGE,
+    mob_reach, reflect_damage, shoot_npc, shoot_pc, special_on_mob, strike_npc_by_monster,
+    strike_npc_by_npc, strike_pc, AttackAffect, MobStriker, NpcVictim, PcHitEnd, PcStrike,
+    PcVictim, DAMAGE_DODGE,
 };
 
 use super::affect::Affect;
@@ -271,6 +274,354 @@ impl GameState {
             combat.last_attack_ms = Some(now);
         }
         true
+    }
+
+    /// `CHARACTER::Attack` of the monster under `mob` on the NPC `victim`: whether
+    /// it hit (`G/char_battle.cpp:220-328`, NPC victim). The gate is
+    /// `battle_is_attackable` with the ship arm (`mob_can_attack_npc`), the chat is
+    /// drawn before the reach test (`:310-316`), SPECIAL blanks (`:259-279`), and
+    /// RANGE/MAGIC shoot past the same reach. A hit runs the affects, the shown
+    /// records and the hit-point change in `strike_npc`'s order; then
+    /// `iRet != BATTLE_NONE` claims the victim's `SetSyncOwner` and runs its
+    /// `BeginFight` past `CanBeginFight` (`:299-304`) — the mast's NPC type never
+    /// fights back, so the strike stands there — and `OnMove(true)` stamps the
+    /// swing (`:317`). The temple arm is a guard-mast pairing only: no guardian
+    /// stands on the ship's map.
+    pub(super) fn mob_attack_npc(&mut self, mob: u32, victim: u32) -> bool {
+        if !self.mob_can_attack_npc(mob, victim) {
+            return false;
+        }
+        self.monster_chat_attack(mob);
+        if self.mob_is_special(mob) {
+            return false;
+        }
+        let Some(target) = self.npc_victim_state(victim) else {
+            return false;
+        };
+        let Some(npc) = self.npc_by_vid(mob) else {
+            return false;
+        };
+        let reach = mob_reach(npc);
+        let (at, berserk) = (
+            (npc.x, npc.y),
+            self.minds.get(mob).is_some_and(|mind| mind.berserk),
+        );
+        let distance = distance_approx(
+            target.at.0.saturating_sub(at.0),
+            target.at.1.saturating_sub(at.1),
+        );
+        if distance > reach {
+            return false;
+        }
+        let armed = self.shot_type(mob);
+        let shot = armed.is_some();
+        if shot {
+            self.show_npc_fly_target(mob, victim, target.at);
+        }
+        let Some(&(channel, map, striker_at)) = self.npc_of.get(&mob) else {
+            return false;
+        };
+        // The swing reads the striker and the victim from the same list (both live
+        // on the mob's map, which `mob_can_attack_npc` checked) or refuses when the
+        // victim moved between the reach test and the swing, as the guard's does.
+        let Some(&(victim_channel, victim_map, victim_at)) = self.npc_of.get(&victim) else {
+            return false;
+        };
+        if channel != victim_channel || map != victim_map {
+            return false;
+        }
+        let (dragon_stones, dragon_counts) = self.dragon_strike_facts(mob);
+        let banned = self.is_npc_banned(victim);
+        let dice = &mut self.dice;
+        let Some(list) = self.npcs.get(&(channel, map)) else {
+            return false;
+        };
+        let (striker_npc, victim_hp) = {
+            let (Some(striker), Some(victim_npc)) =
+                (list.npcs.get(striker_at), list.npcs.get(victim_at))
+            else {
+                return false;
+            };
+            (striker.clone(), victim_npc.clone())
+        };
+        let magic = armed.is_some_and(|magic| magic);
+        let striker = MobStriker {
+            npc: &striker_npc,
+            berserk,
+            dragon_stones,
+            dragon_counts,
+        };
+        let mut victim_owned = victim_hp;
+        let (strike, reflected_base) = if shot {
+            (
+                shoot_npc(dice, striker, &mut victim_owned, magic, banned),
+                None,
+            )
+        } else {
+            strike_npc_by_monster(dice, striker, &mut victim_owned, banned)
+        };
+        if let Some(npc) = self.npc_mut(victim) {
+            npc.hp = victim_owned.hp;
+        }
+        self.show_npc_strike(mob, victim, strike, reflected_base);
+        let now_span = self.clock.elapsed();
+        let mark = SyncPositionVictim {
+            vid: Vid::new(victim),
+            kind: crate::sync_position::SyncPositionVictimKind::Monster,
+            x: target.at.0,
+            y: target.at.1,
+        };
+        let _claimed = self.set_npc_sync_owner(Vid::new(mob), at, &mark, now_span);
+        if self
+            .npc_by_vid(victim)
+            .is_some_and(super::mob_battle::fights_back)
+            && self.can_begin_fight(victim)
+        {
+            self.begin_fight_npc(victim, mob);
+        }
+        let now = self.clock.now();
+        if let Some(combat) = self.npc_combat.get_mut(&mob) {
+            combat.last_attack_ms = Some(now);
+        }
+        true
+    }
+
+    /// `FlyTarget` of `mob` on the NPC `victim` at `at`: the `GC_FLY_TARGETING`
+    /// around the monster. The victim stands past `mob_can_attack_npc`, so the
+    /// record always names it, never `(0, x, y)`.
+    fn show_npc_fly_target(&mut self, mob: u32, victim: u32, at: (i32, i32)) {
+        let mut record = Vec::new();
+        GcFlyTargeting::new(HEADER_GC_FLY_TARGETING, mob, victim, at.0, at.1)
+            .encode_into(&mut record);
+        let me = EntityKey::Npc(mob);
+        self.packet_around(me, &record, Some(me));
+    }
+    /// What the monster's hit on the NPC `victim` showed: the affects, the shown
+    /// records, the melee reflect back at the striker (`:1979-1988`, NORMAL only —
+    /// a shot or skill never reflects), and the hit-point end, in `strike_npc`'s
+    /// order, with the last-attacked stamp on a landed or lethal hit.
+    fn show_npc_strike(
+        &mut self,
+        mob: u32,
+        victim: u32,
+        strike: world::character::Strike,
+        reflected_base: Option<i32>,
+    ) {
+        self.apply_npc_affect(Vid::new(mob), victim, strike.affect);
+        self.show_strike(Vid::new(mob), victim, strike.events);
+        if matches!(
+            strike.struck,
+            world::character::Struck::Landed { .. } | world::character::Struck::Finished
+        ) {
+            self.reflect_npc_swing(mob, victim, reflected_base);
+        }
+        match strike.struck {
+            world::character::Struck::Landed { damage } => {
+                self.set_last_attacked(mob);
+                self.after_npc_damage(mob, victim, damage);
+            }
+            world::character::Struck::Finished => {
+                self.set_last_attacked(mob);
+                self.dead_npc(victim, Some(Vid::new(mob)));
+            }
+            world::character::Struck::Whiffed
+            | world::character::Struck::Refused
+            | world::character::Struck::AlreadyDead
+            | world::character::Struck::StunnedByGuard => {}
+        }
+    }
+
+    /// The reflect arm of the monster's NORMAL swing on the NPC `victim`
+    /// (`G/char_battle.cpp:1979-1988`): the victim's `POINT_REFLECT_MELEE` share of
+    /// the pre-bonus `base`, thirded when the striker is immune to reflect, runs
+    /// back at the striker as `DAMAGE_TYPE_SPECIAL` through the monster-hit's tail,
+    /// fills the striker's damage map with the SPECIAL kind, and kills rewarded.
+    /// `None` (a shot or skill, never NORMAL) reflects nothing; a zero share still
+    /// calls `Damage` in legacy, so the runner runs even at 0.
+    fn reflect_npc_swing(&mut self, mob: u32, victim: u32, base: Option<i32>) {
+        let Some(base) = base else {
+            return;
+        };
+        let Some(target) = self.npc_by_vid(victim) else {
+            return;
+        };
+        let reflect = target.fight.point(point::POINT_REFLECT_MELEE);
+        let immune = self
+            .npc_by_vid(mob)
+            .is_some_and(|npc| npc.immune_flag & world::character::IMMUNE_REFLECT != 0);
+        let damage = reflect_damage(reflect, immune, base);
+        self.reflect_on_mob(victim, mob, damage);
+    }
+
+    /// The reflect arm's `DAMAGE_TYPE_SPECIAL` hit on the monster under `mob`, off
+    /// the NPC `victim` (`G/char_battle.cpp:1987`, `:2224-2433`): the share runs the
+    /// SPECIAL tail ([`special_on_mob`]), shows through the player-hit's pipeline,
+    /// fills the striker's damage map with the SPECIAL kind (no party share), and
+    /// stuns at 0 with a zero killer. No claim, no `BeginFight`: the reflect is
+    /// inside `Damage`, not an `Attack`. The empire tenth and the drain skip a
+    /// monster attacker (`pAttacker->IsPC()` refuses), the monarch tenth never
+    /// applies (no arrays are ported), and the user rate never scales it.
+    fn reflect_on_mob(&mut self, victim: u32, mob: u32, damage: i32) {
+        let Some(&(channel, map, at)) = self.npc_of.get(&mob) else {
+            return;
+        };
+        let Some(list) = self.npcs.get(&(channel, map)) else {
+            return;
+        };
+        let Some(striker_npc) = list.npcs.get(at) else {
+            return;
+        };
+        let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
+        let mut victim_owned = striker_npc.clone();
+        let (dragon_stones, dragon_counts) = self.dragon_strike_facts(mob);
+        let strike = special_on_mob(
+            &mut self.dice,
+            MobStriker {
+                npc: striker_npc,
+                berserk,
+                dragon_stones,
+                dragon_counts,
+            },
+            &mut victim_owned,
+            damage,
+        );
+        if let Some(npc) = self.npc_mut(mob) {
+            npc.hp = victim_owned.hp;
+        }
+        self.show_strike(Vid::new(mob), mob, strike.events);
+        match strike.struck {
+            world::character::Struck::Landed { damage } => {
+                self.set_last_attacked(mob);
+                self.after_npc_damage_typed(
+                    victim,
+                    mob,
+                    damage,
+                    super::fight::AggroDamage::Special,
+                );
+            }
+            world::character::Struck::Finished => {
+                self.set_last_attacked(mob);
+                self.dead_npc(mob, Some(Vid::new(victim)));
+            }
+            world::character::Struck::AlreadyDead
+            | world::character::Struck::Whiffed
+            | world::character::Struck::Refused
+            | world::character::Struck::StunnedByGuard => {}
+        }
+    }
+
+    /// [`GameState::after_npc_damage`], with the aggro kind of the hit: a reflected
+    /// hit fills the same row but feeds `SPECIAL` aggro (×1, no party share,
+    /// `G/battle.cpp:3818-3820`).
+    fn after_npc_damage_typed(
+        &mut self,
+        attacker: u32,
+        victim: u32,
+        damage: i32,
+        kind: super::fight::AggroDamage,
+    ) {
+        if damage > 0 {
+            self.npc_combat
+                .entry(victim)
+                .or_default()
+                .damage
+                .entry(attacker)
+                .and_modify(|row| row.total = row.total.saturating_add(damage))
+                .or_insert(super::fight::NpcDamage {
+                    total: damage,
+                    aggro: 0,
+                });
+            self.start_recovery(victim);
+            self.update_aggr_point_ex(victim, Vid::new(attacker), kind, damage);
+            self.ship_broadcast_on_mast_hit(victim);
+        }
+        if self.npc_by_vid(victim).is_some_and(|npc| npc.hp <= 0) {
+            self.stun_npc(victim);
+            self.npc_combat.entry(victim).or_default().killer_pid = 0;
+        }
+    }
+
+    /// The end of a monster's `Damage` on the NPC `victim` once the hit points are
+    /// taken (`G/char_battle.cpp:2407-2433`): a hit that took any fills the damage
+    /// map, starts the recovery and feeds NORMAL aggro, a hit on the mast
+    /// broadcasts its HP (`:2277-2282`), and one that left none stuns the NPC with
+    /// a zero killer — a monster's VID is no PID, and `!pAttacker->IsNPC()` refuses
+    /// it (`:2425-2430`).
+    pub(super) fn after_npc_damage(&mut self, attacker: u32, victim: u32, damage: i32) {
+        if damage > 0 {
+            self.npc_combat
+                .entry(victim)
+                .or_default()
+                .damage
+                .entry(attacker)
+                .and_modify(|row| row.total = row.total.saturating_add(damage))
+                .or_insert(super::fight::NpcDamage {
+                    total: damage,
+                    aggro: 0,
+                });
+            self.start_recovery(victim);
+            self.update_aggr_point_ex(
+                victim,
+                Vid::new(attacker),
+                super::fight::AggroDamage::Normal,
+                damage,
+            );
+            self.ship_broadcast_on_mast_hit(victim);
+        }
+        if self.npc_by_vid(victim).is_some_and(|npc| npc.hp <= 0) {
+            self.stun_npc(victim);
+            self.npc_combat.entry(victim).or_default().killer_pid = 0;
+        }
+    }
+
+    /// Whether the NPC `victim` stands on an `ATTR_BANPK` cell (`Damage`'s sectree
+    /// arm, `G/char_battle.cpp:2234`): a standing NPC has a sectree, so only the
+    /// cell refuses.
+    fn is_npc_banned(&self, victim: u32) -> bool {
+        let Some(&(channel, map, _)) = self.npc_of.get(&victim) else {
+            return true;
+        };
+        let _ = channel;
+        self.npc_by_vid(victim)
+            .is_some_and(|npc| self.is_banpk(map, npc.x, npc.y))
+    }
+
+    /// `battle_is_attackable` of the monster under `mob` on the NPC `victim`
+    /// (`G/battle.cpp:99-152`): alive victim, neither cell BANPK, the striker
+    /// neither stunned nor dead, both on one map — then the ship arm
+    /// (`CShipDefenseManager::CanAttack`, `G/ShipDefense.cpp:1809-1823`): a
+    /// monster accepts the mast, and a fake hydra refuses every striker.
+    fn mob_can_attack_npc(&self, mob: u32, victim: u32) -> bool {
+        let Some(npc) = self.npc_by_vid(mob) else {
+            return false;
+        };
+        if npc.stunned || npc.dead {
+            return false;
+        }
+        let Some(target) = self.npc_by_vid(victim) else {
+            return false;
+        };
+        if target.dead {
+            return false;
+        }
+        if super::ship::FAKE_HYDRAS.contains(&target.vnum) {
+            return false;
+        }
+        let monster_on_mast =
+            npc.char_type == CHAR_TYPE_MONSTER && target.vnum == super::ship::MAST_VNUM;
+        if target.char_type != CHAR_TYPE_MONSTER && !monster_on_mast {
+            return false;
+        }
+        let Some(&(_, map, _)) = self.npc_of.get(&mob) else {
+            return false;
+        };
+        let Some(&(_, victim_map, _)) = self.npc_of.get(&victim) else {
+            return false;
+        };
+        if map != victim_map {
+            return false;
+        }
+        !self.is_banpk(map, npc.x, npc.y) && !self.is_banpk(map, target.x, target.y)
     }
 
     /// What the guard's swing showed: the critical and penetrate effects around the
@@ -1580,6 +1931,62 @@ mod tests {
         assert_eq!(user.1, plain.1, "user_dam leaves the monster's swing");
         assert_eq!(mob.0, plain.0, "mob_dam leaves the player's hit");
         assert!(mob.1 > plain.1, "mob_dam grows the monster's swing");
+    }
+
+    /// A monster's swing on the mast: the ship arm opens the gate, the hit takes
+    /// hit points, the damage map fills, and the mast stands unstunned with a zero
+    /// killer — while a fake hydra refuses the same striker.
+    #[test]
+    fn a_monster_swings_on_the_mast_and_not_on_a_fake_hydra() {
+        use gamedata::mob_proto::CHAR_TYPE_NPC;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut striker = a_fighter(ME, 3954, BATTLE_TYPE_MELEE, (100, 2000), 0, SPOT, 10_000);
+        striker.fight.damage_range = [50, 50];
+        striker.fight.dam_multiply_bits = 1.0f32.to_bits();
+        let mast_vid = ME + 1;
+        let mut mast = a_fighter(
+            mast_vid,
+            super::super::ship::MAST_VNUM,
+            BATTLE_TYPE_MELEE,
+            (150, 2000),
+            0,
+            NEAR,
+            10_000,
+        );
+        mast.char_type = CHAR_TYPE_NPC;
+        let fake_vid = ME + 2;
+        let fake = a_fighter(
+            fake_vid,
+            super::super::ship::FAKE_HYDRAS[0],
+            BATTLE_TYPE_MELEE,
+            (100, 2000),
+            0,
+            NEAR,
+            10_000,
+        );
+        let mut world = stand_field(&clock, vec![striker, mast, fake], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        world.dice = Pcg32::new(quiet_seed(), 0);
+        assert!(world.mob_attack_npc(ME, mast_vid), "the ship arm opens");
+        assert!(!world.mob_attack_npc(ME, fake_vid), "the fake refuses");
+        let hp = world.npc_by_vid(mast_vid).expect("the mast stands").hp;
+        assert!(hp < 10_000, "the hit takes hit points: {hp}");
+        assert!(
+            world
+                .npc_by_vid(fake_vid)
+                .is_some_and(|npc| npc.hp == 10_000),
+            "the fake stands untouched"
+        );
+        let combat = world.npc_combat.get(&mast_vid).expect("the row fills");
+        assert!(combat.damage.get(&ME).is_some_and(|row| row.total > 0));
+        assert_eq!(combat.killer_pid, 0, "a monster's VID is no PID");
+        assert!(
+            world.npc_by_vid(mast_vid).is_some_and(|npc| !npc.stunned),
+            "no stun above 0"
+        );
     }
 
     /// The player's shown hit and the monster's shown swing on a fresh field with the

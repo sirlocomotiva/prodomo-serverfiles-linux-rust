@@ -36,8 +36,8 @@ use protocol::gc_inventory::HEADER_GC_SYNC_POSITION;
 use protocol::gc_position::GcSyncPositionElement;
 use protocol::gc_vid::GcSpecialEffect;
 use world::character::{
-    attack_rating, mob_calc_attack, number, skill_damage_pc, AttackAffect, AttackRatingInput,
-    MobStriker, PcHitEnd, PcStrike, PcVictim, SE_EFFECT_HEALER,
+    attack_rating, mob_calc_attack, mob_calc_attack_npc, number, skill_damage_npc, skill_damage_pc,
+    AttackAffect, AttackRatingInput, MobStriker, PcHitEnd, PcStrike, PcVictim, SE_EFFECT_HEALER,
 };
 use world::npc::Npc;
 
@@ -556,6 +556,7 @@ impl GameState {
     /// the victim's `BeginFight`, `Damage`, and the CRUSH slide of a hit that neither
     /// killed nor stunned. The cooldown and main-target arms are dead (an NPC's `m_pInfo`
     /// is NULL, so no `HitOnce` gate), and the damage functor carries no `MaxHit` cap.
+    /// The players run before the NPCs: two collects, then PCs, then NPCs.
     fn splash_damage(&mut self, cast: SplashCast, poly: &Poly) {
         if cast.attr != SKILL_ATTR_MELEE {
             return;
@@ -577,11 +578,10 @@ impl GameState {
         let Some(index) = self.maps.get(&place) else {
             return;
         };
-        // `ForEachAround` collects the entities before it calls the functor on any. The
-        // NPC walk stays coded: `splash_can_hit_npc` refuses every NPC victim (NPC on
-        // NPC past guards), so the arm is dead — but the walk still tests each one.
+        // `ForEachAround` collects the entities before it calls the functor on any.
         let around = index.around_of(EntityKey::Npc(cast.mob));
         let mut pcs = Vec::new();
+        let mut npcs = Vec::new();
         for key in around {
             match key {
                 EntityKey::Character(raw) => {
@@ -590,14 +590,20 @@ impl GameState {
                     }
                 }
                 EntityKey::Npc(raw) => {
-                    let _ = raw != cast.mob
-                        && self.splash_can_hit_npc(cast.mob, raw, cast.at, cast.range);
+                    if raw != cast.mob
+                        && self.splash_can_hit_npc(cast.mob, raw, cast.at, cast.range)
+                    {
+                        npcs.push(raw);
+                    }
                 }
                 EntityKey::Ground(_) => {}
             }
         }
         for victim in pcs {
             self.splash_hit_pc(cast, victim, poly, &point2);
+        }
+        for victim in npcs {
+            self.splash_hit_npc(cast, victim, poly, &point2);
         }
     }
 
@@ -626,10 +632,11 @@ impl GameState {
             && self.banpk_cells_clear(mob, victim.raw(), true)
     }
 
-    /// `battle_is_attackable` of the monster `mob` on the non-player `victim`, plus the
-    /// range test. `CanAttack` refuses NPC on NPC past guards (`G/pvp.cpp:391-392`, and
-    /// no guard NPC is ported), so no hosted cast lands — but the walk still tests each
-    /// one, and the refuse arms stay coded.
+    /// `battle_is_attackable` of the monster `mob` on the non-player `victim`, plus
+    /// the splash's range test. `CanAttack` refuses NPC on NPC past the ship arm
+    /// (`G/pvp.cpp:391-392` plus `CShipDefenseManager::CanAttack`,
+    /// `G/ShipDefense.cpp:1809-1823`), so only the mast passes: a fake hydra
+    /// refuses every striker, and no guard NPC is ported.
     fn splash_can_hit_npc(&self, mob: u32, victim: u32, at: (i32, i32), range: u32) -> bool {
         let Some(spot) = self.npc_spot(victim) else {
             return false;
@@ -643,7 +650,26 @@ impl GameState {
         if distance_approx(spot.0.saturating_sub(at.0), spot.1.saturating_sub(at.1)) > range {
             return false;
         }
-        false
+        let Some(npc) = self.npc_by_vid(mob) else {
+            return false;
+        };
+        if npc.stunned || npc.dead {
+            return false;
+        }
+        let Some(target) = self.npc_by_vid(victim) else {
+            return false;
+        };
+        if target.dead {
+            return false;
+        }
+        if super::ship::FAKE_HYDRAS.contains(&target.vnum) {
+            return false;
+        }
+        let mast = npc.char_type == CHAR_TYPE_MONSTER && target.vnum == super::ship::MAST_VNUM;
+        if target.char_type != CHAR_TYPE_MONSTER && !mast {
+            return false;
+        }
+        self.banpk_cells_clear(mob, victim, false)
     }
 
     /// The BANPK half of `battle_is_attackable`: neither the caster's nor the victim's
@@ -752,7 +778,7 @@ impl GameState {
         drop(vars);
         let strike = self.melee_arm_pc(cast.mob, victim, amount, ignore_defence);
         self.show_skill_strike(cast.mob, victim, &strike);
-        // `CanBeginFight → BeginFight` runs BEFORE `Damage` (`:1632-1633`), but the tree's
+        // `CanBeginFight → BeginFight` runs BEFORE `Damage` (`G/char_skill.cpp:1637-1638`), but the tree's
         // `damage_pc` already ran inside `show_skill_strike` — ordering the visible effects
         // as legacy does needs the pose before the damage records, so `show_skill_strike`
         // runs `begin_fight` first; this site keeps the legacy order in the code.
@@ -765,6 +791,240 @@ impl GameState {
         }
         let _ = strike;
     }
+    /// One NPC victim of the splash: the same recompute as [`GameState::splash_hit_pc`]
+    /// — the ignore-defence and ignore-rating rolls off `point2`, `k`, `ar` on the
+    /// victim, `atk` ignoring the defence, `maxhp`/`maxsp` (a monster's `maxsp` is 0),
+    /// the chain index, `ek` 0, a redrawn `wep` — the negate, `CalcBattleDamage`,
+    /// the melee arm through `Damage`'s MELEE path, and the CRUSH slide of a hit
+    /// that neither killed nor stunned. A master-typed caster would take the
+    /// master-bonus poly, but a monster holds no skill level, so
+    /// `GetUsedSkillMasterType` is always normal. The mast begins no fight, and
+    /// the slide refuses a `NOMOVE` victim.
+    fn splash_hit_npc(&mut self, cast: SplashCast, victim: u32, poly: &Poly, point2: &Poly) {
+        let k = f64::from(self.skill_k(cast.vnum, cast.level));
+        let mut vars = BTreeMap::from([("k", k)]);
+        let Some(target) = self.npc_by_vid(victim).cloned() else {
+            return;
+        };
+        let target_dx = target.fight.point(point::POINT_DX);
+        let Some(npc) = self.npc_by_vid(cast.mob).cloned() else {
+            return;
+        };
+        let (low, high) = damage_roll_low_high(&npc);
+        let chain = i32::from(self.chain_of(cast.mob));
+        vars.insert("lv", f64::from(npc.fight.level));
+        vars.insert("iq", f64::from(npc.fight.point(point::POINT_IQ)));
+        vars.insert("str", f64::from(npc.fight.point(point::POINT_ST)));
+        vars.insert("dex", f64::from(npc.fight.point(point::POINT_DX)));
+        vars.insert("con", f64::from(npc.fight.point(point::POINT_HT)));
+        vars.insert("def", f64::from(npc.fight.point(point::POINT_DEF_GRADE)));
+        vars.insert(
+            "odef",
+            f64::from(
+                npc.fight
+                    .point(point::POINT_DEF_GRADE)
+                    .wrapping_sub(npc.fight.point(point::POINT_DEF_GRADE_BONUS)),
+            ),
+        );
+        vars.insert("horse_level", 0.0);
+        let ignore_defence = if cast.flag & SKILL_FLAG_PENETRATE != 0 {
+            let percent = f64_to_i32(point2.eval(&vars));
+            number(&mut self.dice, 1, 100) <= percent
+        } else {
+            false
+        };
+        let ignore_rating = if cast.flag & SKILL_FLAG_IGNORE_TARGET_RATING != 0 {
+            let percent = f64_to_i32(point2.eval(&vars));
+            number(&mut self.dice, 1, 100) <= percent
+        } else {
+            false
+        };
+        vars.insert(
+            "ar",
+            f64::from(attack_rating(AttackRatingInput {
+                attacker_dexterity: npc.fight.point(point::POINT_DX),
+                attacker_level: i32::from(npc.fight.level),
+                victim_dexterity: target_dx,
+                ignore_target_rating: ignore_rating,
+            })),
+        );
+        vars.insert("maxhp", f64::from(target.max_hp));
+        vars.insert("maxsp", 0.0);
+        vars.insert("chain", f64::from(chain));
+        self.inc_chain(cast.mob);
+        vars.insert("ek", 0.0);
+        let atk = if cast.flag & SKILL_FLAG_USE_MELEE_DAMAGE != 0 {
+            self.skill_melee_attack_npc(cast.mob, victim, ignore_rating)
+        } else {
+            0
+        };
+        vars.insert("atk", f64::from(atk));
+        let wep = number(&mut self.dice, low, high);
+        vars.insert("wep", f64::from(wep));
+        vars.insert("mwep", f64::from(wep));
+        vars.insert("mtk", f64::from(wep));
+        let amount = -f64_to_i32(poly.eval(&vars));
+        // `CalcBattleDamage` (`G/battle.cpp:244-251`): below 3, `number(1, 5)`.
+        let amount = if amount < 3 {
+            number(&mut self.dice, 1, 5)
+        } else {
+            amount
+        };
+        drop(vars);
+        let strike = self.melee_arm_npc(cast.mob, victim, amount, ignore_defence);
+        self.show_skill_strike_npc(cast.mob, victim, &strike);
+        let stunned = self.npc_by_vid(victim).is_some_and(|npc| npc.stunned);
+        let dead = self.npc_by_vid(victim).is_some_and(|npc| npc.dead);
+        // `!Damage && !IsStun`: the CRUSH slide (`:1899-1961`) — a hit that neither
+        // killed nor stunned, on a victim without `AIFLAG_NOMOVE`. The mast is
+        // NOMOVE, so the slide refuses it.
+        if !dead && !stunned && cast.flag & SKILL_FLAG_CRUSH != 0 {
+            self.crush_slide_npc(cast.mob, victim);
+        }
+        let _ = strike;
+    }
+
+    /// `CalcMeleeDamage(caster, victim, true, ignore)` (`G/char_skill.cpp:1424-1425`):
+    /// the NPC-victim arms of `CalcAttBonus` on the mast, rated past the functor's
+    /// roll. The twin of [`GameState::skill_melee_attack`] on the NPC side.
+    fn skill_melee_attack_npc(&mut self, mob: u32, victim: u32, ignore_target_rating: bool) -> i32 {
+        let Some(npc) = self.npc_by_vid(mob).cloned() else {
+            return 0;
+        };
+        let Some(target) = self.npc_by_vid(victim).cloned() else {
+            return 0;
+        };
+        let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
+        mob_calc_attack_npc(&mut self.dice, &npc, &target, berserk, ignore_target_rating).max(0)
+    }
+
+    /// The melee arm and `Damage`'s MELEE path on an NPC: the skill's pre-mitigation
+    /// `atk` through [`skill_damage_npc`]. A dead or gone victim refuses with a
+    /// whiff, as the PC arm does. The caller judged the BANPK arm.
+    fn melee_arm_npc(
+        &mut self,
+        mob: u32,
+        victim: u32,
+        amount: i32,
+        ignore_defence: bool,
+    ) -> world::character::Strike {
+        let refused = || world::character::Strike {
+            events: Vec::new(),
+            struck: world::character::Struck::Refused,
+            affect: AttackAffect::default(),
+            stolen_gold: 0,
+        };
+        let Some(npc) = self.npc_by_vid(mob).cloned() else {
+            return refused();
+        };
+        let Some(mut target) = self.npc_by_vid(victim).cloned() else {
+            return refused();
+        };
+        if target.dead {
+            return refused();
+        }
+        let (dragon_stones, dragon_counts) = self.dragon_strike_facts(mob);
+        let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
+        let striker = MobStriker {
+            npc: &npc,
+            berserk,
+            dragon_stones,
+            dragon_counts,
+        };
+        let banned = self
+            .npc_of
+            .get(&victim)
+            .and_then(|&(_, map, _)| self.npc_by_vid(victim).map(|npc| (map, npc.x, npc.y)))
+            .is_some_and(|(map, x, y)| self.is_banpk(map, x, y));
+        let strike = skill_damage_npc(
+            &mut self.dice,
+            striker,
+            &mut target,
+            amount,
+            ignore_defence,
+            banned,
+        );
+        if let Some(npc) = self.npc_mut(victim) {
+            npc.hp = target.hp;
+        }
+        strike
+    }
+
+    /// What the skill's hit on an NPC showed: the victim's `BeginFight` past
+    /// `CanBeginFight` first (legacy runs it before `Damage`), then the shown
+    /// records and the hit-point end, as the melee swing's do.
+    fn show_skill_strike_npc(&mut self, mob: u32, victim: u32, strike: &world::character::Strike) {
+        // `CanBeginFight → BeginFight` (`G/char_skill.cpp:1637-1638`): the mast's
+        // NPC type never fights back, so the strike stands there.
+        if self
+            .npc_by_vid(victim)
+            .is_some_and(super::mob_battle::fights_back)
+            && self.can_begin_fight(victim)
+        {
+            self.begin_fight_npc(victim, mob);
+        }
+        self.show_strike(Vid::new(mob), victim, strike.events.clone());
+        match strike.struck {
+            world::character::Struck::Landed { damage } => {
+                self.set_last_attacked(mob);
+                self.after_npc_damage(mob, victim, damage);
+            }
+            world::character::Struck::Finished => {
+                self.set_last_attacked(mob);
+                self.dead_npc(victim, Some(Vid::new(mob)));
+            }
+            world::character::Struck::Whiffed
+            | world::character::Struck::Refused
+            | world::character::Struck::AlreadyDead
+            | world::character::Struck::StunnedByGuard => {}
+        }
+    }
+
+    /// The CRUSH slide of a monster on an NPC (`G/char_skill.cpp:1899-1961`):
+    /// 400.0 from the caster through the victim, stepped back 10 at a time off a
+    /// blocked cell. NOMOVE refuses before anything moves.
+    fn crush_slide_npc(&mut self, mob: u32, victim: u32) {
+        let Some(ai) = self.npc_by_vid(victim).map(|npc| npc.ai_flags) else {
+            return;
+        };
+        if ai & gamedata::mob_proto::AIFLAG_NOMOVE != 0 {
+            return;
+        }
+        let Some(caster) = self.npc_spot(mob) else {
+            return;
+        };
+        let Some(spot) = self.npc_spot(victim) else {
+            return;
+        };
+        let Some(&(_, map, _)) = self.npc_of.get(&victim) else {
+            return;
+        };
+        let degree = rotation_to_xy(
+            spot.0.saturating_sub(caster.0),
+            spot.1.saturating_sub(caster.1),
+        );
+        let mut length = 400.0_f32;
+        let (mut fx, mut fy) = delta_by_degree(degree, length);
+        let (mut tx, mut ty) = (
+            spot.0.saturating_add(f32_to_i32(fx)),
+            spot.1.saturating_add(f32_to_i32(fy)),
+        );
+        while !self.is_movable(map, tx, ty) && length > 0.0 {
+            if length >= 10.0 {
+                length -= 10.0;
+            } else {
+                length = 0.0;
+            }
+            (fx, fy) = delta_by_degree(degree, length);
+            tx = spot.0.saturating_add(f32_to_i32(fx));
+            ty = spot.1.saturating_add(f32_to_i32(fy));
+        }
+        if length <= 0.0 {
+            return;
+        }
+        let _ = self.npc_goto(victim, tx, ty);
+    }
+
     /// `GetChainLightningIndex`: 0 for a caster with no combat yet.
     fn chain_of(&self, mob: u32) -> u8 {
         self.npc_combat.get(&mob).map_or(0, |combat| combat.chain)
@@ -838,7 +1098,7 @@ impl GameState {
     /// What the skill's hit on a player showed: `BeginFight` first (legacy runs it before
     /// `Damage`), then each effect around the player, then the hit.
     fn show_skill_strike(&mut self, mob: u32, victim: Vid, strike: &PcStrike) {
-        // `CanBeginFight → BeginFight` (`:1632-1633`): legacy sends no record for a
+        // `CanBeginFight → BeginFight` (`G/char_skill.cpp:1637-1638`): legacy sends no record for a
         // player's `BeginFight` (it sets the pose and the victim only).
         let can_begin = self.bodies.get(&victim).is_some_and(|body| !body.fighting)
             && !self.is_down(victim.raw());
@@ -1459,5 +1719,58 @@ mod tests {
         slots[0] = slot(258, 2, Some(3.6), splash_now());
         let (_clock, world, _inbox) = a_cast(slots, 10_000);
         assert!((world.skill_k(258, 2) - 0.06).abs() < 1e-6);
+    }
+
+    /// The splash's NPC arm: a MELEE cast beside the mast takes its hit points
+    /// through the MELEE path, while a fake hydra beside it stands untouched.
+    #[test]
+    fn the_splash_hits_the_mast_and_refuses_a_fake_hydra() {
+        use gamedata::mob_proto::CHAR_TYPE_NPC;
+        let mut slots = empty_slots();
+        slots[0] = slot(256, 20, Some(3.6), splash_now());
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut npc = a_fighter(ME, 101, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
+        npc.char_type = CHAR_TYPE_MONSTER;
+        npc.fight.damage_range = [10, 10];
+        npc.fight.dam_multiply_bits = 1.0_f32.to_bits();
+        npc.skills = slots;
+        let mast_vid = ME + 1;
+        let mut mast = a_fighter(
+            mast_vid,
+            super::super::ship::MAST_VNUM,
+            BATTLE_TYPE_MELEE,
+            (150, 2000),
+            0,
+            NEAR,
+            10_000,
+        );
+        mast.char_type = CHAR_TYPE_NPC;
+        let fake_vid = ME + 2;
+        let fake = a_fighter(
+            fake_vid,
+            super::super::ship::FAKE_HYDRAS[0],
+            BATTLE_TYPE_MELEE,
+            (100, 2000),
+            0,
+            NEAR,
+            10_000,
+        );
+        let mut world =
+            stand_field(&clock, vec![npc, mast, fake], open_cells(), true).with_mob_skills(dumps());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.dice = Pcg32::new(1, 0);
+        assert!(world.battle_skill(ME, Vid::new(1)));
+        let hp = world.npc_by_vid(mast_vid).expect("the mast stands").hp;
+        assert!(hp < 10_000, "the splash takes hit points: {hp}");
+        assert!(
+            world
+                .npc_by_vid(fake_vid)
+                .is_some_and(|npc| npc.hp == 10_000),
+            "the fake stands untouched"
+        );
     }
 }

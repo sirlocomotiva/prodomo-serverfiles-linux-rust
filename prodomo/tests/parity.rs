@@ -42940,6 +42940,94 @@ fn a_captain_boards_starts_and_lands_the_ship_defence() {
         "(SELECT map_index FROM player WHERE name = 'Alpha') = 359",
     );
 }
+/// `sys.dungeon.ship_defense`: Alpha boards, starts, and watches wave 1 land on the
+/// mast. The start's burst is the broadcast, the attack warning and the wave line (the
+/// probe's heal is absent here); the wave-1 countdown chats at 60 and under 10; and the
+/// deck's first spawn walks the mast — a `GC_TARGET` naming it with less than its
+/// 5,000,000 — while the fake-hydra intimidation stays dead on the map.
+#[test]
+fn a_wave_strikes_the_mast_while_the_fake_heads_stand_dead() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET map_index = 135, x = 1107800, y = 1782700 WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/ship_probe.lua", SHIP_PROBE)],
+        &ship_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, listed, entered) = enter_world_seeing(&server, b"alice", 0);
+    let npc = shown_vid(&entered, 9009, "the cape shows 9009");
+    alice.send_record(&client_click(npc));
+    assert_eq!(
+        alice.read_game()[0],
+        GC_SCRIPT,
+        "the board menu with the probe's arm"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game()[0],
+        GC_SCRIPT,
+        "the flags and the shadow pair around the create"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(alice.read_game()[0], GC_WARP, "the recall spot on the run");
+    alice.quiet("the create step ends");
+    wait_for(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 3580000",
+    );
+    drop(alice);
+    let (mut alice, _character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_view(&mut alice);
+    let wheel = shown_vid(&entered, 20436, "the run shows the wheel");
+    let mast = shown_vid(&entered, 20434, "the run shows the mast");
+    alice.send_record(&client_click(wheel));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the wheel's menu");
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game()[0],
+        GC_SCRIPT,
+        "the running read and the heal"
+    );
+    read_ship_start_burst(&mut alice);
+    alice.quiet("the start step ends");
+    // The wave-1 countdown chats at 60, then under 10; the deck may take a minute
+    // to speak, so the wait is two.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
+    let mut struck = false;
+    let mut fake_dead = false;
+    loop {
+        let Some(record) = alice.read_game_until(deadline) else {
+            break;
+        };
+        if record[0] == GC_TARGET && record.get(1..5) == Some(&mast.to_le_bytes()) {
+            let hp = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            if i64::from(hp) < 5_000_000 {
+                struck = true;
+            }
+        }
+        if record[0] == GC_CHARACTER_DEL {
+            // The fake-hydra clear destroys the intimidation's head 3 s on.
+            fake_dead = true;
+        }
+        if struck && fake_dead {
+            break;
+        }
+    }
+    assert!(struck, "a deck spawn struck the mast");
+    assert!(fake_dead, "the fake head goes without a swing");
+}
 
 /// The fight's probe: the NPC's reward arm reads `CanGetReward` and attempts the
 /// take, so the wire pins the gate's refusal before the fight is won.

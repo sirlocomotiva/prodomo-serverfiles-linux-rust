@@ -14,9 +14,10 @@ pub use melee::{
     FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL, SE_EFFECT_HEALER, SE_PENETRATE,
 };
 pub use mob_melee::{
-    mob_att_bonus_self, mob_calc_attack, mob_reach, pc_hp_pct, pc_poison_rate, reflect_damage,
-    shoot_pc, skill_damage_pc, strike_npc_by_npc, strike_pc, MobStriker, NpcVictim, PcHitEnd,
-    PcStrike, PcVictim, IMMUNE_REFLECT,
+    mob_att_bonus_self, mob_calc_attack, mob_calc_attack_npc, mob_reach, pc_hp_pct, pc_poison_rate,
+    reflect_damage, shoot_npc, shoot_pc, skill_damage_npc, skill_damage_pc, special_on_mob,
+    strike_npc_by_monster, strike_npc_by_npc, strike_pc, MobStriker, NpcVictim, PcHitEnd, PcStrike,
+    PcVictim, IMMUNE_REFLECT,
 };
 pub use pk::{pk_eligibility, PkActor, PkDenial, PkEligibility, PkMode};
 pub use pvp::{

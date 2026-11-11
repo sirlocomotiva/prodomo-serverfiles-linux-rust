@@ -541,10 +541,19 @@ impl GameState {
         if let Some(mind) = self.minds.get_mut(vid) {
             mind.berserk = false;
         }
-        // Steps 4-6: the held victim is dropped when it is gone, dead or on BANPK, and an
-        // aggressive wanderer looks for one. A son with no victim takes its stone's
-        // nearest damage-map attacker (`:670-674`).
+        // Steps 4-6: the held victim — PC or NPC — is dropped when it is gone, dead
+        // or on BANPK (`:653-668`), and an aggressive wanderer with no building
+        // victim looks for one (`:670-686`). A son with no victim takes its stone's
+        // nearest damage-map attacker (`:670-674`). Only the guard's NPC victims
+        // reached this far before the ship's retarget: a wave monster holds the mast.
         let victim = self.idle_victim(vid, who);
+        let held_npc = self.minds.get(vid).and_then(|mind| mind.victim_npc);
+        if let Some(mast) = held_npc.filter(|_| victim.is_none()) {
+            if self.can_begin_fight(vid) {
+                self.begin_fight_npc(vid, mast);
+            }
+            return;
+        }
         let victim = match (victim, who.stone) {
             (None, Some(stone)) if self.npc_by_vid(stone).is_some_and(|stone| !stone.dead) => {
                 self.nearest_victim(stone)
@@ -658,12 +667,16 @@ impl GameState {
         self.send_npc_update(vid, words);
     }
 
-    /// Idle steps 4-6 (`G/char_state.cpp:653-686`): the victim held, or found for an
-    /// aggressive wanderer. The `!victim` arm's second is set by the caller asking for nothing.
+    /// Idle steps 4-6 (`G/char_state.cpp:653-686`): the PC victim held, or found for
+    /// an aggressive wanderer. An NPC victim is the caller's to keep: [`idle_monster`]
+    /// reads it before this runs, so the dead-or-BANPK drop below never clears it
+    /// and the search never runs past it — legacy's `!victim || IsBuilding` gate —
+    /// while the PC half still drops and seconds as written.
     fn idle_victim(&mut self, vid: u32, who: Who) -> Option<Vid> {
+        let held_npc = self.held_npc_victim(vid);
         let held = self.victim_of(vid);
         let lost = match held {
-            None => true,
+            None => held_npc.is_none(),
             Some(found) => {
                 self.is_dead(found.raw())
                     || self
@@ -672,7 +685,7 @@ impl GameState {
                         .is_some_and(|(map, spot)| self.is_banpk(map, spot.x, spot.y))
             }
         };
-        if lost {
+        if lost && held_npc.is_none() {
             self.set_victim(vid, None);
             self.set_duration(vid, pulses(1));
         } else if held.is_some() {
@@ -680,17 +693,17 @@ impl GameState {
         }
         // The Meley 40000 retry applies to a map that is not hosted; map 61's `xmas_tree`
         // flag reads 0 here.
-        if !self.minds.no_wander
-            && who.aggressive
-            && self
+        if held_npc.is_none() && !self.minds.no_wander && who.aggressive {
+            let fights_back = self
                 .npc_by_vid(vid)
-                .is_some_and(super::mob_battle::fights_back)
-        {
-            let sight = self
-                .npc_by_vid(vid)
-                .map_or(0, |npc| npc.fight.aggressive_sight);
-            if let Some(found) = self.find_victim(vid, sight) {
-                return Some(found);
+                .is_some_and(super::mob_battle::fights_back);
+            if fights_back {
+                let sight = self
+                    .npc_by_vid(vid)
+                    .map_or(0, |npc| npc.fight.aggressive_sight);
+                if let Some(found) = self.find_victim(vid, sight) {
+                    return Some(found);
+                }
             }
         }
         if lost {
@@ -918,8 +931,12 @@ impl GameState {
         if let Some((_, true)) = step {
             // With a victim that is not a coward's, Battle after one Pulse; only the
             // `MonsterLog` sits under legacy's `if (!IsState(m_stateBattle))` (`:907-918`).
+            // `GetVictim` is one slot, so an NPC victim — the ship's mast — routes
+            // the same way, and the log names it from the NPC slot, as `GetName`
+            // reads the mob Name.
             let victim = self.victim_of(vid);
-            let to_battle = victim.is_some()
+            let victim_npc = self.minds.get(vid).and_then(|mind| mind.victim_npc);
+            let to_battle = (victim.is_some() || victim_npc.is_some())
                 && self
                     .npc_by_vid(vid)
                     .is_none_or(|npc| npc.ai_flags & AIFLAG_COWARD == 0);
@@ -937,6 +954,12 @@ impl GameState {
                         if let Ok(character) = self.characters.find_by_vid(found) {
                             let mut line = super::detail_log::LOG_BATTLE_APPROACH.to_vec();
                             line.extend_from_slice(character.name().as_bytes());
+                            self.monster_log(vid, &line);
+                        }
+                    } else if let Some(found) = victim_npc {
+                        if let Some(npc) = self.npc_by_vid(found) {
+                            let mut line = super::detail_log::LOG_BATTLE_APPROACH.to_vec();
+                            line.extend_from_slice(&npc.name);
                             self.monster_log(vid, &line);
                         }
                     }
@@ -2435,5 +2458,75 @@ mod tests {
         world.process_pulse(1);
         assert!(world.victim_of(ME + 1).is_none());
         assert!(world.minds.get(ME + 1).is_some_and(|mind| !mind.fighting));
+    }
+
+    /// A monster holding an NPC victim starts the fight on it at its first Idle —
+    /// the ship's retarget needs no search — and drops a dead one for a second.
+    #[test]
+    fn a_held_npc_victim_starts_the_fight() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mob = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let mast = an_npc(ME + 1, CHAR_TYPE_NPC, 20_434, 0);
+        let mut world = a_map(&clock, vec![mob, mast]).with_no_wander(true);
+        let _inbox = a_player(&mut world);
+        let mind = world
+            .minds
+            .ensure(ME, Mind::new(world.npc_by_vid(ME).unwrap()));
+        mind.victim_npc = Some(ME + 1);
+        world.dice = Pcg32::new(7, 0);
+        world.process_pulse(1);
+        assert!(world.minds.get(ME).is_some_and(|mind| mind.fighting));
+        assert_eq!(
+            world.minds.get(ME).and_then(|mind| mind.victim_npc),
+            Some(ME + 1)
+        );
+        // A dead held victim is dropped with the 1-second wait.
+        world.npc_mut(ME + 1).unwrap().dead = true;
+        world.process_pulse(2);
+        assert!(world
+            .minds
+            .get(ME)
+            .and_then(|mind| mind.victim_npc)
+            .is_none());
+        assert_eq!(
+            world.minds.get(ME).map(|mind| mind.duration),
+            Some(pulses(1))
+        );
+    }
+
+    /// A walk that arrives with an NPC victim asks for Battle, as a PC victim's
+    /// does: the ship's chase reaches the mast and fights.
+    #[test]
+    fn a_walk_arriving_with_an_npc_victim_asks_for_battle() {
+        let seed = a_seed(|dice| {
+            let _wait = number(dice, 3, 5);
+            number(dice, 0, 6) == 0
+        });
+        let clock = TestClock::default();
+        clock.set(T0);
+        let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let mast = an_npc(ME + 1, CHAR_TYPE_NPC, 20_434, 0);
+        let mut world = a_map(&clock, vec![monster, mast]);
+        let _inbox = a_player(&mut world);
+        world.dice = Pcg32::new(seed, 0);
+        world.process_pulse(1);
+        let walk = mind(&world);
+        assert_eq!(walk.asked, Some(Fsm::Move));
+        world
+            .minds
+            .ensure(ME, Mind::new(world.npc_by_vid(ME).unwrap()))
+            .victim_npc = Some(ME + 1);
+        let clock = TestClock::default();
+        world.clock = super::super::motion::WorldClock::new(Box::new(clock.clone()));
+        clock.set(T0 + walk.motion.duration_ms);
+        for pulse in 2..=5 {
+            world.process_pulse(pulse);
+        }
+        let arrived = mind(&world);
+        assert_eq!(
+            (arrived.state, arrived.asked),
+            (Fsm::Move, Some(Fsm::Battle))
+        );
     }
 }

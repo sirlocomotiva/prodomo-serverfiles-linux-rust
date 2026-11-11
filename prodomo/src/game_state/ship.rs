@@ -353,11 +353,13 @@ pub(super) struct ShipRuns {
     by_leader: BTreeMap<u32, ShipRun>,
 }
 
-/// Whether `map` is the ship's map: 358 itself, or its 3580000..3590000 private
-/// copies (`CShipDefenseManager::IsDungeon`, `G/ShipDefense.cpp:1955-1958`). The
-/// death hook, the login flow and the quest reads share it.
+/// Whether `map` is the ship's map: the 3580000..3590000 private copies
+/// (`CShipDefenseManager::IsDungeon`, `G/ShipDefense.cpp:1955-1958`). Base 358 is
+/// not one: legacy's range starts at `SHIP_MAP_INDEX * 10000`, and no live run's
+/// index is ever the base. The death hook, the login flow and the quest reads
+/// share it.
 pub(super) fn is_ship_map(map: i32) -> bool {
-    map == MAP || (3_580_000..3_590_000).contains(&map)
+    (3_580_000..3_590_000).contains(&map)
 }
 
 /// Whether `CreatePrivateMap` could copy `base`: the Channel hosts it, which is what
@@ -520,18 +522,27 @@ impl GameState {
         self.order_ship_warp(reader, index, x, y);
     }
 
-    /// Judge one `ship_defense_mgr.start` (`Start`, `G/ShipDefense.cpp:1548-1567`):
-    /// the run starts and the deck's first wave prepares. Quiet with no run.
+    /// Judge one `ship_defense_mgr.start` (`ship_defense_mgr_start`,
+    /// `G/questlua_shipdefense_mgr.cpp:41-61` into `Start`, `G/ShipDefense.cpp:1548-1567`):
+    /// the already-running gate is the quest bind's, not `Start`'s: a leader whose
+    /// run stands on `STATE_START` restarts nothing and prepares no second wave.
+    /// The `Start` below it keeps its own two gates (the leader holds the call, and
+    /// holds a run). Quiet with no run.
     fn judge_ship_start(&mut self, reader: Vid) {
         let leader = self.ship_create_leader_of(reader);
         if leader == 0 {
             return;
         }
-        let Some(run) = self.ship.of_mut(leader) else {
+        let Some(run) = self.ship.of(leader) else {
             return;
         };
-        run.state = STATE_START;
+        if run.state == STATE_START {
+            return;
+        }
         let index = run.index;
+        if let Some(run) = self.ship.of_mut(leader) {
+            run.state = STATE_START;
+        }
         let due = self.last_pulse.saturating_add(25);
         if let Some(run) = self.ship.of_mut(leader) {
             run.spawn_due = None;
@@ -816,6 +827,37 @@ impl GameState {
         Some((vid, max))
     }
 
+    /// `Damage`'s mast arm (`G/char_battle.cpp:2277-2282`): a hit on the mast on the
+    /// ship's map broadcasts its HP. The map must exist, as legacy's `GetMap` gate
+    /// demands; the run's stored HP follows the NPC's, as `GetHP` reads the same
+    /// character the blow just changed.
+    pub(super) fn ship_broadcast_on_mast_hit(&mut self, vid: u32) {
+        let Some(&(channel, map, _)) = self.npc_of.get(&vid) else {
+            return;
+        };
+        if !is_ship_map(map) {
+            return;
+        }
+        if self.npc_by_vid(vid).is_none_or(|npc| npc.vnum != MAST_VNUM) {
+            return;
+        }
+        if !self.maps.contains_key(&(channel, map)) {
+            return;
+        }
+        let hp = self.npc_by_vid(vid).map_or(0, |npc| npc.hp);
+        for run in self.ship.by_leader.values_mut() {
+            if run.index != map {
+                continue;
+            }
+            if let Some((mast, _, max)) = run.mast {
+                if mast == vid {
+                    run.mast = Some((mast, i64::from(hp), max));
+                }
+            }
+        }
+        self.ship_broadcast_hp(map);
+    }
+
     /// `BroadcastAllianceHP` (`G/ShipDefense.cpp:1675-1700`): the mast's `GC_TARGET`
     /// to every player on the run's map.
     fn ship_broadcast_hp(&self, index: i32) {
@@ -944,9 +986,9 @@ impl GameState {
     }
 
     /// `SetWave` (`G/ShipDefense.cpp:1233-1308`): the deck runs `wave` — the back
-    /// barriers go, the regen stands, the minis stand, the spawn timer starts, and
-    /// the laser timer starts past wave 1. Wave 1 also starts its 120-second wave
-    /// timer.
+    /// barriers go, the regen stands, the minis stand, the spawn timer starts, the
+    /// monsters retarget the mast, and the laser timer starts past wave 1. Wave 1
+    /// also starts its 120-second wave timer.
     fn ship_set_wave(&mut self, leader: u32, wave: u8, due: u64) {
         let Some(run) = self.ship.of(leader) else {
             return;
@@ -983,6 +1025,53 @@ impl GameState {
             if matches!(wave, 2..=4) {
                 run.laser_due = Some(due);
             }
+        }
+        self.ship_find_ally(index);
+    }
+
+    /// `FindAllyCharacter` (`G/ShipDefense.cpp:635-660`): every monster on the
+    /// run's map takes the standing mast as its victim. The mast alone is the
+    /// alliance character (`GetAllianceCharacter`, `:1403-1406`); a dead or gone
+    /// mast holds no victim. `SetVictim` keeps the striker's stand — no fight
+    /// begins here — and the monster's next Idle sees the held victim and starts
+    /// it, as `__StateIdle_Monster` starts on any live `GetVictim`
+    /// (`G/char_state.cpp:651, :689-695`). VID order stands in for the sectree
+    /// walk, which names no order either.
+    fn ship_find_ally(&mut self, index: i32) {
+        let channel = self.ship_channel(index);
+        let mast = self
+            .ship
+            .by_leader
+            .values()
+            .find(|run| run.index == index)
+            .and_then(|run| run.mast)
+            .map(|(mast, _, _)| mast);
+        let Some(mast) = mast else {
+            return;
+        };
+        if self.npc_by_vid(mast).is_none_or(|npc| npc.dead) {
+            return;
+        }
+        let mut mobs: Vec<u32> = self
+            .npc_of
+            .iter()
+            .filter(|(_, place)| place.0 == channel && place.1 == index)
+            .map(|(vid, _)| *vid)
+            .filter(|vid| {
+                self.npc_by_vid(*vid)
+                    .is_some_and(|npc| npc.char_type == gamedata::mob_proto::CHAR_TYPE_MONSTER)
+            })
+            .collect();
+        mobs.sort_unstable();
+        for mob in mobs {
+            let Some(npc) = self.npc_by_vid(mob) else {
+                continue;
+            };
+            let fresh = super::mob_ai::Mind::new(npc);
+            let mind = self.minds.ensure(mob, fresh);
+            mind.victim_npc = Some(mast);
+            let now = self.clock.now();
+            self.npc_combat.entry(mob).or_default().last_victim_set_ms = Some(now);
         }
     }
 
@@ -1391,9 +1480,9 @@ impl GameState {
     }
 
     /// `SpawnEvent` (`G/ShipDefense.cpp:322-493`): wave 1 spawns past 40 seconds, the
-    /// hydra waves roll the egg and the minis and step their regens, and the seconds
-    /// tick on. The step-0 re-arm quirk (`% 3` truthy) is ported as written: `uiCountSec
-    /// % 3` nonzero, not zero.
+    /// hydra waves roll the egg and the minis and step their regens, the deck's
+    /// monsters retarget the mast, and the seconds tick on. The step-0 re-arm quirk
+    /// (`% 3` truthy) is ported as written: `uiCountSec % 3` nonzero, not zero.
     fn run_ship_spawn(&mut self, leader: u32, pulse: u64) {
         let Some((wave, step, secs, due)) = self.ship.of(leader).and_then(|run| run.spawn_due)
         else {
@@ -1449,6 +1538,7 @@ impl GameState {
                     run.spawn_due =
                         Some((wave, step, secs.saturating_add(1), pulse.saturating_add(25)));
                 }
+                self.ship_find_ally(index);
                 return;
             }
             _ => {}
@@ -1456,6 +1546,7 @@ impl GameState {
         if let Some(run) = self.ship.of_mut(leader) {
             run.spawn_due = Some((wave, step, secs.saturating_add(1), pulse.saturating_add(25)));
         }
+        self.ship_find_ally(index);
     }
 
     /// `LaserEffectEvent` (`G/ShipDefense.cpp:153-230`): the shelters clear first,
@@ -2468,6 +2559,172 @@ mod tests {
                 .any(|window| window == b"remaining HP")),
             "the HP chats: {lines:02x?}"
         );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.first() == Some(&protocol::gc_actors::GcTarget::header())),
+            "the broadcast goes: {lines:02x?}"
+        );
+    }
+    /// The second start is quiet: the quest bind's already-running gate refuses
+    /// before `Start` runs, so no second wave-1 fake stands and the wave timer
+    /// keeps its count.
+    #[test]
+    fn the_second_start_is_quiet() {
+        let ShipWorld {
+            mut world,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        let before = world.npcs_on(1, 3_580_000).npcs.len();
+        let pulse = world.last_pulse();
+        if let Some(run) = world.ship.of_mut(LEADER_VID) {
+            run.wave_due = Some((false, 1, 37, pulse));
+        }
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        assert_eq!(world.npcs_on(1, 3_580_000).npcs.len(), before);
+        let run = world.ship.of(LEADER_VID).expect("the run stands");
+        assert!(matches!(run.wave_due, Some((false, 1, 37, _))));
+    }
+
+    /// Base 358 is no ship map: a death there runs no deck arm, while a death on
+    /// the private index still drops the dead VID from the run's uniques.
+    #[test]
+    fn base_358_is_no_ship_map() {
+        assert!(!is_ship_map(MAP));
+        assert!(is_ship_map(3_580_000));
+        let ShipWorld {
+            mut world,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        world.judge_ship_start(Vid::new(LEADER_VID));
+        let mast = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.mast)
+            .expect("the mast stands")
+            .0;
+        world.ship_on_kill(mast, None);
+        assert!(
+            world.ship.of(LEADER_VID).and_then(|run| run.mast).is_none(),
+            "the private death drops the mast"
+        );
+    }
+
+    /// The retarget holds the mast in the NPC slot of every monster on the run's
+    /// map, and only there: the wheel (an NPC) and a monster on another map keep
+    /// no victim.
+    #[test]
+    fn the_retarget_holds_the_mast_for_the_deck_monsters() {
+        let ShipWorld {
+            mut world,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        let index = world.ship.of(LEADER_VID).expect("the run stands").index;
+        let pulse = world.last_pulse();
+        let mast = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.mast)
+            .expect("the mast stands")
+            .0;
+        let (mob, _) = world
+            .ship_spawn(1, index, 3954, (380, 400), 0, pulse)
+            .expect("the mob stands");
+        if let Some(npc) = world.npc_mut(mob) {
+            npc.char_type = gamedata::mob_proto::CHAR_TYPE_MONSTER;
+        }
+        let wheel = world
+            .npcs_on(1, index)
+            .npcs
+            .iter()
+            .find(|npc| npc.vnum == WHEEL_VNUM)
+            .expect("the wheel stands")
+            .vid;
+        if let Some(npc) = world.npc_mut(wheel) {
+            npc.char_type = gamedata::mob_proto::CHAR_TYPE_NPC;
+        }
+        world.ship_find_ally(index);
+        assert_eq!(
+            world.minds.get(mob).and_then(|mind| mind.victim_npc),
+            Some(mast)
+        );
+        assert_eq!(
+            world.minds.get(wheel).and_then(|mind| mind.victim_npc),
+            None,
+            "the wheel is no monster"
+        );
+        // A dead mast holds no victim: the arms refuse, and the hold stays as it
+        // was.
+        world
+            .minds
+            .get_mut(mob)
+            .expect("the mind stands")
+            .victim_npc = None;
+        world.npc_mut(mast).expect("the mast stands").dead = true;
+        world.ship_find_ally(index);
+        assert_eq!(
+            world.minds.get(mob).and_then(|mind| mind.victim_npc),
+            None,
+            "a dead mast holds no victim"
+        );
+        // A gone mast holds none either: the run names a VID that stands nowhere.
+        world.npc_mut(mast).expect("the mast stands").dead = false;
+        let gone = mast + 1000;
+        let run = world.ship.of_mut(LEADER_VID).expect("the run stands");
+        if let Some((_, hp, max)) = run.mast {
+            run.mast = Some((gone, hp, max));
+        }
+        world.ship_find_ally(index);
+        assert_eq!(
+            world.minds.get(mob).and_then(|mind| mind.victim_npc),
+            None,
+            "a gone mast holds no victim"
+        );
+    }
+
+    /// The mast hit broadcasts: the run's HP follows the NPC's, and a player on
+    /// the run's map hears the target with the new HP.
+    #[test]
+    fn the_mast_hit_broadcasts() {
+        let ShipWorld {
+            mut world,
+            mut leader_inbox,
+            lease: _lease,
+            member_lease: _member_lease,
+            ..
+        } = a_ship_world();
+        world.judge_ship_create(Vid::new(LEADER_VID), NOW);
+        if let Some(body) = world.bodies.get_mut(&Vid::new(LEADER_VID)) {
+            body.map = 3_580_000;
+        }
+        let mast = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.mast)
+            .expect("the mast stands")
+            .0;
+        if let Some(npc) = world.npc_mut(mast) {
+            npc.hp = npc.hp.saturating_sub(100);
+        }
+        let _ = heard(&mut leader_inbox);
+        world.ship_broadcast_on_mast_hit(mast);
+        let (_, hp, max) = world
+            .ship
+            .of(LEADER_VID)
+            .and_then(|run| run.mast)
+            .expect("the mast stands");
+        assert_eq!(hp, max.saturating_sub(100));
+        let lines = heard(&mut leader_inbox);
         assert!(
             lines
                 .iter()

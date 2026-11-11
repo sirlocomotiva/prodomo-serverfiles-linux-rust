@@ -384,6 +384,26 @@ impl GameState {
             _ => {}
         }
     }
+    /// The held NPC victim of `mob` (`GetVictim` on the NPC slot): kept while the
+    /// NPC stands, dropped — with the 1-second wait — when it is gone, dead or on
+    /// BANPK (`G/char_state.cpp:653-668`). The drop clears both slots, as
+    /// `SetVictim(NULL)` does; the mast is never BANPK and dies loudly, so the
+    /// ship's retarget holds through the fight.
+    pub(super) fn held_npc_victim(&mut self, mob: u32) -> Option<u32> {
+        let held = self.minds.get(mob).and_then(|mind| mind.victim_npc)?;
+        let lost = self.npc_by_vid(held).is_none_or(|npc| npc.dead)
+            || self
+                .npc_of
+                .get(&held)
+                .and_then(|(_, map, _)| self.npc_spot(held).map(|spot| (*map, spot)))
+                .is_some_and(|(map, spot)| self.is_banpk(map, spot.0, spot.1));
+        if lost {
+            self.set_victim(mob, None);
+            self.set_duration(mob, pulses(1));
+            return None;
+        }
+        Some(held)
+    }
 
     /// `GetVictim`: the held victim while it is online. `Gone`, no victim, or a body that is
     /// gone reads as `NULL`.
@@ -660,15 +680,30 @@ impl GameState {
         self.battle_swing(mob, fighter, victim, target);
     }
 
-    /// `StateBattle` of the guard under `mob` on its monster victim: the head guards are
-    /// dead (a guard is no stone, no player, `CanMove` holds, and the stun returns), the
-    /// coward and summoner arms are empty (no guard proto carries the flag or a summon
-    /// vnum), and the loss, engage and swing run on the NPC slot.
+    /// `StateBattle` (`G/char_state.cpp:930-1183`) of the guard under `mob` on its
+    /// monster victim — [`GameState::battle_swing_npc`] swings `Attack` past the stun
+    /// guard — or of the monster on its mast or monster victim, whose head guards
+    /// run first (stones and NPC strikers never reach Battle, `!CanMove()` always
+    /// holds, and `IsStun()` returns with the duration as it was; the instant arm
+    /// stays first: both arms return alike, so the order is unobservable,
+    /// `:941-944`). The coward and summoner arms are empty (no guard proto carries
+    /// the flag or a summon vnum), and the loss, engage and swing run on the NPC
+    /// slot.
     fn state_battle_npc(&mut self, mob: u32) {
         let Some(fighter) = self.fighter(mob) else {
             return;
         };
-        if self.npc_by_vid(mob).is_some_and(|npc| npc.stunned) {
+        if !self.is_guard(mob)
+            && self
+                .npc_by_vid(mob)
+                .is_none_or(|npc| npc.char_type != CHAR_TYPE_MONSTER || npc.stunned)
+        {
+            return;
+        }
+        if self.npc_by_vid(mob).is_some_and(|npc| npc.stunned)
+            || (!self.is_guard(mob)
+                && self.npc_affect_words(mob)[0] & super::fight::AFF_STUN_WORD != 0)
+        {
             return;
         }
         let victim = self.minds.get(mob).and_then(|mind| mind.victim_npc);
@@ -686,11 +721,12 @@ impl GameState {
         self.battle_swing_npc(mob, fighter, victim, target);
     }
 
-    /// Battle's victim loss on a monster victim (`:967-1036`): a stunned, dead, BANPK or
-    /// gone victim is dropped, the guard `Return()`s home, and the duration is 1 second.
-    /// No re-search (the research arm needs `IsDead` or BANPK *and* `IsAggressive`, and
-    /// the guard protos are not aggressive) and no `KILL_AND_GO` (the guard is NOMOVE,
-    /// and legacy's `Goto` would refuse).
+    /// Battle's victim loss on an NPC victim (`:967-1036`): a stunned, dead, BANPK
+    /// or gone victim is dropped, the guard `Return()`s home, and the duration is
+    /// 1 second. A non-guard's dead or BANPK victim of an aggressive wanderer is
+    /// searched again (`FindVictim` finds PCs only), with the `KILL_AND_GO` walk
+    /// when nothing is found; the guard protos are not aggressive, so the old
+    /// no-research arm stays theirs.
     fn battle_lost_npc(&mut self, mob: u32, state: Option<(u32, VictimState)>) -> bool {
         let lost = match state {
             None => true,
@@ -699,15 +735,38 @@ impl GameState {
         if !lost {
             return false;
         }
+        let research = matches!(state, Some((_, target)) if target.dead || target.banpk)
+            && !self.is_guard(mob)
+            && !self.minds.wanders_off()
+            && self.fighter(mob).is_some_and(|fighter| fighter.aggressive);
+        if research {
+            let fighter = self.fighter(mob).expect("a fighter was found");
+            let found = self.find_victim(mob, fighter.sight);
+            let dead = state.map(|(_, target)| target).expect("a loss was found");
+            self.set_victim(mob, found);
+            self.set_duration(mob, pulses(1));
+            if found.is_none()
+                && self
+                    .npc_by_vid(mob)
+                    .is_some_and(|npc| kill_goes(npc.fight.battle_type))
+            {
+                self.kill_and_go(mob, fighter, dead);
+            }
+            return true;
+        }
         self.set_victim(mob, None);
-        let _ = self.npc_return(mob);
+        if self.is_guard(mob) {
+            let _ = self.npc_return(mob);
+        }
         self.set_duration(mob, pulses(1));
         true
     }
 
-    /// Battle's range arms on a monster victim (`:1067-1104`): a victim 4000 or more
+    /// Battle's range arms on an NPC victim (`:1067-1104`): a victim 4000 or more
     /// away is dropped with the duration as it was, with the protege follow; one past
-    /// the reach is chased, which a NOMOVE guard refuses. True when either arm ran.
+    /// the reach is chased (`__CHARACTER_GotoNearTarget`, `:759-780`), which a NOMOVE
+    /// guard refuses — the chase ends here and re-runs each update, as legacy's
+    /// failed `Goto` does. True when either arm ran.
     fn battle_engage_npc(
         &mut self,
         mob: u32,
@@ -739,19 +798,27 @@ impl GameState {
         }
         let past_reach = f64::from(dist) >= f64::from(u32_to_f32(u32::from(fighter.range))) * 1.15;
         if past_reach {
-            let _ = victim;
-            // `__CHARACTER_GotoNearTarget` (`G/char_state.cpp:759-780`): NOMOVE refuses
-            // before `Follow` runs, and the guard is always NOMOVE, so the chase ends
-            // here and re-runs each update, as legacy's failed `Goto` does.
-            debug_assert!(fighter.ai_flags & AIFLAG_NOMOVE != 0);
+            if fighter.ai_flags & AIFLAG_NOMOVE != 0 {
+                return true;
+            }
+            let tenths = if fighter.battle_type == BATTLE_TYPE_RANGE
+                || fighter.battle_type == BATTLE_TYPE_MAGIC
+            {
+                8
+            } else {
+                9
+            };
+            let min = f32::from(fighter.range.saturating_mul(tenths) / 10);
+            let _ = self.follow_npc(mob, victim, min);
             return true;
         }
         false
     }
 
-    /// Battle's swing on a monster victim (`:1106-1183`): `PM_ATTACKED_BY` first (a
+    /// Battle's swing on an NPC victim (`:1106-1183`): `PM_ATTACKED_BY` first (a
     /// guard has no spawn group, so the send is vacuous), then the timer, then berserk
-    /// on (a guard's berserk point is 0), then `Attack` on the monster.
+    /// on (a guard's berserk point is 0), then `Attack` — the guard's stun or the
+    /// monster's swing — on the victim.
     fn battle_swing_npc(&mut self, mob: u32, fighter: Fighter, victim: u32, target: VictimState) {
         self.party_attacked_by(mob);
         let now = self.clock.now();
@@ -779,7 +846,12 @@ impl GameState {
                 mind.berserk = true;
             }
         }
-        if !self.guard_attack(mob, victim) {
+        let hit = if self.is_guard(mob) {
+            self.guard_attack(mob, victim)
+        } else {
+            self.mob_attack_npc(mob, victim)
+        };
+        if !hit {
             self.set_duration(mob, FAILED_ATTACK_PULSES);
             return;
         }

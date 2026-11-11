@@ -52964,3 +52964,62 @@ in this slice), `cargo test --workspace --doc --locked --offline` (1 passed in 9
 left behind) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 570. The deck strikes the mast
+
+The ship's defence fights now. `SetWave` runs `FindAllyCharacter`
+(`G/ShipDefense.cpp:635-660`): every monster on the run's map takes the standing
+mast as its NPC victim, so the wave walks the mast instead of idling, while the
+wheel — no monster — holds nothing. The NPC victim rides the mind's `victim_npc`
+slot through the state machine: Idle starts the fight on a held mast at its first
+tick and drops a dead or gone one with the 1-second wait, the walk's arrival asks
+for Battle past it, and Battle's head guards run first (stones and NPC strikers
+never fight; `CanMove` holds; the stun returns with the duration as it was).
+
+The swing is `CHARACTER::Attack` on an NPC victim (`G/char_battle.cpp:220-328`):
+the chat before the reach, the SPECIAL blank, the RANGE/MAGIC shoot past the same
+reach, the claim, the victim's `BeginFight` past `CanBeginFight` — which the mast's
+NPC type never passes, so the strike stands there — and the swing stamp. Its melee
+body is `strike_npc_by_monster`: `battle_hit` (`G/battle.cpp:760-817`) into
+`Damage`'s NORMAL path (`G/char_battle.cpp:1744-2436`), down to the damage shown —
+the NPC-arm `CalcMeleeDamage`, the affect draws, the block, critical and penetrate
+chances, the NPC-vs-NPC steals, the bonuses, the BANPK refusal, the chat draw, the
+stun and dead checks, the user rate (an identity off a monster), the stoneskin, the
+death blow, the dragon, and the `+0.5`. The shared tail (`npc_damage_tail`) serves
+the mast's reflect too: the victim's `POINT_REFLECT_MELEE` share of the pre-bonus
+base, thirded when the striker is immune, back as `DAMAGE_TYPE_SPECIAL` off the
+NPC's empire (`:1979-1988`), filling the striker's damage map SPECIAL with no
+party share. A hit on the mast broadcasts its HP (`:2277-2282`), and the run's
+stored HP follows the NPC's. The splash learned the NPC arm (`splash_hit_npc`):
+PCs run before NPCs, the recompute mirrors the PC's, and the CRUSH slide refuses
+the NOMOVE mast.
+
+Two corrections ride along. Base 358 is no ship map: `IsDungeon` runs
+`358*10000..359*10000` (`:1955-1958`), and no live run's index is ever the base —
+the earlier `map == MAP` arm was wrong, and `base_358_is_no_ship_map` pins the
+range. And the already-running gate is the quest bind's, not `Start`'s: the bind
+refuses past `IsRunning` (`ship_defense_mgr_start`,
+`G/questlua_shipdefense_mgr.cpp:41-61`, into `IsRunning`'s `STATE_START` read,
+`:1636-1648`), while `Start` keeps its own two gates (the leader holds the call,
+and holds a run) — a second start restarts nothing and prepares no second wave
+(`the_second_start_is_quiet`).
+
+Scenario `a_wave_strikes_the_mast_while_the_fake_heads_stand_dead`: Alpha boards,
+starts, and watches wave 1 land on the mast — the start burst, the countdown chats
+at 60 and under 10, a `GC_TARGET` naming the mast below its 5,000,000, and the
+fake-hydra clear destroying the intimidation's head 3 s on. Unit pins: the mast
+swing and the fake's refusal (`a_monster_swings_on_the_mast_and_not_on_a_fake_hydra`),
+the retarget's hold with the dead and gone mast refusals, the mast-hit broadcast,
+the held-NPC-victim Idle and walk arms, and the reflect's pre-bonus base and
+thirding. Mutants (fake accepts, gone mast retargets, inverted thirding) all killed.
+Inventory: `sys.dungeon.ship_defense` goes `missing` to `partial`; no `missing` row
+remains in any table.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite570.txt` (5383 passed, 0 failed in 46 targets),
+`cargo test --workspace --doc --locked --offline` (1 passed in 9 targets),
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

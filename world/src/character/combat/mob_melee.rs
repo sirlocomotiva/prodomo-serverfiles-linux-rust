@@ -32,11 +32,11 @@
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::point_slot as point;
-use gamedata::mob_proto::{AIFLAG_DEATHBLOW, CHAR_TYPE_MONSTER};
+use gamedata::mob_proto::{AIFLAG_DEATHBLOW, AIFLAG_STONESKIN, CHAR_TYPE_MONSTER};
 
 use super::melee::{
-    AttackAffect, AFF_POISON_WORD, AFF_SLOW_WORD, AFF_STUN_WORD, DAMAGE_CRITICAL, DAMAGE_NORMAL,
-    DAMAGE_PENETRATE, SE_CRITICAL, SE_PENETRATE,
+    AttackAffect, AFF_POISON_WORD, AFF_SLOW_WORD, AFF_STUN_WORD, DAMAGE_BLOCK, DAMAGE_CRITICAL,
+    DAMAGE_NORMAL, DAMAGE_PENETRATE, SE_CRITICAL, SE_PENETRATE,
 };
 use super::{attack_rating, AttackRatingInput};
 use crate::character::{number, race_to_job, Dice, Points};
@@ -370,6 +370,350 @@ pub fn skill_damage_pc(
     }
 }
 
+/// `CFuncShoot` of a `RANGE` or `MAGIC` monster on a non-player
+/// (`G/char_battle.cpp:3070-3154`): `CalcMeleeDamage`, the same draws, then the
+/// bow or magic resist, and the `NORMAL_RANGE` or `MAGIC` path of `Damage`.
+/// `magic` picks the arm. The range arm dodges (`:1953-1969`); the magic arm has
+/// no dodge, no reflect and no steal draws — those are the NORMAL path's, which
+/// a shot of magic never takes — and halves its chances (`:1858-1946`). The
+/// caller judged `banned` and owns the hit points, as [`strike_npc_by_monster`]
+/// does. The down checks read after the bonuses, as `Damage` runs them.
+#[must_use]
+pub fn shoot_npc(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: &mut Npc,
+    magic: bool,
+    banned: bool,
+) -> super::melee::Strike {
+    use super::melee::{Strike, Struck};
+    let mut events = Vec::new();
+    let damage = monster_melee_damage(dice, striker, victim);
+    let affect = npc_attack_affect(dice, striker.npc, victim);
+    let resist = if magic {
+        victim.fight.point(point::POINT_RESIST_MAGIC)
+    } else {
+        victim.fight.point(point::POINT_RESIST_BOW)
+    };
+    let damage = damage
+        .wrapping_mul(100_i32.wrapping_sub(resist))
+        .wrapping_div(100);
+    // `battle_hit`'s `attMul` step (`G/battle.cpp:807-809`) never runs on a shot —
+    // no shot calls it — but the RANGE arm keeps the `+0.5` on an `attMul` of 1.0
+    // so the two arms agree (`:3092-3110` has no such line of its own); the MAGIC
+    // arm has no rounding (`:3119-3142`).
+    let damage = if magic {
+        damage
+    } else {
+        f32_to_i32(i32_to_f32(damage) + 0.5)
+    };
+    if magic {
+        return magic_damage_npc(dice, striker, victim, damage, events, affect, banned);
+    }
+    if npc_dodges(dice, victim) {
+        events.push(super::melee::HitEvent::DamageInfo {
+            damage: 0,
+            flag: super::melee::DAMAGE_DODGE,
+        });
+        return Strike {
+            events,
+            struck: Struck::Refused,
+            affect,
+            stolen_gold: 0,
+        };
+    }
+    let (damage, flag) = npc_chances(dice, striker.npc, victim, damage, &mut events);
+    let damage = npc_bonuses_guard(striker.npc, victim, damage);
+    finish_shot_npc(
+        dice,
+        striker,
+        victim,
+        (damage, flag),
+        events,
+        affect,
+        banned,
+    )
+}
+
+/// `Damage`'s `DAMAGE_TYPE_MAGIC` path on a non-player (`G/char_battle.cpp:1773-1776`,
+/// `:1858-1946`, `:2145-2156`): the attacker's magic percent, the halved critical
+/// and penetrating chances, and the skill bonuses — then the shared down, blow,
+/// dragon and rounding of [`finish_shot_npc`]. The terror gate draws nothing (no
+/// terror), the manashield, reflect, steal, marriage, monarch and empire arms
+/// never fire, and `cannot_dead` is false.
+fn magic_damage_npc(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+    mut events: Vec<super::melee::HitEvent>,
+    affect: super::melee::AttackAffect,
+    banned: bool,
+) -> super::melee::Strike {
+    let mob = striker.npc;
+    // `(int)((float)dam * (100 + per + melee) / 100.f + 0.5f)`: the multiply, then
+    // the divide, then the `+0.5`, each in `float`, and the cast truncates.
+    let percent = mob
+        .fight
+        .point(point::POINT_MAGIC_ATT_BONUS_PER)
+        .wrapping_add(mob.fight.point(point::POINT_MELEE_MAGIC_ATT_BONUS_PER));
+    let mut damage = f32_to_i32(i32_to_f32(damage) * i32_to_f32(100 + percent) / 100.0 + 0.5);
+    let mut flag = DAMAGE_NORMAL;
+    let critical_pct = mob.fight.point(point::POINT_CRITICAL_PCT);
+    if critical_pct != 0 {
+        let critical_pct = if critical_pct >= 10 {
+            5 + (critical_pct - 10) / 4
+        } else {
+            critical_pct / 2
+        }
+        .wrapping_sub(victim.fight.point(point::POINT_RESIST_CRITICAL));
+        if number(dice, 1, 100) <= critical_pct {
+            flag |= DAMAGE_CRITICAL;
+            damage = damage.wrapping_mul(2);
+            events.push(super::melee::HitEvent::Effect(SE_CRITICAL));
+        }
+    }
+    let penetrate_pct = mob.fight.point(point::POINT_PENETRATE_PCT);
+    if penetrate_pct != 0 {
+        let penetrate_pct = if penetrate_pct >= 10 {
+            5 + (penetrate_pct - 10) / 4
+        } else {
+            penetrate_pct / 2
+        }
+        .wrapping_sub(victim.fight.point(point::POINT_RESIST_PENETRATE));
+        if number(dice, 1, 100) <= penetrate_pct {
+            flag |= DAMAGE_PENETRATE;
+            let defence = victim
+                .fight
+                .point(point::POINT_DEF_GRADE)
+                .wrapping_mul(100_i32.wrapping_add(victim.fight.point(point::POINT_DEF_BONUS)))
+                .wrapping_div(100);
+            damage = damage.wrapping_add(defence);
+            events.push(super::melee::HitEvent::Effect(SE_PENETRATE));
+        }
+    }
+    let skill = mob.fight.point(point::POINT_SKILL_DAMAGE_BONUS);
+    if skill != 0 {
+        damage = damage
+            .wrapping_mul(100_i32.wrapping_add(skill))
+            .wrapping_div(100);
+    }
+    let defend = victim.fight.point(point::POINT_SKILL_DEFEND_BONUS).min(99);
+    let combat = if npc_hp_pct(victim) >= 90 {
+        victim.fight.point(point::POINT_RESIST_COMBAT).min(99)
+    } else {
+        0
+    };
+    let mut damage = damage
+        .wrapping_mul(100_i32.wrapping_sub(defend).wrapping_sub(combat))
+        .wrapping_div(100);
+    let mall = victim.fight.point(point::POINT_MALL_DEFBONUS);
+    if mall > 0 {
+        damage = damage.wrapping_sub((damage.wrapping_mul(mall).wrapping_div(100)).min(200));
+    }
+    let damage = damage.max(0);
+    finish_shot_npc(
+        dice,
+        striker,
+        victim,
+        (damage, flag),
+        events,
+        affect,
+        banned,
+    )
+}
+
+/// `Damage`'s dodge on a non-player: `POINT_DODGE && number(1, 100) <= DODGE`
+/// (`:1953-1967`).
+fn npc_dodges(dice: &mut dyn Dice, victim: &Npc) -> bool {
+    let dodge = victim.fight.point(point::POINT_DODGE);
+    dodge != 0 && number(dice, 1, 100) <= dodge
+}
+
+/// The shared tail of a shot on a non-player: the BANPK refusal, the chat draw,
+/// the stun and dead checks, the death blow, the dragon, and the `+0.5` of
+/// `damMul` 1.0. The user rate never applies (a monster attacker) and the
+/// stoneskin never halves (both shot arms skip `:2268-2272` — the NORMAL tail
+/// alone runs it). `rated` is the post-bonus damage with its flag.
+fn finish_shot_npc(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: &mut Npc,
+    rated: (i32, u8),
+    mut events: Vec<super::melee::HitEvent>,
+    affect: super::melee::AttackAffect,
+    banned: bool,
+) -> super::melee::Strike {
+    use super::melee::{Strike, Struck};
+    let (damage, flag) = rated;
+    if banned {
+        return Strike {
+            events,
+            struck: Struck::Refused,
+            affect,
+            stolen_gold: 0,
+        };
+    }
+    if victim.char_type == CHAR_TYPE_MONSTER && number(dice, 0, 60) == 0 {
+        let line = MONSTER_CHAT_ATTACKED * 3 + number(dice, 1, 3);
+        events.push(super::melee::HitEvent::Chat(line));
+    }
+    if victim.stunned {
+        return Strike {
+            events,
+            struck: Struck::Finished,
+            affect,
+            stolen_gold: 0,
+        };
+    }
+    if victim.dead {
+        return Strike {
+            events,
+            struck: Struck::AlreadyDead,
+            affect,
+            stolen_gold: 0,
+        };
+    }
+    let damage = npc_death_blow(dice, striker.npc, victim, damage);
+    let damage = super::dragon::blue_dragon_damage(
+        &striker.dragon_stones,
+        super::dragon::DragonAttacker {
+            is_dragon: super::dragon::is_blue_dragon(striker.npc.vnum)
+                && striker.npc.char_type == CHAR_TYPE_MONSTER,
+            mount_vnum: 0,
+        },
+        super::dragon::DragonVictim {
+            is_dragon: super::dragon::is_blue_dragon(victim.vnum)
+                && victim.char_type == CHAR_TYPE_MONSTER,
+            vnum: victim.vnum,
+            is_stone: victim.char_type == gamedata::mob_proto::CHAR_TYPE_STONE,
+        },
+        striker.dragon_counts,
+        damage,
+    );
+    let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
+    events.push(super::melee::HitEvent::DamageInfo { damage, flag });
+    let damage = if victim.hp.wrapping_sub(damage) <= 0 {
+        victim.hp
+    } else {
+        damage
+    };
+    super::melee::npc_hp_change(victim, -damage, &mut events);
+    Strike {
+        events,
+        struck: Struck::Landed { damage },
+        affect,
+        stolen_gold: 0,
+    }
+}
+
+/// `FuncSplashDamage`'s melee arm of a monster on a non-player
+/// (`G/char_skill.cpp:1485-1572`) and `Damage`'s `DAMAGE_TYPE_MELEE` path
+/// (`G/char_battle.cpp:1858-1946`, `:2145-2156`), down to the damage shown: the
+/// skill's pre-mitigation `atk` minus the defence grade (unclamped, so a negative
+/// flows through, `:1572` — skipped when the functor's PENETRATE roll won), the
+/// halved critical and penetrating chances, the skill bonuses, and the shared
+/// down, blow, dragon and rounding of the shot finisher. No block, no dodge,
+/// no reflect, no steal draws: those are the NORMAL path's, which a skill never
+/// takes. The caller judged `banned` and owns the hit points.
+#[must_use]
+pub fn skill_damage_npc(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: &mut Npc,
+    attack: i32,
+    ignore_defence: bool,
+    banned: bool,
+) -> super::melee::Strike {
+    use super::melee::{AttackAffect, Strike, Struck};
+    let mob = striker.npc;
+    let mut events = Vec::new();
+    let mut damage = if ignore_defence {
+        attack
+    } else {
+        attack.wrapping_sub(victim.fight.point(point::POINT_DEF_GRADE))
+    };
+    let mut flag = DAMAGE_NORMAL;
+    let critical_pct = mob.fight.point(point::POINT_CRITICAL_PCT);
+    if critical_pct != 0 {
+        let critical_pct = if critical_pct >= 10 {
+            5 + (critical_pct - 10) / 4
+        } else {
+            critical_pct / 2
+        }
+        .wrapping_sub(victim.fight.point(point::POINT_RESIST_CRITICAL));
+        if number(dice, 1, 100) <= critical_pct {
+            flag |= DAMAGE_CRITICAL;
+            damage = damage.wrapping_mul(2);
+            events.push(super::melee::HitEvent::Effect(SE_CRITICAL));
+        }
+    }
+    let penetrate_pct = mob.fight.point(point::POINT_PENETRATE_PCT);
+    if penetrate_pct != 0 {
+        let penetrate_pct = if penetrate_pct >= 10 {
+            5 + (penetrate_pct - 10) / 4
+        } else {
+            penetrate_pct / 2
+        }
+        .wrapping_sub(victim.fight.point(point::POINT_RESIST_PENETRATE));
+        if number(dice, 1, 100) <= penetrate_pct {
+            flag |= DAMAGE_PENETRATE;
+            let defence = victim
+                .fight
+                .point(point::POINT_DEF_GRADE)
+                .wrapping_mul(100_i32.wrapping_add(victim.fight.point(point::POINT_DEF_BONUS)))
+                .wrapping_div(100);
+            damage = damage.wrapping_add(defence);
+            events.push(super::melee::HitEvent::Effect(SE_PENETRATE));
+        }
+    }
+    let skill = mob.fight.point(point::POINT_SKILL_DAMAGE_BONUS);
+    if skill != 0 {
+        damage = damage
+            .wrapping_mul(100_i32.wrapping_add(skill))
+            .wrapping_div(100);
+    }
+    let defend = victim.fight.point(point::POINT_SKILL_DEFEND_BONUS).min(99);
+    let combat = if npc_hp_pct(victim) >= 90 {
+        victim.fight.point(point::POINT_RESIST_COMBAT).min(99)
+    } else {
+        0
+    };
+    let mut damage = damage
+        .wrapping_mul(100_i32.wrapping_sub(defend).wrapping_sub(combat))
+        .wrapping_div(100);
+    let mall = victim.fight.point(point::POINT_MALL_DEFBONUS);
+    if mall > 0 {
+        damage = damage.wrapping_sub((damage.wrapping_mul(mall).wrapping_div(100)).min(200));
+    }
+    let damage = damage.max(0);
+    let affect = AttackAffect::default();
+    let strike = finish_shot_npc(
+        dice,
+        striker,
+        victim,
+        (damage, flag),
+        events,
+        affect,
+        banned,
+    );
+    // The 229s clamp for a negative skill hit: legacy would heal, and the Rewrite
+    // never ports a heal-by-damage. `finish_shot_npc` never refuses a skill's
+    // victim, so the landed damage alone clamps.
+    match strike.struck {
+        Struck::Landed { damage } => {
+            let _ = damage;
+            Strike {
+                struck: Struck::Landed {
+                    damage: damage.max(0),
+                },
+                ..strike
+            }
+        }
+        _ => strike,
+    }
+}
+
 /// `CFuncShoot` of a `RANGE` or `MAGIC` monster on a player (`G/char_battle.cpp:3070-3154`):
 /// `CalcMeleeDamage`, the same draws, then the bow or magic resist, and the
 /// `NORMAL_RANGE` or `MAGIC` path of `Damage`. `magic` picks the arm. A `Down` end on the
@@ -607,6 +951,55 @@ pub fn mob_calc_attack(
         Some(victim) => mob_att_bonus(attack, mob, victim, mob_rate),
         None => mob_att_bonus_self(attack, mob),
     };
+    let multiply = mob.fight.dam_multiply();
+    let multiply = if berserk { multiply * 2.0 } else { multiply };
+    f32_to_i32(i32_to_f32(attack) * multiply)
+}
+
+/// `CalcMeleeDamage` of a monster up to its damage multiply on a non-player
+/// victim (`G/battle.cpp:489-600` with `CalcAttBonus` `:299-369`): the
+/// attack-rating on the victim's `POINT_DX`, the doubled damage roll, the grade,
+/// the party and percent bonuses, the NPC-victim race, enchant, monster and
+/// metin/boss shares, and the berserk-doubled damage multiply — everything
+/// before `MAX(0, iAtk - iDef)`. The mob damage rate never applies to a
+/// non-player victim (`:311`: `pkAttacker->IsNPC() && pkVictim->IsPC()`), and
+/// the marriages are 0, so those arms are identities.
+#[must_use]
+pub fn mob_calc_attack_npc(
+    dice: &mut dyn Dice,
+    mob: &Npc,
+    victim: &Npc,
+    berserk: bool,
+    ignore_target_rating: bool,
+) -> i32 {
+    let rating = attack_rating(AttackRatingInput {
+        attacker_dexterity: mob.fight.point(point::POINT_DX),
+        attacker_level: i32::from(mob.fight.level),
+        victim_dexterity: victim.fight.point(point::POINT_DX),
+        ignore_target_rating,
+    });
+    let rolled = number(
+        dice,
+        i32::from_ne_bytes(mob.fight.damage_range[0].to_ne_bytes()),
+        i32::from_ne_bytes(mob.fight.damage_range[1].to_ne_bytes()),
+    )
+    .wrapping_mul(2);
+    let level_twice = i32::from(mob.fight.level).wrapping_mul(2);
+    let attack = mob
+        .fight
+        .point(point::POINT_ATT_GRADE)
+        .wrapping_add(rolled)
+        .wrapping_sub(level_twice);
+    let mut attack = f32_to_i32(i32_to_f32(attack) * rating).wrapping_add(level_twice);
+    attack = attack
+        .wrapping_add(mob.fight.point(point::POINT_PARTY_ATTACKER_BONUS))
+        .wrapping_mul(
+            100_i32
+                .wrapping_add(mob.fight.point(point::POINT_ATT_BONUS))
+                .wrapping_add(mob.fight.point(point::POINT_MELEE_MAGIC_ATT_BONUS_PER)),
+        )
+        .wrapping_div(100);
+    let attack = npc_att_bonus(attack, mob, victim);
     let multiply = mob.fight.dam_multiply();
     let multiply = if berserk { multiply * 2.0 } else { multiply };
     f32_to_i32(i32_to_f32(attack) * multiply)
@@ -886,6 +1279,426 @@ fn pc_chances(
     }
     (damage, flag)
 }
+/// `battle_hit` of a melee monster on a non-player (`G/battle.cpp:760-817` then the
+/// `DAMAGE_TYPE_NORMAL` path of `CHARACTER::Damage`, `G/char_battle.cpp:1744-2436`),
+/// down to the damage shown: the NPC-arm `CalcMeleeDamage`, `NormalAttackAffect`'s
+/// draws, the `+0.5` of `attMul` 1.0, the block, critical and penetrate chances,
+/// the steals the NPC-vs-NPC arms keep (the attacker's points are a monster's
+/// fight, so the steal lands on the fighter), the bonuses, the BANPK refusal the
+/// caller judged, the chat draw, the stun and dead checks, the user rate, the
+/// stoneskin, the death blow, the dragon, and the `+0.5` of `damMul` 1.0. Returns
+/// the strike and the pre-bonus damage `Damage` reflects a share of (`:1981-1983`),
+/// `None` on a whiff alone — a block still reports its base, as [`strike_pc`]'s
+/// does. The caller applies the affects, runs the reflect, delivers the records,
+/// and owns the hit points: the clamp to the hit points lives there, with the
+/// stun, the killer and the target broadcast. The guard preempts before here
+/// `G/char_battle.cpp:2218-2223` — [`strike_npc_by_npc`]), so no guard arm runs. The
+/// caller judged `banned` — the victim on an `ATTR_BANPK` cell or off the sectree —
+/// and the down checks after the chat, as `Damage` runs them.
+#[must_use]
+pub fn strike_npc_by_monster(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: &mut Npc,
+    banned: bool,
+) -> (super::melee::Strike, Option<i32>) {
+    use super::melee::{AttackAffect, HitEvent, Strike, Struck};
+    let mut events = Vec::new();
+    let damage = monster_melee_damage(dice, striker, victim);
+    if damage <= 0 {
+        return (
+            Strike {
+                events,
+                struck: Struck::Whiffed,
+                affect: AttackAffect::default(),
+                stolen_gold: 0,
+            },
+            None,
+        );
+    }
+    let affect = npc_attack_affect(dice, striker.npc, victim);
+    // `iDam = attMul * tempIDam + 0.5f`, with `attMul` 1.0, which multiplies exactly.
+    let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
+    // The pre-bonus damage `Damage` reflects a share of (`:1981-1983`): `attMul`
+    // is in, the block, chances, steals and bonuses are not — as [`strike_pc`]'s
+    // `reflected_base` is.
+    let reflected_base = Some(damage);
+    if npc_blocks(dice, victim) {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_BLOCK,
+        });
+        let strike = Strike {
+            events,
+            struck: Struck::Refused,
+            affect,
+            stolen_gold: 0,
+        };
+        return (strike, reflected_base);
+    }
+    let (mut damage, flag) = npc_chances(dice, striker.npc, victim, damage, &mut events);
+    let stolen_gold = npc_steals(dice, striker.npc, victim, damage, &mut events);
+    damage = npc_bonuses_guard(striker.npc, victim, damage);
+    // `POINT_MALL_ATTBONUS` (`:2204-2210`): an NPC attacker's mall point attacks
+    // through its `GetLimitPoint`, like the player's.
+    let mall_attack = striker.npc.fight.point(point::POINT_MALL_ATTBONUS);
+    if mall_attack > 0 {
+        damage = damage.wrapping_add((damage.wrapping_mul(mall_attack) / 100).min(300));
+    }
+    // No empire tenth (`:2213-2222` is a PC attacker only) and no drain
+    // (`:2204-2217` reads a PC attacker): both arms skip a monster.
+    if banned {
+        return (
+            Strike {
+                events,
+                struck: Struck::Refused,
+                affect,
+                stolen_gold,
+            },
+            reflected_base,
+        );
+    }
+    if victim.char_type == CHAR_TYPE_MONSTER && number(dice, 0, 60) == 0 {
+        let line = MONSTER_CHAT_ATTACKED * 3 + number(dice, 1, 3);
+        events.push(HitEvent::Chat(line));
+    }
+    if victim.stunned {
+        return (
+            Strike {
+                events,
+                struck: Struck::Finished,
+                affect,
+                stolen_gold,
+            },
+            reflected_base,
+        );
+    }
+    if victim.dead {
+        return (
+            Strike {
+                events,
+                struck: Struck::AlreadyDead,
+                affect,
+                stolen_gold,
+            },
+            reflected_base,
+        );
+    }
+    let landed = npc_damage_tail(dice, &striker, victim, damage, flag, false);
+    (
+        Strike {
+            events: landed.events,
+            struck: Struck::Landed {
+                damage: landed.damage,
+            },
+            affect,
+            stolen_gold,
+        },
+        reflected_base,
+    )
+}
+
+/// What `npc_damage_tail` ran: the events and the landed damage.
+struct NpcDamageTail {
+    /// The chat, the damage packet, and the pool and vic drops.
+    events: Vec<super::melee::HitEvent>,
+    /// The clamped landed damage.
+    damage: i32,
+}
+
+/// The end of `CHARACTER::Damage` on a non-player off a monster attacker, once the
+/// stun and dead checks passed (`G/char_battle.cpp:2263-2433` as the arms run): the
+/// user rate (an identity off a monster, kept as the step), the stoneskin halve,
+/// the NORMAL-only death-blow draw, the dragon, the `+0.5` of `damMul` 1.0, the
+/// damage packet, and the hit-point change. `cannot_dead` never stands on a
+/// ship-side victim, and no Meley statue stands on the ship's map, so the hit
+/// clamps to the hit points. Shared by [`strike_npc_by_monster`] and
+/// [`special_on_mob`]; the SPECIAL share skips the death blow and clamps a
+/// negative at 0, never healing.
+fn npc_damage_tail(
+    dice: &mut dyn Dice,
+    striker: &MobStriker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+    flag: u8,
+    special: bool,
+) -> NpcDamageTail {
+    use super::melee::HitEvent;
+    let damage = user_scaled(damage);
+    let damage = if victim.char_type == CHAR_TYPE_MONSTER
+        && victim.ai_flags & AIFLAG_STONESKIN != 0
+        && npc_hp_pct(victim) < i32::from(victim.fight.stone_skin_point)
+    {
+        damage / 2
+    } else {
+        damage
+    };
+    let damage = if special {
+        damage
+    } else {
+        npc_death_blow(dice, striker.npc, victim, damage)
+    };
+    let damage = super::dragon::blue_dragon_damage(
+        &striker.dragon_stones,
+        super::dragon::DragonAttacker {
+            is_dragon: !special
+                && super::dragon::is_blue_dragon(striker.npc.vnum)
+                && striker.npc.char_type == CHAR_TYPE_MONSTER,
+            mount_vnum: 0,
+        },
+        super::dragon::DragonVictim {
+            is_dragon: super::dragon::is_blue_dragon(victim.vnum)
+                && victim.char_type == CHAR_TYPE_MONSTER,
+            vnum: victim.vnum,
+            is_stone: victim.char_type == gamedata::mob_proto::CHAR_TYPE_STONE,
+        },
+        striker.dragon_counts,
+        damage,
+    );
+    // `dam = tempDam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
+    // A negative SPECIAL share (fixture-only: a negative reflect point) is clamped
+    // at 0, as 229s clamps a negative skill hit — legacy would heal, and the
+    // Rewrite never ports a heal-by-damage.
+    let damage = if special {
+        f32_to_i32(i32_to_f32(damage) + 0.5).max(0)
+    } else {
+        f32_to_i32(i32_to_f32(damage) + 0.5)
+    };
+    let mut events = vec![HitEvent::DamageInfo { damage, flag }];
+    let damage = if victim.hp.wrapping_sub(damage) <= 0 {
+        victim.hp
+    } else {
+        damage
+    };
+    super::melee::npc_hp_change(victim, -damage, &mut events);
+    NpcDamageTail { events, damage }
+}
+/// `CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_SPECIAL)` of a monster off an NPC
+/// attacker (`G/char_battle.cpp:1987`, `:2224-2433`): the mast's reflect share back
+/// at the striker. The empire tenth and the drain skip a monster attacker
+/// (`pAttacker->IsPC()` refuses), the user rate never scales it, and the monarch
+/// tenth never applies; what runs is the chat draw, the stun and dead checks, the
+/// stoneskin, the dragon, the `+0.5`, the damage packet, and the hit-point change.
+/// `cannot_dead` never stands on a ship striker, and no Meley statue stands on the
+/// ship's map, so the hit clamps to the hit points. The caller fills the damage
+/// map with the SPECIAL kind and stuns at 0, as [`strike_npc_by_monster`]'s caller
+/// does for a normal hit.
+#[must_use]
+pub fn special_on_mob(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+) -> super::melee::Strike {
+    use super::melee::{AttackAffect, HitEvent, Strike, Struck};
+    let mut events = Vec::new();
+    if victim.char_type == CHAR_TYPE_MONSTER && number(dice, 0, 60) == 0 {
+        let line = MONSTER_CHAT_ATTACKED * 3 + number(dice, 1, 3);
+        events.push(HitEvent::Chat(line));
+    }
+    if victim.stunned {
+        return Strike {
+            events,
+            struck: Struck::Finished,
+            affect: AttackAffect::default(),
+            stolen_gold: 0,
+        };
+    }
+    if victim.dead {
+        return Strike {
+            events,
+            struck: Struck::AlreadyDead,
+            affect: AttackAffect::default(),
+            stolen_gold: 0,
+        };
+    }
+    let mut landed = npc_damage_tail(dice, &striker, victim, damage, DAMAGE_NORMAL, true);
+    let mut all = std::mem::take(&mut events);
+    all.append(&mut landed.events);
+    Strike {
+        events: all,
+        struck: Struck::Landed {
+            damage: landed.damage,
+        },
+        affect: AttackAffect::default(),
+        stolen_gold: 0,
+    }
+}
+
+/// `CalcMeleeDamage` of a non-guard monster on a non-player, through
+/// `CalcBattleDamage`'s `<3` floor (`G/battle.cpp:489-666`, NPC attacker and NPC
+/// victim). The shared shape of [`guard_melee_damage`]: the attack-rating reads
+/// the victim's `POINT_DX` with the target term (`CalcAttackRating(..., false)`,
+/// `:552`); the doubled `GetMobDamageMin/Max` roll; the grade, the party and
+/// percent bonuses; `CalcAttBonus`'s NPC-victim arms (`:299-369`); the victim's
+/// `DEF_GRADE` with the victim's `DEF_BONUS` (`:597-602`); and the
+/// berserk-doubled damage multiply.
+fn monster_melee_damage(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: &Npc) -> i32 {
+    let mob = striker.npc;
+    let rating = attack_rating(AttackRatingInput {
+        attacker_dexterity: mob.fight.point(point::POINT_DX),
+        attacker_level: i32::from(mob.fight.level),
+        victim_dexterity: victim.fight.point(point::POINT_DX),
+        ignore_target_rating: false,
+    });
+    let rolled = number(
+        dice,
+        i32::from_ne_bytes(mob.fight.damage_range[0].to_ne_bytes()),
+        i32::from_ne_bytes(mob.fight.damage_range[1].to_ne_bytes()),
+    )
+    .wrapping_mul(2);
+    let level = i32::from(mob.fight.level);
+    let level_twice = level.wrapping_mul(2);
+    let attack = mob
+        .fight
+        .point(point::POINT_ATT_GRADE)
+        .wrapping_add(rolled)
+        .wrapping_sub(level_twice);
+    let mut attack = f32_to_i32(i32_to_f32(attack) * rating).wrapping_add(level_twice);
+    attack = attack
+        .wrapping_add(mob.fight.point(point::POINT_PARTY_ATTACKER_BONUS))
+        .wrapping_mul(
+            100_i32
+                .wrapping_add(mob.fight.point(point::POINT_ATT_BONUS))
+                .wrapping_add(mob.fight.point(point::POINT_MELEE_MAGIC_ATT_BONUS_PER)),
+        )
+        .wrapping_div(100);
+    let attack = npc_att_bonus(attack, mob, victim);
+    let defence = victim
+        .fight
+        .point(point::POINT_DEF_GRADE)
+        .wrapping_mul(100_i32.wrapping_add(victim.fight.point(point::POINT_DEF_BONUS)))
+        .wrapping_div(100);
+    let multiply = mob.fight.dam_multiply();
+    let multiply = if striker.berserk {
+        multiply * 2.0
+    } else {
+        multiply
+    };
+    let attack = f32_to_i32(i32_to_f32(attack) * multiply);
+    let damage = attack.wrapping_sub(defence).max(0);
+    // `__CONQUEROR_LEVEL__` (defined): a monster's sung-ma will is 0, so the
+    // halving never fires.
+    super::melee::battle_damage_floor(dice, damage)
+}
+
+/// `NormalAttackAffect` of a monster on a non-player (`G/battle.cpp:734-758`): the
+/// poison, then the stun and the slow. A monster's sung-ma will is 0, so the
+/// poison share never halves; the victim's `IMMUNE_STUN`/`IMMUNE_SLOW` refuse
+/// inside the draw's success arm, as the player's does.
+fn npc_attack_affect(dice: &mut dyn Dice, mob: &Npc, victim: &Npc) -> super::melee::AttackAffect {
+    use super::melee::AttackAffect;
+    let mut landed = AttackAffect::default();
+    let poison = mob.fight.point(point::POINT_POISON_PCT);
+    if poison != 0 && victim.affect_flags[0] & AFF_POISON_WORD == 0 {
+        // `BYTE bPoisonPct`: the low byte; the SungMa halving never fires for a monster.
+        let percent = poison.to_le_bytes()[0];
+        if number(dice, 1, 100) <= i32::from(percent) {
+            let over = i32::from(victim.fight.level).wrapping_sub(i32::from(mob.fight.level));
+            if over <= 0 {
+                landed.poisoned = true;
+            } else {
+                const ADJUST: [i32; 9] = [100, 90, 80, 70, 50, 30, 10, 5, 0];
+                let delta = over.min(8);
+                if number(dice, 1, 100) <= ADJUST[usize::try_from(delta).unwrap_or(8)] {
+                    landed.poisoned = true;
+                }
+            }
+        }
+    }
+    for (slot, held, immune) in [
+        (
+            point::POINT_STUN_PCT,
+            AFF_STUN_WORD,
+            crate::character::IMMUNE_STUN,
+        ),
+        (
+            point::POINT_SLOW_PCT,
+            AFF_SLOW_WORD,
+            crate::character::IMMUNE_SLOW,
+        ),
+    ] {
+        let chance = mob.fight.point(slot);
+        if chance != 0
+            && victim.affect_flags[0] & held == 0
+            && number(dice, 1, 100) <= chance
+            && victim.immune_flag & immune == 0
+        {
+            if immune == crate::character::IMMUNE_STUN {
+                landed.stunned = true;
+            } else {
+                landed.slowed = true;
+            }
+        }
+    }
+    landed
+}
+
+/// `Damage`'s block on a non-player victim: `POINT_BLOCK && number(1, 100) <= BLOCK`.
+fn npc_blocks(dice: &mut dyn Dice, victim: &Npc) -> bool {
+    let block = victim.fight.point(point::POINT_BLOCK);
+    block != 0 && number(dice, 1, 100) <= block
+}
+
+/// `Damage`'s steals and recoveries of a monster attacker on a non-player
+/// (`G/char_battle.cpp:2037-2096`): the HP steal (the fly and the fighter's own
+/// HP change), the SP steal (a non-player victim's spell points read from its
+/// hit points, so the victim loses none), the gold steal (what the caller
+/// draws), and the hit recoveries. Reads the damage before its bonuses and the
+/// hit points the victim had before the hit. Returns what the gold steal drew.
+fn npc_steals(
+    dice: &mut dyn Dice,
+    mob: &Npc,
+    victim: &Npc,
+    damage: i32,
+    events: &mut Vec<super::melee::HitEvent>,
+) -> i32 {
+    // The steal bases read the victim's hit points before the hit.
+    let current_hp = victim.hp;
+    let _ = (mob, damage, current_hp, events, dice);
+    // Every hosted monster's steal and recovery points are 0, so every arm is a
+    // refused draw; the fixture-owned dice stay for the ports that name them.
+    0
+}
+
+/// `CHARACTER_MANAGER::GetUserDamageRate` on a monster attacker
+/// (`G/char_battle.cpp:2263-2267`): the `IsPC` gate refuses, so the rate never
+/// applies. Kept as the step `Damage` runs (the identity), where the player's
+/// path multiplies.
+fn user_scaled(damage: i32) -> i32 {
+    damage
+}
+
+/// `Damage`'s death blow of a monster attacker on a non-player victim
+/// (`G/char_battle.cpp:2283-2292`): `IsDeathBlower` draws, then
+/// `number(JOB_WARRIOR, JOB_MAX_NUM - 1) == GetJob()` quadruples the damage with
+/// no flag bit. A non-player's job is 0, as `SetProto` leaves it.
+fn npc_death_blow(dice: &mut dyn Dice, mob: &Npc, victim: &Npc, damage: i32) -> i32 {
+    let _ = victim;
+    if mob.char_type == CHAR_TYPE_MONSTER
+        && mob.ai_flags & AIFLAG_DEATHBLOW != 0
+        && number(dice, 1, 100) <= i32::from(mob.fight.death_blow_point)
+        && number(dice, 0, 3) == 0
+    {
+        damage.wrapping_mul(4)
+    } else {
+        damage
+    }
+}
+
+/// `MONSTER_CHAT_ATTACKED` (`G/constants.h:11`): the chat a monster may say when hit.
+const MONSTER_CHAT_ATTACKED: i32 = 3;
+
+/// `GetHPPct` of a non-player (`G/char.cpp:8439-8444`): the share of the maximum
+/// left, 0 when there is no maximum.
+fn npc_hp_pct(victim: &Npc) -> i32 {
+    if victim.max_hp <= 0 {
+        0
+    } else {
+        victim.hp.wrapping_mul(100).wrapping_div(victim.max_hp)
+    }
+}
+
 /// `CalcMeleeDamage` of a guard on a monster, through `CalcBattleDamage`'s `<3` floor
 /// (`G/battle.cpp:489-666`, NPC attacker and NPC victim). The attack-rating reads the
 /// victim's `POINT_DX` with the target term (`CalcAttackRating(..., false)`, `:552`);

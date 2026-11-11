@@ -164,7 +164,7 @@ pub(super) enum AggroDamage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NpcCombat {
     /// `m_dwKillerPID`: the player whose hit stunned it, which `Dead` reads and resets.
-    killer_pid: u32,
+    pub(super) killer_pid: u32,
     /// `INSTANT_FLAG_NO_REWARD`, which a guard's swing sets before the stun: `Dead`
     /// skips the whole `Reward` past it (`G/char_battle.cpp:1475`, `:2221`).
     pub(super) no_reward: bool,
@@ -1502,7 +1502,13 @@ impl GameState {
     /// `attacker`'s `dam` of `kind`: the type multiplier, the victim's ×1.2, the add
     /// floored at 0, the party's share past `PM_AGGRO_INCREASE`, then
     /// `ChangeVictimByAggro`.
-    fn update_aggr_point_ex(&mut self, mob: u32, attacker: Vid, kind: AggroDamage, dam: i32) {
+    pub(super) fn update_aggr_point_ex(
+        &mut self,
+        mob: u32,
+        attacker: Vid,
+        kind: AggroDamage,
+        dam: i32,
+    ) {
         let mut dam = match kind {
             AggroDamage::Normal | AggroDamage::Special | AggroDamage::Melee => dam,
             AggroDamage::NormalRange | AggroDamage::Magic => Self::aggro_scaled(dam, 1.2),
@@ -1911,7 +1917,7 @@ impl GameState {
     /// `StartRecoveryEvent` of the non-player under `vid` (`G/char.cpp:3287-3314`): none while
     /// one runs, it is dead or stunned, or its hit points are full. The Meley statue and the
     /// ship's mast stand on no hosted map.
-    fn start_recovery(&mut self, vid: u32) {
+    pub(super) fn start_recovery(&mut self, vid: u32) {
         let Some(npc) = self.npc_by_vid(vid) else {
             return;
         };

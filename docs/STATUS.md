@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-11, after ledger section 569 (the stamina in StateMove).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 570
+Last reviewed: 2026-11-11, after ledger section 570 (the deck strikes the mast).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 571
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -619,8 +619,8 @@ spent exp. One `partial` timer remains (`affect_event`). Since 558 `cg.game.item
 in the fight window and restores a walking player's past five seconds, `PointChange`'s
 switch walks the flag at 0 and restores the mode line's point off it, the refill runs
 through the switch, and the consume gauge starts and stops with its lines; the uninitialized
-walk stamp is a recorded Defect, and the dead-pool gate stays a pre-existing 229d gap.
-next slice is the owner's call: the forest's leader branch is ported, the sash
+walk stamp is a recorded Defect, and the dead-pool gate stays a pre-existing 229d gap. Since 570 `sys.dungeon.ship_defense` is `partial` (no `missing` row remains anywhere): the wave monsters retarget the mast, swing on it through `Damage`'s NORMAL path with its SPECIAL reflect, and the mast broadcasts its HP — while the fake hydras refuse every striker.
+The next slice the forest's leader branch is ported, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.
 

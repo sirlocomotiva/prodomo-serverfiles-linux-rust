@@ -802,7 +802,7 @@ pub(crate) fn hp_pct(victim: &Npc) -> i32 {
 
 /// A non-player's `PointChange(POINT_HP, amount)`: nothing while it is dead or stunned,
 /// otherwise held to the maximum and broadcast to its targeters.
-fn npc_hp_change(victim: &mut Npc, amount: i32, events: &mut Vec<HitEvent>) {
+pub(crate) fn npc_hp_change(victim: &mut Npc, amount: i32, events: &mut Vec<HitEvent>) {
     if victim.dead || victim.stunned {
         return;
     }
