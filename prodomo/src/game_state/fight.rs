@@ -558,7 +558,8 @@ impl GameState {
         let _heard = reply.send(diff);
     }
 
-    /// Commit one `GUILD_SYMBOL_UPLOAD` (`G/input_login.cpp:1025-1026`).
+    /// Commit one `GUILD_SYMBOL_UPLOAD` (`G/input_login.cpp:993-1027`): the land
+    /// gate, then the bytes.
     fn apply_symbol_upload(
         &mut self,
         guild_id: u32,

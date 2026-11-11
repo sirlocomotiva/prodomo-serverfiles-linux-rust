@@ -9598,8 +9598,9 @@ where
 }
 
 /// Run one `GUILD_SYMBOL_UPLOAD`: the size gates close, as legacy's `SetPhase` does;
-/// the world commits the bytes, and the descriptor stores the row. An unknown guild
-/// is quiet, as the land gate's close is: the port refuses instead of closing (230v).
+/// the world runs the land gate and commits the bytes, and the descriptor stores the
+/// row. A refused guild — unknown, or landless off a test server — is quiet, as the
+/// land gate's close is: the port refuses instead of closing (230v).
 async fn symbol_upload<S>(
     _session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -16199,18 +16200,43 @@ where
         }
     }
     for store in &judged.stores {
-        let GuildQuestStore::Disband {
+        if !store_deleteguild_store(addr, context, store).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// Store one `/deleteguild` half: the disband, then the cleared land's halves —
+/// the dead guild falls out of the in-memory index, but its row may still stand,
+/// so the halves drain before the disband's delete (`GuildQuestStore::Disband`
+/// rides first for the world's ordering, not the store's). Answers whether the
+/// step may be sent.
+async fn store_deleteguild_store(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    store: &GuildQuestStore,
+) -> bool {
+    match store {
+        GuildQuestStore::Disband {
             guild_id,
             members,
             at,
-        } = store
-        else {
-            warn!(%addr, "A deleteguild held no disband; closing");
-            return false;
-        };
-        if let Err(error) = db::guilds::disband_guild(&context.store, *guild_id, members, *at).await
-        {
-            warn!(%addr, %error, "A deleteguild could not be stored; closing");
+        } => {
+            if let Err(error) =
+                db::guilds::disband_guild(&context.store, *guild_id, members, *at).await
+            {
+                warn!(%addr, %error, "A deleteguild could not be stored; closing");
+                return false;
+            }
+        }
+        GuildQuestStore::Clear { .. } => {
+            if !store_quest_land_store(addr, context, store).await {
+                return false;
+            }
+        }
+        _ => {
+            warn!(%addr, "A deleteguild held no disband or clear; closing");
             return false;
         }
     }

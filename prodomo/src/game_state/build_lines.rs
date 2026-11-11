@@ -882,8 +882,9 @@ impl GameState {
 
     /// `do_clear_land`'s wipe (`CLand::ClearLand`, `:1021-1037`): every object
     /// on the land goes in id order, the owner drops, and the claim stone
-    /// stands at the land center.
-    fn clear_build_land(&mut self, place: (u8, i32), land_id: u32) {
+    /// stands at the land center. The disband's land-clear (`ClearLandByGuildID`,
+    /// `G/guild.cpp:1045`) calls it too.
+    pub(super) fn clear_build_land(&mut self, place: (u8, i32), land_id: u32) {
         let mut objects = self
             .building_objects
             .get(&place)
@@ -1601,6 +1602,53 @@ mod tests {
             "the place unkeys"
         );
         assert!(inbox.try_recv().is_err(), "the ADD and the DEL");
+    }
+
+    /// A disband clears its land: the master's destroy queues the disband and the
+    /// land's clear, the object goes, the owner drops, and the guild goes with the
+    /// land cleared.
+    #[test]
+    fn a_disband_clears_its_land() {
+        let clock = TestClock::default();
+        let mut world = built(&clock);
+        let (vid, _mover, mut inbox) = master(&mut world);
+        world.link_guild(vid);
+        assert_eq!(world.guild_of(1), Some(7), "the master links");
+        world
+            .run_build_line(vid, b"c 14043 200 200 0 0 0", mover())
+            .expect("the piece stands");
+        while inbox.try_recv().is_ok() {}
+        let judged = world.judge_deleteguild(vid, 1_000_000);
+        assert_eq!(
+            judged.stores,
+            vec![
+                GuildQuestStore::Disband {
+                    guild_id: 7,
+                    members: vec![1],
+                    at: 1_000_000,
+                },
+                GuildQuestStore::Clear { land_id: 1 },
+            ],
+            "the disband first, then the clear"
+        );
+        assert_eq!(world.guild_of(1), None, "the guild goes");
+        assert_eq!(world.guilds.land_owner(1), None, "the owner drops");
+        assert!(world
+            .building_objects
+            .get(&PLACE)
+            .expect("the land lists")
+            .is_empty());
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard.iter().any(|record| record[0] == 2),
+            "the object's removal fans"
+        );
+        assert!(
+            heard.iter().any(|record| {
+                record[0] == 130 && record.len() == 3 + 24 && record[3..7] == 1u32.to_le_bytes()
+            }),
+            "the cleared land fans its list"
+        );
     }
 
     /// `clear_land` wipes the land: the object goes, the owner drops, the

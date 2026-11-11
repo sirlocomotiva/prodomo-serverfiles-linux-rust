@@ -1817,13 +1817,16 @@ impl GameState {
         MarkUploadAnswer::Saved { mark_id }
     }
 
-    /// Commit one judged symbol upload (`GuildSymbolUpload`'s store half,
-    /// `G/input_login.cpp:1025-1026`): the bytes go into the map, replacing any earlier
-    /// ones, and the descriptor persists them. Unknown guilds are refused: legacy's land
-    /// gate closes their uploaders on a production server, and the port refuses them
-    /// instead of closing.
+    /// Commit one judged symbol upload (`GuildSymbolUpload`, `G/input_login.cpp:993-1027`):
+    /// the land gate (`:1016-1021`) and the store half (`:1025-1026`). The gate holds the
+    /// bytes unless the guild owns a land, except on a test server; unknown guilds are
+    /// refused either way. The port refuses where legacy closes. The descriptor persists
+    /// the held bytes.
     pub(super) fn commit_symbol_upload(&mut self, guild_id: u32, data: &[u8]) -> bool {
         if !self.guilds.by_id.contains_key(&guild_id) {
+            return false;
+        }
+        if !self.test_server && self.guilds.first_owned_land(guild_id).is_none() {
             return false;
         }
         guild_mark::upload_symbol(&mut self.symbols, guild_id, data);
@@ -2210,7 +2213,7 @@ impl GameState {
         });
         let mut own = vec![
             guild_grade_record(&grades),
-            guild_info_record(&guild.info()),
+            guild_info_record(&guild.info(&self.guilds.land_owners)),
             guild_list_record(&guild.list()),
         ];
         for other_pid in guild
@@ -2256,7 +2259,10 @@ impl GameState {
             }
         });
         let _sent = self.write_to_client(vid, guild_grade_record(&grades));
-        let _sent = self.write_to_client(vid, guild_info_record(&guild.info()));
+        let _sent = self.write_to_client(
+            vid,
+            guild_info_record(&guild.info(&self.guilds.land_owners)),
+        );
         let _sent = self.write_to_client(vid, guild_list_record(&guild.list()));
         for other_pid in guild
             .members
@@ -3344,7 +3350,7 @@ impl GameState {
             guild.exp = exp;
             guild.level = level;
             guild.ladder_point = ladder;
-            let info = guild.info();
+            let info = guild.info(&self.guilds.land_owners);
             let members: Vec<Vid> = guild
                 .members
                 .values()
@@ -6400,7 +6406,7 @@ impl GameState {
         });
         let mut out = vec![
             guild_grade_record(&grades),
-            guild_info_record(&guild.info()),
+            guild_info_record(&guild.info(&self.guilds.land_owners)),
             guild_list_record(&guild.list()),
         ];
         for other_pid in guild
@@ -6475,7 +6481,7 @@ impl GameState {
             b"get_money0" => quiet(number(self.guild_gold(own))),
             b"get_max_member0" => quiet(number(u32::from(self.guild_max_members(own)))),
             b"get_total_member_level0" => quiet(number(self.guild_total_level(own))),
-            b"has_land0" => quiet(GuildAnswer::Boolean(false)),
+            b"has_land0" => quiet(GuildAnswer::Boolean(self.guild_has_land(own))),
             b"get_win_count0" => quiet(signed(self.guild_war_tally(own, 0))),
             b"get_draw_count0" => quiet(signed(self.guild_war_tally(own, 1))),
             b"get_loss_count0" => quiet(signed(self.guild_war_tally(own, 2))),
@@ -6727,10 +6733,10 @@ impl GameState {
     /// `G/guild.cpp:1034-1046`, and `DisbandGuild`, `G/guild_manager.cpp:259-273`): the
     /// guildless caller is quiet; a guild at war chats the line; a caller that does not
     /// lead is quiet; else the guild disbands — every online member's link leaves, the
-    /// REMOVE fans, the disband stamp lands, the guild, the links, the mark and the
-    /// symbol go — and the descriptor deletes the rows and stamps every member. The
-    /// `__GUILD_BONUSES__` ungrant waits for `sys.guild.bonuses`, as the wire removal's
-    /// does.
+    /// REMOVE fans, the disband stamp lands, the owned land clears, the guild, the
+    /// links, the mark and the symbol go — and the descriptor deletes the rows and
+    /// stamps every member. The `__GUILD_BONUSES__` ungrant waits for
+    /// `sys.guild.bonuses`, as the wire removal's does.
     /// Judge one `/deleteguild` (`ACMD(do_deleteguild)`, `G/cmd_gm.cpp:2169-2173`):
     /// `RequestDisband` on the caller's guild, which is what the quest destroy runs.
     pub(super) fn judge_deleteguild(&mut self, vid: Vid, now: u32) -> GuildQuestJudged {
@@ -6803,17 +6809,37 @@ impl GameState {
         // them (`G/MeleyLair.cpp:1439-1452`). The map and the registration go with
         // the guild, as `EndDungeonWarp` drops them.
         self.end_meley_run(id);
+        // `RequestDisband`'s land-clear (`ClearLandByGuildID`, `G/guild.cpp:1045`):
+        // the owned land clears before the guild goes, so the fan can still name
+        // it: each hosted place holding its map clears its objects, in place
+        // order, then the owner drops and the fan carries the guild's NAME.
+        let mut stores = vec![GuildQuestStore::Disband {
+            guild_id: id,
+            members,
+            at: now,
+        }];
+        if let Some(land) = self.guilds.first_owned_land(id) {
+            if let Some(map) = self.guild_lands.get(land).map(|land| land.map_index) {
+                let places: Vec<(u8, i32)> = self
+                    .maps
+                    .keys()
+                    .filter(|(_, m)| *m == map)
+                    .copied()
+                    .collect();
+                for place in places {
+                    let taken = self.build_halves.len();
+                    self.clear_build_land(place, land);
+                    stores.extend(self.build_halves.split_off(taken));
+                }
+            }
+        }
         self.guilds.by_id.remove(&id);
         self.marks.delete_mark(id);
         self.symbols.remove(&id);
         GuildQuestJudged {
             answer: GuildAnswer::None,
             own: Vec::new(),
-            stores: vec![GuildQuestStore::Disband {
-                guild_id: id,
-                members,
-                at: now,
-            }],
+            stores,
         }
     }
 
@@ -7100,6 +7126,13 @@ impl GameState {
             .map_or(0, |guild| guild.max_power)
     }
 
+    /// Whether the caller's guild owns a land (`guild_has_land0`,
+    /// `G/questlua_guild.cpp:502-510`, through `HasLand`, `G/guild.cpp:1990-1993`):
+    /// false when it holds none.
+    fn guild_has_land(&self, own: Option<u32>) -> bool {
+        own.is_some_and(|id| self.guilds.first_owned_land(id).is_some())
+    }
+
     /// The gold of the caller's guild, 0 when it holds none.
     fn guild_gold(&self, own: Option<u32>) -> u32 {
         own.and_then(|id| self.guilds.by_id.get(&id))
@@ -7327,7 +7360,7 @@ impl GameState {
         if let Some(row) = guild.members.get_mut(&from) {
             row.grade = JOIN_GRADE;
         }
-        let info = guild.info();
+        let info = guild.info(&self.guilds.land_owners);
         let grades: [GcGuildGrade; GUILD_GRADE_COUNT] = std::array::from_fn(|index| {
             let (name, auth) = &guild.grades[index];
             GcGuildGrade {
@@ -7643,7 +7676,7 @@ impl GameState {
             guild.power = max_power;
             (exp, level, ladder)
         };
-        let info = guild.info();
+        let info = guild.info(&self.guilds.land_owners);
         let members: Vec<Vid> = guild
             .members
             .values()
@@ -7804,10 +7837,10 @@ impl Guild {
             .map(|(_, auth)| *auth)
     }
 
-    /// The INFO body (`SendGuildInfoPacket`, `G/guild.cpp:910-939`). `has_land` is 0:
-    /// `HasLand` asks the building manager (`:1990-1993`), which is not ported
-    /// (`sys.world.objects`).
-    fn info(&self) -> GcGuildInfo {
+    /// The INFO body (`SendGuildInfoPacket`, `G/guild.cpp:910-939`): `has_land`
+    /// answers the land index (`HasLand`, `G/guild.cpp:1990-1993`, through
+    /// `FindLandByGuild`, `G/building.cpp:799-812`).
+    fn info(&self, owners: &BTreeMap<u32, u32>) -> GcGuildInfo {
         GcGuildInfo {
             member_count: u16::try_from(self.members.len()).unwrap_or(u16::MAX),
             max_member_count: self.max_member_count(),
@@ -7817,7 +7850,7 @@ impl Guild {
             level: self.level,
             name: pad_guild_name(&self.name),
             gold: self.gold,
-            has_land: 0,
+            has_land: u8::from(owners.values().any(|owner| *owner == self.id)),
         }
     }
 
@@ -7892,6 +7925,17 @@ impl Guilds {
     /// Drop the owner of `land` (`CLand::SetOwner(0)`).
     pub(super) fn drop_land_owner(&mut self, land: u32) {
         self.land_owners.remove(&land);
+    }
+
+    /// The first land `guild` owns in id order (`CManager::FindLandByGuild`,
+    /// `G/building.cpp:799-812`): legacy scans its `std::map` and returns the first
+    /// whose `dwGuildID` matches, which is the first in id order. A guild holds at
+    /// most one land, so at most one ever answers.
+    pub(super) fn first_owned_land(&self, guild: u32) -> Option<u32> {
+        self.land_owners
+            .iter()
+            .find(|(_, owner)| **owner == guild)
+            .map(|(land, _)| *land)
     }
 
     /// The shadow guild `id`'s master, level, ladder and dungeon triple, if any:
@@ -8074,7 +8118,7 @@ impl Guilds {
             b"get_money0" => number(self.shadow_counter(own, |guild| guild.gold)),
             b"get_max_member0" => number(u32::from(self.shadow_max_members(own))),
             b"get_total_member_level0" => number(self.shadow_total_level(own)),
-            b"has_land0" => GuildAnswer::Boolean(false),
+            b"has_land0" => GuildAnswer::Boolean(self.shadow_has_land(own)),
             b"get_win_count0" => signed(self.shadow_tally(own, |guild| guild.war_wins)),
             b"get_draw_count0" => signed(self.shadow_tally(own, |guild| guild.war_draws)),
             b"get_loss_count0" => signed(self.shadow_tally(own, |guild| guild.war_losses)),
@@ -8213,6 +8257,11 @@ impl Guilds {
     fn shadow_max_members(&self, own: Option<u32>) -> u16 {
         own.and_then(|id| self.by_id.get(&id))
             .map_or(0, Guild::max_member_count)
+    }
+
+    /// Whether the caller's shadow guild owns a land, false when it holds none.
+    fn shadow_has_land(&self, own: Option<u32>) -> bool {
+        own.is_some_and(|id| self.first_owned_land(id).is_some())
     }
 
     /// The summed member levels of the caller's shadow guild, 0 when it holds none.
@@ -8693,6 +8742,40 @@ mod tests {
     }
 
     #[test]
+    fn a_landless_upload_stops_off_test_but_passes_on_it() {
+        use quest::manager::GuildAnswer;
+        // `GuildSymbolUpload`'s land gate (`G/input_login.cpp:1016-1021`): a guild
+        // owning no land is refused off a test server, and held on one. An unknown
+        // guild is refused either way. The fixture's `a_world` stands in test mode.
+        let (_clock, mut world, _, _) = a_guilded_pair();
+        assert!(world.test_server);
+        assert!(world.commit_symbol_upload(GUILD_ID, &[9; 16]));
+        world.test_server = false;
+        assert!(!world.commit_symbol_upload(GUILD_ID, &[9; 16]));
+        assert!(!world.commit_symbol_upload(4242, &[9; 16]));
+        world.install_land_owners(&vec![(1, GUILD_ID)]);
+        assert!(world.commit_symbol_upload(GUILD_ID, &[9; 16]));
+        assert_eq!(world.guilds.first_owned_land(GUILD_ID), Some(1));
+        // The quest reader and the shadow agree with the gate, and the INFO body
+        // carries the bit.
+        let judged =
+            world.answer_guild_quest(Vid::new(MASTER_VID), b"has_land0", &[], NOW, "master");
+        assert_eq!(judged.answer, GuildAnswer::Boolean(true));
+        assert_eq!(
+            world
+                .guilds
+                .judge_shadow(Some(MASTER_VID), b"has_land0", &[], "master"),
+            GuildAnswer::Boolean(true)
+        );
+        let judged = world.answer_guild_quest(Vid::new(GUEST_VID), b"has_land0", &[], NOW, "guest");
+        assert_eq!(judged.answer, GuildAnswer::Boolean(false));
+        let info = world.guilds.by_id[&GUILD_ID].info(&world.guilds.land_owners);
+        assert_eq!(info.has_land, 1);
+        world.guilds.drop_land_owner(1);
+        assert!(!world.commit_symbol_upload(GUILD_ID, &[9; 16]));
+    }
+
+    #[test]
     fn a_symbol_mismatch_serves_and_a_match_is_quiet() {
         // `GuildSymbolCRC` serves the bytes on a size or CRC miss and sends nothing
         // on a hit or an unknown guild; an upload to an unknown guild is refused.
@@ -8870,6 +8953,28 @@ mod tests {
                 .quest_flag(MASTER_VID, b"guild_manage.new_disband_time")
         });
         assert_eq!(stamp, Some(i32::try_from(NOW).unwrap()));
+    }
+
+    /// A disband landless clears nothing: the fixture owns no land, so the judged
+    /// stores carry the disband alone.
+    #[test]
+    fn a_landless_disband_queues_no_clear() {
+        use quest::manager::GuildAnswer;
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        world.quests = Some(a_quest_manager());
+        heard(&mut master);
+        heard(&mut guest);
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"destroy_guild", &[], NOW, "");
+        assert_eq!(judged.answer, GuildAnswer::None);
+        assert_eq!(
+            judged.stores,
+            [GuildQuestStore::Disband {
+                guild_id: GUILD_ID,
+                members: vec![MASTER_VID],
+                at: NOW,
+            }],
+            "the disband alone, no Clear"
+        );
     }
 
     /// `pc.remove_from_guild` leaves through the wire removal's commit: the rest hear the

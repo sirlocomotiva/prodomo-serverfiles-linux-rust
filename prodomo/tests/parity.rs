@@ -3045,6 +3045,9 @@ struct Entered {
     lands: Vec<Vec<u8>>,
     /// The advance-skill window line, for an ungrouped entrant past level 4.
     window: Option<Vec<u8>>,
+    /// The guild walk's INFO record, for a guilded entrant — set by the guilded
+    /// enter helpers, empty otherwise.
+    guild_walk_info: std::cell::OnceCell<Option<Vec<u8>>>,
 }
 
 /// [`enter_game_records`], answering what the burst showed.
@@ -3128,6 +3131,7 @@ fn finish_enter_game_kingdom(
         report,
         lands,
         window,
+        guild_walk_info: std::cell::OnceCell::new(),
     }
 }
 
@@ -3167,6 +3171,7 @@ fn enter_game_guilded(
     let mut kept: Vec<Vec<u8>> = Vec::new();
     let mut subs = want.iter();
     let mut sub = subs.next();
+    let mut walk_info: Option<Vec<u8>> = None;
     while sub.is_some() {
         let record = keyed.read_game_raw();
         if record[0] != GC_GUILD {
@@ -3179,12 +3184,18 @@ fn enter_game_guilded(
             continue;
         }
         assert_eq!(Some(&got), sub, "want sub {sub:?}: {record:02x?}");
+        if got == GUILD_SUBHEADER_GC_INFO {
+            walk_info = Some(record);
+            sub = subs.next();
+            continue;
+        }
         sub = subs.next();
     }
     // The enter walk's WAR_LIST (`SendGuildWar`): with no wars it is the bare envelope,
     // read here so the burst below sees only what it knows.
     keyed.unread(kept);
     let entered = finish_enter_game(keyed, add, info);
+    let _set = entered.guild_walk_info.set(walk_info);
     // The login's guild-bonus update (`GuildUpdateAffect` in `LoginMember`): the point
     // move and the add ride the burst behind the walk, pushed back by the readers
     // above, and are pulled here before the login lines that follow.
@@ -3298,6 +3309,7 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
         report,
         lands,
         window,
+        guild_walk_info: std::cell::OnceCell::new(),
     }
 }
 
@@ -19331,8 +19343,10 @@ fn seed_war_pair(database: &ScratchDatabase) {
 }
 
 /// A guild master builds on its land and clears it: `/build c` stands the object and
-/// spends the price (with the claim-half stored), an unknown VID knocks nothing, and
-/// `/clear_land` wipes the land and stones the center.
+/// spends the price (with the claim-half stored), an unknown VID knocks nothing,
+/// `/clear_land` wipes the land and stones the center, and `/deleteguild` —
+/// after a fresh reclaim into the store — clears its land with the disband.
+/// The master's login INFO names the owned land (`HasLand`).
 #[test]
 fn a_master_builds_on_its_land_and_clears_it() {
     let Some(database) = ScratchDatabase::create() else {
@@ -19376,6 +19390,7 @@ fn a_master_builds_on_its_land_and_clears_it() {
     let server = Server::start(binary(), database.url());
     let (mut alice, _, entered) =
         enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    walk_info_names_the_land(&entered);
     // The enter names no guild — the walk already named MyGuild — and lists map 1's
     // 18 lands, land 1 first, owned by guild 1.
     assert_eq!(
@@ -19444,6 +19459,80 @@ fn a_master_builds_on_its_land_and_clears_it() {
         &database,
         "(SELECT count(*) FROM building_object WHERE land_id = 1) = 0 AND (SELECT count(*) FROM          guild_land WHERE land_id = 1) = 0",
     );
+    master_disbands_and_its_land_clears(&database, alice, server);
+}
+
+/// The guilded walk's INFO names the owned land (`HasLand`).
+fn walk_info_names_the_land(entered: &Entered) {
+    let walk_info = entered
+        .guild_walk_info
+        .get()
+        .expect("the guilded walk sets INFO")
+        .as_ref()
+        .expect("the walk carries INFO");
+    assert_eq!(
+        walk_info[38], 1,
+        "the owned land names itself: {walk_info:02x?}"
+    );
+}
+
+/// The disband half of `a_master_builds_on_its_land_and_clears_it`: the guild
+/// reclaims the land straight into the store with an object standing on it, the
+/// master relogs onto it (the rows install at boot), and `/deleteguild` clears
+/// the land with the guild — REMOVE, the object's removal, the ownerless list,
+/// the claim stone with its summary — and the store empties.
+fn master_disbands_and_its_land_clears(database: &ScratchDatabase, alice: Keyed, server: Server) {
+    drop(alice);
+    drop(server);
+    // The guild reclaims the land straight into the store, an object stands on it
+    // again, and the disband clears it with the guild: the REMOVE rides first, then
+    // the object's removal, then the cleared land's list with no owner.
+    sql(
+        database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (1, 1)",
+    );
+    sql(
+    database,
+    "INSERT INTO building_object (id, land_id, vnum, map_index, x, y, x_rot, y_rot,          z_rot, life) VALUES (9, 1, 14300, 1, 430800, 907000, 0, 0, 0, 100)",
+);
+    // The store rows install on the next boot, so the claim and the object land
+    // through a reconnect: the master relogs onto the claimed land.
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _, entered) =
+        enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    let list = &entered.lands[0];
+    assert_eq!(&list[23..27], &1u32.to_le_bytes(), "land 1's guild again");
+    // The disband clears the land with the guild.
+    alice.send_record(&slash(b"/deleteguild"));
+    let removed = alice.read_game();
+    assert_eq!(
+        guild_subheader(&removed),
+        GUILD_SUBHEADER_GC_REMOVE,
+        "the member hears the removal first: {removed:02x?}"
+    );
+    let gone = alice.read_game();
+    assert_eq!(
+        gone[0], GC_CHARACTER_DEL,
+        "the object's removal: {gone:02x?}"
+    );
+    // No NAME rides: the enter already told the master its own guild.
+    let fan = alice.read_game();
+    assert_eq!(fan[0], GC_LAND_LIST, "the cleared land's list: {fan:02x?}");
+    assert_eq!(&fan[3..7], &1u32.to_le_bytes(), "land 1");
+    assert_eq!(&fan[23..27], &0u32.to_le_bytes(), "no owner");
+    // The clear stones the center: the claim stone shows behind the list, with
+    // its summary.
+    let stone = alice.read_game();
+    assert_eq!(stone[0], GC_CHARACTER_ADD, "the claim stone: {stone:02x?}");
+    let summary = alice.read_game();
+    assert_eq!(
+        summary[0], GC_CHAR_ADDITIONAL_INFO,
+        "the stone's summary: {summary:02x?}"
+    );
+    alice.still("nothing follows the disband");
+    check(database, "SELECT COUNT(*) = 0 FROM guild");
+    check(database, "SELECT COUNT(*) = 0 FROM guild_land");
+    check(database, "SELECT COUNT(*) = 0 FROM building_object");
 }
 
 /// A `CHAT_TYPE_NOTICE` line to a character of empire 1.

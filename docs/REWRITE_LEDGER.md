@@ -53732,3 +53732,35 @@ The full suite flaked once under load (`a_gaya_craft_spends_and_a_market_opens`,
 
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5464 passed with 1 load flake in 46 targets, and the parity target re-run at `--test-threads=8` 440 passed, 0 failed; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
 
+
+## 594. The disband's land-clear
+
+`RequestDisband`'s other half (`ClearLandByGuildID`, `G/guild.cpp:1045`) runs with
+the destroy: the owned land clears before the guild goes. `first_owned_land`
+(`FindLandByGuild`, `G/building.cpp:799-812`) finds it — the first in id order, as
+legacy's `std::map` scan does — then each hosted place holding its map clears its
+objects through the `/clear_land` wipe (`clear_build_land`, now shared) in place
+order, once the owner is dropped the land fans, and the claim stone stands. The
+fan lands before `by_id` drops the guild, so a viewer that never heard the guild
+still gets its NAME (the scenario's master already knows its own, so no NAME
+rides there). The judged stores carry the disband first, then each place's
+`Clear`; the `/deleteguild` drain (`store_deleteguild_store`) stores each half in
+order — the disband's delete cascades the owner row first, so the clear's drop is
+a no-op and its object delete does the work. The quest destroy's halves drain
+through the same shared land path. The land answers come with the finder: the
+walk INFO's `has_land` bit (`HasLand`, `G/guild.cpp:1990-1993`, the one stale "not
+ported" the row's note named), `guild.has_land0` in the world and the shadow
+(they answered false since 230s), and the symbol upload's land gate
+(`G/input_login.cpp:1016-1021`, held unless owned except on a test server) —
+refuse where legacy closes, as the unknown-guild arm already did. Scenario
+`a_master_builds_on_its_land_and_clears_it` grows a tail: the guild reclaims the
+land into the store, the master relogs onto it (the rows install at boot), and
+`/deleteguild` fans REMOVE, the object's removal, the ownerless list and the
+claim stone with its summary, and the store empties. The walk INFO's bit is
+pinned at the first enter (`guild_walk_info`, captured by the guilded-enter
+helper for every guilded scenario). Unit seats: `a_disband_clears_its_land` (the
+disband first, then the clear, in one judgement), `a_landless_disband_queues_no_clear`,
+and `a_landless_upload_stops_off_test_but_passes_on_it` (the gate, both readers,
+the INFO bit).
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5468 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+

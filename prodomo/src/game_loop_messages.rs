@@ -1505,9 +1505,10 @@ pub enum GameCommand {
         /// Where the game thread reports the diff triples.
         reply: oneshot::Sender<Vec<(u8, Vec<u8>)>>,
     },
-    /// Commits one judged symbol upload (`GuildSymbolUpload`'s store half,
-    /// `G/input_login.cpp:1025-1026`): the bytes go into the map, replacing any earlier
-    /// ones. Unknown guilds are refused.
+    /// Commits one judged symbol upload (`GuildSymbolUpload`, `G/input_login.cpp:993-1027`):
+    /// the land gate, then the store half (`:1025-1026`): the bytes go into the map,
+    /// replacing any earlier ones. Unknown guilds, and landless guilds off a test
+    /// server, are refused.
     SymbolUpload {
         /// The opaque guild id the symbol belongs to.
         guild_id: u32,
