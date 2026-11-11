@@ -52682,3 +52682,82 @@ fn the_dragon_stones_scale_the_dragons_blows_both_ways() {
     let _ = defence;
     drop(alice);
 }
+
+/// Ledger 568: Delta the sura learns 63 (`Tais Vrajit`), casts it naked, and the next affect
+/// tick strips it: the weapon aura's flag is set with no weapon worn (`UpdateAffect`,
+/// `G/char_affect.cpp:168-174`). The cast's add lands first, then — within the tick's ~1 s —
+/// the remove, with no SP spent between them (the strip takes the row before the drain, so
+/// starvation cannot be the cause; Delta's 300 SP covers the 25-a-tick cost regardless).
+#[test]
+fn a_naked_aura_is_stripped_on_the_next_tick() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 1, skill_point = 1, sp = 200, x = 480000, y = 960000 \
+         WHERE name = 'Delta'",
+    );
+    // Delta's stored spot is map 2, which no Channel hosts; map 1 loads.
+    let (mut delta, listed, _items) = load_character(&server, b"alice", 3);
+    let vid = listed.id;
+    let _entered = enter_game_shown(&mut delta);
+    read_login_event(&mut delta);
+    delta.send_record(&client_chat(CHAT_TALKING, b"/skillup 63"));
+    let mut saw_spend = false;
+    let mut burst = Vec::new();
+    for _ in 0..8 {
+        let record = delta.read_game();
+        if record == point_change(vid, 28, 0, 0) {
+            assert!(!saw_spend, "one spend");
+            saw_spend = true;
+            continue;
+        }
+        if record[0] == GC_SKILL_LEVEL_NEW {
+            burst = record;
+            break;
+        }
+        panic!("past a skill-up, a record nobody accounted for: {record:02x?}");
+    }
+    assert!(saw_spend, "the spend lands");
+    assert_eq!(burst[1 + 63 * 6], 0, "master 0");
+    assert_eq!(burst[1 + 63 * 6 + 1], 1, "level 1");
+    let mut cast = vec![CG_USE_SKILL];
+    cast.extend_from_slice(&63_u32.to_le_bytes());
+    cast.extend_from_slice(&vid.to_le_bytes());
+    delta.send_record(&cast);
+    let mut saw_add = false;
+    for _ in 0..8 {
+        let record = delta.read_game();
+        if record[0] == GC_AFFECT_ADD {
+            let kind = u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
+            assert_eq!(kind, 63, "the cast's aura: {record:02x?}");
+            saw_add = true;
+            break;
+        }
+    }
+    assert!(saw_add, "the cast lands its aura");
+    // The cast laid two rows (the point and the point2 arms); the tick strips both.
+    let mut removes = Vec::new();
+    for _ in 0..16 {
+        let record = delta.read_game();
+        if record[0] == GC_AFFECT_REMOVE {
+            let kind = u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
+            if kind == 63 {
+                removes.push(record[5]);
+            }
+            if removes.len() == 2 {
+                break;
+            }
+        }
+    }
+    removes.sort_unstable();
+    assert_eq!(
+        removes,
+        [95, 100],
+        "the next tick strips the naked aura's rows"
+    );
+}

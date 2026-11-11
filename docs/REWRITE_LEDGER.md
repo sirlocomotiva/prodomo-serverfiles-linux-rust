@@ -52850,3 +52850,50 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 568. The affect_event audit
+
+`event.char_affect.affect_event` and `sys.event.core` are `ported`: the timer is audited
+arm-by-arm against `UpdateAffect` (`G/char_affect.cpp:166-234`) and `ProcessAffect`
+(`:339-466`), and no `partial` timer remains (`timed-events.md` is 63 `ported`, 36 `unused`).
+
+Ported, in `prodomo/src/game_state/affect.rs`'s `run_affect_event`: the aura strip at the
+tick's head (`:168-174`, behind `__FIX_BUG_AURA_TAIS_FARA_ARMA__`, defined in
+`prodomodefines.h:101` — a set `AFF_GWIGUM`/`AFF_GEOMGYEONG` flag goes with its skill-63/4
+rows when `wears_weapon` reads none worn), the 151-162 guild-band strip before the SP
+drain (`:402-407`, the guildless included, via `guild_holds_any_war`), and the
+`UpdatePacket` condition on removals (`:449-458` — the update goes out when the flags or
+either raw speed moved, as `run_clear_affect` already did). The band is live: guild skills
+152-157 lay first-arm buffs with durations 180-300 (`skill_proto`), usable through
+`ALWAYS_USABLE`, and out-of-war members kept them until now.
+
+Dead arms, recorded in the row, not ported: the shop-premium arm (`:345-355` — no granter;
+shop premium reads 0) and the hair-expiry arm (`:366-385` — `affect.add_hair`/
+`remove_hair` are `unused`). The pools stay non-negative through every ported path, so the
+tick's `== 0` end check holds; `SaveAffect` was already `saved_affects_of`. V3 (stamina
+consumption, walking flags) stays a recorded Divergence.
+
+Scenario `a_naked_aura_is_stripped_on_the_next_tick`: Delta the sura (moved to map 1; her
+stored spot is unhosted map 2) learns 63, casts it naked, the two adds land, and the next
+tick strips both rows. Unit pins: the weaponless aura goes while the armed control stays,
+the band strips 152/157/162 while 150/163 stay, and a speed-only expiry still updates the
+view. Mutants (strip inverted, band inverted, speed compare ANDed) all killed by the unit
+pins.
+
+Inventory: `event.char_affect.affect_event` partial to ported, `sys.event.core` missing to
+ported.
+
+Flakes: the first full run lost `a_gm_reads_the_guild_info_and_the_re_entry_tool` (a move record
+raced the relog's arrival burst), the second `a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit`
+(a special effect landed in the off toggle's quiet window), and the parity re-run in between
+`a_gm_flags_a_stray_dog_aggressive_and_coward` (the known coward-escape bound, 5128 over 5100).
+All three pass alone (the guild one five times); none touches the affect tick's records. The
+receipt run holds `--test-threads=8`.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite568c.txt` (5360 passed, 0 failed in 46 targets; two earlier runs each flaked one unrelated single, green alone), `cargo test --workspace --doc
+--locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

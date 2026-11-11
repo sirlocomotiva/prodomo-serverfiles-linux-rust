@@ -21,7 +21,7 @@ use protocol::gc_inventory::HEADER_GC_SYNC_POSITION;
 use protocol::gc_nested::{GcAffectAdd, GcAffectElement};
 use protocol::gc_position::GcSyncPositionElement;
 use protocol::gc_vid::{GcHeaderAndDwordAndByte, HEADER_GC_AFFECT_REMOVE};
-use world::character::{is_recovering, update_recovery};
+use world::character::{is_recovering, update_recovery, Equipment};
 
 use super::view::EntityKey;
 use super::GameState;
@@ -31,14 +31,24 @@ use crate::loading_phase::{
     AFFECT_GUILD_BONUS_FIRST, AFFECT_GUILD_BONUS_LAST, AFFECT_INVISIBILITY,
     AFFECT_MULTI_FARM_PREMIUM, AFFECT_PICKUP_ENABLE, AFFECT_PLAYER_TOP_1, AFFECT_PLAYER_TOP_3,
     AFFECT_PREMIUM_END, AFFECT_PREMIUM_START, AFFECT_REVIVE_INVISIBLE, AFFECT_SUNGMA_END,
-    AFFECT_SUNGMA_FIRST, AFFECT_WAR_FLAG, AFFECT_WORLD_BOSS_REWARD, AFF_INVISIBILITY,
-    AFF_REVIVE_INVISIBLE, AFF_STUN, INFINITE_AFFECT_DURATION, REVIVE_INVISIBLE_SECONDS,
+    AFFECT_SUNGMA_FIRST, AFFECT_WAR_FLAG, AFFECT_WORLD_BOSS_REWARD, AFF_GEOMGYEONG, AFF_GWIGUM,
+    AFF_INVISIBILITY, AFF_REVIVE_INVISIBLE, AFF_STUN, INFINITE_AFFECT_DURATION,
+    REVIVE_INVISIBLE_SECONDS,
 };
 use crate::save::PASSES_PER_SEC;
 
 /// The Pulses a stopped body waits before the stamina refills: `3000` ms of legacy's clock at
 /// 25 Pulses a second.
 const STAMINA_REST_PULSES: u64 = 75;
+/// `SKILL_GEOMKYUNG` (`G/skill.h:56`): 4, auto-incremented after `SKILL_JEONGWI` = 3. The
+/// skill rows the aura strip takes off with the flag when no weapon is worn.
+const SKILL_GEOMKYUNG: u32 = 4;
+/// `SKILL_GWIGEOM` (`G/skill.h:91`): 63, auto-incremented after `SKILL_YONGKWON` = 62. The
+/// skill rows the aura strip takes off with the flag when no weapon is worn.
+const SKILL_GWIGEOM: u32 = 63;
+/// The guild-skill band `ProcessAffect` strips outside a war (`G/skill.h:162`, `:172`):
+/// 151-162.
+const GUILD_SKILL_BAND: std::ops::RangeInclusive<u32> = 151..=162;
 
 /// One timed affect of a character, as legacy's `CAffect` keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,6 +764,54 @@ impl GameState {
             .map_or(0, |points| points.get_point(kind))
     }
 
+    /// Whether the player under `vid` wears a weapon (`GetWear(WEAR_WEAPON)`,
+    /// `G/char.h`): the aura strip's gate.
+    fn wears_weapon(&self, vid: Vid) -> bool {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return false;
+        };
+        Equipment::of(character.items(), &self.protos)
+            .wear(common::enums::EWearPositions::Weapon as u16)
+            .is_some()
+    }
+
+    /// Whether `vid`'s guild holds any begun war (`GetGuild()->UnderAnyWar()`): the
+    /// guildless hold none (`G/char_affect.cpp:404` reads the null guild as false).
+    fn guild_holds_any_war(&self, vid: Vid) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| self.guild_of(character.player_id()))
+            .is_some_and(|id| self.guild_under_any_war(id))
+    }
+
+    /// The guild-skill strip (`ProcessAffect`, `G/char_affect.cpp:402-407`): band rows go
+    /// when the guild is in no war; the guildless lose them too. Each stripped row
+    /// uncomputes and answers its remove packet. Answers whether any row went.
+    fn strip_peacetime_guild_affects(&mut self, vid: Vid) -> bool {
+        if self.guild_holds_any_war(vid) {
+            return false;
+        }
+        let stripped = match self.affect_events.get_mut(&vid) {
+            Some(event) => {
+                let mut stripped = Vec::new();
+                event.affects.retain(|affect| {
+                    if GUILD_SKILL_BAND.contains(&affect.kind) {
+                        stripped.push(*affect);
+                        return false;
+                    }
+                    true
+                });
+                stripped
+            }
+            None => Vec::new(),
+        };
+        for affect in &stripped {
+            self.compute_affect(vid, affect, false);
+            let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
+        }
+        !stripped.is_empty()
+    }
     /// Runs the affect events due by `pulse`, in the order they were started.
     pub(super) fn run_affect_events(&mut self, pulse: u64) {
         let mut due: Vec<(u64, u64, Vid)> = self
@@ -772,6 +830,19 @@ impl GameState {
     /// the removals and the flag update, and the next run when something is left.
     fn run_affect_event(&mut self, vid: Vid, pulse: u64) {
         let flags_before = self.affect_flags_of(vid);
+        let mov_before = self.raw_point_of(vid, point::POINT_MOV_SPEED);
+        let att_before = self.raw_point_of(vid, point::POINT_ATT_SPEED);
+        // The aura strip (`UpdateAffect`, `G/char_affect.cpp:168-174`, behind
+        // `__FIX_BUG_AURA_TAIS_FARA_ARMA__`, which this tree defines): a weapon aura
+        // whose flag is set goes with its skill rows when no weapon is worn.
+        for (flag, skill) in [
+            (AFF_GWIGUM, SKILL_GWIGEOM),
+            (AFF_GEOMGYEONG, SKILL_GEOMKYUNG),
+        ] {
+            if flags_before[0] & (1 << (flag - 1)) != 0 && !self.wears_weapon(vid) {
+                self.remove_pc_affect(vid, skill);
+            }
+        }
         let idle = self
             .bodies
             .get(&vid)
@@ -800,6 +871,9 @@ impl GameState {
         // `CHorseNameManager::Validate` (`G/horsename_manager.cpp:58-75`) runs before the
         // countdown, like `ProcessAffect` runs it on its hair arm's heels.
         self.validate_horse_name(vid);
+        // The guild-skill strip runs before the drain, as legacy checks each affect's
+        // guild band before its SP cost.
+        let _stripped = self.strip_peacetime_guild_affects(vid);
         let Some(event) = self.affect_events.get_mut(&vid) else {
             return;
         };
@@ -847,7 +921,10 @@ impl GameState {
             self.change_pc_point(vid, point::POINT_SP, -drained, false);
         }
         let flags_after = self.affect_flags_of(vid);
-        if flags_after != flags_before {
+        if flags_after != flags_before
+            || self.raw_point_of(vid, point::POINT_MOV_SPEED) != mov_before
+            || self.raw_point_of(vid, point::POINT_ATT_SPEED) != att_before
+        {
             self.send_affect_update(vid, flags_after);
         }
         if again {
@@ -1870,5 +1947,136 @@ mod tests {
         assert!(super::clear_affect_keeps(AFFECT_WORLD_BOSS_REWARD));
         assert!(super::clear_affect_keeps(AFFECT_PICKUP_ENABLE));
         assert!(!super::clear_affect_keeps(AFFECT_GUILD_BONUS_LAST + 1));
+    }
+
+    #[test]
+    fn the_tick_strips_a_weaponless_aura_and_keeps_an_armed_one() {
+        use common::enums::EWearPositions;
+        use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
+        use gamedata::item_kind::{ITEM_WEAPON, WEAPON_SWORD};
+        use protocol::item_pos::ItemPos;
+        use world::item::Item;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let unarmed = Vid::new(1);
+        let mut bare = enter_on(&mut world, PLACE, 1, (5, 5), 10);
+        let sword = world
+            .protos
+            .rows()
+            .iter()
+            .find(|proto| proto.item_type == ITEM_WEAPON && proto.sub_type == WEAPON_SWORD)
+            .expect("the protos hold a sword")
+            .vnum;
+        let mut blade = Item::new(11, sword);
+        blade.set_size(1).unwrap();
+        let cell = INVENTORY_MAX_NUM + EWearPositions::Weapon as u16;
+        let (mut armed_inbox, _) = crate::game_state::fixtures::enter_seeing_with(
+            &mut world,
+            PLACE,
+            2,
+            (6, 6),
+            10,
+            &[(ItemPos::new(EWindows::Inventory as u8, cell), blade)],
+        );
+        let armed = Vid::new(2);
+        assert!(world.wears_weapon(armed), "the control wears its sword");
+        assert!(!world.wears_weapon(unarmed), "the bare entrant wears none");
+        for vid in [unarmed, armed] {
+            world.add_pc_affect(
+                vid,
+                Affect::buff(
+                    super::SKILL_GWIGEOM,
+                    common::point_slot::POINT_NONE,
+                    0,
+                    crate::loading_phase::AFF_GWIGUM,
+                    60,
+                    0,
+                ),
+                false,
+            );
+        }
+        while bare.try_recv().is_ok() {}
+        while armed_inbox.try_recv().is_ok() {}
+        world.run_affect_events(25);
+        assert!(
+            world
+                .affect_events
+                .get(&unarmed)
+                .is_none_or(|event| event.affects.is_empty()),
+            "the weaponless aura goes"
+        );
+        assert_eq!(
+            world.affect_events[&armed].affects.len(),
+            1,
+            "the armed aura stays"
+        );
+        let mut saw_remove = false;
+        while let Ok(frame) = bare.try_recv() {
+            if frame.first() == Some(&protocol::gc_vid::HEADER_GC_AFFECT_REMOVE) {
+                saw_remove = true;
+            }
+        }
+        assert!(saw_remove, "the strip answers the aura's remove packet");
+    }
+
+    #[test]
+    fn the_tick_strips_guild_band_rows_outside_a_war_and_keeps_the_edges() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let vid = Vid::new(1);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (5, 5), 10);
+        for kind in [150, 152, 157, 162, 163] {
+            world.add_pc_affect(
+                vid,
+                Affect::buff(kind, common::point_slot::POINT_NONE, 0, 0, 60, 0),
+                false,
+            );
+        }
+        while inbox.try_recv().is_ok() {}
+        // The guildless hold no war, so 152, 157 and 162 go; 150 and 163 stay.
+        world.run_affect_events(25);
+        let mut kinds: Vec<u32> = world.affect_events[&vid]
+            .affects
+            .iter()
+            .map(|affect| affect.kind)
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, [150, 163]);
+        let mut removes = 0;
+        while let Ok(frame) = inbox.try_recv() {
+            if frame.first() == Some(&protocol::gc_vid::HEADER_GC_AFFECT_REMOVE) {
+                removes += 1;
+            }
+        }
+        assert_eq!(removes, 3, "each stripped band row answers its remove");
+    }
+
+    #[test]
+    fn an_expiry_that_moves_only_speed_still_updates_the_view() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let vid = Vid::new(1);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (5, 5), 10);
+        world.add_pc_affect(
+            vid,
+            Affect::buff(200, common::point_slot::POINT_MOV_SPEED, 10, 0, 1, 0),
+            false,
+        );
+        while inbox.try_recv().is_ok() {}
+        world.run_affect_events(25);
+        assert!(
+            world
+                .affect_events
+                .get(&vid)
+                .is_none_or(|event| event.affects.is_empty()),
+            "the one-tick row expires"
+        );
+        let mut saw_update = false;
+        while let Ok(frame) = inbox.try_recv() {
+            if frame.first() == Some(&protocol::gc_inventory::HEADER_GC_CHARACTER_UPDATE.value()) {
+                saw_update = true;
+            }
+        }
+        assert!(saw_update, "the speed-only expiry updates the view");
     }
 }
