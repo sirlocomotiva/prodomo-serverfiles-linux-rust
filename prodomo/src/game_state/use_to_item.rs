@@ -129,6 +129,12 @@ fn arena_limited_item(vnum: u32) -> bool {
         || matches!(vnum, 71_044 | 71_055)
 }
 
+/// `IsLimitedPotionOnPVP` (`G/arena.cpp:1126-1129`): limited, and not allowed.
+/// The allowed ten live once, in `auto_potion.rs`.
+fn duel_limited_potion(vnum: u32) -> bool {
+    arena_limited_item(vnum) && !super::auto_potion::PVP_ALLOWED.contains(&vnum)
+}
+
 /// Arena potion admission (`G/char_item.cpp:5581-5609`, `:5684-5714`).
 fn arena_potion_refusal(
     vnum: u32,
@@ -222,6 +228,24 @@ impl GameState {
             .place_of(vid.raw())
             .is_some_and(|(_, map)| self.is_arena_map(map));
         if arena_map && arena_limited_item(vnum) {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1205]", &[]);
+            }
+            return false;
+        }
+        // `UseItemEx`'s head (`G/char_item.cpp:2769-2775`): with the
+        // `no_potions_on_pvp` flag up, a duellist's limited potion that is not
+        // allowed refuses with the same line.
+        let no_potions = self
+            .quests
+            .as_ref()
+            .is_some_and(|quests| quests.manager().event_flag(b"no_potions_on_pvp") != 0);
+        let fighting = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .is_some_and(|character| self.pvp_is_fighting(character.player_id()));
+        if no_potions && fighting && duel_limited_potion(vnum) {
             if let Some(mover) = self.own_mover(vid) {
                 self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1205]", &[]);
             }
@@ -981,10 +1005,90 @@ mod tests {
             .expect("player 1")
     }
 
+    /// The head duel gate (`G/char_item.cpp:2769-2775`): with the flag up, a
+    /// duellist's limited potion that is not allowed refuses with `[LS;1205]`;
+    /// an allowed blue potion passes, and so does a use with the flag down.
+    #[test]
+    fn a_duellist_with_the_flag_up_refuses_a_limited_potion() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let (_inbox, _shown) = enter_seeing_with(&mut world, PLACE, 1, (5, 5), 10_000, &[]);
+        let (_inbox, _shown) = enter_seeing_with(&mut world, PLACE, 2, (6, 6), 10_000, &[]);
+        // A fight between 1 and 2, as an accept leaves it.
+        world.run_pvp(Vid::new(1), b"2");
+        world.run_pvp(Vid::new(2), b"1");
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager =
+            quest::manager::Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        world.quests = Some(crate::game_state::quests::Quests::new(
+            manager,
+            std::sync::Arc::default(),
+            gamedata::mob_locale_names::MobNamesByLanguage::default(),
+        ));
+        world
+            .quests
+            .as_mut()
+            .expect("quests loaded")
+            .manager_mut()
+            .set_event_flag(b"no_potions_on_pvp", 1);
+        // A limited potion and an allowed one, both on the owner's data.
+        let limited = Item::new(7, 71_055);
+        let allowed = Item::new(8, 27_004);
+        let at_limited = ItemPos::new(EWindows::Inventory as u8, 0);
+        let at_allowed = ItemPos::new(EWindows::Inventory as u8, 1);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .expect("online")
+            .items_mut()
+            .set(at_limited, &limited)
+            .expect("cell 0 is free");
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .expect("online")
+            .items_mut()
+            .set(at_allowed, &allowed)
+            .expect("cell 1 is free");
+        assert!(
+            !world.arena_item_use_allowed(Vid::new(1), at_limited),
+            "the limited potion refuses"
+        );
+        assert!(
+            world.arena_item_use_allowed(Vid::new(1), at_allowed),
+            "the allowed blue potion passes"
+        );
+        world
+            .quests
+            .as_mut()
+            .expect("quests loaded")
+            .manager_mut()
+            .set_event_flag(b"no_potions_on_pvp", 0);
+        assert!(
+            world.arena_item_use_allowed(Vid::new(1), at_limited),
+            "the flag down passes"
+        );
+    }
+
     #[test]
     fn arena_limited_items_match_the_complete_legacy_list() {
         for vnum in 50_801..=50_826 {
             assert!(arena_limited_item(vnum));
+            assert_eq!(
+                duel_limited_potion(vnum),
+                !super::super::auto_potion::PVP_ALLOWED.contains(&vnum),
+                "the duel gate is limited-and-not-allowed: {vnum}"
+            );
+        }
+        for vnum in super::super::auto_potion::PVP_ALLOWED {
+            assert!(
+                !duel_limited_potion(vnum),
+                "an allowed potion never refuses: {vnum}"
+            );
         }
         for vnum in [50_020, 50_021, 50_022, 71_044, 71_055] {
             assert!(arena_limited_item(vnum));

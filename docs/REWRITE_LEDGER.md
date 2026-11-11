@@ -53675,3 +53675,28 @@ limit owns that socket. Unit seats: the land
 (`a_nog_use_lands_three_rows_and_uses_one_up`), the held refusal
 (`a_held_302_row_refuses_the_second_pocket`).
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5461 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 592. The shared duel-potion gate
+
+`UseItemEx`'s head (`G/char_item.cpp:2769-2775`) refuses a duellist's limited
+potion while `no_potions_on_pvp` stands, with the same `[LS;1205]` the arena
+gate tells. It seats in `arena_item_use_allowed` (`use_to_item.rs`), behind the
+arena-limited arm as legacy's `else if` sits behind `IsLimitedItem`: the flag
+from the quest manager, `pvp_is_fighting` for the attacker's pair, and
+`duel_limited_potion` (`IsLimitedPotionOnPVP`, `G/arena.cpp:1126-1129`):
+limited, and not allowed. The allowed ten live once, in `auto_potion.rs`
+(`PVP_ALLOWED`, now `pub(super)`): the blue potions and the automatic blue
+potions (`IsAllowedPotionOnPVP`, `G/arena.cpp:1105-1124`). Both plain-item and
+use-to-item uses run through the one gate, as both run through `UseItemEx`'s
+head. A GM stands the flag in the scenario because `questlib_extra.lua`'s load
+set is not ported (only the boot's two seeds stand). Scenario
+`a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion`: Alice (a
+`HIGH_WIZARD`) stands the flag, fights Yankee, uses the limited 50817 and hears
+`[LS;1205]` with the row kept. Yankee enters first while Alpha is offline, so
+his own team list names her with the offline byte, and her enter fans him
+`TEAM_LOGIN` ahead of her view. Unit seat: the refuse, the allowed blue
+potion's pass, and the flag-down pass
+(`a_duellist_with_the_flag_up_refuses_a_limited_potion`), plus the duel list
+pinned against the arena list in the legacy-list sweep.
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5463 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+

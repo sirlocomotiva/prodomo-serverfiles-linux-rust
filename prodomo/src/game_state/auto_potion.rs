@@ -61,7 +61,8 @@ const STUN_SKILLS: [u32; 4] = [5, 20, 107, 50];
 
 /// The vnums the duel-potion gate lets through (`IsAllowedPotionOnPVP`,
 /// `G/arena.cpp:1105-1124`): the blue potions and the automatic blue potions.
-const PVP_ALLOWED: [u32; 10] = [
+/// Shared with the head duel gate in `use_to_item.rs`.
+pub(super) const PVP_ALLOWED: [u32; 10] = [
     27004, 27005, 27006, 39040, 39041, 39042, 72727, 72728, 72729, 72730,
 ];
 

@@ -54464,3 +54464,123 @@ fn a_nog_pocket_lands_302_and_a_second_is_refused_while_held() {
     );
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
 }
+
+/// `cg.game.item_use`: `UseItemEx`'s head (`G/char_item.cpp:2769-2775`) refuses a
+/// duellist's limited potion while `no_potions_on_pvp` stands. Alice (a
+/// `HIGH_WIZARD`) stands the flag herself, then fights Yankee; she uses the
+/// limited 50817 and hears `[LS;1205]` with the row kept. A GM stands the flag
+/// because `questlib_extra.lua`'s load set is not ported (only the boot's two
+/// seeds stand). Yankee enters first while Alpha is offline, so his own team
+/// list names her with the offline byte; her enter then fans him `TEAM_LOGIN`.
+#[test]
+fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    for login in ["alice", "bob"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         50817 FROM player WHERE name = 'Alpha'",
+    );
+    // Alice carries the grant from the select, where `/eventflag` reads it.
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(50_817).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    // Yankee enters while Alpha is offline: his own team list names Alpha with
+    // the offline byte, inside his login event, ahead of the board's line. The
+    // enter helper only reads the online shape, so the enter is manual here.
+    let (mut yankee, _, yankee_list) = select_screen_on(&server, 1, b"bob", ENGLISH);
+    let (_yankee_character, _yankee_quickslots, _yankee_items) =
+        load_selected(&mut yankee, &yankee_list, 0);
+    let _yankee_entered = enter_game_shown(&mut yankee);
+    assert_eq!(
+        yankee.read_game(),
+        messenger_team_list_many(&[(b"Alpha".as_slice(), false)]),
+        "Yankee hears the offline team"
+    );
+    read_login_event(&mut yankee);
+    yankee.still("nothing follows");
+    let (mut alice, _empire, list) = select_screen_on(&server, 1, b"alice", ENGLISH);
+    let (_character, _quickslots, _items) = load_selected(&mut alice, &list, 0);
+    let entered = enter_game_shown(&mut alice);
+    // Alice hears no team list of her own: the team is every GM name other
+    // than her own, and her grant names her.
+    read_login_event(&mut alice);
+    // Yankee's team set holds Alpha, so her enter fans `TEAM_LOGIN` to him,
+    // ahead of her view records (`LoadTeamList`, `G/messenger_manager.cpp:48-52`).
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(1, b"Alpha"),
+        "Yankee hears Alpha's team login"
+    );
+    let yankee_sees_alice = yankee.read_game();
+    assert_eq!(
+        yankee_sees_alice[0], GC_CHARACTER_ADD,
+        "Alice's view reaches Yankee"
+    );
+    let yankee_sees_info = yankee.read_game();
+    assert_eq!(
+        yankee_sees_info[0], GC_CHAR_ADDITIONAL_INFO,
+        "Alice's summary reaches Yankee"
+    );
+    let update = yankee.read_game();
+    assert_eq!(
+        update[0], GC_CHARACTER_UPDATE,
+        "Alice's login hides reach Yankee's view"
+    );
+    yankee.still("nothing follows");
+    let alice_vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
+    let yankee_vid = entered
+        .shown
+        .records
+        .iter()
+        .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[5..11] == b"Yankee"[..])
+        .map(|record| u32::from_le_bytes(record[1..5].try_into().expect("a VID")))
+        .expect("Yankee stands in view");
+    // When: Alice stands the flag, the duel begins, and Alice uses. Then:
+    // `[LS;1205]`, the row kept.
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        b"/eventflag no_potions_on_pvp 1",
+    ));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag no_potions_on_pvp 1"),
+        "the flag stands"
+    );
+    challenge_and_accept(&mut alice, &mut yankee, alice_vid, yankee_vid);
+    alice.send_record(&client_item_use(0));
+    let mut refused = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !refused {
+        let Some(record) = alice.read_game_until(deadline) else {
+            break;
+        };
+        if record == an_info_line(b"[LS;1205]") {
+            refused = true;
+        }
+    }
+    assert!(refused, "the duel gate refuses");
+    check(&database, "(SELECT count = 2 FROM item WHERE id = 30)");
+    drop(alice);
+    drop(yankee);
+}
