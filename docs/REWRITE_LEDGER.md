@@ -52562,3 +52562,76 @@ Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --loc
 `prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 560. The dungeon's returns
+
+`sys.dungeon.core` was `missing`; it is `partial` now. The slice ports the two arms
+that fire when a party comes apart inside a dungeon: the leader's disconnect sends
+the near members home (`FExitDungeon`, `G/party.cpp:655-661`), and a body that lands
+on a living dungeon's map rejoins its present set (the login's `SetDungeon` stamp,
+`G/input_login.cpp:788`).
+
+The exit arm (`exit_dungeon_nears`, `party.rs:634`) runs in `unlink_party` between
+the bonus zeroes and the near clear, while the flags still read, as legacy orders
+it. It fires only when the leader stands on a living dungeon's map; every other
+linked near member with a saved exit is ordered home in PID order and leaves the
+present set, and members with no exit stay, as `d.exit_all` leaves them. The
+re-stamp (`join_dungeon`, `dungeons.rs`, called from `place_body` in `motion.rs`)
+cancels the dead event through the member-entered path, as the login's stamp does
+through `IncMember`.
+
+The scenario first tried to prove the re-stamp with a relog back inside, and the
+relog refused to go there: the row names the dungeon, so the login re-seeds the
+pending warp from the exit columns. That is `SetPlayerProto`
+(`G/char.cpp:2289-2294`), unconditional in legacy too — a relog whose row names a
+private map always comes home. Legacy shows the character on the dungeon map first
+and warps it after; the Rewrite lands it home directly. The end states match, so
+the re-stamp is a safety net for jump-landings and future warp-onto-private paths,
+and the scenario pins the homecoming instead:
+`a_leader_disconnect_sends_the_near_home_and_the_relog_comes_home`. A party of two
+jumps into the forest and both hear the landing `back`; past one party tick the
+leader disconnects and Yankee warps to its saved exit while its row goes home;
+Alpha's relog lands home too, Yankee quits to disband the pair, and the quiets
+prove no `back` reaches the outsiders.
+
+Two races surfaced while writing it. Alpha's own removal may or may not reach
+Yankee before the warp-leave drops Yankee's pending outbox, so the scenario
+accepts it but does not require it (the same-map disconnect fan is proven
+elsewhere). And the 3 s party Update fans the relink's own headers, so Yankee's
+re-enter runs in a tick-free window (a blind 3.5 s sleep while both stand offline)
+through a new `enter_game_view_partied` helper, modelled on the guilded enter,
+which pulls the link's walk — own ADD, every member's ADD, every online LINK,
+every member's UPDATE, own UPDATE, PARAMETER — and pushes the burst back.
+
+The slice also asked how the forest middle runs on the legacy server at all: no
+jump stamps its members (`d.new_jump` and `d.new_jump_party` only `Create` and
+warp, and `FWarpToDungeon`'s `IncPartyMember` is commented out), so every
+member's `m_pkDungeon` is NULL and `pc.in_dungeon()` is false until someone
+relogs — owner question 70. If the middle is dead there, the Rewrite's running
+middle (membership derived live from the map) is a recorded Divergence. The
+same stamp question holds the invite and leave gates (`PERR_DUNGEON`/`[LS;822]`,
+`[LS;673]`, `[LS;531]`): legacy reads the stamp, so they may be dead there too,
+and they stay open until the owner answers. Two related arms are dead on the
+data regardless: `CParty::Link`'s dungeon stamp (`G/party.cpp:586-589`) needs
+`d.join`, which no quest calls (`lua.d.join` is `unused` since ledger 401), and
+`IsPartyInDungeon(351)` needs a dungeon of base 351, which no quest jumps to
+(the sweep finds 65, 66, 209 and 210; the index lists those four and no 351).
+
+Unit tests: a re-enter rejoins the present and cancels the dead event, and a
+leader unlink in a dungeon sends only the near with exits home (the far member
+holds an exit and the near fourth holds none, so each gate is pinned alone).
+Mutants: dropping the near filter, the exit gate, the unpresent call, the join
+and the motion re-stamp all fail their test. Dropping the dungeon-alive gate is
+equivalent (the dungeon lookup behind it gates the same map), and the PID exit
+order is unobservable (per-session warps race in legacy too), so neither is
+mutated. The scenario is 8/8 green.
+
+Inventory: `sys.dungeon.core` missing to partial, naming the disconnect scenario.
+
+Gates (2026-11-11): `cargo fmt --all -- --check`, `cargo build --workspace --locked
+--offline`, the full suite to `/tmp/suite560b.txt` (5348 passed, 0 failed in 46 targets), `cargo test --workspace --doc --locked
+--offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, the
+`prodomo\_%` count (0) and `git status --short legacy/` (clean) follow. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

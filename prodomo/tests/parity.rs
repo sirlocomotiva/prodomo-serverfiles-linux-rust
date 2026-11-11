@@ -2307,6 +2307,50 @@ fn enter_game_view(keyed: &mut Keyed) -> Entered {
     keyed.still("nothing follows");
     entered
 }
+
+/// [`enter_game_view`] for an entrant the party relinks: the burst's own pair is read
+/// first, then the link's walk is pulled one record at a time — its own ADD, every
+/// member's ADD in PID order, every online LINK in PID order, every member's UPDATE, its
+/// own UPDATE and the PARAMETER (`CParty::Link`, `G/party.cpp:575-585`) — and everything
+/// else is pushed back for the burst below. `online` is the PIDs that hold a VID,
+/// `members` every member: the all-to-one fans count the offline too. The caller keeps
+/// the Update tick out of the window (it fans the same headers); the walk's own order
+/// gates the pulls.
+fn enter_game_view_partied(keyed: &mut Keyed, online: &[u32], members: &[u32]) -> Entered {
+    keyed.send_record(&client_enter_game());
+    let add = keyed.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = keyed.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let mut want: Vec<u8> = Vec::new();
+    want.push(GC_PARTY_ADD);
+    want.extend(std::iter::repeat_n(GC_PARTY_ADD, members.len()));
+    want.extend(std::iter::repeat_n(GC_PARTY_LINK, online.len()));
+    want.extend(std::iter::repeat_n(GC_PARTY_UPDATE, members.len() + 1));
+    want.push(GC_PARTY_PARAMETER);
+    for head in want {
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let record = keyed.read_game_raw();
+            if record[0] == head {
+                if head == GC_PARTY_ADD {
+                    let pid = u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
+                    assert!(
+                        members.contains(&pid),
+                        "the walk names a member: {record:02x?}"
+                    );
+                }
+                break;
+            }
+            kept.push(record);
+        }
+        keyed.unread(kept);
+    }
+    let entered = finish_enter_game(keyed, add, info);
+    read_login_event(keyed);
+    keyed.still("nothing follows");
+    entered
+}
 /// [`enter_game_view`] for an entrant inside a window: answers the burst and the
 /// board's raw login record, for the shape asserts.
 fn enter_game_view_cells(keyed: &mut Keyed) -> (Entered, Vec<u8>) {
@@ -14283,6 +14327,7 @@ const TARGET_LEN: usize = 32;
 /// walk records (`G/party.cpp` sends).
 const CG_PARTY_INVITE: u8 = 0x48;
 const CG_PARTY_INVITE_ANSWER: u8 = 0x49;
+const CG_PARTY_REMOVE: u8 = 0x4a;
 /// `HEADER_CG_PARTY_SET_STATE` (75): the PID, the role byte and the flag byte.
 const CG_PARTY_SET_STATE: u8 = 75;
 const GC_PARTY_INVITE: u8 = 0x4d;
@@ -24662,6 +24707,216 @@ fn a_party_enters_the_forest_and_its_timer_sends_it_home() {
  player WHERE name = 'Yankee') = 1",
     );
 }
+/// The records that may ride ahead of the forest returns' own: the relink's walk and the
+/// view's own inserts and updates.
+fn forest_return_noise(head: u8) -> bool {
+    matches!(
+        head,
+        GC_PARTY_ADD
+            | GC_PARTY_LINK
+            | GC_PARTY_UNLINK
+            | GC_PARTY_UPDATE
+            | GC_PARTY_PARAMETER
+            | GC_CHARACTER_ADD
+            | GC_CHAR_ADDITIONAL_INFO
+            | GC_CHARACTER_UPDATE
+            | GC_WALK_MODE
+            | GC_OWNERSHIP
+    )
+}
+
+/// Both members hear the landing `back` two seconds on.
+fn forest_both_hear_the_landing(mut party: ForestParty) -> ForestParty {
+    for (who, what) in [(&mut party.alice, "Alpha"), (&mut party.yankee, "Yankee")] {
+        let back = loop {
+            let record = who.read_game();
+            if record[0] == GC_CHAT {
+                break record;
+            }
+            assert!(
+                forest_return_noise(record[0]),
+                "{what} hears the landing first: {record:02x?}"
+            );
+        };
+        assert_eq!(
+            back,
+            chat_packet(CHAT_TYPE_NOTICE, 1, b"back"),
+            "{what} hears the landing"
+        );
+    }
+    party
+}
+
+/// One party tick runs with both linked inside, nearing Yankee; its update proves it.
+fn forest_tick_nears_while_both_inside(mut party: ForestParty) -> ForestParty {
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    for _ in 0..32 {
+        let record = party.yankee.read_game();
+        if record[0] == GC_PARTY_UPDATE {
+            break;
+        }
+        assert!(
+            forest_return_noise(record[0]),
+            "ahead of the tick: {record:02x?}"
+        );
+    }
+    party
+}
+
+/// The leader's wire is gone; Yankee's carries its own warp home. Alpha's own removal
+/// may or may not arrive first: the warp queues to Yankee's session while the removal
+/// fans from the game thread, and the warp-leave drops Yankee's pending outbox with
+/// it. A stranger's removal still fails. The `RemoveBonus` fan zeroes Yankee's role
+/// points through `ComputePoints` between the two.
+fn forest_drop_warps_yankee_home(yankee: &mut Keyed, alpha_vid: u32, yankee_vid: u32, port: u16) {
+    let mut removed_self = false;
+    let mut warped = false;
+    for _ in 0..32 {
+        if removed_self && warped {
+            break;
+        }
+        let record = yankee.read_game();
+        if record[0] == GC_CHARACTER_DEL {
+            let vid = u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
+            if vid == alpha_vid {
+                continue;
+            }
+            assert_eq!(vid, yankee_vid, "no stranger leaves: {record:02x?}");
+            removed_self = true;
+            continue;
+        }
+        if record[0] == GC_WARP {
+            assert_eq!(
+                record,
+                a_warp_record((469_700, 949_600), port),
+                "Yankee warps to its saved exit"
+            );
+            warped = true;
+            continue;
+        }
+        assert!(
+            forest_return_noise(record[0]) || record[0] == GC_POINT_CHANGE,
+            "behind the disconnect: {record:02x?}"
+        );
+    }
+    assert!(removed_self && warped, "Yankee sees its warp home");
+}
+
+/// Alpha lands home beside Yankee, so Yankee reads the arrive: the insert, its info
+/// and the entrant's revive entry and restate, as `drain_leader_relog` does.
+fn forest_yankee_sees_alpha_arrive(yankee: &mut Keyed, alpha_vid: u32) {
+    let add = yankee.read_game();
+    assert_eq!(
+        add[0], GC_CHARACTER_ADD,
+        "yankee sees the arrive: {add:02x?}"
+    );
+    assert_eq!(&add[1..5], &alpha_vid.to_le_bytes(), "the insert's vid");
+    let info = yankee.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+    let entry = yankee.read_game_raw();
+    assert!(
+        yankee.timer_record(&entry),
+        "the entrant's entry is the timer's: {entry:02x?}"
+    );
+    let restate = yankee.read_game_raw();
+    assert!(
+        yankee.timer_restate(&restate),
+        "the entrant's login update restates its entry: {restate:02x?}"
+    );
+}
+
+/// `sys.dungeon.core`: the leader's disconnect sends the near home, and the relog comes
+/// home. A party of two jumps into the forest; both hear the landing `back`. Past one
+/// party tick the leader disconnects, and the near Yankee is warped to its saved exit
+/// (`FExitDungeon`, `G/party.cpp:655-661`) while its row goes home to map 1. Alpha's
+/// relog lands home too: the row names the dungeon, so the login re-seeds the pending
+/// warp from the exit (`SetPlayerProto`, `G/char.cpp:2289-2294`). Yankee quits at once,
+/// disbanding the pair, and the quiets prove no `back` reaches the outsiders.
+#[test]
+fn a_leader_disconnect_sends_the_near_home_and_the_relog_comes_home() {
+    let Some((server, database, _root)) = forest_world_with_probe(RETURN_PROBE) else {
+        return;
+    };
+    let (party, guardian) = forest_party_forms(&server);
+    let party = forest_dialog_spends_the_tickets(party, guardian);
+    let party = forest_jump_lands_at_the_entry(&server, &database, party);
+    let party = forest_both_hear_the_landing(party);
+    let party = forest_tick_nears_while_both_inside(party);
+    let ForestParty {
+        alice,
+        mut yankee,
+        alpha,
+        yankee_listed,
+        alice_key,
+        yankee_key,
+        alpha_vid,
+        yankee_vid,
+        port,
+    } = party;
+    // The leader disconnects; Yankee's wire carries its own warp home.
+    drop(alice);
+    forest_drop_warps_yankee_home(&mut yankee, alpha_vid, yankee_vid, port);
+    // Both stand offline, so one Update tick fires to nobody and the next is three
+    // seconds out: Yankee's enter below runs in a tick-free window, and the pulled
+    // walk is the link's own.
+    std::thread::sleep(std::time::Duration::from_millis(3_500));
+    // Yankee re-enters home on map 1, at its saved exit, relinked to a party of two
+    // with an offline leader.
+    yankee = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut yankee, b"bob", yankee_key, CLIENT_KEY).expect("the key logs in again");
+    let _loaded = load_selected(&mut yankee, &list, 0);
+    let members = [alpha.id, yankee_listed.id];
+    let own = enter_game_view_partied(&mut yankee, &[yankee_listed.id], &members);
+    assert_eq!(
+        inserted_at(&own.add),
+        (469_700, 949_600),
+        "Yankee enters home at its exit"
+    );
+    check(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Yankee') = 1",
+    );
+    // Yankee quits at once: a party of two disbands with no REMOVE, only the role
+    // points' zeroes and their `ComputePoints` cascade (`:1717-1721`), and the party
+    // is gone before Alpha's relog. The cascade's length varies with the recompute,
+    // so the drain runs till the wire idles.
+    yankee.send_record(&client_party_remove(yankee_listed.id));
+    let idle = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        let Some(record) = yankee.read_game_until(idle) else {
+            break;
+        };
+        if record[0] != GC_POINT_CHANGE {
+            yankee.pushed.insert(0, record);
+            break;
+        }
+    }
+    // Alpha's relog comes home, not back inside: the row names the dungeon, so the
+    // login re-seeds the pending warp from the exit columns (`SetPlayerProto`,
+    // `G/char.cpp:2289-2294`), which is legacy's end state too. No `back` can reach
+    // either of them now: both left the present set, and no login inside arms the
+    // timer again.
+    let mut alice = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut alice, b"alice", alice_key, CLIENT_KEY).expect("the key logs in again");
+    let _loaded = load_selected(&mut alice, &list, 0);
+    let own = enter_game_view(&mut alice);
+    assert_eq!(
+        inserted_at(&own.add),
+        (469_600, 949_500),
+        "Alpha enters home at its exit"
+    );
+    check(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 1",
+    );
+    forest_yankee_sees_alpha_arrive(&mut yankee, alpha_vid);
+    // With the party gone no Update tick can fall inside the quiets, so their silence
+    // proves no `back` reaches the outsiders.
+    alice.quiet_allowing_farm("no return reaches alpha");
+    yankee.quiet_allowing_farm("no return reaches yankee");
+}
 
 /// `lua.ds.give_qualification`, `lua.ds.is_qualified`, `lua.ds.open_refine_window`,
 /// `lua.ds.open_attr_change_window`: the alchemist (20001) stands on map 1, and Alpha
@@ -26433,6 +26688,13 @@ fn drain_leader_relog(guest: &mut Keyed) {
         guest.timer_restate(&restate),
         "the entrant's login update restates its entry: {restate:02x?}"
     );
+}
+
+/// A `CG_PARTY_REMOVE` (74) naming `pid`.
+fn client_party_remove(pid: u32) -> Vec<u8> {
+    let mut record = vec![CG_PARTY_REMOVE];
+    record.extend_from_slice(&pid.to_le_bytes());
+    record
 }
 
 /// A `CG_PARTY_SET_STATE` naming `pid` with `role` and `flag`.
@@ -38043,6 +38305,22 @@ const SOLO_PROBE: &[u8] = b"quest solo_probe begin\n\
     if not pc.in_dungeon() then\n\
     pc.setf(\"enchanted_forest_zone\", \"dungeon_enter\", 1)\n\
     d.new_jump(210, 782400, 1502100)\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+/// Ledger 560: the probe of the returns. A login in the dungeon arms one `return_notice`
+/// two seconds on, and the timer notices `back` to the dungeon's present set.
+const RETURN_PROBE: &[u8] = b"quest return_probe begin\n\
+    state start begin\n\
+    when login begin\n\
+    if pc.in_dungeon() then\n\
+    server_timer(\"return_notice\", 2, d.get_map_index())\n\
+    end\n\
+    end\n\
+    when return_notice.server_timer begin\n\
+    if d.select(get_server_timer_arg()) then\n\
+    d.notice(\"back\")\n\
     end\n\
     end\n\
     end\n\

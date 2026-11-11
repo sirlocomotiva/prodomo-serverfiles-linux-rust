@@ -398,15 +398,14 @@ impl super::GameState {
                 continue;
             };
             self.order_dungeon_exit(vid, exit);
-            if let Some(dungeon) = self.dungeons.by_index.get_mut(&index) {
-                dungeon.present.remove(&vid);
-            }
+            self.unpresent(index, vid);
         }
     }
 
     /// One member's warp back to the place it came from: the ordered warp names the
-    /// remembered exit, and the member leaves the dungeon's present set.
-    fn order_dungeon_exit(&mut self, vid: Vid, exit: crate::save::ExitLocation) {
+    /// remembered exit. The caller drops the member from the present set, as
+    /// `d.exit_all` and the party's `FExitDungeon` arm do.
+    pub(super) fn order_dungeon_exit(&mut self, vid: Vid, exit: crate::save::ExitLocation) {
         let raw = vid.raw();
         let Some(clients) = self.clients.as_ref() else {
             return;
@@ -501,6 +500,26 @@ impl super::GameState {
             let pulse = self.last_pulse;
             self.dungeons.last_member_left(map, pulse);
         }
+    }
+    /// Drop `vid` from the present set of the dungeon under `index`, arming nothing:
+    /// what `d.exit_all` and the party's `FExitDungeon` arm do after ordering the
+    /// member's warp out. The member's own departure arms the dead event when it is
+    /// the last one out (`leave_dungeon`). Quiet with none.
+    pub(super) fn unpresent(&mut self, index: i32, vid: Vid) {
+        if let Some(dungeon) = self.dungeons.by_index.get_mut(&index) {
+            dungeon.present.remove(&vid);
+        }
+    }
+
+    /// `CDungeon::IncMember` (`G/dungeon.cpp:213-219`): the player entered the map of
+    /// the dungeon under `map`, so it joins the dungeon's present set and the dead
+    /// event is cancelled. Quiet with none.
+    pub(super) fn join_dungeon(&mut self, vid: Vid, map: i32) {
+        let Some(dungeon) = self.dungeons.by_index.get_mut(&map) else {
+            return;
+        };
+        dungeon.present.insert(vid);
+        self.dungeons.member_entered(map);
     }
 
     /// `dungeon_dead_event` (`G/dungeon.cpp:192-211`) and `quest_server_timer_event`
@@ -911,6 +930,200 @@ mod tests {
         assert_eq!(dungeons.dead_due(100 + DEAD_EVENT_PULSES), [index]);
         dungeons.member_entered(index);
         assert!(dungeons.dead_due(u64::MAX).is_empty());
+    }
+
+    /// A level-10 `PcCard` named `name` for the present-set tests.
+    fn present_card(name: String) -> crate::loading_phase::PcCard {
+        crate::loading_phase::PcCard {
+            name,
+            job: 0,
+            empire: 1,
+            level: 10,
+            conqueror_level: 0,
+            language: 0,
+            pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+            skill_group: 0,
+            alignment: 0,
+            voice: 0,
+            premium: 0,
+            premium_time: 0,
+        }
+    }
+
+    /// `FindByMapIndex(GetMapIndex())` (`G/input_login.cpp:788`): entering a living
+    /// dungeon's index rejoins its present set, and a re-enter cancels the armed dead
+    /// event (`IncMember`, `G/dungeon.cpp:213-219`). Entering a map with no dungeon
+    /// is quiet.
+    #[test]
+    fn a_reenter_rejoins_the_present_and_cancels_the_dead_event() {
+        use crate::game_loop_messages::EnterPlace;
+        use crate::game_state::fixtures::{a_world, enter_on, TestClock};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world.host_map(
+            1,
+            2_100_000,
+            gamedata::server_attr::SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 10,
+                rows: 10,
+            },
+        );
+        let index = world.dungeons.create(210, hosted, &[]).expect("an index");
+        assert_eq!(index, 2_100_000);
+        let mut inbox = enter_on(&mut world, (1, index), 1, (100, 100), 12_345);
+        while inbox.try_recv().is_ok() {}
+        assert!(world
+            .dungeons
+            .get(index)
+            .unwrap()
+            .present
+            .contains(&Vid::new(1)));
+        assert!(world.dungeons.get(index).unwrap().dead_due.is_none());
+        world.leave_dungeon(Vid::new(1), index);
+        assert!(world.dungeons.get(index).unwrap().present.is_empty());
+        assert!(world.dungeons.get(index).unwrap().dead_due.is_some());
+        let card = present_card("P1".to_owned());
+        world.place_body(
+            Vid::new(1),
+            EnterPlace {
+                channel: 1,
+                map: index,
+                x: 100,
+                y: 100,
+                z: 0,
+            },
+            card,
+        );
+        assert!(world
+            .dungeons
+            .get(index)
+            .unwrap()
+            .present
+            .contains(&Vid::new(1)));
+        assert!(world.dungeons.get(index).unwrap().dead_due.is_none());
+        // A map with no dungeon is quiet.
+        world.place_body(
+            Vid::new(1),
+            EnterPlace {
+                channel: 1,
+                map: 1,
+                x: 100,
+                y: 100,
+                z: 0,
+            },
+            present_card("P1".to_owned()),
+        );
+        assert!(world
+            .dungeons
+            .get(index)
+            .unwrap()
+            .present
+            .contains(&Vid::new(1)));
+    }
+
+    /// `FExitDungeon` (`G/party.cpp:655-661`): the leader unlinks while standing in a
+    /// living dungeon, so the linked near member with a saved exit leaves the present
+    /// set; the far member and the exitless near member stay, and the unlinked leader
+    /// itself stays (its own departure removes it). The warp order is the scenario's.
+    #[test]
+    fn a_leader_unlink_in_a_dungeon_sends_only_the_near_with_exits_home() {
+        const LEADER_VID: u32 = 100;
+        const GUEST_VID: u32 = 101;
+        const THIRD_VID: u32 = 102;
+        const FOURTH_VID: u32 = 103;
+        const HERE: (i32, i32) = (3200, 3200);
+        const EAST: (i32, i32) = (3300, 3200);
+        const NEAR_WEST: (i32, i32) = (3150, 3200);
+        const FAR: (i32, i32) = (9000, 9000);
+        use crate::game_loop_messages::EnterPlace;
+        use crate::game_state::fixtures::{a_world, enter, TestClock};
+
+        let clock = TestClock::default();
+        clock.set(1_000);
+        let mut world = a_world(&clock);
+        let _leader = enter(&mut world, LEADER_VID, HERE, 0);
+        let _guest = enter(&mut world, GUEST_VID, EAST, 0);
+        let _third = enter(&mut world, THIRD_VID, FAR, 0);
+        let _fourth = enter(&mut world, FOURTH_VID, NEAR_WEST, 0);
+        world.create_party(LEADER_VID);
+        world.join_party(LEADER_VID, GUEST_VID);
+        world.join_party(LEADER_VID, THIRD_VID);
+        world.join_party(LEADER_VID, FOURTH_VID);
+        for vid in [LEADER_VID, GUEST_VID, THIRD_VID, FOURTH_VID] {
+            world.link_party(Vid::new(vid));
+        }
+        world.host_map(
+            1,
+            2_100_000,
+            gamedata::server_attr::SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 10,
+                rows: 10,
+            },
+        );
+        let index = world
+            .dungeons
+            .create(210, |_: i32| true, &[])
+            .expect("an index");
+        // All four stand on the dungeon's map; the Update nears the leader, the guest
+        // (100 apart) and the fourth (50 apart) but not the third (5800 off). The guest
+        // and the third hold saved exits; the fourth holds none, so each gate is pinned
+        // alone: nearness by the exited guest against the stayed third, the exit by the
+        // stayed fourth.
+        for (vid, at) in [
+            (LEADER_VID, HERE),
+            (GUEST_VID, EAST),
+            (THIRD_VID, FAR),
+            (FOURTH_VID, NEAR_WEST),
+        ] {
+            world.place_body(
+                Vid::new(vid),
+                EnterPlace {
+                    channel: 1,
+                    map: index,
+                    x: at.0,
+                    y: at.1,
+                    z: 0,
+                },
+                present_card(format!("P{vid}")),
+            );
+        }
+        world.update_party_nears(LEADER_VID);
+        world.dungeons.get(index).expect("the dungeon lives");
+        if let Some(dungeon) = world.dungeons.by_index.get_mut(&index) {
+            for vid in [GUEST_VID, THIRD_VID] {
+                dungeon.exits.insert(
+                    Vid::new(vid),
+                    crate::save::ExitLocation {
+                        x: 100,
+                        y: 100,
+                        map_index: 1,
+                    },
+                );
+            }
+        }
+        world.unlink_party(Vid::new(LEADER_VID));
+        let dungeon = world.dungeons.get(index).expect("the dungeon lives");
+        assert!(
+            !dungeon.present.contains(&Vid::new(GUEST_VID)),
+            "the near exits"
+        );
+        assert!(
+            dungeon.present.contains(&Vid::new(THIRD_VID)),
+            "the far stays"
+        );
+        assert!(
+            dungeon.present.contains(&Vid::new(FOURTH_VID)),
+            "the exitless near stays"
+        );
+        assert!(
+            dungeon.present.contains(&Vid::new(LEADER_VID)),
+            "the leader stays"
+        );
     }
 
     #[test]

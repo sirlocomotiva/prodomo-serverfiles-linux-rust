@@ -468,6 +468,12 @@ impl GameState {
         // `CWarMapManager::Find(GetMapIndex())` (`G/input_login.cpp:780`): a character
         // that enters a war map joins it.
         self.join_war_map(vid, place.map);
+        // `CDungeonManager::FindByMapIndex(GetMapIndex())` (`G/input_login.cpp:788`): a
+        // character that enters a living dungeon's index rejoins its present set, and
+        // its dead event is cancelled (`IncMember`, `G/dungeon.cpp:213-219`). The
+        // quest side never needed this (it derives the dungeon live from the map),
+        // but the notice and exit fans and the dead event read the set.
+        self.join_dungeon(vid, place.map);
         // `Show` starts the affect event of a PC below its maximum stamina (`G/char.cpp:1874-1875`).
         let below_max = self
             .characters

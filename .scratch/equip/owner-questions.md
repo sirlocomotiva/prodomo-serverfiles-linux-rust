@@ -650,3 +650,14 @@ owner answers.
  whole chain is dead code in the checked-in server; the Rewrite answers the board
  afresh on every ask, so no reload notice is needed either. Waits on it: confirm the
  two rows `unused`.
+70. **The forest middle looks dead on the legacy server (ledger 560).** No jump stamps
+ its members: `d.new_jump` and `d.new_jump_party` only `Create` and warp (`questlua_dungeon.cpp:318-441`),
+ and even `FWarpToDungeon` has its `IncPartyMember` commented out (`dungeon.cpp:141`).
+ The only stamp is the login's (`input_login.cpp:788`), so after a jump every member's
+ `m_pkDungeon` is NULL and `pc.in_dungeon()` is false until someone relogs. The forest's
+ `when 6408.kill with pc.in_dungeon()` and `when 6418.kill with pc.in_dungeon()` arms
+ (`enchanted_forest_zone.lua:57-71`) can only fire after a mid-dungeon relog. The Rewrite
+ derives membership live from the map, so its middle runs. Waits on it: does the forest
+ middle run on your server today (a relog? another path I missed?), or is it dead there?
+ If it is dead, the Rewrite's running middle is a recorded Divergence; if it runs, say
+ how and the port is re-audited.

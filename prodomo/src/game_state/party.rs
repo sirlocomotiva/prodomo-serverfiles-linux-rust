@@ -346,8 +346,10 @@ impl GameState {
 
     /// `IsPartyJoinableMutableCondition` (`G/char.cpp:6045-6066`): the observer, level,
     /// joined and full checks. The enabled arm passes (always enabled) and the dungeon arm
-    /// passes (no dungeons — see the module doc), so no `JoinErr` names them and the
-    /// `[LS;822]`/`[LS;835]` lines have no sender yet. `PERR_LOWLEVEL`/`PERR_HILEVEL`
+    /// is not ported (a leader stamped into a dungeon should hear `[LS;822]`, but the stamp
+    /// waits on owner question 70), so no `JoinErr` names them and the
+    /// `[LS;822]`/`[LS;835]` lines have no
+    /// sender yet. `PERR_LOWLEVEL`/`PERR_HILEVEL`
     /// never return — legacy's checker has no arm that yields them either (the answer
     /// switches still list them).
     fn joinable_mutable(&self, leader: CharacterId, guest: CharacterId) -> JoinErr {
@@ -571,7 +573,11 @@ impl GameState {
     /// detaches; the PID stays a member. When the unlinked member holds LEADER,
     /// `RemoveBonus` runs: every linked member's six role points zero through
     /// `ComputePoints` and every member's near flag clears. Quiet when the VID holds no
-    /// party. The dungeon `FExitDungeon` arm is not ported (no dungeons).
+    /// party. The leader's dungeon arm (`FExitDungeon`, `:655-661`) runs between the
+    /// points and the near clear, while the flags still read: when the leader stands
+    /// in a living dungeon, every linked near member is sent to its saved exit. The
+    /// unlinked leader itself is skipped: its departure is already in progress, and
+    /// legacy's `WarpSet` on the destroyed character is unobservable.
     pub(super) fn unlink_party(&mut self, vid: Vid) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return;
@@ -611,10 +617,52 @@ impl GameState {
         for other in linked {
             self.zero_role_points(other, true);
         }
+        self.exit_dungeon_nears(vid, leader);
         if let Some(party) = self.parties.by_leader.get_mut(&leader) {
             for member in party.members.values_mut() {
                 member.near = false;
             }
+        }
+    }
+
+    /// `FExitDungeon` (`G/party.cpp:623-629`, called at `:655-661`): the leader `vid`
+    /// unlinks while standing in a living dungeon, so every other linked near member
+    /// of `leader`'s party is sent to its saved exit (`ExitToSavedLocation`,
+    /// `G/char.cpp:6685-6692`), in PID order, and leaves the present set. Members with
+    /// no saved exit stay, as `d.exit_all` leaves them. Quiet when the leader stands
+    /// in no living dungeon.
+    fn exit_dungeon_nears(&mut self, vid: Vid, leader: CharacterId) {
+        let Some((_, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        if !self.dungeons.lives(u32::try_from(map).unwrap_or(0)) {
+            return;
+        }
+        let nears: Vec<Vid> = self
+            .parties
+            .by_leader
+            .get(&leader)
+            .map(|party| {
+                party
+                    .members
+                    .values()
+                    .filter_map(|member| match member.vid {
+                        Some(near) if member.near && near != vid => Some(near),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for near in nears {
+            let Some(exit) = self
+                .dungeons
+                .get(map)
+                .and_then(|dungeon| dungeon.exits.get(&near).copied())
+            else {
+                continue;
+            };
+            self.order_dungeon_exit(near, exit);
+            self.unpresent(map, near);
         }
     }
 
@@ -1630,7 +1678,10 @@ impl GameState {
         let Some(leader) = self.party_leader_of(self_pid) else {
             return;
         };
-        // `ch->GetDungeon()` ×2 and `IsPartyInDungeon(351)`: no dungeons, so pass.
+        // `ch->GetDungeon()` ×2 (`[LS;673]`) waits on owner question 70: legacy reads the
+        // stamp, which no jump sets, so the gates may be dead there too.
+        // `IsPartyInDungeon(351)` is dead on the owner's data: no quest jumps to base
+        // 351 (ledger 560).
         if leader == self_pid {
             self.party_remove_as_leader(sender, leader, self_pid, pid);
         } else {
@@ -1692,8 +1743,9 @@ impl GameState {
     }
 
     /// `do_ungroup` (`G/cmd_general.cpp:1060-1088`): the caller `pid` names leaves its
-    /// party. The PC-party and dungeon gates pass (always enabled, no dungeons); a
-    /// partyless caller stays quiet; a caller in a party of two disbands it
+    /// party. The PC-party gate passes (always enabled) and the dungeon gate (`[LS;531]`)
+    /// waits on owner question 70 with the other stamp gates; a partyless caller stays
+    /// quiet; a caller in a party of two disbands it
     /// silently; else it hears `[LS;532]` and quits. Like `PartyRemove`, a leader
     /// and a member run the same self-leave: the record arm's leader/member split
     /// only matters when the target differs from the sender.
