@@ -53764,3 +53764,21 @@ and `a_landless_upload_stops_off_test_but_passes_on_it` (the gate, both readers,
 the INFO bit).
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5468 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
 
+
+## 595. The first item id
+
+`sys.item.id_range` is `ported`. The machinery stood since ledgers 195-196:
+`db::items::resolve_item_id_range` resolves the boot span from `MAX(id)` inside
+it (legacy's `BuildRange`, `D/ItemIDRangeManager.cpp:87`) with the two checks that
+changed acceptance (`MINIMUM_REMAIN_COUNT`, the above-span row), `install_item_ids`
+installs it before the ready gate opens (a gate without it would admit clients
+onto a world that refuses every grant), and the world's `ItemIds` draws it
+monotonically, densely, without reuse and never zero (`GetNewID`,
+`G/item_manager_idrange.cpp:20-49`). The row stayed `partial` only for want of a
+scenario; now the chain has one. The grant scenario's `/item 27003` gains a
+seat: after the count row lands, `MIN(id)` of the caller's 27003 rows is
+100 000 000, the configured span's first id on an empty table — the stored
+row's id, not only a packet's. Exhaustion stays the recorded Divergence: an
+error (`IdRangeExhausted`) instead of legacy's ten logs, `.killscript`,
+`thecore_shutdown()` and returning 0.
+Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5468 passed, 0 failed in 46 targets (the first attempt was killed at the 300 s tool deadline; its 16 scratch databases were dropped afterwards, so a rerun covered the suite); doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

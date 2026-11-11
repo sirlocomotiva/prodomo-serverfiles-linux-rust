@@ -30035,7 +30035,8 @@ fn a_gm_mobs_a_stray_dog_around() {
 /// refusal. The god hears the usage on the empty line, the miss without its
 /// stop on a name nothing answers, and the miss with its stop on a vnum with
 /// no proto; on `27003` a red potion lands in the caller's inventory, whose
-/// `GC_ITEM_SET` carries vnum 27003 and count 1.
+/// `GC_ITEM_SET` carries vnum 27003 and count 1, and whose stored row's id is the boot span's
+/// first (`sys.item.id_range`).
 #[test]
 fn a_gm_grants_itself_a_red_potion() {
     let Some(database) = ScratchDatabase::create() else {
@@ -30114,6 +30115,18 @@ fn a_gm_grants_itself_a_red_potion() {
         &database,
         "(SELECT count(*) FROM item WHERE owner_id IN (SELECT id FROM player WHERE name = \
          'Alpha') AND vnum = 27003) = 1",
+    );
+    // `sys.item.id_range`: the grant drew one id from the boot span's start, and it is the
+    // stored row's id, not only a packet's.
+    assert_eq!(
+        support::rows(
+            database.url(),
+            "SELECT MIN(id) FROM item WHERE owner_id IN (SELECT id FROM player WHERE name = \
+             'Alpha') AND vnum = 27003",
+            1,
+        ),
+        vec![vec![100_000_000]],
+        "the potion's id is the span's first"
     );
     drop(alice);
     drop(yankee);
