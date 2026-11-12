@@ -2381,6 +2381,29 @@ fn read_login_event(keyed: &mut Keyed) {
     let _marks = read_login_event_blocking(keyed, 0, None);
 }
 
+/// [`read_login_event`] while the moon, hex and fish events run: the three letters
+/// and titles ride between `dungeon_info`'s line and the hides, in quest order.
+fn read_login_event_drops(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    read_letter(keyed, 6, b"Mystery Box Event ", "the fish");
+    read_letter(keyed, 8, b"Hexagonal Chest Event ", "the hex");
+    read_letter(keyed, 12, b"Moonlight Treasures ", "the moon");
+    read_login_lines_hiding_after_dungeon(keyed, empire, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
+
 /// [`read_login_event`] while the siege war runs: the war's letter and title ride
 /// between `dungeon_info`'s line and the hides, in quest order.
 fn read_login_event_siege(keyed: &mut Keyed) {
@@ -52121,6 +52144,26 @@ const DROP_EVENT_PROBE: &[u8] = b"quest drop_probe begin\n\
     end\n\
     end\n";
 
+/// Ledger 604's event probe: the skill teacher (vnum 20300) walks a phase counter
+/// through the moon, hex and fish starts, saying each.
+const FISH_EVENT_PROBE: &[u8] = b"quest fish_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    local phase = pc.getqf('phase')\n\
+    if phase == 0 then\n\
+    start_event(7)\n\
+    say('moon started')\n\
+    elseif phase == 1 then\n\
+    start_event(8)\n\
+    say('hex started')\n\
+    else\n\
+    start_event(9)\n\
+    say('fish started')\n\
+    end\n\
+    pc.setqf('phase', phase + 1)\n\
+    end\n\
+    end\n\
+    end\n";
 /// Ledger 602's map-230 probe: the skill teacher (vnum 20300) walks a phase
 /// counter through the four starts (events 3-6) and the four ends, saying each.
 const MAP_EVENT_PROBE: &[u8] = b"quest map_probe begin\n\
@@ -52611,6 +52654,202 @@ fn the_tanaka_letters_dialog_and_yonahs_exchange_run() {
     drop(alice);
     server.wait_for_count("Character left the world", 3);
     tanaka_second_draw_is_six(&mut server, &database);
+    drop(server);
+}
+
+const MOON_BUTTON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Moonlight Treasures [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Hello young hero![ENTER][ENTER]Today the moon is shining in its brightest form. And that's[ENTER]because it is full moon today.[ENTER][ENTER]On this special day, you can obtain Moonlight Boxes from[ENTER]every monster you hunt. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Enjoy the full moon and the treasure it holds for you! [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][DONE]";
+const HEX_BUTTON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Hexagonal Chest Event [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]One of the traditions in Chinese New year is the gifting[ENTER]and the wishes of good fortune. In Chinese culture, the[ENTER]six sides of the Hexagonal Box represent these wishes. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Collect Hexagonal Boxes from any monster! Hexagonal[ENTER]boxes contain a random upgrade material.[ENTER][ENTER]Enjoy the treasure and it's contents! [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][DONE]";
+const FISH_BUTTON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Mystery Box Event [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Bring 3 Minnows to a Fisherman, and you will[ENTER]exchange them into Mystery Box which you will[ENTER]be able to open to get another items. Be aware[ENTER]the chest may contain savage monsters! [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Enjoy the event and good luck on catching fish![COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][DONE]";
+
+const FISH_MENU_PAGE: &[u8] = b"[QUESTION 1;Mystery Box Event |2;Inchide]";
+const FISH_SCOLD_PAGE: &[u8] = b"[ENTER]I am sorry but you do not own enough fish[ENTER]for the reward![ENTER][ENTER]Please come back with at least 3 Minnows to[ENTER]receive the Mystery Box![ENTER][ENTER]Good luck! [ENTER][DONE]";
+
+const FISH_OFFER_PAGE: &[u8] = b"[ENTER]I see you have been fishing and I have got[ENTER]something to offer you in exchange. Give me 3[ENTER]of your Minnows and I will reward you with Mystery[ENTER]Box. It contains either valuable items or monsters[ENTER]jumping out of it. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Would you like to make a trade?[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Yes |2;No ]";
+/// The scold half of [`the_fishermans_exchange_runs_and_the_drop_letters_read`]:
+/// a relog onto the fisherman's spot hears the chat menu and, with no minnows
+/// held, the scold.
+fn fish_scold_with_no_minnows(server: &mut Server, database: &ScratchDatabase) {
+    sql(
+        database,
+        "UPDATE player SET x = 442100, y = 936500 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_drops(&mut alice);
+    alice.still("nothing follows");
+    let fisher = first_shown_vid(&entered, 9009, "map 1 shows the fisherman");
+    alice.send_record(&client_click(fisher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, FISH_MENU_PAGE),
+        "the chat menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, FISH_SCOLD_PAGE),
+        "the scold with no minnows"
+    );
+    alice.quiet("the scold ends");
+    drop(alice);
+    server.wait_for_count("Character left the world", 2);
+}
+
+/// Ledger 604's start half: the teacher starts the moon, hex and fish events, and
+/// every letter's button and quest window entry reads its dialog.
+fn fish_drop_starts(server: &mut Server) {
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    for (said, notice, letters) in [
+        (
+            b"moon started".as_slice(),
+            b"Moonlight Chest Event has started! Defeat enemies and grab your rewards!".as_slice(),
+            [(12u16, b"Moonlight Treasures ".as_slice())].as_slice(),
+        ),
+        (
+            b"hex started".as_slice(),
+            b"Hexegonal Box Event has started! Defeat enemies and grab your rewards!".as_slice(),
+            [
+                (8u16, b"Hexagonal Chest Event ".as_slice()),
+                (12u16, b"Moonlight Treasures ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+        (
+            b"fish started".as_slice(),
+            b"Fishing Event has started. Bring Fishbones to the Fisherman and receive your reward."
+                .as_slice(),
+            [
+                (6u16, b"Mystery Box Event ".as_slice()),
+                (8u16, b"Hexagonal Chest Event ".as_slice()),
+                (12u16, b"Moonlight Treasures ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        alice.send_record(&client_click(teacher));
+        read_drop_start(&mut alice, said, notice, letters);
+    }
+    for (quest, page) in [
+        (12u16, MOON_BUTTON_PAGE),
+        (8, HEX_BUTTON_PAGE),
+        (6, FISH_BUTTON_PAGE),
+    ] {
+        alice.send_record(&client_script_button(u32::from(quest)));
+        assert_eq!(
+            alice.read_game(),
+            server_script(1, page),
+            "quest {quest}'s button"
+        );
+        alice.send_record(&client_script_button(u32::from(quest) | SELECT_QUEST));
+        assert_eq!(
+            alice.read_game(),
+            server_script(1, page),
+            "quest {quest}'s entry"
+        );
+    }
+    alice.quiet("the reads end");
+    drop(alice);
+    server.wait_for("Character left the world");
+}
+
+/// `quest.fishing_event`, `quest.moonlight_drop_event` and `quest.hexegonal_drop_event`
+/// over the wire: the teacher starts all three (each start notice, each begin
+/// letter replaying behind the later starts), and every letter's button and quest
+/// window entry runs its `button or info` dialog; the fisherman's (9009) chat menu
+/// names the fishing entry, which with fewer than 3 minnows chats the scold, and
+/// with 3 offers the exchange — a yes spends the 3 and pays the Mystery Box
+/// (50033). Quest numbers: fish 6, hex 8, moon 12.
+#[test]
+fn the_fishermans_exchange_runs_and_the_drop_letters_read() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (mut server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/fish_probe.lua",
+            FISH_EVENT_PROBE,
+        )],
+        &hide_seek_channels(),
+        "no_wander = true",
+    );
+    fish_drop_starts(&mut server);
+    fish_scold_with_no_minnows(&mut server, &database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 41, id, 1, 0, 3, 27802 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    assert_eq!(
+        set_fields(&items[0]),
+        (common::item_slots::EWindows::Inventory as u8, 0, 27_802, 3),
+        "the seeded minnows sit in cell 0"
+    );
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_drops(&mut alice);
+    alice.still("nothing follows");
+    let fisher = first_shown_vid(&entered, 9009, "map 1 shows the fisherman");
+    alice.send_record(&client_click(fisher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, FISH_MENU_PAGE),
+        "the menu with the minnows"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, FISH_OFFER_PAGE),
+        "the exchange offer"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), a_clear_record(0), "the minnows' clear");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line("[LS;444;Lada misterioasa]".as_bytes()),
+        "the give names the box first"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (
+            common::item_slots::EWindows::Inventory as u8,
+            830,
+            50_033,
+            1
+        ),
+        "the box lands in gift bank 3's first cell"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the dialog closes"
+    );
+    alice.quiet("nothing follows the exchange");
+    wait_for(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE vnum = 27802 AND owner_id = (SELECT id FROM player WHERE name = 'Alpha'))",
+    );
+    assert_eq!(
+        rows_of(
+            &database,
+            "SELECT id, vnum FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha') AND vnum = 50033"
+        )
+        .len(),
+        1,
+        "the box is stored"
+    );
+    drop(alice);
+    server.wait_for_count("Character left the world", 3);
     drop(server);
 }
 

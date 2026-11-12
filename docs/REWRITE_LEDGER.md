@@ -54074,3 +54074,24 @@ and the close after the yes, the store empty of both the ear and any reward,
 and the second draw. Two mutants die on their intended asserts (the select
 resume's `+1` on the ear's clear, `count_item`'s `+1` on the scold).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5506 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged record in its `quiet`) passes alone; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy clean after the scenario split into three login helpers (Yonah spawns twice on map 1, so a first-match vid replaces `shown_vid`); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 604. The fisherman's exchange
+
+`quest.fishing_event`, `quest.moonlight_drop_event` and `quest.hexegonal_drop_event`
+are `ported`: scenario `the_fishermans_exchange_runs_and_the_drop_letters_read`.
+The teacher starts all three (each start notice, each begin letter replaying
+behind the later starts — fish 6, hex 8, moon 12), and every letter's button and
+quest window entry runs its `button or info` dialog over the wire. The
+fisherman's (9009) chat menu names the fishing entry, which with fewer than 3
+minnows chats the scold and with 3 offers the exchange; a yes spends the 3 and
+pays the Mystery Box (50033) — the `[LS;444;Lada misterioasa]` line first, then
+the SET into cell 830, gift bank 3's first cell (`ITEM_GIFTBOX` maps to bank 3,
+`gamedata/src/item_custom_category.rs:137`), then the dialog's close — with the
+minnows gone from the store and exactly one 50033 row held. No production code
+changed: every arm the scripts call was already ported. The scenario pins the
+full bytes of all three button pages, the menu, the scold and the offer, and
+grew the `read_login_event_drops` reader for the relogs under the running
+events. Two mutants die on their intended asserts (`count_item`'s `+3` on the
+scold — a `+1` survives, since 1 is still fewer than 3 — and the select
+resume's `+1` on the minnows' clear).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5508 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
