@@ -54354,6 +54354,167 @@ fn aura_window(alice: &mut Keyed, keeper: u32, entry: u8, window: u8, note: &str
 }
 
 /// The Hydra kill's congrats (`3965.kill`, `yohara_system.lua:74-84`).
+/// `quest.meleylair`'s three chats over the live script: the click menus the three
+/// arms and the close; the lore chat tells the Sung-Mahi story around a wait; the
+/// fight chat lists the 3/600 requirements, registers on Yes (the `(6, 300)` pair
+/// plus the `[LS;1001;0]` ladder line), and refuses the repeat from CH 1; the
+/// shelter chat refuses without guild PK mode (limit 4), then enters in guild PK
+/// mode (the remove and the recall-spot warp).
+#[test]
+fn a_guildmate_hears_meleys_three_words_and_enters_the_shelter() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    seed_meley_guild(&database);
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &meley_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, listed, entered) =
+        enter_world_seeing_guilded(&server, b"alice", 0, 1, Some(&[(801, 48, 5)]));
+    let npc = shown_vid(&entered, 20_419, "the sub map shows 20419");
+    alice.send_record(&client_click(npc));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, MELEY_MENU),
+        "the three chats and the close"
+    );
+    // The lore chat tells the Sung-Mahi story around a wait.
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_LORE_FIRST].concat()),
+        "the fear page"
+    );
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_LORE_LAST].concat()),
+        "the warning page"
+    );
+    // The fight chat lists the 3/600 requirements and registers on Yes.
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu again");
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_ASK].concat()),
+        "the requirements"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_REGISTERED].concat()),
+        "the register passes"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1001;0]"),
+        "the ladder line"
+    );
+    alice.quiet("the register step ends");
+    wait_for(
+        &database,
+        "(SELECT ladder_point FROM guild WHERE id = 7) = 0",
+    );
+    // The repeat refuses from CH 1; the shelter half runs in its helper.
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu a third time");
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_ALREADY].concat()),
+        "the repeat refuses from CH 1"
+    );
+    meley_shelter_refuses_then_enters(&mut alice, &server, &database, listed.id, npc);
+}
+
+/// The shelter chat's second half: it refuses without guild PK mode (`limit ==
+/// 4`), then enters with it — the close, the remove, the recall-spot warp.
+fn meley_shelter_refuses_then_enters(
+    alice: &mut Keyed,
+    server: &Server,
+    database: &ScratchDatabase,
+    vid: u32,
+    npc: u32,
+) {
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu a fourth time");
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_SHELTER_ASK].concat()),
+        "the shelter asks"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_NEED_GUILD_MODE].concat()),
+        "the peace-mode refusal"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 4"));
+    assert_eq!(read_update_mode(alice, vid), 4, "guild lands");
+    alice.quiet("the switch ends");
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu a fifth time");
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_SHELTER_ASK].concat()),
+        "the shelter asks again"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the close");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&vid.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((320_000, 1_529_000), server.channel(1).port()),
+        "the recall spot on the run"
+    );
+    alice.quiet("the enter step ends");
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 2120000",
+    );
+}
+
+/// The click's menu: the three owner chats and the close.
+const MELEY_MENU: &[u8] = b"[QUESTION 1;The Sung Mahi dragons?|2;Fight the Sung Mahi dragons!|3;Go inside shelter!|4;Inchide]";
+
+/// `say_title(mob_name(20419))` (`meleylair.lua`): the name from `en/mob_names.txt`
+/// between the two `color256` ratios, then `say`'s blank line beyond `say_title`'s.
+const MELEY_TITLE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Gard\xe3 Dragon Dolnarr[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]";
+
+/// The lore chat's first page, before the `wait()`.
+const MELEY_LORE_FIRST: &[u8] = b"I fear that many will not grab the dawns of day...[ENTER][ENTER]Sung-Mahi, the demons god, has come back and also with[ENTER]their 3 dragons. They feed with human souls! Once they[ENTER]have eaten enough, Sung Mahi powers will grow... and[ENTER]that mean the end for all of us. We cannot allow this[ENTER]to happen, but it will require something more than just[ENTER]a brave warrior.[ENTER][ENTER]Only a united guild power can stand up to fight these[ENTER]frightening beasts. Can you help us? Do you know any other[ENTER]adventuriers brave as you? We have to warn all of them![ENTER][NEXT]";
+
+/// The lore chat's last page, after the `wait()`.
+const MELEY_LORE_LAST: &[u8] = b"I heard frightening stories about those warriors who want[ENTER]to fight the dragons. They never come back...[ENTER][DONE]";
+
+/// The fight chat's ask: the requirements and the Yes/No.
+const MELEY_ASK: &[u8] = b"To fight against Sung Mahi dragons you have to register[ENTER]the guild.[ENTER][ENTER]To register you need following requirments:[ENTER]- Guild must be at least level 3.[ENTER]- Guild must have at least 600 ladder points.[ENTER][ENTER]Do you want to register?[ENTER][QUESTION 1;Yes|2;No]";
+
+/// The fight chat's register pass: `resultMsg[6]` with the 300 the register
+/// kept (`meleylair.lua:57`).
+const MELEY_REGISTERED: &[u8] = b"You\x27re guild was registered, if you defeat the dragons,[ENTER]300 ladder points will be returned to the guild.[ENTER][DONE]";
+
+/// The fight chat's repeat refusal: `IsRegistered` reads the run on CH 1.
+const MELEY_ALREADY: &[u8] = b"You\x27re guild is already registered! You can access[ENTER]the shelter from CH 1.[ENTER][ENTER][DONE]";
+
+/// The shelter chat's ask.
+const MELEY_SHELTER_ASK: &[u8] =
+    b"Do you want to go inside shelter?[ENTER][ENTER][QUESTION 1;Yes|2;No]";
+
+/// The shelter chat's `limit == 4` refusal: no guild PK mode.
+const MELEY_NEED_GUILD_MODE: &[u8] =
+    b"To can join the run you must have the combatent[ENTER]status checking in guild.[ENTER][DONE]";
+
 /// Ledger 618's flag probe: the skill teacher (vnum 20300, bound but questless)
 /// answers a click by setting `xmas_boom` to 1 from the quest side and saying so.
 const FLAG_ARM_PROBE: &[u8] = b"quest flag_arm_probe begin\n\

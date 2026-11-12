@@ -54389,3 +54389,28 @@ Tests:
   `read_add_of_race`.
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5521 passed, 1 failed in 46 targets — the failure is `a_morphed_caller_hears_every_stat_refusal`, a known load flake (ledgers 606-609, 611-615), green alone in 10.11 s. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
+
+## 619. Meley's three words
+
+`quest.meleylair` is `ported`: scenario
+`a_guildmate_hears_meleys_three_words_and_enters_the_shelter`. No production
+code changed — the probe of the previous turn showed the live script already
+runs, so this slice pins it. The click on 20419 menus the three owner chats
+and the close (pinned whole). The lore chat tells the Sung-Mahi story around
+a `wait()` (both pages pinned). The fight chat lists the 3/600 requirements
+from `MeleyLair.GetRequirments`, registers on Yes (the `(6, 300)` pair behind
+`resultMsg[6]`, the `[LS;1001;0]` ladder line, the row's 0), and refuses the
+repeat from CH 1 through `IsRegistered`. The shelter chat asks, refuses
+without guild PK mode (`limit == 4`, pinned), then — with `/pkmode 4` — enters
+on Yes: the close, `EncodeRemovePacket(this)`, and the recall-spot warp to the
+run's index, with the row's 2120000. The title byte is `0xe3` straight from
+`en/mob_names.txt` (`Gard\xe3 Dragon Dolnarr`), not the `0xe0` the first draft
+guessed. Two mutants die on the register pass: `LADDER_COST` at 601 and
+`MIN_LEVEL` at 13 both refuse where the guild of 3/600 passes.
+
+Tests:
+
+- `prodomo/tests/parity.rs`:
+  `a_guildmate_hears_meleys_three_words_and_enters_the_shelter` (8/8 under load).
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` (after splitting the scenario's shelter half into a helper — the test stood at 105/100 lines), `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5522 passed, 1 failed in 46 targets — the failure is `a_gm_pulls_the_dogs_and_attracts_the_ranger`, a known load flake (ledger 617's receipt names the class), green alone in 9.11 s. The stale first suite run (launched before the clippy split) was killed and rerun cleanly; its 8 orphaned `prodomo_proc_*` databases were dropped by hand. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
