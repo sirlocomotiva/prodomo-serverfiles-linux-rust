@@ -54092,6 +54092,134 @@ fn altar_crown(alice: &mut Keyed, entered: &Entered, stone: u32, database: &Scra
     );
 }
 
+/// [`a_visitor_hears_the_gaya_stones_three_words`]'s ground: Alpha on the spider
+/// floor (217) beside the 20095 stone with 5 shining stones (30400) in its first
+/// cell.
+fn seed_gaya_visitor(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "UPDATE player SET map_index = 217, x = 69000, y = 612100 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 40, id, 1, 0, 5, 30400 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `quest.system_gaya_0`'s three arms over the live script: the click menus the two
+/// chats and the close; the first chat says the shining-stone word; the gift of the
+/// 5 stones runs the take, whose yes opens the Gaya window; the second chat says
+/// the bonus word, whose yes opens the Gaya market (the clear, nine items, the
+/// locked slots, the stamp and the open).
+#[test]
+fn a_visitor_hears_the_gaya_stones_three_words() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_gaya_visitor(&database);
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &[ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 217],
+        }],
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    let gaya = shown_vid(&entered, 20_095, "the spider floor shows its gaya stone");
+    alice.send_record(&client_click(gaya));
+    assert_eq!(alice.read_game(), server_script(1, GAYA_MENU), "the menu");
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, GAYA_ROCKS),
+        "the stones word"
+    );
+    alice.send_record(&client_give(gaya, 0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, GAYA_TAKE),
+        "the take asks"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the take closes"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenGuiGaya"),
+        "the Gaya window opens"
+    );
+    alice.send_record(&client_click(gaya));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, GAYA_MENU),
+        "the menu again"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, GAYA_BONUS),
+        "the bonus word"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the bonus closes"
+    );
+    gaya_market_reads(&mut alice);
+    drop(server);
+}
+
+/// [`a_visitor_hears_the_gaya_stones_three_words`]'s market: the clear, nine items,
+/// the locked slots, the stamp and the open.
+fn gaya_market_reads(alice: &mut Keyed) {
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaMarketClear"),
+        "the market clear"
+    );
+    for _ in 0..9 {
+        let line = alice.read_game();
+        let text = &line[10..];
+        assert!(
+            text.starts_with(b"GayaMarketItems "),
+            "a market item: {text:?}"
+        );
+    }
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"GayaMarketSlotsDesblock 0 0 0 0 0 0"),
+        "the locked slots"
+    );
+    let stamp = alice.read_game();
+    assert!(
+        stamp[10..].starts_with(b"GayaMarketTime "),
+        "the stamp: {stamp:?}"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"OpenGuiGayaMarket"),
+        "the market opens"
+    );
+}
+
+const GAYA_MENU: &[u8] =
+    b"[QUESTION 1;Pietre Str\xe3lucitoare|2;Ce bonusuri \xeemi aduce Gaya? |3;Inchide]";
+const GAYA_ROCKS: &[u8] = b"[ENTER]Dore\xbati s\xe3 transformi pietrele str\xe3lucitoare[ENTER]\xeen Gaya ? [ENTER]Pentru a \xeencepe am nevoie de minim 5 pietre str\xe3lucitoare.[ENTER][DONE]";
+const GAYA_TAKE: &[u8] = b"[ENTER]Am nevoie de 5 pietre str\xe3lucitoare \xbai de pietre spirit [ENTER]+0, +1, +2, sau +3 pentru a le transforma \xeen Gaya. [ENTER]Desigur, am nevoie \xbai de 50.000 yang.  [ENTER][ENTER]\xaaansa de reu\xbait\xe3 este de 60%, [ENTER]Dore\xbati s\xe3 continu\xe3m ? [ENTER][ENTER][QUESTION 1;Da |2;Nu ]";
+const GAYA_BONUS: &[u8] = b"[ENTER]Nu ai auzit \xeenc\xe3 de magazinul Gaya? [ENTER]Nu? Oh atunci trebuie s\xe3 \xee\xfei povestesc.. [ENTER]De la magazinul gaya po\xfei achizi\xfeiona anumite obiecte folositoare! [ENTER]Dore\xbati s\xe3 vizualizezi magazinul ? [ENTER][ENTER][QUESTION 1;Da |2;Nu ]";
+
 const ALTAR_FIRST_GREET: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Eu sunt Yaholo, paznicul Altarului Puterii.[ENTER]Aceasta cladire face posibil pentru breasla ta[ENTER]acceptarea mai multor membri. Cand breasla ta[ENTER]creste, poti construi un Altar mai mare pentru a[ENTER]putea invita mai multi membri.[ENTER][NEXT]";
 const ALTAR_LOW_POWER: &[u8] = b"Hmm Breasla ta...[ENTER][COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Cred ca ar trebui sa lucrezi mai mult pentru a-ti[ENTER]dezvolta breasla. Momentan nu are suficienta[ENTER]putere pentru un Altar mai bun.[ENTER][DONE]";
 const ALTAR_FIRST_OFFER: &[u8] = b"Hmm Breasla ta...[ENTER][COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Puterea sa a crescut considerabil. Doresti sa[ENTER]inlocuiesti Altarul Puterii cu unul mai mare?[ENTER]Daca da, ai nevoie de urmatoarele materiale:[ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]25 Mil. Yang[ENTER]10 pietre suport[ENTER]15 bucati Placaj[ENTER]10 buturugi[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Inlocuieste Altarul Puterii|2;Nu inlocui Altarul Puterii]";

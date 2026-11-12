@@ -54273,3 +54273,17 @@ altar's use. No production code changed. Two mutants die on their intended
 asserts (`is_guild_master` pinned true runs the master arm for the layman;
 select answers pinned to 1 rebuild on the no).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5517 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone, as in the 606-609 and 611-613 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 615. The gaya stone's words
+
+`quest.sistem_gaia` is `ported`: scenario
+`a_visitor_hears_the_gaya_stones_three_words`. Alpha stands on the spider floor
+(217, served by a `start_configured` Channel — the default Channels do not host
+it) beside the 20095 stone with 5 shining stones: the click menus the two chats
+and the close, the first chat says the stones word whole (byte-exact Latin
+bytes), the gift of the 5 runs the take whose yes opens the Gaya window, and
+the second chat says the bonus word whole whose yes opens the market (the
+clear, nine items, the locked slots, the stamp and the open). No production
+code changed. Two mutants die by silence on their intended reads (`count_item`
+pinned to 0 never runs the take; `open_gaya_market` dropped sends no clear).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5517 passed, 2 failed in 46 targets (both known flakes, both pass alone: `a_gm_flags_a_stray_dog_aggressive_and_coward`'s coward-escape wait and `a_morphed_caller_hears_every_stat_refusal`, as in the 606-609 and 611-614 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
