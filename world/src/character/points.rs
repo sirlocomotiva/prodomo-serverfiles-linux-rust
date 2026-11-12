@@ -63,14 +63,16 @@
 //! - `POINT_GOLD` and `POINT_GAYA`: the currencies. `POINT_INVEN` is ported: the rise
 //!   refuses above `INVENTORY_LOCK_COVER_COUNT` (18) and keeps `m_points.envanter`.
 //! - `POINT_POLYMORPH`, `POINT_ENERGY` and `POINT_COSTUME_ATTR_BONUS`: each drives its
-//!   own system. `POINT_ENERGY` is ported with its attribute buff (`CBuffOnAttributes`,
-//!   `G/buff_on_attributes.cpp`, the `POINT_ENERGY` half of `__NEW_SET_BONUS__`);
-//!   `POINT_COSTUME_ATTR_BONUS` stays refused, because no owner proto, blend row or
-//!   quest lays its apply. The three biologist arms are ported: the mission, the taken and the
-//!   completed, kept beside the arrays as legacy's `DWORD`s are, the state clamped to
-//!   mission 9. The two protected-inventory arms are ported the same way: the locked
-//!   state (`BYTE`) and its password, kept beside the arrays and set by the amount,
-//!   not raised by it.
+//!   own system. `POINT_POLYMORPH` is ported: the amount adds to the slot, the point
+//!   record carries the new total, and the caller runs `SetPolymorph` off it
+//!   (`G/char.cpp:4705-4709`). `POINT_ENERGY` is ported with its attribute buff
+//!   (`CBuffOnAttributes`, `G/buff_on_attributes.cpp`, the `POINT_ENERGY` half of
+//!   `__NEW_SET_BONUS__`); `POINT_COSTUME_ATTR_BONUS` stays refused, because no owner
+//!   proto, blend row or quest lays its apply. The three biologist arms are ported: the
+//!   mission, the taken and the completed, kept beside the arrays as legacy's `DWORD`s
+//!   are, the state clamped to mission 9. The two protected-inventory arms are ported
+//!   the same way: the locked state (`BYTE`) and its password, kept beside the arrays
+//!   and set by the amount, not raised by it.
 //!
 //! The random hit and spell points a level-up adds (`iRandomHP` and `iRandomSP`) are 0: they
 //! grow only at a level-up, and the store gains their columns when the level-up is ported.
@@ -348,10 +350,13 @@ const SUNGMA_SLOTS: [usize; 4] = [
 /// tree does not define, so neither is a slot here. Five attack bonuses are **not** in the
 /// list: `POINT_ATTBONUS_INSECT`, `_FIRE`, `_ICE`, `_DESERT` and `_TREE` fall to the
 /// unknown-type arm.
-const PLAIN: [usize; 121] = [
+const PLAIN: [usize; 122] = [
     // `POINT_MOUNT`'s arm adds and sends (`char.cpp:4711-4715`); its `MountVnum` call
     // re-shows the rider, which the world runs (`GameState::change_pc_point`).
     point::POINT_MOUNT,
+    // `POINT_POLYMORPH`'s arm adds and sends (`char.cpp:4705-4709`); its `SetPolymorph`
+    // call re-shows the caller, which the world runs the same way.
+    point::POINT_POLYMORPH,
     point::POINT_ST,
     point::POINT_HT,
     point::POINT_DX,
@@ -498,7 +503,7 @@ const COUNTERS: [usize; 5] = [
 ];
 
 /// The arms whose side effects are not ported. See the module note.
-const NOT_PORTED: [usize; 9] = [
+const NOT_PORTED: [usize; 8] = [
     point::POINT_CONQUEROR_LEVEL,
     point::POINT_CONQUEROR_EXP,
     point::POINT_CONQUEROR_LEVEL_STEP,
@@ -506,7 +511,6 @@ const NOT_PORTED: [usize; 9] = [
     point::POINT_EXP,
     point::POINT_LEVEL_STEP,
     point::POINT_GOLD,
-    point::POINT_POLYMORPH,
     point::POINT_COSTUME_ATTR_BONUS,
 ];
 
@@ -3809,7 +3813,7 @@ mod tests {
             assert_eq!(written.value, expected, "{kind}");
             assert_eq!(points.get_point(kind), start + 7);
         }
-        assert_eq!(PLAIN.len(), 121);
+        assert_eq!(PLAIN.len(), 122);
     }
 
     /// `RefreshAffect` at the end of `ComputePoints` (`char.cpp:3150`): a held affect's point

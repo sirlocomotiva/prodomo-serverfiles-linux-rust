@@ -34862,11 +34862,14 @@ fn a_late_entrant_hears_the_live_duel() {
 }
 
 /// `cmd.polymorph` and `cmd.polyitem` (`do_polymorph`, `do_polymorph_item`,
-/// `G/cmd_gm.cpp:3049-3104`). The god morphs into the dog vnum 101: the witness's client
+/// `G/cmd_gm.cpp:3049-3104`), the ball's use (`ItemProcess_Polymorph`'s ball arm,
+/// `G/char_item.cpp:9749-9814`), and the book's use (`CPolymorphUtils::PolymorphCharacter`,
+/// `G/polymorph.cpp:36-115`). The god morphs into the dog vnum 101: the witness's client
 /// hears its `GC_CHARACTER_ADD` with race 101, the spawn state flag, and `AFF_SPAWN` on its
 /// affect words (`G/char.cpp:7700-7705`); a job vnum unmorphs, and an unchanged vnum sends
 /// nothing. `/polyitem 101` grants a 70104 ball holding 101 in its first socket
-/// (`G/cmd_gm.cpp:3081-3084`); an empty line is silent.
+/// (`G/cmd_gm.cpp:3081-3084`); an empty line is silent. The ball's own use is
+/// `a_used_ball_morphs_through_the_timed_affect_and_spends_itself`.
 #[test]
 fn a_gm_polymorphs_into_the_dog_and_grants_its_ball() {
     let Some(database) = ScratchDatabase::create() else {
@@ -34985,6 +34988,126 @@ fn a_gm_polymorphs_into_the_dog_and_grants_its_ball() {
     // An empty polyitem is silent.
     alice.send_record(&client_chat(CHAT_TALKING, b"/polyitem"));
     alice.still("an empty polyitem answers nothing");
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
+/// The granted ball's use (`ItemProcess_Polymorph`'s ball arm, `G/char_item.cpp:9749-9814`):
+/// `/polyitem 101` grants the ball, and its use from the granted cell morphs through the
+/// timed affect — the log tells the use, the witness's add carries race 101 with the
+/// spawn flag — and the ball's row leaves the store. Alpha is level 154, the dog level
+/// 1, so the bar (`MAX(0, 20 - 154 * 3 / 10)` = 0) holds.
+#[test]
+fn a_used_ball_morphs_through_the_timed_affect_and_spends_itself() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1,          470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD'          FROM account WHERE login = 'alice'",
+    );
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id,          'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    let mut server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_god_login_event(&mut alice);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polyitem 101"));
+    let (records, _) = alice.drain_game(Duration::from_millis(500), an_item_window_record);
+    let set = the_item_set(&records)
+        .unwrap_or_else(|| panic!("the ball must reach the wire, got {records:02x?}"));
+    let cell = u16::from_le_bytes(set[2..4].try_into().expect("two bytes"));
+
+    // The ball is used from its granted cell: the log tells the use, the witness's add
+    // carries race 101 with the spawn flag, and the ball's row leaves the store.
+    alice.send_record(&client_item_use(cell));
+    server.wait_for("USE_POLYMORPH_BALL");
+    let morph = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(morph[22..24].try_into().expect("two bytes")),
+        101,
+        "the ball shows the vnum"
+    );
+    assert_eq!(morph[26], 1 << 1, "the morph reencodes with the spawn flag");
+    let left = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE vnum = 70104",
+        1,
+    );
+    assert_eq!(left[0][0], 0, "the spent ball leaves no row");
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
+/// The 50322 book's use on a blank book (`CPolymorphUtils::PolymorphCharacter`,
+/// `G/polymorph.cpp:36-115`): socket 0 names no mob, so the use keeps the book and
+/// morphs nothing — no witness reencode, no store change. The hit and the miss are
+/// unit seats (`a_used_book_morphs_and_stamps_its_practice_down`,
+/// `a_missed_book_tells_the_failed_line_and_stamps_nothing`), because the chance
+/// needs a seeded die.
+#[test]
+fn a_blank_book_keeps_itself_and_morphs_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1,          470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(&database, "UPDATE account SET empire = 1");
+    // The book stands in cell 0 with a blank socket 0 and three practices.
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, vnum, count, socket1) SELECT          100000000, id, 1, 0, 50322, 1, 3 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    let (mut alice, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, GERMAN, None);
+    let (mut yankee, yankee_listed) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, None);
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    alice.send_record(&client_item_use(0));
+    alice.still("a blank book answers nothing");
+    assert!(
+        no_add_of_within(&mut yankee, listed.id),
+        "a blank book morphs nothing"
+    );
+    let kept = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE vnum = 50322",
+        1,
+    );
+    assert_eq!(kept[0][0], 1, "the blank book stays");
     drop(alice);
     drop(yankee);
     drop(server);

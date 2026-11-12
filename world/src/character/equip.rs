@@ -43,12 +43,12 @@ use gamedata::item_kind::{
     ARMOR_BODY, COSTUME_AURA, COSTUME_BODY, COSTUME_HAIR, COSTUME_MOUNT, COSTUME_PET, COSTUME_SASH,
     COSTUME_WEAPON, ITEM_ANTIFLAG_ASSASSIN, ITEM_ANTIFLAG_FEMALE, ITEM_ANTIFLAG_MALE,
     ITEM_ANTIFLAG_SHAMAN, ITEM_ANTIFLAG_SURA, ITEM_ANTIFLAG_WARRIOR, ITEM_ARMOR, ITEM_BELT,
-    ITEM_COSTUME, ITEM_DS, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_SKILLBOOK, ITEM_SPECIAL_DS,
-    ITEM_TALISMAN, ITEM_TOTEM, ITEM_UNIQUE, ITEM_USE, ITEM_WEAPON, LIMIT_CHAMPION, LIMIT_CON,
-    LIMIT_DEX, LIMIT_INT, LIMIT_LEVEL, LIMIT_STR, USE_SPECIAL, WEARABLE_ABILITY, WEARABLE_ARROW,
-    WEARABLE_BODY, WEARABLE_DARK, WEARABLE_EAR, WEARABLE_EARTH, WEARABLE_ELEC, WEARABLE_FIRE,
-    WEARABLE_FOOTS, WEARABLE_GLOVE, WEARABLE_HEAD, WEARABLE_ICE, WEARABLE_NECK, WEARABLE_SHIELD,
-    WEARABLE_UNIQUE, WEARABLE_WEAPON, WEARABLE_WIND, WEARABLE_WRIST,
+    ITEM_COSTUME, ITEM_DS, ITEM_PICK, ITEM_POLYMORPH, ITEM_RING, ITEM_ROD, ITEM_SKILLBOOK,
+    ITEM_SPECIAL_DS, ITEM_TALISMAN, ITEM_TOTEM, ITEM_UNIQUE, ITEM_USE, ITEM_WEAPON, LIMIT_CHAMPION,
+    LIMIT_CON, LIMIT_DEX, LIMIT_INT, LIMIT_LEVEL, LIMIT_STR, USE_SPECIAL, WEARABLE_ABILITY,
+    WEARABLE_ARROW, WEARABLE_BODY, WEARABLE_DARK, WEARABLE_EAR, WEARABLE_EARTH, WEARABLE_ELEC,
+    WEARABLE_FIRE, WEARABLE_FOOTS, WEARABLE_GLOVE, WEARABLE_HEAD, WEARABLE_ICE, WEARABLE_NECK,
+    WEARABLE_SHIELD, WEARABLE_UNIQUE, WEARABLE_WEAPON, WEARABLE_WIND, WEARABLE_WRIST,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use protocol::item_pos::ItemPos;
@@ -1088,16 +1088,25 @@ pub fn is_skill_book(proto: &ItemProto) -> bool {
     proto.item_type == ITEM_USE && proto.sub_type == USE_SPECIAL && BOOK_VNUMS.contains(&proto.vnum)
 }
 
+/// Whether the proto is a polymorph ball or book: `ITEM_POLYMORPH` of the ball five
+/// or the 50322 book (`ItemProcess_Polymorph`, `G/char_item.cpp:9783-9814`, `:9816-9835`).
+#[must_use]
+pub fn is_polymorph_ball(proto: &ItemProto) -> bool {
+    proto.item_type == ITEM_POLYMORPH && matches!(proto.vnum, 70_104..=70_107 | 71_093 | 50_322)
+}
+
+/// The nine seated `ITEM_USE` arms, in the order `use_special_kind` answers them.
+type SeatedArms = (bool, bool, bool, bool, bool, bool, bool, bool, bool);
+
+/// The use's classification: the potion, the skill book, the quest item, the
+/// polymorph ball or book, and the nine seated arms.
+type UseClassed = (bool, bool, bool, bool, SeatedArms);
+
 /// The unported-use refusal for the classified proto, or `None` when some arm
 /// answers it: an `ITEM_USE` of no known sub type names the sub type, any other
 /// unanswered type names the type.
-fn use_ported(
-    proto: &ItemProto,
-    potion: bool,
-    book: bool,
-    quest: bool,
-    seated: (bool, bool, bool, bool, bool, bool, bool, bool, bool),
-) -> Option<MoveRefused> {
+fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
+    let (potion, book, quest, ball, seated) = classed;
     let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
     if !potion
         && !book
@@ -1117,6 +1126,7 @@ fn use_ported(
     if !potion
         && !book
         && !quest
+        && !ball
         && !clear
         && !cloak
         && !abled
@@ -1131,6 +1141,52 @@ fn use_ported(
         return Some(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
     None
+}
+
+/// The consumed kind of the seated `ITEM_USE` arms (or the skill book), or `None`
+/// when the use is no seated arm: the cure, the cloak, the ability potion, the
+/// 50801-50820 pair, the 507 arm, the gold bar, the cape, the pocket, else the plain
+/// book's `Used`.
+fn seated_use_kind(
+    book: bool,
+    seated: (bool, bool, bool, bool, bool, bool, bool, bool, bool),
+) -> Option<super::item_move::MoveKind> {
+    use super::item_move::MoveKind;
+    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
+    if !(book
+        || clear
+        || cloak
+        || abled
+        || euro
+        || timed
+        || shop_premium
+        || barred
+        || caped
+        || nogged)
+    {
+        return None;
+    }
+    Some(if clear {
+        MoveKind::Cleared
+    } else if cloak {
+        MoveKind::Cloaked
+    } else if abled {
+        MoveKind::Abled
+    } else if euro {
+        MoveKind::EuroFree
+    } else if timed {
+        MoveKind::Timed
+    } else if shop_premium {
+        MoveKind::ShopPremium
+    } else if barred {
+        MoveKind::Barred
+    } else if caped {
+        MoveKind::Caped
+    } else if nogged {
+        MoveKind::Nogged
+    } else {
+        MoveKind::Used
+    })
 }
 
 /// The game-state-seated `ITEM_USE` arms of the proto: the `USE_CLEAR` cure, the
@@ -1255,14 +1311,17 @@ pub fn use_item(
         .protos
         .get(item.vnum)
         .ok_or(MoveRefused::UnknownVnum(item.vnum))?;
-    let potion = super::potion::is_potion(proto);
-    let book = is_skill_book(proto);
-    let quest = proto.item_type == gamedata::item_kind::ITEM_QUEST;
-    let seated = use_special_kind(proto);
-    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
-    if let Some(refused) = use_ported(proto, potion, book, quest, seated) {
+    let classed = (
+        super::potion::is_potion(proto),
+        is_skill_book(proto),
+        proto.item_type == gamedata::item_kind::ITEM_QUEST,
+        is_polymorph_ball(proto),
+        use_special_kind(proto),
+    );
+    if let Some(refused) = use_ported(proto, classed) {
         return Err(refused);
     }
+    let (potion, book, quest, ball, seated) = classed;
     use_checks(&item, proto, rules, gear.points)?;
     // `UseItemEx`'s first-use starts (`G/char_item.cpp:2804-2820`): the clock stamps after
     // the checks, before the belt arms and the type switch. Without a clock base the use
@@ -1301,8 +1360,18 @@ pub fn use_item(
         used.changes = changes;
         return Ok(used);
     }
-    if book || clear || cloak || abled || euro || timed || shop_premium || barred || caped || nogged
-    {
+    if ball && proto.vnum != 50_322 {
+        // `case ITEM_POLYMORPH`'s ball arm (`G/char_item.cpp:9783-9814`) uses one of
+        // the stack; the gates refused before the step, and the game state lands the
+        // morph and the bonus after it, so this arm answers the consume and the kind
+        // names the land. The book (50322) stops here: the game state runs its chance
+        // and keeps it, as its count never falls.
+        return consume_one_use(items, &item, proto, MoveKind::Morphed, &mut stamped);
+    }
+    if ball {
+        return Ok(done(MoveKind::Booked, Trail::default()));
+    }
+    if let Some(kind) = seated_use_kind(book, seated) {
         // `case USE_CLEAR` (`G/char_item.cpp:5539-5551`) strips the bad affects and
         // uses one of the stack; the strip runs on the game state (it holds the
         // affects), so this arm answers the consume and the kind names the strip.
@@ -1314,27 +1383,6 @@ pub fn use_item(
         // the same way, after the game state's refusals, and the cape of courage
         // gathers the monsters the same way. The Nog pocket lands its three rows
         // the same way, after the held refusal.
-        let kind = if clear {
-            MoveKind::Cleared
-        } else if cloak {
-            MoveKind::Cloaked
-        } else if abled {
-            MoveKind::Abled
-        } else if euro {
-            MoveKind::EuroFree
-        } else if timed {
-            MoveKind::Timed
-        } else if shop_premium {
-            MoveKind::ShopPremium
-        } else if barred {
-            MoveKind::Barred
-        } else if caped {
-            MoveKind::Caped
-        } else if nogged {
-            MoveKind::Nogged
-        } else {
-            MoveKind::Used
-        };
         return consume_one_use(items, &item, proto, kind, &mut stamped);
     }
     let mut equipper = Equipper::new(items, gear, rules.usable_cells);

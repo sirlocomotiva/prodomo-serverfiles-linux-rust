@@ -53852,3 +53852,56 @@ and the same line from Alpha (level 154) reaches the map. The score-99 mutant
 `a_high_level_whisper_speaks_past_the_words` (`whisper.rs`), and the
 `gamedata::spam` row tests including the owner's empty table.
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5476 passed, 1 failed in 46 targets — the failure is `a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks` ("the second sort waits"), which passes alone, in 8 parallel runs, and beside the new scenario, so a load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 597. The polymorph ball and book
+
+Ledger 364 morphed through the GM line; this slice ports the two consumables that
+morph through the timed affect: the ball five (70104-70107, 71093) and the 50322
+practice book (`ItemProcess_Polymorph`, `G/char_item.cpp:9749-9814`, with
+`CPolymorphUtils::PolymorphCharacter`, `G/polymorph.cpp:36-115`, and the practice
+tail, `:117-129`). `sys.char.polymorph` stays `partial`; its note names the two new
+scenarios.
+
+The ball's use runs in three seats. The guards (`ball_use_allowed`, in
+`use_item_guards`) refuse with legacy's line and the ball kept: morphed `[LS;458]`,
+riding `[LS;1053]` (`IsRiding` is the horse or the mount vnum, `G/char.cpp:8783-8786`),
+a zero or unknown socket-0 vnum `[LS;460]`, and a mob at or past the caller's level
+plus `MAX(0, 20 - level * 3 / 10)` `[LS;461]`. The world step (`MoveKind::Morphed`,
+`world/src/character/equip.rs`) consumes one of the stack. The land
+(`land_polymorph_ball`) takes the ball, socket and skill captured before the step —
+the step already spent the ball — and lays the timed `AFFECT_POLYMORPH` pair: 5
+minutes unskilled, else `5 + (5 + skill / 40 * 25)` minutes (`:9800`),
+`POINT_POLYMORPH` with the socket-0 vnum (override `true`) and `POINT_ATT_BONUS`
+with `(2 + skill / 40) * 100` (override `false`, `:9807`, so the second row does
+not retire the first), strips the two blade auras (skills 4 and 63, `:9809-9812`),
+and tells `USE_POLYMORPH_BALL` to the log.
+
+`POINT_POLYMORPH` leaves `NOT_PORTED` for the plain arm, and `change_pc_point`
+runs the `SetPolymorph` arm (`G/char.cpp:4705-4709`) after the point record, as the
+mount arm does — so the affect's compute morphs through the point change, and its
+expiry unmorphs the same way. The remove path needed no new code: `compute_affect`
+with `add = false` runs the negative change, whose total 0 clears the race.
+
+The book's use is a `MoveKind::Booked` world step that changes nothing — its count
+never falls — and the land runs the chance: the master's duration (10/15/20/25
+ticks from the skill ladder, anything else silent), the hit when the chance (the
+caller's level minus the mob's plus socket 2 plus 29 plus the skill) beats 0 and
+the `number(1, 100)` draw, the morph row (override) and, for the dog or 1901 (the
+two `m_mapSPDType` rows; the attack and defence tables stay empty), the
+move-speed bonus row of skill plus socket 2 (`duration - 1`, no override), then
+socket 1's stamp down — or the spent line when it already reads 0. The two
+`LC_TEXT` lines are in no locale file (the main table and all 12 country files
+were swept), so the lookup answers the key itself. `GiveBook` and `BookUpgrade`
+stay unported behind their two `unused` quest names. The stamp's update and store
+change join the step's, as `SetSocket` sends and stores.
+
+Proved by `a_used_ball_morphs_through_the_timed_affect_and_spends_itself` (the
+grant, the granted cell read off the wire, the log line, the witness's race-101
+spawn reencode, the spent row gone) and
+`a_blank_book_keeps_itself_and_morphs_nothing` (a blank socket 0 keeps the book
+and morphs nothing). Unit seats: the land's morph and spend, the four gate lines
+with the ball kept, and the book's hit (seed 0) and miss (seed 1) with the stamp
+and the failed line. Along the way `use_item`'s early arms and the land's captures
+moved into their own seats (`use_item_early`, `UseLand`), and the world's use
+classification into its own tuple, so the line and argument lints hold.
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5482 passed, 1 failed in 46 targets — the failure is `a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks`, which passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

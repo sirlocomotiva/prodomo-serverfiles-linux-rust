@@ -523,6 +523,8 @@ impl GameState {
             }
         }
         let mount = (kind == point::POINT_MOUNT).then(|| points.get_point(point::POINT_MOUNT));
+        let morph =
+            (kind == point::POINT_POLYMORPH).then(|| points.get_point(point::POINT_POLYMORPH));
         let stamina_after = stamina_before.map(|_| points.stamina());
         // `POINT_STAMINA`'s walking switch (`G/char.cpp:4286-4296`): an emptied pool
         // walks the flag at once, and a pool that climbs off 0 restores the mode
@@ -542,6 +544,11 @@ impl GameState {
         // `POINT_MOUNT`'s arm (`G/char.cpp:4711-4715`): `MountVnum` with the new total.
         if let Some(mount) = mount {
             self.mount_vnum(vid, u32::from_ne_bytes(mount.to_ne_bytes()));
+        }
+        // `POINT_POLYMORPH`'s arm (`G/char.cpp:4705-4709`): `SetPolymorph` with the
+        // new total, after the point record, without the maintain flag.
+        if let Some(morph) = morph {
+            self.set_polymorph(vid, u32::from_ne_bytes(morph.to_ne_bytes()), false);
         }
     }
     /// `PointChange(POINT_HP, hp - GetHP())`: sets the hit points of the player under `vid`.

@@ -229,6 +229,16 @@ pub enum MoveKind {
     /// `G/char_item.cpp:3787-3811`). The game state lands the three rows after
     /// the held refusal.
     Nogged,
+    /// A polymorph ball used one of its stack up (`case ITEM_POLYMORPH`'s
+    /// 70104-70107/71093 arm, `G/char_item.cpp:9783-9814`). The game state runs
+    /// the gates and lands the morph after the consume: the socket-0 vnum and a
+    /// failed morph keep the ball, so the world step only answers this kind for
+    /// a vnum the mob table holds, unmorphed and unmounted, past the level bar.
+    Morphed,
+    /// The 50322 book ran its chance (`CPolymorphUtils::PolymorphCharacter`,
+    /// `G/polymorph.cpp:36-115`): the game state lands the morph and the bonus on
+    /// a hit, stamps socket 1 down, and keeps the count, which never falls.
+    Booked,
 }
 
 /// A record the client is sent, in the order legacy sends it.

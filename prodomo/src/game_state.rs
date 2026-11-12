@@ -4385,6 +4385,45 @@ impl GameState {
         if !self.nog_use_allowed(vid, at, actor) {
             return Some(self.arena_item_refused(vid, actor));
         }
+        // The polymorph ball's gates (`ItemProcess_Polymorph`, `:9749-9796`): a
+        // morph, a ride, a zero or unknown socket-0 vnum, or a mob past the level
+        // bar refuses with its line, the ball kept.
+        if !self.ball_use_allowed(vid, at, actor) {
+            return Some(self.arena_item_refused(vid, actor));
+        }
+        None
+    }
+
+    /// The early `CG_ITEM_USE` arms: the bait, the portal, the blend, the campfire, the
+    /// multi-farm premium, the shaman stone and the search glass, each in legacy's order.
+    /// Answers the step when one fires, `None` when the use runs the world step.
+    fn use_item_early(
+        &mut self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        actor: Mover,
+    ) -> Option<Result<MovedItems, MoveItemRefused>> {
+        if self.bait_at(vid, at) {
+            return Some(self.use_bait(vid, at, actor));
+        }
+        if self.portal_at(vid, at) {
+            return Some(self.use_portal_item(vid, at, actor));
+        }
+        if self.blend_at(vid, at) {
+            return Some(self.use_blend_item(vid, at, actor));
+        }
+        if self.campfire_at(vid, at) {
+            return Some(self.use_campfire_item(vid, at, actor));
+        }
+        if multi_farm::premium_at(self, vid, at) {
+            return Some(multi_farm::use_premium(self, vid, at, actor));
+        }
+        if let Some(shaman) = self.use_shaman_item(vid, at, actor) {
+            return Some(shaman);
+        }
+        if let Some(glass) = self.search_glass_at(vid, at) {
+            return Some(self.open_shop_search(vid, glass, actor));
+        }
         None
     }
 
@@ -4414,26 +4453,8 @@ impl GameState {
         if let Some((kind, special)) = self.auto_at(vid, at) {
             return self.use_auto_item(vid, at, actor, kind, special);
         }
-        if self.bait_at(vid, at) {
-            return self.use_bait(vid, at, actor);
-        }
-        if self.portal_at(vid, at) {
-            return self.use_portal_item(vid, at, actor);
-        }
-        if self.blend_at(vid, at) {
-            return self.use_blend_item(vid, at, actor);
-        }
-        if self.campfire_at(vid, at) {
-            return self.use_campfire_item(vid, at, actor);
-        }
-        if multi_farm::premium_at(self, vid, at) {
-            return multi_farm::use_premium(self, vid, at, actor);
-        }
-        if let Some(shaman) = self.use_shaman_item(vid, at, actor) {
-            return shaman;
-        }
-        if let Some(glass) = self.search_glass_at(vid, at) {
-            return self.open_shop_search(vid, glass, actor);
+        if let Some(early) = self.use_item_early(vid, at, actor) {
+            return early;
         }
         // The book the read passed, and the slot it climbed, for the store: `None` while
         // the step is no read.
@@ -4488,6 +4509,8 @@ impl GameState {
                 .map_or(-1, |proto| proto.item_type);
             (item.vnum, item_type)
         });
+        let ball = self.ball_at(vid, at);
+        let pbook = self.poly_book_at(vid, at);
         let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
             // `G/char_item.cpp:7236-7241`, before the summon arms; the refusal chats the popup.
             if rules.secured {
@@ -4505,7 +4528,15 @@ impl GameState {
         }
         self.run_quest_used(vid, at, actor, account, &mut moved);
         let kind = moved.kind;
-        self.land_item_use_kind(vid, kind, used_vnum, account, &mut moved);
+        let land = UseLand {
+            kind,
+            used_vnum,
+            at,
+            ball,
+            pbook,
+            account,
+        };
+        self.land_item_use_kind(vid, land, &mut moved);
         // unless it already runs.
         if moved
             .points
@@ -4541,11 +4572,17 @@ impl GameState {
     fn land_item_use_kind(
         &mut self,
         vid: common::vid::Vid,
-        kind: world::character::MoveKind,
-        used_vnum: u32,
-        account: &crate::game_loop_messages::QuestAccount,
+        land: UseLand<'_>,
         moved: &mut MovedItems,
     ) {
+        let UseLand {
+            kind,
+            used_vnum,
+            at,
+            ball,
+            pbook,
+            account,
+        } = land;
         if kind == world::character::MoveKind::Cleared {
             self.remove_bad_affect(vid);
         }
@@ -4572,6 +4609,16 @@ impl GameState {
         }
         if kind == world::character::MoveKind::Nogged {
             self.land_nog_ability(vid, used_vnum);
+        }
+        if kind == world::character::MoveKind::Morphed {
+            if let Some((ball, socket, skill)) = ball {
+                self.land_polymorph_ball(vid, ball, socket, skill);
+            }
+        }
+        if kind == world::character::MoveKind::Booked {
+            if let Some((socket0, socket1, socket2, skill)) = pbook {
+                self.land_polymorph_book(vid, at, (socket0, socket1, socket2), skill, moved);
+            }
         }
     }
 
@@ -6302,6 +6349,19 @@ struct BookAt {
     socket0: i32,
     /// The proto's six values.
     values: [i32; 6],
+}
+
+/// The land's captures: the step's kind, the used vnum and cell, the ball's
+/// (ball, socket, skill) and the book's (sockets, skill) from before the step, and the
+/// quest account.
+#[derive(Debug, Clone, Copy)]
+struct UseLand<'a> {
+    kind: world::character::MoveKind,
+    used_vnum: u32,
+    at: protocol::item_pos::ItemPos,
+    ball: Option<(u32, u32, u8)>,
+    pbook: Option<(u32, u32, u32, u8)>,
+    account: &'a crate::game_loop_messages::QuestAccount,
 }
 
 impl PulseProcessor for GameState {

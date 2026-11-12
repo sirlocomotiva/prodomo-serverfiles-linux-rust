@@ -1,5 +1,7 @@
 //! `/polymorph` (`do_polymorph`, `G/cmd_gm.cpp:3049-3068`): the caller shows as the
-//! named mob vnum, or unmorphs on an empty or job vnum.
+//! named mob vnum, or unmorphs on an empty or job vnum. And the polymorph ball's use
+//! (`ItemProcess_Polymorph`'s ball arm, `G/char_item.cpp:9749-9814`): the socket-0 vnum
+//! morphs the caller through the timed affect, or refuses with its line, the ball kept.
 //!
 //! `SetPolymorph` (`G/char.cpp:7680-7724`) sets the race and the maintain flag
 //! (`world::character::Points::set_polymorph`), stops the ride, reencodes with the spawn
@@ -11,19 +13,54 @@
 //! The spawn state bit is held only for the reencode (`REMOVE_BIT`, `:7705`), but
 //! `AFF_SPAWN` is never reset (D5), so every later insert and update of the player carries
 //! it, as each later insert carries the shown race (`GetRaceNum`).
+
+//!
+//! The ball's use is a `MoveKind::Morphed` world step: the guards run the gates in
+//! legacy's order — the morph, the ride, the socket-0 vnum against the mob table, and
+//! the level bar — then the step consumes the ball, and [`GameState::land_polymorph_ball`]
+//! lays the `POINT_POLYMORPH` row (whose change morphs through the point arm) and the
+//! attack-bonus row, strips the two blade auras, and tells `USE_POLYMORPH_BALL` to the
+//! log. The land takes the ball, socket and skill captured before the step, because the
+//! step already spent the ball.
+//!
+//! The 50322 book's use is a `MoveKind::Booked` world step: the step changes nothing
+//! (its count never falls), and [`GameState::land_polymorph_book`] runs
+//! `CPolymorphUtils::PolymorphCharacter` (`G/polymorph.cpp:36-115`): the master's
+//! duration, the chance from the levels, the practice in socket 2 and the skill, the
+//! morph row and the typed bonus row, and socket 1's stamp down. `GiveBook` and
+//! `BookUpgrade` stay unported behind their two `unused` quest names.
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
 use common::point_slot as point;
 use common::vid::Vid;
-use world::character::{polymorph_power, SKILL_POLYMORPH};
+use world::character::{number, polymorph_power, SKILL_POLYMORPH};
 
 use super::view::EntityKey;
 use super::GameState;
 use crate::command::two_arguments;
 use crate::game_state::skill_admin::str_to_dword;
 use crate::game_state::whisper::str_to_int;
-use crate::loading_phase::AFF_SPAWN;
+use crate::loading_phase::{
+    AFFECT_POLYMORPH, AFF_GEOMGYEONG, AFF_GWIGUM, AFF_POLYMORPH, AFF_SPAWN,
+};
+use protocol::gc_chat::CHAT_TYPE_INFO;
+
+/// The 50322 practice book's vnum (`POLYMORPH_BOOK_ID`, `G/polymorph.h:8`).
+const POLYMORPH_BOOK: u32 = 50_322;
+
+/// The vnums whose book morphs run (`m_mapSPDType`, `G/polymorph.cpp:11-14`): the dog
+/// 101 and 1901. The attack and defence tables stay empty, so no other vnum wins a bonus.
+const BOOK_SPD: [u32; 2] = [101, 1901];
+
+/// `LC_TEXT("Transformation failed")` (`G/polymorph.cpp:72,79`): the key is in no locale
+/// file (the main table and all 12 country files were swept for both book lines), so the
+/// locale lookup answers the key itself.
+const BOOK_FAILED: &[u8] = b"Transformation failed";
+
+/// `LC_TEXT("I ended up training in disguise.")` (`:119`): the key is likewise absent,
+/// so the lookup answers the key.
+const BOOK_SPENT: &[u8] = b"I ended up training in disguise.";
 
 impl GameState {
     /// `do_polymorph` (`G/cmd_gm.cpp:3049-3068`): two words (the vnum and the maintain
@@ -138,6 +175,269 @@ impl GameState {
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.add_state.spawn = false;
         }
+    }
+
+    /// The polymorph ball at `at` for the character online under `vid`, or `None` when the
+    /// step is no ball use: no item, no proto, no `ITEM_POLYMORPH` kind, or a vnum outside
+    /// the ball five. Answers the ball's vnum, its socket-0 vnum, and the caller's skill-129
+    /// level.
+    pub(super) fn ball_at(
+        &self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+    ) -> Option<(u32, u32, u8)> {
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let item = character.items().item_at(at)?.clone();
+        let proto = self.protos.get(item.vnum)?;
+        if proto.item_type != gamedata::item_kind::ITEM_POLYMORPH {
+            return None;
+        }
+        if !matches!(item.vnum, 70_104..=70_107 | 71_093) {
+            return None;
+        }
+        let skill = self.pc_skill_level(vid.raw(), SKILL_POLYMORPH);
+        let socket = u32::from_ne_bytes(item.sockets[0].to_ne_bytes());
+        Some((item.vnum, socket, skill))
+    }
+
+    /// Whether the caller may use the ball (`ItemProcess_Polymorph`,
+    /// `G/char_item.cpp:9749-9796`): morphed refuses `[LS;458]`, riding refuses
+    /// `[LS;1053]`, a zero or unknown socket-0 vnum refuses `[LS;460]`, and a mob at or
+    /// past the caller's level plus its bar refuses `[LS;461]` — each tells, each keeps
+    /// the ball. Anything else passes.
+    pub(super) fn ball_use_allowed(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: crate::item_move::Mover,
+    ) -> bool {
+        let Some((_ball, socket, _skill)) = self.ball_at(vid, at) else {
+            return true;
+        };
+        let points = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points().cloned());
+        let Some(points) = points else {
+            return true;
+        };
+        let Some(mine) = self.own_mover(vid).map(|own| crate::item_move::Mover {
+            recently_fought: mover.recently_fought,
+            ..own
+        }) else {
+            return true;
+        };
+        if points.is_polymorphed() {
+            self.tell(vid, mine, CHAT_TYPE_INFO, b"[LS;458]", &[]);
+            return false;
+        }
+        if self.is_riding(vid.raw()) {
+            self.tell(vid, mine, CHAT_TYPE_INFO, b"[LS;1053]", &[]);
+            return false;
+        }
+        let row = (socket != 0)
+            .then(|| {
+                self.regens
+                    .respawner()
+                    .and_then(|respawner| respawner.mob(socket))
+            })
+            .flatten();
+        let Some(row) = row else {
+            self.tell(vid, mine, CHAT_TYPE_INFO, b"[LS;460]", &[]);
+            return false;
+        };
+        // `MAX(0, 20 - GetLevel() * 3 / 10)` (`:9790`): the bar past the caller's level the
+        // mob must sit under.
+        let bar = (20 - i32::from(points.level()) * 3 / 10).max(0);
+        if i32::from(row.level) >= i32::from(points.level()) + bar {
+            self.tell(vid, mine, CHAT_TYPE_INFO, b"[LS;461]", &[]);
+            return false;
+        }
+        true
+    }
+
+    /// Lands the ball's use (`G/char_item.cpp:9797-9814`): the timed `AFFECT_POLYMORPH`
+    /// pair — `POINT_POLYMORPH` with the socket-0 vnum (its change morphs through the
+    /// point arm), and `POINT_ATT_BONUS` with `(2 + skill / 40) * 100` — strips the two
+    /// blade auras, and tells the use to the log. The duration is 5 minutes unskilled,
+    /// else `(5 + (5 + skill / 40 * 25))` minutes (`:9800`).
+    /// The 50322 book at `at` for the character online under `vid`, or `None` when the
+    /// step is no book use. Answers sockets 0-2 and the caller's skill-129 level.
+    pub(super) fn poly_book_at(
+        &self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+    ) -> Option<(u32, u32, u32, u8)> {
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let item = character.items().item_at(at)?.clone();
+        if item.vnum != POLYMORPH_BOOK {
+            return None;
+        }
+        let proto = self.protos.get(item.vnum)?;
+        if proto.item_type != gamedata::item_kind::ITEM_POLYMORPH {
+            return None;
+        }
+        let sockets = [
+            u32::from_ne_bytes(item.sockets[0].to_ne_bytes()),
+            u32::from_ne_bytes(item.sockets[1].to_ne_bytes()),
+            u32::from_ne_bytes(item.sockets[2].to_ne_bytes()),
+        ];
+        let skill = self.pc_skill_level(vid.raw(), SKILL_POLYMORPH);
+        Some((sockets[0], sockets[1], sockets[2], skill))
+    }
+
+    /// Lands the book's use (`CPolymorphUtils::PolymorphCharacter`,
+    /// `G/polymorph.cpp:36-115`, with the `UpdateBookPracticeGrade` tail, `:117-129`).
+    /// The caller's skill mastery names the duration (10/15/20/25 ticks; anything else
+    /// keeps the book silently), the chance is the caller's level minus the mob's plus
+    /// socket 2 plus 29 plus the skill, and a miss tells the failed line; a hit lays
+    /// the morph row (override) and, for the dog or 1901, the move-speed bonus row of
+    /// skill plus socket 2 (`duration - 1`, no override), then stamps socket 1 down —
+    /// or tells the spent line when it already reads 0. The log tells the use first,
+    /// as the ball arm's does. `moved` gains socket 1's stamp change and update.
+    pub(super) fn land_polymorph_book(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        held: (u32, u32, u32),
+        skill: u8,
+        moved: &mut crate::item_move::MovedItems,
+    ) {
+        use world::character::set_item_socket;
+
+        let (socket0, socket1, socket2) = held;
+
+        let Some(mine) = self.own_mover(vid) else {
+            return;
+        };
+        tracing::info!(socket0, "USE_POLYMORPH_BOOK");
+        let duration = match crate::game_state::pc_skill::master_of(skill) {
+            0 => 10,
+            1 => 15,
+            2 => 20,
+            3 => 25,
+            _ => return,
+        };
+        let level = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(0, |points| i32::from(points.level()));
+        let mob = (socket0 != 0)
+            .then(|| {
+                self.regens
+                    .respawner()
+                    .and_then(|respawner| respawner.mob(socket0))
+            })
+            .flatten();
+        let Some(mob) = mob else {
+            return;
+        };
+        let practice = i32::try_from(socket2).unwrap_or(i32::MAX);
+        let chance = level - i32::from(mob.level) + practice + (29 + i32::from(skill));
+        let hit = chance > 0 && number(&mut self.dice, 1, 100) <= chance;
+        if !hit {
+            let line = self.locale.find(BOOK_FAILED, mine.language);
+            self.tell(vid, mine, CHAT_TYPE_INFO, line, &[]);
+            return;
+        }
+        let vnum = i32::try_from(socket0).unwrap_or(i32::MAX);
+        self.add_pc_affect(
+            vid,
+            super::affect::Affect::buff(
+                AFFECT_POLYMORPH,
+                point::POINT_POLYMORPH,
+                vnum,
+                AFF_POLYMORPH,
+                duration,
+                0,
+            ),
+            true,
+        );
+        if BOOK_SPD.contains(&socket0) {
+            let bonus = i32::from(skill).saturating_add(practice);
+            self.add_pc_affect(
+                vid,
+                super::affect::Affect::buff(
+                    AFFECT_POLYMORPH,
+                    point::POINT_MOV_SPEED,
+                    bonus,
+                    AFF_POLYMORPH,
+                    duration - 1,
+                    0,
+                ),
+                false,
+            );
+        }
+        // `UpdateBookPracticeGrade` (`:117-129`): socket 1 stamps down, or the spent
+        // line tells when it already reads 0. The stamp's update and store change join
+        // the step's, as `SetSocket` sends and stores.
+        if socket1 > 0 {
+            let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+                return;
+            };
+            let Some(item) = character.items().item_at(at).cloned() else {
+                return;
+            };
+            let pid = character.player_id();
+            let written = set_item_socket(
+                character.items_mut(),
+                item.id,
+                (1, i32::try_from(socket1 - 1).unwrap_or(i32::MAX)),
+            );
+            let stamped = crate::item_move::MovedItems::new(
+                pid,
+                vid.raw(),
+                written,
+                mine,
+                &self.protos,
+                &self.locale,
+            );
+            moved.records.extend(stamped.records);
+            moved.changes.extend(stamped.changes);
+        } else {
+            let line = self.locale.find(BOOK_SPENT, mine.language);
+            self.tell(vid, mine, CHAT_TYPE_INFO, line, &[]);
+        }
+    }
+
+    /// Lands the ball's use (`G/char_item.cpp:9797-9814`): the timed `AFFECT_POLYMORPH`
+    /// pair — `POINT_POLYMORPH` with the socket-0 vnum (its change morphs through the
+    /// point arm), and `POINT_ATT_BONUS` with `(2 + skill / 40) * 100` — strips the two
+    /// blade auras, and tells the use to the log. The duration is 5 minutes unskilled,
+    /// else `(5 + (5 + skill / 40 * 25))` minutes (`:9800`).
+    pub(super) fn land_polymorph_ball(&mut self, vid: Vid, ball: u32, socket: u32, skill: u8) {
+        let minutes: i64 = if skill == 0 {
+            5
+        } else {
+            5 + (5 + i64::from(skill) / 40 * 25)
+        };
+        let seconds = i32::try_from(minutes.saturating_mul(60)).unwrap_or(i32::MAX);
+        let bonus = (2 + i64::from(skill) / 40) * 100;
+        let bonus = i32::try_from(bonus).unwrap_or(i32::MAX);
+        let vnum = i32::try_from(socket).unwrap_or(i32::MAX);
+        // The second add passes `false` (`:9807`): `FindAffect` would find the first row
+        // and override it, so only `true` then `false` keeps both rows.
+        for (on, value, over) in [
+            (point::POINT_POLYMORPH, vnum, true),
+            (point::POINT_ATT_BONUS, bonus, false),
+        ] {
+            self.add_pc_affect(
+                vid,
+                super::affect::Affect::buff(AFFECT_POLYMORPH, on, value, AFF_POLYMORPH, seconds, 0),
+                over,
+            );
+        }
+        // The blade auras (`:9809-9812`): each held flag strips its skill's row.
+        for (flag, skill) in [(AFF_GEOMGYEONG, 4), (AFF_GWIGUM, 63)] {
+            let word = usize::try_from((flag - 1) / 32).unwrap_or(0);
+            if word < 2 && self.affect_flags_of(vid)[word] & (1 << ((flag - 1) % 32)) != 0 {
+                let _stripped = self.remove_pc_affect(vid, skill);
+            }
+        }
+        tracing::info!(ball, socket, seconds, "USE_POLYMORPH_BALL");
     }
 }
 
@@ -293,6 +593,335 @@ mod tests {
         let job = world.points_of(ME).expect("points").race();
         assert_eq!(add.w_race_num, u16::from(job), "the clear shows the job");
         assert!(has_spawn_affect(&add), "AFF_SPAWN outlives the clear");
+    }
+
+    /// The caller's mover: empire 1, at peace, with no flags.
+    const fn mover() -> crate::item_move::Mover {
+        crate::item_move::Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        }
+    }
+
+    /// A world with a 70104 ball holding socket 0 `socket` in cell 0, and the dog (level
+    /// `dog`) in the mob table, the caller entered and drained.
+    fn a_ball(socket: u32, dog: u8) -> (GameState, UnboundedReceiver<Vec<u8>>, Vid) {
+        use std::sync::Arc;
+
+        use common::item_slots::EWindows;
+        use gamedata::item_proto::{ItemProto, ItemProtos};
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProto, MobProtos, CHAR_TYPE_MONSTER};
+        use gamedata::records::MobTableRecord;
+        use protocol::item_pos::ItemPos;
+        use world::item::Item;
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        use super::super::fixtures::{a_world, enter_seeing_with};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let proto = ItemProto::for_category_rule(70_104, gamedata::item_kind::ITEM_POLYMORPH, 0);
+        world.protos = Arc::new(ItemProtos::from_rows(vec![proto]));
+        let row = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: DOG,
+                mob_type: CHAR_TYPE_MONSTER,
+                level: dog,
+                max_hp: 100,
+                ..MobTableRecord::default()
+            },
+        };
+        world.install_respawner(
+            Respawner::new(
+                Arc::new(MobProtos::from_rows(vec![row])),
+                Arc::new(MobGroups::default()),
+                Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+                NpcVids::starting_at(FIRST_NPC_VID + 100),
+            ),
+            open_cells(),
+        );
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut ball = Item::new(7, 70_104);
+        ball.sockets[0] = i32::try_from(socket).unwrap_or(i32::MAX);
+        let (inbox, _) = enter_seeing_with(&mut world, PLACE, ME, SPOT, 12_345, &[(at, ball)]);
+        let vid = Vid::new(ME);
+        (world, inbox, vid)
+    }
+
+    /// The ball's use through the world step: the caller morphs into the socket-0 vnum
+    /// with the spawn words, the ball leaves the inventory, and the two timed rows
+    /// land (`POINT_POLYMORPH` with the vnum, `POINT_ATT_BONUS` with 200 unskilled).
+    #[test]
+    fn a_used_ball_morphs_and_spends_itself() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+
+        let (mut world, mut mine, vid) = a_ball(DOG, 1);
+        drained(&mut mine);
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let account = crate::game_loop_messages::QuestAccount::default();
+        let step = mover();
+        let moved = world
+            .use_item(vid, at, step, &account)
+            .expect("the use lands");
+        assert_eq!(moved.kind, world::character::MoveKind::Morphed);
+        let points = world.points_of(ME).expect("points");
+        assert!(points.is_polymorphed());
+        assert_eq!(points.polymorph_race(), DOG);
+        assert!(
+            world
+                .characters
+                .find_by_vid(vid)
+                .expect("caller")
+                .items()
+                .item_at(at)
+                .is_none(),
+            "the spent ball leaves the cell"
+        );
+        let rows: Vec<(u32, usize, i32)> = world
+            .affect_events
+            .get(&vid)
+            .map(|event| {
+                event
+                    .affects
+                    .iter()
+                    .map(|affect| (affect.kind, usize::from(affect.apply_on), affect.value))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            rows.contains(&(AFFECT_POLYMORPH, point::POINT_POLYMORPH, 101)),
+            "the morph row lands: {rows:?}"
+        );
+        assert!(
+            rows.contains(&(AFFECT_POLYMORPH, point::POINT_ATT_BONUS, 200)),
+            "the bonus row lands: {rows:?}"
+        );
+        let heard = drained(&mut mine);
+        let add = alpha_add(&heard);
+        assert_eq!(add.w_race_num, u16::try_from(DOG).unwrap());
+        assert_eq!(add.b_state_flag, ADD_CHARACTER_STATE_SPAWN);
+    }
+
+    /// The ball's refusals, each with its line, the ball kept: morphed `[LS;458]`, a
+    /// zero socket `[LS;460]`, an unknown socket `[LS;460]`, and a mob past the level
+    /// bar `[LS;461]`.
+    #[test]
+    fn a_gated_ball_refuses_with_its_line_and_keeps_the_ball() {
+        use common::item_slots::EWindows;
+        use protocol::gc_chat::GcChat;
+        use protocol::item_pos::ItemPos;
+
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let account = crate::game_loop_messages::QuestAccount::default();
+        let step = mover();
+        for (socket, dog, morph_first, line) in [
+            (DOG, 1, true, b"[LS;458]"),
+            (0, 1, false, b"[LS;460]"),
+            (7, 1, false, b"[LS;460]"),
+            (DOG, 30, false, b"[LS;461]"),
+        ] {
+            let (mut world, mut mine, vid) = a_ball(socket, dog);
+            if morph_first {
+                world.set_polymorph(vid, DOG, false);
+            }
+            drained(&mut mine);
+            let moved = world
+                .use_item(vid, at, step, &account)
+                .expect("a refusal answers");
+            assert_eq!(moved.kind, world::character::MoveKind::Used);
+            assert!(
+                world
+                    .characters
+                    .find_by_vid(vid)
+                    .expect("caller")
+                    .items()
+                    .item_at(at)
+                    .is_some(),
+                "the refused ball stays"
+            );
+            let heard = drained(&mut mine);
+            assert!(
+                heard
+                    .iter()
+                    .filter_map(|record| GcChat::decode(record).ok())
+                    .any(|chat| chat.text == line),
+                "the line tells: {heard:02x?}"
+            );
+            assert!(
+                !world.points_of(ME).expect("points").is_polymorphed() || morph_first,
+                "no morph lands"
+            );
+        }
+    }
+
+    /// A world with a 50322 book holding `sockets` in cell 0, the dog (level 1) in the
+    /// mob table, and the caller's skill 129 at `skill`, entered and drained.
+    fn a_book(sockets: [u32; 3], skill: u8) -> (GameState, UnboundedReceiver<Vec<u8>>, Vid) {
+        use std::sync::Arc;
+
+        use common::item_slots::EWindows;
+        use gamedata::item_proto::{ItemProto, ItemProtos};
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProto, MobProtos, CHAR_TYPE_MONSTER};
+        use gamedata::records::MobTableRecord;
+        use protocol::item_pos::ItemPos;
+        use world::item::Item;
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        use super::super::fixtures::{a_world, enter_seeing_with};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let proto =
+            ItemProto::for_category_rule(POLYMORPH_BOOK, gamedata::item_kind::ITEM_POLYMORPH, 0);
+        world.protos = Arc::new(ItemProtos::from_rows(vec![proto]));
+        let row = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: DOG,
+                mob_type: CHAR_TYPE_MONSTER,
+                level: 1,
+                max_hp: 100,
+                ..MobTableRecord::default()
+            },
+        };
+        world.install_respawner(
+            Respawner::new(
+                Arc::new(MobProtos::from_rows(vec![row])),
+                Arc::new(MobGroups::default()),
+                Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+                NpcVids::starting_at(FIRST_NPC_VID + 100),
+            ),
+            open_cells(),
+        );
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let mut book = Item::new(7, POLYMORPH_BOOK);
+        for (slot, value) in sockets.iter().enumerate() {
+            book.sockets[slot] = i32::try_from(*value).unwrap_or(i32::MAX);
+        }
+        let (inbox, _) = enter_seeing_with(&mut world, PLACE, ME, SPOT, 12_345, &[(at, book)]);
+        world.set_pc_skill_level(ME, SKILL_POLYMORPH, skill);
+        let vid = Vid::new(ME);
+        (world, inbox, vid)
+    }
+
+    /// The book's hit through the world step: the caller morphs into socket 0 with the
+    /// spawn words, the book stays with socket 1 stamped down, and the two rows land
+    /// (the morph row of 10 ticks, the dog's move-speed bonus of 9). Seed 0 draws at
+    /// or under the chance (10 - 1 + 0 + 29 + 0 = 38).
+    #[test]
+    fn a_used_book_morphs_and_stamps_its_practice_down() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+        use world::character::Pcg32;
+
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let account = crate::game_loop_messages::QuestAccount::default();
+        let step = mover();
+        let (mut world, mut mine, vid) = a_book([DOG, 3, 0], 0);
+        world.dice = Pcg32::new(0, 0);
+        drained(&mut mine);
+        let moved = world
+            .use_item(vid, at, step, &account)
+            .expect("the use lands");
+        assert_eq!(moved.kind, world::character::MoveKind::Booked);
+        assert!(
+            world.points_of(ME).expect("points").is_polymorphed(),
+            "seed 0 wins the chance"
+        );
+        let points = world.points_of(ME).expect("points");
+        assert_eq!(points.polymorph_race(), DOG);
+        let book = world
+            .characters
+            .find_by_vid(vid)
+            .expect("caller")
+            .items()
+            .item_at(at)
+            .cloned()
+            .expect("the book stays");
+        assert_eq!(book.sockets[1], 2, "socket 1 stamps down");
+        let rows: Vec<(u32, usize, i32, i32)> = world
+            .affect_events
+            .get(&vid)
+            .map(|event| {
+                event
+                    .affects
+                    .iter()
+                    .map(|affect| {
+                        (
+                            affect.kind,
+                            usize::from(affect.apply_on),
+                            affect.value,
+                            affect.remaining,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            rows.contains(&(AFFECT_POLYMORPH, point::POINT_POLYMORPH, 101, 10)),
+            "the morph row lands: {rows:?}"
+        );
+        assert!(
+            rows.contains(&(AFFECT_POLYMORPH, point::POINT_MOV_SPEED, 0, 9)),
+            "the dog's run row lands: {rows:?}"
+        );
+    }
+
+    /// The book's miss through the world step: the failed line tells, no morph lands,
+    /// and the book stays unstamped. Seed 1 draws past the chance
+    /// (10 - 1 + 0 + 29 + 0 = 38).
+    #[test]
+    fn a_missed_book_tells_the_failed_line_and_stamps_nothing() {
+        use common::item_slots::EWindows;
+        use protocol::gc_chat::GcChat;
+        use protocol::item_pos::ItemPos;
+        use world::character::Pcg32;
+
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let account = crate::game_loop_messages::QuestAccount::default();
+        let step = mover();
+        let (mut world, mut mine, vid) = a_book([DOG, 3, 0], 0);
+        world.dice = Pcg32::new(1, 0);
+        drained(&mut mine);
+        let moved = world
+            .use_item(vid, at, step, &account)
+            .expect("the use lands");
+        assert_eq!(moved.kind, world::character::MoveKind::Booked);
+        assert!(
+            !world.points_of(ME).expect("points").is_polymorphed(),
+            "seed 1 misses the chance"
+        );
+        let heard = drained(&mut mine);
+        assert!(
+            heard
+                .iter()
+                .filter_map(|record| GcChat::decode(record).ok())
+                .any(|chat| chat.text == BOOK_FAILED),
+            "the failed line tells: {heard:02x?}"
+        );
+        let book = world
+            .characters
+            .find_by_vid(vid)
+            .expect("caller")
+            .items()
+            .item_at(at)
+            .cloned()
+            .expect("the book stays");
+        assert_eq!(book.sockets[1], 3, "a miss stamps nothing");
     }
 
     /// `/polymorph` runs at `POS_DEAD`: a dead caller's reencode carries the dead bit

@@ -47,6 +47,8 @@ pub const ITEM_SKILLBOOK: i32 = 17;
 pub const ITEM_SKILLFORGET: i32 = 22;
 /// `ITEM_QUEST`, an item a quest reads.
 pub const ITEM_QUEST: i32 = 18;
+/// `ITEM_POLYMORPH` (19): a ball or book that morphs its user.
+pub const ITEM_POLYMORPH: i32 = 19;
 /// `ITEM_PICK`, a pickaxe.
 pub const ITEM_PICK: i32 = 24;
 /// `ITEM_TOTEM`, which `FindEquipCell` refuses whatever its wear flags say.
