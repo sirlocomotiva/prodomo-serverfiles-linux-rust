@@ -52121,6 +52121,153 @@ const DROP_EVENT_PROBE: &[u8] = b"quest drop_probe begin\n\
     end\n\
     end\n";
 
+/// Ledger 602's map-230 probe: the skill teacher (vnum 20300) walks a phase
+/// counter through the four starts (events 3-6) and the four ends, saying each.
+const MAP_EVENT_PROBE: &[u8] = b"quest map_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    local phase = pc.getqf('phase')\n\
+    if phase == 0 then\n\
+    start_event(3)\n\
+    say('boss started')\n\
+    elseif phase == 1 then\n\
+    start_event(4)\n\
+    say('metin started')\n\
+    elseif phase == 2 then\n\
+    start_event(5)\n\
+    say('mining started')\n\
+    elseif phase == 3 then\n\
+    start_event(6)\n\
+    say('frog started')\n\
+    elseif phase == 4 then\n\
+    end_event(3)\n\
+    say('boss ended')\n\
+    elseif phase == 5 then\n\
+    end_event(4)\n\
+    say('metin ended')\n\
+    elseif phase == 6 then\n\
+    end_event(5)\n\
+    say('mining ended')\n\
+    else\n\
+    end_event(6)\n\
+    say('frog ended')\n\
+    end\n\
+    pc.setqf('phase', phase + 1)\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// One map-230 start's answers on the owner's data (no map 230): the probe's
+/// dialog and the begin letters in quest order — no start notice, as the arms
+/// return past the flag without one.
+fn read_map_start(keyed: &mut Keyed, said: &[u8], letters: &[(u16, &[u8])]) {
+    let mut dialog = said.to_vec();
+    dialog.extend_from_slice(b"[ENTER][DONE]");
+    assert_eq!(keyed.read_game(), server_script(1, &dialog), "the dialog");
+    for (quest, title) in letters {
+        read_letter(keyed, *quest, title, "the begin letter");
+    }
+    keyed.quiet("the start ends");
+}
+
+/// `sys.event.manager`'s boss, metin, mining and frog arms (`SetBossEvent`,
+/// `SetMetinEvent`, `SetMiningEvent`, `SetGoldFrogEvent`,
+/// `G/event_manager.cpp:986-1154`): on the owner's data map 230 never loads, so
+/// the four starts set their flags with no notice and no walk — only the probe's
+/// dialog and the begin letters (boss 4, metin 10, mining 11, frog 7, each behind
+/// the already-running letters in quest order) — and the four ends chat their end
+/// (the frog's keeping its missing space) with no warp, no telling and no kill,
+/// each clearing exactly the quests whose flags no longer run. The walks, the
+/// mining plant and the ends' bodies are unit-pinned on a hosted 230.
+#[test]
+fn four_clicks_start_the_map_events_silently_and_four_end_them() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/map_probe.lua",
+            MAP_EVENT_PROBE,
+        )],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    for (said, letters) in [
+        (
+            b"boss started".as_slice(),
+            [(4u16, b"Boss Event ".as_slice())].as_slice(),
+        ),
+        (
+            b"metin started".as_slice(),
+            [
+                (4u16, b"Boss Event ".as_slice()),
+                (10u16, b"Metins Shower Event ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+        (
+            b"mining started".as_slice(),
+            [
+                (4u16, b"Boss Event ".as_slice()),
+                (10u16, b"Metins Shower Event ".as_slice()),
+                (11u16, b"Mining Event ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+        (
+            b"frog started".as_slice(),
+            [
+                (4u16, b"Boss Event ".as_slice()),
+                (7u16, b"Gold Frog Event ".as_slice()),
+                (10u16, b"Metins Shower Event ".as_slice()),
+                (11u16, b"Mining Event ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        alice.send_record(&client_click(teacher));
+        read_map_start(&mut alice, said, letters);
+    }
+    for (said, notice, clears) in [
+        (
+            b"boss ended".as_slice(),
+            b"Boss Hunt Event has ended. Thank you for participating.".as_slice(),
+            [4u16, 6, 8, 9, 12, 13, 14, 15, 16].as_slice(),
+        ),
+        (
+            b"metin ended".as_slice(),
+            b"Metin Shower Event has ended. Thank you for participating.".as_slice(),
+            [4u16, 6, 8, 9, 10, 12, 13, 14, 15, 16].as_slice(),
+        ),
+        (
+            b"mining ended".as_slice(),
+            b"Mining Event has ended. Thank you for participating.".as_slice(),
+            [4u16, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16].as_slice(),
+        ),
+        (
+            b"frog ended".as_slice(),
+            b"Golden Frog Event has ended.Thank you for participating.".as_slice(),
+            [4u16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].as_slice(),
+        ),
+    ] {
+        alice.send_record(&client_click(teacher));
+        read_drop_end(&mut alice, said, notice, clears);
+    }
+    drop(alice);
+    drop(server);
+}
+
 /// Ledger 601's Tanaka probe: the skill teacher (vnum 20300) toggles event 12 —
 /// start when `tanaka_event` is 0, else end — and says which.
 const TANAKA_PROBE: &[u8] = b"quest tanaka_probe begin\n\

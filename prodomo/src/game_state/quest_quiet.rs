@@ -522,16 +522,39 @@ impl GameState {
     /// and the switch falls through; so is an event whose state already holds, as
     /// legacy's early return does. Else the flag takes the state, and the exp and
     /// loot arms grant their empire privs (`SetExperienceEvent`, `SetItemDropEvent`,
-    /// `:928-982`); the moonlight, hexegonal and fishing arms chat their start
-    /// (`SetMoonlightEvent`, `SetHexegonalEvent`, `SetFishingEvent`, `:1156-1202`);
-    /// the siege and kingdom arms stand their wars (`SetSiegeWarEvent`,
-    /// `SetKingdomWarEvent`, `:1531-1680`); every other arm waits for its system.
+    /// `:928-982`); the boss, metin, mining and frog arms run their map-230
+    /// walks (`SetBossEvent`, `SetMetinEvent`, `SetMiningEvent`,
+    /// `SetGoldFrogEvent`, `:986-1154`); the moonlight, hexegonal and fishing
+    /// arms chat their start (`SetMoonlightEvent`, `SetHexegonalEvent`,
+    /// `SetFishingEvent`, `:1156-1202`); the siege and kingdom arms stand their
+    /// wars (`SetSiegeWarEvent`, `SetKingdomWarEvent`, `:1531-1680`); every
+    /// other arm waits for its system.
     pub(super) fn start_game_event(&mut self, index: i32, value0: i32, value1: i32) {
         let _ = value1;
         let Some(flag) = event_flag_name(index) else {
             return;
         };
         if self.manager_event_flag(flag) != 0 {
+            return;
+        }
+        if index == 3 {
+            self.start_boss_event();
+            self.fire_event_edge(true);
+            return;
+        }
+        if index == 4 {
+            self.start_metin_event();
+            self.fire_event_edge(true);
+            return;
+        }
+        if index == 5 {
+            self.start_mining_event();
+            self.fire_event_edge(true);
+            return;
+        }
+        if index == 6 {
+            self.start_frog_event();
+            self.fire_event_edge(true);
             return;
         }
         if index == 10 {
@@ -585,13 +608,35 @@ impl GameState {
     /// `_end_event` (`G/questlua_global.cpp:1668-1686`) after the step: an index no
     /// event has, or whose state already cleared, is quiet. Else the flag clears,
     /// and the exp, loot, moonlight, hexegonal and fishing arms chat their end;
-    /// the siege and kingdom arms end their wars (`SetSiegeWarEvent`,
-    /// `SetKingdomWarEvent`, `:1566-1726`).
+    /// the boss, metin, mining and frog arms end their map-230 walks
+    /// (`SetBossEvent`, `SetMetinEvent`, `SetMiningEvent`, `SetGoldFrogEvent`,
+    /// `:986-1154`); the siege and kingdom arms end their wars
+    /// (`SetSiegeWarEvent`, `SetKingdomWarEvent`, `:1566-1726`).
     pub(super) fn end_game_event(&mut self, index: i32) {
         let Some(flag) = event_flag_name(index) else {
             return;
         };
         if self.manager_event_flag(flag) == 0 {
+            return;
+        }
+        if index == 3 {
+            self.end_boss_event();
+            self.fire_event_edge(false);
+            return;
+        }
+        if index == 4 {
+            self.end_metin_event();
+            self.fire_event_edge(false);
+            return;
+        }
+        if index == 5 {
+            self.end_mining_event();
+            self.fire_event_edge(false);
+            return;
+        }
+        if index == 6 {
+            self.end_frog_event();
+            self.fire_event_edge(false);
             return;
         }
         if index == 10 {
@@ -920,8 +965,15 @@ mod tests {
             b"Item-Drop Boost Event has ended."
         );
         world.start_game_event(3, 0, 0);
+        assert!(
+            inbox.try_recv().is_err(),
+            "boss (3) starts silently off its map"
+        );
         world.end_game_event(3);
-        assert!(inbox.try_recv().is_err(), "boss (3) moves the flag alone");
+        assert_eq!(
+            text_of(&inbox.try_recv().expect("the boss end")),
+            b"Boss Hunt Event has ended. Thank you for participating."
+        );
         for (index, flag) in [
             (1, b"exp_event".as_slice()),
             (2, b"item_drop_event".as_slice()),

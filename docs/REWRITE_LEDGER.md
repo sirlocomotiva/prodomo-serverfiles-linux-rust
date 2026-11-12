@@ -54007,3 +54007,41 @@ path keeps the constant, now cited. The two later rounds, the no-host start and
 fire, the end's non-cancel, and the point path's non-aggressive stand are
 unit-pinned in `tanaka.rs`.
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5499 passed, 1 failed in 46 targets — the one (`a_grade_refine_spends_the_stones_and_lands_a_new_one`) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 602. The map-230 arms
+
+`sys.event.manager`'s boss, metin, mining and frog arms (events 3-6,
+`SetBossEvent`, `SetMetinEvent`, `SetMiningEvent`, `SetGoldFrogEvent`,
+`G/event_manager.cpp:986-1154`) are live (the row stays `partial`), and
+`event.event_manager.dynamic_spawn_cycle_event` is `ported`: scenario
+`four_clicks_start_the_map_events_silently_and_four_end_them`. Map 230
+(`EVENT_MAP_INDEX`) has no folder and no index row on the owner's data, so
+there the four starts set their flags with no notice and no walk — only the
+probe's dialog and the begin letters (boss 4, metin 10, mining 11, frog 7, each
+behind the already-running letters in quest order) — and the four ends chat
+their end (the frog's keeping its missing space, `has ended.Thank you`) with
+no warp, no telling and no kill, each clearing exactly the quests whose flags
+no longer run.
+
+The bodies live in `prodomo/src/game_state/event_cycle.rs` behind the hosted-230
+gate, and a hosted 230 pins them in unit tests: the dynamic walk's ten rounds
+(five of the first file, five of the second, clears at 1 and 6, +5 min, the
+eleventh call stopping), the frog static walk's three rounds (+8 min, the
+round-1 clear — no Tanaka exemption off the Tanaka map — the fourth call
+stopping), the mining start's plant (its vein regen stands now and schedules
+its first fire at `number(0, 16) + time`, through `respawn` and `stand_more`)
+and the mining end's free, and the ends' kill with the queued home warp (60 s
+for the boss, 15 s for the rest). The walks spawn `m` lines through
+`SpawnMobRange`'s 16 tries, aggressive, points at their point not aggressive,
+`g` lines through the new `spawn_event_group_aggressive`, and
+`s` lines anywhere. `main.rs` loads the six files at boot onto 230's base
+(empty without the map). The siege's home warp, kill sweep and map telling
+generalized to any map (`queue_war_home`, `kill_war_map`, `tell_war_map` take
+it), and the warps queue carries the map.
+
+The slice's one correction: the first ends never cleared their flags — legacy's
+`UpdateGameFlag` tops every Set arm, and the dedicated-arm path in
+`end_game_event` returns before the generic clear. The owner's walk files hold
+`m` lines only (88/96 boss, 149/155 metin, 85 frog) and the mining file 403 `g`
+lines, pinned by count.
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5504 passed, 2 failed in 46 targets — the one scenario (`a_morphed_caller_hears_every_stat_refusal`) passes alone, so the known load flake, not this slice, and the one unit pin (`the_event_pair_moves_flags_grants_and_notices`) held the pre-slice silence of the boss end, updated to the new end notice and green on rerun with the lib suite 1861 clean; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

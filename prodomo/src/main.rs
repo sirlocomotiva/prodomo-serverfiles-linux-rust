@@ -10543,6 +10543,7 @@ struct GameData {
     npcs: NpcData,
     /// The Tanaka cycle's placed entries, which each round spawns once.
     tanaka: Vec<gamedata::regen::RegenEntry>,
+    event_cycles: prodomo::game_state::EventCycleFiles,
     /// The shops a keeper opens, which the game thread holds.
     shops: Arc<NpcShops>,
     /// The renewal tabs a keeper opens, which the game thread holds.
@@ -10648,6 +10649,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let blend_table = load_blend_table(config)?;
     let lands = load_lands(config)?;
     let tanaka = load_tanaka(config, &atlas);
+    let event_cycles = load_event_cycles(config, &atlas);
     let object_protos = load_object_protos(config)?;
     let daily_weeks = load_daily_weeks(config)?;
     let cube_recipes = load_cube_recipes(config)?;
@@ -10665,6 +10667,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         quest_translate,
         npcs,
         tanaka,
+        event_cycles,
         shops,
         renewal_shops,
         drops,
@@ -11023,6 +11026,49 @@ fn load_tanaka(
             Vec::new()
         }
     }
+}
+
+/// Load the map-230 walks' entries: the frog, boss (two stages), metin (two
+/// stages) and mining files placed on map 230's base. Each missing map or
+/// refusing file loads empty; the walks then spawn nothing there, as legacy's
+/// `GetMap` miss does.
+fn load_event_cycles(
+    config: &ServerConfig,
+    atlas: &gamedata::map_atlas::MapAtlas,
+) -> prodomo::game_state::EventCycleFiles {
+    use prodomo::game_state::EventCycleFiles;
+    let mut files = EventCycleFiles::default();
+    let Some(region) = atlas.region(230) else {
+        return files;
+    };
+    let load = |name: &str| -> Vec<gamedata::regen::RegenEntry> {
+        let path = config.data_dir().join("event").join(name);
+        match gamedata::regen::load_file(&path, region.sx, region.sy) {
+            Ok(entries) => {
+                info!(
+                    file = name,
+                    entries = entries.len(),
+                    "Event cycle entries loaded"
+                );
+                entries
+            }
+            Err(error) => {
+                warn!(file = name, %error, "Event cycle entries refused");
+                Vec::new()
+            }
+        }
+    };
+    files.frog = load("golden_frog_event_regen_type_0.txt");
+    files.boss = [
+        load("boss_event_regen_type_1.txt"),
+        load("boss_event_regen_type_2.txt"),
+    ];
+    files.metin = [
+        load("metin_event_regen_type_1.txt"),
+        load("metin_event_regen_type_2.txt"),
+    ];
+    files.mining = load("mining_event_regen_type_0.txt");
+    files
 }
 
 fn load_lands(config: &ServerConfig) -> Result<Arc<gamedata::land::Lands>, String> {
@@ -11649,6 +11695,7 @@ fn build_world(
         .with_view_range(config.game.view_range)
         .with_no_wander(config.game.no_wander)
         .with_tanaka(data.tanaka.clone())
+        .with_event_cycles(data.event_cycles.clone())
         .with_locale_strings(Arc::clone(&data.locale))
         .with_locale_dir(config.locale_dir())
         .with_quest_translate(Arc::clone(&data.quest_translate))

@@ -56,6 +56,7 @@ use std::sync::Arc;
 
 use common::vid::Vid;
 use gamedata::map_atlas::MapRegion;
+use gamedata::regen::RegenEntry;
 use gamedata::server_attr::ATTR_BANPK;
 use world::cells::{HostedCells, MapCells};
 use world::npc::{MapNpcs, Npc, Respawner};
@@ -101,6 +102,18 @@ pub(super) enum Due {
     /// boss runs first (a Divergence — legacy's heap order at equal priority is
     /// heap-shape dependent, as the other arms note).
     TanakaCycle {
+        /// The rounds fired so far.
+        step: u8,
+    },
+    /// `static_spawn_cycle_event` for the golden frog and `dynamic_spawn_cycle_event`
+    /// for the boss and metin (`G/event_manager.cpp:220-336`) on the event map: the
+    /// 3-round 8 min frog walk and the 10-round 5 min boss/metin walks. It sorts
+    /// after [`Due::TanakaCycle`]: at an equal Pulse the Tanaka walk runs first (a
+    /// Divergence — legacy's heap order at equal priority is heap-shape dependent,
+    /// as the other arms note).
+    MapCycle {
+        /// The walk: the frog's static one or the boss's or metin's dynamic one.
+        stage: super::event_cycle::CycleStage,
         /// The rounds fired so far.
         step: u8,
     },
@@ -369,6 +382,9 @@ impl GameState {
                 Due::TanakaCycle { step } => {
                     self.fire_tanaka_cycle(step);
                 }
+                Due::MapCycle { stage, step } => {
+                    self.fire_event_cycle(stage, step);
+                }
                 Due::SantaSpawn { map } => self.fire_santa_spawn(map, pulse),
                 Due::BattleArena => {}
                 Due::WorldBoss => self.run_world_boss_tick(pulse),
@@ -453,7 +469,7 @@ impl GameState {
     /// Stands the characters a regen spawned on its map after the others: each enters the
     /// map's view, which sends its insert to every player that now sees it; an ore vein's end
     /// is scheduled; a warp or goto NPC starts its event; and the regen counts the units.
-    fn stand_more(
+    pub(super) fn stand_more(
         &mut self,
         key: (u8, i32),
         at: usize,
@@ -948,6 +964,80 @@ impl GameState {
         } else {
             None
         }
+    }
+
+    /// `SpawnGroup` on `place` for an event walk (`G/regen.cpp:366-372`): the
+    /// group's members in the box, aggressive, as `regen_load_in_file` forces.
+    pub(super) fn spawn_event_group_aggressive(
+        &mut self,
+        place: (u8, i32),
+        vnum: u32,
+        area: (i32, i32, i32, i32),
+    ) {
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        match respawner.spawn_group_line((&region, &cells), vnum, area, &mut self.dice) {
+            Ok(mut stood) => {
+                for npc in &mut stood {
+                    npc.ai_flags |= gamedata::mob_proto::AIFLAG_AGGRESSIVE;
+                }
+                self.stand_runtime(place, stood, pulse);
+            }
+            Err(error) => warn!(?place, %error, "an event spawn outnumbered the VIDs left"),
+        }
+    }
+
+    /// One mining line's plant: the regen joins the map's list, spawns its
+    /// units now, stands them, and schedules its first fire.
+    pub(super) fn plant_event_regen(&mut self, place: (u8, i32), entry: &RegenEntry) {
+        if entry.time == 0 {
+            return;
+        }
+        let first_fire =
+            world::character::number(&mut self.dice, 0, 16).unsigned_abs() + entry.time;
+        let regen = world::npc::Regen {
+            entry: *entry,
+            count: 0,
+            first_fire,
+        };
+        let at = self.npcs.get(&place).map_or(0, |list| list.regens.len());
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return;
+        };
+        let stood = match respawner.respawn((&region, &cells), &regen, at, &mut self.dice) {
+            Ok(stood) => stood,
+            Err(error) => {
+                tracing::warn!(?place, %error, "a mining line outnumbered the VIDs left");
+                return;
+            }
+        };
+        let pulse = self.last_pulse;
+        {
+            let Some(list) = self.npcs.get_mut(&place) else {
+                return;
+            };
+            std::sync::Arc::make_mut(list).regens.push(regen);
+        }
+        let when = pulse.saturating_add(pulses(first_fire));
+        self.regens.due.insert((
+            when,
+            Due::Regen {
+                channel: place.0,
+                map: place.1,
+                at,
+            },
+        ));
+        self.stand_more(place, at, stood, pulse);
     }
 
     /// `SpawnMobRandomPosition(vnum, map)` on `place` for an event arm.

@@ -74,7 +74,7 @@ const STONE_WARP_SECS: u64 = 3;
 const END_WARP_SECS: u64 = 60;
 /// The teleported line (`SendNoticeMap`'s `LC_TEXT`, read from the owner's
 /// `locale_string.txt` through the hearer's language).
-const TELEPORT_LINE: &[u8] = b"Everyone will be teleported into the city shortly.";
+pub(super) const TELEPORT_LINE: &[u8] = b"Everyone will be teleported into the city shortly.";
 
 /// The wars' scores: `m_bSiegeScore` and `m_aKingdomWarScore`, with the home warps
 /// the end-arms and the stone kills queue as Pulses.
@@ -84,8 +84,8 @@ pub(super) struct SiegeWar {
     siege_score: u8,
     /// The kingdom kills by empire slot (0 is all-empires, always 0).
     kingdom: [KingdomRow; 4],
-    /// The queued home warps: the Pulse and the empire (0 is every empire).
-    warps: Vec<(u64, u8)>,
+    /// The queued home warps: the Pulse, the map and the empire (0 is every empire).
+    pub(super) warps: Vec<(u64, i32, u8)>,
 }
 
 /// `mining::IsVeinOfOre` (`G/mining.cpp:469-480`): the veins of `mining::info`.
@@ -156,9 +156,9 @@ impl GameState {
         self.set_event_flag(b"siege_jinno_score", 0);
         self.set_event_flag(b"siege_war_event", 0);
         self.broadcast_notice_text(b"Siege War Event has ended. Thank you for participating!");
-        self.queue_war_home(END_WARP_SECS, 0);
-        self.kill_war_map();
-        self.tell_war_map(TELEPORT_LINE, false);
+        self.queue_war_home(WAR_MAP, END_WARP_SECS, 0);
+        self.kill_war_map(WAR_MAP);
+        self.tell_war_map(WAR_MAP, TELEPORT_LINE, false);
     }
 
     /// `SetKingdomWarEvent(true)` (`:1662-1680`): the four rows zero with their
@@ -189,8 +189,8 @@ impl GameState {
         self.siege_war.kingdom = [KingdomRow::default(); 4];
         self.set_event_flag(b"kingdom_war_event", 0);
         self.broadcast_notice_text(b"Kingdom War Event has ended. Thank you for participating!");
-        self.queue_war_home(END_WARP_SECS, 0);
-        self.tell_war_map(TELEPORT_LINE, false);
+        self.queue_war_home(WAR_MAP, END_WARP_SECS, 0);
+        self.tell_war_map(WAR_MAP, TELEPORT_LINE, false);
     }
 
     /// The war reward table (`SetSiegeWarEvent`'s end arms, `SetKingdomWarEvent`'s
@@ -220,7 +220,7 @@ impl GameState {
         };
         self.broadcast_notice_text(STONE_LINES[slot]);
         self.siege_war.siege_score = self.siege_war.siege_score.saturating_add(1);
-        self.queue_war_home(STONE_WARP_SECS, STONE_EMPIRES[slot]);
+        self.queue_war_home(WAR_MAP, STONE_WARP_SECS, STONE_EMPIRES[slot]);
         let count = i32::from(self.siege_war.siege_score);
         if count == 2 {
             self.set_event_flag(STONE_FLAGS[slot], count);
@@ -286,20 +286,22 @@ impl GameState {
         Some(record)
     }
 
-    /// Queue a home warp `secs` seconds out for `empire` (0 is every empire).
-    fn queue_war_home(&mut self, secs: u64, empire: u8) {
+    /// Queue a home warp `secs` seconds out on `map` for `empire` (0 is every
+    /// empire): `warp_all_to_village_event`'s schedule (`:123-190`).
+    pub(super) fn queue_war_home(&mut self, map: i32, secs: u64, empire: u8) {
         let pulses = secs.saturating_mul(u64::from(crate::save::PASSES_PER_SEC));
         let due = self.last_pulse.saturating_add(pulses);
-        self.siege_war.warps.push((due, empire));
+        self.siege_war.warps.push((due, map, empire));
     }
 
-    /// The queued home warps' Pulse arm: every player on 103 of the queued empire
-    /// (every empire for 0) warps to its empire start. An empire-0 player stays,
-    /// as legacy's `sys_err` arm returns without warping it.
+    /// The queued home warps' Pulse arm: every player on the queued map of the
+    /// queued empire (every empire for 0) warps to its empire start. An
+    /// empire-0 player stays, as legacy's `sys_err` arm returns without
+    /// warping it.
     pub(super) fn run_war_home(&mut self, pulse: u64) {
         let mut index = 0;
         while index < self.siege_war.warps.len() {
-            let (due, empire) = self.siege_war.warps[index];
+            let (due, map, empire) = self.siege_war.warps[index];
             if pulse < due {
                 index += 1;
                 continue;
@@ -308,9 +310,7 @@ impl GameState {
             let mut vids: Vec<Vid> = self
                 .bodies
                 .iter()
-                .filter(|(_, body)| {
-                    body.map == WAR_MAP && (empire == 0 || body.card.empire == empire)
-                })
+                .filter(|(_, body)| body.map == map && (empire == 0 || body.card.empire == empire))
                 .map(|(vid, _)| *vid)
                 .collect();
             vids.sort_by_key(|vid| vid.raw());
@@ -328,13 +328,13 @@ impl GameState {
         }
     }
 
-    /// `FKillSectree` on 103 (`:194-204`): every monster, stone and vein there dies.
-    /// `M2_DESTROY_CHARACTER` removes the dead outright; the corpses' timers never
-    /// arm.
-    fn kill_war_map(&mut self) {
+    /// `FKillSectree` on `map` (`:194-204`): every monster, stone and vein there
+    /// dies. `M2_DESTROY_CHARACTER` removes the dead outright; the corpses'
+    /// timers never arm.
+    pub(super) fn kill_war_map(&mut self, map: i32) {
         let mut vids: Vec<u32> = Vec::new();
-        for ((_, map), list) in &self.npcs {
-            if *map != WAR_MAP {
+        for ((_, at), list) in &self.npcs {
+            if *at != map {
                 continue;
             }
             for npc in &list.npcs {
@@ -354,9 +354,9 @@ impl GameState {
         }
     }
 
-    /// `SendNoticeMap(line, 103, big)` (`G/cmd_gm.cpp:1453-1500`): every PC on 103
-    /// hears the line as a notice, or a big notice.
-    fn tell_war_map(&self, line: &[u8], big: bool) {
+    /// `SendNoticeMap(line, map, big)` (`G/cmd_gm.cpp:1453-1500`): every PC on
+    /// `map` hears the line as a notice, or a big notice.
+    pub(super) fn tell_war_map(&self, map: i32, line: &[u8], big: bool) {
         let chat = if big {
             CHAT_TYPE_BIG_NOTICE
         } else {
@@ -365,7 +365,7 @@ impl GameState {
         let mut vids: Vec<Vid> = self
             .bodies
             .iter()
-            .filter(|(_, body)| body.map == WAR_MAP)
+            .filter(|(_, body)| body.map == map)
             .map(|(vid, _)| *vid)
             .collect();
         vids.sort_by_key(|vid| vid.raw());
@@ -551,12 +551,12 @@ mod tests {
         let due = 3 * u64::from(crate::save::PASSES_PER_SEC);
         assert_eq!(
             world.siege_war.warps,
-            [(due, 1)],
+            [(due, WAR_MAP, 1)],
             "Shinsoo's 3 s warp queues"
         );
         world.run_war_home(due - 1);
         assert_eq!(world.bodies[&Vid::new(0x6001)].map, WAR_MAP, "not yet");
-        assert_eq!(world.siege_war.warps, [(due, 1)], "still queued");
+        assert_eq!(world.siege_war.warps, [(due, WAR_MAP, 1)], "still queued");
         world.run_war_home(due);
         assert!(world.siege_war.warps.is_empty(), "the warp fires");
         while shinsoo.try_recv().is_ok() {}

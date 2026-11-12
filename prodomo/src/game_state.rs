@@ -90,6 +90,7 @@ mod dungeons;
 mod emotion;
 mod empire_priv;
 mod event_calendar;
+mod event_cycle;
 mod event_flag;
 mod extend_inven;
 mod fight;
@@ -193,6 +194,7 @@ pub use daily_gift::{
     DAILY_GIFT_COLLECT_USE_TICKET, DAILY_GIFT_OPEN,
 };
 pub use dungeon_info::DungeonRankAsk;
+pub use event_cycle::EventCycleFiles;
 pub use extend_inven::unlock_price;
 pub use fish_event::{FishBoard, FishCell, FishEventStep, FISH_EVENT_SLOTS};
 pub use gaya_system::{GAYA_CRAFT, GAYA_MARKET, GAYA_REFRESH};
@@ -1044,6 +1046,8 @@ pub struct GameState {
     /// The Tanaka cycle's placed entries (`data/event/tanaka_event_regen_type_0.txt`).
     /// See [`tanaka`].
     tanaka: tanaka::TanakaEntries,
+    /// The map-230 walks' placed entries. See [`event_cycle`].
+    event_cycles: event_cycle::EventCycleFiles,
     /// What each non-player keeps of its fight: its killer, its owner and its events. See
     /// [`fight`].
     npc_combat: HashMap<u32, fight::NpcCombat>,
@@ -1287,6 +1291,12 @@ impl GameState {
     #[must_use]
     pub fn with_tanaka(mut self, entries: tanaka::TanakaEntries) -> Self {
         self.tanaka = entries;
+        self
+    }
+    /// Share the map-230 walks' placed entries.
+    #[must_use]
+    pub fn with_event_cycles(mut self, files: event_cycle::EventCycleFiles) -> Self {
+        self.event_cycles = files;
         self
     }
 
