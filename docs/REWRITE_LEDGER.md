@@ -53782,3 +53782,73 @@ row's id, not only a packet's. Exhaustion stays the recorded Divergence: an
 error (`IdRangeExhausted`) instead of legacy's ten logs, `.killscript`,
 `thecore_shutdown()` and returning 0.
 Gates (2026-11-11): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5468 passed, 0 failed in 46 targets (the first attempt was killed at the 300 s tool deadline; its 16 scratch databases were dropped afterwards, so a rerun covered the suite); doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 596. The spam block
+
+`SpamBlockCheck` (`G/input_main.cpp:192-234`) is the one chat gate still missing
+from `sys.char.chat` after ledger 255: the level-gated, per-IP score that blocks
+a spammer's address for fifteen minutes. It is live now, on both arms that run
+it — the talking line (`:836-839`, past the silence, before the type switch) and
+the whisper (`:540-552`, past the blocks, before the copy) — and
+`event.input_main.block_chat_by_ip_event` is `ported` with it. The row's only
+remainder is the prism check, which is dead in legacy (`ProcessTextTag` returns
+0) and stays a note.
+
+The words come from `spam_db` as `LoadSpamDB` reads them:
+`SELECT word, score FROM spam_db WHERE type='SPAM'`, once at boot
+(`G/db.cpp:760-779`; the refresh behind `ENABLE_SPAMDB_REFRESH` is dead —
+`event.db.reload_spam_event` stays `unused`). `gamedata::spam` is the new rule:
+`build_spam_table` keeps the `(word, score)` pairs in row order with both caps
+checked before anything is allocated, and `spam_words_from_dump` reads them from
+the Game data `common.sql`. The score is `atoi` at the `Insert` call (`:798`),
+so a stored negative converts to `unsigned int` — `atoi_score` keeps that wrap
+(`wrapping_neg`, so `-1` is `0xffff_ffff`), and a dump without the table is the
+owner's shape (`command grep -c spam_db` on their `common.sql` prints 0): no
+words, not an error. The `[game]` tunables (`spam_block_score` 100,
+`spam_block_duration` 900 s, `spam_block_max_level` 10) predate this slice with
+the compiled-in defaults (`G/config.cpp:129-135`); the score keeps legacy's
+`MAX(1, …)` (`:1365`).
+
+The gate itself is `GameState::spam_block_check` (`prodomo/src/game_state/whisper.rs`),
+in legacy's order: at or past the level it passes; otherwise the IP's entry is
+found or made, an armed block answers its remaining seconds, else the line's
+score adds to the entry and a total at or past the bar blocks the IP and answers
+the full duration. The score is `GetSpamScore` (`G/spam.h:16-36`) — spaces
+stripped, every word summed, the last match logged — over `WildCaseCmp`
+(`G/utils.cpp:290-328`): `*` swallows a run, `?` one byte, the rest
+case-insensitive. The per-IP map is keyed on the sender's address, the Rewrite's
+`GetHostName()`, as the legacy's is keyed on the hostname
+(`spam_score_of_ip`, `:166-167`; divergence of representation, not of behaviour:
+both key one watch per connecting address). The clear event (`:169-189`) has no
+port: the block is an expiry Pulse on the game thread, and reading a lifted
+block zeroes the score first, which is what the event did. `SPAM_SCORE` and `SPAM_IP` stay tracing logs (`info!`). The
+`CharLog(ch, 0, "SPAM", word)` has no port: quest `char_log` is the only
+`CHAR_LOG` trace, and ledger 566's question (which game logs the operator
+keeps) is still open, so no new log kind is added here.
+
+On the chat arm the descriptor asks the world once per plain line
+(`spam_answer`, `prodomo/src/main.rs`): a slash line goes to the interpreter
+before the question (`:802`), and the judge runs the verdict in legacy's place —
+counter, then the silence, then the spam verdict, then the type switch (`:807-839`).
+On the whisper arm the game thread runs the check itself, past the blocks
+(`deliver_whisper`); a blocked whisperer hears the silence ladder, not
+`[LS;652]`, because the check already sent it. The dispatch gains a fifth
+quarter (`apply_block_chat_line`) so `apply_chat_line` stays under the line
+lint.
+
+Proved by `a_spammy_line_blocks_its_ip_and_a_high_level_speaks_through`: the
+server boots on a `common.sql` with one seeded `SPAM` row (`*gold*`, 100) via
+the new `Server::start_with_tables_configured` (`parity/src/server.rs`), which
+seeds a `game_tables` dump the way `start_with_files_configured` seeds Game
+data. Yankee (level 1) speaks a clean line the map hears, then a spammy line
+that is consumed with `[LS;1030;15;0]`; a second line hears the countdown again
+(the kept instant, not a timer task); its whisper is refused with the ladder too;
+and the same line from Alpha (level 154) reaches the map. The score-99 mutant
+(the seeded row under the bar) kills the scenario. Unit seats:
+`the_wildcard_matches_stars_questions_and_folds_case`,
+`the_spam_score_strips_spaces_and_sums_every_hit`,
+`a_blocked_verdict_answers_the_ladder_and_pass_continues` (`prodomo/src/chat.rs`),
+`a_spammy_whisper_blocks_its_ip_and_a_second_line_hears_the_countdown` and
+`a_high_level_whisper_speaks_past_the_words` (`whisper.rs`), and the
+`gamedata::spam` row tests including the owner's empty table.
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5476 passed, 1 failed in 46 targets — the failure is `a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks` ("the second sort waits"), which passes alone, in 8 parallel runs, and beside the new scenario, so a load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -56,7 +56,7 @@ use protocol::gc_whisper::{
     GcWhisper, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SENDER_BLOCKED, WHISPER_TYPE_SYSTEM,
     WHISPER_TYPE_TARGET_BLOCKED,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::game_loop_messages::WhisperOutcome;
 use crate::game_state::GameState;
@@ -91,6 +91,23 @@ pub(super) struct OfflineMail {
     /// `get_dword_time()` when each character last left a line for an absent target
     /// (`dwLastOfflinePMTime`, `G/char.h:2177`). A session's own: the leave forgets it.
     pub(super) last_pm: std::collections::HashMap<Vid, u32>,
+}
+
+/// One IP's spam-watch entry: the running score and the block's expiry.
+///
+/// `spam_score_of_ip` (`G/input_main.cpp:164-165`) holds `(score, event)` per hostname;
+/// the Rewrite holds `(score, until)` per sender IP instead of an event pointer, because
+/// the game thread owns no event queue for this. `until` is the Pulse the block lifts on,
+/// the `PASSES_PER_SEC(g_uiSpamBlockDuration)` arm of `event_create` (`:223`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SpamWatch {
+    /// The accumulated score, `it->second.first`, which the clear event zeroes.
+    pub(super) score: u32,
+    /// The Pulse the block lifts on, or `None` when the IP is not blocked. The clear
+    /// event (`block_chat_by_ip_event`, `:169-189`) zeroes the score and drops the
+    /// event; the Rewrite checks this Pulse and zeroes the score when it reads a
+    /// lifted block, because no event fires here to do it.
+    pub(super) until: Option<u64>,
 }
 
 /// What a `/dc` line did.
@@ -471,6 +488,89 @@ const OFFLINE_MESSAGE_SENT: &[u8] = b"An offline message has been sent.";
 const OFFLINE_MESSAGE_WAIT: &[u8] = b"You have to wait 10 seconds for send offline message.";
 
 impl GameState {
+    /// Share the spam words and their rules: `g_uiSpamBlockScore`, `g_uiSpamBlockDuration`
+    /// and `g_iSpamBlockMaxLevel` (`[game] spam_block_score`, `spam_block_duration`,
+    /// `spam_block_max_level`, `G/config.cpp:129-135`). The duration arrives in seconds and
+    /// is kept in Pulses, as legacy's `event_create` arm multiplies it
+    /// (`G/input_main.cpp:223`).
+    #[must_use]
+    pub fn with_spam_words(
+        mut self,
+        words: std::sync::Arc<Vec<gamedata::spam::SpamWord>>,
+        score: u32,
+        duration_secs: u32,
+        max_level: i32,
+    ) -> Self {
+        self.spam_words = words;
+        self.spam_block_score = score.max(1);
+        self.spam_block_pulses =
+            u64::from(duration_secs).saturating_mul(u64::from(crate::save::PASSES_PER_SEC));
+        self.spam_block_max_level = max_level;
+        self
+    }
+
+    /// `SpamBlockCheck` (`G/input_main.cpp:192-234`): the per-IP spam gate both the chat
+    /// handler (`:836-839`) and the whisper handler (`:540-552`) run past the silence.
+    /// `ip` is the sender's address, the Rewrite's `GetHostName()`.
+    ///
+    /// The order is legacy's: below the level the IP's entry is found or made, an armed
+    /// block answers its remaining seconds, otherwise the line's score adds to the entry
+    /// and a total at or past the bar blocks the IP. The clear event
+    /// (`block_chat_by_ip_event`, `:169-189`) has no port: the block is an expiry Pulse,
+    /// and reading a lifted block zeroes the score first, which is what the event did.
+    /// `32` lost its per-line trace in ledger 482; the score log stays, because the spam
+    /// watch would otherwise be silent about why a line died.
+    pub(super) fn spam_block_check(
+        &mut self,
+        vid: Vid,
+        ip: std::net::IpAddr,
+        text: &[u8],
+    ) -> crate::chat::SpamVerdict {
+        use crate::chat::{spam_score, SpamVerdict};
+        let level = self.level_of(vid).unwrap_or(0);
+        if i32::from(level) >= self.spam_block_max_level {
+            return SpamVerdict::Pass;
+        }
+        let now = self.last_pulse;
+        let watch = self.spam_watch.entry(ip).or_default();
+        if let Some(until) = watch.until {
+            if now < until {
+                let seconds = i32::try_from((until - now) / u64::from(crate::save::PASSES_PER_SEC))
+                    .unwrap_or(i32::MAX);
+                return SpamVerdict::Blocked { seconds };
+            }
+            watch.score = 0;
+            watch.until = None;
+        }
+        let (hit, score) = spam_score(text, &self.spam_words);
+        watch.score = watch.score.saturating_add(score);
+        if let Some(word) = hit {
+            let from = self
+                .characters
+                .find_by_vid(vid)
+                .map(|character| character.name().to_owned())
+                .unwrap_or_default();
+            info!(
+                from,
+                text = String::from_utf8_lossy(text).as_ref(),
+                score,
+                total = watch.score,
+                word = String::from_utf8_lossy(word).as_ref(),
+                "SPAM_SCORE"
+            );
+        }
+        if watch.score >= self.spam_block_score {
+            let until = now.saturating_add(self.spam_block_pulses);
+            watch.until = Some(until);
+            let seconds =
+                i32::try_from(self.spam_block_pulses / u64::from(crate::save::PASSES_PER_SEC))
+                    .unwrap_or(i32::MAX);
+            info!(%ip, seconds, "SPAM_IP");
+            return SpamVerdict::Blocked { seconds };
+        }
+        SpamVerdict::Pass
+    }
+
     /// The character online under `name` in this Channel, if any.
     ///
     /// `FindPC` (`G/char_manager.cpp:244-260`) finds the online character of the
@@ -496,9 +596,10 @@ impl GameState {
         name: &[u8],
         text: &[u8],
         record: Vec<u8>,
+        ip: std::net::IpAddr,
         reply: tokio::sync::oneshot::Sender<WhisperOutcome>,
     ) {
-        let outcome = self.deliver_whisper(vid, name, text, record);
+        let outcome = self.deliver_whisper(vid, name, text, record, ip);
         if reply.send(outcome).is_err() {
             debug!(?vid, "nobody was left to hear a whisper's answer");
         }
@@ -511,6 +612,7 @@ impl GameState {
         name: &[u8],
         text: &[u8],
         record: Vec<u8>,
+        ip: std::net::IpAddr,
     ) -> WhisperOutcome {
         // `FindPC` compares bytes, and a character's Name is ASCII, so a name that
         // is not text cannot name one. The line then waits for the name, as it
@@ -546,6 +648,14 @@ impl GameState {
                 self.answer_blocked(vid, name, WHISPER_TYPE_TARGET_BLOCKED);
                 return WhisperOutcome::Answered;
             }
+        }
+        // `if (true == SpamBlockCheck(ch, buf, buflen))` (`G/input_main.cpp:540-552`):
+        // past the blocks, before the copy and the conversion. A blocked sender hears
+        // the silence ladder, not `[LS;652]`: the check already sent it.
+        if let crate::chat::SpamVerdict::Blocked { seconds } = self.spam_block_check(vid, ip, text)
+        {
+            self.answer_spam_blocked(vid, seconds);
+            return WhisperOutcome::Answered;
         }
         match target {
             Some(target) => {
@@ -688,6 +798,22 @@ impl GameState {
             CHAT_TYPE_INFO,
             crate::chat::BLOCK_CHAT_NO_DURATION.as_bytes(),
             &[],
+        );
+    }
+
+    /// Tell a spam-blocked whisper sender its line went nowhere
+    /// (`G/input_main.cpp:540-552`): the full `SendBlockChatInfo` ladder for the
+    /// block's remaining seconds, as a talker hears it.
+    fn answer_spam_blocked(&mut self, vid: Vid, seconds: i32) {
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        self.tell(
+            vid,
+            mover,
+            CHAT_TYPE_INFO,
+            crate::chat::block_chat_info_key(seconds),
+            &crate::chat::block_chat_info_args(seconds),
         );
     }
 
@@ -2159,8 +2285,13 @@ mod tests {
             .expect("the second player enters");
         let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
 
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"P101", b"hello", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"P101",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Delivered);
         assert_eq!(
             inbox.try_recv().expect("the target has the line"),
@@ -2171,8 +2302,13 @@ mod tests {
     #[test]
     fn the_sender_hears_nothing_when_it_names_itself() {
         let (mut world, _clock, _inbox) = a_world_with_a_player();
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"P100", b"hello", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"P100",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Dropped);
     }
 
@@ -2181,8 +2317,13 @@ mod tests {
         let (mut world, clock, mut inbox) = a_world_with_a_player();
         clock.set(20_000);
 
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"Nobody", b"hello", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Answered);
         let notice = inbox.try_recv().expect("the sender was told");
         assert_eq!(notice[0], protocol::gc_inventory::HEADER_GC_WHISPER.value());
@@ -2203,11 +2344,22 @@ mod tests {
         let (mut world, clock, mut inbox) = a_world_with_a_player();
         clock.set(20_000);
 
-        world.deliver_whisper(Vid::new(VID), b"Nobody", b"hello", b"the record".to_vec());
+        world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         let _first = inbox.try_recv().expect("the sender was told");
         clock.set(25_000);
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"Nobody", b"again", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"again",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Answered);
         let notice = inbox.try_recv().expect("the sender was told");
         assert_eq!(
@@ -2227,7 +2379,13 @@ mod tests {
         let (mut world, clock, mut inbox) = a_world_with_a_player();
         clock.set(20_000);
 
-        let outcome = world.deliver_whisper(Vid::new(VID), b"Nobody", b"", b"record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"",
+            b"record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Dropped);
         assert!(inbox.try_recv().is_err(), "the sender heard nothing");
         assert!(world.take_offline_messages(b"Nobody").is_empty());
@@ -2352,10 +2510,22 @@ mod tests {
     fn a_new_session_may_leave_a_line_at_once() {
         let (mut world, clock, mut inbox) = a_world_with_a_player();
         clock.set(20_000);
-        world.deliver_whisper(Vid::new(VID), b"Nobody", b"first", b"record".to_vec());
+        world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"first",
+            b"record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         let _sent = inbox.try_recv().expect("the sender was told");
         clock.set(21_000);
-        world.deliver_whisper(Vid::new(VID), b"Nobody", b"second", b"record".to_vec());
+        world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"second",
+            b"record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         let wait = inbox.try_recv().expect("the sender was told");
         assert_eq!(
             &wait[GC_WHISPER_WIRE_SIZE..],
@@ -2366,7 +2536,13 @@ mod tests {
         let mut inbox = enter(&mut world, VID, (3200, 3200), 0);
         let _burst = heard(&mut inbox);
         clock.set(22_000);
-        let outcome = world.deliver_whisper(Vid::new(VID), b"Nobody", b"third", b"record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"third",
+            b"record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Answered);
         let notice = inbox.try_recv().expect("the sender was told");
         assert_eq!(
@@ -2474,8 +2650,13 @@ mod tests {
         let _second_burst = heard(&mut sender);
         world.block_modes.insert(Vid::new(VID), BLOCK_WHISPER);
 
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"P101", b"hello", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"P101",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Answered);
         let notice = sender.try_recv().expect("the sender was told");
         assert_eq!(notice[0], protocol::gc_inventory::HEADER_GC_WHISPER.value());
@@ -2497,8 +2678,13 @@ mod tests {
         let _second_burst = heard(&mut sender);
         world.block_modes.insert(Vid::new(OTHER), BLOCK_WHISPER);
 
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"P101", b"hello", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"P101",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Answered);
         let notice = sender.try_recv().expect("the sender was told");
         assert_eq!(notice[3], WHISPER_TYPE_TARGET_BLOCKED);
@@ -2510,8 +2696,13 @@ mod tests {
         let (mut world, _clock, mut inbox) = a_world_with_a_player();
         world.block_modes.insert(Vid::new(VID), BLOCK_WHISPER);
 
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"P100", b"hello", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"P100",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Dropped);
         assert!(inbox.try_recv().is_err(), "the sender heard nothing");
     }
@@ -2917,8 +3108,13 @@ mod tests {
             true,
         );
         let _add = heard(&mut sender);
-        let outcome =
-            world.deliver_whisper(Vid::new(VID), b"P101", b"hello", b"the record".to_vec());
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"P101",
+            b"hello",
+            b"the record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
         assert_eq!(outcome, WhisperOutcome::Answered);
         let lines = heard(&mut sender);
         assert_eq!(lines.len(), 1, "the refusal is the only line");
@@ -2927,6 +3123,97 @@ mod tests {
             "a silenced sender hears `[LS;652]`"
         );
         assert!(target.try_recv().is_err(), "the target heard nothing");
+    }
+
+    #[test]
+    fn a_spammy_whisper_blocks_its_ip_and_a_second_line_hears_the_countdown() {
+        let (mut world, _clock, mut sender) = a_world_with_a_player();
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        world = world.with_spam_words(
+            std::sync::Arc::new(vec![gamedata::spam::SpamWord {
+                word: b"*gold*".to_vec(),
+                score: 100,
+            }]),
+            100,
+            900,
+            10,
+        );
+        let _enter = heard(&mut sender);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(VID))
+            .expect("the player is in the world")
+            .set_points(Some(crate::game_state::fixtures::points_at(1, 0, 0)));
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"cheap GOLD here",
+            b"record".to_vec(),
+            ip,
+        );
+        assert_eq!(outcome, WhisperOutcome::Answered);
+        let lines = heard(&mut sender);
+        assert_eq!(lines.len(), 1, "the refusal is the only line");
+        assert!(
+            lines[0]
+                .windows(14)
+                .any(|window| window == b"[LS;1030;15;0]"),
+            "900 seconds split the ladder way: {lines:?}"
+        );
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"a clean line",
+            b"record".to_vec(),
+            ip,
+        );
+        assert_eq!(outcome, WhisperOutcome::Answered);
+        let lines = heard(&mut sender);
+        assert_eq!(lines.len(), 1, "a blocked IP hears only the countdown");
+        assert!(
+            lines[0].windows(5).any(|window| window == b"[LS;1"),
+            "the countdown is the ladder, not the silence key"
+        );
+    }
+
+    #[test]
+    fn a_high_level_whisper_speaks_past_the_words() {
+        let (mut world, clock, mut sender) = a_world_with_a_player();
+        world = world.with_spam_words(
+            std::sync::Arc::new(vec![gamedata::spam::SpamWord {
+                word: b"*gold*".to_vec(),
+                score: 100,
+            }]),
+            100,
+            900,
+            10,
+        );
+        let _enter = heard(&mut sender);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(VID))
+            .expect("the player is in the world")
+            .set_points(Some(crate::game_state::fixtures::points_at(10, 0, 0)));
+        let _ = &clock;
+        let outcome = world.deliver_whisper(
+            Vid::new(VID),
+            b"Nobody",
+            b"cheap GOLD here",
+            b"record".to_vec(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        );
+        assert_eq!(
+            outcome,
+            WhisperOutcome::Answered,
+            "at the bar's level the line leaves for its absent target"
+        );
+        let lines = heard(&mut sender);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.windows(12).any(|w| w == b"have to wait")),
+            "the sender hears the offline wait, not the ladder: {lines:?}"
+        );
     }
 
     #[test]

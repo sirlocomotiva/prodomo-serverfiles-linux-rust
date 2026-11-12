@@ -54,6 +54,7 @@ pub mod renewal_shop;
 pub mod server_attr;
 pub mod shop;
 pub mod skill;
+pub mod spam;
 pub mod special_item_group;
 pub mod sql_dump;
 pub mod stack_attribute;

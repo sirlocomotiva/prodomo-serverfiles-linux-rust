@@ -589,6 +589,23 @@ pub struct GameState {
     /// The offline mail (`whisper::OfflineMail`): the lines waiting for an absent
     /// target and when each sender last left one.
     offline_mail: whisper::OfflineMail,
+    /// The spam words `GetSpamScore` matches a line against (`SpamManager::m_vec_word`,
+    /// `G/spam.h:54`), read once at boot from the owner's `common.sql`. Empty on the
+    /// owner's data, which has no `spam_db` table.
+    spam_words: Arc<Vec<gamedata::spam::SpamWord>>,
+    /// `g_uiSpamBlockScore` (`[game] spam_block_score`): the score that blocks an IP.
+    spam_block_score: u32,
+    /// `g_uiSpamBlockDuration` (`[game] spam_block_duration`), in Pulses: how long an
+    /// IP stays blocked. The seconds become Pulses with `PASSES_PER_SEC`, as legacy's
+    /// `event_create` arm does (`G/input_main.cpp:223`).
+    spam_block_pulses: u64,
+    /// `g_iSpamBlockMaxLevel` (`[game] spam_block_max_level`): the check runs only
+    /// below it (`G/input_main.cpp:194`).
+    spam_block_max_level: i32,
+    /// The per-IP spam scores and blocks (`spam_score_of_ip`, `G/input_main.cpp:164-165`),
+    /// keyed by the sender IP: the Rewrite's `GetHostName()` is the connection's address,
+    /// which `inet_ntoa` formats (`G/desc.cpp:214`).
+    spam_watch: std::collections::HashMap<std::net::IpAddr, whisper::SpamWatch>,
     /// The OX quiz list (`COXEventManager::m_vec_quiz`, `G/OXEvent.h:28`), by level:
     /// every `add_ox_quiz` call lands here after its step, and `/show_quiz` reads it.
     ox_quiz: Vec<Vec<quest_quiet::OxQuiz>>,
@@ -1541,11 +1558,12 @@ impl GameState {
             }
             GameCommand::Whisper {
                 vid,
+                ip,
                 name,
                 text,
                 record,
                 reply,
-            } => self.answer_whisper(vid, &name, &text, record, reply),
+            } => self.answer_whisper(vid, &name, &text, record, ip, reply),
             GameCommand::MessengerLogin { .. }
             | GameCommand::MessengerAddByVid { .. }
             | GameCommand::MessengerAddByName { .. }
@@ -1668,17 +1686,11 @@ impl GameState {
             self.apply_emotion_priv_line(command);
             return;
         }
+        if Self::is_block_chat_line(&command) {
+            self.apply_block_chat_line(command);
+            return;
+        }
         match command {
-            GameCommand::BlockChatOf { vid, reply } => self.answer_block_chat_of(vid, reply),
-            GameCommand::BlockChat { vid, rest, reply } => {
-                self.answer_block_chat(vid, &rest, reply);
-            }
-            GameCommand::BlockChatList { vid, reply } => {
-                self.block_chat_list(vid);
-                if reply.send(()).is_err() {
-                    debug!(?vid, "nobody was left to hear a silence list");
-                }
-            }
             GameCommand::Dc { vid, rest, reply } => {
                 self.disconnect(vid, &rest);
                 if reply.send(()).is_err() {
@@ -2625,6 +2637,46 @@ impl GameState {
                 }
             }
             _ => debug_assert!(false, "the dispatch routes only mode lines here"),
+        }
+    }
+
+    /// Whether `command` is a silence or spam-verdict line.
+    fn is_block_chat_line(command: &GameCommand) -> bool {
+        matches!(
+            command,
+            GameCommand::BlockChatOf { .. }
+                | GameCommand::SpamBlockCheck { .. }
+                | GameCommand::BlockChat { .. }
+                | GameCommand::BlockChatList { .. }
+        )
+    }
+
+    /// Runs the silence or spam-verdict line: one quarter of
+    /// [`GameState::apply_chat_line`], split out so none trips the line lint.
+    fn apply_block_chat_line(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::BlockChatOf { vid, reply } => self.answer_block_chat_of(vid, reply),
+            GameCommand::SpamBlockCheck {
+                vid,
+                ip,
+                text,
+                reply,
+            } => {
+                let verdict = self.spam_block_check(vid, ip, &text);
+                if reply.send(verdict).is_err() {
+                    debug!(?vid, "nobody was left to hear a spam verdict");
+                }
+            }
+            GameCommand::BlockChat { vid, rest, reply } => {
+                self.answer_block_chat(vid, &rest, reply);
+            }
+            GameCommand::BlockChatList { vid, reply } => {
+                self.block_chat_list(vid);
+                if reply.send(()).is_err() {
+                    debug!(?vid, "nobody was left to hear a silence list");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only silence lines here"),
         }
     }
 

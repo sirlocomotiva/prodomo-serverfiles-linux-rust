@@ -1258,6 +1258,8 @@ pub enum GameCommand {
     Whisper {
         /// The VID of the sending character.
         vid: common::vid::Vid,
+        /// The sender's address, the Rewrite's `GetHostName()` for `SpamBlockCheck`.
+        ip: std::net::IpAddr,
         /// The target's name, as the client sent it.
         name: Vec<u8>,
         /// The line itself, which the world needs on its own when it has to leave
@@ -2276,6 +2278,18 @@ pub enum GameCommand {
         /// Where the game thread reports the remaining duration.
         reply: oneshot::Sender<Option<i32>>,
     },
+    /// `SpamBlockCheck` (`G/input_main.cpp:192-234`) on the speaking character's line:
+    /// the descriptor asks before judging a chat line. See `game_state::whisper`.
+    SpamBlockCheck {
+        /// The VID of the speaking character.
+        vid: common::vid::Vid,
+        /// The sender's address, the Rewrite's `GetHostName()`.
+        ip: std::net::IpAddr,
+        /// The line itself, which the score matches against.
+        text: Vec<u8>,
+        /// Where the game thread reports the verdict.
+        reply: oneshot::Sender<crate::chat::SpamVerdict>,
+    },
     /// Runs one `/block_chat` or `/jy` line (`do_block_chat`,
     /// `G/cmd_gm.cpp:3364-3433`): the named character is silenced for the parsed
     /// time, `0` included. See `game_state::whisper`.
@@ -2826,6 +2840,7 @@ impl GameCommand {
             GameCommand::Emotion { .. }
                 | GameCommand::PrivEmpire { .. }
                 | GameCommand::BlockChatOf { .. }
+                | GameCommand::SpamBlockCheck { .. }
                 | GameCommand::BlockChat { .. }
                 | GameCommand::BlockChatList { .. }
                 | GameCommand::Dc { .. }
@@ -5548,6 +5563,7 @@ impl GameLoopController {
     pub async fn whisper(
         &self,
         vid: common::vid::Vid,
+        ip: std::net::IpAddr,
         name: Vec<u8>,
         text: Vec<u8>,
         record: Vec<u8>,
@@ -5555,6 +5571,7 @@ impl GameLoopController {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Whisper {
             vid,
+            ip,
             name,
             text,
             record,
@@ -7352,6 +7369,29 @@ impl GameLoopController {
         self.send_command(GameCommand::BlockChatOf { vid, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run `SpamBlockCheck` on the speaking character's line, against
+    /// the per-IP scores it keeps.
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn spam_block_check(
+        &self,
+        vid: common::vid::Vid,
+        ip: std::net::IpAddr,
+        text: Vec<u8>,
+    ) -> Result<crate::chat::SpamVerdict, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SpamBlockCheck {
+            vid,
+            ip,
+            text,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

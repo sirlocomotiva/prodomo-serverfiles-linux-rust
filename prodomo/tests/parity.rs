@@ -54817,3 +54817,81 @@ fn a_level_to_120_grants_the_top_row_and_a_move_off_fells_it() {
     drop(alice);
     drop(yankee);
 }
+/// `sys.char.chat`'s `SpamBlockCheck` (`G/input_main.cpp:192-234`, `:836-839`, `:540-552`).
+/// The server boots with one seeded spam word (`*gold*`, 100) and the compiled-in bar
+/// (100) and duration (900 s). Yankee is level 1, so the check runs: its first spammy
+/// talking line is consumed and answers `[LS;1030;15;0]`; a second line while blocked
+/// answers the countdown again and the map hears nothing; the whisper arm is gated the
+/// same way. Alpha is level 154, past the bar's level, so the same line from it reaches
+/// the map and proves the gate is the level, not the word.
+#[test]
+fn a_spammy_line_blocks_its_ip_and_a_high_level_speaks_through() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let owner = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/sql/gamedata/common.sql"),
+    )
+    .expect("the owner's common.sql");
+    let mut common = owner;
+    common.extend_from_slice(
+        b"INSERT INTO `spam_db` (`word`, `score`, `type`) VALUES ('*gold*',100,'SPAM');\n",
+    );
+    let (server, _tables) = Server::start_with_tables_configured(
+        binary(),
+        database.url(),
+        &[("common.sql", &common)],
+        "",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, None);
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    // A clean line first, so the test proves the map hears Yankee before the block.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"hello all"));
+    let heard = yankee.read_game();
+    assert_eq!(&heard[10..], b"Yankee : hello all");
+    assert_eq!(alice.read_game(), heard, "the map hears a clean line");
+
+    // The spammy line crosses the bar at once: consumed, and the ladder answers 900 s.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"cheap GOLD here"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;1030;15;0]"),
+        "fifteen minutes stay"
+    );
+    alice.quiet("the map hears no spammy line");
+
+    // While blocked, even a clean line is consumed and answers the countdown again.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"hello again"));
+    let again = yankee.read_game();
+    assert_eq!(again[0], GC_CHAT, "the countdown is an info line");
+    assert_eq!(&again[10..15], b"[LS;1", "the countdown is the ladder");
+    alice.quiet("the map hears no line from a blocked IP");
+
+    // The whisper arm runs the same check: blocked too, with the ladder, not `[LS;652]`.
+    yankee.send_record(&client_whisper(b"Alpha", b"cheap gold too"));
+    let refused = yankee.read_game();
+    assert_eq!(
+        refused[0], GC_CHAT,
+        "a spam-blocked whisper hears the ladder"
+    );
+    assert_eq!(&refused[10..15], b"[LS;1", "not the silence key");
+    alice.quiet("the whisper never reached its target");
+
+    // Alpha is level 154, past `spam_block_max_level`: the same line goes through.
+    alice.send_record(&client_chat(CHAT_TALKING, b"cheap GOLD here"));
+    let through = alice.read_game();
+    assert_eq!(&through[10..], b"Alpha : cheap GOLD here");
+    assert_eq!(yankee.read_game(), through, "the map hears past the level");
+}

@@ -100,6 +100,96 @@ pub const CHAT_MONARCH_NOTICE: u8 = 9;
 /// `CHAT_TYPE_MAX_NUM` (`length.h:418`) with `ENABLE_DICE_SYSTEM` undefined.
 pub const CHAT_MAX_NUM: u8 = 10;
 
+/// `g_uiSpamBlockScore` (`server/server/game/config.cpp:130`), the compiled-in default of
+/// `[game] spam_block_score`.
+pub const SPAM_BLOCK_SCORE: u32 = 100;
+
+/// `g_uiSpamBlockDuration` (`server/server/game/config.cpp:129`), the compiled-in default of
+/// `[game] spam_block_duration`, in seconds.
+pub const SPAM_BLOCK_DURATION_SECS: u32 = 60 * 15;
+
+/// `g_iSpamBlockMaxLevel` (`server/server/game/config.cpp:135`), the compiled-in default of
+/// `[game] spam_block_max_level`.
+pub const SPAM_BLOCK_MAX_LEVEL: i32 = 10;
+
+/// One `spam_db` row, as `gamedata::spam` reads it at boot.
+pub use gamedata::spam::SpamWord;
+
+/// What one line's `SpamBlockCheck` says (`G/input_main.cpp:192-234`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpamVerdict {
+    /// The line proceeds: the speaker is at or past the level, or no word matched and
+    /// the IP's score stays under the bar.
+    Pass,
+    /// The line is consumed and the sender hears the silence ladder: the IP is already
+    /// blocked, or this line's hits cross the bar.
+    Blocked {
+        /// The silence's remaining seconds, as `SendBlockChatInfo` reads them.
+        seconds: i32,
+    },
+}
+
+/// `WildCaseCmp` (`G/utils.cpp:290-328`): `*` swallows any run, `?` one byte, and any other
+/// byte matches itself case-insensitively. The `tolower` is the C locale's, so only ASCII
+/// letters fold.
+#[must_use]
+pub fn wild_case_cmp(pattern: &[u8], text: &[u8]) -> bool {
+    let mut pattern = pattern;
+    let mut text = text;
+    loop {
+        let Some((&head, rest)) = pattern.split_first() else {
+            return text.is_empty();
+        };
+        match head {
+            b'*' => {
+                if rest.is_empty() {
+                    return true;
+                }
+                return (0..=text.len()).any(|at| wild_case_cmp(rest, &text[at..]));
+            }
+            b'?' => {
+                let Some((_, tail)) = text.split_first() else {
+                    return false;
+                };
+                pattern = rest;
+                text = tail;
+            }
+            _ => {
+                let Some((&byte, tail)) = text.split_first() else {
+                    return false;
+                };
+                if !head.eq_ignore_ascii_case(&byte) {
+                    return false;
+                }
+                pattern = rest;
+                text = tail;
+            }
+        }
+    }
+}
+
+/// `SpamManager::GetSpamScore` (`G/spam.h:19-42`): the line with its spaces stripped, matched
+/// against every word, answering the last word that matched and the summed score. The strip is
+/// `isspace` over the C locale, so the five ASCII whitespace bytes plus vertical tab and form
+/// feed.
+#[must_use]
+pub fn spam_score<'a>(text: &[u8], words: &'a [SpamWord]) -> (Option<&'a [u8]>, u32) {
+    let bare: Vec<u8> = text
+        .iter()
+        .copied()
+        .filter(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .collect();
+    let mut hit = None;
+    let mut score = 0_u32;
+    for word in words {
+        if wild_case_cmp(&word.word, &bare) {
+            hit = Some(word.word.as_slice());
+            score = score.saturating_add(word.score);
+        }
+    }
+    (hit, score)
+}
+
 /// `g_iShoutLimitLevel` (`server/server/game/config.cpp:52`), the compiled-in default of
 /// `[game] shout_limit_level`.
 pub const SHOUT_LIMIT_LEVEL: i32 = 15;
@@ -233,6 +323,12 @@ pub struct ChatContext {
     /// The remaining `AFFECT_BLOCK_CHAT` duration, or `None` when the affect is
     /// absent. Legacy has no way to set it yet, so live it is always `None`.
     pub block_chat_seconds: Option<i32>,
+    /// What `SpamBlockCheck` said about this line (`input_main.cpp:836-839`): `Some`
+    /// carries the world's answer, `None` means the check was skipped. The caller asks
+    /// lazily — only a plain line that passed the counter and the silence pays the
+    /// world round-trip — and a skipped check is `Pass`, as a line legacy dropped
+    /// earlier never reaches the check either.
+    pub spam: Option<SpamVerdict>,
     /// `ch->GetParty() != NULL`, answered by the world, read only for a party line
     /// (`input_main.cpp:959`). The descriptor asks lazily: only a party line pays the
     /// round-trip.
@@ -418,9 +514,16 @@ pub fn judge_chat(record: &CgChat, state: &mut ChatState, context: &ChatContext)
         };
     }
 
-    // `switch (pinfo->type)` (`input_main.cpp:926-988`). `SpamBlockCheck` and the
-    // prism check sit between the block-chat affect and this switch; the first needs
-    // a per-IP score the Rewrite has no store for and the second is dead in legacy.
+    // `SpamBlockCheck` (`input_main.cpp:836-839`): the caller ran the check against the
+    // world's per-IP scores and carries the verdict in the context.
+    if let Some(SpamVerdict::Blocked { seconds }) = context.spam {
+        return ChatOutcome::Judged {
+            effects: vec![ChatEffect::BlockChatInfo { seconds }],
+        };
+    }
+
+    // `switch (pinfo->type)` (`input_main.cpp:926-988`). The prism check sits between the
+    // spam check and this switch and is dead in legacy (`ProcessTextTag` returns 0).
     match record.chat_type {
         CHAT_TALKING => ChatOutcome::Judged {
             effects: vec![ChatEffect::TalkingToMap {
@@ -648,7 +751,7 @@ pub fn info_line(effect: &ChatEffect, to: Recipient<'_>) -> Option<Vec<u8>> {
 /// `[LS;652]` at zero, then the hour-and-minute, hour-only, minute-only, or
 /// seconds key. The time splits the legacy way: whole hours out first, then
 /// whole minutes, and what is left is seconds.
-fn block_chat_info_key(seconds: i32) -> &'static [u8] {
+pub(crate) fn block_chat_info_key(seconds: i32) -> &'static [u8] {
     if seconds <= 0 {
         return BLOCK_CHAT_NO_DURATION.as_bytes();
     }
@@ -668,7 +771,7 @@ fn block_chat_info_key(seconds: i32) -> &'static [u8] {
 /// The arguments the key takes: the split hours, minutes and seconds that are
 /// not zero. Legacy would also send its uninitialised `buf` after the key; only
 /// the locale string is reproduced, see the module note.
-fn block_chat_info_args(seconds: i32) -> Vec<Arg<'static>> {
+pub(crate) fn block_chat_info_args(seconds: i32) -> Vec<Arg<'static>> {
     if seconds <= 0 {
         return Vec::new();
     }
@@ -756,6 +859,7 @@ mod tests {
             pulse: 0,
             shout_limit_level: SHOUT_LIMIT_LEVEL,
             block_chat_seconds: None,
+            spam: None,
             in_party: false,
             in_guild: false,
         }
@@ -811,6 +915,69 @@ mod tests {
             }],
         );
         assert_eq!(state.counter(), 1);
+    }
+
+    #[test]
+    fn the_wildcard_matches_stars_questions_and_folds_case() {
+        assert!(wild_case_cmp(b"*gold*", b"cheapGOLDhere"));
+        assert!(wild_case_cmp(b"*gold*", b"gold"));
+        assert!(!wild_case_cmp(b"*gold*", b"silver"));
+        assert!(wild_case_cmp(b"g?ld", b"GOLD"));
+        assert!(!wild_case_cmp(b"g?ld", b"gld"));
+        assert!(wild_case_cmp(b"*", b"anything"));
+        assert!(!wild_case_cmp(b"gold", b"golden"), "no substring match");
+        assert!(
+            !wild_case_cmp(b"", b"x"),
+            "an empty word matches only empty"
+        );
+        assert!(wild_case_cmp(b"", b""));
+    }
+
+    #[test]
+    fn the_spam_score_strips_spaces_and_sums_every_hit() {
+        let words = [
+            SpamWord {
+                word: b"*gold*".to_vec(),
+                score: 60,
+            },
+            SpamWord {
+                word: b"*cheap*".to_vec(),
+                score: 50,
+            },
+        ];
+        let (hit, score) = spam_score(b"  cheap   GOLD  ", &words);
+        assert_eq!(hit, Some(&b"*cheap*"[..]), "the last match answers");
+        assert_eq!(score, 110);
+        let (hit, score) = spam_score(b"hello", &words);
+        assert_eq!((hit, score), (None, 0));
+        let (hit, score) = spam_score(b"anything", &[]);
+        assert_eq!((hit, score), (None, 0), "no words is no score");
+    }
+
+    #[test]
+    fn a_blocked_verdict_answers_the_ladder_and_pass_continues() {
+        let mut state = ChatState::new();
+        let ctx = ChatContext {
+            spam: Some(SpamVerdict::Blocked { seconds: 900 }),
+            ..context()
+        };
+        assert_eq!(
+            judge_chat(&say(b"hello"), &mut state, &ctx),
+            ChatOutcome::Judged {
+                effects: vec![ChatEffect::BlockChatInfo { seconds: 900 }],
+            }
+        );
+        let ctx = ChatContext {
+            spam: Some(SpamVerdict::Pass),
+            ..context()
+        };
+        assert!(
+            matches!(
+                judge_chat(&say(b"hello"), &mut state, &ctx),
+                ChatOutcome::Judged { .. }
+            ),
+            "a pass reaches the type switch"
+        );
     }
 
     #[test]

@@ -262,6 +262,38 @@ impl Server {
         (server, data)
     }
 
+    /// Like [`Server::start_with_files_configured`] but the replaced files live under
+    /// `sql/gamedata`, the `game_tables` dumps, rather than the Game data folder: each
+    /// `(path, bytes)` writes `bytes` to `path` under a copies-and-links folder the
+    /// config names as `game_tables`, so a scenario can seed a table the owner ships
+    /// empty. The Game data folder is the owner's own.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start_with_files`].
+    #[must_use]
+    pub fn start_with_tables_configured(
+        binary: &Path,
+        store_url: &str,
+        files: &[(&str, &[u8])],
+        game: &str,
+    ) -> (Self, PathBuf) {
+        let root = unique_root();
+        let data = legacy_dir().join("gamedata");
+        let owner = legacy_dir().join("sql/gamedata");
+        let tables = root.join("tables");
+        for (path, bytes) in files {
+            let path = Path::new(path);
+            link_all_but(&owner, &tables, path);
+            let target = tables.join(path);
+            drop(fs::remove_file(&target));
+            fs::write(&target, bytes).expect("the replaced file should be writable");
+        }
+        let config = config_text_on_tables(&data, &tables, store_url, &default_channels(), game);
+        let server = Self::start_in(root, binary, &config);
+        (server, tables)
+    }
+
     /// Rewrite `bytes` to `path` under the Game data folder [`Server::start_with_files`]
     /// returned: `path` relative to that folder, such as `locale/europe/fishing.txt`.
     /// The path must be a real file the server started with, not a link to the owner's
@@ -579,12 +611,13 @@ fn link_all_but(from: &Path, to: &Path, path: &Path) {
     }
 }
 
-/// The keys naming `game_data` as the Game data folder and the owner's table dumps.
-fn data_keys_on(game_data: &Path) -> String {
+/// The keys naming `game_data` as the Game data folder and `game_tables` as the table
+/// dumps.
+fn data_keys_on_tables(game_data: &Path, game_tables: &Path) -> String {
     format!(
         "game_data = \"{}\"\ngame_tables = \"{}\"\n",
         game_data.display(),
-        legacy_dir().join("sql/gamedata").display()
+        game_tables.display()
     )
 }
 
@@ -611,9 +644,27 @@ fn config_text_on(
     channels: &[ChannelSpec],
     game: &str,
 ) -> String {
+    config_text_on_tables(
+        game_data,
+        &legacy_dir().join("sql/gamedata"),
+        store_url,
+        channels,
+        game,
+    )
+}
+
+/// [`config_text`] with `game_data` as the Game data folder and `game_tables` as the
+/// table dumps.
+fn config_text_on_tables(
+    game_data: &Path,
+    game_tables: &Path,
+    store_url: &str,
+    channels: &[ChannelSpec],
+    game: &str,
+) -> String {
     let mut text = format!(
         "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"{store_url}\"\n\n[auth]\nport = 0\n",
-        data_keys_on(game_data)
+        data_keys_on_tables(game_data, game_tables)
     );
     if !game.is_empty() {
         write!(text, "\n[game]\n{game}\n").expect("writing to a String cannot fail");
@@ -651,7 +702,10 @@ mod tests {
 
     /// The keys naming the owner's legacy Game data folder and table dumps, read in place.
     fn data_keys() -> String {
-        data_keys_on(&legacy_dir().join("gamedata"))
+        data_keys_on_tables(
+            &legacy_dir().join("gamedata"),
+            &legacy_dir().join("sql/gamedata"),
+        )
     }
 
     #[test]

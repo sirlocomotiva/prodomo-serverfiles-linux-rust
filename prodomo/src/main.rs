@@ -49,6 +49,7 @@ use gamedata::npc_shop::{shops_from_dump, NpcShops};
 use gamedata::pc_motion::PcMotions;
 use gamedata::regen::{self, RegenEntry};
 use gamedata::server_attr::{self, SectreeGrid};
+use gamedata::spam::spam_words_from_dump;
 use prodomo::auth_login::{
     judge_account, judge_credentials, login_from_field, password_candidate, AuthClaim, AuthRefusal,
     AuthRegistry, LoginGrant,
@@ -59,8 +60,8 @@ use prodomo::channel_login::{
 };
 use prodomo::channel_status::ChannelStatusBoard;
 use prodomo::chat::{
-    judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState, WhisperCounter, CHAT_GUILD,
-    CHAT_PARTY,
+    judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState, SpamVerdict, WhisperCounter,
+    CHAT_GUILD, CHAT_PARTY,
 };
 use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
@@ -3300,6 +3301,35 @@ async fn silence_answer(
     }
 }
 
+/// `SpamBlockCheck` (`G/input_main.cpp:836-839`), asked lazily: only a plain line pays
+/// the world round-trip — a slash line goes to the interpreter before the counter and
+/// never reaches the check (`G/input_main.cpp:802`). A character outside the world
+/// passes: it holds no level under the bar. `None` closes the connection: the world
+/// could not answer, as with the talking relay.
+async fn spam_answer(
+    game: &GameLoopController,
+    record: &CgChat,
+    addr: SocketAddr,
+    world: Option<common::vid::Vid>,
+) -> Option<Option<SpamVerdict>> {
+    if record.text.len() > 1 && record.text[0] == b'/' {
+        return Some(None);
+    }
+    let Some(world_vid) = world else {
+        return Some(None);
+    };
+    match game
+        .spam_block_check(world_vid, addr.ip(), record.text.clone())
+        .await
+    {
+        Ok(verdict) => Some(Some(verdict)),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not answer the spam question; closing");
+            None
+        }
+    }
+}
+
 /// An info line to the sender: the one `send_all` the judge's sender-only effects share.
 /// `false` closes the connection.
 async fn send_info_line<S>(
@@ -3432,12 +3462,16 @@ where
     else {
         return false;
     };
+    let Some(spam) = spam_answer(&context.game, &record, addr, held.world).await else {
+        return false;
+    };
     let chat_context = ChatContext {
         name: character.name.clone(),
         vid: character.id,
         empire: character.empire,
         level: character.level,
         block_chat_seconds,
+        spam,
         in_party,
         in_guild,
         language: to.language,
@@ -3583,6 +3617,7 @@ async fn whisper_line(
         .game
         .whisper(
             common::vid::Vid::new(character.id),
+            addr.ip(),
             name.to_vec(),
             record.text.clone(),
             bytes,
@@ -10561,6 +10596,8 @@ struct GameData {
     world_boss: Arc<gamedata::world_boss::WorldBossTable>,
     /// The battle-pass table, which the game thread holds.
     battle_pass: Arc<gamedata::battle_pass::BattlePassTable>,
+    /// The spam words, which the game thread holds.
+    spam_words: Arc<Vec<gamedata::spam::SpamWord>>,
     /// The quest libraries' load-time settings, which `MainCharacterPacket` reads the map's
     /// music from.
     settings: quest::host::Settings,
@@ -10613,6 +10650,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let cube_recipes = load_cube_recipes(config)?;
     let world_boss = load_world_boss(config)?;
     let battle_pass = load_battle_pass(config)?;
+    let spam_words = load_spam_words(config)?;
     let quests = load_quests(config, &npcs)?;
     let settings = quests.manager().host().settings();
     let data = GameData {
@@ -10650,9 +10688,26 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         cube_recipes,
         world_boss,
         battle_pass,
+        spam_words,
         settings,
     };
     Ok((data, quests))
+}
+
+/// Load the spam words: the `spam_db` rows of the Game data tables, as `LoadSpamDB` reads
+/// them (`G/db.cpp:760-779`). The owner's dump has no table, so live this is empty.
+fn load_spam_words(config: &ServerConfig) -> Result<Arc<Vec<gamedata::spam::SpamWord>>, String> {
+    let dump_path = config.game_tables.join("common.sql");
+    let dump = std::fs::read(&dump_path)
+        .map_err(|error| format!("Failed to read {}: {error}", dump_path.display()))?;
+    let words = spam_words_from_dump(&dump).map_err(|error| {
+        format!(
+            "Failed to read the spam words in {}: {error}",
+            dump_path.display()
+        )
+    })?;
+    info!(words = words.len(), "Spam words loaded");
+    Ok(Arc::new(words))
 }
 
 /// Load the NPC shops: the `shop` and `shop_item` rows of the Game data tables, laid out as
@@ -11543,6 +11598,12 @@ fn build_world(
         .with_cube_recipes(Arc::clone(&data.cube_recipes))
         .with_world_boss_table(Arc::clone(&data.world_boss))
         .with_battle_pass_table(Arc::clone(&data.battle_pass))
+        .with_spam_words(
+            Arc::clone(&data.spam_words),
+            config.game.spam_block_score,
+            config.game.spam_block_duration,
+            config.game.spam_block_max_level,
+        )
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)
