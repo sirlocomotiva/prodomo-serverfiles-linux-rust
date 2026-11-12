@@ -53898,11 +53898,210 @@ fn altar_rebuild(alice: &mut Keyed, entered: &Entered, stone: u32, database: &Sc
     );
 }
 
+/// [`a_master_crowns_its_second_altar_and_a_layman_is_told_its_use`]'s ground:
+/// `MyGuild` (7) at level 11 on lands 5-7 with a stood 14062, 14063 and 14061, Alpha
+/// its master with 30M and exactly the checked price (15 stones, 15 plywood, 20
+/// logs), and Beta a lay member; both stand by the keepers.
+fn seed_crown_guild(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO guild (id, name, master_pid, level) SELECT 7, 'MyGuild', id, 11 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 7, 1 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 7, 2 FROM player WHERE name = 'Beta'",
+    );
+    sql(
+        database,
+        "UPDATE player SET x = 468200, y = 901610, gold = 30000000 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "UPDATE player SET x = 468200, y = 901610 WHERE name = 'Beta'",
+    );
+    for (id, vnum, count) in [
+        (40_u32, 90010_u32, 15_u32),
+        (41, 90011, 15),
+        (42, 90012, 20),
+    ] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'",
+                pos = id - 40,
+            ),
+        );
+    }
+    sql(
+        database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (5, 7), (6, 7), (7, 7)",
+    );
+    sql(
+        database,
+        "INSERT INTO building_object (id, land_id, vnum, map_index, x, y, x_rot, y_rot, z_rot, life) VALUES (3, 5, 14062, 1, 468200, 901300, 0, 0, 0, 0), (4, 6, 14063, 1, 468400, 901300, 0, 0, 0, 0), (5, 7, 14061, 1, 468600, 901300, 0, 0, 0, 0)",
+    );
+    sql(
+        database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, 'alter_of_power.build_level'::bytea, 10 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `quest.alter_of_power`'s 20078, 20079 and lay arms over the live script: the
+/// master's click on the 20078 offers the crown, the no is put off, and the yes
+/// with exactly the checked price rebuilds to 14062's successor — the 30M leaves,
+/// the three cells empty (the 15 plywood go whole, although the script asks for 20:
+/// both sides take all held), the 20078 goes and the 20079 stands with its name,
+/// and the object row swaps to 14063. The crowned click says the best already
+/// stands, and Beta's lay click on the 20077 hears the altar's use.
+#[test]
+fn a_master_crowns_its_second_altar_and_a_layman_is_told_its_use() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_crown_guild(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, entered) = enter_world_seeing_guilded(
+        &server,
+        b"alice",
+        0,
+        1,
+        Some(&[(803, 147, 8), (804, 146, 8), (805, 53, 10)]),
+    );
+    let stone = shown_vid(&entered, 20_078, "land 5 shows its 14062 keeper");
+    alice.send_record(&client_click(stone));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, ALTAR_SECOND_GREET),
+        "the greeting"
+    );
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, ALTAR_SECOND_OFFER),
+        "the offer"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, ALTAR_PUT_OFF),
+        "the no is put off"
+    );
+    alice.quiet("the refusal ends");
+    altar_crown(&mut alice, &entered, stone, &database);
+    let crown = shown_vid(&entered, 20_079, "land 6 shows its 14063 keeper");
+    alice.send_record(&client_click(crown));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, ALTAR_CROWNED),
+        "the best stands"
+    );
+    drop(alice);
+    let (mut beta, _beta_char, beta_entered) = enter_world_seeing_guilded(
+        &server,
+        b"alice",
+        1,
+        1,
+        Some(&[(803, 147, 8), (804, 146, 8), (805, 53, 10)]),
+    );
+    let first = shown_vid(&beta_entered, 20_077, "land 7 shows its 14061 keeper");
+    beta.send_record(&client_click(first));
+    assert_eq!(
+        beta.read_game(),
+        server_script(1, ALTAR_LAYMAN),
+        "the lay page"
+    );
+    drop(server);
+}
+
+/// [`a_master_crowns_its_second_altar_and_a_layman_is_told_its_use`]'s crowning:
+/// the second click offers again, and the yes pays the 30M and the materials and
+/// swaps the 14062 for the 14063.
+fn altar_crown(alice: &mut Keyed, entered: &Entered, stone: u32, database: &ScratchDatabase) {
+    alice.send_record(&client_click(stone));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, ALTAR_SECOND_GREET),
+        "the greeting again"
+    );
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, ALTAR_SECOND_OFFER),
+        "the offer again"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        gold_change_of(&entered.add, 0),
+        "the 30M leaves"
+    );
+    for cell in 0..3_u16 {
+        assert_eq!(
+            set_fields(&alice.read_game()),
+            (1, cell, 0, 0),
+            "cell {cell} empties"
+        );
+    }
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, ALTAR_SECOND_BUILT),
+        "the built page"
+    );
+    assert_eq!(
+        alice.read_game(),
+        [vec![0x02], stone.to_le_bytes().to_vec()].concat(),
+        "the old NPC goes"
+    );
+    let stood = alice.read_game();
+    assert_eq!(stood[0], GC_CHARACTER_ADD, "the new keeper stands");
+    assert_eq!(
+        u16::from_le_bytes(stood[22..24].try_into().expect("two bytes")),
+        20_079,
+        "as 20079"
+    );
+    assert_eq!(
+        alice.read_game()[0],
+        GC_CHAR_ADDITIONAL_INFO,
+        "the new keeper's name"
+    );
+    let delete = alice.read_game();
+    assert_eq!(delete[0], 0x02, "the object entity goes");
+    let add = alice.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD, "the object stands again");
+    assert_eq!(add[21], CHAR_TYPE_BUILDING, "a building");
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        14_063,
+        "as 14063"
+    );
+    alice.quiet("the rebuild step ends");
+    check(
+        database,
+        "NOT EXISTS (SELECT 1 FROM building_object WHERE id = 3) AND (SELECT COUNT(*) = 1 FROM building_object WHERE land_id = 5 AND vnum = 14063)",
+    );
+}
+
 const ALTAR_FIRST_GREET: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Eu sunt Yaholo, paznicul Altarului Puterii.[ENTER]Aceasta cladire face posibil pentru breasla ta[ENTER]acceptarea mai multor membri. Cand breasla ta[ENTER]creste, poti construi un Altar mai mare pentru a[ENTER]putea invita mai multi membri.[ENTER][NEXT]";
 const ALTAR_LOW_POWER: &[u8] = b"Hmm Breasla ta...[ENTER][COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Cred ca ar trebui sa lucrezi mai mult pentru a-ti[ENTER]dezvolta breasla. Momentan nu are suficienta[ENTER]putere pentru un Altar mai bun.[ENTER][DONE]";
 const ALTAR_FIRST_OFFER: &[u8] = b"Hmm Breasla ta...[ENTER][COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Puterea sa a crescut considerabil. Doresti sa[ENTER]inlocuiesti Altarul Puterii cu unul mai mare?[ENTER]Daca da, ai nevoie de urmatoarele materiale:[ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]25 Mil. Yang[ENTER]10 pietre suport[ENTER]15 bucati Placaj[ENTER]10 buturugi[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Inlocuieste Altarul Puterii|2;Nu inlocui Altarul Puterii]";
 const ALTAR_PUT_OFF: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Cum doresti. Te astept mai tarziu.[ENTER][DONE]";
 const ALTAR_FIRST_BUILT: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Bun. Voi inlocui cu o constructie noua.[ENTER][DONE]";
+const ALTAR_SECOND_GREET: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Cu cat este nivelul breslei mai inalt, cu atat[ENTER]este mai mare altarul fortelor, pe care poti sa[ENTER]il construiesti. Daca creste nivelul breslei, ea[ENTER]denive mai puternica. [ENTER][NEXT]";
+const ALTAR_SECOND_OFFER: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Hmm Breasla ta...[ENTER]Oh, acum este mult mai puternica![ENTER]Iti voi inlocui Altarul Puterii cu cel mai bun[ENTER]altar. Pentru asta ai nevoie de urmatoarele[ENTER]materiale:[ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]30 Mil. Yang[ENTER]15 pietre suport[ENTER]20 bucati Placaj[ENTER]20 buturugi[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Inlocuieste Altarul Puterii|2;Nu inlocui Altarul Puterii]";
+const ALTAR_SECOND_BUILT: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Bun. Voi inlocui altarul cu o cladire noua. Acum[ENTER]breasla ta va avea cel mai bun Altar. Felicitari![ENTER][DONE]";
+const ALTAR_CROWNED: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Nu pot face nimic pentru tine: Breasla ta detine[ENTER]deja cel mai bun Altar al Puterii.[ENTER][DONE]";
+const ALTAR_LAYMAN: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yaholo:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Altarul Puterii da dreptul breslei tale sa[ENTER]accepte mai multi membri.[ENTER][DONE]";
 
 const TOWER_WEAPON_OWN: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Fierar Arme[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Oh, esti membru al breslei mele! Daca vrei sa-ti[ENTER]imbunatatesti armele le aduci la mine, nu te duci[ENTER]la acei amatori din oras. Rata mea de succes este[ENTER]cu 10% mai mare. Membrii breslei au o reducere de[ENTER]5%. Doar da-mi arma pe care doresti s-o[ENTER]imbunatatesti ca sa pot incepe.[ENTER][DONE]";
 const TOWER_WEAPON_STRANGER: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Fierar Arme[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Ma numesc Stanley si ma ocup cu imbunatatirea[ENTER]armelor.[ENTER]Ma pricep mai bine decat fierarul satului! Daca[ENTER]vii la mine ai putea sa iti maresti sansa cu 10%.[ENTER]Da-mi arma care trebuie imbunatatita.---[ENTER]LOCA::SPACE---[ENTER][DONE]";

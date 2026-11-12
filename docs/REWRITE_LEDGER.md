@@ -54256,3 +54256,20 @@ Two mutants die on their intended asserts (`pc.getqf` pinned to 0 offers on the
 first click instead of scolding; `reconstruct` off by one stands 20079 instead
 of 20078).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5516 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone, as in the 606-609 and 611-612 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the three-way split of the 136-line scenario) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 614. The altar's crown
+
+`quest.guild_building_alter_of_power` is `ported`: scenario
+`a_master_crowns_its_second_altar_and_a_layman_is_told_its_use`. The guild is 11
+with a stood 14062, 14063 and 14061: the master's 20078 click offers the crown,
+the no is put off, and the yes with exactly the checked price (15 stones, 15
+plywood, 20 logs, 30M) rebuilds — the 30M leaves, the three cells empty, the
+20078 goes and the 20079 stands with its name, and the object row swaps to
+14063. The script checks 15 plywood but removes 20 (`:63` vs `:72`); both sides'
+`RemoveSpecifyItem` takes all held when short, so the 15 go whole with no
+visible difference — a quest-source quirk, not a Divergence. The 20079 click
+says the best already stands, and the lay member's 20077 click hears the
+altar's use. No production code changed. Two mutants die on their intended
+asserts (`is_guild_master` pinned true runs the master arm for the layman;
+select answers pinned to 1 rebuild on the no).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5517 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone, as in the 606-609 and 611-613 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
