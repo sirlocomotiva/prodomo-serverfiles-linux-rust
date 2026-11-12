@@ -54353,6 +54353,203 @@ fn aura_window(alice: &mut Keyed, keeper: u32, entry: u8, window: u8, note: &str
     );
 }
 
+/// The Hydra kill's congrats (`3965.kill`, `yohara_system.lua:74-84`).
+const YOHARA_HYDRA_CONGRATS: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Statuia Razboinicului: [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Felicitari.[ENTER]Te astept unde am vorbit ultima data. [ENTER][ENTER][DONE]";
+
+/// The statue's menu at `killReward_new`: the ship's return, the Yohara trip, the
+/// reward chat, and the close.
+const YOHARA_STATUE_MENU: &[u8] =
+    b"[QUESTION 1;Return|2;Un continent nou|3;Devino Campion  |4;Inchide]";
+
+/// The reward chat (`20433.chat."Devino Campion  "`, `yohara_system.lua:98-112`):
+/// the 0xe7 byte is the mob name's CP949 `\xb1`, carried byte-exact.
+const YOHARA_CHAMPION_REWARD: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Savas\xe7i heykeli[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Felicitari sincere.. [ENTER]Ai invins Hydra. Acum ti-ai dovedit puterea.[ENTER]Poti avansa la nivelul de campion acum. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Ai trecut la nivelul de campion[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][DONE]";
+
+/// The twenty point records `SetConqueror`'s reset and recompute send
+/// (`G/char.cpp:11678-11697`): the next-exp arm, the first compute's seven, the
+/// level arm with the speed and the three zeroed bonuses, the second compute's
+/// seven, and the two pool maxima.
+fn read_conqueror_reset(keyed: &mut Keyed, own: u32) {
+    for (kind, value, note) in [
+        (176_u8, 433_400_i64, "the conqueror next exp"),
+        (18, 240, "the attack grade"),
+        (20, 120, "the client defence grade"),
+        (16, 120, "the defence grade"),
+        (20, 120, "the client defence grade again"),
+        (22, 240, "the magic attack grade"),
+        (23, 120, "the magic defence grade"),
+        (173, 1, "the conqueror level"),
+        (17, 100, "the attack speed"),
+        (53, 0, "the monster bonus"),
+        (146, 0, "the metin bonus"),
+        (147, 0, "the boss bonus"),
+        (18, 240, "the attack grade recomputed"),
+        (20, 120, "the client defence grade recomputed"),
+        (16, 120, "the defence grade recomputed"),
+        (20, 120, "the client defence grade recomputed again"),
+        (22, 240, "the magic attack grade recomputed"),
+        (23, 120, "the magic defence grade recomputed"),
+        (6, 650, "the max hit points"),
+        (8, 200, "the max spirit points"),
+    ] {
+        assert_eq!(
+            keyed.read_game(),
+            point_change(own, kind, 0, value),
+            "{note}"
+        );
+    }
+}
+
+/// Stage [`a_hydra_kill_moves_yohara_to_its_champion_reward`]: the owner's mob
+/// proto with the Hydra (3965) shrunk to level 1 with 1 hit point, map 1's regen
+/// with one at the entrant's feet, and map 1's NPCs with the warrior statue
+/// (20433) beside it.
+fn yohara_champion_stage(database: &ScratchDatabase) -> (Server, PathBuf) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "UPDATE player SET x = 469600, y = 948500, level = 120, exp = 625000000 WHERE name =          'Beta'",
+    );
+    // The CRC32 of `killMonsters_new`, as a signed `integer`.
+    sql(
+        database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id,          'yohara_system.__status'::bytea, -332622545 FROM player WHERE player.name = 'Beta'",
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata");
+    let owner = std::fs::read(root.join("proto/mob_proto.txt")).expect("mob proto");
+    let mut proto = Vec::new();
+    for line in owner.split_inclusive(|&byte| byte == b'\n') {
+        if line.starts_with(b"3965\t") {
+            let mut cells: Vec<&[u8]> = line
+                .strip_suffix(b"\r\n")
+                .expect("CRLF")
+                .split(|&byte| byte == b'\t')
+                .collect();
+            assert_eq!(cells.len(), 72, "the 3965 line keeps its columns");
+            cells[5] = b"1";
+            cells[14] = b"1";
+            cells[18] = b"1";
+            cells[19] = b"1";
+            cells[20] = b"1";
+            proto.extend_from_slice(&cells.join(&b'\t'));
+            proto.extend_from_slice(b"\r\n");
+        } else {
+            proto.extend_from_slice(line);
+        }
+    }
+    let mut regen =
+        std::fs::read(root.join("locale/europe/map/metin2_map_a1/regen.txt")).expect("a1 regen");
+    regen.extend_from_slice(b"m\t600\t525\t1\t1\t0\t0\t60s\t100\t1\t3965\n");
+    let mut npcs =
+        std::fs::read(root.join("locale/europe/map/metin2_map_a1/npc.txt")).expect("a1 npcs");
+    npcs.extend_from_slice(b"m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t20433\n");
+    let (server, data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[
+            ("proto/mob_proto.txt", &proto),
+            ("locale/europe/map/metin2_map_a1/regen.txt", &regen),
+            ("locale/europe/map/metin2_map_a1/npc.txt", &npcs),
+        ],
+        &default_channels(),
+        "no_wander = true",
+    );
+    (server, data)
+}
+
+/// `quest.yohara_system`'s Hydra kill and champion reward over the live script:
+/// Beta, level 120 with the filled marble (`exp = next_exp(120) / 4`) and the quest
+/// at `killMonsters_new`, enters beside the staged Hydra and the warrior statue.
+/// A punch kills the Hydra (`3965.kill` counts 1, resets, says the congrats and
+/// moves the quest to `killReward_new`); the click then offers the reward chat,
+/// and "Devino Campion" runs `pc.set_conqueror`, which makes Beta a champion
+/// (the reward page, the begin-bit clear, the reset's point records, the gold and
+/// points pair, and the trailing conqueror-exp record), clears the letter
+/// (`q.done`) and completes the quest. The marrow: the grant lands on no exp
+/// record, because an over-cap character's filled marble silences `gain_exp`
+/// (`G/char.cpp:4113-4116`); the stored row keeps conqueror level 1 and the
+/// `__COMPLETE__` status.
+#[test]
+fn a_hydra_kill_moves_yohara_to_its_champion_reward() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _data) = yohara_champion_stage(&database);
+    let (mut alice, _beta, _items) = load_character(&server, b"alice", 1);
+    let (entered, _cooldown) = enter_game_view_cells(&mut alice);
+    let hydras = vids_of_race(&entered.shown, 3965);
+    assert_eq!(hydras.len(), 1, "map 1 shows the staged Hydra");
+    let statue = shown_vid(&entered, 20_433, "map 1 shows its statue");
+    let own = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_target(hydras[0]));
+    assert_eq!(alice.read_game()[0], 0x3f, "the target answers");
+    alice.send_record(&client_attack(hydras[0]));
+    for (want, note) in [
+        (0x87_u8, "the damage"),
+        (0x3f, "the hit points"),
+        (0x0d, "the stun"),
+        (0x3f, "the clear"),
+        (0x46, "the orb"),
+    ] {
+        assert_eq!(alice.read_fight()[0], want, "{note}");
+    }
+    assert_eq!(
+        alice.read_fight(),
+        server_script(1, YOHARA_HYDRA_CONGRATS),
+        "the kill's congrats"
+    );
+    for (want, note) in [(0x0e_u8, "the death"), (0x02, "the corpse leaves")] {
+        assert_eq!(alice.read_fight()[0], want, "{note}");
+    }
+    alice.send_record(&client_click(statue));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, YOHARA_STATUE_MENU),
+        "the reward chat joins the menu"
+    );
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, YOHARA_CHAMPION_REWARD),
+        "the reward page"
+    );
+    assert_eq!(
+        alice.read_game(),
+        quest_begin_clear(49),
+        "the letter's `q.done` clears yohara's begin bit"
+    );
+    read_conqueror_reset(&mut alice, own);
+    let mut gold = vec![GC_CHARACTER_GOLD];
+    gold.extend_from_slice(&0_u64.to_le_bytes());
+    assert_eq!(alice.read_game(), gold, "the gold record");
+    let points = alice.read_game();
+    assert_eq!(points[0], GC_PLAYER_POINTS, "the points record");
+    for (slot, value, note) in [
+        (1_usize, 120_i64, "the level stays"),
+        (3, 625_000_000, "the experience stays"),
+        (173, 1, "the conqueror level"),
+        (175, 0, "the conqueror experience"),
+        (176, 433_400, "the conqueror next"),
+    ] {
+        assert_eq!(point_slot(&points, slot), value, "{note}");
+    }
+    assert_eq!(
+        alice.read_game(),
+        point_change(own, 175, 0, 0),
+        "the trailing conqueror-exp record"
+    );
+    alice.still("nothing follows");
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    check(
+        &database,
+        "(SELECT conqueror_level FROM player WHERE name = 'Beta') = 1 AND (SELECT value FROM          quest_flag WHERE player_id = (SELECT id FROM player WHERE name = 'Beta') AND name =          'yohara_system.__status'::bytea) = 668443392",
+    );
+    drop(server);
+}
+
 const AURA_MENU: &[u8] = b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]";
 const AURA_ABOUT_FIRST: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]teowahdan:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]bla[ENTER]blabla[ENTER]blablabla[ENTER]blabla[ENTER]bla[ENTER][NEXT]";
 const AURA_ABOUT_LAST: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]teowahdan:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]bla[ENTER]blabla[ENTER]blablabla[ENTER]blabla[ENTER]bla[ENTER][DONE]";

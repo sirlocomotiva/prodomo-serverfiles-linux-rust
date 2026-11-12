@@ -54303,3 +54303,56 @@ without which the next yes hears `[LS;1014]`) before the next opens. No
 production code changed. Two mutants die on their intended reads (the dropped
 absorb open sends no window; answers pinned to 0 open on the no).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5519 passed, 1 failed in 46 targets (`an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off` flaked — its throttle window missed under load — and passes alone, as in the earlier receipt); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the `client_aura_cancel` helper replaced two `&vec!`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 617. The Hydra's death and the champion's reward
+
+`quest.yohara_system` is `ported`: scenario
+`a_hydra_kill_moves_yohara_to_its_champion_reward`. The staged Hydra (3965, shrunk
+to level 1 with 1 hit point, stood at the entrant's feet beside the staged warrior
+statue) dies to a punch, and its `3965.kill` counts 1, resets, says the congrats
+page whole and moves the quest to `killReward_new`. The statue's click then offers
+the reward chat ("Devino Campion"), and its answer runs `pc.set_conqueror`: the
+reward page whole (the 0xe7 byte is the mob name's CP949 `\xb1`, carried
+byte-exact), the begin-bit clear of quest 49 (`q.done`), the reset's twenty point
+records, the gold and points pair (the level stays 120, the experience stays
+625000000, conqueror 1, conqueror exp 0, conqueror next 433400), and the trailing
+conqueror-exp record. The letter clears and the quest completes; the stored row
+keeps conqueror level 1 and the `__COMPLETE__` status (668443392, read back from
+the row). The quest is complete over the wire: the login move (257), the letter
+(259), the mark and click (288), and the kill and reward (this slice).
+`lua.pc.set_conqueror` keeps its `ported` with the wire run named in its note. No
+production code changed: the bridge, the judge and the reset were already live.
+
+**Legacy** (`G/char.cpp:11659-11700`, `G/char.cpp:4113-4116`,
+`legacy/gamedata/locale/europe/quest/_basic/yohara_system.lua:66-113`):
+
+- `SetConqueror(true)` chats the already line for a conqueror and the marble line
+  below the level-120 filled marble, else `PointChange(POINT_CONQUEROR_LEVEL, 1)`,
+  the step, point and sungma resets, `SetConquerorExp(0)`, `ComputePoints`,
+  `PointsPacket`, and the `POINT_CONQUEROR_EXP` update. The normal experience is
+  untouched: no `SetExp` runs.
+- `gain_exp`'s conqueror build early-returns with no record when the level is past
+  the cap and the experience holds a quarter of the next (`:4113-4116`). Beta is
+  level 120 past the test cap of 99 with exactly the quarter banked, so the kill's
+  grant lands on the orb alone and no exp record rides. That silence is the
+  scenario's marrow, pinned by the orb-then-congrats order.
+- `set_state("__COMPLETE__")` stores `GetQuestStateIndex`'s number for the
+  compiled `__COMPLETE__` state, which reads back as 668443392.
+
+**Corrections to ledger 275.** Its wire scenario seeded `killReward_new` as
+-512007343, but the CRC32 is -511997343 (zlib agrees with `quest::crc32`, whose
+`123456789` vector is pinned): the seed was wrong by exactly 10000, so yohara sat
+at an unrecognized status and its wire run proved the ship's return only, never
+the reward chat. Its menu therefore showed three entries where the true
+`killReward_new` menu shows four. This slice seeds `killMonsters_new` as -332622545
+(the signed CRC32) and lets the kill move the quest, so the menu's fourth entry is
+the state proof. The two mutants die on their intended reads: the seed off by one
+dies on the congrats, and the conqueror level pinned at 2 dies on the reset's
+record.
+
+Tests:
+
+- `prodomo/tests/parity.rs`:
+  `a_hydra_kill_moves_yohara_to_its_champion_reward` (8/8 under load).
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5520 passed, 1 failed in 46 targets — the failure is `a_cape_of_courage_gathers_the_dogs_around`, a known load flake (ledger 616's receipt names the class), green alone in 5.08 s. The stale first suite run (launched before the clippy split) was killed and rerun cleanly; its 5 orphaned `prodomo_proc_2826711_*` databases were dropped by hand. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No production code changed, so no width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
