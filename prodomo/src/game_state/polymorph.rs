@@ -156,6 +156,28 @@ impl GameState {
         })
     }
 
+    /// The plain point [`GameState::poly_victim_dx`] falls back to: 0 with no
+    /// points, as the rating's victim arm would read for a missing victim.
+    pub(super) fn victim_plain_dx(&self, vid: Vid) -> i32 {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(0, |points| points.get_point(point::POINT_DX))
+    }
+
+    /// The victim's morphed dexterity for `CalcAttackRating`'s victim arm
+    /// (`G/battle.cpp:281`): `GetPolymorphPoint(POINT_DX)` of the player under `vid`,
+    /// `Some` exactly while morphed without keeping its stats and the row is known,
+    /// else the plain point. A `None` row (an unknown vnum) reads the plain point,
+    /// as the missed `CMobManager::Get` does (`G/char.cpp:3673-3701`).
+    pub(super) fn poly_victim_dx(&self, vid: Vid) -> Option<i32> {
+        let poly = self.poly_attack_of(vid)?;
+        let dex = poly.row.map(|row| row.0)?;
+        let points = self.characters.find_by_vid(vid).ok()?.points()?;
+        Some(points.polymorph_point(Some(dex), poly.power))
+    }
+
     /// `GetPolymorphPower` (`G/char.cpp:7669-7678`): the `poly` event flag on the test
     /// server when it is set, else the skill-129 climb through the power table.
     fn polymorph_power(&self, vid: Vid) -> i32 {
@@ -606,6 +628,56 @@ mod tests {
             .poly_attack_of(vid)
             .expect("an unknown vnum still reads some");
         assert!(poly.row.is_none(), "but its row is none");
+        drained(&mut mine);
+        drained(&mut witness);
+    }
+
+    /// `poly_victim_dx`: nothing while clear or maintaining, the plain point for an
+    /// unknown vnum, and the row's scaled dexterity plus the caller's own otherwise.
+    #[test]
+    fn the_victim_row_reads_the_morphed_dexterity() {
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProto, MobProtos};
+        use gamedata::records::MobTableRecord;
+        use std::sync::Arc;
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        let (_clock, mut world, mut mine, mut witness) = a_morph();
+        let row = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: DOG,
+                dex: 6,
+                ..MobTableRecord::default()
+            },
+        };
+        world.install_respawner(
+            Respawner::new(
+                Arc::new(MobProtos::from_rows(vec![row])),
+                Arc::new(MobGroups::default()),
+                Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+                NpcVids::starting_at(FIRST_NPC_VID + 100),
+            ),
+            open_cells(),
+        );
+        let vid = Vid::new(ME);
+        assert!(world.poly_victim_dx(vid).is_none(), "clear reads none");
+        world.run_polymorph(vid, b"101");
+        // Unskilled skill 129 reads power 0, so the row adds nothing to the
+        // fixture's own 3.
+        assert_eq!(world.poly_victim_dx(vid), Some(3));
+        world.run_polymorph(vid, b"0");
+        world.run_polymorph(vid, b"101 1");
+        assert!(
+            world.poly_victim_dx(vid).is_none(),
+            "a maintain morph reads none"
+        );
+        world.run_polymorph(vid, b"404");
+        assert!(
+            world.poly_victim_dx(vid).is_none(),
+            "an unknown vnum reads none"
+        );
         drained(&mut mine);
         drained(&mut witness);
     }

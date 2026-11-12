@@ -60,6 +60,11 @@ pub struct MobStriker<'a> {
 pub struct PcVictim<'a> {
     /// Its points.
     pub points: &'a Points,
+    /// The victim's morphed dexterity (`GetPolymorphPoint(POINT_DX)`): `Some` exactly
+    /// while the victim is morphed without keeping its stats, with the row's scaled
+    /// dexterity plus its own. The caller, which owns the mob table and the power,
+    /// built it, as for [`super::melee::PolyAttack`].
+    pub poly_dexterity: Option<i32>,
     /// `IsAffectFlag`'s two words, which gate the poison, stun and slow draws.
     pub affect_flags: [u32; 2],
     /// `IsStun() || IsDead()`: the down check comes before the death blow.
@@ -229,7 +234,13 @@ pub fn strike_pc(
     mob_rate: i32,
 ) -> PcStrike {
     let mut effects = Vec::new();
-    let damage = mob_melee_damage(dice, striker, victim.points, mob_rate);
+    let damage = mob_melee_damage(
+        dice,
+        striker,
+        victim.points,
+        victim.poly_dexterity,
+        mob_rate,
+    );
     let affect = mob_attack_affect(dice, striker.npc, &victim);
     // `iDam = attMul * (float)iDam + 0.5f`, with `attMul` 1.0, which multiplies exactly.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
@@ -726,7 +737,13 @@ pub fn shoot_pc(
     mob_rate: i32,
 ) -> PcStrike {
     let mut effects = Vec::new();
-    let damage = mob_melee_damage(dice, striker, victim.points, mob_rate);
+    let damage = mob_melee_damage(
+        dice,
+        striker,
+        victim.points,
+        victim.poly_dexterity,
+        mob_rate,
+    );
     let affect = mob_attack_affect(dice, striker.npc, &victim);
     let resist = if magic {
         victim.points.get_point(point::POINT_RESIST_MAGIC)
@@ -883,10 +900,19 @@ fn mob_melee_damage(
     dice: &mut dyn Dice,
     striker: MobStriker<'_>,
     victim: &Points,
+    poly_dexterity: Option<i32>,
     mob_rate: i32,
 ) -> i32 {
     let mob = striker.npc;
-    let attack = mob_calc_attack(dice, mob, Some(victim), striker.berserk, false, mob_rate);
+    let attack = mob_calc_attack(
+        dice,
+        mob,
+        Some(victim),
+        poly_dexterity,
+        striker.berserk,
+        false,
+        mob_rate,
+    );
     let defence = victim
         .get_point(point::POINT_DEF_GRADE)
         .wrapping_mul(100_i32.wrapping_add(victim.get_point(point::POINT_DEF_BONUS)))
@@ -907,11 +933,16 @@ fn mob_melee_damage(
 /// bonuses are 0, so those arms are identities. Berserk doubles the multiply
 /// (`G/char.cpp:2605-2612`). `mob_rate` is `GetMobDamageRate` (`:311-318`), read by the
 /// caller: it applies to a player victim only, never to the pre-check's self.
+/// `poly_dexterity` is the victim's morphed dexterity, `Some` exactly while a player
+/// victim is morphed without keeping its stats (`G/battle.cpp:281`); the caller, which
+/// owns the mob table and the power, read it.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn mob_calc_attack(
     dice: &mut dyn Dice,
     mob: &Npc,
     victim: Option<&Points>,
+    poly_dexterity: Option<i32>,
     berserk: bool,
     ignore_target_rating: bool,
     mob_rate: i32,
@@ -920,7 +951,7 @@ pub fn mob_calc_attack(
         attacker_dexterity: mob.fight.point(point::POINT_DX),
         attacker_level: i32::from(mob.fight.level),
         victim_dexterity: victim.map_or(mob.fight.point(point::POINT_DX), |victim| {
-            victim.get_point(point::POINT_DX)
+            poly_dexterity.unwrap_or_else(|| victim.get_point(point::POINT_DX))
         }),
         ignore_target_rating,
     });
@@ -2076,6 +2107,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             magic,
             100,
@@ -2103,6 +2135,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             mob_rate,
         )
@@ -2123,6 +2156,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             100,
         )
@@ -2182,6 +2216,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down: false,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             100,
         );
@@ -2200,6 +2235,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down: false,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             100,
         );
@@ -2283,6 +2319,26 @@ mod tests {
             }
         );
         let _ = points;
+    }
+
+    /// The victim's morph in the rating (`G/battle.cpp:281`): the 406's swing on
+    /// Alpha rates the plain DX 19 at source 24, but the morphed DX 65 at source 55,
+    /// so the evasion climbs and the draw-0 attack falls from 193 to 175.
+    #[test]
+    fn a_morphed_victims_dexterity_dulls_the_swings_rating() {
+        let proto = wind_proto();
+        let mob = monster(&proto, 1 << 3, 0);
+        let points = alpha();
+        let mut dice = Script::new(&[0]);
+        assert_eq!(
+            mob_calc_attack(&mut dice, &mob, Some(&points), None, false, false, 100),
+            193
+        );
+        let mut dice = Script::new(&[0]);
+        assert_eq!(
+            mob_calc_attack(&mut dice, &mob, Some(&points), Some(65), false, false, 100),
+            175
+        );
     }
 
     #[test]
@@ -2681,6 +2737,7 @@ mod tests {
                 affect_flags: [AFF_STUN_WORD, 0],
                 down: false,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             100,
         );
@@ -2909,6 +2966,7 @@ mod tests {
                 affect_flags: [AFF_STUN_WORD, 0],
                 down: false,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             100,
         );
@@ -2941,6 +2999,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down: false,
                 immune_flag: crate::character::IMMUNE_STUN | crate::character::IMMUNE_SLOW,
+                poly_dexterity: None,
             },
             100,
         );
@@ -2971,6 +3030,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down: false,
                 immune_flag: u32::MAX,
+                poly_dexterity: None,
             },
             100,
         );
@@ -3008,6 +3068,7 @@ mod tests {
                 affect_flags: [AFF_STUN_WORD, 0],
                 down: false,
                 immune_flag: 0,
+                poly_dexterity: None,
             },
             100,
         );
@@ -3037,6 +3098,7 @@ mod tests {
                 affect_flags: [0; 2],
                 down: false,
                 immune_flag: crate::character::IMMUNE_STUN,
+                poly_dexterity: None,
             },
             100,
         );
@@ -3069,6 +3131,7 @@ mod tests {
                     affect_flags: [0; 2],
                     down: false,
                     immune_flag: 0,
+                    poly_dexterity: None,
                 },
                 100,
             );
@@ -3253,6 +3316,7 @@ mod tests {
             affect_flags: [0; 2],
             down: false,
             immune_flag: 0,
+            poly_dexterity: None,
         };
         let mut dice = Script::new(&[]);
         let strike = skill_damage_pc(

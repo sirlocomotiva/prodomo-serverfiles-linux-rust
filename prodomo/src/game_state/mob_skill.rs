@@ -225,10 +225,12 @@ impl GameState {
         };
         let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
         let mob_rate = self.mob_damage_rate();
+        let poly_dexterity = self.poly_victim_dx(victim);
         mob_calc_attack(
             &mut self.dice,
             &npc,
             Some(&target),
+            poly_dexterity,
             berserk,
             ignore_target_rating,
             mob_rate,
@@ -502,7 +504,8 @@ impl GameState {
             // (the NPC arms) draws the roll, and `CalcBattleDamage` floors below 3.
             let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
             let mob_rate = self.mob_damage_rate();
-            let atk = mob_calc_attack(&mut self.dice, &npc, None, berserk, false, mob_rate).max(0);
+            let atk =
+                mob_calc_attack(&mut self.dice, &npc, None, None, berserk, false, mob_rate).max(0);
             vars.insert("atk", f64::from(atk));
         }
         // `USE_MAGIC_DAMAGE` and `USE_ARROW_DAMAGE` are dead for hosted rows (no row sets
@@ -719,7 +722,9 @@ impl GameState {
         };
         let health_cap = target_points.max_hp();
         let mana_cap = target_points.max_sp();
-        let target_dx = target_points.get_point(point::POINT_DX);
+        let target_dx = self
+            .poly_victim_dx(victim)
+            .unwrap_or_else(|| target_points.get_point(point::POINT_DX));
         let Some(npc) = self.npc_by_vid(cast.mob).cloned() else {
             return;
         };
@@ -1094,8 +1099,11 @@ impl GameState {
             dragon_stones,
             dragon_counts,
         };
+        // `skill_damage_pc` never rates: the skill's `ar` was computed on the
+        // splash path, so the victim's morph is already in the amount.
         let target = PcVictim {
             points: &points,
+            poly_dexterity: None,
             affect_flags: affects,
             down,
             immune_flag: points.immune_flag(),
@@ -1583,6 +1591,48 @@ mod tests {
             .unwrap()
             .hp()
     }
+    /// The splash's per-victim `atk` on a morphed victim (`G/battle.cpp:281`): the
+    /// dog's dexterity 6 at power 100 lifts the warrior's 3 to 9, so the evasion
+    /// source climbs from 2 to 6, the `atk` falls from 13 to 12, and the 256 splash
+    /// lands 16 instead of 18 (the morph's defence 14 replaces the plain 13 in both).
+    /// Seed 0's draws as in the crush test. The splash's own `ar` names the same DX,
+    /// but no hosted 256-family poly observes it, so this pin cannot cover that arm.
+    #[test]
+    fn the_splash_rates_a_morphed_victims_dexterity() {
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProto, MobProtos};
+        use gamedata::records::MobTableRecord;
+        use std::sync::Arc;
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        let mut slots = empty_slots();
+        slots[0] = slot(256, 20, Some(3.6), splash_now());
+        let (_clock, mut world, _inbox) = a_cast(slots, 10_000);
+        let row = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: 101,
+                dex: 6,
+                ..MobTableRecord::default()
+            },
+        };
+        world.install_respawner(
+            Respawner::new(
+                Arc::new(MobProtos::from_rows(vec![row])),
+                Arc::new(MobGroups::default()),
+                Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+                NpcVids::starting_at(FIRST_NPC_VID + 100),
+            ),
+            open_cells(),
+        );
+        world.set_pc_skill_level(1, 129, 40);
+        world.run_polymorph(Vid::new(1), b"101");
+        world.dice = Pcg32::new(0, 0);
+        assert!(world.battle_skill(ME, Vid::new(1)));
+        assert_eq!(points_hp(&mut world, 1), 760 - 16);
+    }
+
     /// 264's poly reads the VICTIM's maximum HP: `-(maxhp*k)` negated is 760*0.5 = 380,
     /// minus 13 → 367 (seed 0's draws as in the crush test).
     #[test]

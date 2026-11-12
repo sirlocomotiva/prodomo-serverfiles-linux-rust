@@ -16151,6 +16151,161 @@ fn a_free_hit_on_a_player_of_his_own_empire_marks_the_killer() {
     );
 }
 
+/// The victim morph's reencode drain: the HP restore of the plain punch's damage (the
+/// zero changes send nothing: amount 0 changes no total), the punch's ownership, the
+/// stale row, the morph add and summary, then the battle compute's grade records and
+/// the view's sixteen re-shown NPCs.
+fn drain_victim_morph_reencode(alpha: &mut Keyed, caller: u32, killer: u32) {
+    let hp = alpha.read_game();
+    assert_eq!(hp[0], GC_POINT_CHANGE, "{hp:02x?}");
+    assert_eq!(hp[8], 5, "the HP restore");
+    assert_eq!(
+        alpha.read_game(),
+        ownership_of(killer, caller),
+        "the victim hears the ownership"
+    );
+    let stale = alpha.read_game();
+    assert_eq!(stale[0], GC_CHARACTER_DEL, "{stale:02x?}");
+    assert_eq!(
+        &stale[1..5],
+        &caller.to_le_bytes(),
+        "the stale row is the caller's"
+    );
+    let own = alpha.read_game();
+    assert_eq!(own[0], GC_CHARACTER_ADD, "{own:02x?}");
+    assert_eq!(
+        u16::from_le_bytes(own[22..24].try_into().expect("two bytes")),
+        503,
+        "the own add is the morph"
+    );
+    let summary = alpha.read_game();
+    assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO, "{summary:02x?}");
+    let mut grades = 0;
+    let mut adds = 0;
+    loop {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record[0] == GC_POINT_CHANGE {
+            grades += 1;
+        } else if record[0] == GC_CHARACTER_ADD {
+            adds += 1;
+            let info = alpha.read_game();
+            assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+        } else {
+            panic!("after the reencode: {record:02x?}");
+        }
+    }
+    assert!(
+        grades >= 4,
+        "the battle compute resends the grades: {grades}"
+    );
+    assert_eq!(adds, 16, "the view re-shows the map's sixteen NPCs");
+}
+/// `G/battle.cpp:281`: a morphed victim's evasion dexterity. Dave (free, ST 100,
+/// grade 441: twice 154 plus the assassin's `(4*100 + 2*0)/3`) hits Alpha plain for
+/// 222, then Alpha morphs into the 503 (`/polymorph 503`, power 100 at climb 40) and
+/// the same punch lands 151: the defence recomputes to 232 (154 + vitality 35 + the
+/// row's 43) and the rating reads the morphed DX 65 (the row's 46 plus Alpha's own
+/// 19), not the plain 19, which would land 158. Both see the damage.
+#[test]
+fn a_morph_into_the_bowman_dulls_the_free_hit_it_takes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "dave");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, st, x, y) SELECT id, 0, 'Dave', \
+         1, 154, 100, 470100, 950100 FROM account WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET stamina = 12345 WHERE name = 'Dave'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 129, 40, 0 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, alpha_listed, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut dave, dave_listed, _dave_entered) = enter_world_hearing_team(
+        &server,
+        1,
+        b"dave",
+        &[(b"Alpha".as_slice(), true)],
+        "dave hears alpha online",
+    );
+    alpha.sees_enter(dave_listed.id, false, None);
+
+    dave.send_record(&client_chat(CHAT_TALKING, b"/pkmode 2"));
+    assert_eq!(read_update_mode(&mut dave, dave_listed.id), 2);
+    assert_eq!(read_update_mode(&mut alpha, dave_listed.id), 2);
+    dave.quiet("the switch ends");
+    alpha.quiet("the switch ends");
+
+    // The plain punch: 222, past the ST-0 scenario's 140.
+    dave.send_record(&client_attack(alpha_listed.id));
+    let update = dave.read_game();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "Dave's killer update");
+    assert_eq!(
+        dave.read_hit(),
+        damage_info(alpha_listed.id, DAMAGE_NORMAL, 222)
+    );
+    assert_eq!(
+        dave.read_hit(),
+        ownership_of(dave_listed.id, alpha_listed.id)
+    );
+    let seen = alpha.read_game();
+    assert_eq!(seen[0], GC_CHARACTER_UPDATE, "Alpha sees the killer update");
+    assert_eq!(
+        alpha.read_hit(),
+        damage_info(alpha_listed.id, DAMAGE_NORMAL, 222)
+    );
+
+    // The morph: Alpha takes the bowman's shape, and the witness sees race 503.
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/polymorph 503"));
+    let add = read_add_of(&mut dave, alpha_listed.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        503,
+        "the shown race is the vnum"
+    );
+    let seen_summary = dave.read_game();
+    assert_eq!(
+        seen_summary[0], GC_CHAR_ADDITIONAL_INFO,
+        "{seen_summary:02x?}"
+    );
+    drain_victim_morph_reencode(&mut alpha, alpha_listed.id, dave_listed.id);
+
+    // The morphed punch: 151, not the plain-DX 158.
+    dave.send_record(&client_attack(alpha_listed.id));
+    assert_eq!(
+        dave.read_hit(),
+        damage_info(alpha_listed.id, DAMAGE_NORMAL, 151)
+    );
+    assert_eq!(
+        alpha.read_hit(),
+        damage_info(alpha_listed.id, DAMAGE_NORMAL, 151)
+    );
+    drop(alpha);
+    drop(dave);
+    drop(server);
+}
+
 /// The exp tail of a kill: the exp point change past the death's ownership releases, then
 /// the exp orb from the victim to the killer, then `GC_DEAD` past the death's drops
 /// (`GROUND_ADD`) and any late swing's record. The kill's drop table rolls after the exp and

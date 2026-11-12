@@ -54728,3 +54728,36 @@ the receipt's parity rerun at `--test-threads=8`: 475 passed, 0 failed); `cargo 
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 630. The morphed victim's evasion
+
+Ledger 629 ported the attacker's `GetPolymorphPoint(POINT_DX)` and left the victim's
+(`G/battle.cpp:281`): every rating still read a player victim's plain `POINT_DX`. This
+slice ports that arm everywhere a player victim is rated: the PvP damage
+(`player_damage`'s `PlayerVictim.dexterity`), the mob swings and shots
+(`PcVictim.poly_dexterity` through `mob_melee_damage` into `mob_calc_attack`), the mob
+skill's per-victim `atk` (`skill_melee_attack`) and its splash `ar` (`splash_hit_pc`),
+and the PC buff compute's `ar` (`compute_attack_rating`). `GameState::poly_victim_dx`
+reads it: `Some` exactly while morphed without keeping its stats and the row is known,
+reusing `poly_attack_of`'s gate and `Points::polymorph_point`. The PC damage funnels
+need no change: they take NPC victims only, whose dexterity never morphs.
+
+The scenario replays the free-hit pair with Dave at ST 100 (grade 441, the assassin's
+`(4*100 + 2*0)/3`): the plain punch lands 222, then Alpha morphs into the 503 at climb
+40 (power 100) and the same punch lands 151 — the defence recomputes to 232 and the
+rating reads the morphed DX 65, not the plain 19, which would land 158
+(`a_morph_into_the_bowman_dulls_the_free_hit_it_takes`). Its reencode drain found two
+wire facts worth naming: the morph's zero changes send nothing (amount 0 changes no
+total), and the victim hears the punch's ownership behind its damage. Three unit tests
+pin the arms: the 406's draw-0 attack on Alpha falls from 193 to 175 at victim DX 65,
+the 256 splash on a dog-morphed warrior lands 16 instead of 18, and `poly_victim_dx`
+reads none while clear, maintaining, or unknown. `sys.char.polymorph` stays `partial`.
+
+Four mutants die: the PvP arm dropped (the scenario lands 158), the mob-calc arm
+dropped (193 instead of 175), the maintain gate weakened to `&&` (the victim-row pin),
+and the skill-melee arm dropped (the splash lands 18). The splash-`ar` arm's own
+mutant survives: no hosted 256-family poly names `ar`, so nothing observes it — the
+arm is ported for the rows that do (46, 66, 76 and the rest name it) but unpinned
+until one is hosted.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5562 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

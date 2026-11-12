@@ -578,7 +578,9 @@ pub trait MeleeVictim {
 /// defence it stands, and the resists its points hold.
 #[derive(Debug, Clone, Copy)]
 pub struct PlayerVictim {
-    /// `GetPoint(POINT_DX)`.
+    /// `GetPolymorphPoint(POINT_DX)`: the morphed dexterity while the victim is
+    /// morphed without keeping its stats, else `GetPoint(POINT_DX)`. The caller,
+    /// which owns the mob table and the power, read it.
     pub dexterity: i32,
     /// `GetPoint(POINT_DEF_GRADE)`.
     pub def_grade: i32,

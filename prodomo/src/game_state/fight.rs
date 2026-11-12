@@ -967,10 +967,14 @@ impl GameState {
     /// with the wielded weapon's kind resist against the victim (`:775-800`).
     fn player_damage(&mut self, vid: Vid, victim: Vid) -> Option<i32> {
         // The victim's facts first: the attacker's borrow of the characters comes after.
+        // The rating reads the morphed dexterity (`G/battle.cpp:281`).
+        let victim_dexterity = self
+            .poly_victim_dx(victim)
+            .unwrap_or_else(|| self.victim_plain_dx(victim));
         let victim_facts = {
             let points = self.pc_points_mut(victim.raw())?;
             PlayerVictim {
-                dexterity: points.get_point(point::POINT_DX),
+                dexterity: victim_dexterity,
                 def_grade: points.get_point(point::POINT_DEF_GRADE),
                 def_bonus: points.get_point(point::POINT_DEF_BONUS),
                 resists: [

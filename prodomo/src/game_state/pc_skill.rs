@@ -2964,12 +2964,16 @@ impl GameState {
     }
 
     /// `compute_skill_on`'s attack rating: the caster's dexterity and level
-    /// against the victim's dexterity (0 with no victim).
+    /// against the victim's dexterity (0 with no victim), morphed while the victim
+    /// is morphed without keeping its stats (`G/battle.cpp:281`).
     fn compute_attack_rating(
         points_snapshot: &world::character::Points,
         victim_points: Option<&world::character::Points>,
+        victim_poly_dx: Option<i32>,
     ) -> f32 {
-        let victim_dex = victim_points.map_or(0, |points| points.get_point(point::POINT_DX));
+        let victim_dex = victim_points.map_or(0, |points| {
+            victim_poly_dx.unwrap_or_else(|| points.get_point(point::POINT_DX))
+        });
         attack_rating(AttackRatingInput {
             attacker_dexterity: points_snapshot.get_point(point::POINT_DX),
             attacker_level: i32::from(points_snapshot.level()),
@@ -3001,7 +3005,9 @@ impl GameState {
         let Some((points_snapshot, victim_points)) = self.compute_vars_points(vid, victim) else {
             return;
         };
-        let ar = Self::compute_attack_rating(&points_snapshot, victim_points.as_ref());
+        let victim_poly_dx = self.poly_victim_dx(victim);
+        let ar =
+            Self::compute_attack_rating(&points_snapshot, victim_points.as_ref(), victim_poly_dx);
         // `atk` is 0 on every hosted arm: no 230f row sets a `USE_*_DAMAGE` flag
         // (`:2538-2555` — melee/magic/arrow `SetPointVar` all skipped) and 109's
         // `mwep` reads 0 with no weapon vars set. `ek` is the Eunhyung level

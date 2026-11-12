@@ -86,6 +86,7 @@ impl GameState {
             return false;
         };
         let (dragon_stones, dragon_counts) = self.dragon_strike_facts(mob);
+        let poly_dexterity = self.poly_victim_dx(victim);
         let characters = &self.characters;
         let Ok(character) = characters.find_by_vid(victim) else {
             return false;
@@ -109,6 +110,7 @@ impl GameState {
         };
         let pc = PcVictim {
             points,
+            poly_dexterity,
             affect_flags: affects,
             down,
             immune_flag: points.immune_flag(),
