@@ -53956,3 +53956,17 @@ quest's block clears its begin in quest order (4, 6 through 16; quest 5 has no s
 Along the way `Server` grew `wait_for_count`, for the scenario's second leave, and the login
 reader grew its hide-and-seek half, for the relog while the event runs.
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5491 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 600. The drop events
+
+`sys.event.manager`'s moonlight, hexegonal and fishing arms (7-9, `SetMoonlightEvent`,
+`SetHexegonalEvent`, `SetFishingEvent`, `G/event_manager.cpp:1156-1202`) are live (the row stays
+`partial`): scenario `three_clicks_start_the_drop_events_and_three_end_them`. The flag and the
+quest edges were already generic; the arms add their six notices. The probe walks a phase
+counter through three starts and three ends: each start chats its notice and sends its begin
+letter (moon 12, hex 8, fish 6), with the already-running letters replaying behind each later
+start, as the edge runs every quest's begin; each end chats its notice and clears every event
+quest's begin except the quests whose flags still run (the moon's end spares 6 and 8, the
+hex's spares 6, the fish's spares none). The moon and hex drop readers already lived in
+`reward.rs`; the fish gameplay flag is the separate `enable_fish_event`, already ported.
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5492 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -52069,6 +52069,123 @@ const HIDE_SEEK_PROBE: &[u8] = b"quest hide_probe begin\n\
     end\n\
     end\n";
 
+/// Ledger 600's drop-event probe: the skill teacher (vnum 20300) walks a phase counter
+/// through the three flag-and-notice arms — moonlight (7), hexegonal (8), fishing (9) —
+/// starting each in turn, then ending each in turn, and says which.
+const DROP_EVENT_PROBE: &[u8] = b"quest drop_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    local phase = pc.getqf('phase')\n\
+    if phase == 0 then\n\
+    start_event(7)\n\
+    say('moon started')\n\
+    elseif phase == 1 then\n\
+    start_event(8)\n\
+    say('hex started')\n\
+    elseif phase == 2 then\n\
+    start_event(9)\n\
+    say('fish started')\n\
+    elseif phase == 3 then\n\
+    end_event(7)\n\
+    say('moon ended')\n\
+    elseif phase == 4 then\n\
+    end_event(8)\n\
+    say('hex ended')\n\
+    else\n\
+    end_event(9)\n\
+    say('fish ended')\n\
+    end\n\
+    pc.setqf('phase', phase + 1)\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `sys.event.manager`'s moonlight, hexegonal and fishing arms (`SetMoonlightEvent`,
+/// `SetHexegonalEvent`, `SetFishingEvent`, `G/event_manager.cpp:1156-1202`): the teacher's
+/// clicks start all three (each start notice, each begin letter — moon 12, hex 8, fish 6 —
+/// with the already-running letters replaying behind each later start, as the edge runs
+/// every quest's begin) and end all three (each end notice, then every event quest's
+/// `event_end` block clearing its own begin — each end sparing exactly the quests whose
+/// flags still run: the moon's end spares 6 and 8, the hex's spares 6, the fish's spares
+/// none).
+#[test]
+fn three_clicks_start_the_drop_events_and_three_end_them() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/drop_probe.lua",
+            DROP_EVENT_PROBE,
+        )],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    for (said, notice, letters) in [
+        (
+            b"moon started".as_slice(),
+            b"Moonlight Chest Event has started! Defeat enemies and grab your rewards!".as_slice(),
+            [(12u16, b"Moonlight Treasures ".as_slice())].as_slice(),
+        ),
+        (
+            b"hex started".as_slice(),
+            b"Hexegonal Box Event has started! Defeat enemies and grab your rewards!".as_slice(),
+            [
+                (8u16, b"Hexagonal Chest Event ".as_slice()),
+                (12u16, b"Moonlight Treasures ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+        (
+            b"fish started".as_slice(),
+            b"Fishing Event has started. Bring Fishbones to the Fisherman and receive your reward."
+                .as_slice(),
+            [
+                (6u16, b"Mystery Box Event ".as_slice()),
+                (8u16, b"Hexagonal Chest Event ".as_slice()),
+                (12u16, b"Moonlight Treasures ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        alice.send_record(&client_click(teacher));
+        read_drop_start(&mut alice, said, notice, letters);
+    }
+    for (said, notice, clears) in [
+        (
+            b"moon ended".as_slice(),
+            b"Moonlight Chest Event has ended!".as_slice(),
+            [4u16, 7, 9, 10, 11, 12, 13, 14, 15, 16].as_slice(),
+        ),
+        (
+            b"hex ended".as_slice(),
+            b"Hexegonal Box Event has ended!".as_slice(),
+            [4u16, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].as_slice(),
+        ),
+        (
+            b"fish ended".as_slice(),
+            b"Fishing Event has ended. Thank you for participating!".as_slice(),
+            [4u16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].as_slice(),
+        ),
+    ] {
+        alice.send_record(&client_click(teacher));
+        read_drop_end(&mut alice, said, notice, clears);
+    }
+    drop(alice);
+    drop(server);
+}
+
 /// `sys.event.manager`'s hide-and-seek arm (`SetHideAndSeekEvent`, `HideAndSeekNPC`,
 /// `G/event_manager.cpp:1204-1320`, and `CHARACTER::OnClick`'s arm, `G/char.cpp:6297-6329`):
 /// the teacher's click starts the event (the start notice, the round at 5, the box hidden
@@ -52222,6 +52339,44 @@ fn read_box_click(keyed: &mut Keyed, boxed: u32) -> i32 {
     }
     assert_eq!(moved[0], GC_CHAT, "the moved box hints: {moved:02x?}");
     hide_spot_of(&moved[10..]).0
+}
+
+/// One drop-event start's answers: the probe's dialog, the start notice, and the
+/// begin letters in quest order (the event's own, then the still-running replays).
+fn read_drop_start(keyed: &mut Keyed, said: &[u8], notice: &[u8], letters: &[(u16, &[u8])]) {
+    let mut dialog = said.to_vec();
+    dialog.extend_from_slice(b"[ENTER][DONE]");
+    assert_eq!(keyed.read_game(), server_script(1, &dialog), "the dialog");
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, notice),
+        "the start"
+    );
+    for (quest, title) in letters {
+        read_letter(keyed, *quest, title, "the begin letter");
+    }
+    keyed.quiet("the start ends");
+}
+
+/// One drop-event end's answers: the probe's dialog, the end notice, and the
+/// `event_end` clears in quest order.
+fn read_drop_end(keyed: &mut Keyed, said: &[u8], notice: &[u8], clears: &[u16]) {
+    let mut dialog = said.to_vec();
+    dialog.extend_from_slice(b"[ENTER][DONE]");
+    assert_eq!(keyed.read_game(), server_script(1, &dialog), "the dialog");
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, notice),
+        "the end"
+    );
+    for quest in clears {
+        assert_eq!(
+            keyed.read_game(),
+            quest_begin_clear(*quest),
+            "quest {quest}'s begin clears"
+        );
+    }
+    keyed.quiet("the end ends");
 }
 
 /// The Channels the hide-and-seek event runs on: Channel 1 hosts map 1 and the

@@ -522,7 +522,9 @@ impl GameState {
     /// and the switch falls through; so is an event whose state already holds, as
     /// legacy's early return does. Else the flag takes the state, and the exp and
     /// loot arms grant their empire privs (`SetExperienceEvent`, `SetItemDropEvent`,
-    /// `:928-982`); the siege and kingdom arms stand their wars (`SetSiegeWarEvent`,
+    /// `:928-982`); the moonlight, hexegonal and fishing arms chat their start
+    /// (`SetMoonlightEvent`, `SetHexegonalEvent`, `SetFishingEvent`, `:1156-1202`);
+    /// the siege and kingdom arms stand their wars (`SetSiegeWarEvent`,
     /// `SetKingdomWarEvent`, `:1531-1680`); every other arm waits for its system.
     pub(super) fn start_game_event(&mut self, index: i32, value0: i32, value1: i32) {
         let _ = value1;
@@ -559,14 +561,27 @@ impl GameState {
         } else if index == 2 {
             self.grant_event_priv(1, value0);
             self.broadcast_notice_text(b"Item-Drop Boost Event has started. Enjoy the grinding.");
+        } else if index == 7 {
+            self.broadcast_notice_text(
+                b"Moonlight Chest Event has started! Defeat enemies and grab your rewards!",
+            );
+        } else if index == 8 {
+            self.broadcast_notice_text(
+                b"Hexegonal Box Event has started! Defeat enemies and grab your rewards!",
+            );
+        } else if index == 9 {
+            self.broadcast_notice_text(
+                b"Fishing Event has started. Bring Fishbones to the Fisherman and receive your reward.",
+            );
         }
         self.fire_event_edge(true);
     }
 
     /// `_end_event` (`G/questlua_global.cpp:1668-1686`) after the step: an index no
     /// event has, or whose state already cleared, is quiet. Else the flag clears,
-    /// and the exp and loot arms chat their end; the siege and kingdom arms end
-    /// their wars (`SetSiegeWarEvent`, `SetKingdomWarEvent`, `:1566-1726`).
+    /// and the exp, loot, moonlight, hexegonal and fishing arms chat their end;
+    /// the siege and kingdom arms end their wars (`SetSiegeWarEvent`,
+    /// `SetKingdomWarEvent`, `:1566-1726`).
     pub(super) fn end_game_event(&mut self, index: i32) {
         let Some(flag) = event_flag_name(index) else {
             return;
@@ -599,6 +614,12 @@ impl GameState {
             self.broadcast_notice_text(b"Experience Boost Event has ended.");
         } else if index == 2 {
             self.broadcast_notice_text(b"Item-Drop Boost Event has ended.");
+        } else if index == 7 {
+            self.broadcast_notice_text(b"Moonlight Chest Event has ended!");
+        } else if index == 8 {
+            self.broadcast_notice_text(b"Hexegonal Box Event has ended!");
+        } else if index == 9 {
+            self.broadcast_notice_text(b"Fishing Event has ended. Thank you for participating!");
         }
         self.fire_event_edge(false);
     }
