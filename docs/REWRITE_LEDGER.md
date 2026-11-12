@@ -54192,3 +54192,20 @@ die (the select resume's `+1` shows the timetable's other arm for the own
 pick; a `judge_reconstructs` that judges nothing leaves the client hanging
 where the old NPC's delete should arrive).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5513 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the seed-helper extract for the scenario's 105 lines) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 610. The orc lord's book
+
+`quest.guild_create` is `ported`: scenario
+`a_partyless_kill_of_the_orc_lord_moves_guild_create_to_reward`. Nothing sets
+the quest to `run` — no quest line and no C++ line names it there — so the
+scenario seeds `__status` to `run`'s CRC32 (1349952704): the login reads the
+run letter (quest 35) and the entry runs the run page (pinned whole, with the
+70101 image). The stage shrinks the orc lord (691) to level 1 with 1 hit point
+and stands one at the entrant's feet; a partyless punch kills it, and the
+kill's `party_kill` half runs on the killer's own PC (legacy's partyless
+`GetPCForce`), moving the quest to `reward`: the reward letter and title ride
+live behind the exp and orb, and the reward button gives 70101 into the first
+free cell with the page after. No production code changed. Two mutants die on
+their intended asserts (a `kill` that skips the leader half loses the reward
+letter; `item_name` off by one breaks the run page's image title).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5514 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the two `mut` removals) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -53439,6 +53439,147 @@ fn a_master_rebuilds_its_melt_stone_and_keeps_its_own_attribute() {
     drop(server);
 }
 
+/// Stage [`a_partyless_kill_of_the_orc_lord_moves_guild_create_to_reward`]: the
+/// owner's mob proto with the orc lord (691) shrunk to level 1 with 1 hit point,
+/// and map 1's regen with one at the entrant's feet.
+fn guild_create_stage(database: &ScratchDatabase) -> Server {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata");
+    let owner = std::fs::read(root.join("proto/mob_proto.txt")).expect("mob proto");
+    let mut proto = Vec::new();
+    for line in owner.split_inclusive(|&byte| byte == b'\n') {
+        if line.starts_with(b"691\t") {
+            let mut cells: Vec<&[u8]> = line
+                .strip_suffix(b"\r\n")
+                .expect("CRLF")
+                .split(|&byte| byte == b'\t')
+                .collect();
+            assert_eq!(cells.len(), 72, "the 691 line keeps its columns");
+            cells[5] = b"1";
+            cells[14] = b"1";
+            cells[18] = b"1";
+            cells[19] = b"1";
+            cells[20] = b"1";
+            proto.extend_from_slice(&cells.join(&b'\t'));
+            proto.extend_from_slice(b"\r\n");
+        } else {
+            proto.extend_from_slice(line);
+        }
+    }
+    let mut regen =
+        std::fs::read(root.join("locale/europe/map/metin2_map_a1/regen.txt")).expect("a1 regen");
+    regen.extend_from_slice(b"m\t605\t540\t1\t1\t0\t0\t60s\t100\t1\t691\n");
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[
+            ("proto/mob_proto.txt", &proto),
+            ("locale/europe/map/metin2_map_a1/regen.txt", &regen),
+        ],
+        &hide_seek_channels(),
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    server
+}
+
+/// `quest.guild_create`'s `run` over the live script: seeded at `run` (nothing sets
+/// it — no quest or C++ line names it there), the login reads the run letter and its
+/// button runs the run page, and a partyless punch that kills the orc lord runs its
+/// `691.party_kill`, which moves the quest to `reward`: the reward letter and title
+/// ride live, and the reward button gives 70101 into the first free cell.
+#[test]
+fn a_partyless_kill_of_the_orc_lord_moves_guild_create_to_reward() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = guild_create_stage(&database);
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+          'guild_create.__status'::bytea, 1349952704 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _character, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    let lords = vids_of_race(&entered.shown, 691);
+    assert_eq!(lords.len(), 1, "map 1 shows the staged orc lord");
+    read_login_lines(&mut alice, 0, None);
+    let mut letters = Vec::new();
+    while let Some(record) = alice.read_game_until(std::time::Instant::now() + QUIET_WINDOW) {
+        letters.push(record);
+    }
+    let run = letters
+        .iter()
+        .find(|record| is_letter_of(record, b"Ia cartea"))
+        .expect("run's letter");
+    let quest: u32 = String::from_utf8_lossy(&run[6..])
+        .split("[QUESTBUTTON idx;")
+        .nth(1)
+        .and_then(|rest| rest.split('|').next())
+        .and_then(|idx| idx.parse().ok())
+        .expect("the button names its quest");
+    assert_eq!(quest, 35, "guild_create is quest 35");
+    alice.send_record(&client_script_button(quest | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, GUILD_CREATE_RUN_PAGE),
+        "the run page"
+    );
+    alice.send_record(&client_target(lords[0]));
+    assert_eq!(alice.read_game()[0], 0x3f, "the target answers");
+    alice.send_record(&client_attack(lords[0]));
+    for (want, note) in [
+        (0x87_u8, "the damage"),
+        (0x3f, "the hit points"),
+        (0x0d, "the stun"),
+        (0x3e, "the claim"),
+        (0x3f, "the clear"),
+        (0x3e, "the killer's clear"),
+        (0x11, "the exp"),
+        (0x46, "the orb"),
+    ] {
+        assert_eq!(alice.read_fight()[0], want, "{note}");
+    }
+    assert_eq!(
+        alice.read_fight(),
+        server_script(
+            0,
+            b"[QUESTBUTTON idx;35|name;Ai luat Cartea Intelepciunii][DONE]"
+        ),
+        "the reward letter"
+    );
+    assert_eq!(
+        alice.read_fight(),
+        server_quest_title(35, b"Ai luat Cartea Intelepciunii"),
+        "the reward title"
+    );
+    for (want, note) in [
+        (0x0e_u8, "the death"),
+        (0x3e, "the killer's clear"),
+        (0x02, "the corpse leaves"),
+    ] {
+        assert_eq!(alice.read_fight()[0], want, "{note}");
+    }
+    alice.send_record(&client_script_button(quest | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;444;Cartea Intelepciunii]"),
+        "the give names the item first"
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(set_fields(&alice.read_game()), (inventory, 0, 70_101, 1));
+    let page = alice.read_game();
+    assert!(
+        is_letter_of(&page, b"Ai primit cartea") && page.ends_with(b"[DONE]"),
+        "the page follows the give: {page:02x?}"
+    );
+    alice.quiet("the page is the press's last record");
+    drop(server);
+}
+
+const GUILD_CREATE_RUN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Ia cartea[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Ai nevoie de cartea predestinarii pentru a putea[ENTER]forma o breasla.[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][INSERT_IMAGE image_type;item|idx;70101|title;Cartea Intelepciunii|desc;|index;0|total;1][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Primesti cartea daca ucizi, cu ajutorul unei[ENTER]grupe, un orc superior[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][DONE]";
+
 const MELT_TIMETABLE_PAGE: &[u8] = b"Poti angaja inca un alchimist cu 3,000,000 Yang.[ENTER]Pentru a schimba, alege un atribut:[ENTER][QUESTION 1;Diamant|2;Lemn fosila|3;Cupru|4;Argint|5;Aur|6;Jade|7;Continua|8;Inchis]";
 
 const PANEL_MAIN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Please select one of the options:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Moonlight Box Drop|2;Hexegonal Box Drop|3;Fishing Event|4;Mining Event|5;Metin Event|6;Boss Event|7;Golden Frog Event|8;Hide and Seek Event|9;Tanaka Event|10;Experience Event|11;Loot Event|12;OX Event|13;Siege War Event|14;Kingdom War Event|15;Cancel]";
