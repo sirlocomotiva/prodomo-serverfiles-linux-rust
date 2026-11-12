@@ -54238,3 +54238,21 @@ Starbuck). No production code changed. Two mutants die on their intended
 asserts (`npc.get_guild` pinned to 0 breaks the first own page; `pc.get_guild`
 pinned to 7 breaks the first stranger page).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5515 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone, as in the 606-609 and 611 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 613. The first altar
+
+`quest.guild_building_alter_of_power`'s 20077 arm is done (the row stays
+`partial` for the 20078, 20079 and non-master arms): scenario
+`a_master_outgrows_its_first_altar_and_rebuilds_it`. The guild starts at level
+1 — below every bonus window, so the second boot's enter reads the fresh bonus
+rows instead of the stale saved ones (boot 1 at level 10 left 804/805 in the
+affects table, and their point-backs broke the enter's bonus pull): the first
+click sets `build_level` to 1 and says the low-power scold, which the logout
+saves. Grown to 11 between boots, the click offers the rebuild, the no is put
+off, and the yes — with 30M and the 10/10/15 materials — rebuilds: the 25M
+leaves, the three cells empty, the 20077 goes and the 20078 stands with its
+name, and the object row swaps from 14061 to 14062. No production code changed.
+Two mutants die on their intended asserts (`pc.getqf` pinned to 0 offers on the
+first click instead of scolding; `reconstruct` off by one stands 20079 instead
+of 20078).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5516 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone, as in the 606-609 and 611-612 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the three-way split of the 136-line scenario) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
