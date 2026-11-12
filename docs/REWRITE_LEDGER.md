@@ -54901,3 +54901,32 @@ zero-socket gate narrowed to `< 0`, the world's classify retargeted at `ITEM_QUE
 and the level-0 gate neutered. The scenario ran 8/8.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5570 passed, 1 failed in 46 targets — the known `a_morphed_caller_hears_every_stat_refusal` load flake, green alone; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 636. Counting SkillCanUp's seats
+
+`sys.skill.extra`'s note said "`SkillCanUp` stays out". It does not: the family
+exclusivity is enforced at every site that can observe it, and this slice corrects
+the note rather than porting anything.
+
+The accounting, from a sweep of `SetSkillLevel`'s callers and `SkillCanUp`'s gates:
+
+- Quest `pc.set_skill_level` (`quests.rs::set_skill_level`, with the free
+  `skill_can_up`), `/setskill`+`other` and `/all_skill_master`
+  (`skill_admin.rs::skill_can_up`) all enforce the switch: one ward (221-228) or one
+  boost (236-243) per character, 229-235 refused by the `default` arm, level 0 always
+  landing. The wolfman term of 239 is compiled out (`__WOLFMAN_CHARACTER__` is not in
+  `prodomodefines.h`).
+- `SkillLevelUp`'s :738 gate and `SetSkillLevel`'s :196 gate on the up/down paths are
+  dead in the port: `PcSkills::from_dumps` keeps skill types 0-4 plus the kept type-0
+  vnums, so no 221-243 row is ever hosted and no climb or drop reaches the family
+  check. (A :738 gate was written during this slice and reverted once the filter was
+  found; the tree carries no trace of it.)
+- The horse's `SetSkillLevel(131, ...)` call is outside 221-243, and the guild calls
+  are a different function.
+
+What stays out is exactly the 7/8 anti/help functor (cast) arms, which need hosted
+type-6 rows to mean anything.
+
+No code changed. The inventory test below is the check.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5569 passed, 2 failed in 46 targets — both pass alone (`a_morphed_caller_hears_every_stat_refusal` and `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off`), so the known load flakes, not this slice, which changed no code; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
