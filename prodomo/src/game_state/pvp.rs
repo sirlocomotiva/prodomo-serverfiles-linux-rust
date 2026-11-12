@@ -280,6 +280,7 @@ impl GameState {
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(attacker);
+        self.eunhyung_on_attack(attacker);
         self.cancel_mining(attacker);
         if let Some(body) = self.bodies.get_mut(&victim) {
             body.last_move = now;

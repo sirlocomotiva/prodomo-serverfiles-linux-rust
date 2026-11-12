@@ -682,13 +682,14 @@ impl GameState {
             }
         }
         // `BATTLE_DAMAGE` or `BATTLE_DEAD`: `OnMove(true)` (`G/char.cpp:6148-6179`). The victim's
-        // `OnMove` holds nothing for a non-player, and no Eunhyung is ported.
+        // `OnMove` holds nothing for a non-player.
         let now = self.clock.now();
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.last_move = now;
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(vid);
+        self.eunhyung_on_attack(vid);
         self.cancel_mining(vid);
         AttackAnswer {
             gold: stolen,

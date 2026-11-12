@@ -15869,6 +15869,203 @@ fn a_targeted_wind_mob_shows_its_element_in_the_target_record() {
 /// cleared, the dog has no owner, then (ledger 229n) the empty exp record (154 levels above the
 /// dog, the 1% delta row leaves nothing of 15) and the exp orb, and the dog is dead. A second
 /// later the dog goes: no owner, then its removal; and its regen waits 1000 seconds.
+/// Ledger 638: `/skillup 34`'s spend and byte 76, past ticks and flag reshowings.
+fn skillup_34(alpha: &mut Keyed, alpha_vid: u32) {
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/skillup 34"));
+    let mut saw_spend = false;
+    let mut saw_levels = false;
+    let end = std::time::Instant::now() + Duration::from_secs(8);
+    while !(saw_spend && saw_levels) {
+        let record = alpha
+            .read_game_until(end)
+            .expect("the spend and the levels land");
+        if record == point_change(alpha_vid, 28, 0, 0) {
+            assert!(!saw_spend, "one spend");
+            saw_spend = true;
+        } else if record[0] == GC_SKILL_LEVEL_NEW {
+            assert_eq!(record.len(), SKILL_LEVEL_LEN);
+            assert_eq!(record[1 + 34 * 6], 0, "34's master");
+            assert_eq!(record[1 + 34 * 6 + 1], 1, "34 learned");
+            saw_levels = true;
+        } else {
+            assert!(
+                record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
+                "a tick or a flag reshown: {record:02x?}"
+            );
+        }
+    }
+}
+
+/// Ledger 638: the self-cast of 34 — the SP charge, the flag update, the add.
+fn cast_cloak(alpha: &mut Keyed, alpha_vid: u32) {
+    let mut use_skill = vec![CG_USE_SKILL];
+    use_skill.extend_from_slice(&34_u32.to_le_bytes());
+    use_skill.extend_from_slice(&alpha_vid.to_le_bytes());
+    alpha.send_record(&use_skill);
+    let mut kept = Vec::new();
+    let end = std::time::Instant::now() + Duration::from_secs(8);
+    while kept.len() < 3 {
+        let record = alpha.read_game_until(end).expect("the cast lands");
+        if record[0] == GC_POINT_CHANGE {
+            if record.len() > 8 && record[8] == 7 {
+                kept.push(record);
+            }
+            continue;
+        }
+        kept.push(record);
+    }
+    assert_eq!(kept[0], point_change(alpha_vid, 7, 0, 567), "the charge");
+    assert_eq!(kept[1][0], GC_CHARACTER_UPDATE, "the flags reshown");
+    assert_eq!(
+        kept[2],
+        vec![
+            GC_AFFECT_ADD,
+            34,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            19,
+            0,
+            0,
+            0,
+            16,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        "the hide lands"
+    );
+}
+
+/// Ledger 638: `/mob 131`'s insert VID, past ticks, flag reshowings and the login
+/// revive's end.
+fn mob_at_feet(alpha: &mut Keyed) -> u32 {
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/mob 131"));
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let record = alpha.read_game_raw_until(end).expect("the spawn");
+        if record[0] == GC_CHARACTER_ADD {
+            let stood = u32::from_le_bytes(record[1..5].try_into().unwrap());
+            assert_ne!(stood, 0);
+            return stood;
+        }
+        if record != affect_remove_of(215) {
+            assert!(
+                record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
+                "a tick or a flag reshown: {record:02x?}"
+            );
+        }
+    }
+}
+
+/// Ledger 638: the swing's strip — the remove of 34 and the flag update.
+fn await_strip(alpha: &mut Keyed) {
+    let swing = client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    );
+    alpha.send_record(&swing);
+    let mut saw_strip = false;
+    let mut saw_reshown = false;
+    let end = std::time::Instant::now() + Duration::from_secs(2);
+    while !(saw_strip && saw_reshown) {
+        let record = alpha.read_game_until(end).expect("the strip lands");
+        if record == affect_remove_of(34) {
+            assert!(!saw_strip, "one strip");
+            saw_strip = true;
+        } else if record[0] == GC_CHARACTER_UPDATE {
+            saw_reshown = true;
+        } else {
+            assert_eq!(record[0], GC_POINT_CHANGE, "only ticks: {record:02x?}");
+        }
+    }
+}
+
+/// Ledger 638: the wait for a swing on the bare feet and `second`'s claim.
+fn await_found(alpha: &mut Keyed, second: u32) {
+    let mut saw_swing = false;
+    let mut saw_claim = false;
+    let end = std::time::Instant::now() + Duration::from_secs(12);
+    while !(saw_swing && saw_claim) {
+        let record = alpha.read_game_until(end).expect("the bare feet are found");
+        if record[0] == GC_DAMAGE_INFO {
+            saw_swing = true;
+        } else if record[0] == GC_OWNERSHIP {
+            let holder = u32::from_le_bytes(record[1..5].try_into().unwrap());
+            if holder == second {
+                saw_claim = true;
+            }
+        } else {
+            assert!(
+                record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
+                "only ticks and flag reshowings: {record:02x?}"
+            );
+        }
+    }
+}
+
+/// Ledger 638: the `EUNHYUNG` hide (`G/char.cpp:6159-6167`, `G/char_state.cpp:201`,
+/// `G/trigger.cpp:103`). Alpha is seeded an assassin holding one skill point; `/skillup 34`
+/// learns the hide and the cast lands it (the SP charge, the flag update, the add). When
+/// `/mob` stands an aggressive 131 at the cloaked feet, ten silent seconds follow: the
+/// login revive expires early in the wait, so its tail is the cloak's alone — no damage,
+/// no claim. A swing then strips the hide within two seconds (the move path's `OnMove(true)`
+/// arm; the cloak's own 16 seconds cannot explain it), and a second 131 finds and swings
+/// at the bare feet, claiming them too.
+#[test]
+fn a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET job = 1, skill_group = 1, skill_point = 1, hp = 1370, sp = 600 \
+         WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alpha, listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let alpha_vid = listed.id;
+    skillup_34(&mut alpha, alpha_vid);
+    cast_cloak(&mut alpha, alpha_vid);
+    // Ten silent seconds: the login revive expires early in the wait (it is
+    // `read_game_until`-swallowed), so the wait's tail is the cloak's alone.
+    let first = mob_at_feet(&mut alpha);
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while let Some(record) = alpha.read_game_until(end) {
+        assert_ne!(record[0], GC_DAMAGE_INFO, "nothing swings at the cloak");
+        assert_ne!(record[0], GC_OWNERSHIP, "nothing claims the cloak");
+        assert!(
+            record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
+            "only ticks and flag reshowings: {record:02x?}"
+        );
+    }
+    await_strip(&mut alpha);
+    let second = mob_at_feet(&mut alpha);
+    assert_ne!(second, first);
+    await_found(&mut alpha, second);
+}
+
 #[test]
 fn a_punch_on_a_targeted_dog_stuns_it_and_it_dies_three_seconds_later_and_leaves() {
     let Some(database) = ScratchDatabase::create() else {

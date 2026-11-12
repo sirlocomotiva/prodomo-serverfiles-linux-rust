@@ -2567,10 +2567,18 @@ impl GameState {
         self.cancel_mining(vid);
     }
 
+    /// `GetAffectedEunhyung()/100.0` (`G/char_skill.cpp:1454`): the functor's `ek`.
+    fn ek_of(&self, vid: Vid) -> f64 {
+        f64::from(
+            self.pc_skills
+                .get(&vid.raw())
+                .map_or(0, |state| state.affected_eunhyung),
+        ) / 100.0
+    }
+
     /// `OnMove(true)`'s Eunhyung arm (`G/char.cpp:6159-6167`): with flag 19 held, 34 goes
-    /// and the affected level stamps, else the level clears. (The hide itself waits:
-    /// monsters still see the cloaked.)
-    fn eunhyung_on_attack(&mut self, vid: Vid) {
+    /// and the affected level stamps, else the level clears.
+    pub(super) fn eunhyung_on_attack(&mut self, vid: Vid) {
         // Flag 19 is bit 18 of word 0.
         if self.affect_flags_of(vid)[0] & (1 << 18) != 0 {
             let _cloaked = self.remove_pc_affect(vid, SKILL_EUNHYUNG);
@@ -2742,6 +2750,23 @@ impl GameState {
 
     /// `ComputeSkill`'s damage arm (`G/char_skill.cpp:2443-2732`) on the 230d rows: the
     /// riding and polymorph gates, the row, the horse-type arms, the SELFONLY victim
+    /// The functor's per-victim draws (`G/char_skill.cpp:1412-1446`): `PENETRATE`'s and
+    /// `IGNORE_TARGET_RATING`'s `kPointPoly2` rolls. Answers whether each applies.
+    fn skill_ignore_draws(
+        &mut self,
+        flag: u32,
+        point2: &common::skill_poly::Poly,
+        k: f64,
+    ) -> (bool, bool) {
+        let vars = BTreeMap::from([("k", k)]);
+        let threshold = f64_to_i32(point2.eval(&vars));
+        (
+            flag & SKILL_FLAG_PENETRATE != 0 && number(&mut self.dice, 1, 100) <= threshold,
+            flag & SKILL_FLAG_IGNORE_TARGET_RATING != 0
+                && number(&mut self.dice, 1, 100) <= threshold,
+        )
+    }
+
     /// (no 230d row sets it), the target-range arm (`DISTANCE_SQRT >= range + 50`
     /// refuses), the level, and the functor on the one victim — no SPLASH walk
     /// (no 230d row sets SPLASH). Then `Damage(pc, iDam, MELEE)`: the MELEE pipe, the
@@ -2770,17 +2795,10 @@ impl GameState {
         };
         let (job, group) = (body.card.job, body.card.skill_group);
         let k = self.pc_skill_k(job, group, row.record.vnum, level);
-        // The functor's per-victim draws (`G/char_skill.cpp:1412-1446`): PENETRATE's and
-        // IGNORE_TARGET_RATING's `kPointPoly2` rolls, then `atk` and `ar`. No 230d row
-        // sets IGNORE_TARGET_RATING; only vnum 61 sets PENETRATE, and its point2 poly
-        // (`1+k*9`) reads a plain level-1 `k`, so it can draw.
-        let point2_vars = BTreeMap::from([("k", k)]);
-        let point2 = f64_to_i32(row.point2.eval(&point2_vars));
+        // No 230d row sets IGNORE_TARGET_RATING; only vnum 61 sets PENETRATE, and
+        // its point2 poly (`1+k*9`) reads a plain level-1 `k`, so it can draw.
         let flag = row.record.flag;
-        let ignore_defence =
-            flag & SKILL_FLAG_PENETRATE != 0 && number(&mut self.dice, 1, 100) <= point2;
-        let ignore_rating =
-            flag & SKILL_FLAG_IGNORE_TARGET_RATING != 0 && number(&mut self.dice, 1, 100) <= point2;
+        let (ignore_defence, ignore_rating) = self.skill_ignore_draws(flag, &row.point2, k);
         let points_snapshot = self
             .characters
             .find_by_vid(vid)
@@ -2807,7 +2825,8 @@ impl GameState {
             &victim_snapshot,
             poly,
         );
-        let vars = skill_vars(&points_snapshot, &victim_snapshot, k, atk, ar);
+        let mut vars = skill_vars(&points_snapshot, &victim_snapshot, k, atk, ar);
+        vars.insert("ek", self.ek_of(vid));
         let mut amount = -f64_to_i32(row.point.eval(&vars));
         // No hosted cast rises past NORMAL (`SetSkillLevel` maps level < 20 there), so
         // the grandmaster `kMasterBonusPoly` arm never fires.
@@ -3113,9 +3132,9 @@ impl GameState {
             Self::compute_attack_rating(&points_snapshot, victim_points.as_ref(), victim_poly_dx);
         // `atk` is 0 on every hosted arm: no 230f row sets a `USE_*_DAMAGE` flag
         // (`:2538-2555` — melee/magic/arrow `SetPointVar` all skipped) and 109's
-        // `mwep` reads 0 with no weapon vars set. `ek` is the Eunhyung level
-        // over 100: the 230f set can hold 34, but no attack since a cast sets
-        // the level (EUNHYUNG hide waits), so 0.
+        // `mwep` reads 0 with no weapon vars set. `ek` is 0: a buff cast's
+        // variables carry no `ek` in legacy (`:2538-2581` sets none; only the
+        // functor's `:1454` does).
         let atk = 0;
         let ek = 0.0;
         let mut vars = buff_vars(&points_snapshot, k, atk, ar, ek);
@@ -3321,14 +3340,7 @@ impl GameState {
         if !once {
             return;
         }
-        // The per-victim draws (`:1412-1446`): PENETRATE's and IGNORE_TARGET_RATING's
-        // `kPointPoly2` rolls, then `atk` and `ar`.
-        let point2_vars = BTreeMap::from([("k", k)]);
-        let point2 = f64_to_i32(row.point2.eval(&point2_vars));
-        let ignore_defence =
-            flag & SKILL_FLAG_PENETRATE != 0 && number(&mut self.dice, 1, 100) <= point2;
-        let ignore_rating =
-            flag & SKILL_FLAG_IGNORE_TARGET_RATING != 0 && number(&mut self.dice, 1, 100) <= point2;
+        let (ignore_defence, ignore_rating) = self.skill_ignore_draws(flag, &row.point2, k);
         let points_snapshot = self
             .characters
             .find_by_vid(vid)
@@ -3379,6 +3391,7 @@ impl GameState {
             )
         };
         let mut vars = skill_vars(&points_snapshot, &victim_snapshot, k, atk, ar);
+        vars.insert("ek", self.ek_of(vid));
         // `SetPolyVarForAttack` (`:1324-1354`): hosted polys name `mwep` only
         // (81/91/92/93); `wep`/`mtk` unset-read-0.
         let mwep = weapon.as_ref().map_or(0, |weapon| {
@@ -4175,6 +4188,7 @@ impl GameState {
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(vid);
+        self.eunhyung_on_attack(vid);
         self.cancel_mining(vid);
     }
 
@@ -4380,8 +4394,8 @@ pub(crate) fn master_of(level: u8) -> u8 {
 /// The functor's variables for a no-SPLASH cast (`G/char_skill.cpp:1402-1446`,
 /// `SetPolyVarForAttack`): `k`, the stat vars, `ar`, `atk`, the victim's maxima,
 /// and `chain` 0 (no splash walk raises it). `def`/`odef` are the caster's; no
-/// horse is ported, so `horse_level` is 0; `ek` is 0 (no Eunhyung affect is
-/// ported). The weapon vars (`wep`/`mtk`/`mwep`) wait: no 230d point poly names
+/// horse is ported, so `horse_level` is 0; `ek` is the caller's Eunhyung level
+/// over 100 (`:1454`). The weapon vars (`wep`/`mtk`/`mwep`) wait: no 230d point poly names
 /// them, and an unset name reads 0 either way (see the `Poly` docs).
 /// The functor's own `ar` attacker dexterity: the morphed row's scaled dexterity
 /// plus the caster's own while a non-maintain morph is on, else the plain point
@@ -4422,7 +4436,6 @@ fn skill_vars(
         // `GetMaxSP` of a monster is 0 (`ComputePoints`' else arm, `G/char.cpp:3016-3018`).
         ("maxsp", 0.0),
         ("chain", 0.0),
-        ("ek", 0.0),
     ])
 }
 /// `ComputeSkill`'s point variables for a SELFONLY buff cast

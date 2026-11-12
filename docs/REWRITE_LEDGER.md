@@ -54958,3 +54958,40 @@ The new scenario proves the one arm no wire test touched: a targeted 401
 killed semantically, restores checksum-verified; the scenario ran 8/8.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5572 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 638. Uncloaking on attack
+
+`sys.skill.affect` is `ported`. Its note's "the `EUNHYUNG` hide waits" was half
+stale: every hide site but one family was already in.
+
+The accounting, from a sweep of `EUNHYUNG` in `game/`:
+
+- `FindVictim`'s EUNHYUNG/INVISIBILITY/TERROR skips (both spellings — the
+  `char_state.cpp` method and `trigger.cpp`'s functor are the same ladder),
+  the guild cast's strip, `RemoveGoodAffect`'s kind 34, `IsGoodAffect` keeping
+  34, and `OnMove(true)`'s Eunhyung arm itself are all ported.
+- What was missing was four of `OnMove(true)`'s call sites: legacy strips the
+  cloak on the attack move (`input_main.cpp:1840`), on every damage dealt
+  (`char_battle.cpp`, 23 sites), and on the non-`NORMAL` skill computes. The
+  port stripped only the revive (and cancelled mining) at the swing move, the
+  melee damage, the shoot pipe's pair and the PvP damage — the fight code even
+  said "no Eunhyung is ported". All four now call `eunhyung_on_attack` in
+  legacy order (revive, Eunhyung, mining). The cast path is deliberately
+  untouched: only the `ComputeSkill` arms strip, and the MAGIC one already
+  does; a buff cast while cloaked keeps the cloak. The functor's `ek` variable
+now reads the stamped level over 100 (`:1454`) instead of 0 — unobservable on
+the owner's data (no hosted poly names `ek`), so no test pins it; the buff
+variables keep 0, as legacy's buff arm sets none.
+
+The new scenario proves both halves over the wire: a learned-and-cast 34
+cloaks Alpha (the charge, the flag update, the add), a `/mob`bed aggressive
+131 finds nothing for ten seconds (the revive expires early in the wait, so
+the tail is the cloak's alone), a swing strips the hide within two seconds
+(the cloak's own 16 seconds cannot explain it), and a second 131 finds,
+swings and claims. Mutants (the swing's strip reverted, the find skip
+narrowed to `INVISIBILITY`) both killed semantically, restores
+checksum-verified; the scenario ran 8/8. (The first flake loop ran 0/7 on the
+stale M2-mutant binary — restored source, no rebuild; the re-run after a
+clean build is the 8/8 above.)
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5573 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained (15 scratch databases from the mid-flight suite run killed for the clippy refactor were dropped by hand). No ADR changed.

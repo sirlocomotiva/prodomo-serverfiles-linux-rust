@@ -746,6 +746,7 @@ impl GameState {
                 }
                 if matches!(record.function, FUNC_ATTACK | FUNC_COMBO) {
                     self.remove_revive_invisible(vid);
+                    self.eunhyung_on_attack(vid);
                 }
                 // `OnMove`'s `mining_cancel` (`G/char.cpp:6176-6178`), for the attack
                 // functions' `OnMove(true)` and a skill motion's `OnMove()`.
