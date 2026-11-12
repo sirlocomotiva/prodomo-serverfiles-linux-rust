@@ -44856,6 +44856,12 @@ fn client_aura_accept(window: u8) -> Vec<u8> {
     vec![CG_AURA, 0, 0, 2, window]
 }
 
+/// One `CG_AURA` cancel: the dead window byte rides unread, as the close names no
+/// window.
+fn client_aura_cancel() -> Vec<u8> {
+    vec![CG_AURA, 0, 0, 3, 0]
+}
+
 /// One `GC_AURA` check-in, parsed off the client's socket: the subheader, the
 /// material's cell, the aura slot, the vnum, the drain socket, and the first
 /// attribute.
@@ -54213,6 +54219,144 @@ fn gaya_market_reads(alice: &mut Keyed) {
         "the market opens"
     );
 }
+
+/// [`a_visitor_past_the_sash_mark_hears_the_aura_keepers_four_words`]'s ground:
+/// Alpha beside the 60003 keeper on map 1.
+fn seed_aura_visitor(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "UPDATE player SET x = 482800, y = 943900 WHERE name = 'Alpha'",
+    );
+}
+
+/// `quest.acce_system`'s four arms over the live script: 60003 is Theowahdan too,
+/// so the sash letter marks him and the first click runs the sash target script
+/// (the mark's delete, the first page); its answer runs the rest (the second page,
+/// the captain's mark, the new letter and title). The second click menus the four
+/// aura chats with the five sash ones. The about chat says the bla pages around a
+/// wait; absorb, refine and evolve ask, the no closes, and the yes closes the
+/// dialog and opens its window (0, 1, 2), each closed before the next opens.
+#[test]
+fn a_visitor_past_the_sash_mark_hears_the_aura_keepers_four_words() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_aura_visitor(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    let keeper = shown_vid(&entered, 60_003, "map 1 shows its aura keeper");
+    alice.send_record(&client_click(keeper));
+    assert_eq!(
+        alice.read_game()[0],
+        GC_QUEST_TARGET_DELETE,
+        "the mark goes first"
+    );
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the sash page");
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the sash rest");
+    assert_eq!(
+        alice.read_game()[0],
+        GC_QUEST_TARGET_CREATE,
+        "the captain's mark"
+    );
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the new letter");
+    assert_eq!(alice.read_game()[0], GC_QUEST_INFO, "the new title");
+    aura_menu(&mut alice, keeper);
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, AURA_ABOUT_FIRST),
+        "the about first"
+    );
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, AURA_ABOUT_LAST),
+        "the about last"
+    );
+    aura_absorb(&mut alice, keeper);
+    aura_refuse(&mut alice, keeper, 2, "the refine no closes");
+    aura_window(&mut alice, keeper, 2, 1, "the refine opens");
+    aura_window(&mut alice, keeper, 3, 2, "the evolve opens");
+    drop(server);
+}
+
+/// [`a_visitor_past_the_sash_mark_hears_the_aura_keepers_four_words`]'s menu: the
+/// click menus the four aura chats with the five sash ones.
+fn aura_menu(alice: &mut Keyed, keeper: u32) {
+    alice.send_record(&client_click(keeper));
+    assert_eq!(alice.read_game(), server_script(1, AURA_MENU), "the menu");
+}
+
+/// Its absorb: the ask, and the yes closes the dialog and opens window 0, which the
+/// client closes again.
+fn aura_absorb(alice: &mut Keyed, keeper: u32) {
+    aura_menu(alice, keeper);
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, AURA_ABSORB_ASK),
+        "the absorb asks"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the yes closes"
+    );
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_AURA, 5, 0, 0, 0],
+        "window 0 opens"
+    );
+    alice.send_record(&client_aura_cancel());
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_AURA, 5, 0, 1, 3],
+        "window 0 closes"
+    );
+}
+
+/// Its refusal: the ask at `entry`, and the no closes with nothing after.
+fn aura_refuse(alice: &mut Keyed, keeper: u32, entry: u8, note: &str) {
+    aura_menu(alice, keeper);
+    alice.send_record(&client_script_answer(entry));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the ask");
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "{note}");
+    alice.quiet("nothing follows the no");
+}
+
+/// Its window: the ask at `entry`, and the yes closes the dialog and opens `window`,
+/// which the client closes again.
+fn aura_window(alice: &mut Keyed, keeper: u32, entry: u8, window: u8, note: &str) {
+    aura_menu(alice, keeper);
+    alice.send_record(&client_script_answer(entry));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the ask");
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the yes closes"
+    );
+    assert_eq!(alice.read_game(), vec![GC_AURA, 5, 0, 0, window], "{note}");
+    alice.send_record(&client_aura_cancel());
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_AURA, 5, 0, 1, 3],
+        "the window closes"
+    );
+}
+
+const AURA_MENU: &[u8] = b"[QUESTION 1;About the auras...|2;Aura: Bonus absorption|3;Aura: Refine|4;Aura: Evolve|5;Transmutation|6;What is a Sash?|7;Combination|8;Absorption of bonuses|9;Inchide]";
+const AURA_ABOUT_FIRST: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]teowahdan:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]bla[ENTER]blabla[ENTER]blablabla[ENTER]blabla[ENTER]bla[ENTER][NEXT]";
+const AURA_ABOUT_LAST: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]teowahdan:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]bla[ENTER]blabla[ENTER]blablabla[ENTER]blabla[ENTER]bla[ENTER][DONE]";
+const AURA_ABSORB_ASK: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]teowahdan:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Would you like to absorb bonuses?[ENTER][QUESTION 1;Da|2;Nu]";
 
 const GAYA_MENU: &[u8] =
     b"[QUESTION 1;Pietre Str\xe3lucitoare|2;Ce bonusuri \xeemi aduce Gaya? |3;Inchide]";

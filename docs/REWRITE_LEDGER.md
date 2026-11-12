@@ -54287,3 +54287,19 @@ clear, nine items, the locked slots, the stamp and the open). No production
 code changed. Two mutants die by silence on their intended reads (`count_item`
 pinned to 0 never runs the take; `open_gaya_market` dropped sends no clear).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5517 passed, 2 failed in 46 targets (both known flakes, both pass alone: `a_gm_flags_a_stray_dog_aggressive_and_coward`'s coward-escape wait and `a_morphed_caller_hears_every_stat_refusal`, as in the 606-609 and 611-614 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 616. The aura keeper's words
+
+`quest.aura_system` is `ported`: scenario
+`a_visitor_past_the_sash_mark_hears_the_aura_keepers_four_words`. Race 60003 is
+Theowahdan too (`sash_mission.lua:15` marks him by vnum), so the sash letter's
+mark runs first: the first click is the mark's delete and the sash page, its
+answer the rest with the captain's mark and the new letter and title. The
+second click menus the four aura chats with the five sash ones (pinned whole).
+The about says the bla pages around a wait (pinned); absorb, refine and evolve
+ask their `[QUESTION 1;Da|2;Nu]`, the no closes with nothing after, and the yes
+closes the dialog and opens window 0, 1 and 2, each closed (`CG_AURA` sub 3,
+without which the next yes hears `[LS;1014]`) before the next opens. No
+production code changed. Two mutants die on their intended reads (the dropped
+absorb open sends no window; answers pinned to 0 open on the no).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5519 passed, 1 failed in 46 targets (`an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off` flaked — its throttle window missed under load — and passes alone, as in the earlier receipt); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the `client_aura_cancel` helper replaced two `&vec!`) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
