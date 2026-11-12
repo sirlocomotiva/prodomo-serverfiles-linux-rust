@@ -54160,3 +54160,19 @@ arm for the moonlight answer instead of the Inactive page; the moonlight flag
 remapped to `hexegonal_drop` loses the moon's begin letter after the start
 notice).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5510 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 608. The observer's quiet wars
+
+`quest.guild_war_bet` and `quest.guild_war_observer` are `ported`: scenario
+`an_observer_with_no_wars_says_so_to_the_bettor_and_the_watcher`. With no
+guilds at all, the first empire's observer (11001) offers the bet entry and
+the watch list; the bet entry explains (pinned whole) and, past the wait,
+scolds that no guild war runs, and the watch entry says no guild fights. Both
+quests' with-wars arms were already scenariod live (the bet's `string.format`
+error where legacy errors, the watch list's warp to the watchers' start), so
+no production code changed. Mutants: the plain-select resume's `+1` survives,
+as it should — a chat menu answers through `running.chat`, not that arm —
+while the chat dispatch's `+1` dies on the explainer (the watch entry runs
+instead), and a non-empty warp war list dies on the none line (the choose arm
+runs instead).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5512 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

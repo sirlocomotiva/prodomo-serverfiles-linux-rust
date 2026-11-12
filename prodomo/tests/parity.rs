@@ -53249,6 +53249,75 @@ fn a_god_opens_the_event_panel_and_rings_the_moonlight() {
     drop(server);
 }
 
+/// `quest.guild_war_bet` and `quest.guild_war_observer` over the wire with no wars
+/// running: the first empire's observer (11001) offers the bet entry and the watch list,
+/// the bet entry explains and, past the wait, scolds that no guild war runs, and the watch
+/// entry says no guild fights. The bet's with-wars arm already errors where legacy errors
+/// (`a_bet_quest_lists_the_reserved_war_and_errors_where_legacy_errors`), and the watch
+/// list's with-wars arm already warps (`an_observer_warps_to_the_wars_watchers_start`).
+#[test]
+fn an_observer_with_no_wars_says_so_to_the_bettor_and_the_watcher() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 475300, y = 957000 WHERE name = 'Alpha'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let observer = shown_vid(&entered, 11_001, "map 1 shows one observer");
+    alice.send_record(&client_click(observer));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Pariul pentru razboiul breslelor|2;Lista razboaielor dintre bresle|3;Inchide]"
+        ),
+        "the observer's menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    let explainer = [
+        bet_title(b"Pariul breslelor").as_slice(),
+        b"Cumpara bilete de pariuri pentru regatul tau.[ENTER][ENTER]1. La fiercare razboi al Gildelor exista o[ENTER]stacheta, anuntata in prealabil, pentru Gilde[ENTER]care va castiga.[ENTER]2. Poti cumpara un bilet pentru pariuri pe care[ENTER]ghicesti daca Gide, despre care tu crezi ca va[ENTER]castiga, va reusi sa depaseasca aceasta stacheta.[ENTER]3. Alegerea va fi determinata de proportia[ENTER]pariurilor, iar dupa razboi vei fi anuntat daca[ENTER]pierzi sau castigi.[ENTER][ENTER]* 10% din castigul pariurilor va fi platit[ENTER]regatului.".as_slice(),
+        b"[ENTER][NEXT]".as_slice(),
+    ]
+    .concat();
+    assert_eq!(alice.read_game(), server_script(1, &explainer));
+    alice.send_record(&client_script_answer(254));
+    let scold = [
+        bet_title(b"Administratorul luptelor:").as_slice(),
+        b"Deocamdata nu are loc niciun razboi de bresle pe[ENTER]care sa poti paria.[ENTER][DONE]"
+            .as_slice(),
+    ]
+    .concat();
+    assert_eq!(alice.read_game(), server_script(1, &scold));
+    alice.quiet("the scold ends the bet");
+    alice.send_record(&client_click(observer));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"[QUESTION 1;Pariul pentru razboiul breslelor|2;Lista razboaielor dintre bresle|3;Inchide]"
+        ),
+        "the observer's menu again"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Deocamdata nu participa nicio breasla la vreo[ENTER]lupta.[ENTER][DONE]"
+        ),
+        "the watch list is empty"
+    );
+    alice.quiet("the none ends the watch");
+    drop(server);
+}
+
 const PANEL_MAIN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Please select one of the options:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Moonlight Box Drop|2;Hexegonal Box Drop|3;Fishing Event|4;Mining Event|5;Metin Event|6;Boss Event|7;Golden Frog Event|8;Hide and Seek Event|9;Tanaka Event|10;Experience Event|11;Loot Event|12;OX Event|13;Siege War Event|14;Kingdom War Event|15;Cancel]";
 const PANEL_MOON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Moonlight Box Drop[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]State: Inactive[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Enable Event|2;Disable Event|3;Exit]";
 const PANEL_MOON_ACTIVE_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Moonlight Box Drop[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]State: Active[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Enable Event|2;Disable Event|3;Exit]";
