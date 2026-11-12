@@ -54551,3 +54551,27 @@ Two mutants (the wiring dropped, default rules instead of the loaded ones) die i
 the scenario.
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5529 passed, 0 failed in 46 targets), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 625. The mask-vnum stamp
+
+The mask table was ported and the creation call looked the mask up — then wrote
+it into the wrong field. Legacy's `CreateItem` builds the item with the new vnum
+and stores the ori vnum in the separate `m_dwMaskVnum` (`G/item_manager.cpp:199`),
+which nothing ever reads: no caller of the item's `GetMaskVnum` exists in the
+game server, no packet carries it (the positive control is `GetSIGVnum`, read at
+`G/char_item.cpp:2880,2886,8594`). The Rewrite overwrote `item.vnum` with the
+ori, so a created 76002 left the server as 30319 — a different item, stackable
+where the real one is not. It was reachable: the daily gift's week 4 day 1 is a
+fixed 76002, and the Tanaka quest's random table holds it too.
+
+`world::item::Item` gains the write-only `mask_vnum` field, the creation call
+stamps it and keeps the vnum, and `a_masked_gift_lands_as_its_new_vnum` collects
+week 4 day 1 free and reads `(1, 0, 76002, 1)` on the wire; before the fix the
+same collect read 30319. The old unit test `mask_answers_the_shown_vnum` pinned
+the bug, so it is `mask_rides_beside_the_new_vnum` now. `sys.item.proto` stays
+`partial`: the bag is never drawn.
+
+Two mutants (the overwrite restored, the field zeroed) die in the scenario and
+the unit test respectively.
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5529 passed, 1 failed in 46 targets — `a_morphed_caller_hears_every_stat_refusal`, a burst-reader timing flake in `sees_enter` at `parity.rs:4055`, green alone), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

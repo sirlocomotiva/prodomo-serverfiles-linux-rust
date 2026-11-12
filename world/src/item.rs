@@ -239,6 +239,13 @@ pub struct Item {
     /// It is memory-only: the row stores no column for it, and every construction
     /// (`CreateItem`) recomputes it from the groups (`G/item_manager.cpp:412-441`).
     pub sig_vnum: u32,
+    /// `m_dwMaskVnum` (`item.h:415`, stamped at `G/item_manager.cpp:199`): the ori
+    /// vnum for a new-vnum, else 0. Memory-only and write-only: no reader in the
+    /// legacy game server calls the item's `GetMaskVnum` (the only `GetMaskVnum()`
+    /// hits are the manager's table lookup), no packet carries it, and the positive
+    /// control `GetSIGVnum` does have readers (`G/char_item.cpp:2880,2886,8594`).
+    /// The vnum stays the new one; only this field holds the ori.
+    pub mask_vnum: u32,
     /// Where the item currently is. [`NPOS`] until it is stored.
     ///
     /// Legacy keeps the window and cell in `CItem::m_window_type` and
@@ -275,6 +282,8 @@ impl Item {
             size: 1,
             // `CItem(dwVnum)` zeroes it (`G/item.cpp:41`).
             sig_vnum: 0,
+            // `m_dwMaskVnum(0)` (`G/item.cpp:41`); the creation call stamps it.
+            mask_vnum: 0,
             pos: NPOS,
             locked: false,
         }

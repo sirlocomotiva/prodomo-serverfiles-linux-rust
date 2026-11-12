@@ -44747,6 +44747,44 @@ fn a_shop_sign_and_a_shop_title_with_a_banned_word_are_refused() {
     );
 }
 
+/// `sys.item.proto`: the daily gift's week 4 opens on the fixed 76002 (a new-vnum
+/// whose ori is 30319), and day 1's free collect lands it as 76002 — the mask rides
+/// `mask_vnum`, never the vnum (`G/item_manager.cpp:199`).
+#[test]
+fn a_masked_gift_lands_as_its_new_vnum() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    stage_daily_gifts(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    run_daily_event(&mut alice, b"1 4 1", 1);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Daily gifts are now available."),
+        "the start is noticed"
+    );
+    alice.send_record(&client_daily_gift(1, 0));
+    read_test_days(&mut alice);
+    let week = read_gift_week(&mut alice);
+    assert_eq!(
+        week.vnums[0], 76002,
+        "day 1 offers the masked vnum: {:?}",
+        week.vnums
+    );
+    assert_eq!(week.statuses[0], 1, "day 1 waits");
+    alice.send_record(&client_daily_gift(2, 0));
+    guard_test_day(&mut alice, 1);
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 0, 76002, 1),
+        "the gift lands as its new vnum, not its ori"
+    );
+}
+
 /// The start step's burst after its script: the start's broadcast (the mast's
 /// target HP), the wave's pair, the heal's own notice, the stun's flag update and
 /// affect add, and the heal's broadcast again.

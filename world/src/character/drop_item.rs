@@ -796,9 +796,9 @@ pub fn make_drop_item(
     }
     let id: ItemId = ids.allocate().map_err(|_| DropRefused::IdsExhausted)?;
     let mut item = Item::new(id, vnum);
-    if mask != 0 {
-        item.vnum = mask;
-    }
+    // `SetMaskVnum(dwMaskVnum)` (`G/item_manager.cpp:199`): the ori vnum rides the
+    // mask field and the item keeps its new vnum. The field is never read.
+    item.mask_vnum = mask;
     item.sig_vnum = sig_vnum_of(made.groups, proto, vnum);
     let count = if proto.flags & ITEM_FLAG_STACKABLE == 0 {
         1
@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn mask_answers_the_shown_vnum() {
+    fn mask_rides_beside_the_new_vnum() {
         let protos = table(vec![stackable(39001)]);
         let mut dice = Script::new(vec![50]);
         let mut gauss = Gauss::new();
@@ -1153,7 +1153,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(item.vnum, 25041);
+        assert_eq!(item.vnum, 39001, "the item keeps its new vnum");
+        assert_eq!(item.mask_vnum, 25041, "the ori rides the mask field");
     }
 
     #[test]

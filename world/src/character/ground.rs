@@ -145,6 +145,7 @@ pub fn drop_gold(
             refine_element: 0,
             transmutation: 0,
             sig_vnum: 0,
+            mask_vnum: 0,
             locked: false,
         },
         x: to.x,
