@@ -54471,3 +54471,26 @@ Tests:
   `a_leaver_is_asked_and_warped_out_and_a_stranger_is_checked_out` (8/8 under load).
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5525 passed, 0 failed in 46 targets. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
+
+## 622. The ward book's wire run
+
+`quest.7and8th_skills` is `ported`: scenario
+`the_ward_book_teaches_a_ward_and_refuses_once_learned`. No production code
+changed — 265's wire scenario ran the boost book and the reset book, and the
+ward book ran in quest-unit only, so this slice mirrors 265's run for 50515.
+The use offers all nine ward skills and a Cancel (pinned whole); picking
+Sword Spin Ward asks the confirmation, and the Yes removes the book and sets
+221 to 1 (the skill packet's six bytes, the store's row). A second book finds
+the ward learned and refuses ("You already learn one of ward skills."). All
+four arms have wire runs now (boost/reset 265, GRAND 268). Two mutants die on
+their intended reads: the set one short dies on the skill packet, and the
+level read off by one dies on the refusal (the first M2 touched the world's
+`slot` instead of the session's `skill_level` and survived — the script reads
+the live session, so the mutant proved the wrong function).
+
+Tests:
+
+- `prodomo/tests/parity.rs`:
+  `the_ward_book_teaches_a_ward_and_refuses_once_learned` (8/8 under load).
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5526 passed, 0 failed in 46 targets. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.

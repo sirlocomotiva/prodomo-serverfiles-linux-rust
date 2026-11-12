@@ -11492,6 +11492,97 @@ fn the_boost_book_teaches_a_skill_and_the_reset_book_forgets_it() {
     wait_for(&database, "(SELECT count(*) = 0 FROM player_skill)");
 }
 
+/// `quest.7and8th_skills`' ward arm (50515) over the wire, mirroring 265's boost run:
+/// the use offers all nine ward skills and a Cancel; picking Sword Spin Ward asks the
+/// confirmation, and the Yes removes the book and sets 221 to 1 (the skill packet, the
+/// store's row). A second book finds the ward learned and refuses. (The boost, GRAND
+/// and reset arms are 265's and 268's wire runs.)
+#[test]
+fn the_ward_book_teaches_a_ward_and_refuses_once_learned() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 2 WHERE name = 'Alpha'",
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    Server::write_console(&console, "item give Alpha 50515 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 50_515, 1));
+    alpha.send_record(&client_item_use(0));
+    let offer: [&[u8]; 5] = [
+        b"",
+        b"This ancient book seems to be very powerful! It is",
+        b"the key to tremendous skills. But first you must",
+        b"decide! Fighters can only master a single skill.",
+        b"Choose wisely",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Lehrbuch Konter",
+                &offer,
+                b"[QUESTION 1;Sword Spin Ward|2;Ambush Ward|3;Finger Strike Ward|4;Shooting Dragon Ward|5;Spirit Strike Ward|6;Fire Arrow Ward|7;Dark Strike Ward|8;Summon Lightning Ward|9;Wolf's Breath Ward|10;Cancel]"
+            )
+        ),
+        "all nine wards and the Cancel"
+    );
+    alpha.send_record(&client_script_answer(0));
+    let confirm: [&[u8]; 3] = [
+        b"",
+        b"You choose to learn Sword Spin Ward.",
+        b"You're sure about your decision?",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(b"Lehrbuch Konter", &confirm, b"[QUESTION 1;Yes|2;No]")
+        ),
+        "the confirmation"
+    );
+    alpha.still("the confirmation waits");
+    alpha.send_record(&client_script_answer(0));
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 0, 0));
+    let skills = alpha.read_game();
+    assert_eq!(skills.len(), SKILL_LEVEL_LEN);
+    assert_eq!(skills[0], GC_SKILL_LEVEL_NEW);
+    assert_eq!(&skills[1 + 221 * 6..][..6], &[0, 1, 0, 0, 0, 0]);
+    assert_eq!(alpha.read_game(), server_script(0, b"[DONE]"));
+    alpha.still("the script ended");
+    check(&database, "(SELECT count(*) = 0 FROM item)");
+    wait_for(
+        &database,
+        "(SELECT (vnum, level, next_read) = (221, 1, 0) FROM player_skill)",
+    );
+    Server::write_console(&console, "item give Alpha 50515 1");
+    server.wait_for("id 100000001; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 50_515, 1));
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Lehrbuch Konter",
+                &[b"", b"You already learn one of ward skills."],
+                b"[DONE]"
+            )
+        ),
+        "the learned refusal"
+    );
+    alpha.still("the refusal ends");
+}
+
 /// Ledger 216: `CG_ITEM_USE` of an equippable item puts it on, and a use of the worn item takes
 /// it off (`CHARACTER::UseItemEx`, `G/char_item.cpp:3040-3053`).
 ///
