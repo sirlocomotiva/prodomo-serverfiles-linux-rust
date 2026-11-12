@@ -54448,3 +54448,26 @@ Tests:
   are the class it hid); the gate dropped dies on the off-server silence.
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5524 passed, 0 failed in 46 targets. The first suite run (5523/1) caught 229i's `an_npc_near_a_player_wanders_and_tells_its_view` asserting no dog ever fans a walk mode; the scenario now collects the fans, and the rerun is green. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
+
+## 621. The shelter's leave
+
+`quest.meleylair_zone` is `ported`: scenario
+`a_leaver_is_asked_and_warped_out_and_a_stranger_is_checked_out`. No production
+code changed — the leave judge (`LeaveRequest`) and the login check (`Check`)
+are 419's, so this slice pins the live script over the wire. On the run, the
+shelter NPC menus "Leave the shelter!" and the close (pinned); the ask reads
+the Yes/No, the No closes with `[DONE]` and nothing after, and the Yes drops
+the reader from the run and warps it to the sub-map spot on map 62 — the
+close, `EncodeRemovePacket(this)`, the warp to (597500, 699700), the row's 62.
+A guildless stranger seeded on the run's map at the recall spot is warped out
+by the login `Check` to the same spot (the remove and the warp, the row's 62).
+The 20420 chest arm is 419's; the 20388 click arm is empty in the source.
+Two mutants die: the leave without its warp-out dies on a read timeout, and
+the sub-spot cell off by one dies on the warp's x.
+
+Tests:
+
+- `prodomo/tests/parity.rs`:
+  `a_leaver_is_asked_and_warped_out_and_a_stranger_is_checked_out` (8/8 under load).
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5525 passed, 0 failed in 46 targets. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.

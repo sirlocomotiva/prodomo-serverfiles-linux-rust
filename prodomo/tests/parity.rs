@@ -43850,6 +43850,186 @@ fn a_guild_registers_enters_and_leaves_meleys_lair() {
     // would need an NPC on the run's map, which legacy never places there.
 }
 
+/// `quest.meleylair_zone`'s leave and login arms over the live script: on the run,
+/// the shelter NPC menus "Leave the shelter!" and the close; the ask reads the Yes/No,
+/// the No closes quietly, and the Yes drops the reader from the run and warps it to
+/// the sub-map spot on map 62 (the close, the remove, the warp, the row's 62). A
+/// guildless stranger seeded on the run's map is warped out by the login `Check` to
+/// the same spot. (The 20420 chest arm is 419's; the 20388 click arm is empty in the
+/// source.)
+#[test]
+fn a_leaver_is_asked_and_warped_out_and_a_stranger_is_checked_out() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    seed_meley_guild(&database);
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &meley_channels(),
+        "no_wander = true",
+    );
+    meley_leave_registers_and_enters(&server, &database);
+    meley_leave_asks_and_warps(&server, &database);
+}
+
+/// The leave's first half: register, guild PK mode, and the enter to the run.
+fn meley_leave_registers_and_enters(server: &Server, database: &ScratchDatabase) {
+    let (mut alice, listed, entered) =
+        enter_world_seeing_guilded(server, b"alice", 0, 1, Some(&[(801, 48, 5)]));
+    let npc = shown_vid(&entered, 20_419, "the sub map shows 20419");
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu");
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_ASK].concat()),
+        "the requirements"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_REGISTERED].concat()),
+        "the register passes"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1001;0]"),
+        "the ladder line"
+    );
+    alice.quiet("the register step ends");
+    wait_for(
+        database,
+        "(SELECT ladder_point FROM guild WHERE id = 7) = 0",
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 4"));
+    assert_eq!(read_update_mode(&mut alice, listed.id), 4, "guild lands");
+    alice.quiet("the switch ends");
+    alice.send_record(&client_click(npc));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu again");
+    alice.send_record(&client_script_answer(2));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_SHELTER_ASK].concat()),
+        "the shelter asks"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the close");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((320_000, 1_529_000), server.channel(1).port()),
+        "the recall spot on the run"
+    );
+    alice.quiet("the enter step ends");
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 2120000",
+    );
+}
+
+/// The leave's second half: the run's menu, the ask, the quiet No, the Yes with
+/// its warp to the sub-map spot, and the stranger's login check to the same spot.
+fn meley_leave_asks_and_warps(server: &Server, database: &ScratchDatabase) {
+    let (keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let mut alice = keyed;
+    let entered = enter_game_guilded(&mut alice, 1, Some(&[(801, 48, 5)]));
+    assert_eq!((character.x, character.y), (320_000, 1_529_000));
+    let shelter = shown_vid(&entered, 20_419, "the run shows its 20419");
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    let _marks = read_login_letters(&mut alice, false);
+    read_login_update(&mut alice);
+    alice.quiet("the login ends");
+    alice.send_record(&client_click(shelter));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, MELEY_LEAVE_MENU),
+        "the run's menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_LEAVE_ASK].concat()),
+        "the leave asks"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the No");
+    alice.quiet("nothing follows the No");
+    alice.send_record(&client_click(shelter));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the menu again");
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[MELEY_TITLE, MELEY_LEAVE_ASK].concat()),
+        "the leave asks again"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the close");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&1_u32.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((597_500, 699_700), server.channel(1).port()),
+        "the sub-map spot on map 62"
+    );
+    alice.quiet("the leave ends");
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 62",
+    );
+    drop(alice);
+    // A guildless stranger seeded on the run's map: the login `Check` warps it
+    // out to the same spot.
+    create_account(server, "bob");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y, map_index) SELECT id, 0, 'Bob', 0, 320000, 1529000, 2120000 FROM account WHERE login = 'bob'",
+    );
+    let (mut bob, _character, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"bob", 0, ENGLISH);
+    bob.send_record(&client_enter_game());
+    let mut out = Vec::new();
+    while out.len() < 2 {
+        let record = bob
+            .read_game_until(std::time::Instant::now() + QUIET_WINDOW)
+            .expect("the check warps the stranger out");
+        if record[0] == GC_CHARACTER_DEL || record[0] == GC_WARP {
+            out.push(record);
+        }
+    }
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&4_u32.to_le_bytes());
+    assert_eq!(out[0], removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        out[1],
+        a_warp_record((597_500, 699_700), server.channel(1).port()),
+        "the stranger lands on the sub-map spot"
+    );
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Bob') = 62",
+    );
+}
+
+/// The run's click menu: the leave chat and the close.
+const MELEY_LEAVE_MENU: &[u8] = b"[QUESTION 1;Leave the shelter!|2;Inchide]";
+
+/// The leave chat's ask.
+const MELEY_LEAVE_ASK: &[u8] =
+    b"Do you want to leave the shelter?[ENTER][ENTER][QUESTION 1;Yes|2;No]";
+
 /// The ship defence probe: 9009's board arm reads the four constant flags and the
 /// shadow pair, creates, and says whether the shadow stands; the wheel's start arm
 /// starts, reads the shadow, heals, and says so; the wheel's land arm lands.
