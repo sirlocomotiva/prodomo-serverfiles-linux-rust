@@ -101,6 +101,7 @@ mod fishing;
 mod fixtures;
 mod full_set;
 mod gaya_system;
+mod giftbox;
 mod gm_lines;
 mod guild;
 mod guild_bonus;
@@ -4439,6 +4440,9 @@ impl GameState {
         }
         if self.campfire_at(vid, at) {
             return Some(self.use_campfire_item(vid, at, actor));
+        }
+        if self.giftbox_at(vid, at) {
+            return Some(self.use_giftbox(vid, at, actor));
         }
         if multi_farm::premium_at(self, vid, at) {
             return Some(multi_farm::use_premium(self, vid, at, actor));

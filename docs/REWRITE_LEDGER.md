@@ -54575,3 +54575,35 @@ Two mutants (the overwrite restored, the field zeroed) die in the scenario and
 the unit test respectively.
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5529 passed, 1 failed in 46 targets — `a_morphed_caller_hears_every_stat_refusal`, a burst-reader timing flake in `sees_enter` at `parity.rs:4055`, green alone), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 626. The giftbox draw
+
+The special bag is drawn now. `use_giftbox` ports `case ITEM_GIFTBOX`
+(`G/char_item.cpp:3180-3258`) as an early use arm: the battle-pass `CHEST_OPEN`
+mission registers, the 51500-52000 dragon-soul gate refuses the unqualified with
+`[LS;1094]`, a box with no group talks `[LS;56]` and stays shut, and the draw
+runs the group's `multi_index` — `number(1, 100)` per row for a `Pct` bag, one
+`number(1, back)` otherwise. All eight arms land: `GOLD` grants nothing (legacy's
+`PointChange(POINT_GOLD)` is an empty case under `ENABLE_REMOVE_LIMIT_GOLD`, so
+the line prints and no gold moves), `EXP` banks through the live grant, `MOB`
+spawns the count-as-vnum aggressive at the opener's spot (a null spawn fails the
+use), `SLOW` lands minus the count for 300 s, `DRAIN_HP` takes its capped share,
+`POISON` poisons, `MOB_GROUP` stands its rect aggressive, and the item arm runs
+`AutoGiveItem` (vnum 0 fails, as `CreateItem(0)` answers null). One box is spent
+only when every arm lands, the gifts' records ride before the spend's, and each
+row tells its line — experience tells two. The `ENABLE_NEWSTUFF` box time limit
+stays out: its value is 0, as only the never-loaded `questlib_extra` sets it.
+
+`a_moonlight_box_draws_its_group_and_tells_the_gift` opens the owner's 50011
+over the wire and reads the pickup, the gift's set (one of the 29 rows), the
+spent box's clear, and the row's line. Nine unit tests pin the kept box, the
+gate order, the gold no-op, the banked exp, the slow's value and seconds, the
+drain's cap, the failed spawn, the failed gives, and the two-line exp plus the
+count-2 plural boundary. `sys.item.proto` stays `partial` on the treasure-key
+arm.
+
+Three mutants (the spend dropped, the gate inverted, the plural boundary moved)
+die in the scenario and the unit tests; the boundary mutant first survived and
+grew its pin.
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5539 passed, 1 failed in 46 targets — `a_morphed_caller_hears_every_stat_refusal`, the same burst-reader timing flake as 625, green alone), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

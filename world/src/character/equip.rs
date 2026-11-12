@@ -1411,6 +1411,42 @@ pub fn use_item(
         Err(refused) => declined(refused, trail),
     }
 }
+
+/// Spend one giftbox of the stack at `at`: the `SetCount(item->GetCount() - 1)`
+/// of a drawn `ITEM_GIFTBOX` use (`G/char_item.cpp:3215`). The game state runs the
+/// draw first and calls this only once the draw's arms have all landed, as legacy
+/// consumes only when `GiveItemFromSpecialItemGroup` returns true.
+///
+/// # Errors
+///
+/// As [`use_item`]: a missing or foreign source, no gear, an unknown vnum, or a
+/// refused use.
+pub fn consume_giftbox(
+    items: &mut CharacterItems,
+    at: ItemPos,
+    rules: &super::item_move::MoveRules,
+    gear: Option<&mut Gear<'_>>,
+) -> Result<super::item_move::MoveDone, MoveRefused> {
+    let item = use_source(items, at)?;
+    let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+    let proto = gear
+        .protos
+        .get(item.vnum)
+        .ok_or(MoveRefused::UnknownVnum(item.vnum))?;
+    use_checks(&item, proto, rules, gear.points)?;
+    let mut stamped = super::item_move::MoveDone {
+        kind: super::item_move::MoveKind::Used,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    consume_one_use(
+        items,
+        &item,
+        proto,
+        super::item_move::MoveKind::Used,
+        &mut stamped,
+    )
+}
 const EXPIRY_SOCKET: usize = 0;
 
 /// The use counter (`UseItemEx`'s socket 1, `G/char_item.cpp:2809-2819`).

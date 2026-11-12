@@ -44785,6 +44785,95 @@ fn a_masked_gift_lands_as_its_new_vnum() {
     );
 }
 
+/// `sys.item.proto`: the moonlight box (50011) draws its single group row over the
+/// wire — the pickup notice, the gift's set, the spent box's clear, and the row's
+/// line — with the gift one of the group's 29 rows.
+#[test]
+fn a_moonlight_box_draws_its_group_and_tells_the_gift() {
+    /// The owner's 50011 rows: `(vnum, count)`, in file order.
+    const ROWS: [(u32, u16); 29] = [
+        (71084, 15),
+        (50252, 1),
+        (51505, 1),
+        (51506, 1),
+        (27987, 10),
+        (51505, 1),
+        (50128, 10),
+        (30055, 2),
+        (30060, 2),
+        (30056, 2),
+        (30058, 2),
+        (30057, 2),
+        (30059, 2),
+        (30076, 1),
+        (30003, 1),
+        (30004, 1),
+        (30005, 1),
+        (25040, 5),
+        (30078, 5),
+        (30077, 1),
+        (27992, 1),
+        (27993, 1),
+        (27994, 1),
+        (30052, 1),
+        (30048, 1),
+        (30049, 1),
+        (30046, 1),
+        (30051, 1),
+        (30053, 1),
+    ];
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0,          1, 50011 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_item_use(0));
+    let pickup = alice.read_game();
+    assert_eq!(pickup[0], GC_CHAT, "the gift is picked up first");
+    let pickup = &pickup[10..];
+    let name = pickup
+        .strip_prefix(b"[LS;444;")
+        .and_then(|rest| rest.strip_suffix(b"]"))
+        .expect("the pickup names the gift");
+    let (window, cell, vnum, count) = set_fields(&alice.read_game());
+    assert_eq!(window, 1, "the gift lands in the inventory window");
+    assert!(
+        cell == 1 || cell >= common::item_slots::CUSTOM_INVENTORY_SLOT_START,
+        "the gift lands past the box or in its custom bank: {cell}"
+    );
+    assert!(
+        ROWS.contains(&(vnum, count)),
+        "the gift is a group row: ({vnum}, {count})"
+    );
+    assert_eq!(
+        set_fields(&alice.read_game()),
+        (1, 0, 0, 0),
+        "the spent box clears"
+    );
+    let line = alice.read_game();
+    assert_eq!(line[0], GC_CHAT, "the row tells its line");
+    let mut want = Vec::from(b"[LS;".as_slice());
+    if count > 1 {
+        want.extend_from_slice(b"204;");
+        want.extend_from_slice(name);
+        want.extend_from_slice(b";");
+        want.extend_from_slice(count.to_string().as_bytes());
+    } else {
+        want.extend_from_slice(b"35;");
+        want.extend_from_slice(name);
+    }
+    want.push(b']');
+    assert_eq!(&line[10..], want.as_slice(), "the line names the gift");
+    alice.quiet("the draw tells nothing more");
+}
+
 /// The start step's burst after its script: the start's broadcast (the mast's
 /// target HP), the wave's pair, the heal's own notice, the stun's flag update and
 /// affect add, and the heal's broadcast again.
