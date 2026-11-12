@@ -2422,6 +2422,27 @@ fn read_login_event_kingdom(keyed: &mut Keyed) {
     let _marks = read_login_letters(keyed, true);
     read_login_update(keyed);
 }
+/// [`read_login_event`] while the hide-and-seek event runs: the event's letter and title
+/// ride between `dungeon_info`'s line and the hides, in quest order.
+fn read_login_event_hideseek(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    read_letter(keyed, 9, b"Hide and Seek Event", "the event");
+    read_login_lines_hiding_after_dungeon(keyed, empire, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
+
 /// [`read_login_event`] past the board's line: the rank lines and the rest, for an
 /// entrant whose login line an earlier read consumed (the Shared Channel's
 /// duel-start lands between the two).
@@ -52031,6 +52052,245 @@ const WAR_PROBE: &[u8] = b"quest war_probe begin\n\
     end\n\
     end\n\
     end\n";
+
+/// Ledger 599's hide-and-seek probe: the skill teacher (vnum 20300, bound but questless)
+/// toggles event 10 — start when `hide_seek_event` is 0, else end — and says which.
+const HIDE_SEEK_PROBE: &[u8] = b"quest hide_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    if game.get_event_flag('hide_seek_event') == 0 then\n\
+    start_event(10)\n\
+    say('hidden')\n\
+    else\n\
+    end_event(10)\n\
+    say('sought')\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `sys.event.manager`'s hide-and-seek arm (`SetHideAndSeekEvent`, `HideAndSeekNPC`,
+/// `G/event_manager.cpp:1204-1320`, and `CHARACTER::OnClick`'s arm, `G/char.cpp:6297-6329`):
+/// the teacher's click starts the event (the start notice, the round at 5, the box hidden
+/// on a drawn map with its hint noticed, then the begin notification's letter), the hint
+/// names the map and the spot, a relog onto the spot shows the box's insert, the box's
+/// click pays one 50109 (the unstackable clamp) and moves the box with the round now 4,
+/// and the teacher's click ends the event (the end notice, then every event quest's
+/// `event_end` block clearing its own begin: 4, 6 through 16 in quest order, 5 having no
+/// such block). The box's map is read off the hint, so no draw is assumed.
+#[test]
+fn a_click_finds_the_hidden_box_and_its_click_moves_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (mut server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/hide_probe.lua",
+            HIDE_SEEK_PROBE,
+        )],
+        &hide_seek_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let (map, at) = read_hide_start(&mut alice);
+    alice.quiet("the start ends");
+
+    // Onto the hinted spot: the box's insert shows in the fresh view.
+    drop(alice);
+    server.wait_for("Character left the world");
+    sql(
+        &database,
+        &format!(
+            "UPDATE player SET x = {}, y = {}, map_index = {map} WHERE name = 'Alpha'",
+            at.0, at.1
+        ),
+    );
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_hideseek(&mut alice);
+    alice.still("nothing follows");
+    let boxed = shown_vid(&entered, 20_359, "the hinted map shows the box");
+    alice.send_record(&client_click(boxed));
+    let _ = (map, read_box_click(&mut alice, boxed));
+    alice.quiet("the click ends");
+
+    // Back to the teacher: its click ends the event. The first leave is already logged,
+    // so the wait counts two.
+    drop(alice);
+    server.wait_for_count("Character left the world", 2);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600, map_index = 1 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_hideseek(&mut alice);
+    alice.still("nothing follows");
+    let teacher = shown_vid(&entered, 20_300, "map 1 still shows the teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"sought[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Hide and Seek Event has ended. Thank you for participating!"
+        ),
+        "the end"
+    );
+    for quest in [4u16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
+        assert_eq!(
+            alice.read_game(),
+            quest_begin_clear(quest),
+            "quest {quest}'s begin clears"
+        );
+    }
+    alice.quiet("the end ends");
+    drop(alice);
+    drop(server);
+}
+
+/// The start click's answers: the dialog, the start notice, the hint, and the begin
+/// notification's letter. Answers the hint's map and spot.
+fn read_hide_start(keyed: &mut Keyed) -> (i32, (i32, i32)) {
+    assert_eq!(
+        keyed.read_game(),
+        server_script(1, b"hidden[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Hide and Seek Event has started. Search for the Old Box to receive a reward!"
+        ),
+        "the start"
+    );
+    let hint = keyed.read_game();
+    assert_eq!(hint[0], GC_CHAT, "the hint is a chat line: {hint:02x?}");
+    let spot = hide_spot_of(&hint[10..]);
+    read_letter(keyed, 9, b"Hide and Seek Event", "the begin notification");
+    spot
+}
+
+/// The box click's answers: the give naming the gift box, its set paying one 50109,
+/// the found box's removal, and the moved box's new hint (with its insert and info
+/// first when the draw kept it in view). Answers the new hint's map.
+fn read_box_click(keyed: &mut Keyed, boxed: u32) -> i32 {
+    assert_eq!(
+        keyed.read_game(),
+        an_info_line(b"[LS;444;Cutie Rosie de Ebonita]"),
+        "the give names the gift box first"
+    );
+    let set = keyed.read_game();
+    assert_eq!(set_fields(&set).2, 50_109, "the reward's vnum");
+    assert_eq!(set_fields(&set).3, 1, "the unstackable clamp pays one");
+    let mut gone = vec![GC_CHARACTER_DEL];
+    gone.extend_from_slice(&boxed.to_le_bytes());
+    assert_eq!(keyed.read_game(), gone, "the found box disappears");
+    let mut moved = keyed.read_game();
+    if moved[0] == GC_CHARACTER_ADD && moved[22..24] == 20_359u16.to_le_bytes() {
+        let info = keyed.read_game();
+        assert_eq!(
+            info[0], GC_CHAR_ADDITIONAL_INFO,
+            "the moved box's info: {info:02x?}"
+        );
+        assert_eq!(
+            info[1..5],
+            moved[1..5],
+            "the info names the moved box: {info:02x?}"
+        );
+        moved = keyed.read_game();
+    }
+    assert_eq!(moved[0], GC_CHAT, "the moved box hints: {moved:02x?}");
+    hide_spot_of(&moved[10..]).0
+}
+
+/// The Channels the hide-and-seek event runs on: Channel 1 hosts map 1 and the
+/// four hiding maps (61-64).
+fn hide_seek_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 3, 61, 62, 63, 64],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// The hide-and-seek hint's map and spot: the map the hint names and the spot its
+/// number names (no number is the first spot).
+fn hide_spot_of(record: &[u8]) -> (i32, (i32, i32)) {
+    let hint = record.strip_suffix(&[0]).unwrap_or(record);
+    let (map, base, spots) = if hint.starts_with(b"Mount Sohan") {
+        (
+            61,
+            (358_400, 153_600),
+            [(238, 1427), (819, 121), (1425, 1011), (1043, 693)],
+        )
+    } else if hint.starts_with(b"Fireland") {
+        (
+            62,
+            (588_800, 614_400),
+            [(1044, 980), (798, 806), (1032, 668), (805, 1168)],
+        )
+    } else if hint.starts_with(b"Sahara Desert") {
+        (
+            63,
+            (204_800, 486_400),
+            [(821, 787), (435, 703), (698, 428), (1485, 692)],
+        )
+    } else {
+        assert!(
+            hint.starts_with(b"Valley of Seungryong"),
+            "a listed hint: {hint:?}"
+        );
+        (
+            64,
+            (588_800, 768_000),
+            [(184, 121), (1225, 279), (130, 1219), (1438, 1208)],
+        )
+    };
+    let slot = hint
+        .iter()
+        .rev()
+        .take_while(|byte: &&u8| byte.is_ascii_digit())
+        .copied()
+        .collect::<Vec<u8>>()
+        .iter()
+        .rev()
+        .copied()
+        .collect::<Vec<u8>>();
+    let slot = String::from_utf8_lossy(&slot)
+        .parse::<usize>()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let (sx, sy) = spots[slot.min(3)];
+    (map, (base.0 + sx * 100, base.1 + sy * 100))
+}
 
 /// `sys.event.manager`'s siege and kingdom arms (`SetSiegeWarEvent`,
 /// `SetKingdomWarEvent`, `G/event_manager.cpp:1531-1726`): the click starts both

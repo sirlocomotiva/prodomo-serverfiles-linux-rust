@@ -104,6 +104,7 @@ mod gm_lines;
 mod guild;
 mod guild_bonus;
 mod guild_mark;
+mod hide_seek;
 mod horse;
 mod horse_ride;
 mod horse_summon;
@@ -1036,6 +1037,9 @@ pub struct GameState {
     /// The siege and kingdom wars' scores (`m_bSiegeScore`, `m_aKingdomWarScore`,
     /// `G/event_manager.h:146-148`). See [`siege_war`].
     siege_war: siege_war::SiegeWar,
+    /// The hide-and-seek box (`m_pHideAndSeekNPC`, `G/event_manager.h:150`). See
+    /// [`hide_seek`].
+    hide_and_seek: hide_seek::HideAndSeek,
     /// What each non-player keeps of its fight: its killer, its owner and its events. See
     /// [`fight`].
     npc_combat: HashMap<u32, fight::NpcCombat>,

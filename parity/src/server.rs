@@ -476,6 +476,48 @@ impl Server {
         }
     }
 
+    /// [`Self::wait_for`] until `needle` has been logged `count` times in total.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the process exits early, its stdout closes, or the count is not
+    /// reached within [`PROCESS_TIMEOUT`].
+    pub fn wait_for_count(&mut self, needle: &str, count: usize) {
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            if self
+                .console
+                .iter()
+                .filter(|line| line.contains(needle))
+                .count()
+                >= count
+            {
+                return;
+            }
+            if let Some(status) = self.child.try_wait().expect("status should be readable") {
+                self.console.extend(self.lines.try_iter());
+                panic!(
+                    "prodomo exited before logging {needle:?} {count} times: {status}\n{}",
+                    self.console()
+                );
+            }
+            match self.lines.recv_timeout(POLL_INTERVAL) {
+                Ok(line) => {
+                    self.console.push(line);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("stdout closed:\n{}", self.console());
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "prodomo did not log {needle:?} {count} times:\n{}",
+                self.console()
+            );
+        }
+    }
+
     /// Whether a line collected so far contains `needle`.
     #[must_use]
     pub fn logged(&self, needle: &str) -> bool {

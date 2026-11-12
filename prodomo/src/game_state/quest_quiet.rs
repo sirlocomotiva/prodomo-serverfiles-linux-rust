@@ -532,6 +532,11 @@ impl GameState {
         if self.manager_event_flag(flag) != 0 {
             return;
         }
+        if index == 10 {
+            self.start_hide_and_seek();
+            self.fire_event_edge(true);
+            return;
+        }
         if index == 11 {
             self.start_ox_event();
             self.fire_event_edge(true);
@@ -569,6 +574,11 @@ impl GameState {
         if self.manager_event_flag(flag) == 0 {
             return;
         }
+        if index == 10 {
+            self.end_hide_and_seek();
+            self.fire_event_edge(false);
+            return;
+        }
         if index == 11 {
             self.end_ox_event();
             self.fire_event_edge(false);
@@ -595,7 +605,7 @@ impl GameState {
 
     /// The manager's event flag `flag` (`GetEventState`'s read,
     /// `G/event_manager.cpp:663-716`), 0 with no quests.
-    fn manager_event_flag(&self, flag: &[u8]) -> i32 {
+    pub(super) fn manager_event_flag(&self, flag: &[u8]) -> i32 {
         self.quests
             .as_ref()
             .map_or(0, |quests| quests.manager().event_flag(flag))

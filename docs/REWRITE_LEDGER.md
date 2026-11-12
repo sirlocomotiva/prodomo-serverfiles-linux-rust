@@ -53939,3 +53939,20 @@ the `sys.char.polymorph` note carry the slice. Along the way `book_arm_gates`
 shed its morph arm into `book_morph_refused` and the scenario its seed and
 entry halves, so the line lint holds.
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5485 passed, 3 failed in 46 targets — all three pass alone and in the 8× check (`a_cape_of_courage_gathers_the_dogs_around` timed out on 8 bytes, `a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit` saw a stray header 114, and this slice's own scenario saw a lagged `GC_CHARACTER_UPDATE` in its last quiet), so the known load flakes, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 599. The hidden box
+
+`sys.event.manager`'s hide-and-seek arm (event 10, `SetHideAndSeekEvent`, `HideAndSeekNPC`,
+`G/event_manager.cpp:1204-1320`, and `CHARACTER::OnClick`'s arm, `G/char.cpp:6297-6329`) is live
+(the row stays `partial`): scenario `a_click_finds_the_hidden_box_and_its_click_moves_it`. The
+skill teacher's probe click starts the event (the start notice, the round at 5, the box on a
+drawn map with its hint, then the begin notification's letter); the hint names the map and the
+spot, a relog onto the spot shows the box's insert, the box's click pays one 50109 through
+`AutoGiveItem` (the gift box is not stackable, so the COUNT of 5 clamps to 1) and moves the box
+with the round now 4, and the teacher's click ends the event. The end falls the flag first, as
+`UpdateGameFlag` at the top of legacy's arm does — ledger 598's code never cleared
+`hide_seek_event`, so the event quest's own `event_end` block never fired; now every event
+quest's block clears its begin in quest order (4, 6 through 16; quest 5 has no such block).
+Along the way `Server` grew `wait_for_count`, for the scenario's second leave, and the login
+reader grew its hide-and-seek half, for the relog while the event runs.
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5491 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

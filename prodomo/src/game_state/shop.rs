@@ -730,6 +730,11 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
+        // `OnClick`'s hide-and-seek arm (`G/char.cpp:6297-6329`): the box's click pays
+        // before the quest click runs.
+        if let Some(reward) = self.hide_box_click(vid, target, mover) {
+            return ShopAnswer::Moved(reward);
+        }
         // The descriptor's actor carries PEACE: the click's scripts read the world's
         // own PK mode, alignment, guild, flags and dead bit, as an item step's do.
         let mover = Mover {
