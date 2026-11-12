@@ -54812,3 +54812,30 @@ she morphs, so the witness drains before the line — a stale-add trap, not a wi
 fact.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5567 passed, 1 failed in 46 targets — the one (`a_cape_of_courage_gathers_the_dogs_around` timed out on 8 bytes) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 633. The skillbook's morph gate
+
+This slice started down a wrong path and ended on a real gap. The plan was the
+shop stand's morph tail — until the source showed there is none: `BuildPrivateShop`
+(`G/char.cpp:11989-12133`) never touches the morph or the horse; it spawns an
+entity and leaves the owner alone. Only the bundle shop's `OpenMyShop` clears the
+morph and unsummons, and that tail is already ported (`myshop.rs`). A first
+implementation on `private_stand` was written, tested, and then reverted on this
+reading; the tree carries no trace of it.
+
+The real gap is the `ITEM_SKILLBOOK` morph gate (`G/char_item.cpp:3282-3288`): a
+morphed reader refuses with `[LS;1041]`, the book kept. The `USE_SPECIAL` book arms
+have their 521/1041 gates (ledger 598), but the main book-type arm read without
+one. `read_skill_book` now refuses before the socket/skill read, so the morphed
+read never trains.
+
+The scenario seeds a 50300 with skill 5 in cell 3 (`/book` needs IMPLEMENTOR, past
+the morph seed's GOD): morphed, the use refuses with 1041 and the row stays
+(`a_morphed_reader_hears_1041_from_the_granted_skillbook`). The unit test pins the
+same gate on the 50401 in memory. `sys.char.polymorph` stays `partial`.
+
+One mutant dies: the gate dropped reads instead of refusing. The scenario's own
+lesson: the first draft granted via `/book` and hung on the authority — GOD hears
+nothing from an IMPLEMENTOR line.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5569 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

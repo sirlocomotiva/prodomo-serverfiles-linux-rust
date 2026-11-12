@@ -1206,6 +1206,14 @@ impl GameState {
             None => return (false, None),
         };
         if proto.item_type == gamedata::item_kind::ITEM_SKILLBOOK {
+            // `:3282-3288`: a morphed reader refuses with 1041, the book kept.
+            if self
+                .points_of(vid.raw())
+                .is_some_and(world::character::Points::is_polymorphed)
+            {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1041]", &[]);
+                return (false, None);
+            }
             // `:3282-3331`: 50300 reads the socket, every other book value 0.
             let skill = if item_vnum == 50300 {
                 socket0
@@ -5687,6 +5695,31 @@ mod tests {
             texts(&frames),
             [b"[LS;295]".to_vec()],
             "the combo gate talks 295"
+        );
+    }
+
+    /// A morphed reader opening the `ITEM_SKILLBOOK` 50401 hears `[LS;1041]`
+    /// (`G/char_item.cpp:3282-3288`): the book stays in the cell and nothing climbs.
+    /// The gate runs before the read's own, so the morphed read never trains.
+    #[test]
+    fn a_morphed_reader_hears_1041_from_a_skillbook_and_keeps_it() {
+        let (mut world, mut inbox) = a_reader(50401, 25_000);
+        world.set_polymorph(Vid::new(1), 101, false);
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        let mover = world.own_mover(Vid::new(1)).expect("the body stands");
+        let cell =
+            protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
+        let _ = world.use_item(
+            Vid::new(1),
+            cell,
+            mover,
+            &crate::game_loop_messages::QuestAccount::default(),
+        );
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert_eq!(
+            texts(&frames),
+            [b"[LS;1041]".to_vec()],
+            "the skillbook refuses: {frames:?}"
         );
     }
 

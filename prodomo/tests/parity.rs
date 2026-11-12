@@ -33997,6 +33997,62 @@ fn a_console_opens_and_a_book_names_its_skill_in_socket_zero() {
     drop(server);
 }
 
+/// Ledger 633: the `ITEM_SKILLBOOK` morph gate (`G/char_item.cpp:3282-3288`). God
+/// Alice is granted a 50300 naming skill 5, morphs into the dog by the live line,
+/// and uses the book: the read refuses with `[LS;1041]` and the book's row stays.
+/// The clear's use reads instead — the test only watches the refusal, since the
+/// read's own climb is the book system's, already proved.
+#[test]
+fn a_morphed_reader_hears_1041_from_the_granted_skillbook() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_morph_stat_pair(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    // The 50300 stands in cell 3 with skill 5 in socket 0 (`/book` needs
+    // IMPLEMENTOR, past the seed's GOD).
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, vnum, count, socket0) SELECT 100000000, id, 1, 3, 50300, 1, 5 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    let (mut alice, listed) = enter_morph_stat_god(&server);
+    let (mut yankee, _) = enter_morph_stat_witness(&server, &mut alice);
+
+    // The book stands seeded in cell 3.
+
+    // Morphed: the use refuses with 1041 and the row stays.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let add = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        101,
+        "the shown race is the dog"
+    );
+    alice.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_item_use(3));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;1041]"),
+        "the morphed read refuses"
+    );
+    let kept = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE vnum = 50300",
+        1,
+    );
+    assert_eq!(kept[0][0], 1, "the refused book stays");
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
 /// `cmd.set` (the gold, exp, maxima and skill arms): `/set` tells the usage
 /// with the field list, misses an offline name, stays silent on an unknown field,
 /// and sets by prefix. Alice is `IMPLEMENTOR`; Zulu is online and holds no gold.
