@@ -5235,9 +5235,7 @@ impl GameState {
             }
         }
         for (name, value) in moves.event_sets {
-            if let Some(quests) = self.quests.as_mut() {
-                quests.manager_mut().set_event_flag(&name, value);
-            }
+            self.set_event_flag(&name, value);
         }
         (staged, home)
     }

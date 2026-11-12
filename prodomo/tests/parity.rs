@@ -42548,7 +42548,7 @@ fn read_event_clears(keyed: &mut Keyed, quests: &[u16], note: &str) {
 /// whether the `__status` flag changed at once: 0 before the call (`start` is state 0) and
 /// non-zero right after it. The literal `away` number cannot be named: `qc` refuses a number
 /// it would print as `1.50368e+09`; the unit test pins the exact CRC.
-const FLAG_PROBE: &[u8] = b"quest flag_probe begin\n\
+const FLAG618_PROBE: &[u8] = b"quest flag618_probe begin\n\
     state start begin\n\
     when 20300.click begin\n\
     local before = pc.getqf('__status')\n\
@@ -43311,7 +43311,7 @@ fn a_click_sees_the_new_state_at_once() {
     let (server, _data) = Server::start_with_files_channels(
         binary(),
         database.url(),
-        &[("locale/europe/quest/zz_probe/flag_probe.lua", FLAG_PROBE)],
+        &[("locale/europe/quest/zz_probe/flag_probe.lua", FLAG618_PROBE)],
         &default_channels(),
         "no_wander = true",
     );
@@ -54354,6 +54354,72 @@ fn aura_window(alice: &mut Keyed, keeper: u32, entry: u8, window: u8, note: &str
 }
 
 /// The Hydra kill's congrats (`3965.kill`, `yohara_system.lua:74-84`).
+/// Ledger 618's flag probe: the skill teacher (vnum 20300, bound but questless)
+/// answers a click by setting `xmas_boom` to 1 from the quest side and saying so.
+const FLAG_ARM_PROBE: &[u8] = b"quest flag_arm_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    game.set_event_flag('xmas_boom', 1)\n\
+    say('set')\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// `lua.game.set_event_flag`, `sys.event.xmas`: the teacher's click sets `xmas_boom`
+/// from a quest script, and the set runs the world's arm, not just the table: the
+/// dialog lands first, then the `xmas_boom 1` ring, then map 1's firework seller
+/// (9004) standing at its base plus 615 m, 618 m with its name behind its add.
+/// Before the routing the ring and the seller never came; the GM lines (365) ran
+/// the same arm from the other side.
+#[test]
+fn a_quest_set_flag_rings_its_arm_and_stands_its_seller() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471450, y = 954700 WHERE name = 'Alpha'",
+    );
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/flag_arm_probe.lua",
+            FLAG_ARM_PROBE,
+        )],
+        &default_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"set[ENTER][DONE]"),
+        "the dialog beats the arm"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"xmas_boom 1"),
+        "the quest-set flag rings"
+    );
+    assert_eq!(
+        read_add_of_race(&mut alice, 9004),
+        (409_600 + 61_500, 896_000 + 61_800),
+        "map 1's firework seller stands at its base plus 615 m, 618 m"
+    );
+    assert_eq!(
+        alice.read_game()[0],
+        GC_CHAR_ADDITIONAL_INFO,
+        "the seller's name rides behind its add"
+    );
+    alice.still("nothing follows");
+    drop(server);
+}
+
 const YOHARA_HYDRA_CONGRATS: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Statuia Razboinicului: [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Felicitari.[ENTER]Te astept unde am vorbit ultima data. [ENTER][ENTER][DONE]";
 
 /// The statue's menu at `killReward_new`: the ship's return, the Yohara trip, the

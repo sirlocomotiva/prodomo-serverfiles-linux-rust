@@ -54356,3 +54356,36 @@ Tests:
   `a_hydra_kill_moves_yohara_to_its_champion_reward` (8/8 under load).
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5520 passed, 1 failed in 46 targets — the failure is `a_cape_of_courage_gathers_the_dogs_around`, a known load flake (ledger 616's receipt names the class), green alone in 5.08 s. The stale first suite run (launched before the clippy split) was killed and rerun cleanly; its 5 orphaned `prodomo_proc_2826711_*` databases were dropped by hand. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No production code changed, so no width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
+
+## 618. The quest-set flag's ring
+
+`sys.event.xmas` stays `partial`, but the gap ledger 365 named — "`game.set_event_flag`,
+which does not yet reach the arms" — is closed. `apply_dungeon_moves`
+(`prodomo/src/game_state/quests.rs`) wrote quest-set flags straight into the manager's
+table, bypassing `GameState::set_event_flag` and every arm it runs; now it routes each
+`event_sets` pair through the world's set, the same call the GM lines and the DB-peer
+answer share. Legacy funnels both sides through the one `SetEventFlag`
+(`G/questmanager.cpp:1335-1688`): the quest call and the GM line both issue
+`RequestSetEventFlag`, and the table write and the arms run when the DB process
+answers. Scenario `a_quest_set_flag_rings_its_arm_and_stands_its_seller`: the probe
+quest sets `xmas_boom` to 1 on a click, and the dialog lands first, then the
+`xmas_boom 1` ring, then map 1's firework seller (9004) standing at its base plus
+615 m, 618 m with its name behind its add. `lua.game.set_event_flag` keeps its
+`ported` with the arm run named in its note.
+
+Still partial: the premium buyer rates (dead with no premium time), the
+`crcdisconnect` mode, the `SendEventFlagList` prob suffixes, the char-stone and
+refine-box drop events, and the `ENABLE_NEWSTUFF` limit flags. Only the
+never-loaded `questlib_extra` sets those limits on the owner's data, so the drop
+limit stays its 1000 ms constant until the owner decides; the forest's
+`frt_dungeon_status` set (line 18) is the one live quest-set flag and names no arm.
+
+Tests:
+
+- `prodomo/tests/parity.rs`:
+  `a_quest_set_flag_rings_its_arm_and_stands_its_seller` (8/8 under load).
+- Mutants: the routing reverted dies on a read timeout waiting for the ring (the
+  dialog lands, nothing follows), and the seller pinned at race 9005 dies in
+  `read_add_of_race`.
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (1 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5521 passed, 1 failed in 46 targets — the failure is `a_morphed_caller_hears_every_stat_refusal`, a known load flake (ledgers 606-609, 611-615), green alone in 10.11 s. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
