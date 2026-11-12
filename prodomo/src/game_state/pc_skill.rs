@@ -551,8 +551,8 @@ impl GameState {
     /// `SKILL` for 1-4/6, `HORSE_SKILL` for 5), the climb (`SetSkillLevel`'s
     /// ladder), and the typed 17/30/40 jump draws (`ENABLE_FORCE2MASTERSKILL` is
     /// ON, so the NORMAL draw jumps straight to 20; the quest-flag arm is
-    /// compiled out). `g_bSkillDisable` is a dead test global, always false; no
-    /// polymorph is ported, so that arm is vacuous. A landed up spends the point
+    /// compiled out). `g_bSkillDisable` is a dead test global, always false; a
+    /// polymorphed caller hears `[LS;521]`. A landed up spends the point
     /// (its point-change record goes out), climbs the level, recomputes the
     /// points, and sends byte 76 with all 255 slots (`SkillLevelPacket`).
     /// Returns the vnum and its new level when the up lands, for the store's
@@ -569,11 +569,43 @@ impl GameState {
             Some(body) => (body.card.job, body.card.skill_group),
             None => return None,
         };
-        self.skill_level_up(vid, job, group, vnum, SkillUpMethod::Point)
+        let up = self.skill_level_up(vid, job, group, vnum, SkillUpMethod::Point);
+        // `SkillLevelUp`'s polymorph arm (`G/char_skill.cpp:731-736`) talks here,
+        // after the parse and the lock, when a morphed caller asked for a vnum the
+        // arms would otherwise reach.
+        if up.is_none()
+            && self
+                .points_of(vid.raw())
+                .is_some_and(world::character::Points::is_polymorphed)
+            && Self::skill_arms_reach(job, group, vnum)
+        {
+            use protocol::gc_chat::CHAT_TYPE_INFO;
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;521]", &[]);
+            }
+        }
+        up
+    }
+
+    /// The `/skillup` dispatch arms (`G/cmd_general.cpp:928-973`): `CanUseSkill` or
+    /// the else-switch, before `SkillLevelUp`'s own gates see the vnum.
+    fn skill_arms_reach(job: u8, group: u8, vnum: u32) -> bool {
+        gamedata::pc_skill_data::can_use(job, group, false, vnum)
+            || matches!(
+                vnum,
+                137..=140
+                    | SKILL_ANTI_FIRST..=SKILL_ANTI_LAST
+                    | SKILL_ADD_HP
+                    | SKILL_RESIST_PENETRATE
+                    | SKILL_NEW_FIRST..=SKILL_NEW_LAST
+                    | SKILL_HELP_FIRST..=SKILL_HELP_LAST
+            )
     }
 
     /// `SkillLevelUp`'s gate half: the level the up would climb to, or `None`
-    /// when any gate refuses.
+    /// when any gate refuses. The polymorph arm (`G/char_skill.cpp:731-736`)
+    /// is silent here: only `/skillup` talks (`[LS;521]`), the book and quest
+    /// climbs pass through `LearnSkillByBook`, whose refusal replaces it.
     fn skill_up_level(
         &self,
         vid: Vid,
@@ -582,6 +614,12 @@ impl GameState {
         vnum: u32,
         method: SkillUpMethod,
     ) -> Option<u8> {
+        if self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed)
+        {
+            return None;
+        }
         let usable = gamedata::pc_skill_data::can_use(job, group, false, vnum)
             || matches!(
             vnum,
@@ -972,6 +1010,14 @@ impl GameState {
     ) -> Option<(u32, u8, bool)> {
         match item_vnum {
             50301..=50303 => {
+                // `:4410-4415`: the leader trio refuses a morphed reader with 521.
+                if self
+                    .points_of(vid.raw())
+                    .is_some_and(world::character::Points::is_polymorphed)
+                {
+                    self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;521]", &[]);
+                    return None;
+                }
                 let level = self.pc_skill_level(vid.raw(), SKILL_LEADERSHIP);
                 if i32::from(level) < values[0] {
                     self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;274]", &[]);
@@ -984,6 +1030,14 @@ impl GameState {
                 Some((SKILL_LEADERSHIP, 0, false))
             }
             50304..=50306 => {
+                // `:4437-4442`: the combo trio refuses a morphed reader with 1041.
+                if self
+                    .points_of(vid.raw())
+                    .is_some_and(world::character::Points::is_polymorphed)
+                {
+                    self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1041]", &[]);
+                    return None;
+                }
                 let level = self.pc_skill_level(vid.raw(), SKILL_COMBO);
                 let pc_level = self.pc_level(vid);
                 if level == 0 && pc_level < 30 {
@@ -1027,6 +1081,9 @@ impl GameState {
             && item_vnum != 50600
             && item_vnum != 50060
         {
+            return None;
+        }
+        if self.book_morph_refused(vid, mover, item_vnum) {
             return None;
         }
         let pct = values[1].clamp(0, 100);
@@ -1111,6 +1168,29 @@ impl GameState {
         };
         let (vnum, prob) = armed?;
         Some((vnum, prob, item_vnum == 50060))
+    }
+
+    /// Every later book arm refuses a morphed reader first: the passive ladder
+    /// (`:4562-4567`) with 521, the language, summon, craft, mining, and horse
+    /// arms with 1041 (`:4491-4496`, `:4517-4522`, and `:4650` on). Answers
+    /// whether the read refused.
+    fn book_morph_refused(&self, vid: Vid, mover: Mover, item_vnum: u32) -> bool {
+        if !self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed)
+        {
+            return false;
+        }
+        let notice: &[u8] = if (50314..=50316).contains(&item_vnum)
+            || (50323..=50326).contains(&item_vnum)
+            || (50335..=50340).contains(&item_vnum)
+        {
+            b"[LS;521]"
+        } else {
+            b"[LS;1041]"
+        };
+        self.tell(vid, mover, CHAT_TYPE_INFO, notice, &[]);
+        true
     }
 
     pub(super) fn read_skill_book(
@@ -5180,6 +5260,38 @@ mod tests {
         assert!(inbox.try_recv().is_err());
     }
 
+    /// A morphed caller raising a learnable vnum hears `[LS;521]` and nothing
+    /// moves; a vnum the dispatch arms never reach (250: no job learns it and
+    /// the else-switch skips it) stays silent, with the point unspent either way.
+    #[test]
+    fn a_morphed_skill_up_talks_only_when_the_arms_reach() {
+        let (_clock, mut world, mut inbox) = a_cast();
+        world.set_polymorph(Vid::new(1), 101, false);
+        world.change_pc_point(Vid::new(1), point::POINT_SKILL, 1, false);
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        assert_eq!(world.skill_up(Vid::new(1), b"1"), None);
+        assert_eq!(world.pc_skill_level(1, 1), 0);
+        let mut frames = Vec::new();
+        while let Ok(frame) = inbox.try_recv() {
+            frames.push(frame);
+        }
+        assert_eq!(frames.len(), 1, "one refusal: {frames:?}");
+        let line = &frames[0];
+        let size = usize::from(u16::from_le_bytes([line[1], line[2]]));
+        assert_eq!((line[0], size, line.len()), (4, line.len(), line.len()));
+        assert_eq!(&line[10..], b"[LS;521]");
+        assert_eq!(world.skill_up(Vid::new(1), b"250"), None);
+        assert!(inbox.try_recv().is_err(), "an unreached vnum stays silent");
+        let left = world
+            .characters
+            .find_by_vid(Vid::new(1))
+            .unwrap()
+            .points()
+            .unwrap()
+            .get_point(point::POINT_SKILL);
+        assert_eq!(left, 1, "nothing spent");
+    }
+
     /// `/skillup 3x` ups 3 (`strtoul` stops at `x`); `/skillup 999999999999`
     /// wraps mod 2^32 and refuses as an unknown row.
     #[test]
@@ -5548,6 +5660,51 @@ mod tests {
             [b"[LS;295]".to_vec()],
             "the combo gate talks 295"
         );
+    }
+
+    /// A morphed reader opening 50301 hears `[LS;521]`, and opening 50304 hears
+    /// `[LS;1041]`; the book stays in the cell and nothing climbs. The two basic
+    /// arms refuse before their ladder gates, so the morphed read never trains.
+    #[test]
+    fn a_morphed_reader_hears_the_book_refusal_and_keeps_the_book() {
+        for (vnum, notice) in [
+            (50301, b"[LS;521]".as_slice()),
+            (50304, b"[LS;1041]".as_slice()),
+        ] {
+            let (mut world, mut inbox) = a_reader(vnum, 25_000);
+            world.set_polymorph(Vid::new(1), 101, false);
+            std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+            let mover = world.own_mover(Vid::new(1)).expect("the body stands");
+            let cell =
+                protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
+            let _ = world.use_item(
+                Vid::new(1),
+                cell,
+                mover,
+                &crate::game_loop_messages::QuestAccount::default(),
+            );
+            let frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+            assert_eq!(
+                texts(&frames),
+                [notice.to_vec()],
+                "{vnum} refuses: {frames:?}"
+            );
+            assert_eq!(
+                world.pc_skill_level(1, SKILL_LEADERSHIP),
+                0,
+                "{vnum} climbs nothing"
+            );
+            assert!(
+                world
+                    .characters
+                    .find_by_vid(Vid::new(1))
+                    .unwrap()
+                    .items()
+                    .item_at(cell)
+                    .is_some(),
+                "{vnum} keeps the book"
+            );
+        }
     }
 
     /// The language empire gate refuses with 328: 50311 teaches 126, and the reader is

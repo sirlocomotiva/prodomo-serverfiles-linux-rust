@@ -6,8 +6,8 @@
 //! needs a stat point and a real point below the cap; the lower needs a reset count
 //! and a real point above the job's start. The cap is `g_iStatusPointSetMaxValue`
 //! (`game.status_point_set_max_value`, `G/config.cpp:1101-1110`), 90 on the owner's
-//! data. The polymorph gate is dead: no ported path polymorphs, so it never refuses.
-//! The lock gates the raise and the lower at legacy's places, with the popup it chats.
+//! data. The polymorph gate refuses first (`[LS;521]`), then the lock gates the raise
+//! and the lower at legacy's places, with the popup it chats.
 //!
 //! The raises land exactly as legacy writes them: both arrays move, `ComputePoints`
 //! runs, the attribute's `PointChange` runs (which recomputes the battle points),
@@ -76,6 +76,15 @@ impl GameState {
         if word.is_empty() {
             return None;
         }
+        if self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed)
+        {
+            use protocol::gc_chat::CHAT_TYPE_INFO;
+            let mover = self.own_mover(vid)?;
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;521]", &[]);
+            return None;
+        }
         // `do_stat` and `do_stat_minus` (`G/cmd_general.cpp:730,805`), after the empty
         // line; the popup chats. `do_stat_val` has no gate.
         if self.is_secured(vid) {
@@ -102,13 +111,23 @@ impl GameState {
     /// held numbers, or `None` for a line that runs nothing (no word, an
     /// amount at most 0, an unknown word, a gate, or a cap). The amount is
     /// clamped to the stat pool and to the room below the cap; the landing
-    /// is `do_stat`'s, with the amount in place of 1. The polymorph gate is
-    /// dead: no ported path polymorphs, so it never refuses.
+    /// is `do_stat`'s, with the amount in place of 1. A polymorphed caller
+    /// hears the Romanian line (`[LS;521]`'s sibling, `:3709-3713`).
     pub(super) fn run_stat_val(&mut self, vid: Vid, rest: &[u8]) -> Option<StatHeld> {
         let (word, tail) = one_argument(rest);
         let (amount_word, _) = one_argument(tail);
         let amount = str_to_int(&amount_word);
         if word.is_empty() || amount <= 0 {
+            return None;
+        }
+        if self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed)
+        {
+            use protocol::gc_chat::CHAT_TYPE_INFO;
+            let mover = self.own_mover(vid)?;
+            let line = b"@@(cmd_general)tradus:You cannot change your state as long as you are transformed";
+            self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);
             return None;
         }
         let kind = match word.as_slice() {
@@ -125,7 +144,7 @@ impl GameState {
     /// attribute rises by the line's amount for stat points. Answers the new
     /// held numbers, or `None` for a line that runs nothing. Only the empty
     /// word is silent; every other refusal answers: the polymorph gate sends
-    /// `[LS;521]` (dead: no ported path polymorphs, so it never refuses), an
+    /// `[LS;521]`, an
     /// empty pool sends `There are no stat points left.`, an amount past the
     /// pool sends `Less stat points left.`, and a negative amount sends `You
     /// entered an incorrect value.`. The clamp is a hardcoded 90 on the
@@ -140,6 +159,13 @@ impl GameState {
             return None;
         }
         let mover = self.own_mover(vid)?;
+        if self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed)
+        {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;521]", &[]);
+            return None;
+        }
         let points = self.pc_points_mut(vid.raw())?;
         let pool = points.get_point(point::POINT_STAT);
         if pool <= 0 {
@@ -187,7 +213,7 @@ impl GameState {
     /// else the never-logged-in arm); below the target's job start answers
     /// `Cannot set stat under initial stat`; a delta past the target's pool
     /// answers `Less stat points left.`. The polymorph gate sends `[LS;521]`
-    /// (dead: no ported path polymorphs) and the subcommand gate is dead too:
+    /// when the *target* is polymorphed, and the subcommand gate is dead:
     /// the dispatcher only builds the four attributes. Past 90 the target
     /// clamps to 90 and the delta shrinks with it; a zero or negative delta
     /// lands: the real array takes the target, the instant array moves by the
@@ -217,6 +243,15 @@ impl GameState {
             self.tell_set_stat_miss(vid, mover, &name_word);
             return None;
         };
+        // The polymorph gate (`G/cmd_gm.cpp:4606-4610`): the *target's* morph refuses,
+        // and the caller hears the line.
+        if self
+            .points_of(target.raw())
+            .is_some_and(world::character::Points::is_polymorphed)
+        {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;521]", &[]);
+            return None;
+        }
         let points = self.pc_points_mut(target.raw())?;
         let current = points.real_point(kind);
         let pool = points.get_point(point::POINT_STAT);
@@ -1029,6 +1064,81 @@ mod tests {
                 "{word:?} carries pool {pool}: {kinds:?}"
             );
         }
+    }
+
+    /// A morphed caller hears `[LS;521]` on `/stat`, `/stat-`, and the `con+` line,
+    /// and the Romanian line on `stat_val`, with no point moved and no record but the
+    /// line. The morph comes through `SetPolymorph`, so the gate reads the live race.
+    #[test]
+    fn a_morphed_caller_hears_the_refusal_on_every_stat_line() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = entered(&mut world);
+        world.set_polymorph(Vid::new(VID), 101, false);
+        while inbox.try_recv().is_ok() {}
+        assert!(
+            world.run_stat(Vid::new(VID), b"st", false).is_none(),
+            "a morphed raise runs nothing"
+        );
+        assert!(
+            world.run_stat(Vid::new(VID), b"st", true).is_none(),
+            "a morphed lower runs nothing"
+        );
+        assert!(
+            world
+                .run_stat_plus(Vid::new(VID), b"3", point::POINT_HT)
+                .is_none(),
+            "a morphed con+ runs nothing"
+        );
+        assert!(
+            world.run_stat_val(Vid::new(VID), b"st 3").is_none(),
+            "a morphed stat_val runs nothing"
+        );
+        let mut frames = Vec::new();
+        while let Ok(frame) = inbox.try_recv() {
+            frames.push(frame);
+        }
+        let texts: Vec<Vec<u8>> = frames.iter().map(|frame| text_of(frame)).collect();
+        assert_eq!(
+            texts,
+            [
+                b"[LS;521]".to_vec(),
+                b"[LS;521]".to_vec(),
+                b"[LS;521]".to_vec(),
+                b"@@(cmd_general)tradus:You cannot change your state as long as you are transformed"
+                    .to_vec(),
+            ],
+            "each line refuses with its own line: {texts:?}"
+        );
+        let points = world.pc_points_mut(VID).expect("the entrant has points");
+        assert_eq!(points.get_point(point::POINT_STAT), 1, "no point moves");
+    }
+
+    /// `tcon` on a morphed target refuses with `[LS;521]` to the *caller*, and the
+    /// target's points stay. An unmorphed target moves, so the gate reads the target.
+    #[test]
+    fn a_set_on_a_morphed_target_refuses_to_the_caller() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let (mut caller, mut other) = entered_pair(&mut world);
+        world.set_polymorph(Vid::new(OTHER), 101, false);
+        while caller.try_recv().is_ok() {}
+        while other.try_recv().is_ok() {}
+        assert!(
+            world
+                .run_set_stat(Vid::new(VID), b"P24578 3", point::POINT_HT)
+                .is_none(),
+            "a morphed target runs nothing"
+        );
+        let mut frames = Vec::new();
+        while let Ok(frame) = caller.try_recv() {
+            frames.push(frame);
+        }
+        assert_eq!(frames.len(), 1, "the caller hears one line");
+        assert_eq!(text_of(&frames[0]), b"[LS;521]", "the line is the refusal");
+        assert!(other.try_recv().is_err(), "the target hears nothing");
+        let points = world.pc_points_mut(OTHER).expect("the other has points");
+        assert_eq!(points.get_point(point::POINT_STAT), 5, "no point moves");
     }
 
     /// The reset fills the count to 12 with one record and answers the held row.

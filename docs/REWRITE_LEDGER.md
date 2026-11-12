@@ -53905,3 +53905,37 @@ and the failed line. Along the way `use_item`'s early arms and the land's captur
 moved into their own seats (`use_item_early`, `UseLand`), and the world's use
 classification into its own tuple, so the line and argument lints hold.
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5482 passed, 1 failed in 46 targets — the failure is `a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks`, which passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 598. The morphed stat gates
+
+Ledger 597 gave the world a live morph race; six call sites still claimed their
+polymorph gates were dead. They are not dead anymore. The stat family's five
+gates refuse first: `/stat` and `/stat-` with `[LS;521]` before the lock
+(`G/cmd_general.cpp:723-730`), `stat_val` with the Romanian line
+(`:3709-3713`), `con+` with `[LS;521]` (`G/cmd_gm.cpp:4084-4088`), and `/tcon`
+with `[LS;521]` to the caller when the *target* is morphed (`:4606-4610`).
+`SkillLevelUp`'s polymorph arm (`G/char_skill.cpp:731-736`) refuses silently
+inside `skill_up_level`, so the book and quest climbs pass through it, and
+`/skillup` talks (`[LS;521]`) only when the dispatch arms (`:928-973`) reach
+the vnum — a morphed caller raising an unreached vnum stays silent with the
+point unspent, as legacy's `CanUseSkill`-first order has it. The book arms
+refuse by ladder: the leader trio and the passive ladder with 521
+(`G/char_item.cpp:4410-4415`, `:4562-4567`), the combo trio and the language,
+summon, craft, mining, and horse arms with 1041 (`:4437-4442`, `:4491-4496`,
+`:4517-4522`, and `:4650` on).
+
+The gates read the world's own race through `points_of`, and the four `dead:
+no ported path polymorphs` claims are gone from the docs. The 50335-50340
+passive books sit in the same 521 arm (`ENABLE_NEW_PASSIVE_SKILL` is on):
+they ride the same `case` as 50314-50326.
+
+Proved by `a_morphed_caller_hears_every_stat_refusal` (the live `/polymorph
+101` morphs, every caller line refuses with its own line, `/tcon` refuses to
+the unmorphed caller, nothing moves, and the unmorph runs again with its
+records) and four unit seats: the four caller lines' texts, the target gate's
+caller-side line, the skillup reach/silence split (250 stays silent), and the
+two basic books' refusal with the book kept. Twelve `commands.md` notes and
+the `sys.char.polymorph` note carry the slice. Along the way `book_arm_gates`
+shed its morph arm into `book_morph_refused` and the scenario its seed and
+entry halves, so the line lint holds.
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5485 passed, 3 failed in 46 targets — all three pass alone and in the 8× check (`a_cape_of_courage_gathers_the_dogs_around` timed out on 8 bytes, `a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit` saw a stray header 114, and this slice's own scenario saw a lagged `GC_CHARACTER_UPDATE` in its last quiet), so the known load flakes, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

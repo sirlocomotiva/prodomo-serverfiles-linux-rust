@@ -26392,6 +26392,166 @@ fn a_stat_point_raises_and_a_reset_lowers() {
     );
 }
 
+/// The stat family's polymorph gates (`do_stat`'s and `do_stat_minus`'s `:723-728`,
+/// `do_stat_val`'s `:3709-3713`, `do_stat_plus_amount`'s `:4084-4088`, and
+/// `do_set_stat`'s `:4606-4610`): a god morphs into the dog, and every stat line
+/// refuses — `/stat st` and `/stat- st` with `[LS;521]`, `stat_val st 3` with the
+/// Romanian line, `con+ 3` with `[LS;521]` — while `/tcon Alpha 3` refuses to the
+/// *unmorphed* caller with `[LS;521]` because the *target* is morphed. The morph
+/// is the live `/polymorph 101`, so the gates read the world's own race, and the
+/// unmorph proves the lines run again: `/stat st` moves a point with its records.
+#[test]
+fn a_morphed_caller_hears_every_stat_refusal() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_morph_stat_pair(&database);
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    let (mut alice, listed) = enter_morph_stat_god(&server);
+    let (mut yankee, _) = enter_morph_stat_witness(&server, &mut alice);
+
+    // The morph: the witness's add carries race 101.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let add = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        101,
+        "the shown race is the dog"
+    );
+    alice.drain_game(Duration::from_millis(500), game_len);
+    yankee.drain_game(Duration::from_millis(500), game_len);
+
+    // Every caller line refuses with its own line and nothing moves.
+    for (line, want, note) in [
+        (
+            b"/stat st".as_slice(),
+            b"[LS;521]".as_slice(),
+            "the raise refuses",
+        ),
+        (
+            b"/stat- st".as_slice(),
+            b"[LS;521]".as_slice(),
+            "the lower refuses",
+        ),
+        (
+            b"/stat_val st 3".as_slice(),
+            b"@@(cmd_general)tradus:You cannot change your state as long as you are transformed"
+                .as_slice(),
+            "stat_val refuses in Romanian",
+        ),
+        (
+            b"/con+ 3".as_slice(),
+            b"[LS;521]".as_slice(),
+            "con+ refuses",
+        ),
+    ] {
+        alice.send_record(&client_chat(CHAT_TALKING, line));
+        assert_eq!(
+            alice.read_game(),
+            chat_packet(CHAT_TYPE_INFO, 1, want),
+            "{note}"
+        );
+    }
+    alice.quiet("no record follows the refusals");
+
+    // The target gate: unmorphed Yankee aims at morphed Alpha and hears 521.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/tcon Alpha 3"));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 0, b"[LS;521]"),
+        "the target's morph refuses"
+    );
+    yankee.quiet("no record follows the target refusal");
+    wait_for(
+        &database,
+        "(SELECT stat_point FROM player WHERE name = 'Alpha') = 5",
+    );
+
+    // The unmorph proves the lines run again: a point moves with its records.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 2"));
+    let back = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(back[22..24].try_into().expect("two bytes")),
+        u16::from(listed.job),
+        "the clear shows the job again"
+    );
+    alice.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/stat st"));
+    let kinds = read_point_kinds(&mut alice, listed.id, 32);
+    assert!(
+        kinds.contains(&12),
+        "the attribute's change rides again: {kinds:?}"
+    );
+    alice.quiet("the raise ends");
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
+/// The seed for [`a_morphed_caller_hears_every_stat_refusal`]: the pair, god Alice
+/// and low-wizard Yankee, five stat points and one reset on Alpha, and the sash
+/// flag the god login event expects.
+fn seed_morph_stat_pair(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    create_account_before_boot(database, "bob");
+    add_characters(database);
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, 470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Yankee', 'LOW_WIZARD' FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE player SET stat_point = 5, stat_reset_count = 1 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, 'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// The god half of [`a_morphed_caller_hears_every_stat_refusal`]'s entry: Alice
+/// loads, enters, and hears the offline Yankee team list before her god event.
+fn enter_morph_stat_god(server: &Server) -> (Keyed, Listed) {
+    let (mut alice, listed, _items) = load_character(server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    assert_eq!(
+        alice.read_game(),
+        messenger_team_list_many(&[(b"Yankee".as_slice(), false)]),
+        "the entrant hears the GM team"
+    );
+    read_god_login_event(&mut alice);
+    (alice, listed)
+}
+
+/// The witness half: Yankee enters hearing Alpha's team, his team login fans to
+/// Alice before his view burst, and Alice sees him enter.
+fn enter_morph_stat_witness(server: &Server, alice: &mut Keyed) -> (Keyed, Listed) {
+    let (yankee, yankee_listed) =
+        enter_world_on_with_team(server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    let fan = alice.read_game();
+    assert_eq!(
+        fan,
+        messenger_login(1, b"Yankee"),
+        "the fan is yankee's team login"
+    );
+    alice.sees_enter(yankee_listed.id, true, None);
+    (yankee, yankee_listed)
+}
+
 /// How many of `kinds` are `kind`.
 fn count_point_kind(kinds: &[u8], kind: u8) -> usize {
     kinds
