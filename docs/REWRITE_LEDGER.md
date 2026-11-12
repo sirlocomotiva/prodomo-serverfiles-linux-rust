@@ -54870,3 +54870,34 @@ that proves it. The scenario cell names the latest proof,
 `a_morphed_reader_hears_1041_from_the_granted_skillbook`.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5568 passed, 2 failed in 46 targets — both pass alone (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet; the fishing take missed its length assert), so the known load flakes, not this slice, which changed no code; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 635. The forget arm
+
+`sys.skill.core`'s forget arm is ported: `SkillLevelDown` (`G/char_skill.cpp:647-722`)
+and `case ITEM_SKILLFORGET` (`G/char_item.cpp:3262-3279`), the 70037 that stands in the
+owner's data.
+
+The down mirrors the up's shape: the silent gates (morphed, unknown row, unlearnable,
+mastered, no group, past 254, level 0, and the compiled-in `__7AND8TH_SKILLS__`
+anti/help never-to-zero), the typed point refund (`SUB_SKILL`/`SKILL`/`HORSE_SKILL`),
+the drop by one, the general recompute, and byte 76. Two deliberate choices: the
+`ENABLE_REWARD_SYSTEM` tail stays out, as on the way up (the missions are defined but
+no climb fires them); and the recompute runs here even though the up path's own
+"recomputes the points" claim is currently false outside the 141/164-166 refreshes —
+legacy runs `ComputePoints()` in both tails, and a 141 down without it would leave the
+max-HP bonus stale. The up's missing compute is a neighboring gap, not this slice's.
+
+The use arm talks 78 on the land and 88 on any refusal — the down's gates are all
+silent, the morph gate included, so a morphed forgetter hears 88, not 1041. The zero
+socket keeps the book silently under the shared 230g Divergence (legacy destroys it).
+The wire order surprised once: the consume's item-set lands before the down's records
+(refund, the compute's diffs, byte 76, 78), as the boost-book scenario already pins for
+reads. The scenario asserts the refund among the 13 point-changes, the 109 back at 0,
+the store row's delete (level 0 deletes), the 88 with the book kept, and the blank
+book's silence with the book kept.
+
+Mutants (all killed, all restores checksum-verified): the refund negated, the
+zero-socket gate narrowed to `< 0`, the world's classify retargeted at `ITEM_QUEST`,
+and the level-0 gate neutered. The scenario ran 8/8.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5570 passed, 1 failed in 46 targets — the known `a_morphed_caller_hears_every_stat_refusal` load flake, green alone; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

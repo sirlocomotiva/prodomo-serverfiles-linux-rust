@@ -758,7 +758,72 @@ impl GameState {
         Some((slot, climbed))
     }
 
-    /// `IsLearnableSkill` (`G/char_skill.cpp:260-339`): the row is known, below
+    /// `SkillLevelDown` (`G/char_skill.cpp:647-722`): the forget arm's drop. The gates
+    /// refuse silently (`m_pSkillLevels` always stands; `g_bSkillDisable` is a dead
+    /// false): a morphed caller, an unknown row, an unlearnable skill, a mastered
+    /// skill, no group, a vnum past 254, a level of 0 — and, under the compiled-in
+    /// `__7AND8TH_SKILLS__`, an anti/help vnum (221-243) at level 1, which never
+    /// drops to 0. A landed down refunds one typed point (`SUB_SKILL` for type 0,
+    /// `SKILL` for 1-4/6, `HORSE_SKILL` for 5, whose record goes out), drops the
+    /// level by one, recomputes the points, and sends byte 76 with all 255 slots
+    /// (`SkillLevelPacket`). The general compute refreshes the passives from the
+    /// dropped level (no 141-specific call exists on the way down, as none does on the
+    /// way up outside the climb); the `ENABLE_REWARD_SYSTEM` tail stays out, as on the
+    /// way up. Answers the vnum and its new level when the down lands, for the store's
+    /// `store_skill`.
+    fn skill_level_down(&mut self, vid: Vid, job: u8, group: u8, vnum: u32) -> Option<(u8, u8)> {
+        if self
+            .points_of(vid.raw())
+            .is_some_and(world::character::Points::is_polymorphed)
+        {
+            return None;
+        }
+        let row = self.pc_skill_tables.get(vnum).map(|skill| skill.record)?;
+        if !self.is_learnable_skill(vid, job, group, &row) {
+            return None;
+        }
+        let level = self.pc_skill_level(vid.raw(), vnum);
+        if master_of(level) != SKILL_NORMAL {
+            return None;
+        }
+        if group == 0 {
+            return None;
+        }
+        if vnum >= SKILL_MAX_NUM {
+            return None;
+        }
+        if level == 0 {
+            return None;
+        }
+        if (SKILL_NEW_FIRST..=SKILL_HELP_LAST).contains(&vnum) && level == 1 {
+            return None;
+        }
+        let refund = match row.skill_type {
+            0 => point::POINT_SUB_SKILL,
+            1..=4 | 6 => point::POINT_SKILL,
+            5 => point::POINT_HORSE_SKILL,
+            _ => return None,
+        };
+        let refunded = {
+            let points = self.pc_points_mut(vid.raw())?;
+            points
+                .point_change(refund, 1, false, false)
+                .unwrap_or_default()
+                .clone()
+        };
+        self.send_point_records(vid, &refunded);
+        let down = level.saturating_sub(1);
+        self.pc_skill_state(vid.raw()).levels[vnum as usize] = down;
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            let recomputed = points.compute_points();
+            self.send_point_records(vid, &recomputed);
+        }
+        self.send_skill_levels(vid);
+        let slot = u8::try_from(vnum).ok()?;
+        Some((slot, down))
+    }
+
+    /// `IsLearnableSkill` (`G/char_skill.cpp:260-339`): the row is known, below row is known, below
     /// 40, a type-0 below its max, a type-5 (140 needs an assassin), else a
     /// grouped row of the job's type, a type-6 anti vnum with no sibling
     /// learned, or a learned new/help vnum (221-228/236-243, the compiled-in
@@ -1253,6 +1318,36 @@ impl GameState {
             self.stamp_next_read(vid, vnum);
         }
         (read, climbed)
+    }
+
+    /// `case ITEM_SKILLFORGET` (`G/char_item.cpp:3262-3279`): the socket names the skill,
+    /// `SkillLevelDown` drops it, and 78 tells the forget while 88 tells the refusal
+    /// (the down's gates are all silent, the morph gate included — a morphed forgetter
+    /// hears 88, not 1041). A socket of 0 or less refuses silently with the book kept,
+    /// as with skill books: legacy destroys it, and silently destroying a player's item
+    /// is the same Divergence (230g). Answers the forget and, when it lands, the slot
+    /// and level for the store.
+    pub(super) fn forget_skill(
+        &mut self,
+        vid: Vid,
+        mover: Mover,
+        socket0: i32,
+    ) -> (bool, Option<(u8, u8)>) {
+        if socket0 <= 0 {
+            return (false, None);
+        }
+        let vnum = u32::try_from(socket0).unwrap_or(0);
+        let (job, group) = match self.bodies.get(&vid) {
+            Some(body) => (body.card.job, body.card.skill_group),
+            None => return (false, None),
+        };
+        if let Some((slot, down)) = self.skill_level_down(vid, job, group, vnum) {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;78]", &[]);
+            (true, Some((slot, down)))
+        } else {
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;88]", &[]);
+            (false, None)
+        }
     }
 
     /// `SetSkillNextReadTime(vnum, now + number(64800, 108000))` after a read the gates

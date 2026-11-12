@@ -4461,8 +4461,8 @@ impl GameState {
     }
 
     /// Run one `CG_ITEM_USE` for the character online under `vid`: an equippable item goes on
-    /// or comes off, a potion is drunk, and a skill book is read (`CHARACTER::UseItem`,
-    /// `G/char_item.cpp:7168`).
+    /// or comes off, a potion is drunk, a skill book is read, and a forget book is
+    /// forgotten (`CHARACTER::UseItem`, `G/char_item.cpp:7168`).
     ///
     /// A book is read before the world step, because the read's gates talk and the world
     /// refuses a gated book without a line. The world then consumes the one it just read:
@@ -4498,35 +4498,18 @@ impl GameState {
             if !read {
                 // The read's gates refused, and talked. Legacy's `UseItemEx` returns false
                 // with the book kept; the step consumed nothing, so it answers as one that
-                // was never run. The owner id comes from the book's holder, which is here.
-                let character = self
-                    .characters
-                    .find_by_vid(vid)
-                    .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
-                let mut moved = MovedItems::new(
-                    character.player_id(),
-                    vid.raw(),
-                    world::character::MoveDone {
-                        kind: world::character::MoveKind::Used,
-                        records: Vec::new(),
-                        changes: Vec::new(),
-                    },
-                    actor,
-                    &self.protos,
-                    &self.locale,
-                );
-                moved.points = character.points().cloned();
-                moved.quickslots = Some(character.quickslots().clone());
+                // was never run.
                 let _ = landed;
-                return Ok(moved);
+                return self.kept_book_answer(vid, actor);
             }
             if let Some((slot, level)) = landed {
-                let stamp = self
-                    .pc_skills
-                    .get(&vid.raw())
-                    .map_or(0, |state| state.next_read[usize::from(slot)]);
-                climbed = Some((slot, level, i32::from_ne_bytes(stamp.to_ne_bytes())));
+                climbed = Some(self.climbed_with_stamp(vid, slot, level));
             }
+        }
+        // The forget book's drop runs before the step, as the read does: the down's 78
+        // and 88 talk, and the world consumes the one the drop landed.
+        if let Some(early) = self.run_forget_book(vid, at, actor, &mut climbed) {
+            return early;
         }
         // The battle-pass use hook (`G/char_item.cpp:2822-2831`): the used
         // item's vnum and type, read before the step consumes it.
@@ -4679,6 +4662,85 @@ impl GameState {
         } else {
             self.use_quest_item(vid, at, actor, account, moved);
         }
+    }
+
+    /// The answer of a pre-step read or drop the gates refused: the book kept, the step
+    /// never run. The owner id comes from the book's holder, which is here. Shared by the
+    /// book block and the forget block, which build it identically.
+    fn kept_book_answer(
+        &self,
+        vid: common::vid::Vid,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let mut moved = MovedItems::new(
+            character.player_id(),
+            vid.raw(),
+            world::character::MoveDone {
+                kind: world::character::MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            },
+            actor,
+            &self.protos,
+            &self.locale,
+        );
+        moved.points = character.points().cloned();
+        moved.quickslots = Some(character.quickslots().clone());
+        Ok(moved)
+    }
+
+    /// The store's climbed triple for the slot a read or drop moved: the slot, the level,
+    /// and the slot's read-time stamp.
+    fn climbed_with_stamp(&self, vid: common::vid::Vid, slot: u8, level: u8) -> (u8, u8, i32) {
+        let stamp = self
+            .pc_skills
+            .get(&vid.raw())
+            .map_or(0, |state| state.next_read[usize::from(slot)]);
+        (slot, level, i32::from_ne_bytes(stamp.to_ne_bytes()))
+    }
+
+    /// Run the forget book's drop before the world step, as the read runs: the down's 78
+    /// and 88 talk, the landed slot feeds `climbed`, and the world consumes the one the
+    /// drop landed. Answers the step when one ran (fired or refused), `None` when the
+    /// step is no forget.
+    fn run_forget_book(
+        &mut self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        actor: Mover,
+        climbed: &mut Option<(u8, u8, i32)>,
+    ) -> Option<Result<MovedItems, MoveItemRefused>> {
+        let socket0 = self.forget_at(vid, at)?;
+        let (forgot, landed) = self.forget_skill(vid, actor, socket0);
+        if !forgot {
+            // The drop refused, and talked (or silently, for the zero socket, as
+            // with books — the shared 230g Divergence). Legacy's `UseItemEx`
+            // returns false with the book kept; the step consumed nothing, so it
+            // answers as one that was never run.
+            let _ = landed;
+            return Some(self.kept_book_answer(vid, actor));
+        }
+        if let Some((slot, level)) = landed {
+            *climbed = Some(self.climbed_with_stamp(vid, slot, level));
+        }
+        None
+    }
+
+    /// The forget book's socket 0 at `at` for the character online under `vid`, or `None`
+    /// when the step is no forget: no item, no proto, or no forget shape
+    /// (`is_skill_forget`).
+    fn forget_at(&self, vid: common::vid::Vid, at: protocol::item_pos::ItemPos) -> Option<i32> {
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let item = character.items().item_at(at)?.clone();
+        let proto = self.protos.get(item.vnum)?;
+        if !world::character::is_skill_forget(proto) {
+            return None;
+        }
+        Some(item.sockets[0])
     }
 
     /// The skill book at `at` for the character online under `vid`, or `None` when the

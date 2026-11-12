@@ -1088,6 +1088,13 @@ pub fn is_skill_book(proto: &ItemProto) -> bool {
     proto.item_type == ITEM_USE && proto.sub_type == USE_SPECIAL && BOOK_VNUMS.contains(&proto.vnum)
 }
 
+/// Whether `CG_ITEM_USE` on an item of this prototype forgets a skill (`:3262-3279`):
+/// `ITEM_SKILLFORGET` (the 70037 of the owner's data).
+#[must_use]
+pub fn is_skill_forget(proto: &ItemProto) -> bool {
+    proto.item_type == gamedata::item_kind::ITEM_SKILLFORGET
+}
+
 /// Whether the proto is a polymorph ball or book: `ITEM_POLYMORPH` of the ball five
 /// or the 50322 book (`ItemProcess_Polymorph`, `G/char_item.cpp:9783-9814`, `:9816-9835`).
 #[must_use]
@@ -1100,13 +1107,13 @@ type SeatedArms = (bool, bool, bool, bool, bool, bool, bool, bool, bool);
 
 /// The use's classification: the potion, the skill book, the quest item, the
 /// polymorph ball or book, and the nine seated arms.
-type UseClassed = (bool, bool, bool, bool, SeatedArms);
+type UseClassed = (bool, bool, bool, bool, bool, SeatedArms);
 
 /// The unported-use refusal for the classified proto, or `None` when some arm
 /// answers it: an `ITEM_USE` of no known sub type names the sub type, any other
 /// unanswered type names the type.
 fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
-    let (potion, book, quest, ball, seated) = classed;
+    let (potion, book, forget, quest, ball, seated) = classed;
     let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
     if !potion
         && !book
@@ -1125,6 +1132,7 @@ fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
     }
     if !potion
         && !book
+        && !forget
         && !quest
         && !ball
         && !clear
@@ -1143,17 +1151,19 @@ fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
     None
 }
 
-/// The consumed kind of the seated `ITEM_USE` arms (or the skill book), or `None`
-/// when the use is no seated arm: the cure, the cloak, the ability potion, the
+/// The consumed kind of the seated `ITEM_USE` arms (or the skill book, or the
+/// forget book), or `None` when the use is no seated arm: the cure, the cloak, the ability potion, the
 /// 50801-50820 pair, the 507 arm, the gold bar, the cape, the pocket, else the plain
-/// book's `Used`.
+/// book's `Used` (the forget book's too).
 fn seated_use_kind(
     book: bool,
+    forget: bool,
     seated: (bool, bool, bool, bool, bool, bool, bool, bool, bool),
 ) -> Option<super::item_move::MoveKind> {
     use super::item_move::MoveKind;
     let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
     if !(book
+        || forget
         || clear
         || cloak
         || abled
@@ -1314,6 +1324,7 @@ pub fn use_item(
     let classed = (
         super::potion::is_potion(proto),
         is_skill_book(proto),
+        is_skill_forget(proto),
         proto.item_type == gamedata::item_kind::ITEM_QUEST,
         is_polymorph_ball(proto),
         use_special_kind(proto),
@@ -1321,7 +1332,7 @@ pub fn use_item(
     if let Some(refused) = use_ported(proto, classed) {
         return Err(refused);
     }
-    let (potion, book, quest, ball, seated) = classed;
+    let (potion, book, forget, quest, ball, seated) = classed;
     use_checks(&item, proto, rules, gear.points)?;
     // `UseItemEx`'s first-use starts (`G/char_item.cpp:2804-2820`): the clock stamps after
     // the checks, before the belt arms and the type switch. Without a clock base the use
@@ -1371,7 +1382,7 @@ pub fn use_item(
     if ball {
         return Ok(done(MoveKind::Booked, Trail::default()));
     }
-    if let Some(kind) = seated_use_kind(book, seated) {
+    if let Some(kind) = seated_use_kind(book, forget, seated) {
         // `case USE_CLEAR` (`G/char_item.cpp:5539-5551`) strips the bad affects and
         // uses one of the stack; the strip runs on the game state (it holds the
         // affects), so this arm answers the consume and the kind names the strip.

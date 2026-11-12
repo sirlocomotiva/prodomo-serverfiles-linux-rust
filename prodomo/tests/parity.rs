@@ -17582,6 +17582,95 @@ fn a_skill_up_spends_and_a_cast_heals_over_the_wire() {
     assert!(charged && healed, "the charge and the heal both land");
 }
 
+/// Ledger 635: a forget book (`ITEM_SKILLFORGET`, 70037) with socket 109 drops Alpha's
+/// learned 109 back to 0, refunds the typed point, tells `[LS;78]`, and consumes the
+/// book; a second forget naming the unlearned 110 refuses with `[LS;88]` and stays;
+/// a blank forget refuses silently and stays.
+#[test]
+fn a_forget_book_drops_the_named_skill_and_a_bad_name_refuses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 2, skill_point = 0 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 109, 1, 0 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 60, \
+         id, 1, 0, 1, 70037, 109 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 61, \
+         id, 1, 1, 1, 70037, 110 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 62, \
+         id, 1, 2, 1, 70037, 0 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let alpha_vid = listed.id;
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    alpha.send_record(&client_item_use(0));
+    // The consume lands first, as with books: the cell clears, then the down's
+    // records follow — the refund, the compute's diffs, byte 76, and 78.
+    let (window, cell, _vnum, count) = set_fields(&alpha.read_game());
+    assert_eq!((window, cell, count), (1, 0, 0), "the book goes");
+    let mut changes = Vec::new();
+    let burst = loop {
+        let record = alpha.read_game();
+        if record[0] == GC_SKILL_LEVEL_NEW {
+            break record;
+        }
+        assert_eq!(record[0], GC_POINT_CHANGE, "a point change: {record:02x?}");
+        changes.push(record);
+    };
+    let refund = point_change(alpha_vid, 28, 0, 1);
+    assert!(
+        changes.contains(&refund),
+        "the refund lands: {changes:02x?}"
+    );
+    assert_eq!(changes.len(), 13, "the refund and the compute's diffs");
+    assert_eq!(burst[0], GC_SKILL_LEVEL_NEW, "{burst:02x?}");
+    assert_eq!(burst.len(), SKILL_LEVEL_LEN);
+    assert_eq!(burst[1 + 109 * 6], 0);
+    assert_eq!(burst[1 + 109 * 6 + 1], 0);
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;78]"));
+    wait_for(
+        &database,
+        "(SELECT count(*) = 0 FROM player_skill WHERE vnum = 109)",
+    );
+    alpha.send_record(&client_item_use(1));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;88]"));
+    alpha.quiet_for(
+        "a refused forget keeps its book",
+        Duration::from_millis(500),
+    );
+    wait_for(
+        &database,
+        "(SELECT count(*) = 1 FROM item WHERE id = 61 AND vnum = 70037)",
+    );
+    // The blank forget refuses silently with the book kept (the shared 230g
+    // Divergence: legacy destroys it).
+    alpha.send_record(&client_item_use(2));
+    alpha.quiet_for("a blank forget says nothing", Duration::from_millis(500));
+    wait_for(
+        &database,
+        "(SELECT count(*) = 1 FROM item WHERE id = 62 AND vnum = 70037)",
+    );
+}
+
 /// `HEADER_CG_ANSWER_MAKE_GUILD` (`G/packet.h:51`): 0x51.
 const CG_ANSWER_MAKE_GUILD: u8 = 0x51;
 
