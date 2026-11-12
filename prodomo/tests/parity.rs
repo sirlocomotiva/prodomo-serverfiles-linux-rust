@@ -53147,6 +53147,112 @@ fn the_hidden_boxs_letter_reads_and_the_siege_asks_to_join() {
     drop(server);
 }
 
+/// `quest.event_panel` over the wire: the implementor's button runs the fifteen-option
+/// select, the moonlight arm says Inactive, and Enable starts the moon (the start notice,
+/// the moon's begin letter) while the panel re-letters itself; the moonlight arm then says
+/// Active, and Disable ends the moon (the end notice, every event quest's begin clear) with
+/// the panel re-lettered again. Quest numbers: panel 5, moonlight 12.
+#[test]
+fn a_god_opens_the_event_panel_and_rings_the_moonlight() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    alice.send_record(&client_script_button(5));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, PANEL_MAIN_PAGE),
+        "the panel's button"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, PANEL_MOON_PAGE),
+        "the moonlight arm says Inactive"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[QUESTBUTTON idx;5|name;GM: Event Panel][DONE]"),
+        "Enable re-letters the panel"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_title(5, b"GM: Event Panel"),
+        "the panel's title"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Moonlight Chest Event has started! Defeat enemies and grab your rewards!"
+        ),
+        "the start notice"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[QUESTBUTTON idx;12|name;Moonlight Treasures ][DONE]"),
+        "the moon's begin letter"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_title(12, b"Moonlight Treasures "),
+        "the moon's title"
+    );
+    alice.quiet("the start ends");
+    alice.send_record(&client_script_button(5));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, PANEL_MAIN_PAGE),
+        "the panel's button again"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, PANEL_MOON_ACTIVE_PAGE),
+        "the moonlight arm says Active"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[QUESTBUTTON idx;5|name;GM: Event Panel][DONE]"),
+        "Disable re-letters the panel"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_title(5, b"GM: Event Panel"),
+        "the panel's title again"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Moonlight Chest Event has ended!"),
+        "the end notice"
+    );
+    for quest in [4_u16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
+        assert_eq!(
+            alice.read_game(),
+            quest_begin_clear(quest),
+            "quest {quest}'s begin clears"
+        );
+    }
+    alice.quiet("the end ends");
+    drop(server);
+}
+
+const PANEL_MAIN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Please select one of the options:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Moonlight Box Drop|2;Hexegonal Box Drop|3;Fishing Event|4;Mining Event|5;Metin Event|6;Boss Event|7;Golden Frog Event|8;Hide and Seek Event|9;Tanaka Event|10;Experience Event|11;Loot Event|12;OX Event|13;Siege War Event|14;Kingdom War Event|15;Cancel]";
+const PANEL_MOON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Moonlight Box Drop[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]State: Inactive[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Enable Event|2;Disable Event|3;Exit]";
+const PANEL_MOON_ACTIVE_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Moonlight Box Drop[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]State: Active[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Enable Event|2;Disable Event|3;Exit]";
+
 /// `sys.event.manager`'s moonlight, hexegonal and fishing arms (`SetMoonlightEvent`,
 /// `SetHexegonalEvent`, `SetFishingEvent`, `G/event_manager.cpp:1156-1202`): the teacher's
 /// clicks start all three (each start notice, each begin letter — moon 12, hex 8, fish 6 —

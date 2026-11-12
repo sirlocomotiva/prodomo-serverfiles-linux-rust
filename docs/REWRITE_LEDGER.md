@@ -54139,3 +54139,24 @@ burst so the siege button arrives where the costume hides' part 1 was
 expected; the select resume's `+1` shows `[DONE]` for the no instead of the
 farewell page).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5509 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 607. The panel's moonlight
+
+`quest.event_panel` is `ported`: scenario
+`a_god_opens_the_event_panel_and_rings_the_moonlight`. The implementor's quest
+5 button runs the fifteen-option select over the wire (pinned whole), the
+moonlight arm says `State: Inactive` with its three-option select, and Enable
+(`set_event(1, 7)`) starts the moon through the already-ported
+`_start_event`/`SetMoonlightEvent` arm: the closing page re-letters the panel
+(the `[QUESTBUTTON idx;5|name;GM: Event Panel]` text with `[DONE]`), the
+panel's title rides, the start notice chats, and the edge's `event_begin`
+sends the moon's begin letter and title. The arm then says `State: Active`,
+and Disable (`set_event(2, 7)`) ends the moon: the panel re-letters, the end
+notice chats, and the edge's `event_end` — which every event quest guards on
+its flag being 0 with a `clear_letter()` — clears the begin bit of every
+other event quest (4, 6-16) in quest order. No production code changed. Two
+mutants die on their intended asserts (the select resume's `+1` shows the hex
+arm for the moonlight answer instead of the Inactive page; the moonlight flag
+remapped to `hexegonal_drop` loses the moon's begin letter after the start
+notice).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5510 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
