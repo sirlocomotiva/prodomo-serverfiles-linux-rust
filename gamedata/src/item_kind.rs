@@ -51,6 +51,10 @@ pub const ITEM_QUEST: i32 = 18;
 pub const ITEM_GIFTBOX: i32 = 23;
 /// `ITEM_POLYMORPH` (19): a ball or book that morphs its user.
 pub const ITEM_POLYMORPH: i32 = 19;
+/// `ITEM_TREASURE_BOX` (20): a box a matching key opens.
+pub const ITEM_TREASURE_BOX: i32 = 20;
+/// `ITEM_TREASURE_KEY` (21): a key a matching box takes.
+pub const ITEM_TREASURE_KEY: i32 = 21;
 /// `ITEM_PICK`, a pickaxe.
 pub const ITEM_PICK: i32 = 24;
 /// `ITEM_TOTEM`, which `FindEquipCell` refuses whatever its wear flags say.
@@ -296,6 +300,8 @@ mod tests {
             (ITEM_SKILLBOOK, "ITEM_SKILLBOOK"),
             (ITEM_SKILLFORGET, "ITEM_SKILLFORGET"),
             (ITEM_QUEST, "ITEM_QUEST"),
+            (ITEM_TREASURE_BOX, "ITEM_TREASURE_BOX"),
+            (ITEM_TREASURE_KEY, "ITEM_TREASURE_KEY"),
             (ITEM_GIFTBOX, "ITEM_GIFTBOX"),
             (ITEM_PICK, "ITEM_PICK"),
             (ITEM_TOTEM, "ITEM_TOTEM"),

@@ -54607,3 +54607,26 @@ die in the scenario and the unit tests; the boundary mutant first survived and
 grew its pin.
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5539 passed, 1 failed in 46 targets — `a_morphed_caller_hears_every_stat_refusal`, the same burst-reader timing flake as 625, green alone), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 627. The treasure key
+
+The key turns now. `key_step` ports `case ITEM_TREASURE_KEY`
+(`G/char_item.cpp:3099-3177`) as a `use_to_item` arm: a missing, exchanging or
+worn box is silent, a non-box talks `[LS;1248]`, a value-0 mismatch or a failed
+draw talks `[LS;46]`, and the key and the box go only when every arm lands. The
+draw is the giftbox's, extracted as `draw_group_rows`, and the secured gate
+stands before it, as `UseItem`'s does. On the owner's data all keys match all
+boxes at value0 0 and no box group exists, so every live use fails kept; the
+scenario proves the three refusals and the kept rows, and the in-memory
+`a_key_opens_its_matching_box` proves the success with a test group. A lone box
+needs nothing: `NotPorted` is already silent, as legacy's `return false` is.
+
+The refactor fixed 626's failure packing: a failed draw dropped the gifts the
+earlier rows had landed, keeping ghost items the client never saw. The gifts
+now ride before the failure line, as legacy's inline sends do. `sys.item.proto`
+is `ported`.
+
+Three mutants (the match inverted, the box's spend dropped, the failure line
+swapped) die in the unit test and the scenario.
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5541 passed, 1 failed in 46 targets — `a_morphed_caller_hears_every_stat_refusal`, the same burst-reader timing flake as 625-626, green alone), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -1,4 +1,5 @@
-//! The giftbox use: `case ITEM_GIFTBOX` (`G/char_item.cpp:3180-3258`).
+//! The giftbox and treasure-key uses: `case ITEM_GIFTBOX` (`G/char_item.cpp:3180-3258`)
+//! and `case ITEM_TREASURE_KEY` (`:3099-3177`).
 //!
 //! The battle-pass `CHEST_OPEN` mission registers first, then the dragon-soul gate
 //! refuses a 51500-52000 box to an unqualified caller with `[LS;1094]`. The box's
@@ -7,9 +8,14 @@
 //! [`SpecialItemGroup::multi_index`]): a `Pct` bag rolls `number(1, 100)` per row,
 //! any other bag draws once over the totals. Each drawn row runs its arm — the
 //! seven keyword arms or the item arm — and only when every arm lands is one box
-//! spent and the row's line told. A failed arm talks `[LS;56]` instead: the box is
-//! kept, but the gifts the earlier rows already gave stay given, as legacy's
-//! early `return false` keeps them.
+//! spent and the row's line told. A failed draw talks the failure line instead:
+//! the box is kept, but the gifts the earlier rows already gave stay given and
+//! sent, as legacy's early `return false` sends them.
+//!
+//! The key's use runs the same draw on the box it names: a missing or held box is
+//! silent, a non-box talks `[LS;1248]`, a value mismatch or a failed draw talks
+//! `[LS;46]`, and the key and the box go only when every arm lands. The key has
+//! no battle-pass hook and no dragon-soul gate.
 //!
 //! # The arms
 //!
@@ -78,6 +84,17 @@ impl GameState {
         at: ItemPos,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
+        if self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .is_some_and(world::character::Points::is_secured)
+        {
+            return Err(MoveItemRefused::Refused(
+                world::character::MoveRefused::Secured,
+            ));
+        }
         let box_vnum = self
             .characters
             .find_by_vid(vid)
@@ -90,25 +107,6 @@ impl GameState {
             self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;1094]", &[]);
             return Ok(self.giftbox_kept(vid, actor));
         }
-        let key = i32::try_from(box_vnum).unwrap_or(i32::MAX);
-        let Some(group) = self.item_groups.special.get(&key).cloned() else {
-            self.tell(vid, actor, CHAT_TYPE_TALKING, b"[LS;56]", &[]);
-            return Ok(self.giftbox_kept(vid, actor));
-        };
-        if group.is_empty() {
-            // Legacy reads `m_vecProbs.back()` on the empty vector, a Defect; the
-            // Rewrite fails the use, as a missing group does.
-            self.tell(vid, actor, CHAT_TYPE_TALKING, b"[LS;56]", &[]);
-            return Ok(self.giftbox_kept(vid, actor));
-        }
-        let rolls: Vec<i32> = if group.group_type == gamedata::special_item_group::GroupType::Pct {
-            (0..group.group_size())
-                .map(|_| number(&mut self.dice, 1, 100))
-                .collect()
-        } else {
-            let back = group.totals.last().copied().unwrap_or(0).max(1);
-            vec![number(&mut self.dice, 1, back)]
-        };
         let questing = self.quest_running(vid);
         let mut gifts = MoveDone {
             kind: world::character::MoveKind::Used,
@@ -116,16 +114,8 @@ impl GameState {
             changes: Vec::new(),
         };
         let mut lines: Vec<(u32, i32)> = Vec::new();
-        for index in group.multi_index(&rolls) {
-            let (Some(vnum), Some(count)) = (group.vnum(index), group.count(index)) else {
-                continue;
-            };
-            let rare = group.rare_pct(index).unwrap_or(0);
-            if !self.land_group_row(vid, vnum, count, rare, questing, &mut gifts) {
-                self.tell(vid, actor, CHAT_TYPE_TALKING, b"[LS;56]", &[]);
-                return Ok(self.giftbox_kept(vid, actor));
-            }
-            lines.push((vnum, count));
+        if !self.draw_group_rows(vid, box_vnum, questing, &mut gifts, &mut lines) {
+            return Ok(self.pack_failed_draw(vid, actor, gifts, b"[LS;56]"));
         }
         let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
             world::character::consume_giftbox(items, at, rules, gear)
@@ -146,6 +136,155 @@ impl GameState {
         changes.append(&mut moved.changes);
         moved.changes = changes;
         Ok(moved)
+    }
+
+    /// Run one treasure-key use on the box at `dest`: the checks, the box's draw,
+    /// the spend of both, and the lines (`case ITEM_TREASURE_KEY`,
+    /// `G/char_item.cpp:3099-3177`).
+    pub(super) fn key_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .is_some_and(world::character::Points::is_secured)
+        {
+            return Err(MoveItemRefused::Refused(
+                world::character::MoveRefused::Secured,
+            ));
+        }
+        // The key's checks run before the draw, whose arms have side effects.
+        self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            world::character::check_key_use(items, at, rules, gear)
+        })?;
+        let box_vnum = self.characters.find_by_vid(vid).ok().and_then(|character| {
+            let box_item = character.items().item_at(dest)?;
+            if character.items().is_exchanging(box_item.id) {
+                return None;
+            }
+            if world::character::is_equip_position(dest) {
+                return None;
+            }
+            Some(box_item.vnum)
+        });
+        let Some(box_vnum) = box_vnum else {
+            return Ok(self.giftbox_kept(vid, actor));
+        };
+        let box_type = self.protos.get(box_vnum).map(|proto| proto.item_type);
+        if box_type != Some(gamedata::item_kind::ITEM_TREASURE_BOX) {
+            self.tell(vid, actor, CHAT_TYPE_TALKING, b"[LS;1248]", &[]);
+            return Ok(self.giftbox_kept(vid, actor));
+        }
+        let key_value = self.key_value0(vid, at);
+        let box_value = self.protos.get(box_vnum).map_or(0, |proto| proto.values[0]);
+        if key_value != box_value {
+            self.tell(vid, actor, CHAT_TYPE_TALKING, b"[LS;46]", &[]);
+            return Ok(self.giftbox_kept(vid, actor));
+        }
+        let questing = self.quest_running(vid);
+        let mut gifts = MoveDone {
+            kind: world::character::MoveKind::Used,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        let mut lines: Vec<(u32, i32)> = Vec::new();
+        if !self.draw_group_rows(vid, box_vnum, questing, &mut gifts, &mut lines) {
+            return Ok(self.pack_failed_draw(vid, actor, gifts, b"[LS;46]"));
+        }
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            world::character::consume_key_and_box(items, at, dest, rules, gear)
+        })?;
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let packed = MovedItems::new(pid, vid.raw(), gifts, actor, &self.protos, &self.locale);
+        let to = actor.recipient(&self.locale);
+        let mut records = packed.records;
+        records.append(&mut moved.records);
+        for (vnum, count) in lines {
+            self.push_group_row_lines(to, vnum, count, &mut records);
+        }
+        moved.records = records;
+        let mut changes = packed.changes;
+        changes.append(&mut moved.changes);
+        moved.changes = changes;
+        Ok(moved)
+    }
+
+    /// The key's `value0`, or 0 with no key.
+    fn key_value0(&self, vid: Vid, at: ItemPos) -> i32 {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|key| self.protos.get(key.vnum))
+            .map_or(0, |proto| proto.values[0])
+    }
+
+    /// The box's draw and its arms (`GiveItemFromSpecialItemGroup`,
+    /// `G/char_item.cpp:9575-9690`): the rows land into `gifts`, their `(vnum,
+    /// count)` into `lines`. A missing or empty group fails, as a failed arm
+    /// does; the gifts the earlier rows already gave stay in `gifts`.
+    fn draw_group_rows(
+        &mut self,
+        vid: Vid,
+        box_vnum: u32,
+        questing: bool,
+        gifts: &mut MoveDone,
+        lines: &mut Vec<(u32, i32)>,
+    ) -> bool {
+        let key = i32::try_from(box_vnum).unwrap_or(i32::MAX);
+        let Some(group) = self.item_groups.special.get(&key).cloned() else {
+            return false;
+        };
+        if group.is_empty() {
+            // Legacy reads `m_vecProbs.back()` on the empty vector, a Defect.
+            return false;
+        }
+        let rolls: Vec<i32> = if group.group_type == gamedata::special_item_group::GroupType::Pct {
+            (0..group.group_size())
+                .map(|_| number(&mut self.dice, 1, 100))
+                .collect()
+        } else {
+            let back = group.totals.last().copied().unwrap_or(0).max(1);
+            vec![number(&mut self.dice, 1, back)]
+        };
+        for index in group.multi_index(&rolls) {
+            let (Some(vnum), Some(count)) = (group.vnum(index), group.count(index)) else {
+                continue;
+            };
+            let rare = group.rare_pct(index).unwrap_or(0);
+            if !self.land_group_row(vid, vnum, count, rare, questing, gifts) {
+                return false;
+            }
+            lines.push((vnum, count));
+        }
+        true
+    }
+
+    /// A failed draw's answer: the gifts the earlier rows gave, then the failure
+    /// line. The box is kept.
+    fn pack_failed_draw(&self, vid: Vid, actor: Mover, gifts: MoveDone, line: &[u8]) -> MovedItems {
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let mut packed = MovedItems::new(pid, vid.raw(), gifts, actor, &self.protos, &self.locale);
+        let to = actor.recipient(&self.locale);
+        packed.records.push(crate::chat_line::chat_packet(
+            to,
+            CHAT_TYPE_TALKING,
+            line,
+            &[],
+        ));
+        packed
     }
 
     /// The kept box: the use talked its refusal, and nothing changed.
@@ -366,8 +505,9 @@ mod tests {
         let moved = world
             .use_giftbox(Vid::new(VID), box_at(), mover())
             .expect("a kept box is no refusal");
-        assert_eq!(text_of(&inbox.try_recv().expect("the talk")), b"[LS;56]");
-        assert!(moved.records.is_empty(), "nothing else sends");
+        assert!(inbox.try_recv().is_err(), "nothing tells ahead");
+        assert_eq!(moved.records.len(), 1, "only the failure line sends");
+        assert_eq!(text_of(&moved.records[0]), b"[LS;56]");
         assert!(moved.changes.is_empty(), "nothing saves");
         let kept = world
             .characters
@@ -526,6 +666,54 @@ mod tests {
         };
         assert!(!world.land_group_row(Vid::new(VID), 99_999_999, 1, -1, false, &mut gifts));
         assert!(!world.land_group_row(Vid::new(VID), 0, 1, -1, false, &mut gifts));
+    }
+
+    /// The key's success: with a group the draw lands, the key and the box go,
+    /// and the row tells its line.
+    #[test]
+    fn a_key_opens_its_matching_box() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world
+            .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).unwrap())
+            .expect("no ids yet");
+        let held = vec![boxed(50_008, 60, 0), boxed(50_006, 61, 1)];
+        let (_inbox, _) = enter_seeing_with(&mut world, PLACE, VID, (5, 5), 10_000, &held);
+        let mut group = gamedata::special_item_group::SpecialItemGroup::default();
+        group.add_item(19, 1, 100, 0);
+        let groups = gamedata::special_item_group::SpecialItemGroups {
+            special: [(50_006, group)].into_iter().collect(),
+            ..Default::default()
+        };
+        world.item_groups = std::sync::Arc::new(groups);
+        let key_at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let box_at = ItemPos::new(EWindows::Inventory as u8, 1);
+        let moved = world
+            .key_step(Vid::new(VID), key_at, box_at, mover())
+            .expect("the draw lands");
+        let character = world.characters.find_by_vid(Vid::new(VID)).expect("online");
+        assert!(character.items().item_at(key_at).is_none(), "the key goes");
+        assert!(character.items().item_at(box_at).is_none(), "the box goes");
+        let sword = character
+            .items()
+            .item_at(ItemPos::new(EWindows::Inventory as u8, 2))
+            .expect("the gift lands past both");
+        assert_eq!((sword.vnum, sword.count), (19, 1));
+        let texts: Vec<Vec<u8>> = moved
+            .records
+            .iter()
+            .filter(|record| record.first() == Some(&4))
+            .map(|record| record[10..].to_vec())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.starts_with(b"[LS;444;")),
+            "the pickup rides: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.starts_with(b"[LS;35;")),
+            "the row tells: {texts:?}"
+        );
+        assert!(!moved.changes.is_empty(), "the spend and the gift save");
     }
 
     /// Experience tells two lines; the single-count gift names itself alone, and

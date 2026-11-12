@@ -44874,6 +44874,42 @@ fn a_moonlight_box_draws_its_group_and_tells_the_gift() {
     alice.quiet("the draw tells nothing more");
 }
 
+/// `sys.item.proto`: the treasure key names a non-box (`[LS;1248]`), a missing box
+/// silently, and its matching box with `[LS;46]` — no box group exists on the
+/// owner's data, so the key and the box stay.
+#[test]
+fn a_key_names_a_non_box_a_missing_box_and_its_groupless_box() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    for (id, vnum, pos) in [(60, 50008, 0), (61, 50006, 1), (62, 19, 2)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id,                  1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_use_to_item(0, 2));
+    assert_eq!(&alice.read_game()[10..], b"[LS;1248]", "a non-box is named");
+    alice.send_record(&client_use_to_item(0, 9));
+    alice.quiet("a missing box is silent");
+    alice.send_record(&client_use_to_item(0, 1));
+    assert_eq!(&alice.read_game()[10..], b"[LS;46]", "no group, no draw");
+    alice.quiet("the failure tells nothing more");
+    let kept = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name =          'Alpha') AND vnum IN (50008, 50006)",
+        1,
+    );
+    assert_eq!(kept[0][0], 2, "the key and the box stay");
+}
+
 /// The start step's burst after its script: the start's broadcast (the mast's
 /// target HP), the wave's pair, the heal's own notice, the stun's flag update and
 /// affect add, and the heal's broadcast again.

@@ -34,9 +34,9 @@ use std::ops::RangeInclusive;
 use common::item_slots::EWindows;
 use common::vid::Vid;
 use gamedata::item_kind::{
-    ITEM_METIN, ITEM_USE, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
-    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_DETACHMENT, USE_ELEMENT_CHANGE,
-    USE_ELEMENT_DOWNGRADE, USE_ELEMENT_UPGRADE, USE_PUT_INTO_ACCESSORY_SOCKET,
+    ITEM_METIN, ITEM_TREASURE_KEY, ITEM_USE, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE,
+    USE_ADD_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_DETACHMENT,
+    USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE, USE_ELEMENT_UPGRADE, USE_PUT_INTO_ACCESSORY_SOCKET,
     USE_PUT_INTO_BELT_SOCKET, USE_TUNING,
 };
 use gamedata::item_proto::ItemProto;
@@ -178,6 +178,8 @@ enum Arm {
     /// `USE_PUT_INTO_ACCESSORY_SOCKET` or `USE_PUT_INTO_BELT_SOCKET`: a bonus or
     /// socket scroll, with its sub-type.
     Bonus(i32),
+    /// `ITEM_TREASURE_KEY`: the box at the destination opens.
+    Key,
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -365,6 +367,9 @@ impl GameState {
             }
             Arm::Detach => {
                 return self.detach_step(vid, at, dest, actor);
+            }
+            Arm::Key => {
+                return self.key_step(vid, at, dest, actor);
             }
             Arm::Element(kind) => {
                 return self.element_step(vid, at, dest, kind, actor);
@@ -692,6 +697,7 @@ impl GameState {
             .and_then(|item| self.protos.get(item.vnum));
         match proto {
             Some(proto) if proto.item_type == ITEM_METIN => Arm::Stone,
+            Some(proto) if proto.item_type == ITEM_TREASURE_KEY => Arm::Key,
             Some(proto)
                 if proto.item_type == ITEM_USE
                     && proto.sub_type == USE_TUNING

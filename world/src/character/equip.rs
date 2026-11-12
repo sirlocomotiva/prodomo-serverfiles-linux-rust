@@ -1447,6 +1447,84 @@ pub fn consume_giftbox(
         &mut stamped,
     )
 }
+
+/// Check the key at `at` before its draw: the source and the use checks, with
+/// nothing spent. The game state calls this before the box's draw, whose arms
+/// have side effects, and spends both only after they land.
+///
+/// # Errors
+///
+/// As [`use_item`]: a missing or foreign source, no gear, an unknown vnum, or a
+/// refused use.
+pub fn check_key_use(
+    items: &mut CharacterItems,
+    at: ItemPos,
+    rules: &super::item_move::MoveRules,
+    gear: Option<&mut Gear<'_>>,
+) -> Result<super::item_move::MoveDone, MoveRefused> {
+    let item = use_source(items, at)?;
+    let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+    let proto = gear
+        .protos
+        .get(item.vnum)
+        .ok_or(MoveRefused::UnknownVnum(item.vnum))?;
+    use_checks(&item, proto, rules, gear.points)?;
+    Ok(super::item_move::MoveDone {
+        kind: super::item_move::MoveKind::Used,
+        records: Vec::new(),
+        changes: Vec::new(),
+    })
+}
+
+/// Spend the key at `at` and the box at `dest`: the two `RemoveItem` calls of a
+/// drawn `ITEM_TREASURE_KEY` use (`G/char_item.cpp:3125-3126`), the key first.
+///
+/// # Errors
+///
+/// As [`use_item`]: a missing or foreign source, no gear, an unknown vnum, or a
+/// refused use.
+pub fn consume_key_and_box(
+    items: &mut CharacterItems,
+    at: ItemPos,
+    dest: ItemPos,
+    rules: &super::item_move::MoveRules,
+    gear: Option<&mut Gear<'_>>,
+) -> Result<super::item_move::MoveDone, MoveRefused> {
+    let key = use_source(items, at)?;
+    let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+    let proto = gear
+        .protos
+        .get(key.vnum)
+        .ok_or(MoveRefused::UnknownVnum(key.vnum))?;
+    use_checks(&key, proto, rules, gear.points)?;
+    let mut stamped = super::item_move::MoveDone {
+        kind: super::item_move::MoveKind::Used,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    let mut spent = consume_one_use(
+        items,
+        &key,
+        proto,
+        super::item_move::MoveKind::Used,
+        &mut stamped,
+    )?;
+    let box_item = use_source(items, dest)?;
+    let box_proto = gear
+        .protos
+        .get(box_item.vnum)
+        .ok_or(MoveRefused::UnknownVnum(box_item.vnum))?;
+    let mut box_spent = consume_one_use(
+        items,
+        &box_item,
+        box_proto,
+        super::item_move::MoveKind::Used,
+        &mut stamped,
+    )?;
+    spent.records.append(&mut box_spent.records);
+    spent.changes.append(&mut box_spent.changes);
+    Ok(spent)
+}
 const EXPIRY_SOCKET: usize = 0;
 
 /// The use counter (`UseItemEx`'s socket 1, `G/char_item.cpp:2809-2819`).
