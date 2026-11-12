@@ -839,6 +839,7 @@ impl GameState {
         let statue = self
             .npc_by_vid(target)
             .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
+        let poly = self.poly_attack_of(vid);
         let character = self.characters.find_by_vid_mut(vid).ok()?;
         let (items, points) = character.items_and_points_mut();
         let points = points?;
@@ -854,6 +855,7 @@ impl GameState {
             empire,
             map,
             user_rate,
+            poly,
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
@@ -981,6 +983,7 @@ impl GameState {
                 weapon_resists: PlayerVictim::weapon_resists_of(points),
             }
         };
+        let poly = self.poly_attack_of(vid);
         let character = self.characters.find_by_vid_mut(vid).ok()?;
         let (items, points) = character.items_and_points_mut();
         let points = points?;
@@ -992,6 +995,7 @@ impl GameState {
             points,
             weapon,
             &victim_facts,
+            poly,
         ))
     }
 
@@ -1092,6 +1096,7 @@ impl GameState {
         let statue = self
             .npc_by_vid(mob)
             .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
+        let poly = self.poly_attack_of(victim);
         let Ok(character) = self.characters.find_by_vid_mut(victim) else {
             return;
         };
@@ -1114,6 +1119,7 @@ impl GameState {
             empire,
             map,
             user_rate,
+            poly,
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
@@ -2558,7 +2564,7 @@ mod tests {
         let mut dice = world.dice.clone();
         let points = points_of(world, vid).clone();
         let npc = world.npc_by_vid(ME).unwrap();
-        calc_melee_damage(&mut dice, &points, None, npc) * 9 / 10
+        calc_melee_damage(&mut dice, &points, None, npc, None) * 9 / 10
     }
 
     fn damage_info(damage: i32, flag: u8) -> Vec<u8> {

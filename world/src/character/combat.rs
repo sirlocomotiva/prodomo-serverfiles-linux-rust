@@ -9,9 +9,10 @@ pub use melee::{
     calc_melee_damage_on_player, calc_melee_skill_atk, damage_magic, damage_melee,
     damage_normal_range, damage_range, damage_special, melee_reach, mob_attack_range,
     normal_attack_affect, skill_magic_attr, skill_melee_attr, skill_range_attr, strike_npc,
-    AttackAffect, HitEvent, MeleeVictim, PlayerVictim, Strike, Striker, Struck, DAMAGE_CRITICAL,
-    DAMAGE_DODGE, DAMAGE_NORMAL, DAMAGE_PENETRATE, DAMAGE_POISON, FLY_CONQUEROR_EXP, FLY_EXP,
-    FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL, SE_EFFECT_HEALER, SE_PENETRATE,
+    AttackAffect, HitEvent, MeleeVictim, PlayerVictim, PolyAttack, Strike, Striker, Struck,
+    DAMAGE_CRITICAL, DAMAGE_DODGE, DAMAGE_NORMAL, DAMAGE_PENETRATE, DAMAGE_POISON,
+    FLY_CONQUEROR_EXP, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL, SE_EFFECT_HEALER,
+    SE_PENETRATE,
 };
 pub use mob_melee::{
     mob_att_bonus_self, mob_calc_attack, mob_calc_attack_npc, mob_reach, pc_hp_pct, pc_poison_rate,

@@ -9,8 +9,7 @@
 //! and the killer's PID when the hit points reach 0, and `Dead` after a hit on a stunned victim.
 //!
 //! What the Rewrite leaves out, because nothing it hosts can reach it:
-//! * the attacker is never polymorphed and holds no marriage bonus, so `GetPolymorphPoint` is
-//!   `GetPoint` and every `GetMarriageBonus` is 0;
+//! * the attacker holds no marriage bonus, so every `GetMarriageBonus` is 0;
 //! * a non-player holds no affect and no skill, so `AFF_JEONGWIHON`, `AFF_TERROR`, `AFF_HOSIN`
 //!   and `AFF_MANASHIELD` never apply, the `SKILL_RESIST_PENETRATE` poly is 0, and the victim of
 //!   `NormalAttackAffect` is never already poisoned, stunned or slowed;
@@ -129,6 +128,18 @@ const JOB_RESISTS: [usize; 4] = [
     point::POINT_RESIST_SHAMAN,
 ];
 
+/// The morphed attacker's row (`CalcMeleeDamage`'s polymorph arm, `G/battle.cpp:527-541`):
+/// the mob's dexterity and damage range through [`Points::polymorph_point`], read by a
+/// morphed attacker that does not keep its stats. `None` (an unknown vnum, as
+/// `CMobManager::Get` missing) skips the range but still bypasses the weapon gate.
+#[derive(Debug, Clone, Copy)]
+pub struct PolyAttack {
+    /// The power, `GetPolymorphPower` (`G/char.cpp:7669-7678`), which the caller read.
+    pub power: i32,
+    /// The row's `(dex, damage_min, damage_max)` (`bDex`, `dwDamageRange`), or `None`.
+    pub row: Option<(u8, u32, u32)>,
+}
+
 /// The player who swings.
 #[derive(Debug)]
 pub struct Striker<'a> {
@@ -154,6 +165,11 @@ pub struct Striker<'a> {
     /// The statue floor (`:2379-2381`): the caller guards a Meley statue, whose
     /// lethal hit stops at 1 HP. Defaults off.
     pub meley_statue: bool,
+    /// The morphed attacker's row, `Some` exactly while the attacker is morphed and
+    /// does not keep its stats (`IsPolymorphed() && !IsPolyMaintainStat()`,
+    /// `G/battle.cpp:494`, `:527`). The caller, which owns the mob table and the
+    /// power, built it.
+    pub poly: Option<PolyAttack>,
     /// The Blue Dragon's stone rows, which `BlueDragon_Damage` reads per hit.
     pub dragon_stones: [common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS],
     /// The live stones of each row's vnum on the victim's map.
@@ -280,7 +296,7 @@ pub fn strike_npc(
     banned: bool,
 ) -> Strike {
     let mut events = Vec::new();
-    let damage = calc_melee_damage(dice, striker.points, striker.weapon, victim);
+    let damage = calc_melee_damage(dice, striker.points, striker.weapon, victim, striker.poly);
     if damage <= 0 {
         return Strike {
             events,
@@ -302,14 +318,16 @@ pub fn strike_npc(
     }
 }
 
-/// `CalcMeleeDamage` of a player who is not polymorphed on a non-player.
+/// `CalcMeleeDamage` of a player on a non-player: `poly` is `Some` exactly while the
+/// attacker is morphed without keeping its stats.
 pub fn calc_melee_damage(
     dice: &mut dyn Dice,
     attacker: &Points,
     weapon: Option<&ItemProto>,
     victim: &Npc,
+    poly: Option<PolyAttack>,
 ) -> i32 {
-    calc_melee_core(dice, attacker, weapon, victim, false, false)
+    calc_melee_core(dice, attacker, weapon, victim, false, false, poly)
 }
 
 /// The functor's per-cast `atk`: `CalcMeleeDamage(pc, victim, true, false)` (ignore-defence,
@@ -319,8 +337,9 @@ pub fn calc_melee_skill_atk(
     attacker: &Points,
     weapon: Option<&ItemProto>,
     victim: &Npc,
+    poly: Option<PolyAttack>,
 ) -> i32 {
-    calc_melee_core(dice, attacker, weapon, victim, true, false)
+    calc_melee_core(dice, attacker, weapon, victim, true, false, poly)
 }
 
 /// `CalcArrowDamage` of a player on a non-player (`G/battle.cpp:668-727`): the bow must
@@ -329,6 +348,8 @@ pub fn calc_melee_skill_atk(
 /// attack with the **attacker's** `DEF_BONUS` on the defence (unlike melee's victim
 /// one); `MAX(0, atk - def)` times the percent. No sung-ma halve, no `<3` floor.
 /// `distance` is the `DISTANCE_SQRT` the caller measured; the rating is never ignored.
+/// `poly` is `Some` exactly while the attacker is morphed without keeping its stats:
+/// only the rating's attacker dexterity reads it.
 #[must_use]
 pub fn calc_arrow_damage(
     dice: &mut dyn Dice,
@@ -337,14 +358,16 @@ pub fn calc_arrow_damage(
     arrow: &ItemProto,
     victim: &Npc,
     distance: i32,
+    poly: Option<PolyAttack>,
 ) -> i32 {
-    calc_arrow_core(dice, attacker, bow, arrow, victim, distance, false)
+    calc_arrow_core(dice, attacker, (bow, arrow), victim, distance, false, poly)
 }
 
 /// The functor's per-cast `atk` for a `USE_ARROW_DAMAGE` row: `CalcArrowDamage(pc,
 /// victim, bow, arrow, true)` (ignore-defence, rated, `G/char_skill.cpp:1429-1437`).
 /// The caller looked the bow and arrow up already (a missing pair reads 0 `atk`
-/// without calling here).
+/// without calling here). `poly` is `Some` exactly while the attacker is morphed
+/// without keeping its stats.
 #[must_use]
 pub fn calc_arrow_skill_atk(
     dice: &mut dyn Dice,
@@ -353,8 +376,9 @@ pub fn calc_arrow_skill_atk(
     arrow: &ItemProto,
     victim: &Npc,
     distance: i32,
+    poly: Option<PolyAttack>,
 ) -> i32 {
-    calc_arrow_core(dice, attacker, bow, arrow, victim, distance, true)
+    calc_arrow_core(dice, attacker, (bow, arrow), victim, distance, true, poly)
 }
 
 /// `CalcArrowDamage` (`G/battle.cpp:668-727`), shared by the plain bow shot and the
@@ -362,12 +386,13 @@ pub fn calc_arrow_skill_atk(
 fn calc_arrow_core(
     dice: &mut dyn Dice,
     attacker: &Points,
-    bow: &ItemProto,
-    arrow: &ItemProto,
+    arms: (&ItemProto, &ItemProto),
     victim: &Npc,
     distance: i32,
     ignore_defence: bool,
+    poly: Option<PolyAttack>,
 ) -> i32 {
+    let (bow, arrow) = arms;
     if bow.item_type != ITEM_WEAPON || bow.sub_type != WEAPON_BOW {
         return 0;
     }
@@ -379,8 +404,11 @@ fn calc_arrow_core(
     if percent == 0 {
         return 0;
     }
+    let attacker_dexterity = poly.map_or(attacker.get_point(point::POINT_DX), |poly| {
+        attacker.polymorph_point(poly.row.map(|row| row.0), poly.power)
+    });
     let rating = attack_rating(AttackRatingInput {
-        attacker_dexterity: attacker.get_point(point::POINT_DX),
+        attacker_dexterity,
         attacker_level: i32::from(attacker.level()),
         victim_dexterity: victim.fight.point(point::POINT_DX),
         ignore_target_rating: false,
@@ -414,9 +442,23 @@ fn calc_arrow_core(
     damage.wrapping_mul(percent).wrapping_div(100)
 }
 
+/// One end of the row's damage range, scaled by the power over 100 (`:538-539`):
+/// `DWORD * int / int` runs wholly in `DWORD` — the power reinterprets to `u32`,
+/// the product wraps in 32 bits, the division is unsigned — and the sum back into
+/// `iDamMin`/`iDamMax` reinterprets to `int`, which the caller's `wrapping_add` keeps.
+fn narrow_poly_range(end: u32, power: i32) -> i32 {
+    let scaled = end
+        .wrapping_mul(u32::from_ne_bytes(power.to_ne_bytes()))
+        .wrapping_div(100);
+    i32::from_ne_bytes(scaled.to_ne_bytes())
+}
+
 /// `CalcMeleeDamage` (`G/battle.cpp:489-666`): a bow complains and gives 0, any other weapon
 /// the swing cannot use gives 0, else the attack minus the defence (`bIgnoreDefense` skips
-/// the subtraction), halved past the sung-ma will, through `CalcBattleDamage`.
+/// the subtraction), halved past the sung-ma will, through `CalcBattleDamage`. `poly` is
+/// `Some` exactly while the attacker is morphed without keeping its stats: the weapon
+/// gate is skipped, the rating reads `GetPolymorphPoint(POINT_DX)`, and the roll adds
+/// the row's scaled damage range (`:494`, `:527-541`).
 fn calc_melee_core<V: MeleeVictim + ?Sized>(
     dice: &mut dyn Dice,
     attacker: &Points,
@@ -424,21 +466,36 @@ fn calc_melee_core<V: MeleeVictim + ?Sized>(
     victim: &V,
     ignore_defence: bool,
     ignore_target_rating: bool,
+    poly: Option<PolyAttack>,
 ) -> i32 {
-    if let Some(weapon) = weapon {
-        if weapon.item_type != ITEM_WEAPON || !MELEE_WEAPONS.contains(&weapon.sub_type) {
-            return 0;
+    if poly.is_none() {
+        if let Some(weapon) = weapon {
+            if weapon.item_type != ITEM_WEAPON || !MELEE_WEAPONS.contains(&weapon.sub_type) {
+                return 0;
+            }
         }
     }
     let level = i32::from(attacker.level());
+    let attacker_dexterity = poly.map_or(attacker.get_point(point::POINT_DX), |poly| {
+        attacker.polymorph_point(poly.row.map(|row| row.0), poly.power)
+    });
     let rating = attack_rating(AttackRatingInput {
-        attacker_dexterity: attacker.get_point(point::POINT_DX),
+        attacker_dexterity,
         attacker_level: level,
         victim_dexterity: victim.dexterity(),
         ignore_target_rating,
     });
-    // `Item_GetDamage`: the weapon's values 3 and 4; an unarmed player rolls 0 to 0.
-    let (low, high) = weapon.map_or((0, 0), |weapon| (weapon.values[3], weapon.values[4]));
+    // `Item_GetDamage`: the weapon's values 3 and 4; an unarmed player rolls 0 to 0. A
+    // morph adds the row's range, each end scaled by the power over 100 (`:536-539`).
+    let (mut low, mut high) = weapon.map_or((0, 0), |weapon| (weapon.values[3], weapon.values[4]));
+    if let Some(PolyAttack {
+        power,
+        row: Some((_, min, max)),
+    }) = poly
+    {
+        low = low.wrapping_add(narrow_poly_range(min, power));
+        high = high.wrapping_add(narrow_poly_range(max, power));
+    }
     let rolled = number(dice, low, high).wrapping_mul(2);
     let refine = weapon.map_or(0, |weapon| weapon.values[5]);
     let percent = attacker
@@ -465,7 +522,7 @@ fn calc_melee_core<V: MeleeVictim + ?Sized>(
 }
 
 /// `CalcBattleDamage` without the level delta (`G/battle.cpp:244-251`): below 3, `number(1, 5)`.
-/// A monster victim's level delta never applies here: the player attacker is never polymorphed.
+/// The level delta is commented out (`:250`), so it never applies.
 pub fn battle_damage_floor(dice: &mut dyn Dice, damage: i32) -> i32 {
     if damage < 3 {
         number(dice, 1, 5)
@@ -603,14 +660,16 @@ impl MeleeVictim for PlayerVictim {
 
 /// `CalcMeleeDamage` of a player attacker on a player victim (`G/battle.cpp:489-666`):
 /// the same core, with the victim's job bonus and its own defence, and then the wielded
-/// weapon's kind resist against the victim (`G/battle.cpp:775-800`).
+/// weapon's kind resist against the victim (`G/battle.cpp:775-800`). `poly` is `Some`
+/// exactly while the attacker is morphed without keeping its stats.
 pub fn calc_melee_damage_on_player(
     dice: &mut dyn Dice,
     attacker: &Points,
     weapon: Option<&ItemProto>,
     victim: &PlayerVictim,
+    poly: Option<PolyAttack>,
 ) -> i32 {
-    let damage = calc_melee_core(dice, attacker, weapon, victim, false, false);
+    let damage = calc_melee_core(dice, attacker, weapon, victim, false, false, poly);
     // `battle_hit`'s weapon resist runs after `CalcMeleeDamage`, so after its floor.
     let Some(weapon) = weapon else {
         return damage;
@@ -1501,7 +1560,7 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::path::Path;
 
-    use gamedata::item_kind::{ITEM_ARMOR, WEAPON_ARROW, WEAPON_BOW};
+    use gamedata::item_kind::{ITEM_ARMOR, ITEM_ROD, WEAPON_ARROW, WEAPON_BOW};
     use gamedata::mob_proto::{MobProtos, RACE_FLAG};
     use gamedata::records::MobTableRecord;
 
@@ -1545,10 +1604,15 @@ mod tests {
             weapon_resists: [0; 6],
         };
         let plain = victim(0, [0; 4], 19);
-        let bare = calc_melee_damage_on_player(&mut dice, &attacker, weapon, &plain);
+        let bare = calc_melee_damage_on_player(&mut dice, &attacker, weapon, &plain, None);
         // `iDam = MAX(0, iAtk - iDef)`: the defence comes off the attack.
-        let defended =
-            calc_melee_damage_on_player(&mut dice, &attacker, weapon, &victim(10, [0; 4], 19));
+        let defended = calc_melee_damage_on_player(
+            &mut dice,
+            &attacker,
+            weapon,
+            &victim(10, [0; 4], 19),
+            None,
+        );
         assert_eq!(bare - defended, 10);
         // `iAtk -= (iAtk * victim->GetPoint(POINT_RESIST_<job>)) / 100`: the shaman's resist.
         let resisted = calc_melee_damage_on_player(
@@ -1556,11 +1620,12 @@ mod tests {
             &attacker,
             weapon,
             &victim(0, [0, 0, 0, 50], 19),
+            None,
         );
         assert!(resisted < bare);
         // `CalcAttackRating`: the victim's dexterity moves the target rating down.
         let nimble =
-            calc_melee_damage_on_player(&mut dice, &attacker, weapon, &victim(0, [0; 4], 0));
+            calc_melee_damage_on_player(&mut dice, &attacker, weapon, &victim(0, [0; 4], 0), None);
         assert!(nimble > bare);
     }
 
@@ -1650,6 +1715,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -1686,7 +1752,74 @@ mod tests {
         let points = alpha();
         assert_eq!(points.get_point(point::POINT_ATT_GRADE), 344);
         let mut dice = Script::new(&[12_345]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &dog()), 322);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &dog(), None),
+            322
+        );
+        assert_eq!(dice.left(), 0);
+    }
+
+    /// The morphed attacker's arms (`G/battle.cpp:527-541`, `G/char.cpp:3698-3699`): at
+    /// power 41 the dog's dexterity 6 adds 2 to the attacker's 19, so the rating reads
+    /// source 65, and the dog's range 20..=24 adds 8..=9 to the unarmed 0..=0. The
+    /// draw 0 rolls the 8 (333), the draw 1 the 9 (335); the grade is the plain 344,
+    /// as no recompute runs here.
+    #[test]
+    fn a_morphed_punch_adds_the_rows_scaled_range_and_dexterity() {
+        let points = alpha();
+        let poly = PolyAttack {
+            power: 41,
+            row: Some((6, 20, 24)),
+        };
+        let mut dice = Script::new(&[0]);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &dog(), Some(poly)),
+            333
+        );
+        assert_eq!(dice.left(), 0);
+        let mut dice = Script::new(&[1]);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &dog(), Some(poly)),
+            335
+        );
+        assert_eq!(dice.left(), 0);
+    }
+
+    /// The morph skips the weapon gate but keeps the weapon's own roll and refine
+    /// (`G/battle.cpp:494`, `:530`): a worn rod neither refuses nor reads its kind,
+    /// so the dog's 8..=9 rides the rod's 0..=0 with no refine, and the draw 0 lands
+    /// the same 333.
+    #[test]
+    fn a_morphed_rod_swings_past_the_weapon_gate() {
+        let points = alpha();
+        let poly = PolyAttack {
+            power: 41,
+            row: Some((6, 20, 24)),
+        };
+        let rod = weapon(ITEM_ROD, 0, [0, 0, 0, 0, 0, 0]);
+        let mut dice = Script::new(&[0]);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, Some(&rod), &dog(), Some(poly)),
+            333
+        );
+        assert_eq!(dice.left(), 0);
+    }
+
+    /// An unknown morph vnum skips the range but still bypasses the gate and reads
+    /// the plain dexterity (`pMob` missing, `:533-541`, `G/char.cpp:3683-3698`): the
+    /// unarmed roll is 0..=0 at the plain rating, the punch's own 322.
+    #[test]
+    fn an_unknown_morph_vnum_punches_the_plain_322() {
+        let points = alpha();
+        let poly = PolyAttack {
+            power: 41,
+            row: None,
+        };
+        let mut dice = Script::new(&[12_345]);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &dog(), Some(poly)),
+            322
+        );
         assert_eq!(dice.left(), 0);
     }
 
@@ -1719,17 +1852,26 @@ mod tests {
         victim.fight.add(point::POINT_DEF_GRADE, 330);
         // 332 - 340 is below 0, so 0, then the low roll: 4 % 5 + 1.
         let mut dice = Script::new(&[0, 4]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &victim), 5);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &victim, None),
+            5
+        );
         assert_eq!(dice.left(), 0);
         // 332 - 329 = 3 is not below 3.
         victim.fight.add(point::POINT_DEF_GRADE, -11);
         let mut dice = Script::new(&[0]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &victim), 3);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &victim, None),
+            3
+        );
         assert_eq!(dice.left(), 0);
         // 332 - 330 = 2 is.
         victim.fight.add(point::POINT_DEF_GRADE, 1);
         let mut dice = Script::new(&[0, 0]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &victim), 1);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &victim, None),
+            1
+        );
         assert_eq!(dice.left(), 0);
     }
 
@@ -1744,7 +1886,7 @@ mod tests {
         ] {
             let mut dice = Script::new(&[]);
             assert_eq!(
-                calc_melee_damage(&mut dice, &points, Some(&weapon), &dog()),
+                calc_melee_damage(&mut dice, &points, Some(&weapon), &dog(), None),
                 0
             );
         }
@@ -1759,6 +1901,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -1786,7 +1929,7 @@ mod tests {
             let sword = weapon(ITEM_WEAPON, sub_type, [0, 0, 0, 10, 20, 3]);
             let mut dice = Script::new(&[7]);
             assert_eq!(
-                calc_melee_damage(&mut dice, &points, Some(&sword), &dog()),
+                calc_melee_damage(&mut dice, &points, Some(&sword), &dog(), None),
                 351,
                 "{sub_type}"
             );
@@ -1857,7 +2000,10 @@ mod tests {
         let mut points = alpha();
         points.set_point(point::POINT_ATTBONUS_MONSTER, 10);
         let mut dice = Script::new(&[0]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &dog()), 355);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &dog(), None),
+            355
+        );
         assert_eq!(dice.left(), 0);
     }
 
@@ -2003,10 +2149,16 @@ mod tests {
         });
         // Map 373 asks for 15 strength; 10 halves the 322.
         let mut dice = Script::new(&[0]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &dog()), 161);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &dog(), None),
+            161
+        );
         points.set_point(point::POINT_SUNGMA_STR, 15);
         let mut dice = Script::new(&[0]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &dog()), 322);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &dog(), None),
+            322
+        );
     }
 
     #[test]
@@ -2154,7 +2306,7 @@ mod tests {
         points.set_point(point::POINT_POISON_PCT, 256 + 3);
         // The draw happens; the victim below the attacker lands it.
         let mut dice = Script::new(&[0, 2]);
-        let damage = calc_melee_damage(&mut dice, &points, None, &dog());
+        let damage = calc_melee_damage(&mut dice, &points, None, &dog(), None);
         let landed = normal_attack_affect(&mut dice, &points, &dog());
         assert_eq!((damage, dice.left()), (322, 0));
         assert!(landed.poisoned);
@@ -2287,6 +2439,7 @@ mod tests {
                 meley_blocked: false,
                 cannot_dead: false,
                 meley_statue: false,
+                poly: None,
                 dragon_stones: [common::dragon::DragonStone::default();
                     common::dragon::DRAGON_STONE_ROWS],
                 dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2303,6 +2456,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2405,6 +2559,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2558,6 +2713,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2675,6 +2831,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2794,6 +2951,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2810,10 +2968,16 @@ mod tests {
         let victim = dog();
         // The punch's 0-to-0 roll; the ignore-defence blow draws the same one roll.
         let mut dice = Script::new(&[12_345]);
-        assert_eq!(calc_melee_damage(&mut dice, &points, None, &victim), 322);
+        assert_eq!(
+            calc_melee_damage(&mut dice, &points, None, &victim, None),
+            322
+        );
         assert_eq!(dice.left(), 0);
         let mut dice = Script::new(&[12_345]);
-        assert_eq!(calc_melee_skill_atk(&mut dice, &points, None, &victim), 332);
+        assert_eq!(
+            calc_melee_skill_atk(&mut dice, &points, None, &victim, None),
+            332
+        );
         assert_eq!(dice.left(), 0);
     }
 
@@ -2838,6 +3002,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2890,27 +3055,27 @@ mod tests {
         // dog's 10 defence: 339.
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
-            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 0),
+            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 0, None),
             339
         );
         assert_eq!(dice.left(), 0);
         // At 700: the gap is 2, the percent 90, so 305.
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
-            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 700),
+            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 700, None),
             305
         );
         // The skill variant ignores the defence: 349.
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
-            calc_arrow_skill_atk(&mut dice, &points, &bow, &arrow, &victim, 0),
+            calc_arrow_skill_atk(&mut dice, &points, &bow, &arrow, &victim, 0, None),
             349
         );
         // A sword is no bow: the shot reads 0 before any draw.
         let sword = weapon(ITEM_WEAPON, WEAPON_SWORD, [0, 0, 0, 10, 10, 0]);
         let mut dice = Script::new(&[]);
         assert_eq!(
-            calc_arrow_damage(&mut dice, &points, &sword, &arrow, &victim, 0),
+            calc_arrow_damage(&mut dice, &points, &sword, &arrow, &victim, 0, None),
             0
         );
         // The defence carries the *attacker's* DEF_BONUS, not the dog's: +100
@@ -2920,14 +3085,14 @@ mod tests {
         boosted.set_point(point::POINT_DEF_BONUS, 100);
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
-            calc_arrow_damage(&mut dice, &boosted, &bow, &arrow, &victim, 0),
+            calc_arrow_damage(&mut dice, &boosted, &bow, &arrow, &victim, 0, None),
             329
         );
         let mut hard = dog();
         hard.fight.add(point::POINT_DEF_BONUS, 100);
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
-            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &hard, 0),
+            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &hard, 0, None),
             339
         );
     }
@@ -2965,6 +3130,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -2990,6 +3156,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -3027,6 +3194,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
@@ -3061,6 +3229,7 @@ mod tests {
             meley_blocked: false,
             cannot_dead: false,
             meley_statue: false,
+            poly: None,
             dragon_stones: [common::dragon::DragonStone::default();
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],

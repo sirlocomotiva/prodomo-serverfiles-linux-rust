@@ -54678,3 +54678,53 @@ hygiene) clean after refactor, no `allow`. `RUSTDOCFLAGS="-D warnings" cargo
 doc` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
 width was measured. Afterwards no `prodomo\_%` database remained. No ADR
 changed.
+
+## 629. The morphed swing
+
+A dog hits harder than a fist, and a morphed fist hits with the dog. Legacy's
+`CalcMeleeDamage` gives a polymorphed attacker that does not keep its stats three
+arms (`G/battle.cpp:494`, `:527-541`): the weapon gate is skipped, the attacker's
+rating reads `GetPolymorphPoint(POINT_DX)`, and the roll adds the mob row's damage
+range with each end scaled by `GetPolymorphPower` over 100. An unknown vnum skips
+the row but keeps the bypass (`pMob` missing, `:533-541`). The Rewrite read none
+of them: every calc's doc said the attacker is never polymorphed. The victim's own
+poly DX (`:281`) is not ported: every rating still reads a player victim's plain
+`POINT_DX`, so a morphed victim's evasion waits on a follow-up.
+
+`world::character::combat::melee::PolyAttack` carries the power and the row's
+`(dex, min, max)` from the caller, which owns the mob table and the flag; the
+melee core, its NPC, player-victim and skill-functor wrappers, and both arrow
+wrappers thread it (the arrow core reads only the rating's dexterity — a bow keeps
+its gate and its own roll). `Points::polymorph_point` is the DX arm of
+`GetPolymorphPoint` (`G/char.cpp:3698-3699`), beside the ST/HT battle compute.
+`GameState::poly_attack_of` builds it: `Some` exactly while morphed without
+maintain, `None` for the row of an unknown vnum. The two `strike_npc` sites, the
+PvP damage, the reflect, the two skill funnels (whose own `ar` reads the same DX)
+and the arrow skill thread it. The range scaling runs wholly in `u32`, as C's
+`DWORD * int / int` does: an earlier draft divided the reinterpreted `i32`, which
+disagrees once the product's high bit is set (only a huge test-server `poly` flag
+reaches it), and Clippy's wrap lints caught it.
+
+The scenario morphs Alpha into the dog at skill-129 climb 25 (power 41) and
+punches the 406: the grades recompute to 350 (twice 154 plus twice polymorph-ST
+21, the shaman adding its own IQ), the rating reads DX 21, the dog's 20..=24
+scales to 8..=9, and the damage lands 228 or 229
+(`a_morphed_attacker_adds_its_morphs_range_to_the_swing`). Three unit tests pin
+the scaled range and dexterity (draws 0 and 1: 333, 335), the rod past the gate
+(333), and the unknown vnum's plain 322; one `polymorph` test pins the row's
+`Some`-only-for-non-maintain shape, with the `SetPolymorph` unchanged-vnum
+behaviour. `sys.char.polymorph` stays `partial`.
+
+Four mutants (the gate inverted, the DX read dropped, the range add dropped, the
+maintain arm's `||` weakened to `&&`) die in the unit tests and the scenario; the
+fourth first survived the scenario and grew its unit pin.
+
+Gates (2026-11-12):
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5558 passed with 1 load flake in 46 targets
+(`a_grade_refine_spends_the_stones_and_lands_a_new_one`, the known mid-run database-read signature, green alone and green in
+the receipt's parity rerun at `--test-threads=8`: 475 passed, 0 failed); `cargo test --workspace --doc` 1 passed; `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings` clean after the `arms` bundle, the `u32` range scaling, the
+`poly_attacker_dexterity` helper and the `drain_morph_reencode` helper; `cargo fmt --all -- --check` clean;
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

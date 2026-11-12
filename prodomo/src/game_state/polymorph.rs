@@ -34,7 +34,7 @@
 
 use common::point_slot as point;
 use common::vid::Vid;
-use world::character::{number, polymorph_power, SKILL_POLYMORPH};
+use world::character::{number, polymorph_power, PolyAttack, SKILL_POLYMORPH};
 
 use super::view::EntityKey;
 use super::GameState;
@@ -133,6 +133,27 @@ impl GameState {
             return Vec::new();
         };
         points.compute_polymorph_battle_points(row, power, group)
+    }
+
+    /// The morphed attacker's row for `CalcMeleeDamage`'s and `CalcArrowDamage`'s
+    /// polymorph arms: `Some` exactly while the player under `vid` is morphed without
+    /// keeping its stats, with the power and the vnum's `(dex, damage_min,
+    /// damage_max)`, or `None` for an unknown vnum, as `CMobManager::Get` missing.
+    pub(super) fn poly_attack_of(&self, vid: Vid) -> Option<PolyAttack> {
+        let points = self.characters.find_by_vid(vid).ok()?.points()?;
+        if !points.is_polymorphed() || points.poly_maintain_stat() {
+            return None;
+        }
+        let vnum = points.polymorph_race();
+        let row = self
+            .regens
+            .respawner()
+            .and_then(|respawner| respawner.mob(vnum))
+            .map(|mob| (mob.dex, mob.damage_range[0], mob.damage_range[1]));
+        Some(PolyAttack {
+            power: self.polymorph_power(vid),
+            row,
+        })
     }
 
     /// `GetPolymorphPower` (`G/char.cpp:7669-7678`): the `poly` event flag on the test
@@ -534,6 +555,59 @@ mod tests {
             drained(&mut witness).is_empty(),
             "the witness hears nothing"
         );
+    }
+
+    /// `poly_attack_of`: nothing while clear, nothing while maintaining, and the row
+    /// with the power otherwise — or no row for an unknown vnum.
+    #[test]
+    fn the_attack_row_is_some_only_for_a_non_maintain_morph() {
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProto, MobProtos};
+        use gamedata::records::MobTableRecord;
+        use std::sync::Arc;
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        let (_clock, mut world, mut mine, mut witness) = a_morph();
+        let row = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: DOG,
+                dex: 6,
+                damage_range: [24, 126],
+                ..MobTableRecord::default()
+            },
+        };
+        world.install_respawner(
+            Respawner::new(
+                Arc::new(MobProtos::from_rows(vec![row])),
+                Arc::new(MobGroups::default()),
+                Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+                NpcVids::starting_at(FIRST_NPC_VID + 100),
+            ),
+            open_cells(),
+        );
+        let vid = Vid::new(ME);
+        assert!(world.poly_attack_of(vid).is_none(), "clear reads none");
+        world.run_polymorph(vid, b"101");
+        let poly = world.poly_attack_of(vid).expect("the morph reads its row");
+        assert_eq!(poly.row, Some((6, 24, 126)));
+        assert_eq!(poly.power, 0, "unskilled skill 129 reads the zeroed slot");
+        // An unchanged vnum leaves the maintain flag alone (`:7689-7690`), so the
+        // maintain morph clears first.
+        world.run_polymorph(vid, b"0");
+        world.run_polymorph(vid, b"101 1");
+        assert!(
+            world.poly_attack_of(vid).is_none(),
+            "a maintain morph reads none"
+        );
+        world.run_polymorph(vid, b"404");
+        let poly = world
+            .poly_attack_of(vid)
+            .expect("an unknown vnum still reads some");
+        assert!(poly.row.is_none(), "but its row is none");
+        drained(&mut mine);
+        drained(&mut witness);
     }
 
     /// The spawn reencode: the caller's own add carries the vnum's low 16 bits, the

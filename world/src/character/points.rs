@@ -1771,6 +1771,20 @@ impl Points {
         }
     }
 
+    /// `GetPolymorphPoint(POINT_DX)` (`G/char.cpp:3673-3701`): the mob's scaled
+    /// dexterity plus the attacker's own, while a morph the caller judged non-maintain
+    /// is on. `dex` is the row's `bDex`, or `None` for an unknown vnum, which reads
+    /// the plain point, as the missed `CMobManager::Get` does.
+    #[must_use]
+    pub fn polymorph_point(&self, dex: Option<u8>, power: i32) -> i32 {
+        dex.map_or(self.get_point(point::POINT_DX), |dex| {
+            narrow(
+                i64::from(dex) * i64::from(power) / 100
+                    + i64::from(self.get_point(point::POINT_DX)),
+            )
+        })
+    }
+
     /// [`Points::compute_points_with`] for a character that wears nothing.
     pub fn compute_points(&mut self) -> Vec<PointRecord> {
         self.compute_points_with(&Equipment::default())

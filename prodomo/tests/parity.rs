@@ -59464,3 +59464,140 @@ fn a_mounted_player_moves_at_its_mounts_run_clip() {
     alice.send_record(&walk);
     assert_eq!(yankee.read_game(), relayed_move(&walk, vid, 134));
 }
+
+/// Ledger 629: the morphed attacker's battle arms (`CalcMeleeDamage`'s polymorph arm,
+/// `G/battle.cpp:527-541`, and `CalcAttackRating`'s `GetPolymorphPoint(POINT_DX)`,
+/// `G/char.cpp:3673-3701`).
+///
+/// Alpha climbs skill 129 to 25 (power 41), takes `HIGH_WIZARD`, and morphs into the dog
+/// 101 without keeping its stats. Its grades recompute to the morphed arm (attack 350:
+/// twice level 154 plus twice polymorph-strength 21, the shaman adding its own IQ 20 to
+/// the dog's 3 scaled by 41), and its rating reads attacker DX 21 (the dog's 6 scaled
+/// by 41 plus its own 19). Its punch on the 406 it targets adds the dog's range,
+/// 20..=24 scaled to 8..=9, so the damage lands 228 or 229, past the plain punch's
+/// 213; the witness's stream proves the morph, and the target record proves the
+/// boar's hit points moved by the same damage.
+/// The morph reencode's drain for the morphed swing: the target click's answer, or
+/// the caller's stale view row first — then its own morph add, its summary,
+/// Yankee's walk and enter, and the map's NPC adds with their summaries and the
+/// morph's grade records, until the target record lands.
+fn drain_morph_reencode(alice: &mut Keyed, caller: u32, yankee: u32) -> Vec<u8> {
+    let mut clicked = alice.read_game();
+    if clicked[0] != GC_CHARACTER_DEL {
+        return clicked;
+    }
+    assert_eq!(
+        &clicked[1..5],
+        &caller.to_le_bytes(),
+        "the stale row is the caller's"
+    );
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHARACTER_ADD, "{own:02x?}");
+    assert_eq!(
+        u16::from_le_bytes(own[22..24].try_into().expect("two bytes")),
+        101,
+        "the own add is the morph"
+    );
+    let summary = alice.read_game();
+    assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO, "{summary:02x?}");
+    assert_eq!(&summary[1..5], &caller.to_le_bytes(), "the summary's VID");
+    let walk = alice.read_game();
+    assert_eq!(walk[0], GC_WALK_MODE, "{walk:02x?}");
+    assert_eq!(&walk[1..5], &yankee.to_le_bytes(), "the walker's VID");
+    let (_named, _add, _info) = alice.sees_arrive(yankee, false, None);
+    loop {
+        let npc = alice.read_game();
+        if npc[0] == GC_TARGET {
+            clicked = npc;
+            break;
+        }
+        if npc[0] == GC_POINT_CHANGE {
+            continue;
+        }
+        assert_eq!(npc[0], GC_CHARACTER_ADD, "{npc:02x?}");
+        let npc_info = alice.read_game();
+        assert_eq!(npc_info[0], GC_CHAR_ADDITIONAL_INFO, "{npc_info:02x?}");
+    }
+    clicked
+}
+
+#[test]
+fn a_morphed_attacker_adds_its_morphs_range_to_the_swing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470200, 950200 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 129, 25, 0 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        BOAR_AT_ALPHA,
+        "no_wander = true",
+    );
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    let boar = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+
+    // The morph: the witness's add carries race 101.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let add = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        101,
+        "the shown race is the vnum"
+    );
+
+    // When: the morphed Alpha punches the boar. Then: the damage carries the dog's
+    // scaled range on the morphed grade 350 (`2*154 + 2*(3*41/100 + 20)`, the shaman's
+    // own IQ): the 8..=9 roll lands 228 or 229, past the plain punch's 213. The
+    // morph's reencode may still hold a stale view row of the caller, which leaves
+    // before the click lands.
+    alice.send_record(&client_target(boar));
+    let clicked = drain_morph_reencode(&mut alice, listed.id, yankee_listed.id);
+    assert_eq!(clicked[0], GC_TARGET, "{clicked:02x?}");
+    alice.send_record(&client_attack(boar));
+    let punch = alice.read_fight();
+    assert_eq!(punch[0], GC_DAMAGE_INFO, "{punch:02x?}");
+    assert_eq!(&punch[1..5], &boar.to_le_bytes(), "the boar's VID");
+    let dealt = i32::from_le_bytes(punch[6..10].try_into().expect("four bytes"));
+    assert!(
+        (228..=229).contains(&dealt),
+        "the morphed punch lands 228 or 229: {dealt}"
+    );
+    let shown = alice.read_fight();
+    assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+    let boar_hp = i32::from_le_bytes(shown[6..10].try_into().expect("four bytes"));
+    assert_eq!(
+        boar_hp,
+        1736 - dealt,
+        "the punch's damage stays in the hit points"
+    );
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}

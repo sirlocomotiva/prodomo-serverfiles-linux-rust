@@ -64,8 +64,8 @@ pub use combat::{
     skill_range_attr, special_on_mob, strike_npc, strike_npc_by_monster, strike_npc_by_npc,
     strike_pc, strike_pc_by_pc, AttackAffect, AttackRatingInput, HitEvent, MeleeVictim, MobStriker,
     NpcVictim, PcHitEnd, PcStrike, PcVictim, PkActor, PkDenial, PkEligibility, PkMode,
-    PlayerVictim, PvAction, PvAttacker, PvEnd, PvKind, PvStrike, PvVictim, Strike, Striker, Struck,
-    DAMAGE_CRITICAL, DAMAGE_DODGE, DAMAGE_NORMAL, DAMAGE_PENETRATE, DAMAGE_POISON,
+    PlayerVictim, PolyAttack, PvAction, PvAttacker, PvEnd, PvKind, PvStrike, PvVictim, Strike,
+    Striker, Struck, DAMAGE_CRITICAL, DAMAGE_DODGE, DAMAGE_NORMAL, DAMAGE_PENETRATE, DAMAGE_POISON,
     FLY_CONQUEROR_EXP, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, IMMUNE_REFLECT, SE_CRITICAL,
     SE_EFFECT_HEALER, SE_PENETRATE,
 };

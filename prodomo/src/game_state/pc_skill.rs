@@ -54,7 +54,7 @@ use gamedata::pc_skill_data::SHOOT_LIST;
 use world::character::{
     attack_rating, battle_damage_floor, calc_arrow_skill_atk, calc_melee_skill_atk, damage_magic,
     damage_melee, damage_normal_range, damage_range, number, skill_magic_attr, skill_melee_attr,
-    skill_range_attr, AttackRatingInput, Equipment, Points, Striker, Struck,
+    skill_range_attr, AttackRatingInput, Equipment, Points, PolyAttack, Striker, Struck,
 };
 use world::npc::Npc;
 
@@ -2688,8 +2688,10 @@ impl GameState {
             .npc_by_vid(target_vid)
             .expect("the victim stood above")
             .clone();
+        let poly = self.poly_attack_of(vid);
+        let attacker_dexterity = poly_attacker_dexterity(&points_snapshot, poly);
         let ar = attack_rating(AttackRatingInput {
-            attacker_dexterity: points_snapshot.get_point(point::POINT_DX),
+            attacker_dexterity,
             attacker_level: i32::from(points_snapshot.level()),
             victim_dexterity: victim_snapshot.fight.point(point::POINT_DX),
             ignore_target_rating: ignore_rating,
@@ -2700,6 +2702,7 @@ impl GameState {
             &points_snapshot,
             weapon.as_ref(),
             &victim_snapshot,
+            poly,
         );
         let vars = skill_vars(&points_snapshot, &victim_snapshot, k, atk, ar);
         let mut amount = -f64_to_i32(row.point.eval(&vars));
@@ -3227,8 +3230,10 @@ impl GameState {
             .npc_by_vid(victim)
             .expect("the victim stood above")
             .clone();
+        let poly = self.poly_attack_of(vid);
+        let attacker_dexterity = poly_attacker_dexterity(&points_snapshot, poly);
         let ar = attack_rating(AttackRatingInput {
-            attacker_dexterity: points_snapshot.get_point(point::POINT_DX),
+            attacker_dexterity,
             attacker_level: i32::from(points_snapshot.level()),
             victim_dexterity: victim_snapshot.fight.point(point::POINT_DX),
             ignore_target_rating: ignore_rating,
@@ -3250,6 +3255,7 @@ impl GameState {
                         &arrow,
                         &victim_snapshot,
                         distance,
+                        poly,
                     )
                 }
                 None => 0,
@@ -3260,6 +3266,7 @@ impl GameState {
                 &points_snapshot,
                 weapon.as_ref(),
                 &victim_snapshot,
+                poly,
             )
         };
         let mut vars = skill_vars(&points_snapshot, &victim_snapshot, k, atk, ar);
@@ -3627,6 +3634,7 @@ impl GameState {
         let statue = self
             .npc_by_vid(target_vid)
             .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
+        let poly = self.poly_attack_of(vid);
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -3641,6 +3649,7 @@ impl GameState {
             empire,
             map,
             user_rate,
+            poly,
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
@@ -3698,6 +3707,7 @@ impl GameState {
         let statue = self
             .npc_by_vid(target_vid)
             .is_some_and(|npc| npc.vnum == super::meley::STATUE_VNUM);
+        let poly = self.poly_attack_of(vid);
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -3712,6 +3722,7 @@ impl GameState {
             empire,
             map,
             user_rate,
+            poly,
             meley_blocked: blocked,
             cannot_dead: armada,
             meley_statue: statue,
@@ -3985,6 +3996,7 @@ impl GameState {
         else {
             return (None, Vec::new());
         };
+        let poly = self.poly_attack_of(vid);
         let mut damage = world::character::calc_arrow_damage(
             &mut self.dice,
             &points_snapshot,
@@ -3992,6 +4004,7 @@ impl GameState {
             &arrow,
             &npc_snapshot,
             distance,
+            poly,
         );
         let spent = self.use_arrow(vid, 1);
         let landed =
@@ -4261,6 +4274,15 @@ pub(crate) fn master_of(level: u8) -> u8 {
 /// horse is ported, so `horse_level` is 0; `ek` is 0 (no Eunhyung affect is
 /// ported). The weapon vars (`wep`/`mtk`/`mwep`) wait: no 230d point poly names
 /// them, and an unset name reads 0 either way (see the `Poly` docs).
+/// The functor's own `ar` attacker dexterity: the morphed row's scaled dexterity
+/// plus the caster's own while a non-maintain morph is on, else the plain point
+/// (`CalcAttackRating`'s `GetPolymorphPoint(POINT_DX)`, `G/battle.cpp:278`).
+fn poly_attacker_dexterity(points: &Points, poly: Option<PolyAttack>) -> i32 {
+    poly.map_or(points.get_point(point::POINT_DX), |poly| {
+        points.polymorph_point(poly.row.map(|row| row.0), poly.power)
+    })
+}
+
 fn skill_vars(
     points: &Points,
     victim: &Npc,
