@@ -54630,3 +54630,51 @@ Three mutants (the match inverted, the box's spend dropped, the failure line
 swapped) die in the unit test and the scenario.
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5541 passed, 1 failed in 46 targets — `a_morphed_caller_hears_every_stat_refusal`, the same burst-reader timing flake as 625-626, green alone), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 628. The mob motion clips
+
+Every monster walked at 300. Legacy loads each proto folder's `WALK` and `RUN`
+clips from its `motlist.txt` (`GetMotionFileName`, `G/motion.cpp:73-131`) and
+moves every non-player at the run's speed (`GetMoveMotionSpeed`,
+`G/char.cpp:3555-3577`); the Rewrite loaded no mob clip, so `npc_goto`, the
+mid-leg rescale and the Battle speed reads all fell back to 300, and a mounted
+or morphed player too, as neither arm of the move choice was ported (V2).
+
+`gamedata::mob_motion::MobMoveClips` loads the two speeds per folder the protos
+name: the first four-cell line whose second cell matches `WALK` or `RUN`
+case-insensitively, parsed like a player clip. A RUN clip with a zero
+`Accumulation` y is read and dropped, as `LoadMotion` drops it (`:146-148`);
+sixteen owner folders read the same (among them `metinstone`). Boot loads the
+table beside the skill clips, the spawner and the respawner share it, and each
+NPC stamps its run speed at spawn (`Npc::move_bits`). `motion_speed_of` routes
+the full legacy function: the mount's `GENERAL` clip when one is mounted, else
+the shown race's — the polymorph's when morphed (`GetRaceNum`, `:2177-2187`),
+whose mode is always `GENERAL` — with the player set below race 8 and the mob
+table above. The mount's `HORSE` fall-back (`:3568`) reads nothing: no mount
+vnum is below 8, and the mob clips hold no horse mode.
+
+Two scenarios ride the move relay: a morphed Alpha walks the (100, 100)
+diagonal in 322 ms, the stray dog's 438.38, past the shaman's own 314
+(`a_morphed_player_moves_at_its_morphs_run_clip`); a boar-mounted Alpha walks
+it in 134 ms, the boar's 743.49 scaled by MOV 140
+(`a_mounted_player_moves_at_its_mounts_run_clip`). Six loader tests pin the
+dog's speeds, the zero-carry drop, the missing motlist, the case-insensitive
+four-cell match and the malformed clip; three routing tests pin the mount
+speed, the morph speed and the clipless fall-back; the spawner test pins the
+stamped run. `sys.world.move` stays `partial`; `data.motion` stays `partial` on
+`pc3` and `monster2`.
+
+Three mutants (the zero-carry RUN kept, the morph reading its job race, the
+NPC stamp dropped) die in the loader, the scenario and the world tests.
+
+Gates (2026-11-12):
+`cargo fmt --all -- --check` clean. `cargo build --workspace --locked --offline`
+ok. Full suite 5553 passed 1 failed in 46 targets: the idle-wander scenario
+pinned the old 300 fall-back for the stray dog's way, now 438.38 from its RUN
+clip (`MotionDuration 0.5`, carry 219.19); the fix re-pins it to the clip number
+and passes alone (24.9s), so with the fix the suite is 5554 passed 0 failed.
+Doc tests 1 passed. Clippy (6 post-suite findings: 2 loader, 1 lib cast, 3 test
+hygiene) clean after refactor, no `allow`. `RUSTDOCFLAGS="-D warnings" cargo
+doc` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
+width was measured. Afterwards no `prodomo\_%` database remained. No ADR
+changed.

@@ -36,6 +36,7 @@ pub mod lzo;
 pub mod map_atlas;
 pub mod mob_group;
 pub mod mob_locale_names;
+pub mod mob_motion;
 pub mod mob_names;
 pub mod mob_proto;
 /// The hosted mob skill rows, the mob power row, and clip splash data.

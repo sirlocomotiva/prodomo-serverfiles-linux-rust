@@ -15030,9 +15030,11 @@ fn an_npc_near_a_player_wanders_and_tells_its_view() {
             (bearing - heading + 1.0).rem_euclid(360.0) < 6.0,
             "the heading {heading} is the bearing {bearing} truncated to 5"
         );
-        // `(distance / 300) * 1000` in `float`, at a moving speed of 100 (100%).
+        // `(distance / clip) * 1000` in `float`, at a moving speed of 100 (100%). The stray
+        // dog's `RUN` clip carries 219.19 units in 0.5 seconds, speed 438.38; the literal
+        // reads the same `f32` the loader computes from the two clip numbers.
         let (fx, fy) = (i32_to_f32(dx), i32_to_f32(dy));
-        let millis = f32_to_i32((fx * fx + fy * fy).sqrt() / 300.0 * 1000.0);
+        let millis = f32_to_i32((fx * fx + fy * fy).sqrt() / 438.38 * 1000.0);
         assert_eq!(i32::try_from(word(20)), Ok(millis), "the way's duration");
     }
 }
@@ -59354,4 +59356,111 @@ fn a_spammy_line_blocks_its_ip_and_a_high_level_speaks_through() {
     let through = alice.read_game();
     assert_eq!(&through[10..], b"Alpha : cheap GOLD here");
     assert_eq!(yankee.read_game(), through, "the map hears past the level");
+}
+
+/// Ledger 628: a morphed player moves at its morph's run clip. Alpha, a shaman
+/// whose general run is 450 a second, morphs into the stray dog (101) and walks
+/// the (100, 100) diagonal: the relayed duration is 322 ms, the dog's 438.38
+/// over the same diagonal, not the shaman's 314.
+#[test]
+fn a_morphed_player_moves_at_its_morphs_run_clip() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    for login in ["alice", "bob"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    stamina(&database, "Alpha", 12_345);
+    stamina(&database, "Yankee", 12_345);
+    let (mut alice, alpha) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, false, None);
+
+    // A step lands exactly, whatever the enter nudged; then the shaman's own
+    // diagonal: 314 ms at 450 a second.
+    let step = client_move(3, 7, 40, 470_100, 950_100, 0x5eed);
+    alice.send_record(&step);
+    assert_eq!(yankee.read_game(), relayed_move(&step, alpha.id, 0));
+    let walk = client_move(1, 0, 0, 470_200, 950_200, 0x5eee);
+    alice.send_record(&walk);
+    assert_eq!(yankee.read_game(), relayed_move(&walk, alpha.id, 314));
+    alice.quiet("the mover is still excluded");
+
+    // The morph: the witness's add carries race 101.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let add = read_add_of(&mut yankee, alpha.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        101,
+        "the shown race is the vnum"
+    );
+    let info = yankee.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+    assert_eq!(&info[1..5], &alpha.id.to_le_bytes(), "the pair's VID");
+
+    // The same diagonal as the dog: 322 ms at 438.38 a second.
+    let walk = client_move(1, 0, 0, 470_300, 950_300, 0x5eef);
+    alice.send_record(&walk);
+    assert_eq!(yankee.read_game(), relayed_move(&walk, alpha.id, 322));
+}
+
+/// Ledger 628: a mounted player moves at its mount's run clip. The quest mounts
+/// Alpha on the boar (20201), MOV 140 with the band and the bonus; the (100,
+/// 100) diagonal relays 134 ms, the boar's 743.49 scaled by MOV 140, not the
+/// shaman's 314.
+#[test]
+fn a_mounted_player_moves_at_its_mounts_run_clip() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _) = vein_stage(&database, MOUNT_PROBE);
+    create_account(&server, "bob");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    stamina(&database, "Yankee", 12_345);
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let vein = shown_vein(&entered);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    let (mut yankee, yankee_listed) = enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, None);
+    alice.sees_enter(yankee_listed.id, false, None);
+
+    // A step lands exactly; the quest mounts the boar.
+    let step = client_move(3, 7, 40, 470_100, 950_100, 0x5eed);
+    alice.send_record(&step);
+    assert_eq!(yankee.read_game(), relayed_move(&step, vid, 0));
+    quest_mounts(&mut alice, vein, vid);
+    // The mount's re-show reaches the witness too: the pair again, then one
+    // update per affect row.
+    let (_, remount, _) = yankee.sees_arrive(vid, false, None);
+    for _ in 0..3 {
+        let restate = yankee.read_game();
+        assert_eq!(restate[0], GC_CHARACTER_UPDATE, "{restate:02x?}");
+        assert_eq!(&restate[1..5], &vid.to_le_bytes(), "the update's VID");
+    }
+    assert_eq!(
+        u16::from_le_bytes(remount[22..24].try_into().expect("two bytes")),
+        3,
+        "still the shaman"
+    );
+
+    // The diagonal mounted: 134 ms, the boar's clip under MOV 140.
+    let walk = client_move(1, 0, 0, 470_200, 950_200, 0x5eee);
+    alice.send_record(&walk);
+    assert_eq!(yankee.read_game(), relayed_move(&walk, vid, 134));
 }

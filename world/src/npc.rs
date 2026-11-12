@@ -213,6 +213,11 @@ pub struct Npc {
     /// because an `f32` would break `Eq`. A successful swing holds the state for
     /// `(DWORD)(seconds * 25)`, else 50 (`G/char_state.cpp:1179-1181`).
     pub attack_bits: Option<u32>,
+    /// The `RUN` clip's speed as its IEEE-754 bits (`None` without the line, the
+    /// clip, or its carry — the move's `GetMotionDuration` miss), because an `f32`
+    /// would break `Eq`. A non-player's clip is always the run's (`IsPC` gates
+    /// the walk, `G/char.cpp:3562`), and a missing one falls back to 300.
+    pub move_bits: Option<u32>,
     /// `m_pointsInstant.dwImmuneFlag`: the proto's `IMMUNE_FLAG` bits, which the
     /// reflect third reads (`IMMUNE_REFLECT`, `G/length.h:721`). The stun, slow,
     /// poison, terror, fall and curse reads wait for their systems.
@@ -249,6 +254,12 @@ impl Npc {
     #[must_use]
     pub fn attack_s(&self) -> Option<f32> {
         self.attack_bits.map(f32::from_bits)
+    }
+
+    /// The move clip's speed, or `None` without a clip.
+    #[must_use]
+    pub fn move_s(&self) -> Option<f32> {
+        self.move_bits.map(f32::from_bits)
     }
 }
 /// A mini-map entry: `npc_info` of `InsertNPCPosition`.
@@ -427,6 +438,7 @@ pub struct NpcSpawner<'a> {
     groups: &'a MobGroups,
     names: &'a MobLocaleNames,
     clips: Option<&'a gamedata::mob_skill_data::MobSkillClips>,
+    moves: Option<&'a gamedata::mob_motion::MobMoveClips>,
     vids: NpcVids,
     report: SpawnReport,
 }
@@ -494,6 +506,7 @@ impl<'a> NpcSpawner<'a> {
             groups,
             names,
             clips: None,
+            moves: None,
             vids,
             report: SpawnReport::default(),
         }
@@ -505,6 +518,13 @@ impl<'a> NpcSpawner<'a> {
     #[must_use]
     pub fn with_clips(mut self, clips: &'a gamedata::mob_skill_data::MobSkillClips) -> Self {
         self.clips = Some(clips);
+        self
+    }
+    /// Share the move clips: stood-up NPCs copy their `RUN` speed from the
+    /// folder. Without them every NPC moves at the fall-back 300.
+    #[must_use]
+    pub fn with_moves(mut self, moves: &'a gamedata::mob_motion::MobMoveClips) -> Self {
+        self.moves = Some(moves);
         self
     }
     /// What every map spawned so far stood up and did not.
@@ -854,6 +874,7 @@ impl<'a> NpcSpawner<'a> {
             fight: MobFight::of(proto),
             skills: self.skill_slots_of(proto),
             attack_bits: self.attack_of(proto),
+            move_bits: self.move_of(proto),
             immune_flag: proto.immune_flag,
             stunned: false,
             dead: false,
@@ -905,6 +926,16 @@ impl<'a> NpcSpawner<'a> {
             .and_then(|clips| clips.attack_s(folder))
             .map(f32::to_bits)
     }
+
+    /// The proto folder's `RUN` speed as its bits, when the spawner holds the
+    /// move clips.
+    fn move_of(&self, proto: &MobTableRecord) -> Option<u32> {
+        let folder = String::from_utf8_lossy(&proto.folder);
+        let folder = folder.trim_end_matches('\0');
+        self.moves
+            .and_then(|moves| moves.run_s(folder))
+            .map(f32::to_bits)
+    }
 }
 
 /// What a `regen_event` spawns from once boot is over: the spawner's tables, shared, and the
@@ -915,6 +946,7 @@ pub struct Respawner {
     groups: Arc<MobGroups>,
     names: Arc<MobLocaleNames>,
     clips: Option<Arc<gamedata::mob_skill_data::MobSkillClips>>,
+    moves: Option<Arc<gamedata::mob_motion::MobMoveClips>>,
     vids: NpcVids,
 }
 
@@ -932,6 +964,7 @@ impl Respawner {
             groups,
             names,
             clips: None,
+            moves: None,
             vids,
         }
     }
@@ -941,6 +974,15 @@ impl Respawner {
     #[must_use]
     pub fn with_clips(mut self, clips: Arc<gamedata::mob_skill_data::MobSkillClips>) -> Self {
         self.clips = Some(clips);
+        self
+    }
+
+    /// Share the move clips, as the boot spawner holds them: respawned and
+    /// stone sons copy their `RUN` speed too, instead of moving at the
+    /// fall-back.
+    #[must_use]
+    pub fn with_moves(mut self, moves: Arc<gamedata::mob_motion::MobMoveClips>) -> Self {
+        self.moves = Some(moves);
         self
     }
 
@@ -990,6 +1032,9 @@ impl Respawner {
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
         }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
+        }
         let mut site = Site {
             region,
             cells,
@@ -1020,6 +1065,9 @@ impl Respawner {
             NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
+        }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
         }
         let mut site = Site {
             region,
@@ -1057,6 +1105,9 @@ impl Respawner {
             NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
+        }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
         }
         let mut site = Site {
             region,
@@ -1100,6 +1151,9 @@ impl Respawner {
             NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
+        }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
         }
         let mut site = Site {
             region,
@@ -1146,6 +1200,9 @@ impl Respawner {
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
         }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
+        }
         let mut site = Site {
             region,
             cells,
@@ -1178,6 +1235,9 @@ impl Respawner {
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
         }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
+        }
         let mut site = Site {
             region,
             cells,
@@ -1208,6 +1268,9 @@ impl Respawner {
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
         }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
+        }
         let mut site = Site {
             region,
             cells,
@@ -1237,6 +1300,9 @@ impl Respawner {
             NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
         if let Some(clips) = &self.clips {
             spawner = spawner.with_clips(clips);
+        }
+        if let Some(moves) = &self.moves {
+            spawner = spawner.with_moves(moves);
         }
         let mut site = Site {
             region,
@@ -1525,7 +1591,7 @@ mod tests {
                 fight: MobFight::of(protos().get(20_016).expect("the smith")),
                 skills: Default::default(),
                 attack_bits: None,
-                // The spawn fills the immune flag from the proto's `IMMUNE_FLAG`.
+                move_bits: None,
                 immune_flag: 0b10_1011,
                 stunned: false,
                 dead: false,
@@ -2219,6 +2285,31 @@ mod tests {
             .spawn_map(&region(1), &cells(&[]), &entries, &mut Script::new(&[0]))
             .unwrap();
         assert_eq!(map.npcs[0].attack_s(), None);
+    }
+
+    /// A spawner holding the owner's move clips stands a dog with the stray
+    /// dog's run speed (219.19 over 0.5 s); without them it stands at the
+    /// fall-back.
+    #[test]
+    fn a_spawned_dog_carries_its_runs_speed() {
+        let root = owners();
+        let protos = MobProtos::load(&root.join("proto")).unwrap();
+        let names = MobLocaleNames::load(&root.join("locale/europe/country")).unwrap();
+        let moves = gamedata::mob_motion::MobMoveClips::load(&root.join("data/monster"), &protos);
+        let groups = groups();
+        let entries = [point(101, 10_500, 20_700)];
+        let mut spawner =
+            NpcSpawner::new(&protos, &groups, &names, NpcVids::default()).with_moves(&moves);
+        let map = spawner
+            .spawn_map(&region(1), &cells(&[]), &entries, &mut Script::new(&[0]))
+            .unwrap();
+        let speed = map.npcs[0].move_s().unwrap();
+        assert!((speed - 219.19 / 0.5).abs() < 1e-2, "{speed}");
+        let mut bare = NpcSpawner::new(&protos, &groups, &names, NpcVids::default());
+        let map = bare
+            .spawn_map(&region(1), &cells(&[]), &entries, &mut Script::new(&[0]))
+            .unwrap();
+        assert_eq!(map.npcs[0].move_s(), None);
     }
 
     /// A respawner holding the owner's clips stands a dog with the swing clip;

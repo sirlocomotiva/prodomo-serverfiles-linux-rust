@@ -64,8 +64,8 @@
 //! - **The war flags** wait for their system. Santa's hop is ported
 //!   (`crate::game_state::GameState::santa_hop`), and a horse runs `StateHorse`
 //!   ([`super::horse_summon`]).
-//! - **The monster clips.** Every NPC moves at the fall-back motion speed of 300 (V2), as no
-//!   monster `.msa` is loaded.
+//! - **The monster clips.** Every NPC moves at its stamped `RUN` clip's speed (ledger 628),
+//!   300 where its folder has none.
 //!
 //! The berserk and god-speed resets wait for the fight too: 148 mob protos carry `BERSERK` and 46
 //! `GODSPEED`, but only Battle turns either on (`G/char_state.cpp:1125-1133`), so Idle finds
@@ -833,9 +833,13 @@ impl GameState {
         let Some(spot) = self.npc_spot(vid) else {
             return false;
         };
-        let move_speed = self.npc_by_vid(vid).map_or(0, |npc| {
+        let npc = self.npc_by_vid(vid);
+        let move_speed = npc.map_or(0, |npc| {
             super::mob_battle::npc_limit_speed(npc.fight.point(point::POINT_MOV_SPEED))
         });
+        let motion_speed = npc
+            .and_then(world::npc::Npc::move_s)
+            .unwrap_or(MOTION_SPEED_FALLBACK);
         let now = self.clock.now();
         let Some(mind) = self.minds.machines.get_mut(&vid) else {
             return false;
@@ -851,10 +855,10 @@ impl GameState {
             return false;
         }
         mind.motion.dest = (x, y);
-        // `CalculateMoveDuration` (`:3585-3603`); a non-player's clip is always the run's, and no
-        // monster clip is loaded (V2).
+        // `CalculateMoveDuration` (`:3585-3603`); a non-player's clip is always
+        // the run's, stamped at spawn (`IsPC` gates the walk, `G/char.cpp:3562`).
         mind.motion.start = spot;
-        mind.motion.duration_ms = move_duration(spot, (x, y), MOTION_SPEED_FALLBACK, move_speed);
+        mind.motion.duration_ms = move_duration(spot, (x, y), motion_speed, move_speed);
         mind.motion.start_ms = now;
         mind.duration = MOVE_STEP_PULSES;
         let chats = mind.state != Fsm::Move;

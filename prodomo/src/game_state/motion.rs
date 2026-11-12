@@ -9,8 +9,9 @@
 //!
 //! A player's motion speed is the speed of its race's `.msa` clip for its weapon's mode, walk or
 //! run (`GetMoveMotionSpeed`, `G/char.cpp:3555-3577`). The clips are loaded at boot and shared
-//! through `with_motions`. A race with no clip for the mode gets legacy's fall-back of 300. No
-//! mount and no polymorph are ported, so neither branch of the legacy function runs (V2).
+//! through `with_motions`. A race with no clip for the mode gets legacy's fall-back of 300. A
+//! mounted player moves at its mount's mob clip and a morphed one at its morph's, through
+//! `with_mob_moves`; the mount's `HORSE` fall-back reads nothing, as no mount vnum is below 8.
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
@@ -340,8 +341,8 @@ pub(super) fn is_walking(character: &Character, now_walking: bool) -> bool {
 }
 
 /// `CHARACTER::GetMotionMode` (`G/char.cpp:3513-3553`) for the weapon in the weapon slot, or no
-/// weapon. Like legacy it reads only the sub-type. The polymorph arm is not ported, as there is
-/// no polymorph state (V2).
+/// weapon. Like legacy it reads only the sub-type; the polymorph's `GENERAL` arm lives in the
+/// caller, which routes a morphed race before this runs.
 pub(super) fn motion_mode_of(weapon: Option<&Worn<'_>>) -> MotionMode {
     match weapon.map(|worn| worn.proto.sub_type) {
         Some(WEAPON_SWORD) => MotionMode::OneHandSword,
@@ -444,9 +445,14 @@ impl GameState {
             .map_or(0, |points| points.limit_point(POINT_MOV_SPEED))
     }
 
-    /// `GetMoveMotionSpeed` (`G/char.cpp:3555-3577`) for the character under `vid`: the speed of
-    /// its race's clip for its weapon's mode, walk or run as it is now. The fall-back when there
-    /// is no character, no points, or no clip for the race and the mode.
+    /// `GetMoveMotionSpeed` (`G/char.cpp:3555-3577`) for the character under `vid`: the
+    /// mount's move clip when one is mounted, else the race's clip for its weapon's
+    /// mode, walk or run as it is now. The race is the polymorph's when morphed
+    /// (`GetRaceNum`, `G/char.cpp:2177-2187`), whose mode is always `GENERAL`
+    /// (`GetMotionMode`, `:3513-3519`). The mount's `HORSE` fall-back (`:3568`)
+    /// reads nothing: no mount vnum is below 8, and the mob clips hold no horse
+    /// mode. The fall-back when there is no character, no points, or no clip for
+    /// the race and the mode.
     pub(super) fn motion_speed_of(&self, vid: u32) -> f32 {
         let Some(character) = self.characters.find_by_vid(Vid::new(vid)).ok() else {
             return MOTION_SPEED_FALLBACK;
@@ -458,12 +464,53 @@ impl GameState {
             .bodies
             .get(&Vid::new(vid))
             .is_some_and(|body| body.walk.now_walking);
+        let walk = is_walking(character, flag);
+        let mount = points.mount_vnum();
+        if mount != 0 {
+            // The race's `HORSE` fall-back (`:3568`) reads nothing: the player set
+            // holds no mount vnum below 8, and the mob clips hold no horse mode.
+            return self
+                .mob_move_speed(mount, walk)
+                .unwrap_or(MOTION_SPEED_FALLBACK);
+        }
+        let race = points.shown_race();
+        if race >= u32::from(gamedata::pc_motion::MAIN_RACES) {
+            return self
+                .mob_move_speed(race, walk)
+                .unwrap_or(MOTION_SPEED_FALLBACK);
+        }
         let weapon =
             Equipment::of(character.items(), &self.protos).wear(EWearPositions::Weapon as u16);
-        let mode = motion_mode_of(weapon.as_ref());
+        let mode = if points.is_polymorphed() {
+            MotionMode::General
+        } else {
+            motion_mode_of(weapon.as_ref())
+        };
+        // The gate above holds `race` below 8, so the narrowing never truncates; the
+        // fall-back key would miss every clip anyway.
+        let race8 = u8::try_from(race).unwrap_or(u8::MAX);
         self.motions
-            .get(points.race(), mode, is_walking(character, flag))
+            .get(race8, mode, walk)
             .map_or(MOTION_SPEED_FALLBACK, MotionClip::speed)
+    }
+
+    /// The `GENERAL` move speed of the mob `vnum`'s folder: the walk when `walk`
+    /// is set, else the run. `None` without the proto, the folder, or the clip.
+    fn mob_move_speed(&self, vnum: u32, walk: bool) -> Option<f32> {
+        let folder = self.folder_of(vnum)?;
+        if walk {
+            self.mob_moves.walk_s(folder)
+        } else {
+            self.mob_moves.run_s(folder)
+        }
+    }
+
+    /// The folder the proto of `vnum` names, once boot has handed the protos
+    /// over. `None` without the proto, the folder, or a UTF-8 folder.
+    fn folder_of(&self, vnum: u32) -> Option<&str> {
+        let proto = self.regens.respawner()?.mob(vnum)?;
+        let end = proto.folder.iter().position(|&b| b == 0)?;
+        std::str::from_utf8(&proto.folder[..end]).ok()
     }
 
     /// Share the player motion clips boot loaded. Without them every player moves at the
@@ -1106,6 +1153,86 @@ mod tests {
         assert!(world.goto(7, 3200 + 1600, 3200));
         let body = &world.bodies[&Vid::new(7)];
         assert_eq!(body.motion.duration_ms, 5333);
+    }
+
+    #[test]
+    fn a_mounted_player_moves_at_its_mounts_run_clip() {
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_motion::MobMoveClips;
+        use gamedata::mob_proto::{MobProto, MobProtos};
+        use gamedata::records::MobTableRecord;
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        let dir = std::env::temp_dir().join(format!("motion-mount-{}", std::process::id()));
+        let folder = dir.join("fieldy");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("motlist.txt"), "GENERAL RUN run.msa 100\n").unwrap();
+        std::fs::write(
+            folder.join("run.msa"),
+            b"MotionDuration 0.5\nAccumulation 0 -300 0\n",
+        )
+        .unwrap();
+        let mut table = MobTableRecord {
+            vnum: 20_201,
+            ..MobTableRecord::default()
+        };
+        table.folder[..6].copy_from_slice(b"fieldy");
+        let protos = MobProtos::from_rows(vec![MobProto { line: 2, table }]);
+        let moves = MobMoveClips::load(&dir, &protos);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let clock = TestClock::default();
+        let mut world = a_world(&clock).with_mob_moves(std::sync::Arc::new(moves));
+        let respawner = Respawner::new(
+            std::sync::Arc::new(protos),
+            std::sync::Arc::new(MobGroups::default()),
+            std::sync::Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+            NpcVids::starting_at(FIRST_NPC_VID),
+        );
+        world.install_respawner(respawner, super::super::fixtures::open_cells());
+        let _inbox = enter(&mut world, 7, (3200, 3200), 820);
+        world.pc_points_mut(7).unwrap().set_mount_vnum(20_201, 0);
+        assert_eq!(world.motion_speed_of(7).to_bits(), 600.0_f32.to_bits());
+    }
+
+    #[test]
+    fn a_morphed_player_moves_at_its_morphs_run_clip() {
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_motion::MobMoveClips;
+        use gamedata::mob_proto::MobProtos;
+        use world::npc::{NpcVids, Respawner, FIRST_NPC_VID};
+
+        let monster = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/data/monster");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+        let protos = MobProtos::load(&dir).expect("the owner's mob protos load");
+        let moves = MobMoveClips::load(&monster, &protos);
+        let clock = TestClock::default();
+        let mut world = a_world(&clock).with_mob_moves(std::sync::Arc::new(moves));
+        let respawner = Respawner::new(
+            std::sync::Arc::new(protos),
+            std::sync::Arc::new(MobGroups::default()),
+            std::sync::Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+            NpcVids::starting_at(FIRST_NPC_VID),
+        );
+        world.install_respawner(respawner, super::super::fixtures::open_cells());
+        let _inbox = enter(&mut world, 7, (3200, 3200), 820);
+        world.pc_points_mut(7).unwrap().set_polymorph(101, false);
+        let run = 219.19 / 0.5;
+        assert!((world.motion_speed_of(7) - run).abs() < 1e-2);
+    }
+
+    #[test]
+    fn a_mount_with_no_clip_falls_back_to_300() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _inbox = enter(&mut world, 7, (3200, 3200), 820);
+        world.pc_points_mut(7).unwrap().set_mount_vnum(20_201, 0);
+        assert_eq!(
+            world.motion_speed_of(7).to_bits(),
+            MOTION_SPEED_FALLBACK.to_bits()
+        );
     }
 
     /// A clip that moves a body `speed` units a second, over one second.

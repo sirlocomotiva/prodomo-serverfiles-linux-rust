@@ -1144,6 +1144,10 @@ impl GameState {
         let Some(spot) = self.npc_spot(vid) else {
             return;
         };
+        let motion_speed = self
+            .npc_by_vid(vid)
+            .and_then(world::npc::Npc::move_s)
+            .unwrap_or(super::motion::MOTION_SPEED_FALLBACK);
         let now = self.clock.now();
         let Some(mind) = self.minds.get_mut(vid) else {
             return;
@@ -1156,7 +1160,7 @@ impl GameState {
         mind.motion.duration_ms = super::motion::move_duration(
             spot,
             mind.motion.dest,
-            super::motion::MOTION_SPEED_FALLBACK,
+            motion_speed,
             super::mob_battle::npc_limit_speed(move_speed),
         );
         mind.motion.start_ms = now;

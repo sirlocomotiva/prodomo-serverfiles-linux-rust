@@ -725,8 +725,9 @@ pub struct GameState {
     /// The renewal tabs, by keeper vnum.
     renewal_shops: Arc<gamedata::npc_shop::NpcShops>,
     /// The player motion clips, which give each race and weapon its walk and run speed.
-    /// The player motion clips, which give each race and weapon its walk and run speed.
     motions: Arc<gamedata::pc_motion::PcMotions>,
+    /// The mob move clips, which give each monster folder its walk and run speed.
+    mob_moves: Arc<gamedata::mob_motion::MobMoveClips>,
     /// The hosted mob skill rows and the mob power row, which a cast reads.
     mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
     /// The hosted PC skill rows and the eight power rows, which a cast reads.

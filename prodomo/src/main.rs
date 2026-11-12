@@ -10434,6 +10434,27 @@ fn load_mob_clips(
     Arc::new(clips)
 }
 
+/// Load the mob move clips: each named folder's `WALK` and `RUN` speeds
+/// (`CMotionManager::Build`, `G/motion.cpp:327-347`).
+///
+/// A malformed clip is skipped and warned about (legacy's `sys_err` arm); a missing
+/// line or file leaves the speed empty, and the move falls back to 300.
+fn load_mob_moves(
+    config: &ServerConfig,
+    protos: &Arc<gamedata::mob_proto::MobProtos>,
+) -> Arc<gamedata::mob_motion::MobMoveClips> {
+    let moves =
+        gamedata::mob_motion::MobMoveClips::load(&config.data_dir().join("monster"), protos);
+    for path in &moves.skipped {
+        warn!(
+            clip = path,
+            "A move clip failed to parse; its speed falls back to 300"
+        );
+    }
+    info!("Mob move clips loaded");
+    Arc::new(moves)
+}
+
 /// Load the locale strings of every language: `<country_dir>/<code>/locale_string.txt`.
 ///
 /// Legacy reads them at boot (`G/locale_service.cpp:418-455`) and goes on without a file it
@@ -10559,12 +10580,13 @@ struct GameData {
     /// The special item groups, which the game thread holds.
     groups: Arc<gamedata::special_item_group::SpecialItemGroups>,
     /// The player motion clips, the same table the game thread holds.
-    /// The player motion clips, the same table the game thread holds.
     motions: Arc<PcMotions>,
     /// The hosted mob skill rows, the same table the game thread holds.
     mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
     /// The mob skill clips, the same table the game thread holds.
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
+    /// The mob move clips, the same table the game thread holds.
+    mob_moves: Arc<gamedata::mob_motion::MobMoveClips>,
     /// The PC skill rows, the same table the game thread holds.
     pc_skills: Arc<gamedata::pc_skill_data::PcSkills>,
     /// The skill name index, the same table the game thread holds.
@@ -10636,6 +10658,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let motions = load_pc_motions(config)?;
     let mob_skills = load_mob_skills(config)?;
     let mob_clips = load_mob_clips(config, &npcs.protos);
+    let mob_moves = load_mob_moves(config, &npcs.protos);
     let pc_skills = load_pc_skills(config)?;
     let skill_names = load_skill_names(config)?;
     let guild_skills = load_guild_skills(config)?;
@@ -10678,6 +10701,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         motions,
         mob_skills,
         mob_clips,
+        mob_moves,
         pc_skills,
         skill_names,
         guild_skills,
@@ -11354,9 +11378,11 @@ fn stand_up_npcs(
     data: &NpcData,
     cells: &Arc<HostedCells>,
     clips: &Arc<gamedata::mob_skill_data::MobSkillClips>,
+    moves: &Arc<gamedata::mob_motion::MobMoveClips>,
 ) -> Result<(), String> {
     let mut spawner = NpcSpawner::new(&data.protos, &data.groups, &data.names, NpcVids::default())
-        .with_clips(clips);
+        .with_clips(clips)
+        .with_moves(moves);
     for (channel, region, entries) in &data.maps {
         let Some(map_cells) = cells.get(region.index) else {
             continue;
@@ -11382,7 +11408,8 @@ fn stand_up_npcs(
         Arc::clone(&data.names),
         spawner.into_vids(),
     )
-    .with_clips(Arc::clone(clips));
+    .with_clips(Arc::clone(clips))
+    .with_moves(Arc::clone(moves));
     state.install_respawner(respawner, Arc::clone(cells));
     Ok(())
 }
@@ -11655,6 +11682,7 @@ fn build_world(
         .with_motions(Arc::clone(&data.motions))
         .with_mob_skills(Arc::clone(&data.mob_skills))
         .with_mob_clips(Arc::clone(&data.mob_clips))
+        .with_mob_moves(Arc::clone(&data.mob_moves))
         .with_pc_skills(Arc::clone(&data.pc_skills))
         .with_skill_names(Arc::clone(&data.skill_names))
         .with_guild_skills(Arc::clone(&data.guild_skills))
@@ -11708,7 +11736,13 @@ fn build_world(
         .with_protect_level(config.game.pk_protect_level)
         .with_protect_normal(config.game.protect_normal_player)
         .with_recall(Arc::clone(&data.atlas), &channel_maps, &shared);
-    stand_up_npcs(&mut game_state, &data.npcs, &data.cells, &data.mob_clips)?;
+    stand_up_npcs(
+        &mut game_state,
+        &data.npcs,
+        &data.cells,
+        &data.mob_clips,
+        &data.mob_moves,
+    )?;
     Ok(game_state)
 }
 
@@ -17524,6 +17558,7 @@ mod tests {
             &data,
             &Arc::new(hosted),
             &Arc::new(gamedata::mob_skill_data::MobSkillClips::default()),
+            &Arc::new(gamedata::mob_motion::MobMoveClips::default()),
         )
         .expect("boot stands the vein");
         let vids = |state: &GameState| -> Vec<u32> {

@@ -41,8 +41,8 @@
 //! - **The mob skills (V19e, ledger 229u).** The Battle scan casts a hosted skill before
 //!   the swing ([`super::mob_skill`]); no summoner's call or god speed is used, and races
 //!   2191 and 2493 and the Meley map are not ported.
-//! - **The swing waits 50 Pulses (V2).** No monster clip is loaded, so the clip's own wait is
-//!   never read.
+//! - **The swing hold.** A successful swing holds the state for its stamped
+//!   `NORMAL_ATTACK` duration in Pulses, 50 where its folder has no clip.
 //! - **The search order (V19g).** `FindVictim` walks the sectree's `around` order with a strict
 //!   nearer-than test, so the first one met wins a tie.
 //! - **No [TS] lines and no chaser run (V19h).**
@@ -132,8 +132,8 @@ const FIND_TERROR_WORD: u32 = 1 << 20;
 const IMMUNE_TERROR: u32 = 1 << 5;
 
 /// What Battle and Follow read of the monster, copied once per update. `attack_speed` is
-/// `GetLimitPoint(POINT_ATT_SPEED)`, clamped to 0..250; `move_speed` is `GetMoveSpeed()` with
-/// the 300 fall-back (V2).
+/// `GetLimitPoint(POINT_ATT_SPEED)`, clamped to 0..250; `move_speed` is `GetMoveSpeed()` of
+/// the stamped run clip, 300 where the folder has none.
 #[derive(Clone, Copy, Debug)]
 struct Fighter {
     map: i32,
@@ -459,7 +459,7 @@ impl GameState {
             moving,
             rotation: self.minds.get(victim).map_or(0.0, |mind| mind.rotation),
             move_speed: get_move_speed(
-                super::motion::MOTION_SPEED_FALLBACK,
+                npc.move_s().unwrap_or(super::motion::MOTION_SPEED_FALLBACK),
                 npc_limit_speed(npc.fight.point(point::POINT_MOV_SPEED)),
             ),
         })
@@ -520,7 +520,7 @@ impl GameState {
             sight: npc.fight.aggressive_sight,
             attack_speed: npc_limit_speed(npc.fight.point(point::POINT_ATT_SPEED)),
             move_speed: get_move_speed(
-                super::motion::MOTION_SPEED_FALLBACK,
+                npc.move_s().unwrap_or(super::motion::MOTION_SPEED_FALLBACK),
                 npc_limit_speed(npc.fight.point(point::POINT_MOV_SPEED)),
             ),
             hp_pct,

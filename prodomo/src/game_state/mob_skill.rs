@@ -158,6 +158,14 @@ impl GameState {
         self
     }
 
+    /// Share the move clips boot loaded. Without them every NPC moves at the
+    /// fall-back 300, which is legacy's answer for a folder with no clip.
+    #[must_use]
+    pub fn with_mob_moves(mut self, moves: Arc<gamedata::mob_motion::MobMoveClips>) -> Self {
+        self.mob_moves = moves;
+        self
+    }
+
     /// `HasMobSkill` (`G/char_skill.cpp:3322-3340`): any of the 5 slots names a vnum.
     fn has_mob_skill(&self, mob: u32) -> bool {
         self.npc_by_vid(mob)
