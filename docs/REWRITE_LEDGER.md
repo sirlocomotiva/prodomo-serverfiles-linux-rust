@@ -54839,3 +54839,34 @@ lesson: the first draft granted via `/book` and hung on the authority — GOD he
 nothing from an IMPLEMENTOR line.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5569 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 634. Closing the polymorph row
+
+`sys.char.polymorph` is `ported`. The evidence is a full accounting of the 36-hit
+`IsPolymorphed` sweep plus the `GetPolymorphPoint` callers and the `SetPolymorph`
+callers:
+
+- 24 sites ported across ledgers 364-633: the line, ball, book and reversal; the
+  stat, skill-up, book, wear, ride, mount, shop and target gates; the battle
+  compute and both battle DX arms; the target HP and drop-list arms; the quest
+  read; and the `/set` mesh workaround.
+- 3 dead: `char.cpp:6499` (the `#else` of the defined `__VIEW_TARGET_PLAYER_HP__`),
+  the `OFFLINE_SHOP` overload's 30000-morph (`:9355`, the define is unset), and
+  `char_skill.cpp:2120` (its only callers are the mob-skill paths, whose `UseMobSkill`
+  refuses PCs, and no `SetPolymorph` caller touches an NPC — every caller in the
+  sweep is a PC path).
+- 1 waiting on another row: `SkillLevelDown`'s gate (`:655`), which rides the
+  forget arm — the 70037 stands in the owner's data, so the arm is reachable and
+  recorded on `sys.skill.core`'s waits list.
+- 1 moot: the `SetPolymorph` combo reset — the combo state is a server-side
+  anti-cheat hack check (interval, hack count, disconnect at 10) the Rewrite never
+  ported, unobservable to an honest client.
+- The rest unportable: `GiveBook`/`BookUpgrade` and `pc_remove_polymorph`,
+  `pc_polymorph` and `pc_set_race0` stay behind their `unused` quest names (no Lua
+  calls them), and `GetPolymorphPoint`'s IQ arm has no caller.
+
+No code changed: the row's last gap closed in 633, and this slice is the accounting
+that proves it. The scenario cell names the latest proof,
+`a_morphed_reader_hears_1041_from_the_granted_skillbook`.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5568 passed, 2 failed in 46 targets — both pass alone (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet; the fishing take missed its length assert), so the known load flakes, not this slice, which changed no code; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
