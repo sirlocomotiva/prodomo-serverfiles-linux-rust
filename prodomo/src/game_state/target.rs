@@ -230,7 +230,11 @@ impl GameState {
             .map(|_| wanted)
     }
 
-    /// What `SetTarget` shows of `target`: a player's hit points, or an NPC's with its element.
+    /// What `SetTarget` shows of `target`: a player's hit points, or an NPC's with its
+    /// element. A morphed player shows nothing (`__VIEW_TARGET_PLAYER_HP__`,
+    /// `G/char.cpp:6491`: `IsPC() && !IsPolymorphed()`), alone among the arms: the
+    /// no-maximum and the broadcast arms show by the numbers whatever vnum the target
+    /// wears.
     fn target_hit_points(&self, target: u32) -> (HitPoints, u8) {
         if let Some(npc) = self.npc_by_vid(target) {
             return npc_target(npc);
@@ -241,7 +245,11 @@ impl GameState {
             .ok()
             .and_then(world::character::Character::points)
             .map_or((0, 0, 0), |points| {
-                shown_hit_points(points.hp(), points.max_hp())
+                if points.polymorph_race() > 0 {
+                    (0, 0, 0)
+                } else {
+                    shown_hit_points(points.hp(), points.max_hp())
+                }
             });
         (shown, 0)
     }
@@ -415,6 +423,25 @@ mod tests {
         // The same target again changes nothing and sends nothing.
         world.target(Vid::new(1), 2);
         assert!(drained(&mut one).is_empty());
+    }
+
+    /// A morphed player's `SetTarget` shows nothing (`G/char.cpp:6491`), not even a
+    /// maximum, while the unmorphed numbers ride as before; the morph's own records
+    /// are drained first.
+    #[test]
+    fn a_player_targets_a_morphed_player_and_is_sent_nothing() {
+        let (mut world, mut one, mut two) = two_players();
+        world.set_polymorph(Vid::new(2), 101, false);
+        drained(&mut one);
+        drained(&mut two);
+        world.target(Vid::new(1), 2);
+        assert_eq!(drained(&mut one), [target_record(2, (0, 0, 0), 0)]);
+        world.set_polymorph(Vid::new(2), 0, false);
+        drained(&mut one);
+        world.target(Vid::new(1), 0);
+        assert_eq!(drained(&mut one), [target_record(0, (0, 0, 0), 0)]);
+        world.target(Vid::new(1), 2);
+        assert_eq!(drained(&mut one), [player_record(&world, 2)]);
     }
 
     #[test]

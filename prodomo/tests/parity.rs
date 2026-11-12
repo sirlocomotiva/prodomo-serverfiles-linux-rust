@@ -26805,6 +26805,96 @@ fn a_stat_point_raises_and_a_reset_lowers() {
 /// *unmorphed* caller with `[LS;521]` because the *target* is morphed. The morph
 /// is the live `/polymorph 101`, so the gates read the world's own race, and the
 /// unmorph proves the lines run again: `/stat st` moves a point with its records.
+///
+///
+/// Ledger 631: the polymorphed arm of `CHARACTER::SetTarget`'s hit-point show
+/// (`G/char.cpp:6491`, `__VIEW_TARGET_PLAYER_HP__`): a click on an unmorphed player is
+/// answered with its hit points, but once the target morphs the same click is answered
+/// with zeros — not even a maximum — and the clear shows the numbers again. God Alice
+/// clicks low-wizard Yankee three times: plain (50, 325 of 650), morphed into the 101
+/// (zeros, with the reencode drained), and cleared (the numbers again). Yankee hears
+/// nothing throughout: the target is never told it was clicked.
+#[test]
+fn a_click_on_a_morphed_player_shows_nothing_until_the_clear() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_morph_stat_pair(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 325 WHERE name = 'Yankee'",
+    );
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    let (mut alice, _listed) = enter_morph_stat_god(&server);
+    let (mut yankee, yankee_listed) = enter_morph_stat_witness(&server, &mut alice);
+
+    // Plain: Yankee heals while stored below its maximum, so the click's numbers
+    // are read for shape — nonzero hit points of 650 — not exact.
+    alice.send_record(&client_target(yankee_listed.id));
+    let plain = alice.read_game();
+    assert_eq!(&plain[1..5], &yankee_listed.id.to_le_bytes());
+    let plain_hp = i32::from_le_bytes(plain[6..10].try_into().expect("four bytes"));
+    let plain_max = i32::from_le_bytes(plain[10..14].try_into().expect("four bytes"));
+    assert!(
+        plain_hp > 0 && plain_max == 650 && plain[5] > 0,
+        "the plain target shows its hit points: {plain:?}"
+    );
+
+    // Morphed: the reencode passes, then the click shows zeros.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let add = read_add_of(&mut alice, yankee_listed.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        101,
+        "the shown race is the dog"
+    );
+    alice.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_target(0));
+    assert_eq!(
+        alice.read_game(),
+        target_of(0, 0, 0, 0, 0),
+        "the retarget starts from nothing"
+    );
+    alice.send_record(&client_target(yankee_listed.id));
+    assert_eq!(
+        alice.read_game(),
+        target_of(yankee_listed.id, 0, 0, 0, 0),
+        "the morphed target shows nothing"
+    );
+
+    // Cleared: the numbers ride again.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/polymorph 2"));
+    let back = read_add_of(&mut alice, yankee_listed.id);
+    assert_eq!(
+        u16::from_le_bytes(back[22..24].try_into().expect("two bytes")),
+        1,
+        "the clear shows the assassin again"
+    );
+    alice.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_target(0));
+    assert_eq!(alice.read_game(), target_of(0, 0, 0, 0, 0));
+    alice.send_record(&client_target(yankee_listed.id));
+    let clear = alice.read_game();
+    assert_eq!(&clear[1..5], &yankee_listed.id.to_le_bytes());
+    let clear_hp = i32::from_le_bytes(clear[6..10].try_into().expect("four bytes"));
+    let clear_max = i32::from_le_bytes(clear[10..14].try_into().expect("four bytes"));
+    assert!(
+        clear_hp > 0 && clear_max == 650 && clear[5] > 0,
+        "the cleared target shows its hit points again: {clear:?}"
+    );
+    yankee.drain_game(Duration::from_millis(500), game_len);
+    yankee.quiet("the target is never told it was clicked");
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
 #[test]
 fn a_morphed_caller_hears_every_stat_refusal() {
     let Some(database) = ScratchDatabase::create() else {

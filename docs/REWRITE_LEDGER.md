@@ -54761,3 +54761,28 @@ arm is ported for the rows that do (46, 66, 76 and the rest name it) but unpinne
 until one is hosted.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5562 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 631. The morphed target's silence
+
+The polymorph row's "Missing" list names the target HP percent (`G/char.cpp:6491-6499`),
+and this slice ports it: under `__VIEW_TARGET_PLAYER_HP__`, `SetTarget` shows a player's
+hit points only while unmorphed — a morphed target is answered with zeros, not even a
+maximum. `target_hit_points` reads `polymorph_race()` and shows `(0, 0, 0)` while it is
+positive. The broadcast arm (`BroadcastTargetPacket`) has no such gate under the same
+define, so `flush_pc_target` is untouched: a morphed target whose hit points move still
+updates its targeters by the numbers — an asymmetry straight from the source, one
+`#ifdef` with the gate and one without.
+
+The scenario clicks low-wizard Yankee three times: plain (nonzero of 650 — the exact
+hit points heal while the test runs, so the pin reads shape, not numbers), morphed
+into the 101 (zeros, after the reencode drains), and cleared (the numbers again), while
+Yankee hears nothing throughout (`a_click_on_a_morphed_player_shows_nothing_until_the_clear`).
+The unit test pins the same arm in memory with the retarget round trip. `sys.char.polymorph`
+stays `partial`.
+
+One mutant dies: the arm dropped shows the morphed 325 of 650 where the scenario wants
+zeros. Yankee's own politeness record (`GC_WHISPER`'s `[02, 04, ...]`, the login fan's
+tail) lands after the last click, so the final quiet is drained first — the same lesson
+as the morph-stat scenario's drains.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5564 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
