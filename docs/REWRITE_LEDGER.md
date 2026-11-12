@@ -54225,3 +54225,16 @@ arm) survived: that arm is dead — the live quest path answers from
 shadow answering 0 loses the letter in the accept helper; answers pinned to 1
 send the no to the war map instead of the re-button).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5515 passed, 0 failed in 46 targets (two earlier runs flaked in untouched tests: `a_grade_refine_spends_the_stones_and_lands_a_new_one`, then `a_morphed_caller_hears_every_stat_refusal` — both pass alone, and the morph flake is already in the 606-609 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 612. The three towers
+
+`quest.guild_building_npc` is `ported`: scenario
+`a_member_and_a_stranger_hear_the_three_tower_pages`. Three stood objects
+(14013/14014/14015 on lands 5-7) show the refiner NPCs 20044-20046, unspawned on
+the owner's maps; the master's clicks hear the three own-guild pages whole
+(titles `Fierar Arme`, `Fierar de Armuri:`, `Bijutier:`), and the guildless
+stranger's clicks hear the three stranger pages whole (Stanley, Stanton,
+Starbuck). No production code changed. Two mutants die on their intended
+asserts (`npc.get_guild` pinned to 0 breaks the first own page; `pc.get_guild`
+pinned to 7 breaks the first stranger page).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5515 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone, as in the 606-609 and 611 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

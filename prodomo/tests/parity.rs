@@ -53624,6 +53624,93 @@ fn a_no_rebuttons_the_join_ask_and_a_stale_press_says_the_war_is_over() {
     yankee.quiet("the scold ends the page");
 }
 
+/// [`a_member_and_a_stranger_hear_the_three_tower_pages`]'s ground: `MyGuild` (7)
+/// on lands 5-7 with a stood 14013, 14014 and 14015, showing the 20044-20046 tower
+/// NPCs, and Alpha its master standing by them.
+fn seed_tower_guild(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO guild (id, name, master_pid, level) SELECT 7, 'MyGuild', id, 10 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 7, 1 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "UPDATE player SET x = 468200, y = 901610 WHERE name IN ('Alpha', 'Beta')",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (5, 7), (6, 7), (7, 7)",
+    );
+    sql(
+        database,
+        "INSERT INTO building_object (id, land_id, vnum, map_index, x, y, x_rot, y_rot, z_rot, life) VALUES (3, 5, 14013, 1, 468200, 901300, 0, 0, 0, 0), (4, 6, 14014, 1, 468400, 901300, 0, 0, 0, 0), (5, 7, 14015, 1, 468600, 901300, 0, 0, 0, 0)",
+    );
+}
+
+/// `quest.guild_building_npc`'s three clicks over the live script: Alpha masters
+/// `MyGuild`, whose three stood towers show the weapon, armour and jewel NPCs.
+/// Clicking each hears its own-guild page whole; Beta, of no guild, clicks each and
+/// hears the stranger's page whole instead.
+#[test]
+fn a_member_and_a_stranger_hear_the_three_tower_pages() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_tower_guild(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, entered) = enter_world_seeing_guilded(
+        &server,
+        b"alice",
+        0,
+        1,
+        Some(&[(803, 147, 8), (804, 146, 8), (805, 53, 10)]),
+    );
+    for (race, page, note) in [
+        (20_044_u16, TOWER_WEAPON_OWN, "the weapon's own page"),
+        (20_045, TOWER_ARMOUR_OWN, "the armour's own page"),
+        (20_046, TOWER_JEWEL_OWN, "the jewel's own page"),
+    ] {
+        let stone = shown_vid(&entered, race, "the tower shows");
+        alice.send_record(&client_click(stone));
+        assert_eq!(alice.read_game(), server_script(1, page), "{note}");
+    }
+    drop(alice);
+    let (mut beta, _beta_char, _beta_items) = load_character(&server, b"alice", 1);
+    let beta_entered = enter_game_shown(&mut beta);
+    read_login_event(&mut beta);
+    for (race, page, note) in [
+        (
+            20_044_u16,
+            TOWER_WEAPON_STRANGER,
+            "the weapon's stranger page",
+        ),
+        (20_045, TOWER_ARMOUR_STRANGER, "the armour's stranger page"),
+        (20_046, TOWER_JEWEL_STRANGER, "the jewel's stranger page"),
+    ] {
+        let stone = shown_vid(&beta_entered, race, "the stranger sees the tower");
+        beta.send_record(&client_click(stone));
+        assert_eq!(beta.read_game(), server_script(1, page), "{note}");
+    }
+    drop(server);
+}
+
+const TOWER_WEAPON_OWN: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Fierar Arme[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Oh, esti membru al breslei mele! Daca vrei sa-ti[ENTER]imbunatatesti armele le aduci la mine, nu te duci[ENTER]la acei amatori din oras. Rata mea de succes este[ENTER]cu 10% mai mare. Membrii breslei au o reducere de[ENTER]5%. Doar da-mi arma pe care doresti s-o[ENTER]imbunatatesti ca sa pot incepe.[ENTER][DONE]";
+const TOWER_WEAPON_STRANGER: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Fierar Arme[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Ma numesc Stanley si ma ocup cu imbunatatirea[ENTER]armelor.[ENTER]Ma pricep mai bine decat fierarul satului! Daca[ENTER]vii la mine ai putea sa iti maresti sansa cu 10%.[ENTER]Da-mi arma care trebuie imbunatatita.---[ENTER]LOCA::SPACE---[ENTER][DONE]";
+const TOWER_ARMOUR_OWN: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Fierar de Armuri:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Oh, esti membru al breslei mele! Asta inseamna ca[ENTER]poti sa-mi dai armura, scutul, pantofii sau[ENTER]coiful pentru imbunatatire. Rata mea de succes[ENTER]este cu 10% mai mare decat a fierarului din oras![ENTER]De asemenea membrii breslei mele au o reducere de[ENTER]5%. Doar da-mi echipamentul pe care doresti sa-l[ENTER]imbunatatesti.[ENTER][DONE]";
+const TOWER_ARMOUR_STRANGER: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Fierar de Armuri:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Ma numesc Stanton. Ma ocup cu imbunatatirea[ENTER]armurilor. Sunt mult mai bun decat fierarul din[ENTER]oras: rata de succes este cu 10% mai mare. Da-mi[ENTER]armura pe care doresti s-o imbunatatesti.[ENTER][DONE]";
+const TOWER_JEWEL_OWN: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Bijutier:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Oh, esti membru al breslei mele![ENTER]Rata ta de succes va creste cu 10%, daca ma lasi[ENTER]sa iti imbunatatesc bijuteriile.[ENTER]Iar pentru membrii breslei mele ofer 5% reducere.[ENTER][ENTER]Pot sa imbunatatesc bratari, cercei si coliere.[ENTER]Da-mi accesoriul care trebuie[ENTER]imbunatatit! [ENTER][DONE]";
+const TOWER_JEWEL_STRANGER: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Bijutier:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]Ma numesc Starbuck si ma ocup cu imbunatatirea[ENTER]accesoriilor.[ENTER][ENTER]Ma pricep mai bine decat fierarul satului! Daca[ENTER]vii la mine ai putea sa iti maresti sansa cu 10%.[ENTER]Pot sa imbunatatesc bratari, cercei si coliere.[ENTER]Da-mi accesoriul care trebuie imbunatatit![ENTER][DONE]";
+
 const GUILD_CREATE_RUN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Ia cartea[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Ai nevoie de cartea predestinarii pentru a putea[ENTER]forma o breasla.[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][INSERT_IMAGE image_type;item|idx;70101|title;Cartea Intelepciunii|desc;|index;0|total;1][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Primesti cartea daca ucizi, cu ajutorul unei[ENTER]grupe, un orc superior[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][DONE]";
 
 const MELT_TIMETABLE_PAGE: &[u8] = b"Poti angaja inca un alchimist cu 3,000,000 Yang.[ENTER]Pentru a schimba, alege un atribut:[ENTER][QUESTION 1;Diamant|2;Lemn fosila|3;Cupru|4;Argint|5;Aur|6;Jade|7;Continua|8;Inchis]";
