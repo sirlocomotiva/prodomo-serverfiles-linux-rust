@@ -54114,3 +54114,28 @@ their intended asserts (a `judge_warp_set` that warps unknown positions to map
 1 on the post-yes `quiet`, with a `GC_CHARACTER_DEL` arriving; the button
 running the next quest's script on the boss button).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5509 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the literal-separator, unused-parameter and needless-borrow fixes) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 606. The hidden letter and the siege join
+
+`quest.hide_seek_event` and `quest.siege_war_event` are `ported`: scenario
+`the_hidden_boxs_letter_reads_and_the_siege_asks_to_join`. The teacher starts
+hide-and-seek (the start notice, the hint, quest 9's begin letter), and the
+letter's button and quest window entry run its `button or info` dialog. The
+siege half sets `siege_war_event` 1 with no live letter — legacy's flag set
+runs no edge, only the event manager's notify does — so a relog reads quest
+15's letter (the reads plus `title(15)`) behind quest 9's; the siege button
+and entry run the join dialog over the wire: a no chats the farewell page, and
+a yes closes the dialog with `[DONE]` and orders nothing further. The war map's
+point (0, 25600) is on map 103 per the atlas probe (`AT_0_25600=Some(103)`),
+and with no Channel hosting 103 `order_quest_warp`
+(`prodomo/src/game_state/quests.rs:4641`) refuses at the world, warning that
+no channel hosts the target map — legacy's unhosted `CMapLocation::Get`
+refuses the same way while `pc.warp` still answers true (a throwaway probe
+quest said `warp=true`, and the yes leaves the saved position: map 1 at
+(471800, 951600), unlike the boss's unknown-point refusal in `WarpSet`). A
+flag-fall relog drops only the siege letter. No production code changed. Two
+mutants die on their intended asserts (the flag read's `+1` shifts the login
+burst so the siege button arrives where the costume hides' part 1 was
+expected; the select resume's `+1` shows `[DONE]` for the no instead of the
+farewell page).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5509 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal` flaked in the full run and passes alone); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -2466,6 +2466,29 @@ fn read_login_event_hideseek(keyed: &mut Keyed) {
     read_login_update(keyed);
 }
 
+/// [`read_login_event`] while hide-and-seek and the siege flag run: the two
+/// letters and titles ride between `dungeon_info`'s line and the hides, in
+/// quest order.
+fn read_login_event_hidesiege(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    read_letter(keyed, 9, b"Hide and Seek Event", "the hidden box");
+    read_letter(keyed, 15, b"Siege War - Attack and Defend ", "the siege");
+    read_login_lines_hiding_after_dungeon(keyed, empire, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
+
 /// [`read_login_event`] while the Tanaka event runs: the event's letter and title
 /// ride between `dungeon_info`'s line and the hides, in quest order.
 fn read_login_event_tanaka(keyed: &mut Keyed) {
@@ -52983,6 +53006,133 @@ fn the_event_map_dialogs_offer_a_warp_that_finds_no_map() {
     }
     alice.quiet("the reads end");
     map_yes_orders_no_warp(&mut alice);
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    assert_eq!(
+        support::rows(
+            database.url(),
+            "SELECT x, y, map_index FROM player WHERE name = 'Alpha'",
+            3
+        )[0],
+        vec![471_800, 951_600, 1],
+        "the refused warp leaves the saved position"
+    );
+    drop(server);
+}
+
+const HIDE_BUTTON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Hide and Seek Event[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Old Box is spawned on a random location. Find[ENTER]it before the others and get a reward.[ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Keep your eyes on the chat and watch out for hints.[ENTER][ENTER]Good luck! [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][DONE]";
+const SIEGE_JOIN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Siege War - Attack and Defend [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][ENTER]Siege War is here. Your main objective is to[ENTER]destroy enemy Metin Stones but at the same[ENTER]time defend yours.[ENTER][ENTER]Winning Kingdom will receive bonus experience[ENTER]and loot bonuses for the next few days, while[ENTER]2nd place will receive half of the prize. [ENTER][ENTER]Would you like to join the Siege War? [ENTER][QUESTION 1;Yes |2;No ]";
+const SIEGE_FAREWELL_PAGE: &[u8] =
+    b"[ENTER]Then go pick up your weapons and hurry up. [ENTER][ENTER][DONE]";
+
+/// The siege half of [`the_hidden_boxs_letter_reads_and_the_siege_asks_to_join`]:
+/// the flag sets with no live letter, a relog reads quest 15's letter behind
+/// quest 9's, the button and entry run the join dialog, a no chats the farewell
+/// and a yes is refused, and the flag falls with no live clear.
+fn siege_letter_and_join(server: &mut Server, mut alice: Keyed) -> Keyed {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag siege_war_event 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag siege_war_event 1"),
+        "the flag sets"
+    );
+    alice.quiet("the set ends");
+    drop(alice);
+    server.wait_for("Character left the world");
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut alice);
+    read_login_event_hidesiege(&mut alice);
+    alice.still("nothing follows");
+    alice.send_record(&client_script_button(15));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, SIEGE_JOIN_PAGE),
+        "the siege button"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, SIEGE_FAREWELL_PAGE),
+        "the no chats the farewell"
+    );
+    alice.quiet("after no");
+    alice.send_record(&client_script_button(15 | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, SIEGE_JOIN_PAGE),
+        "the siege entry"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the yes closes the dialog"
+    );
+    alice.quiet("no warp record follows the yes");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag siege_war_event 0"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag siege_war_event 0"),
+        "the flag falls"
+    );
+    alice.quiet("the fall ends, with no live clear");
+    alice
+}
+
+/// `quest.hide_seek_event` and `quest.siege_war_event` over the wire: the teacher
+/// starts hide-and-seek (the start notice, the hint, quest 9's begin letter), and
+/// the letter's button and quest window entry run its `button or info` dialog;
+/// `/eventflag` sets the siege flag with no live letter (legacy's flag set runs
+/// no edge — only the event manager's notify does), so a relog reads quest 15's
+/// letter behind quest 9's, and the siege button and entry run the join dialog —
+/// a no chats the farewell, a yes to the war map's point is refused as silently
+/// as the boss's. Quest numbers: hide-and-seek 9, siege 15.
+#[test]
+fn the_hidden_boxs_letter_reads_and_the_siege_asks_to_join() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (mut server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/hide_probe.lua",
+            HIDE_SEEK_PROBE,
+        )],
+        &hide_seek_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    let _ = read_hide_start(&mut alice);
+    alice.quiet("the start ends");
+    alice.send_record(&client_script_button(9));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, HIDE_BUTTON_PAGE),
+        "the hide button"
+    );
+    alice.send_record(&client_script_button(9 | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, HIDE_BUTTON_PAGE),
+        "the hide entry"
+    );
+    alice.quiet("the hide reads end");
+    let alice = siege_letter_and_join(&mut server, alice);
     drop(alice);
     server.wait_for("Character disconnected; wrote the row");
     assert_eq!(
