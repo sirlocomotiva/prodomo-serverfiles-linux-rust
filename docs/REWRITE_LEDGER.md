@@ -54209,3 +54209,19 @@ free cell with the page after. No production code changed. Two mutants die on
 their intended asserts (a `kill` that skips the leader half loses the reward
 letter; `item_name` off by one breaks the run page's image title).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5514 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the two `mut` removals) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 611. The member's no
+
+`quest.guild_war_join` is `ported`: scenario
+`a_no_rebuttons_the_join_ask_and_a_stale_press_says_the_war_is_over`. Both
+masters hold the join letter; Alice's press asks her the `[QUESTION 1;Da|2;Nu]`
+page, and her no runs the else arm (`setskin(NOWINDOW)` + `makequestbutton`),
+re-buttoning the letter with nothing after. A GM-granted `/gwstop 1 2` ends the
+war, and Yankee's press of his stale letter's button finds
+`guild.get_any_war() == 0` and says `Luptele s-au sfarsit deja.` instead of
+asking. No production code changed. A first mutant (the world-side `get_any_war`
+arm) survived: that arm is dead — the live quest path answers from
+`GuildState::judge_shadow`. The two real mutants die where they should (the
+shadow answering 0 loses the letter in the accept helper; answers pinned to 1
+send the no to the war map instead of the re-button).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5515 passed, 0 failed in 46 targets (two earlier runs flaked in untouched tests: `a_grade_refine_spends_the_stones_and_lands_a_new_one`, then `a_morphed_caller_hears_every_stat_refusal` — both pass alone, and the morph flake is already in the 606-609 receipts); `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -53578,6 +53578,52 @@ fn a_partyless_kill_of_the_orc_lord_moves_guild_create_to_reward() {
     drop(server);
 }
 
+/// `quest.guild_war_join`'s no and its war-over scold over the live script: the war
+/// asks both masters to join it, Alice's press asks her the question, and her no
+/// re-buttons her letter (`setskin(NOWINDOW)` + `makequestbutton`) with nothing after.
+/// A GM-granted master's `/gwstop` ends the war (the echo, each side's END fan and the
+/// every-PC `WAR_END_LIST`); Yankee's press of his stale letter's button then finds
+/// `guild.get_any_war() == 0` and says the war-over page instead of asking.
+#[test]
+fn a_no_rebuttons_the_join_ask_and_a_stale_press_says_the_war_is_over() {
+    let Some((_database, _server, mut alice, _alpha_listed, mut yankee, _yankee)) =
+        a_war_pair_ready_on(None, &war_channels())
+    else {
+        return;
+    };
+    let (alice_index, yankee_index) = declare_and_accept_a_battle_war(&mut alice, &mut yankee);
+    assert_eq!(alice_index, yankee_index, "one quest asks both sides");
+    alice.send_record(&client_script_button(alice_index));
+    let question = alice.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question");
+    assert!(
+        String::from_utf8_lossy(&question).contains("[QUESTION 1;Da|2;Nu]"),
+        "the quest asks the member: {question:02x?}"
+    );
+    alice.send_record(&client_script_answer(1));
+    let rebuttoned =
+        format!("[QUESTBUTTON idx;{alice_index}|name;Cere permisiunea de a participa][DONE]");
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, rebuttoned.as_bytes()),
+        "the no re-buttons the letter"
+    );
+    alice.quiet("the no ends the page");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gwstop 1 2"));
+    let echo = alice.read_game();
+    assert_eq!(echo[0], GC_CHAT, "the echo");
+    read_war_end(&mut alice, 1, 2, 1, None);
+    read_war_end(&mut yankee, 2, 1, 1, None);
+    yankee.quiet("the stop settled");
+    yankee.send_record(&client_script_button(yankee_index));
+    assert_eq!(
+        yankee.read_game(),
+        server_script(1, b"Luptele s-au sfarsit deja.[ENTER][DONE]"),
+        "the stale press says the war is over"
+    );
+    yankee.quiet("the scold ends the page");
+}
+
 const GUILD_CREATE_RUN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Ia cartea[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Ai nevoie de cartea predestinarii pentru a putea[ENTER]forma o breasla.[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][INSERT_IMAGE image_type;item|idx;70101|title;Cartea Intelepciunii|desc;|index;0|total;1][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Primesti cartea daca ucizi, cu ajutorul unei[ENTER]grupe, un orc superior[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][DONE]";
 
 const MELT_TIMETABLE_PAGE: &[u8] = b"Poti angaja inca un alchimist cu 3,000,000 Yang.[ENTER]Pentru a schimba, alege un atribut:[ENTER][QUESTION 1;Diamant|2;Lemn fosila|3;Cupru|4;Argint|5;Aur|6;Jade|7;Continua|8;Inchis]";
