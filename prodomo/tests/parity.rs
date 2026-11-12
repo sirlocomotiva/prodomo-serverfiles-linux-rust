@@ -35768,6 +35768,87 @@ fn a_blank_book_keeps_itself_and_morphs_nothing() {
     drop(server);
 }
 
+/// Ledger 632: the 71092 reversal scroll's use (`case USE_SPECIAL`'s 71092 arm,
+/// `G/char_item.cpp:5217-5235`). God Alice stands with the scroll in cell 0; Yankee
+/// morphs into the dog by `/polymorph` and Alice clicks him, then
+/// uses the scroll: the witness's add carries the assassin's race again, and the
+/// scroll's row stays in the store — the arm consumes nothing and says nothing. Then
+/// Alice clears her target and morphs herself, and the scroll's second use clears her
+/// own morph, the witness watching. Yankee's morph is the live line, so the clear
+/// reads the world's own race.
+#[test]
+fn a_used_reversal_scroll_clears_first_the_target_then_the_caller() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_morph_stat_pair(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, vnum, count) SELECT 100000000, id, 1, 0, 71092, 1 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "",
+        "no_wander = true",
+    );
+    let (mut alice, listed) = enter_morph_stat_god(&server);
+    let (mut yankee, yankee_listed) = enter_morph_stat_witness(&server, &mut alice);
+
+    // Yankee morphs by the live line; Alice clicks him.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let add = read_add_of(&mut alice, yankee_listed.id);
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        101,
+        "the shown race is the dog"
+    );
+    alice.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_target(yankee_listed.id));
+    let _clicked = alice.read_game();
+
+    // The scroll clears the TARGET's morph and stays: the witness's add carries the
+    // assassin's race again, and no store row moves.
+    alice.send_record(&client_item_use(0));
+    let back = read_add_of(&mut alice, yankee_listed.id);
+    assert_eq!(
+        u16::from_le_bytes(back[22..24].try_into().expect("two bytes")),
+        1,
+        "the target's clear shows the assassin again"
+    );
+    let kept = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE vnum = 71092",
+        1,
+    );
+    assert_eq!(kept[0][0], 1, "the scroll stays in the store");
+
+    // Alice clears her target, morphs herself, and the scroll clears her own morph.
+    alice.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_target(0));
+    let _cleared = alice.read_game();
+    yankee.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    let own = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(own[22..24].try_into().expect("two bytes")),
+        101,
+        "the caller shows the dog"
+    );
+    yankee.drain_game(Duration::from_millis(500), game_len);
+    alice.send_record(&client_item_use(0));
+    let own_back = read_add_of(&mut yankee, listed.id);
+    assert_eq!(
+        u16::from_le_bytes(own_back[22..24].try_into().expect("two bytes")),
+        u16::from(listed.job),
+        "the caller's clear shows the job again"
+    );
+    drop(alice);
+    drop(yankee);
+    drop(server);
+}
+
 /// Whether no `GC_CHARACTER_ADD` of `vid` arrives within the quiet window.
 fn no_add_of_within(keyed: &mut Keyed, vid: u32) -> bool {
     let deadline = std::time::Instant::now() + QUIET_WINDOW;

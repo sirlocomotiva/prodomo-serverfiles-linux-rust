@@ -4454,6 +4454,9 @@ impl GameState {
         if let Some(glass) = self.search_glass_at(vid, at) {
             return Some(self.open_shop_search(vid, glass, actor));
         }
+        if self.reversal_at(vid, at) {
+            return Some(self.use_reversal_item(vid, actor));
+        }
         None
     }
 

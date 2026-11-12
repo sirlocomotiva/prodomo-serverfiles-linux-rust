@@ -54786,3 +54786,29 @@ tail) lands after the last click, so the final quiet is drained first — the sa
 as the morph-stat scenario's drains.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5564 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 632. The reversal scroll
+
+The 71092 reversal-of-pietrification scroll's use (`case USE_SPECIAL`'s 71092 arm,
+`G/char_item.cpp:5217-5235`): with a target set the target's morph goes, else the
+caller's own; an unmorphed answer changes nothing. Each clear is `SetPolymorph(0)`
+then `RemoveAffect(AFFECT_POLYMORPH)`, in legacy's order. The arm neither counts nor
+removes — the scroll is kept — and nothing is said either way, so the use runs as an
+early arm (the glass precedent): `reversal_at` names the vnum, `use_reversal_item`
+clears and answers the bare used step. `remove_affects_of` widens to `pub(super)`
+for the caller.
+
+The scenario stands the scroll in Alpha's cell 0: Yankee morphs by the live line,
+Alice clicks him, and the scroll's use reencodes the assassin again with the store
+row untouched; then Alice clears her target, morphs herself, and the scroll's second
+use reencodes her job again (`a_used_reversal_scroll_clears_first_the_target_then_the_caller`).
+The unit tests pin both arms in memory, the ball's own use seeding the timed rows.
+`sys.char.polymorph` stays `partial`.
+
+Two mutants die: the clear dropped (no reencode arrives, the 30 s read times out)
+and the target arm dropped to caller-only (the target's morph survives the first
+use). The scenario's own lesson: Yankee's inbox still holds Alice's entry add when
+she morphs, so the witness drains before the line — a stale-add trap, not a wire
+fact.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5567 passed, 1 failed in 46 targets — the one (`a_cape_of_courage_gathers_the_dogs_around` timed out on 8 bytes) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

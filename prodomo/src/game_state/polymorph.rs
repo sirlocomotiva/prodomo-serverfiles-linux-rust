@@ -49,6 +49,10 @@ use protocol::gc_chat::CHAT_TYPE_INFO;
 /// The 50322 practice book's vnum (`POLYMORPH_BOOK_ID`, `G/polymorph.h:8`).
 const POLYMORPH_BOOK: u32 = 50_322;
 
+/// The reversal-of-pietrification scroll (`case USE_SPECIAL`'s 71092 arm,
+/// `G/char_item.cpp:5217-5235`).
+const REVERSAL_SCROLL: u32 = 71_092;
+
 /// The vnums whose book morphs run (`m_mapSPDType`, `G/polymorph.cpp:11-14`): the dog
 /// 101 and 1901. The attack and defence tables stay empty, so no other vnum wins a bonus.
 const BOOK_SPD: [u32; 2] = [101, 1901];
@@ -328,6 +332,41 @@ impl GameState {
         ];
         let skill = self.pc_skill_level(vid.raw(), SKILL_POLYMORPH);
         Some((sockets[0], sockets[1], sockets[2], skill))
+    }
+
+    /// Whether the item at `at` is the 71092 reversal scroll (`case USE_SPECIAL`'s
+    /// 71092 arm, `G/char_item.cpp:5217-5235`).
+    pub(super) fn reversal_at(&self, vid: Vid, at: protocol::item_pos::ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == REVERSAL_SCROLL)
+    }
+
+    /// Uses the 71092 reversal scroll (`G/char_item.cpp:5217-5235`): with a target set
+    /// the target's morph goes, else the caller's own; an unmorphed answer changes
+    /// nothing. Each clear is `SetPolymorph(0)` then `RemoveAffect(AFFECT_POLYMORPH)`,
+    /// in legacy's order — the scroll is kept (the arm neither counts nor removes)
+    /// and nothing is said either way, so the answer is the bare used step.
+    pub(super) fn use_reversal_item(
+        &mut self,
+        vid: Vid,
+        mover: crate::item_move::Mover,
+    ) -> Result<crate::item_move::MovedItems, crate::item_move::MoveItemRefused> {
+        let target = self.targets.of(vid.raw());
+        let cleared = target.unwrap_or(vid.raw());
+        let morphed = self
+            .characters
+            .find_by_vid(Vid::new(cleared))
+            .ok()
+            .and_then(|character| character.points())
+            .is_some_and(|points| points.polymorph_race() > 0);
+        if morphed {
+            self.set_polymorph(Vid::new(cleared), 0, false);
+            self.remove_affects_of(Vid::new(cleared), AFFECT_POLYMORPH);
+        }
+        self.nothing_used(vid, mover)
     }
 
     /// Lands the book's use (`CPolymorphUtils::PolymorphCharacter`,
@@ -803,6 +842,114 @@ mod tests {
         let (inbox, _) = enter_seeing_with(&mut world, PLACE, ME, SPOT, 12_345, &[(at, ball)]);
         let vid = Vid::new(ME);
         (world, inbox, vid)
+    }
+
+    /// The 71092 scroll's use clears the caller's own morph (`G/char_item.cpp:5228-5233`):
+    /// the race clears, the timed `AFFECT_POLYMORPH` rows go with their remove packets,
+    /// and the scroll stays in its cell — the arm consumes nothing and says nothing.
+    #[test]
+    fn a_used_scroll_clears_the_callers_own_morph_and_stays() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+
+        let (mut world, mut mine, vid) = a_ball(DOG, 1);
+        drained(&mut mine);
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let account = crate::game_loop_messages::QuestAccount::default();
+        // The ball's own use morphs through the timed rows, as live, spending the
+        // ball; the scroll is granted into the freed cell 0.
+        let ball_moved = world
+            .use_item(vid, at, mover(), &account)
+            .expect("the ball lands");
+        assert_eq!(ball_moved.kind, world::character::MoveKind::Morphed);
+        drained(&mut mine);
+        let mut scroll = world::item::Item::new(9, REVERSAL_SCROLL);
+        {
+            let (items, _) = world
+                .characters
+                .find_by_vid_mut(vid)
+                .expect("caller")
+                .items_and_points_mut();
+            world::character::grant(items, &mut scroll, &[], 45).expect("a free cell");
+        }
+        let scroll_at = scroll.pos;
+        let moved = world
+            .use_item(vid, scroll_at, mover(), &account)
+            .expect("the use lands");
+        assert_eq!(moved.kind, world::character::MoveKind::Used);
+        let points = world.points_of(ME).expect("points");
+        assert!(!points.is_polymorphed());
+        assert!(
+            world
+                .characters
+                .find_by_vid(vid)
+                .expect("caller")
+                .items()
+                .item_at(scroll_at)
+                .is_some_and(|item| item.vnum == REVERSAL_SCROLL),
+            "the scroll stays in its cell"
+        );
+        assert!(
+            world
+                .affect_events
+                .get(&vid)
+                .is_none_or(|event| event.affects.is_empty()),
+            "the morph rows go"
+        );
+    }
+
+    /// The 71092 scroll's use with a target set clears the TARGET's morph
+    /// (`G/char_item.cpp:5220-5226`): the caller's own morph, when it has one, stays, and
+    /// the target's timed rows go with it.
+    #[test]
+    fn a_used_scroll_clears_the_targets_morph_and_spares_the_caller() {
+        use common::item_slots::EWindows;
+        use protocol::item_pos::ItemPos;
+
+        let (mut world, mut mine, vid) = a_ball(DOG, 1);
+        drained(&mut mine);
+        let at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let account = crate::game_loop_messages::QuestAccount::default();
+        let ball_moved = world
+            .use_item(vid, at, mover(), &account)
+            .expect("the ball lands");
+        assert_eq!(ball_moved.kind, world::character::MoveKind::Morphed);
+        drained(&mut mine);
+        let mut scroll = world::item::Item::new(9, REVERSAL_SCROLL);
+        {
+            let (items, _) = world
+                .characters
+                .find_by_vid_mut(vid)
+                .expect("caller")
+                .items_and_points_mut();
+            world::character::grant(items, &mut scroll, &[], 45).expect("a free cell");
+        }
+        let scroll_at = scroll.pos;
+        // A morphed twin on the same map, and the caller's target on it.
+        let (mut twin_inbox, _) = super::super::fixtures::enter_seeing_with(
+            &mut world,
+            PLACE,
+            ME + 1,
+            (3200, 3400),
+            12_345,
+            &[],
+        );
+        drained(&mut twin_inbox);
+        world.set_polymorph(Vid::new(ME + 1), DOG, false);
+        drained(&mut mine);
+        drained(&mut twin_inbox);
+        world.target(vid, ME + 1);
+        drained(&mut mine);
+        let moved = world
+            .use_item(vid, scroll_at, mover(), &account)
+            .expect("the use lands");
+        assert_eq!(moved.kind, world::character::MoveKind::Used);
+        assert!(
+            world.points_of(ME).expect("caller").is_polymorphed(),
+            "the caller's morph stays"
+        );
+        let twin = world.points_of(ME + 1).expect("twin");
+        assert!(!twin.is_polymorphed(), "the target's morph goes");
     }
 
     /// The ball's use through the world step: the caller morphs into the socket-0 vnum

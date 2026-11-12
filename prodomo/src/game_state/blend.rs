@@ -124,7 +124,7 @@ impl GameState {
 
     /// `RemoveAffect(kind)` on the player under `vid`: every row of the kind
     /// goes, each uncomputed with its remove packet sent.
-    fn remove_affects_of(&mut self, vid: Vid, kind: u32) {
+    pub(super) fn remove_affects_of(&mut self, vid: Vid, kind: u32) {
         let removed = self
             .affect_events
             .get_mut(&vid)
