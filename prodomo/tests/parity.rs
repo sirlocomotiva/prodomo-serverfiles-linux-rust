@@ -14807,13 +14807,15 @@ fn a_full_regen_stands_nothing_more_each_time_it_runs() {
 /// the player's view takes them in (`G/entity_view.cpp:110-118`).
 ///
 /// Thirty stray dogs stand by Alpha. A dog is no aggressive monster, so each waits 3 to 5
-/// seconds in Idle and one time in seven turns to a random heading and runs 300 to 700 units
+/// seconds in Idle and one time in seven turns to a random heading and walks 300 to 700 units
 /// (`__StateIdle_Monster`, `G/char_state.cpp:626-736`), which Goto tells the view as a
 /// `GC_MOVE` `FUNC_WAIT`: the destination, the heading over 5, and the duration of the way at
 /// the fall-back motion speed of 300 (V2) and the dog's moving speed of 100
-/// (`SendMovePacket`, `G/char.cpp:3624-3636`). A dog runs, so no walk mode is sent; a dog that
-/// speaks says a talk with its own VID. Over 20 seconds the dogs wait about 150 times, so the
-/// chance that none walks is below one in a billion.
+/// (`SendMovePacket`, `G/char.cpp:3624-3636`). The walk runs or walks on the `test_server`
+/// toggle (60 in 101 run, ledger 620): a walking dog fans its walk mode before the wait, a
+/// running dog sends the wait alone; a dog that speaks says a talk with its own VID. Over 20
+/// seconds the dogs wait about 150 times, so the chance that none walks is below one in a
+/// billion, and that none runs either.
 #[test]
 fn an_npc_near_a_player_wanders_and_tells_its_view() {
     let Some(database) = ScratchDatabase::create() else {
@@ -14823,6 +14825,7 @@ fn an_npc_near_a_player_wanders_and_tells_its_view() {
 
     // When: Alpha stands by the dogs for 20 seconds. Then: the dogs walk, and say it.
     let mut walks: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut walkers: HashMap<u32, u8> = HashMap::new();
     for record in alice.wire_for(Duration::from_secs(20)) {
         let vid = record_vid(&record);
         match record.first() {
@@ -14833,7 +14836,9 @@ fn an_npc_near_a_player_wanders_and_tells_its_view() {
             }
             Some(&GC_WALK_MODE) => {
                 let walker = u32::from_le_bytes(record[1..5].try_into().expect("a VID"));
-                assert!(!dogs.contains_key(&walker), "a dog runs: {record:02x?}");
+                if dogs.contains_key(&walker) {
+                    walkers.insert(walker, record[5]);
+                }
             }
             Some(&GC_CHAT) if dogs.contains_key(&vid) => {
                 assert_eq!(record[3], CHAT_TYPE_TALKING, "a dog talks");
@@ -14842,6 +14847,13 @@ fn an_npc_near_a_player_wanders_and_tells_its_view() {
         }
     }
     assert!(!walks.is_empty(), "a dog walks in 20 seconds");
+    for (walker, mode) in &walkers {
+        assert!(
+            walks.contains_key(walker),
+            "a fanned dog walks: {walker} mode {mode}"
+        );
+        assert!(*mode <= 1, "walk or run: {mode}");
+    }
     for (vid, walk) in &walks {
         let from = dogs[vid];
         let word = |at: usize| u32::from_le_bytes(walk[at..at + 4].try_into().expect("a word"));

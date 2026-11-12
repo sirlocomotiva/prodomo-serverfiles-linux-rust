@@ -70,9 +70,9 @@
 //! The berserk and god-speed resets wait for the fight too: 148 mob protos carry `BERSERK` and 46
 //! `GODSPEED`, but only Battle turns either on (`G/char_state.cpp:1125-1133`), so Idle finds
 //! nothing to reset (`:643-649`). No affect stuns an NPC and none keeps a shop, so `CanMove`
-//! always holds. The `test_server` walk toggle (`:740-746`), which sets a wandering monster
-//! running 60 times in 101, waits for the `test_server` audit (owner question 5): legacy's
-//! `test_server` defaults to 1 (`G/config.cpp:72`).
+//! always holds. The `test_server` walk toggle (`:740-746`) sets a wandering monster
+//! running 60 times in 101 (ledger 620): legacy's `test_server` defaults to 1
+//! (`G/config.cpp:72`), and the owner never turned it off (owner question 5).
 //!
 //! # Divergences
 //!
@@ -591,6 +591,14 @@ impl GameState {
             let Some((x, y)) = self.wander_target(vid, who.map, distance) else {
                 return;
             };
+            // The `test_server` walk toggle (`:740-746`): a wandering monster runs 60
+            // times in 101 and walks the rest, and draws nothing off the test
+            // server. The flag defaults on (`G/config.cpp:72`); the owner never
+            // turned it off (owner question 5).
+            if self.test_server {
+                let walks = number(&mut self.dice, 0, 100) >= 60;
+                self.set_now_walking(vid, walks);
+            }
             if self.npc_goto(vid, x, y) {
                 self.send_move_wait(vid);
             }
@@ -1530,8 +1538,9 @@ mod tests {
     }
 
     /// A monster's idle walk: one time in 7 it turns to a drawn heading, walks a drawn 300 to
-    /// 700 units at the run, which its view is told as a `FUNC_WAIT`, steps every 4 Pulses to
-    /// the share of the way the time reaches, and at the end waits 1 to 3 seconds.
+    /// 700 units, which its view is told as a `FUNC_WAIT` with the walk fan before it when the
+    /// toggle walks, steps every 4 Pulses to the share of the way the time reaches, and at the
+    /// end waits 1 to 3 seconds.
     #[test]
     fn a_monster_wanders_one_time_in_seven_and_steps_to_its_point() {
         let seed = a_seed(|dice| {
@@ -1544,6 +1553,7 @@ mod tests {
         assert_eq!(number(&mut dice, 0, 6), 0);
         let degrees = number(&mut dice, 0, 359);
         let target = ahead(degrees, number(&mut dice, 300, 700));
+        let walks = number(&mut dice, 0, 100) >= 60;
         assert_eq!(world.dice, dice, "a walk draws no chat");
         let walk = mind(&world);
         assert_eq!(walk.rotation.to_bits(), i32_to_f32(degrees).to_bits());
@@ -1560,8 +1570,14 @@ mod tests {
             1 + MOVE_STEP_PULSES,
             "not the drawn {wait} seconds"
         );
-        assert!(!walk.walking, "a monster runs");
-        assert_eq!(drained(&mut inbox), [move_wait(&walk, T0)]);
+        assert_eq!(walk.walking, walks);
+        let mut told = if walks {
+            vec![walk_mode(ME, WALKMODE_WALK)]
+        } else {
+            Vec::new()
+        };
+        told.push(move_wait(&walk, T0));
+        assert_eq!(drained(&mut inbox), told);
         let clock = TestClock::default();
         world.clock = super::super::motion::WorldClock::new(Box::new(clock.clone()));
         let half = T0 + walk.motion.duration_ms / 2;
@@ -1828,6 +1844,90 @@ mod tests {
         );
         world.set_now_walking(ME, false);
         assert_eq!(drained(&mut inbox), [walk_mode(ME, 0)]);
+    }
+
+    /// The idle wander's walk toggle (`G/char_state.cpp:740-746`): on the test server a
+    /// wandering monster walks when its `number(0, 100)` draw lands at or past 60 and
+    /// runs below it, the walk mode fanning before the `FUNC_WAIT`; off the test server
+    /// it draws nothing and keeps running. Each draws only what legacy draws.
+    #[test]
+    fn a_wandering_monster_walks_or_runs_on_its_draw() {
+        let walking = a_seed(|dice| {
+            let _wait = number(dice, 3, 5);
+            if number(dice, 0, 6) != 0 {
+                return false;
+            }
+            let _degrees = number(dice, 0, 359);
+            let _distance = number(dice, 300, 700);
+            number(dice, 0, 100) >= 60
+        });
+        let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let (world, mut inbox, mut dice) = first_idle(monster, walking);
+        let _wait = number(&mut dice, 3, 5);
+        let _walks = number(&mut dice, 0, 6);
+        let degrees = number(&mut dice, 0, 359);
+        let target = ahead(degrees, number(&mut dice, 300, 700));
+        let _toggle = number(&mut dice, 0, 100);
+        assert_eq!(world.dice, dice, "the toggle draws last");
+        let walk = mind(&world);
+        assert_eq!(walk.motion.dest, target);
+        assert!(walk.walking);
+        assert_eq!(
+            drained(&mut inbox),
+            [walk_mode(ME, WALKMODE_WALK), move_wait(&walk, T0)]
+        );
+        for (draw, walks) in [(60, true), (59, false)] {
+            let edged = a_seed(|dice| {
+                let _wait = number(dice, 3, 5);
+                if number(dice, 0, 6) != 0 {
+                    return false;
+                }
+                let _degrees = number(dice, 0, 359);
+                let _distance = number(dice, 300, 700);
+                number(dice, 0, 100) == draw
+            });
+            let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+            let (edged_world, _, _) = first_idle(monster, edged);
+            assert_eq!(mind(&edged_world).walking, walks, "draw {draw}");
+        }
+        let running = a_seed(|dice| {
+            let _wait = number(dice, 3, 5);
+            if number(dice, 0, 6) != 0 {
+                return false;
+            }
+            let _degrees = number(dice, 0, 359);
+            let _distance = number(dice, 300, 700);
+            number(dice, 0, 100) < 60
+        });
+        let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let (world, mut inbox, _) = first_idle(monster, running);
+        let walk = mind(&world);
+        assert!(!walk.walking);
+        assert_eq!(
+            drained(&mut inbox),
+            [move_wait(&walk, T0)],
+            "no fan, no record"
+        );
+        let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut world = a_map(&clock, vec![monster]).with_test_server(false);
+        let mut inbox = a_player(&mut world);
+        world.dice = Pcg32::new(walking, 0);
+        let mut dice = world.dice.clone();
+        world.process_pulse(1);
+        let _wait = number(&mut dice, 3, 5);
+        let _walks = number(&mut dice, 0, 6);
+        let degrees = number(&mut dice, 0, 359);
+        let target = ahead(degrees, number(&mut dice, 300, 700));
+        assert_eq!(
+            world.dice, dice,
+            "off the test server nothing more is drawn"
+        );
+        let walk = mind(&world);
+        assert_eq!(walk.motion.dest, target, "the same walk, dice for dice");
+        assert!(!walk.walking);
+        assert_eq!(drained(&mut inbox), [move_wait(&walk, T0)]);
     }
 
     /// `no_wander` keeps every monster where it stands, and a walk whose point or half-way point

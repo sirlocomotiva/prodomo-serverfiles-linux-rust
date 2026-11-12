@@ -54414,3 +54414,37 @@ Tests:
   `a_guildmate_hears_meleys_three_words_and_enters_the_shelter` (8/8 under load).
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` (after splitting the scenario's shelter half into a helper — the test stood at 105/100 lines), `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5522 passed, 1 failed in 46 targets — the failure is `a_gm_pulls_the_dogs_and_attracts_the_ranger`, a known load flake (ledger 617's receipt names the class), green alone in 9.11 s. The stale first suite run (launched before the clippy split) was killed and rerun cleanly; its 8 orphaned `prodomo_proc_*` databases were dropped by hand. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
+
+## 620. The wander's walk
+
+`gc.walk_mode` is `ported`, closing the last `partial` in `server-records.md`.
+The gap the row's note carried since 229b — the send on a stamina change —
+was already closed by ledger 569 (V3: `PointChange`'s switch and `StateMove`'s
+spend and restore fan the mode); what remained was the idle wander's
+`test_server` walk toggle (`G/char_state.cpp:740-746`), which the `mob_ai`
+module doc parked behind the `test_server` audit. It is three lines in
+`idle_monster` (`prodomo/src/game_state/mob_ai.rs`): under `test_server` a
+wandering monster draws `number(0, 100)` after its point is fixed and walks
+at 60 or past, runs below, through `set_now_walking`, so the fan rides
+before the `FUNC_WAIT`; off the test server it draws nothing. The flag
+defaults on (`G/config.cpp:72`) and the owner never turned it off (owner
+question 5). The row's scenario is 229b's
+`at_zero_stamina_the_walk_mode_rides_with_each_insert`, with 569's wire run
+and the new unit test named in its note. The toggle broke 229i's
+`an_npc_near_a_player_wanders_and_tells_its_view`, which asserted no dog ever
+fans a walk mode: over 20 seconds the thirty dogs now walk and run both. The
+scenario keeps its walk-shape pins and now collects the dogs' walk fans,
+asserting each fanned dog walks and each fan carries walk or run.
+
+Tests:
+
+- `game_state::mob_ai::tests::a_wandering_monster_walks_or_runs_on_its_draw`:
+  a walking seed fans `WALKMODE_WALK` before the wait, a running seed sends
+  the wait alone, the 60/59 boundary walks/runs, and off the test server the
+  same walk draws nothing more and keeps running, dice for dice.
+- The old wander test replays the new draw and branches its fan on it.
+- Mutants: the threshold at 61 dies on the draw-60 edge (the first version
+  of the mutant survived, both seeds missing the boundary — the edge arms
+  are the class it hid); the gate dropped dies on the off-server silence.
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5524 passed, 0 failed in 46 targets. The first suite run (5523/1) caught 229i's `an_npc_near_a_player_wanders_and_tells_its_view` asserting no dog ever fans a walk mode; the scenario now collects the fans, and the rerun is green. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
