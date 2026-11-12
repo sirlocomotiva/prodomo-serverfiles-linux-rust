@@ -2443,6 +2443,27 @@ fn read_login_event_hideseek(keyed: &mut Keyed) {
     read_login_update(keyed);
 }
 
+/// [`read_login_event`] while the Tanaka event runs: the event's letter and title
+/// ride between `dungeon_info`'s line and the hides, in quest order.
+fn read_login_event_tanaka(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    read_letter(keyed, 14, b"Pirate Tanaka Event", "the event");
+    read_login_lines_hiding_after_dungeon(keyed, empire, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
+
 /// [`read_login_event`] past the board's line: the rank lines and the rest, for an
 /// entrant whose login line an earlier read consumed (the Shared Channel's
 /// duel-start lands between the two).
@@ -52099,6 +52120,141 @@ const DROP_EVENT_PROBE: &[u8] = b"quest drop_probe begin\n\
     end\n\
     end\n\
     end\n";
+
+/// Ledger 601's Tanaka probe: the skill teacher (vnum 20300) toggles event 12 —
+/// start when `tanaka_event` is 0, else end — and says which.
+const TANAKA_PROBE: &[u8] = b"quest tanaka_probe begin\n\
+    state start begin\n\
+    when 20300.click begin\n\
+    if game.get_event_flag('tanaka_event') == 0 then\n\
+    start_event(12)\n\
+    say('tanakas out')\n\
+    else\n\
+    end_event(12)\n\
+    say('tanakas home')\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// The race of a Tanaka pirate insert: 5001 or 5004.
+fn is_tanaka(insert: &[u8]) -> bool {
+    insert[22..24] == 5001u16.to_le_bytes() || insert[22..24] == 5004u16.to_le_bytes()
+}
+
+/// Whether the burst's monster view carries a Tanaka pirate.
+fn has_tanaka(entered: &Entered) -> bool {
+    entered
+        .shown
+        .monsters
+        .iter()
+        .any(|insert| is_tanaka(insert))
+}
+
+/// `sys.event.manager`'s Tanaka arm (`SetTanakaEvent`, `G/event_manager.cpp:1318-1359`)
+/// and its static spawn cycle (`static_spawn_cycle_event`, `:287-336`): the teacher's
+/// click starts the event (the start notice, the begin letter), round 1 lands its
+/// pirates on map 63 within the second, a relog onto the desert shows them in view,
+/// and the teacher's click ends the event (the end notice, every event quest's begin
+/// clearing). The later rounds and the cycle's run past the end are unit-pinned.
+#[test]
+fn a_click_looses_the_tanaka_pirates_onto_the_desert() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (mut server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/tanaka_probe.lua",
+            TANAKA_PROBE,
+        )],
+        &hide_seek_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"tanakas out[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Pirate Tanaka Event has started. Tanakas took over the desert, hunt them down!"
+        ),
+        "the start"
+    );
+    read_letter(
+        &mut alice,
+        14,
+        b"Pirate Tanaka Event",
+        "the begin notification",
+    );
+    alice.quiet("the start ends");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    drop(alice);
+    server.wait_for("Character left the world");
+    sql(
+        &database,
+        "UPDATE player SET x = 253700, y = 505500, map_index = 63 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_tanaka(&mut alice);
+    alice.still("nothing follows");
+    assert!(has_tanaka(&entered), "round 1 shows its pirates");
+    alice.quiet("the view ends");
+    drop(alice);
+    server.wait_for_count("Character left the world", 2);
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600, map_index = 1 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_tanaka(&mut alice);
+    alice.still("nothing follows");
+    let teacher = shown_vid(&entered, 20_300, "map 1 still shows the teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"tanakas home[ENTER][DONE]"),
+        "the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"Pirate Tanaka Event has ended. Thank you for participating!"
+        ),
+        "the end"
+    );
+    for quest in [4u16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
+        assert_eq!(
+            alice.read_game(),
+            quest_begin_clear(quest),
+            "quest {quest}'s begin clears"
+        );
+    }
+    alice.quiet("the end ends");
+    drop(alice);
+    drop(server);
+}
 
 /// `sys.event.manager`'s moonlight, hexegonal and fishing arms (`SetMoonlightEvent`,
 /// `SetHexegonalEvent`, `SetFishingEvent`, `G/event_manager.cpp:1156-1202`): the teacher's

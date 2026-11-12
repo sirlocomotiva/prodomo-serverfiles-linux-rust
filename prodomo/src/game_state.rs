@@ -166,6 +166,7 @@ mod stat;
 mod state;
 mod switchbot;
 mod sync;
+mod tanaka;
 mod target;
 mod target_info;
 mod temple_ochao;
@@ -1040,6 +1041,9 @@ pub struct GameState {
     /// The hide-and-seek box (`m_pHideAndSeekNPC`, `G/event_manager.h:150`). See
     /// [`hide_seek`].
     hide_and_seek: hide_seek::HideAndSeek,
+    /// The Tanaka cycle's placed entries (`data/event/tanaka_event_regen_type_0.txt`).
+    /// See [`tanaka`].
+    tanaka: tanaka::TanakaEntries,
     /// What each non-player keeps of its fight: its killer, its owner and its events. See
     /// [`fight`].
     npc_combat: HashMap<u32, fight::NpcCombat>,
@@ -1276,6 +1280,13 @@ impl GameState {
         stones: Arc<[common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS]>,
     ) -> Self {
         self.dragon_stones = stones;
+        self
+    }
+
+    /// Share the Tanaka cycle's placed entries, which each round spawns once.
+    #[must_use]
+    pub fn with_tanaka(mut self, entries: tanaka::TanakaEntries) -> Self {
+        self.tanaka = entries;
         self
     }
 

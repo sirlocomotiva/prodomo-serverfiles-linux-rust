@@ -96,6 +96,14 @@ pub(super) enum Due {
     /// arena runs first (a Divergence — legacy's heap order at equal priority is
     /// heap-shape dependent, as the other arms note).
     WorldBoss,
+    /// `static_spawn_cycle_event` (`G/event_manager.cpp:287-336`) for the Tanaka map:
+    /// the 3-round 8 min walk. It sorts after [`Due::WorldBoss`]: at an equal Pulse the
+    /// boss runs first (a Divergence — legacy's heap order at equal priority is
+    /// heap-shape dependent, as the other arms note).
+    TanakaCycle {
+        /// The rounds fired so far.
+        step: u8,
+    },
     /// `spawn_santa_event` (`G/xmas_event.cpp:115-141`): Santa's 50 min respawn on this map.
     /// It sorts first here: at an equal Pulse it fires before any other event (a Divergence
     /// — legacy's heap order at equal priority is heap-shape dependent, as the other arms
@@ -358,6 +366,9 @@ impl GameState {
                 // reused. A player's VID is its PID, which comes back at its next login, so a
                 // player's event runs only while its own slot still holds it.
                 Due::Vein(vid) | Due::Campfire(vid) => self.destroy_npc(vid),
+                Due::TanakaCycle { step } => {
+                    self.fire_tanaka_cycle(step);
+                }
                 Due::SantaSpawn { map } => self.fire_santa_spawn(map, pulse),
                 Due::BattleArena => {}
                 Due::WorldBoss => self.run_world_boss_tick(pulse),
@@ -899,6 +910,43 @@ impl GameState {
                 tracing::warn!(?place, %error, "a horse outnumbered the VIDs left");
                 None
             }
+        }
+    }
+
+    /// `SpawnMobRange` on `place` for an event arm (`G/char_manager.cpp:473-503`):
+    /// the proto, the 16 drawn points, aggressive on the stand. Answers the stood
+    /// VID, or nothing when no drawn point took.
+    pub(super) fn spawn_event_mob_range_aggressive(
+        &mut self,
+        place: (u8, i32),
+        vnum: u32,
+        area: (i32, i32, i32, i32),
+    ) -> Option<u32> {
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return None;
+        };
+        let mut stood =
+            match respawner.spawn_mob_line((&region, &cells), vnum, area, false, &mut self.dice) {
+                Ok(stood) => stood,
+                Err(error) => {
+                    warn!(?place, %error, "an event spawn outnumbered the VIDs left");
+                    return None;
+                }
+            };
+        if let Some(npc) = stood.as_mut() {
+            npc.ai_flags |= gamedata::mob_proto::AIFLAG_AGGRESSIVE;
+        }
+        if let Some(npc) = stood {
+            let vid = npc.vid;
+            self.stand_runtime(place, vec![npc], pulse);
+            Some(vid)
+        } else {
+            None
         }
     }
 

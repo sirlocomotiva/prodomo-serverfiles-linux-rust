@@ -544,6 +544,11 @@ impl GameState {
             self.fire_event_edge(true);
             return;
         }
+        if index == 12 {
+            self.start_tanaka();
+            self.fire_event_edge(true);
+            return;
+        }
         if index == 13 {
             self.start_siege_war();
             self.fire_event_edge(true);
@@ -596,6 +601,11 @@ impl GameState {
         }
         if index == 11 {
             self.end_ox_event();
+            self.fire_event_edge(false);
+            return;
+        }
+        if index == 12 {
+            self.end_tanaka();
             self.fire_event_edge(false);
             return;
         }

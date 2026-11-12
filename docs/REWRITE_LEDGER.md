@@ -53970,3 +53970,40 @@ quest's begin except the quests whose flags still run (the moon's end spares 6 a
 hex's spares 6, the fish's spares none). The moon and hex drop readers already lived in
 `reward.rs`; the fish gameplay flag is the separate `enable_fish_event`, already ported.
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5492 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged `GC_CHARACTER_UPDATE` in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 601. The Tanaka pirates
+
+`sys.event.manager`'s Tanaka arm (event 12, `SetTanakaEvent`,
+`G/event_manager.cpp:1318-1359`) is live (the row stays `partial`), and
+`event.event_manager.static_spawn_cycle_event` is `ported`: scenario
+`a_click_looses_the_tanaka_pirates_onto_the_desert`. The start sets the
+`tanaka_event` flag, chats the start notice, sends the begin letter (quest 14,
+`Pirate Tanaka Event`), and arms the cycle at +1 s on the place hosting map 63;
+the end falls the flag, chats the end notice, and clears every event quest's
+begin, as the edge runs only the now-false quests. Round 1 lands its pirates on
+the desert within the second: the scenario sleeps 3 s, relogs onto map 63 at
+the first box's centre, and finds a 5001/5004 insert in the monster view.
+
+The cycle (`static_spawn_cycle_event`, `:287-336`) lives in
+`prodomo/src/game_state/tanaka.rs`: `Due::TanakaCycle { step }` holds the step,
+each fire increments it, rounds 1-3 spawn every `m` line of the owner's
+210-line pirate file once and re-arm at +8 min, and past round 3 the cycle
+stops. The round-1 entity clear is exempt for the Tanaka map (`!=
+TANAKA_EVENT_MAP`), and the end never cancels the cycle (legacy's end arm has
+no cancel). Each line spawns through `regen_spawn`'s (`G/regen.cpp:325-386`)
+dispatch: a point at its point with the legacy rotation (`direction == 0` draws
+`(0..7) * 45`, else `(direction - 1) * 45`), not aggressive — legacy's point
+path takes none — and a box through `SpawnMobRange`'s 16 tries (`G/char_manager.cpp:473-503`),
+aggressive (`regen_load_in_file` forces `is_aggressive` on every placed line,
+`:538`), via the new `spawn_event_mob_range_aggressive` in `regen.rs`.
+`main.rs` loads the entries at boot (`load_tanaka`), empty when map 63 or the
+file is missing; the `ga`/`gg`/`sa` kinds wait, since every event regen file on
+the owner's data holds `m` lines only.
+
+The aggressive call was the slice's one correction: the first port passed a
+constant `true`, and the sweep of `is_aggressive` showed the set lives only in
+`read_line` (`ga`), the dungeon path, and `regen_load_in_file` — the Tanaka
+path keeps the constant, now cited. The two later rounds, the no-host start and
+fire, the end's non-cancel, and the point path's non-aggressive stand are
+unit-pinned in `tanaka.rs`.
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5499 passed, 1 failed in 46 targets — the one (`a_grade_refine_spends_the_stones_and_lands_a_new_one`) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -10541,6 +10541,8 @@ struct GameData {
     quest_translate: Arc<gamedata::quest_translate::QuestTranslate>,
     /// What the game thread stands the NPCs up from before it starts.
     npcs: NpcData,
+    /// The Tanaka cycle's placed entries, which each round spawns once.
+    tanaka: Vec<gamedata::regen::RegenEntry>,
     /// The shops a keeper opens, which the game thread holds.
     shops: Arc<NpcShops>,
     /// The renewal tabs a keeper opens, which the game thread holds.
@@ -10645,6 +10647,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let forked_maps = load_forked_maps(config)?;
     let blend_table = load_blend_table(config)?;
     let lands = load_lands(config)?;
+    let tanaka = load_tanaka(config, &atlas);
     let object_protos = load_object_protos(config)?;
     let daily_weeks = load_daily_weeks(config)?;
     let cube_recipes = load_cube_recipes(config)?;
@@ -10661,6 +10664,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         locale,
         quest_translate,
         npcs,
+        tanaka,
         shops,
         renewal_shops,
         drops,
@@ -10996,6 +11000,31 @@ fn load_forked_maps(config: &ServerConfig) -> Result<Arc<gamedata::forked::Forke
 /// Load the guild lands: the `land` rows (`CClientManager::InitializeLandTable`,
 /// `D/ClientManagerBoot.cpp:919-983`). A dump that does not parse stops the server
 /// before any port opens.
+/// Load the Tanaka cycle's entries: `data/event/tanaka_event_regen_type_0.txt` placed on
+/// map 63's base, as `regen_load_in_file` places them. None when the atlas holds no map
+/// 63 or the file refuses; the cycle then spawns nothing, as legacy's `GetMap` miss does.
+fn load_tanaka(
+    config: &ServerConfig,
+    atlas: &gamedata::map_atlas::MapAtlas,
+) -> Vec<gamedata::regen::RegenEntry> {
+    let Some(region) = atlas.region(63) else {
+        return Vec::new();
+    };
+    let path = config
+        .data_dir()
+        .join("event/tanaka_event_regen_type_0.txt");
+    match gamedata::regen::load_file(&path, region.sx, region.sy) {
+        Ok(entries) => {
+            info!(tanaka = entries.len(), "Tanaka entries loaded");
+            entries
+        }
+        Err(error) => {
+            warn!(%error, "Tanaka entries refused");
+            Vec::new()
+        }
+    }
+}
+
 fn load_lands(config: &ServerConfig) -> Result<Arc<gamedata::land::Lands>, String> {
     let player_path = config.game_tables.join("player.sql");
     let player = std::fs::read(&player_path)
@@ -11619,6 +11648,7 @@ fn build_world(
         .with_clock(Box::new(clock))
         .with_view_range(config.game.view_range)
         .with_no_wander(config.game.no_wander)
+        .with_tanaka(data.tanaka.clone())
         .with_locale_strings(Arc::clone(&data.locale))
         .with_locale_dir(config.locale_dir())
         .with_quest_translate(Arc::clone(&data.quest_translate))
