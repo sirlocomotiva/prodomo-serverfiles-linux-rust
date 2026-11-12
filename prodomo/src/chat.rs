@@ -44,8 +44,10 @@
 //!   `CHARACTER::ChatPacket` does set it (`char.cpp:5179`). The Rewrite writes the
 //!   speaker's empire; that is a recorded Divergence, not parity.
 //! * **The banword filter is disabled.** `// CBanwordManager::instance().ConvertString(buf, buflen);`
-//!   at `input_main.cpp:842` is a comment, so a chat line with a banned word goes out
-//!   unchanged. The Rewrite applies the filter. See [`convert_banwords`].
+//!   at `input_main.cpp:434,554,842` is a comment at all three sites, so a chat line
+//!   with a banned word goes out unchanged, and the Rewrite matches it: nothing
+//!   calls [`convert_banwords`] on the chat path. The helper stays for the port of
+//!   `banword.cpp:73-125` itself, with its unit tests.
 //! * **`ProcessTextTag` is dead.** `input_main.cpp:302-305` opens with `return 0;`, so the
 //!   prism block at `:844-864` can never run and no line is ever refused for markup.
 //!   The Rewrite has no prism accounting, so the same outcome holds, but it is reached
@@ -801,17 +803,12 @@ pub(crate) fn block_chat_info_args(seconds: i32) -> Vec<Arg<'static>> {
 /// `banword.cpp:102-107` stops the scan from re-examining an already-substituted
 /// region.
 ///
-/// # The deliberate Divergence
-///
-/// The only call on the chat path is commented out at `input_main.cpp:842` (the two
-/// other call sites, `:434` and `:554`, are in `Whisper` and are also comments), so
-/// the legacy server **sends a banned word unchanged**. Applying the filter is a
-/// Divergence, recorded in the ledger, and not a Defect reproduction: a bad word
-/// reaching every player on the map is a defect an honest client can cause.
-///
-/// The Rewrite has no banword list loaded yet, so live this is a no-op with an empty
-/// list. The function is the real algorithm so that loading the list later needs no
-/// rewrite of the chat path.
+/// No Divergence: the only call on the chat path is commented out at
+/// `input_main.cpp:842` (the two other call sites, `:434` and `:554`, are in
+/// `Whisper` and are also comments), so the legacy server **sends a banned word
+/// unchanged**, and the Rewrite matches it — nothing calls this on the chat path.
+/// The function is the real algorithm, with its unit tests, so the port of
+/// `banword.cpp:73-125` itself is pinned even though no live path runs it.
 ///
 /// `is_twobyte` is per-locale (`locale_service.cpp:30`) and the Rewrite's only
 /// Locale is `europe`, where the legacy pointer is the Latin-1 test, so a two-byte

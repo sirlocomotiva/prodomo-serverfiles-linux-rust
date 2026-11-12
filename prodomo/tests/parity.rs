@@ -44257,7 +44257,10 @@ fn board_flag_down_and_solo(alice: &mut Keyed, fisher: u32) {
     alice.send_record(&client_script_answer(0));
     assert_eq!(
         alice.read_game(),
-        server_script(1, b"Apararea navei va fi disponibila in curand.[ENTER][DONE]"),
+        server_script(
+            1,
+            b"Apararea navei va fi disponibila in curand.[ENTER][DONE]"
+        ),
         "the flag-down refusal"
     );
     alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag ship_defense 1"));
@@ -44275,10 +44278,18 @@ fn board_flag_down_and_solo(alice: &mut Keyed, fisher: u32) {
     alice.send_record(&client_script_answer(0));
     assert_eq!(
         alice.read_game(),
-        chat_packet(CHAT_TYPE_INFO, 1, b"Puteti incepe calatoria doar cu un grup."),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            1,
+            b"Puteti incepe calatoria doar cu un grup."
+        ),
         "the solo refusal"
     );
-    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the chat ends");
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the chat ends"
+    );
 }
 
 /// Yankee enters on the cape (hearing the GM team) and joins Alice's party.
@@ -44293,11 +44304,13 @@ fn form_cape_party(
         database,
         "INSERT INTO player (account_id, slot, name, job, level, x, y, map_index) SELECT id, 0, 'Yankee', 1, 154, 1107800, 1782700, 135 FROM account WHERE login = 'bob'",
     );
-    sql(database, "UPDATE account SET empire = 1 WHERE login = 'bob'");
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
     let (mut yankee, yankee_listed) =
         enter_world_on_with_team(server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
-    let (_named, yankee_add, _info, _restate) =
-        alice.sees_enter(yankee_listed.id, true, None);
+    let (_named, yankee_add, _info, _restate) = alice.sees_enter(yankee_listed.id, true, None);
     let yankee_vid = u32::from_le_bytes(yankee_add[1..5].try_into().unwrap());
     let mut invite = vec![CG_PARTY_INVITE];
     invite.extend_from_slice(&yankee_vid.to_le_bytes());
@@ -44389,7 +44402,10 @@ fn grant_tickets_and_board_far(
     alice.send_record(&client_script_answer(0));
     assert_eq!(
         alice.read_game(),
-        server_script(1, b"Cel putin un jucator este prea departe de restul grupului.[ENTER][DONE]"),
+        server_script(
+            1,
+            b"Cel putin un jucator este prea departe de restul grupului.[ENTER][DONE]"
+        ),
         "the near gate"
     );
 }
@@ -44413,7 +44429,11 @@ fn board_create_run(
     alice.send_record(&client_script_answer(0));
     assert_eq!(alice.read_game()[0], GC_SCRIPT, "the near question");
     alice.send_record(&client_script_answer(0));
-    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the board ends");
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the board ends"
+    );
     assert_eq!(
         alice.read_game(),
         chat_packet(
@@ -44447,7 +44467,10 @@ fn board_create_run(
         a_warp_record((166_700, 522_300), port),
         "the recall spot on the run"
     );
-    wait_for(database, "(SELECT map_index FROM player WHERE name = 'Alpha') = 3580000");
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 3580000",
+    );
 }
 
 /// The guest boards behind into the standing run: its menu and question, then the
@@ -44466,9 +44489,17 @@ fn board_guest_join(
         "the guest's second menu"
     );
     yankee.send_record(&client_script_answer(0));
-    assert_eq!(yankee.read_game()[0], GC_SCRIPT, "the guest's second question");
+    assert_eq!(
+        yankee.read_game()[0],
+        GC_SCRIPT,
+        "the guest's second question"
+    );
     yankee.send_record(&client_script_answer(0));
-    assert_eq!(yankee.read_game(), server_script(0, b"[DONE]"), "the join ends");
+    assert_eq!(
+        yankee.read_game(),
+        server_script(0, b"[DONE]"),
+        "the join ends"
+    );
     let mut removed = vec![GC_CHARACTER_DEL];
     removed.extend_from_slice(&yankee_id.to_le_bytes());
     assert_eq!(yankee.read_game(), removed, "EncodeRemovePacket(this)");
@@ -44477,7 +44508,10 @@ fn board_guest_join(
         a_warp_record((166_700, 522_300), port),
         "the guest's recall spot on the run"
     );
-    wait_for(database, "(SELECT map_index FROM player WHERE name = 'Yankee') = 3580000");
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Yankee') = 3580000",
+    );
 }
 
 /// Both relog partied onto the run; the wheel's start asks, takes both tickets,
@@ -44497,13 +44531,19 @@ fn relog_and_start_live(server: &Server) -> (Keyed, Keyed, u32) {
     alice.send_record(&client_click(wheel));
     assert_eq!(
         read_menu(&mut alice),
-        server_script(1, b"[QUESTION 1;Incepe Apararea Navei|2;Opreste Calatoria|3;Inchide]"),
+        server_script(
+            1,
+            b"[QUESTION 1;Incepe Apararea Navei|2;Opreste Calatoria|3;Inchide]"
+        ),
         "the wheel's menu"
     );
     alice.send_record(&client_script_answer(0));
     assert_eq!(
         read_menu(&mut alice),
-        server_script(1, b"Vrei sa pornesti si sa incepi calatoria?[ENTER][QUESTION 1;Da|2;Nu]"),
+        server_script(
+            1,
+            b"Vrei sa pornesti si sa incepi calatoria?[ENTER][QUESTION 1;Da|2;Nu]"
+        ),
         "the start question"
     );
     alice.send_record(&client_script_answer(0));
@@ -44521,7 +44561,11 @@ fn relog_and_start_live(server: &Server) -> (Keyed, Keyed, u32) {
     assert_eq!(&take[4..8], &[0, 0, 0, 0], "the cell clears: {take:02x?}");
     let target = alice.read_game();
     assert_eq!(target[0], GC_TARGET, "the mast HP broadcasts");
-    assert_eq!(&target[1..5], &mast.to_le_bytes(), "the mast's VID: {target:02x?}");
+    assert_eq!(
+        &target[1..5],
+        &mast.to_le_bytes(),
+        "the mast's VID: {target:02x?}"
+    );
     assert_eq!(alice.read_game()[0], GC_CHAT, "the attack warning chats");
     assert_eq!(alice.read_game()[0], GC_CHAT, "the wave line chats");
     let guest_take = loop {
@@ -44530,25 +44574,35 @@ fn relog_and_start_live(server: &Server) -> (Keyed, Keyed, u32) {
             break record;
         }
     };
-    assert_eq!(&guest_take[4..8], &[0, 0, 0, 0], "the guest's ticket goes: {guest_take:02x?}");
-    assert_eq!(yankee.read_game()[0], GC_TARGET, "the guest hears the broadcast");
-    assert_eq!(yankee.read_game()[0], GC_CHAT, "the guest hears the warning");
+    assert_eq!(
+        &guest_take[4..8],
+        &[0, 0, 0, 0],
+        "the guest's ticket goes: {guest_take:02x?}"
+    );
+    assert_eq!(
+        yankee.read_game()[0],
+        GC_TARGET,
+        "the guest hears the broadcast"
+    );
+    assert_eq!(
+        yankee.read_game()[0],
+        GC_CHAT,
+        "the guest hears the warning"
+    );
     assert_eq!(yankee.read_game()[0], GC_CHAT, "the guest hears the wave");
     (alice, yankee, wheel)
 }
 
 /// The running leave: the wheel's menu, the leave arm's question, the Da's DONE,
 /// DEL and warp to the cape's recall.
-fn leave_running_to_cape(
-    database: &ScratchDatabase,
-    alice: &mut Keyed,
-    wheel: u32,
-    port: u16,
-) {
+fn leave_running_to_cape(database: &ScratchDatabase, alice: &mut Keyed, wheel: u32, port: u16) {
     alice.send_record(&client_click(wheel));
     assert_eq!(
         read_menu(alice),
-        server_script(1, b"[QUESTION 1;Incepe Apararea Navei|2;Opreste Calatoria|3;Inchide]"),
+        server_script(
+            1,
+            b"[QUESTION 1;Incepe Apararea Navei|2;Opreste Calatoria|3;Inchide]"
+        ),
         "the wheel's menu again"
     );
     alice.send_record(&client_script_answer(1));
@@ -44558,7 +44612,11 @@ fn leave_running_to_cape(
         "the leave question"
     );
     alice.send_record(&client_script_answer(0));
-    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the leave ends");
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the leave ends"
+    );
     let mut removed = vec![GC_CHARACTER_DEL];
     removed.extend_from_slice(&1u32.to_le_bytes());
     assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
@@ -44567,7 +44625,10 @@ fn leave_running_to_cape(
         a_warp_record((1_104_800, 1_788_800), port),
         "the cape's recall"
     );
-    wait_for(database, "(SELECT map_index FROM player WHERE name = 'Alpha') = 135");
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 135",
+    );
 }
 
 /// `quest.ship_defense` over the live wire: a party boards the ship defence, starts
@@ -44617,6 +44678,73 @@ fn a_party_boards_starts_and_leaves_the_live_ship_defence() {
     drop(yankee);
     let (mut alice, _yankee, wheel) = relog_and_start_live(&server);
     leave_running_to_cape(&database, &mut alice, wheel, port);
+}
+
+/// `table.banword`, `sys.char.chat`: a bundle-shop build whose sign holds a banned
+/// word is refused `[LS;812]` (`G/char.cpp:9308`), and a private-shop build whose
+/// title holds one is refused the title line (`G/char.cpp:12043-12047`). The words
+/// are the boot's `banword` table, which the game thread holds since this ledger
+/// (`build_world` never called `with_name_rules`, so the gates never fired). A chat
+/// line with a banned word goes out unchanged: legacy's three `ConvertString` calls
+/// are comments (`G/input_main.cpp:434,554,842`).
+#[test]
+fn a_shop_sign_and_a_shop_title_with_a_banned_word_are_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, 1, 19 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, 1, 50200 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let mut build = vec![CG_MYSHOP];
+    let mut sign = [0u8; 33];
+    sign[..5].copy_from_slice(b"aryan");
+    build.extend_from_slice(&sign);
+    build.push(1);
+    build.extend_from_slice(&19u32.to_le_bytes());
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&0u16.to_le_bytes());
+    build.extend_from_slice(&500u64.to_le_bytes());
+    build.push(3);
+    build.extend_from_slice(&[0u8; 50]);
+    alice.send_record(&build);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;812]"),
+        "the banned sign is refused"
+    );
+    let mut build = vec![CG_PRIVATE_SHOP, 0];
+    let mut title = [0u8; 33];
+    title[..5].copy_from_slice(b"aryan");
+    build.extend_from_slice(&title);
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.push(0);
+    build.push(1);
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&0u16.to_le_bytes());
+    build.extend_from_slice(&500i64.to_le_bytes());
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.extend_from_slice(&3u16.to_le_bytes());
+    alice.send_record(&build);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            1,
+            b"Please choose another title name for your personal shop."
+        ),
+        "the banned title is refused"
+    );
 }
 
 /// The start step's burst after its script: the start's broadcast (the mast's

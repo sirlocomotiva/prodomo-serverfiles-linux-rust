@@ -54524,3 +54524,30 @@ drops nothing (`G/questlua_game.cpp:155-160`), and no 31107 can ever reach the t
 arm. `quest.ship_defense` stays `partial` with the evidence in its note.
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5528 passed, 0 failed in 46 targets), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained (16 strays from the killed runs dropped by hand). No ADR changed.
+
+## 624. The banned shop sign
+
+The shop gates never fired. Both banword refusals were ported — the bundle-shop
+sign's `[LS;812]` (`G/char.cpp:9308`) and the private-shop title's line
+(`G/char.cpp:12043-12047`) — but `build_world` never called `with_name_rules`, so
+the game thread judged every sign against default (empty) rules while only the
+select phase held the loaded table. One line wires the loaded `NameRules` into the
+world, and `a_shop_sign_and_a_shop_title_with_a_banned_word_are_refused` proves
+both refusals over the wire with the boot table's own `aryan`. `table.banword` is
+`ported`.
+
+`sys.char.chat` is `ported` with it, as a verification: its note's five gaps are
+all closed. Whisper went live in 246; the banword conversion is commented out in
+legacy at all three sites (`G/input_main.cpp:434,554,842`), so no conversion is
+parity, not a divergence (as ledger 246 already recorded); `SpamBlockCheck` has
+its scenario; the prism check is dead both sides (`ProcessTextTag` opens with
+`return 0`); and `interpret_command` is the `/` dispatch every `cmd.*` scenario
+exercises. All four `Chat` arms have scenarios. Two stale doc blocks in
+`prodomo/src/chat.rs` claimed the Rewrite applies the chat filter as a Divergence;
+nothing calls `convert_banwords` on the chat path, so they now say it matches
+legacy instead. The helper and its unit tests stay, pinning `banword.cpp:73-125`.
+
+Two mutants (the wiring dropped, default rules instead of the loaded ones) die in
+the scenario.
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5529 passed, 0 failed in 46 targets), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

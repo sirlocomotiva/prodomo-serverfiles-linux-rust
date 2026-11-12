@@ -11679,6 +11679,7 @@ fn build_world(
             config.game.spam_block_duration,
             config.game.spam_block_max_level,
         )
+        .with_name_rules(data.names.clone())
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_emotion_mask_disabled(config.game.disable_emotion_mask)
         .with_test_server(config.game.test_server)
