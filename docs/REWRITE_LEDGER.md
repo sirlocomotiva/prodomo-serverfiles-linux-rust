@@ -54494,3 +54494,33 @@ Tests:
   `the_ward_book_teaches_a_ward_and_refuses_once_learned` (8/8 under load).
 
 Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --doc --locked --offline` (9 passed), `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`, and `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 5526 passed, 0 failed in 46 targets. Afterwards no `prodomo\_%` database remained. `legacy/` is clean. No width was measured. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No ADR changed.
+## 623. The live ship defence
+
+The cape boards, the wheel starts, and the run lets go, all in the owner's
+Romanian. `a_party_boards_starts_and_leaves_the_live_ship_defence` plays the whole
+`ship_defense.lua` voyage with two clients: the flag-down refusal, the GM-set flag,
+the solo syschat refusal, the party form, the guest's leader gate, the ticketless
+board naming both members, the far refusal before the near tick, the create (DONE,
+the ready notice, the own DEL, the run's warp), the guest's join behind into the
+standing run, two partied relogs, the wheel's start (the storm, both ticket takes,
+the mast broadcast and the wave pair on both sides), and the running leave back to
+the cape's recall.
+
+The probe tripped over a real bug first. Console-granted tickets vanished mid-board
+on the wire while their rows stayed in the store: a phantom `ITEM_SET` clear. The
+cause is the grant, not the quest: legacy `CreateItem` stamps socket 0 with
+`time(0) + limit` for a `LIMIT_REAL_TIME` row (`G/item_manager.cpp:280-296`), but
+`grant_item` left the sockets zeroed, so the per-second sweep read `now > 0` and
+ate each fresh ticket. The grant now calls `stamp_created_sockets` (the same
+`CreateItem` port `make_drop_item` uses), before the explicit `socket0` override,
+as legacy's `SetSocket(0, ...)` runs after `CreateItem`. A unit test pins the stamp
+and its row; two mutants (the call dropped, the base pushed an hour out) die in it.
+
+The kill's wood drop and the mast's take stay out, and they are not porting work.
+Vnum 31107 ("Lemn Reparatii") names a row in every `item_names.txt` but none in
+`item_proto.txt` (checked against 71174 present and 999999 absent, and swept
+`legacy/sql/` too), so legacy's `game.drop_item` logs `cannot create item` and
+drops nothing (`G/questlua_game.cpp:155-160`), and no 31107 can ever reach the take
+arm. `quest.ship_defense` stays `partial` with the evidence in its note.
+
+Gates (2026-11-12): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`, `cargo test --workspace --all-targets --locked --offline --no-fail-fast` (5528 passed, 0 failed in 46 targets), `cargo test --workspace --doc --locked --offline`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are green. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained (16 strays from the killed runs dropped by hand). No ADR changed.

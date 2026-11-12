@@ -2351,6 +2351,63 @@ fn enter_game_view_partied(keyed: &mut Keyed, online: &[u32], members: &[u32]) -
     keyed.still("nothing follows");
     entered
 }
+/// [`enter_game_view_partied`] whose final quiet also lets the link's own bonus
+/// points through: a relog into a live party relinks, and the relink's bonus
+/// application lands `GC_POINT_CHANGE`s behind the walk.
+fn enter_game_view_partied_points(
+    keyed: &mut Keyed,
+    online: &[u32],
+    members: &[u32],
+    team: Option<&[u8]>,
+) -> Entered {
+    keyed.send_record(&client_enter_game());
+    let add = keyed.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = keyed.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let mut want: Vec<u8> = Vec::new();
+    want.push(GC_PARTY_ADD);
+    want.extend(std::iter::repeat_n(GC_PARTY_ADD, members.len()));
+    want.extend(std::iter::repeat_n(GC_PARTY_LINK, online.len()));
+    want.extend(std::iter::repeat_n(GC_PARTY_UPDATE, members.len() + 1));
+    want.push(GC_PARTY_PARAMETER);
+    for head in want {
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let record = keyed.read_game_raw();
+            if record[0] == head {
+                break;
+            }
+            kept.push(record);
+        }
+        keyed.unread(kept);
+    }
+    let entered = finish_enter_game(keyed, add, info);
+    if let Some(name) = team {
+        assert_eq!(
+            keyed.read_game(),
+            messenger_team_list(name),
+            "the entrant hears the GM team"
+        );
+    }
+    read_login_event(keyed);
+    // The relink's bonus points land here, with a straggler of the walk itself
+    // (a late UPDATE) when the tick fans mid-burst, ahead of the silence.
+    loop {
+        match keyed.read_game_until(std::time::Instant::now() + QUIET_WINDOW) {
+            None => break,
+            Some(record) => assert!(
+                record[0] == GC_POINT_CHANGE
+                    || record[0] == GC_PARTY_UPDATE
+                    || record[0] == GC_PARTY_LINK
+                    || record[0] == GC_PARTY_ADD,
+                "only bonus points and walk stragglers follow: {record:02x?}"
+            ),
+        }
+    }
+    entered
+}
+
 /// [`enter_game_view`] for an entrant inside a window: answers the burst and the
 /// board's raw login record, for the shape asserts.
 fn enter_game_view_cells(keyed: &mut Keyed) -> (Entered, Vec<u8>) {
@@ -44144,6 +44201,423 @@ const SHIP_PROBE: &[u8] = b"quest ship_probe begin\n\
     end\n\
     end\n\
     end\n";
+
+/// Read past the party walk's tail (LINKs, UPDATEs, ADDs, PARAMETERs) to the next
+/// `GC_SCRIPT` record: the drains gate on the walk's shape, and stragglers the tick
+/// re-fans land ahead of the menu.
+fn read_menu_past_party_walk(who: &mut Keyed, note: &str) -> Vec<u8> {
+    loop {
+        let record = who.read_game();
+        if record[0] == GC_SCRIPT {
+            return record;
+        }
+        assert!(
+            record[0] == GC_PARTY_LINK
+                || record[0] == GC_PARTY_UPDATE
+                || record[0] == GC_PARTY_ADD
+                || record[0] == GC_PARTY_PARAMETER,
+            "{note}: {record:02x?}"
+        );
+    }
+}
+
+/// The board's menu through any tail, for a click whose walk already drained: the
+/// tick may still re-fan between the click and the menu.
+fn read_menu(who: &mut Keyed) -> Vec<u8> {
+    loop {
+        let record = who.read_game();
+        if record[0] == GC_SCRIPT {
+            return record;
+        }
+    }
+}
+
+/// The board's voyage question, answered and asked: the Yes/No record.
+fn ask_board_voyage(who: &mut Keyed, note: &str) {
+    who.send_record(&client_script_answer(0));
+    assert_eq!(
+        who.read_game(),
+        server_script(
+            1,
+            b"Vrei sa-ti incepi calatoria in cautarea[ENTER]Hydra acum?[ENTER][QUESTION 1;Yes|2;No]"
+        ),
+        "{note}"
+    );
+}
+
+/// The board with the flag down (the Romanian refusal), then the flag up and a
+/// solo Yes (the syschat refusal and the skin-0 DONE).
+fn board_flag_down_and_solo(alice: &mut Keyed, fisher: u32) {
+    alice.send_record(&client_click(fisher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;Inchide]"),
+        "the board menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"Apararea navei va fi disponibila in curand.[ENTER][DONE]"),
+        "the flag-down refusal"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag ship_defense 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag ship_defense 1"),
+    );
+    alice.send_record(&client_click(fisher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;Inchide]"),
+        "the board menu again"
+    );
+    ask_board_voyage(alice, "the voyage question");
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"Puteti incepe calatoria doar cu un grup."),
+        "the solo refusal"
+    );
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the chat ends");
+}
+
+/// Yankee enters on the cape (hearing the GM team) and joins Alice's party.
+/// Answers the guest with its list row.
+fn form_cape_party(
+    server: &Server,
+    database: &ScratchDatabase,
+    alice: &mut Keyed,
+) -> (Keyed, Listed) {
+    create_account(server, "bob");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y, map_index) SELECT id, 0, 'Yankee', 1, 154, 1107800, 1782700, 135 FROM account WHERE login = 'bob'",
+    );
+    sql(database, "UPDATE account SET empire = 1 WHERE login = 'bob'");
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    let (_named, yankee_add, _info, _restate) =
+        alice.sees_enter(yankee_listed.id, true, None);
+    let yankee_vid = u32::from_le_bytes(yankee_add[1..5].try_into().unwrap());
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&yankee_vid.to_le_bytes());
+    alice.send_record(&invite);
+    assert_eq!(yankee.read_game()[0], GC_PARTY_INVITE);
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&1u32.to_le_bytes());
+    answer.push(1);
+    yankee.send_record(&answer);
+    drain_party_walk(&mut yankee, "the guest", 3, 2, true);
+    drain_party_walk(alice, "the leader", 4, 2, true);
+    (yankee, yankee_listed)
+}
+
+/// The guest's pre-create board: the menu past the walk's tail, the voyage
+/// question, and the leader gate.
+fn board_guest_pre_create(yankee: &mut Keyed, fisher: u32) {
+    yankee.send_record(&client_click(fisher));
+    assert_eq!(
+        read_menu_past_party_walk(yankee, "the walk's tail ahead of the guest's menu"),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;Inchide]"),
+        "the guest's menu"
+    );
+    ask_board_voyage(yankee, "the guest's question");
+    yankee.send_record(&client_script_answer(0));
+    assert_eq!(
+        yankee.read_game(),
+        server_script(1, b"Doar liderul grupului poate inregistra.[ENTER][DONE]"),
+        "the leader gate"
+    );
+}
+
+/// The leader's ticketless board: the menu past the walk's tail, the voyage
+/// question, and the ticket gate naming both members.
+fn board_leader_ticketless(alice: &mut Keyed, fisher: u32) {
+    alice.send_record(&client_click(fisher));
+    assert_eq!(
+        read_menu_past_party_walk(alice, "the walk's tail ahead of the menu"),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;Inchide]"),
+        "the leader's menu"
+    );
+    ask_board_voyage(alice, "the leader's question");
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            b"Cel putin un jucator nu are Permis de[ENTER]Trecere.[ENTER][COLOR r;1|g;1|b;0] Alpha[ENTER][COLOR r;1|g;1|b;0] Yankee[ENTER][DONE]"
+        ),
+        "the ticket gate names both"
+    );
+}
+
+/// Both tickets granted (stamped, so the sweep leaves them), then the board with
+/// the near tick still pending: the far refusal.
+fn grant_tickets_and_board_far(
+    server: &mut Server,
+    console: &std::path::Path,
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    fisher: u32,
+) {
+    Server::write_console(console, "item give Alpha 71174 1");
+    server.wait_for("id 100000000; the client has it");
+    let grant = loop {
+        let record = alice.read_game();
+        if record[0] == ITEM_SET {
+            break record;
+        }
+    };
+    assert_eq!(set_fields(&grant), (1, 0, 71174, 1));
+    Server::write_console(console, "item give Yankee 71174 1");
+    server.wait_for("id 100000001; the client has it");
+    let grant = loop {
+        let record = yankee.read_game();
+        if record[0] == ITEM_SET {
+            break record;
+        }
+    };
+    assert_eq!(set_fields(&grant), (1, 0, 71174, 1));
+    alice.send_record(&client_click(fisher));
+    assert_eq!(
+        read_menu(alice),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;Inchide]"),
+        "the ticketed menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the ticketed question");
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"Cel putin un jucator este prea departe de restul grupului.[ENTER][DONE]"),
+        "the near gate"
+    );
+}
+
+/// The tick passed, the leader's board creates: the skin-0 DONE, the ready notice
+/// on both sides (the guest's behind its tail), the own DEL, and the run's warp.
+fn board_create_run(
+    server: &Server,
+    database: &ScratchDatabase,
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    fisher: u32,
+) {
+    std::thread::sleep(std::time::Duration::from_millis(3600));
+    alice.send_record(&client_click(fisher));
+    assert_eq!(
+        read_menu(alice),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;Inchide]"),
+        "the near menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game()[0], GC_SCRIPT, "the near question");
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the board ends");
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"The 'Ship Defence' dungeon is ready. The fisherman will let you board now."
+        ),
+        "the ready fan"
+    );
+    let ready = loop {
+        let record = yankee.read_game();
+        if record[0] == GC_CHAT {
+            break record;
+        }
+    };
+    assert_eq!(
+        ready,
+        chat_packet(
+            CHAT_TYPE_NOTICE,
+            1,
+            b"The 'Ship Defence' dungeon is ready. The fisherman will let you board now."
+        ),
+        "the guest hears the ready fan"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&1u32.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((166_700, 522_300), port),
+        "the recall spot on the run"
+    );
+    wait_for(database, "(SELECT map_index FROM player WHERE name = 'Alpha') = 3580000");
+}
+
+/// The guest boards behind into the standing run: its menu and question, then the
+/// join's own DONE, DEL and warp.
+fn board_guest_join(
+    database: &ScratchDatabase,
+    yankee: &mut Keyed,
+    fisher: u32,
+    yankee_id: u32,
+    port: u16,
+) {
+    yankee.send_record(&client_click(fisher));
+    assert_eq!(
+        read_menu(yankee),
+        server_script(1, b"[QUESTION 1;Apararea Navei!|2;Inchide]"),
+        "the guest's second menu"
+    );
+    yankee.send_record(&client_script_answer(0));
+    assert_eq!(yankee.read_game()[0], GC_SCRIPT, "the guest's second question");
+    yankee.send_record(&client_script_answer(0));
+    assert_eq!(yankee.read_game(), server_script(0, b"[DONE]"), "the join ends");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&yankee_id.to_le_bytes());
+    assert_eq!(yankee.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        yankee.read_game(),
+        a_warp_record((166_700, 522_300), port),
+        "the guest's recall spot on the run"
+    );
+    wait_for(database, "(SELECT map_index FROM player WHERE name = 'Yankee') = 3580000");
+}
+
+/// Both relog partied onto the run; the wheel's start asks, takes both tickets,
+/// storms, and broadcasts the mast and the wave on both sides. Answers both
+/// clients with the wheel's VID.
+fn relog_and_start_live(server: &Server) -> (Keyed, Keyed, u32) {
+    let (mut alice, _character, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_view_partied_points(&mut alice, &[1, 4], &[1, 4], None);
+    let wheel = shown_vid(&entered, 20436, "the run shows the wheel");
+    let mast = shown_vid(&entered, 20434, "the run shows the mast");
+    let (mut yankee, _character, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"bob", 0, ENGLISH);
+    let _yankee_entered =
+        enter_game_view_partied_points(&mut yankee, &[1, 4], &[1, 4], Some(b"Alpha"));
+    std::thread::sleep(std::time::Duration::from_millis(3600));
+    alice.send_record(&client_click(wheel));
+    assert_eq!(
+        read_menu(&mut alice),
+        server_script(1, b"[QUESTION 1;Incepe Apararea Navei|2;Opreste Calatoria|3;Inchide]"),
+        "the wheel's menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        read_menu(&mut alice),
+        server_script(1, b"Vrei sa pornesti si sa incepi calatoria?[ENTER][QUESTION 1;Da|2;Nu]"),
+        "the start question"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            "Ce se întâmpla?! Marea devine din ce in ce mai agitata.. Se[ENTER]pregateste o furtuna?[ENTER][DONE]"
+                .as_bytes()
+        ),
+        "the storm"
+    );
+    let take = alice.read_game();
+    assert_eq!(take[0], ITEM_SET, "the leader's ticket goes");
+    assert_eq!(&take[4..8], &[0, 0, 0, 0], "the cell clears: {take:02x?}");
+    let target = alice.read_game();
+    assert_eq!(target[0], GC_TARGET, "the mast HP broadcasts");
+    assert_eq!(&target[1..5], &mast.to_le_bytes(), "the mast's VID: {target:02x?}");
+    assert_eq!(alice.read_game()[0], GC_CHAT, "the attack warning chats");
+    assert_eq!(alice.read_game()[0], GC_CHAT, "the wave line chats");
+    let guest_take = loop {
+        let record = yankee.read_game();
+        if record[0] == ITEM_SET {
+            break record;
+        }
+    };
+    assert_eq!(&guest_take[4..8], &[0, 0, 0, 0], "the guest's ticket goes: {guest_take:02x?}");
+    assert_eq!(yankee.read_game()[0], GC_TARGET, "the guest hears the broadcast");
+    assert_eq!(yankee.read_game()[0], GC_CHAT, "the guest hears the warning");
+    assert_eq!(yankee.read_game()[0], GC_CHAT, "the guest hears the wave");
+    (alice, yankee, wheel)
+}
+
+/// The running leave: the wheel's menu, the leave arm's question, the Da's DONE,
+/// DEL and warp to the cape's recall.
+fn leave_running_to_cape(
+    database: &ScratchDatabase,
+    alice: &mut Keyed,
+    wheel: u32,
+    port: u16,
+) {
+    alice.send_record(&client_click(wheel));
+    assert_eq!(
+        read_menu(alice),
+        server_script(1, b"[QUESTION 1;Incepe Apararea Navei|2;Opreste Calatoria|3;Inchide]"),
+        "the wheel's menu again"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"Vrei sa te intorci?[ENTER][QUESTION 1;Da|2;Nu]"),
+        "the leave question"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"), "the leave ends");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&1u32.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((1_104_800, 1_788_800), port),
+        "the cape's recall"
+    );
+    wait_for(database, "(SELECT map_index FROM player WHERE name = 'Alpha') = 135");
+}
+
+/// `quest.ship_defense` over the live wire: a party boards the ship defence, starts
+/// it, and leaves it. The flag-down board is refused in Romanian; the flag up, a solo
+/// board is refused by syschat; the guest's pre-create board is refused as not the
+/// leader; the leader's ticketless board names both members; tickets granted, the
+/// near tick still pending, the board calls one too far; the tick passed, the board
+/// creates (DONE, the ready notice, the own DEL, the run's warp); the guest boards
+/// behind into the standing run; both relog partied; the wheel's start asks, takes
+/// both tickets, storms, and broadcasts (the mast's target HP and the wave's pair, on
+/// both sides); and the running leave asks back and ships out to the cape's recall.
+/// The kill's wood drop and the mast's take stay out: vnum 31107 names a row in
+/// `item_names.txt` ("Lemn Reparatii") but none in `item_proto.txt`, so legacy's
+/// `CreateItem` returns `NULL` (`G/questlua_game.cpp:155-160`) and no drop can land.
+#[test]
+fn a_party_boards_starts_and_leaves_the_live_ship_defence() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET map_index = 135, x = 1107800, y = 1782700 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' FROM account WHERE login = 'alice'",
+    );
+    let (mut server, console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &ship_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _listed, entered) = enter_world_seeing(&server, b"alice", 0);
+    let fisher = shown_vid(&entered, 9009, "the cape shows 9009");
+    board_flag_down_and_solo(&mut alice, fisher);
+    let (mut yankee, yankee_listed) = form_cape_party(&server, &database, &mut alice);
+    board_guest_pre_create(&mut yankee, fisher);
+    board_leader_ticketless(&mut alice, fisher);
+    grant_tickets_and_board_far(&mut server, &console, &mut alice, &mut yankee, fisher);
+    board_create_run(&server, &database, &mut alice, &mut yankee, fisher);
+    let port = server.channel(1).port();
+    board_guest_join(&database, &mut yankee, fisher, yankee_listed.id, port);
+    drop(alice);
+    drop(yankee);
+    let (mut alice, _yankee, wheel) = relog_and_start_live(&server);
+    leave_running_to_cape(&database, &mut alice, wheel, port);
+}
 
 /// The start step's burst after its script: the start's broadcast (the mast's
 /// target HP), the wave's pair, the heal's own notice, the stun's flag update and

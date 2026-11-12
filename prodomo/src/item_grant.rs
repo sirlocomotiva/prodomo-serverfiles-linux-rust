@@ -43,7 +43,8 @@
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
 use gamedata::item_proto::ItemProtos;
 use world::character::{
-    grant as place, CharacterManager, GrantRefused as PlacementRefused, Rejected,
+    grant as place, stamp_created_sockets, CharacterManager, GrantRefused as PlacementRefused,
+    Rejected,
 };
 use world::item::{Item, ItemIds};
 
@@ -228,8 +229,18 @@ pub fn grant_item(
     // both travel from the prototype and not from anything the grant chose.
     item.flags = proto.flags;
     item.anti_flags = proto.anti_flags;
+    // `CreateItem` stamps socket 0 for a `LIMIT_REAL_TIME` row (`G/item_manager.cpp:280-296`)
+    // before anything else touches it; without the stamp the per-second sweep reads
+    // `now > 0` and eats a fresh grant mid-scenario.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        });
+    stamp_created_sockets(&mut item, proto, now_secs);
     // `SetSocket(0, ...)` (`G/cmd_gm.cpp:3084`): the socket is a `long`, so the vnum's
-    // bits read back signed, as the legacy caller's `DWORD` argument does.
+    // bits read back signed, as the legacy caller's `DWORD` argument does. It runs
+    // after the stamp, as legacy's runs after `CreateItem`.
     if let Some(socket0) = request.socket0 {
         item.sockets[0] = i32::from_ne_bytes(socket0.to_ne_bytes());
     }
@@ -339,6 +350,23 @@ mod tests {
             )
     }
 
+    /// A real vnum whose prototype carries a `LIMIT_REAL_TIME` row, with its span.
+    ///
+    /// Searched rather than hard-coded, for the same reason as [`a_vnum_of_size`].
+    fn a_real_time_vnum(protos: &ItemProtos) -> (u32, i32) {
+        protos
+            .rows()
+            .iter()
+            .find_map(|proto| {
+                proto
+                    .limits
+                    .iter()
+                    .find(|limit| limit.kind == gamedata::item_kind::LIMIT_REAL_TIME)
+                    .map(|limit| (proto.vnum, limit.value))
+            })
+            .unwrap_or_else(|| panic!("no REAL_TIME prototype in the owner's data"))
+    }
+
     /// A world with one player named `Shaman`.
     fn world_with_shaman() -> CharacterManager {
         let mut world = CharacterManager::new();
@@ -362,6 +390,31 @@ mod tests {
             count,
             socket0: None,
         }
+    }
+
+    #[test]
+    fn a_grant_stamps_a_real_time_expiry_like_create_item() {
+        let protos = owners();
+        let (vnum, span) = a_real_time_vnum(&protos);
+        let mut world = world_with_shaman();
+        let mut ids = fresh_ids();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        let outcome = grant_item(&mut world, &protos, &mut ids, &request(vnum, None), 90)
+            .expect("a real-time grant lands");
+        let span = i64::from(span).max(0);
+        let span = if span == 0 { 7 * 24 * 60 * 60 } else { span };
+        let at = i64::from(outcome.record.sockets[0]);
+        assert!(
+            at >= before.saturating_add(span) && at <= before.saturating_add(span + 60),
+            "socket 0 holds now plus the span, not {at}"
+        );
+        // The row the store keeps carries the same stamp, so a reload does not
+        // resurrect an instantly-expired item.
+        assert_eq!(outcome.row.sockets[0], outcome.record.sockets[0]);
     }
 
     #[test]
