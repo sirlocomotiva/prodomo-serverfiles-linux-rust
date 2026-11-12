@@ -15838,6 +15838,26 @@ fn npc_move_of(
     }
 }
 
+/// Ledger 637: the target record carries the victim's element (`ELEMENT_TARGET`,
+/// `G/char.cpp:6575-6592`). A 401 stands at Alpha's feet; it is `HUMAN,ATT_WIND`, so its
+/// element counts to 4 for `ATT_WIND`, and targeting it shows 4 in the record's last byte.
+#[test]
+fn a_targeted_wind_mob_shows_its_element_in_the_target_record() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, _alpha_vid, entered) =
+        alpha_swinging_by(&database, "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t401\n");
+    let mob = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target(mob));
+    assert_eq!(alpha.read_game(), target_of(mob, 100, 981, 981, 4));
+    alpha.send_record(&client_target(0));
+    assert_eq!(alpha.read_game(), target_of(0, 0, 0, 0, 0));
+}
+
 /// Ledger 229j: `CInputMain::Attack` and `battle_melee_attack` (`G/input_main.cpp:1966-2009`,
 /// `G/battle.cpp:172-210`), `CHARACTER::Damage` and its `Stun`, `StunEvent`, `Dead` and
 /// `dead_event` (`G/char_battle.cpp:402-548`, `:1238-1696`, `:2179-2433`), `SetSyncOwner`

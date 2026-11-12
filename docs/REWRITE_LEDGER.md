@@ -54930,3 +54930,31 @@ type-6 rows to mean anything.
 No code changed. The inventory test below is the check.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5569 passed, 2 failed in 46 targets — both pass alone (`a_morphed_caller_hears_every_stat_refusal` and `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off`), so the known load flakes, not this slice, which changed no code; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 637. Closing the resist row
+
+`sys.combat.resist` is `ported`. Its note's "Not yet" was stale: every arm it names
+is in, and the evidence is a sweep, not a port.
+
+- `BONUS_PCT`'s live damage reads are all ported: `ATTBONUS_MONSTER_PCT` in
+  `monster_share` (the melee, arrow and magic-attr arms and the mob self-`atk`
+  share it), and the six element pcts in `element_resist` (the mob-to-player `atk`,
+  which the mob skill splashes reuse). The `BONUS_PTC` arm (`G/battle.cpp:315`) is
+  compiled out — the define is unset (and misspelled `PTC`).
+- `NEW_BONUS` gates nothing: no `#ifdef NEW_BONUS` exists in game code. The
+  boss/metin pct points are plumbed through applies and constants but no damage
+  path reads them.
+- `char_resist.cpp`'s body is ported: the poison/fire events and their removes,
+  `ApplyMobAttribute` (the enchant/resist apply tables), and `IsImmune` as the bare
+  bit test (`__FIX_BUG_IMMUNE__` is defined).
+- `ELEMENT_TARGET`'s element count is ported (`element_of`, unit-pinned) and wired
+  into `GC_TARGET`.
+- The functor's melee/range attr arms skip `CalcAttBonus` exactly as legacy does
+  (only MAGIC calls it); PC-vs-PC has no pct terms in legacy either.
+
+The new scenario proves the one arm no wire test touched: a targeted 401
+(`HUMAN,ATT_WIND`) shows element 4 in its `GC_TARGET`, and clearing the target shows
+0. Mutants (the 1024 reach zeroed, the monster gate retargeted past `ATT_DARK`) both
+killed semantically, restores checksum-verified; the scenario ran 8/8.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5572 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
