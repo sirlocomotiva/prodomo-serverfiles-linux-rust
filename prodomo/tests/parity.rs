@@ -52403,6 +52403,217 @@ fn a_click_looses_the_tanaka_pirates_onto_the_desert() {
     drop(server);
 }
 
+/// The first insert of `vnum` in the enter burst: Yonah (20005) spawns twice on
+/// map 1, so [`shown_vid`]'s exactly-one fails it.
+fn first_shown_vid(entered: &Entered, vnum: u16, note: &str) -> u32 {
+    entered
+        .shown
+        .inserts()
+        .iter()
+        .find(|insert| insert[22..24] == vnum.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .expect(note)
+}
+
+/// The quest that says the next draw of the one `math.random` stream (`13` then `6`
+/// prove the exchange drew first): the elder (20041) has no quest binding on the
+/// owner's data, so its click runs only this.
+const ROLL_PROBE: &[u8] = b"quest roll_probe begin\n\
+    state start begin\n\
+    when 20041.click begin\n\
+    say(''..math.random(1, 15))\n\
+    end\n\
+    end\n\
+    end\n";
+
+const TANAKA_BUTTON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Pirate Tanaka Event[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Pirates Tanaka will start to appear on [ENTER]random places in Yongbi Desert. Your aim is to find[ENTER]hunt them down. Tanaka is still in move, so you[ENTER]will have to be quick and dexterous enough. When[ENTER]the event will end, you will be able to deliver[ENTER]your collected items to Yonah and pick another items. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Happy hunting and enjoy the Event! [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][DONE]";
+const TANAKA_MENU_PAGE: &[u8] = b"[QUESTION 1;Pirate Tanaka Event|2;Inchide]";
+const TANAKA_SCOLD_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yonah:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Arghh, stop standing still and bring me Tanaka's Ear! [ENTER][ENTER][DONE]";
+const TANAKA_OFFER_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Yonah:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Looks like you have been busy hunting[ENTER]down those thieves. In exchange for Tanaka's[ENTER]I will reward you with something, I am just not[ENTER]sure what you would like to have. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]Would you like to exchange Tanaka's Ear[ENTER]for a random item? [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Yes |2;No ]";
+
+/// The roll half of [`the_tanaka_letters_dialog_and_yonahs_exchange_run`]: a relog
+/// onto the elder's spot (5600 from Yonah's, out of one view) hears the stream's
+/// second draw, which pins that the exchange drew first.
+fn tanaka_second_draw_is_six(server: &mut Server, database: &ScratchDatabase) {
+    sql(
+        database,
+        "UPDATE player SET x = 474900, y = 946800 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_tanaka(&mut alice);
+    alice.still("nothing follows the move");
+    let elder = shown_vid(&entered, 20_041, "map 1 shows 20041");
+    alice.send_record(&client_click(elder));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"6[ENTER][DONE]"),
+        "the stream's second draw"
+    );
+    alice.quiet("the roll ends");
+    drop(alice);
+    server.wait_for_count("Character left the world", 4);
+}
+
+/// The start half of [`the_tanaka_letters_dialog_and_yonahs_exchange_run`]: the
+/// teacher's click starts the event, and the letter's button and the quest
+/// window's entry both run the `button or info` dialog.
+fn tanaka_start_and_letter_dialog(server: &mut Server) {
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(server, b"alice", 0);
+    let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    alice.send_record(&client_click(teacher));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"tanakas out[ENTER][DONE]"),
+        "the dialog"
+    );
+    alice.read_game();
+    read_letter(
+        &mut alice,
+        14,
+        b"Pirate Tanaka Event",
+        "the begin notification",
+    );
+    alice.quiet("the start ends");
+    alice.send_record(&client_script_button(14));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, TANAKA_BUTTON_PAGE),
+        "the letter's button"
+    );
+    alice.send_record(&client_script_button(14 | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, TANAKA_BUTTON_PAGE),
+        "the quest window's entry"
+    );
+    alice.quiet("the presses end");
+    drop(alice);
+    server.wait_for("Character left the world");
+}
+
+/// The scold half of [`the_tanaka_letters_dialog_and_yonahs_exchange_run`]: a relog
+/// onto Yonah's spot hears the chat menu and, with no ear held, the scold.
+fn tanaka_scold_without_ear(server: &mut Server, database: &ScratchDatabase) {
+    sql(
+        database,
+        "UPDATE player SET x = 469300, y = 947100 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_tanaka(&mut alice);
+    alice.still("nothing follows");
+    let yonah = first_shown_vid(&entered, 20_005, "map 1 shows Yonah");
+    alice.send_record(&client_click(yonah));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, TANAKA_MENU_PAGE),
+        "the chat menu"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, TANAKA_SCOLD_PAGE),
+        "the scold without the ear"
+    );
+    alice.quiet("the scold ends");
+    drop(alice);
+    server.wait_for_count("Character left the world", 2);
+}
+
+/// `quest.tanaka_event`'s letter and reward arms over the wire: with the event
+/// running, the letter's button and the quest window's entry both run the `button
+/// or info` dialog; Yonah's (20005) chat menu names the event's entry, which without
+/// the ear chats the scold, and with the ear offers the exchange — a yes spends the
+/// ear, and the first draw of the one `math.random` stream is 13, whose Bewitch
+/// Item has no proto on the owner's data, so nothing arrives (legacy's
+/// `AutoGiveItem` refuses a missing proto the same way) while the ear's clear and
+/// the dialog's close both reach the client; the elder then says the stream's
+/// second draw, 6. The begin/end arms rode ledger 601.
+#[test]
+fn the_tanaka_letters_dialog_and_yonahs_exchange_run() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (mut server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[
+            (
+                "locale/europe/quest/zz_probe/tanaka_probe.lua",
+                TANAKA_PROBE,
+            ),
+            ("locale/europe/quest/zz_probe/roll_probe.lua", ROLL_PROBE),
+        ],
+        &hide_seek_channels(),
+        "no_wander = true",
+    );
+    tanaka_start_and_letter_dialog(&mut server);
+    tanaka_scold_without_ear(&mut server, &database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 40, id, 1, 0, 1, 30202 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _quickslots, items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    assert_eq!(
+        set_fields(&items[0]),
+        (common::item_slots::EWindows::Inventory as u8, 0, 30_202, 1),
+        "the seeded ear sits in cell 0"
+    );
+    let entered = enter_game_shown(&mut alice);
+    read_login_event_tanaka(&mut alice);
+    alice.still("nothing follows");
+    let yonah = first_shown_vid(&entered, 20_005, "map 1 shows Yonah");
+    let before = items_of(&database, "Alpha");
+    assert!(
+        before.split(' ').any(|cell| cell == "40:30202"),
+        "the seeded ear is stored: {before}"
+    );
+    alice.send_record(&client_click(yonah));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, TANAKA_MENU_PAGE),
+        "the menu with the ear"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, TANAKA_OFFER_PAGE),
+        "the exchange offer"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(alice.read_game(), a_clear_record(0), "the ear's clear");
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the dialog closes with no reward"
+    );
+    alice.quiet("nothing follows the missed reward");
+    wait_for(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE vnum = 30202 AND owner_id = (SELECT id FROM player WHERE name = 'Alpha'))",
+    );
+    assert_eq!(
+        items_of(&database, "Alpha"),
+        "none",
+        "the ear is gone and the missed roll stores no reward (was {before})"
+    );
+    drop(alice);
+    server.wait_for_count("Character left the world", 3);
+    tanaka_second_draw_is_six(&mut server, &database);
+    drop(server);
+}
+
 /// `sys.event.manager`'s moonlight, hexegonal and fishing arms (`SetMoonlightEvent`,
 /// `SetHexegonalEvent`, `SetFishingEvent`, `G/event_manager.cpp:1156-1202`): the teacher's
 /// clicks start all three (each start notice, each begin letter — moon 12, hex 8, fish 6 —

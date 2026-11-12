@@ -54045,3 +54045,32 @@ The slice's one correction: the first ends never cleared their flags — legacy'
 `m` lines only (88/96 boss, 149/155 metin, 85 frog) and the mining file 403 `g`
 lines, pinned by count.
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5504 passed, 2 failed in 46 targets — the one scenario (`a_morphed_caller_hears_every_stat_refusal`) passes alone, so the known load flake, not this slice, and the one unit pin (`the_event_pair_moves_flags_grants_and_notices`) held the pre-slice silence of the boss end, updated to the new end notice and green on rerun with the lib suite 1861 clean; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 603. The Tanaka exchange
+
+`quest.tanaka_event` is `ported`: scenario
+`the_tanaka_letters_dialog_and_yonahs_exchange_run`. With the event running,
+the letter's button and the quest window's entry both run the `button or info`
+dialog over the wire; Yonah's (20005) chat menu names the event's entry, which
+without the ear chats the scold and with the ear offers the exchange. A yes
+spends the ear — and then the work is done by Game data, not code: the first
+draw of the quest Manager's one `math.random` stream is 13 (Lua 5.1's
+`floor(r*15)+1` over libc `rand`, unseeded — no script on the path seeds it),
+whose Bewitch Item (71051, count 3) has no row in the owner's `item_proto.txt`,
+so `AutoGiveItem` refuses it exactly as legacy's does (`NULL` on a missing
+proto, `G/char_item.cpp:9085-9086`, no line to the client) and nothing arrives:
+the client sees only the ear's clear and the dialog's close, and the store
+holds nothing new. The elder (20041, quest-free on the owner's data) then says
+the stream's second draw, 6, which pins that the exchange drew first — 13, 6,
+12 is the platform's unseeded head, computed from the vendored Lua's own
+formula. Six of the fifteen rewards lack protos (78022, 78023, 71052, 85000,
+71051, 55001), the same Game-data gap the sash quest's 85000 already showed.
+
+No production code changed: every arm the quest calls (`send_letter`,
+`button`/`info`, `count_item`, `remove_item`, `give_item2`, the select resume)
+was already ported. The scenario pins the full bytes of the button page, the
+menu, the scold and the offer, the ear in cell 0 before the click, the clear
+and the close after the yes, the store empty of both the ear and any reward,
+and the second draw. Two mutants die on their intended asserts (the select
+resume's `+1` on the ear's clear, `count_item`'s `+1` on the scold).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5506 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged record in its `quiet`) passes alone; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy clean after the scenario split into three login helpers (Yonah spawns twice on map 1, so a first-match vid replaces `shown_vid`); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
