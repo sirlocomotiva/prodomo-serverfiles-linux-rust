@@ -54176,3 +54176,19 @@ while the chat dispatch's `+1` dies on the explainer (the watch entry runs
 instead), and a non-empty warp war list dies on the none line (the choose arm
 runs instead).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5512 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 609. The master's rebuild
+
+`quest.guild_building_melt` is `ported`: scenario
+`a_master_rebuilds_its_melt_stone_and_keeps_its_own_attribute`. The seed puts
+`MyGuild` (7) on land 5 with a stood 14045, which boots as the 20062 stone;
+the master's click runs the live `with npc.get_guild() == pc.get_guild() and
+pc.isguildmaster()` arm and offers the timetable (pinned whole). Picking its
+own attribute (Lemn fosila) answers `Acest atribut este deja activ.` and
+closes; picking Diamant pays the 3M (the 0xe1 gold change), closes the dialog,
+drops the old NPC, stands the 20060 stone with its name, and deletes and
+re-creates the object row as 14043. No production code changed. Two mutants
+die (the select resume's `+1` shows the timetable's other arm for the own
+pick; a `judge_reconstructs` that judges nothing leaves the client hanging
+where the old NPC's delete should arrive).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5513 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the seed-helper extract for the scenario's 105 lines) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

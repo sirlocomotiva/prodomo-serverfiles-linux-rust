@@ -53318,6 +53318,129 @@ fn an_observer_with_no_wars_says_so_to_the_bettor_and_the_watcher() {
     drop(server);
 }
 
+/// [`a_master_rebuilds_its_melt_stone_and_keeps_its_own_attribute`]'s ground:
+/// `MyGuild` (7) on land 5 with a stood 14045, and Alpha its master with 200M.
+fn seed_melt_master(database: &ScratchDatabase) {
+    sql(
+        database,
+        "INSERT INTO guild (id, name, master_pid, level) SELECT 7, 'MyGuild', id, 10 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN          grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 3) AS grade",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 7, 1 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "UPDATE player SET gold = 200000000, x = 468200, y = 901610 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (5, 7)",
+    );
+    sql(
+        database,
+        "INSERT INTO building_object (id, land_id, vnum, map_index, x, y, x_rot, y_rot, z_rot, life) VALUES (3, 5, 14045, 1, 468200, 901300, 0, 0, 0, 0)",
+    );
+}
+
+/// `quest.guild_building_melt`'s master arm over the live script: Alpha masters
+/// `MyGuild` on land 5, whose stood 14045 shows the 20062 stone. Clicking it offers
+/// the timetable; picking its own attribute (Lemn fosila) is refused as already
+/// active, and picking Diamant rebuilds — the 3M leaves, the old NPC goes, the 20060
+/// stone stands with its name, and the object entity is deleted and re-stood as
+/// 14043. The gifts were ledger 388's.
+#[test]
+fn a_master_rebuilds_its_melt_stone_and_keeps_its_own_attribute() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    seed_melt_master(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, entered) = enter_world_seeing_guilded(
+        &server,
+        b"alice",
+        0,
+        1,
+        Some(&[(803, 147, 8), (804, 146, 8), (805, 53, 10)]),
+    );
+    let stone = shown_vid(&entered, 20_062, "land 5 shows its 14045 stone");
+    alice.send_record(&client_click(stone));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, MELT_TIMETABLE_PAGE),
+        "the timetable"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"Acest atribut este deja activ.[ENTER][DONE]"),
+        "its own attribute stays"
+    );
+    alice.quiet("the refusal ends");
+    alice.send_record(&client_click(stone));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, MELT_TIMETABLE_PAGE),
+        "the timetable again"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        gold_change_of(&entered.add, 197_000_000),
+        "the 3M leaves"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the rebuild closes the dialog"
+    );
+    assert_eq!(
+        alice.read_game(),
+        [vec![0x02], stone.to_le_bytes().to_vec()].concat(),
+        "the old NPC goes"
+    );
+    let stood = alice.read_game();
+    assert_eq!(
+        stood[0], GC_CHARACTER_ADD,
+        "the new stone stands: {stood:02x?}"
+    );
+    assert_eq!(
+        u16::from_le_bytes(stood[22..24].try_into().expect("two bytes")),
+        20_060,
+        "as 20060: {stood:02x?}"
+    );
+    assert_eq!(
+        alice.read_game()[0],
+        GC_CHAR_ADDITIONAL_INFO,
+        "the new stone's name"
+    );
+    let delete = alice.read_game();
+    assert_eq!(delete[0], 0x02, "the object entity goes");
+    let add = alice.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD, "the object stands again");
+    assert_eq!(add[21], CHAR_TYPE_BUILDING, "a building: {add:02x?}");
+    assert_eq!(
+        u16::from_le_bytes(add[22..24].try_into().expect("two bytes")),
+        14_043,
+        "as 14043: {add:02x?}"
+    );
+    alice.quiet("the rebuild step ends");
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM building_object WHERE id = 3) AND (SELECT COUNT(*) = 1 FROM building_object WHERE land_id = 5 AND vnum = 14043)",
+    );
+    drop(server);
+}
+
+const MELT_TIMETABLE_PAGE: &[u8] = b"Poti angaja inca un alchimist cu 3,000,000 Yang.[ENTER]Pentru a schimba, alege un atribut:[ENTER][QUESTION 1;Diamant|2;Lemn fosila|3;Cupru|4;Argint|5;Aur|6;Jade|7;Continua|8;Inchis]";
+
 const PANEL_MAIN_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Please select one of the options:[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Moonlight Box Drop|2;Hexegonal Box Drop|3;Fishing Event|4;Mining Event|5;Metin Event|6;Boss Event|7;Golden Frog Event|8;Hide and Seek Event|9;Tanaka Event|10;Experience Event|11;Loot Event|12;OX Event|13;Siege War Event|14;Kingdom War Event|15;Cancel]";
 const PANEL_MOON_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Moonlight Box Drop[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]State: Inactive[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Enable Event|2;Disable Event|3;Exit]";
 const PANEL_MOON_ACTIVE_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Moonlight Box Drop[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]State: Active[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER][QUESTION 1;Enable Event|2;Disable Event|3;Exit]";
