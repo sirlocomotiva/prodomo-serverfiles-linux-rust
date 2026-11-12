@@ -54095,3 +54095,22 @@ events. Two mutants die on their intended asserts (`count_item`'s `+3` on the
 scold — a `+1` survives, since 1 is still fewer than 3 — and the select
 resume's `+1` on the minnows' clear).
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5508 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 605. The event-map warps
+
+`quest.boss_event`, `quest.metin_event`, `quest.mining_event` and
+`quest.golden_frog_event` are `ported`: scenario
+`the_event_map_dialogs_offer_a_warp_that_finds_no_map`. The teacher starts all
+four (each begin letter behind the already-running letters in quest order —
+boss 4, frog 7, metin 10, mining 11), and every letter's button and quest
+window entry runs its `button or info` dialog with the enter select over the
+wire; a no closes each. A yes to the boss orders the quest warp to the event
+map's point, and with no 230 on the owner's data the atlas resolves nothing,
+so `WarpSet` refuses (`RefusedNoMap`) at debug level — legacy's missing-map
+refusal is silent too — no warp record follows, and the logout's save still
+names map 1 at (471800, 951600). No production code changed. The scenario pins
+the full bytes of all four dialogs and the refused yes. Two mutants die on
+their intended asserts (a `judge_warp_set` that warps unknown positions to map
+1 on the post-yes `quiet`, with a `GC_CHARACTER_DEL` arriving; the button
+running the next quest's script on the boss button).
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5509 passed, 0 failed in 46 targets; `cargo test --workspace --doc` 1 passed, 0 failed in 9 targets; clippy (after the literal-separator, unused-parameter and needless-borrow fixes) and `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -52853,6 +52853,150 @@ fn the_fishermans_exchange_runs_and_the_drop_letters_read() {
     drop(server);
 }
 
+const BOSS_WARP_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Boss Event [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Boss Event is taking place on the Event Map.[ENTER]Bosses are spawned on 3 different areas,[ENTER]each area holds bosses with similar levels. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]If you wish to join, you agree to the rules[ENTER]which are set by Team Members. [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Enter |2;Don't enter ]";
+const FROG_WARP_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Gold Frog Event [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Gold Frogs have landed in the Event Map.[ENTER]Myths say they keep precious items, but their[ENTER]skin is one of the most toughest one in this[ENTER]world. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]If you wish to join, you agree to the rules[ENTER]which are set by Team Members. [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Enter |2;Don't enter ]";
+const METIN_WARP_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Metins Shower Event [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Metins Shower have landed in the Event Map.[ENTER]Metins are spawned on 3 different areas,[ENTER]each area holds Metins with similar levels. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]If you wish to join, you agree to the rules[ENTER]which are set by Team Members. [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Enter |2;Don't enter ]";
+const MINING_WARP_PAGE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Mining Event [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][ENTER]Mining Event is taking place on the Event Map.[ENTER]Veins are spawned on 3 different areas,[ENTER]each area holds veins with similar levels. [ENTER][ENTER][COLOR r;1|g;0.7843137254902|b;0.7843137254902]If you wish to join, you agree to the rules[ENTER]which are set by Team Members. [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER][QUESTION 1;Enter |2;Don't enter ]";
+
+/// The starts half of [`the_event_map_dialogs_offer_a_warp_that_finds_no_map`]:
+/// the teacher starts the boss, metin, mining and frog events.
+fn map_four_starts(alice: &mut Keyed, entered: &Entered) {
+    let teacher = shown_vid(entered, 20_300, "map 1 shows one skill teacher");
+    for (said, letters) in [
+        (
+            b"boss started".as_slice(),
+            [(4u16, b"Boss Event ".as_slice())].as_slice(),
+        ),
+        (
+            b"metin started".as_slice(),
+            [
+                (4u16, b"Boss Event ".as_slice()),
+                (10u16, b"Metins Shower Event ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+        (
+            b"mining started".as_slice(),
+            [
+                (4u16, b"Boss Event ".as_slice()),
+                (10u16, b"Metins Shower Event ".as_slice()),
+                (11u16, b"Mining Event ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+        (
+            b"frog started".as_slice(),
+            [
+                (4u16, b"Boss Event ".as_slice()),
+                (7u16, b"Gold Frog Event ".as_slice()),
+                (10u16, b"Metins Shower Event ".as_slice()),
+                (11u16, b"Mining Event ".as_slice()),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        alice.send_record(&client_click(teacher));
+        read_map_start(alice, said, letters);
+    }
+}
+
+/// The yes half of [`the_event_map_dialogs_offer_a_warp_that_finds_no_map`]: a
+/// yes to the boss orders the quest warp, which finds no map and stays silent.
+fn map_yes_orders_no_warp(alice: &mut Keyed) {
+    alice.send_record(&client_script_button(4));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, BOSS_WARP_PAGE),
+        "the boss dialog again"
+    );
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(0, b"[DONE]"),
+        "the yes closes the dialog"
+    );
+    alice.quiet("no warp record follows the yes");
+}
+
+/// `quest.boss_event`, `quest.metin_event`, `quest.mining_event` and
+/// `quest.golden_frog_event` over the wire: the teacher starts all four (each
+/// begin letter behind the already-running letters in quest order), and every
+/// letter's button and quest window entry runs its `button or info` dialog with
+/// the enter select — a no closes each, and a yes to the boss orders the quest
+/// warp to the event map's point, which `WarpSet` refuses (the atlas holds no
+/// 230), so no warp record follows and the logout's save still names map 1.
+/// Quest numbers: boss 4, frog 7, metin 10, mining 11.
+#[test]
+fn the_event_map_dialogs_offer_a_warp_that_finds_no_map() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET x = 471800, y = 951600 WHERE name = 'Alpha'",
+    );
+    let (mut server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/map_probe.lua",
+            MAP_EVENT_PROBE,
+        )],
+        &hide_seek_channels(),
+        "no_wander = true",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    map_four_starts(&mut alice, &entered);
+    for (quest, page) in [
+        (4u16, BOSS_WARP_PAGE),
+        (7, FROG_WARP_PAGE),
+        (10, METIN_WARP_PAGE),
+        (11, MINING_WARP_PAGE),
+    ] {
+        alice.send_record(&client_script_button(u32::from(quest)));
+        assert_eq!(
+            alice.read_game(),
+            server_script(1, page),
+            "quest {quest}'s button"
+        );
+        alice.send_record(&client_script_answer(1));
+        assert_eq!(
+            alice.read_game(),
+            server_script(0, b"[DONE]"),
+            "quest {quest}'s no"
+        );
+        alice.send_record(&client_script_button(u32::from(quest) | SELECT_QUEST));
+        assert_eq!(
+            alice.read_game(),
+            server_script(1, page),
+            "quest {quest}'s entry"
+        );
+        alice.send_record(&client_script_answer(1));
+        assert_eq!(
+            alice.read_game(),
+            server_script(0, b"[DONE]"),
+            "quest {quest}'s entry no"
+        );
+    }
+    alice.quiet("the reads end");
+    map_yes_orders_no_warp(&mut alice);
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    assert_eq!(
+        support::rows(
+            database.url(),
+            "SELECT x, y, map_index FROM player WHERE name = 'Alpha'",
+            3
+        )[0],
+        vec![471_800, 951_600, 1],
+        "the refused warp leaves the saved position"
+    );
+    drop(server);
+}
+
 /// `sys.event.manager`'s moonlight, hexegonal and fishing arms (`SetMoonlightEvent`,
 /// `SetHexegonalEvent`, `SetFishingEvent`, `G/event_manager.cpp:1156-1202`): the teacher's
 /// clicks start all three (each start notice, each begin letter — moon 12, hex 8, fish 6 —
