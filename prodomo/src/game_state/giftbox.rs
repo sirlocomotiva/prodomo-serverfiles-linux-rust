@@ -61,6 +61,21 @@ use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 const DRAGON_SOUL_BOX_MIN: u32 = 51_500;
 /// The dragon-soul boxes (`:3204`): a caller without the qualification opens none.
 const DRAGON_SOUL_BOX_MAX: u32 = 52_000;
+/// The clam shell (`case 27987`, `G/char_item.cpp:4294-4344`): an `ITEM_GIFTBOX`
+/// proto with a hardcoded draw in the `USE_SPECIAL` switch.
+const CLAM_SHELL: u32 = 27_987;
+/// The shell's water-stone piece (`:4313`).
+const SHELL_WATER_STONE: u32 = 27_990;
+/// The shell's white, blue and blood pearls (`:4326-4340`).
+const SHELL_PEARLS: [u32; 3] = [27_992, 27_993, 27_994];
+/// The shell's roll ceiling for the water stone (`:4311`): 50.
+const SHELL_STONE_CEILING: i32 = 50;
+/// The shell's dead-air ceiling (`prob_table_gb2312[0]`, `:4321`): 95.
+const SHELL_DEAD_CEILING: i32 = 95;
+/// The shell's white-pearl ceiling (`[1]`): 97.
+const SHELL_WHITE_CEILING: i32 = 97;
+/// The shell's blue-pearl ceiling (`[2]`): 99.
+const SHELL_BLUE_CEILING: i32 = 99;
 
 /// The slow's seconds (`:9628`).
 const SLOW_SECS: i32 = 300;
@@ -74,6 +89,85 @@ impl GameState {
             .and_then(|character| character.items().item_at(at))
             .and_then(|item| self.protos.get(item.vnum))
             .is_some_and(|proto| proto.item_type == ITEM_GIFTBOX)
+    }
+
+    /// Whether the item at `at` is the 27987 clam shell (`case 27987`,
+    /// `G/char_item.cpp:4294-4344`).
+    pub(super) fn clam_shell_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == CLAM_SHELL)
+    }
+
+    /// Crack one clam shell (`case 27987`, `G/char_item.cpp:4294-4344`): the
+    /// `CHEST_OPEN` mission registers first, then the use checks run and one
+    /// shell spends. The roll is `number(1, 100)`: 50 or less tells `[LS;221]`
+    /// and gives the 27990 water-stone piece; 95 or less tells `[LS;232]` and
+    /// gives nothing; 97 or less tells `[LS;243]` and gives the 27992 white
+    /// pearl; 99 or less tells `[LS;253]` and gives the 27993 blue pearl; 100
+    /// tells `[LS;264]` and gives the 27994 blood pearl. The give rides
+    /// `AutoGiveItem`, whose extras fall to the feet when the pack is full.
+    pub(super) fn use_clam_shell(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        self.register_pass_item(vid, actor, MISSION_TYPE_CHEST_OPEN, 1, CLAM_SHELL);
+        let roll = number(&mut self.dice, 1, 100);
+        let (line, gift) = if roll <= SHELL_STONE_CEILING {
+            (b"[LS;221]".as_slice(), Some(SHELL_WATER_STONE))
+        } else if roll <= SHELL_DEAD_CEILING {
+            (b"[LS;232]".as_slice(), None)
+        } else if roll <= SHELL_WHITE_CEILING {
+            (b"[LS;243]".as_slice(), Some(SHELL_PEARLS[0]))
+        } else if roll <= SHELL_BLUE_CEILING {
+            (b"[LS;253]".as_slice(), Some(SHELL_PEARLS[1]))
+        } else {
+            (b"[LS;264]".as_slice(), Some(SHELL_PEARLS[2]))
+        };
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            world::character::consume_giftbox(items, at, rules, gear)
+        })?;
+        let questing = self.quest_running(vid);
+        if let Some(gift) = gift {
+            let mut gifts = MoveDone {
+                kind: world::character::MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            };
+            let Some((outcome, done)) = self.auto_give(vid, (gift, 1), 0, questing) else {
+                return Err(MoveItemRefused::NoSuchCharacter { vid });
+            };
+            match outcome {
+                AutoGiven::NoProto | AutoGiven::NotMade => {
+                    return Err(MoveItemRefused::NoSuchCharacter { vid });
+                }
+                AutoGiven::Merged(_) | AutoGiven::Placed { .. } => {}
+                AutoGiven::Unplaced(item) => self.lay_auto_given(vid, item),
+            }
+            gifts.records.extend(done.records);
+            gifts.changes.extend(done.changes);
+            let packed = MovedItems::new(
+                moved.owner_id,
+                vid.raw(),
+                gifts,
+                actor,
+                &self.protos,
+                &self.locale,
+            );
+            let mut records = packed.records;
+            records.append(&mut moved.records);
+            self.push_group_row_lines(actor.recipient(&self.locale), gift, 1, &mut records);
+            moved.records = records;
+            let mut changes = packed.changes;
+            changes.append(&mut moved.changes);
+            moved.changes = changes;
+        }
+        self.tell(vid, actor, CHAT_TYPE_INFO, line, &[]);
+        Ok(moved)
     }
 
     /// Run one giftbox use: the mission, the gate, the draw, the arms, the spend,
@@ -714,6 +808,113 @@ mod tests {
             "the row tells: {texts:?}"
         );
         assert!(!moved.changes.is_empty(), "the spend and the gift save");
+    }
+
+    /// Seed 0's shell draw lands in the water-stone band: it tells `[LS;221]`
+    /// and lands the 27990 piece while one shell spends.
+    #[test]
+    fn a_low_roll_cracks_the_shell_into_a_water_stone() {
+        use world::character::Pcg32;
+        use world::item::ItemIdRange;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world.dice = Pcg32::new(0, 0);
+        world
+            .install_item_ids(ItemIdRange::new(1, 1_000_000, 100).unwrap())
+            .unwrap();
+        let held = vec![boxed(CLAM_SHELL, 60, 0)];
+        let (mut inbox, _) = enter_seeing_with(&mut world, PLACE, VID, (5, 5), 10_000, &held);
+        assert!(world.clam_shell_at(Vid::new(VID), box_at()));
+        let moved = world
+            .use_clam_shell(Vid::new(VID), box_at(), mover())
+            .expect("the shell cracks");
+        let told = inbox.try_recv().expect("the shell tells its line");
+        assert_eq!(text_of(&told), b"[LS;221]");
+        let texts: Vec<Vec<u8>> = moved
+            .records
+            .iter()
+            .filter(|record| record.first() == Some(&4))
+            .map(|record| record[10..].to_vec())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.starts_with(b"[LS;35;")),
+            "the gift names itself: {texts:?}"
+        );
+        let character = world.characters.find_by_vid(Vid::new(VID)).expect("online");
+        assert!(
+            character
+                .items()
+                .item_at(box_at())
+                .is_none_or(|item| { item.vnum == SHELL_WATER_STONE && item.count == 1 }),
+            "the water-stone piece lands where the shell stood"
+        );
+        assert!(!moved.changes.is_empty(), "the spend and the gift save");
+    }
+
+    /// Seed 1's shell draw lands in the dead-air band: it tells `[LS;232]` and
+    /// gives nothing, while the shell still spends.
+    #[test]
+    fn a_dead_roll_cracks_the_shell_into_nothing() {
+        use world::character::Pcg32;
+        use world::item::ItemIdRange;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world.dice = Pcg32::new(1, 0);
+        world
+            .install_item_ids(ItemIdRange::new(1, 1_000_000, 100).unwrap())
+            .unwrap();
+        let held = vec![boxed(CLAM_SHELL, 60, 0)];
+        let (mut inbox, _) = enter_seeing_with(&mut world, PLACE, VID, (5, 5), 10_000, &held);
+        let moved = world
+            .use_clam_shell(Vid::new(VID), box_at(), mover())
+            .expect("the shell cracks");
+        let told = inbox.try_recv().expect("the shell tells its line");
+        assert_eq!(text_of(&told), b"[LS;232]");
+        let texts: Vec<Vec<u8>> = moved
+            .records
+            .iter()
+            .filter(|record| record.first() == Some(&4))
+            .map(|record| record[10..].to_vec())
+            .collect();
+        assert!(texts.is_empty(), "no gift names itself: {texts:?}");
+        let left = world
+            .characters
+            .find_by_vid(Vid::new(VID))
+            .expect("online")
+            .items()
+            .item_at(box_at());
+        assert!(left.is_none(), "the one shell spends");
+    }
+
+    /// Seed 22's shell draw lands past the dead-air ceiling: the white pearl
+    /// lands with `[LS;243]`.
+    #[test]
+    fn a_high_roll_cracks_the_shell_into_a_white_pearl() {
+        use world::character::Pcg32;
+        use world::item::ItemIdRange;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world.dice = Pcg32::new(22, 0);
+        world
+            .install_item_ids(ItemIdRange::new(1, 1_000_000, 100).unwrap())
+            .unwrap();
+        let held = vec![boxed(CLAM_SHELL, 60, 0)];
+        let (mut inbox, _) = enter_seeing_with(&mut world, PLACE, VID, (5, 5), 10_000, &held);
+        let moved = world
+            .use_clam_shell(Vid::new(VID), box_at(), mover())
+            .expect("the shell cracks");
+        let told = inbox.try_recv().expect("the shell tells its line");
+        assert_eq!(text_of(&told), b"[LS;243]");
+        let texts: Vec<Vec<u8>> = moved
+            .records
+            .iter()
+            .filter(|record| record.first() == Some(&4))
+            .map(|record| record[10..].to_vec())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.starts_with(b"[LS;35;")),
+            "the pearl names itself: {texts:?}"
+        );
     }
 
     /// Experience tells two lines; the single-count gift names itself alone, and

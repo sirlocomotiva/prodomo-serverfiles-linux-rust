@@ -62869,3 +62869,61 @@ fn two_sky_fireworks_fly_from_the_lighter_to_herself() {
     wait_for(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
     drop(server);
 }
+
+/// `cg.game.item_use`: `case 27987` (`G/char_item.cpp:4294-4344`) cracks the clam
+/// shell: Alpha cracks one of two, hears one of the five shell lines, and the
+/// stack shrinks. The dice seed is random per boot, so the band is whichever the
+/// roll lands in — the spend and the line prove the arm ran.
+#[test]
+fn a_cracked_shell_tells_its_band_and_spends_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, \
+         0, 2, 27987 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(27_987).expect("the owner's data has it");
+    assert_eq!(
+        proto.item_type,
+        gamedata::item_kind::ITEM_GIFTBOX,
+        "the owner's shell is a giftbox"
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let bands: [&[u8]; 5] = [
+        b"[LS;221]",
+        b"[LS;232]",
+        b"[LS;243]",
+        b"[LS;253]",
+        b"[LS;264]",
+    ];
+    let mut told = None;
+    while std::time::Instant::now() < deadline && told.is_none() {
+        let Some(record) = alpha.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.len() > 10 && record[0] == GC_CHAT && record[3] == 1 {
+            let text = &record[10..];
+            if bands.iter().any(|band| text == *band) {
+                told = Some(text.to_vec());
+            }
+        }
+    }
+    let told = told.expect("one of the five shell lines tells");
+    assert!(
+        bands.iter().any(|band| told == *band),
+        "the band line: {}",
+        told.escape_ascii()
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    drop(alpha);
+    wait_for(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    drop(server);
+}

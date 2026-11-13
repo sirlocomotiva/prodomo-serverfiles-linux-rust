@@ -4536,6 +4536,9 @@ impl GameState {
         if self.campfire_at(vid, at) {
             return Some(self.use_campfire_item(vid, at, actor));
         }
+        if self.clam_shell_at(vid, at) {
+            return Some(self.use_clam_shell(vid, at, actor));
+        }
         if self.giftbox_at(vid, at) {
             return Some(self.use_giftbox(vid, at, actor));
         }
