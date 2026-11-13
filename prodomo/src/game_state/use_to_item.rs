@@ -102,6 +102,13 @@ const YAGONG_PROB: [i32; 9] = [100, 100, 90, 80, 70, 60, 50, 30, 20];
 /// mortal's last bonus change stamps.
 const LAST_CHANGE_ATTR_FLAG: &[u8] = b"Item.LastChangeItemAttr";
 
+/// The aura boost eraser (`ITEM_AURA_BOOST_ITEM_VNUM_BASE + ITEM_AURA_BOOST_ERASER`,
+/// `C/item_length.h:492`, `G/unique_item.h:26`): vnum 49980, whose owner proto is
+/// `USE_SPECIAL` but whose arm reads the second cell (`G/char_item.cpp:5504-5534`).
+const AURA_BOOST_ERASER: u32 = 49_980;
+/// The eraser's line when the target carries no boost (`:5523`).
+const AURA_ERASE_EMPTY_NOTICE: &[u8] = b"[Aura] There is no boost in your aura costume.";
+
 /// `CItem::GetRefineLevel` (`G/item.cpp:1869-1894`): the number after the last `+` of the
 /// proto's base name, read as `str_to_number` (`strtol`) reads it; 0 without a `+`.
 #[must_use]
@@ -220,6 +227,9 @@ enum Arm {
     Charge(i32),
     /// `case 71109` / `case 72719`: the stone-removal water.
     Water,
+    /// `case ITEM_AURA_BOOST_ITEM_VNUM_BASE + ITEM_AURA_BOOST_ERASER`: the boost
+    /// eraser, which reads the second cell.
+    Eraser,
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -410,6 +420,9 @@ impl GameState {
             }
             Arm::Water => {
                 return self.water_step(vid, at, dest, actor);
+            }
+            Arm::Eraser => {
+                return self.eraser_step(vid, at, dest, actor);
             }
             Arm::Key => {
                 return self.key_step(vid, at, dest, actor);
@@ -890,6 +903,73 @@ impl GameState {
     /// reads is all six sockets, but only the first three ever hold stones
     /// (`ITEM_STONES_MAX_NUM`), so a stone above them is unreachable and the scan's
     /// broken-socket term is (`> 2` and not 28960) exactly.
+    /// The aura boost eraser (`case ITEM_AURA_BOOST_ITEM_VNUM_BASE +
+    /// ITEM_AURA_BOOST_ERASER`, `G/char_item.cpp:5504-5534`): the target's boost
+    /// socket (`ITEM_SOCKET_AURA_BOOST`, socket 2) goes to 0, and the eraser shrinks
+    /// when stackable or leaves when not. The use's checks run first, as the stone
+    /// arm's do; an invalid second cell, an exchanging or worn target, or one with no
+    /// proto is silent, as `use_target` says, while a target with no boost chats the
+    /// line, with the eraser kept. `ENABLE_SEALBIND_SYSTEM` is undefined, so the
+    /// bound check does not compile.
+    fn eraser_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let refused = std::cell::RefCell::new(false);
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let eraser = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(eraser.vnum)
+                .ok_or(MoveRefused::UnknownVnum(eraser.vnum))?;
+            world::character::use_checks(&eraser, proto, rules, gear.points)?;
+            let silent = || {
+                Ok(MoveDone {
+                    kind: MoveKind::Used,
+                    records: Vec::new(),
+                    changes: Vec::new(),
+                })
+            };
+            let Some(target) = world::character::use_target(items, dest) else {
+                return silent();
+            };
+            if protos.get(target.vnum).is_none() {
+                return silent();
+            }
+            if target.sockets[world::character::AURA_BOOST_SOCKET] == 0 {
+                *refused.borrow_mut() = true;
+                return silent();
+            }
+            let sockets = items
+                .set_socket(target.id, world::character::AURA_BOOST_SOCKET, 0)
+                .map_err(|_| MoveRefused::Empty)?;
+            let update = items
+                .item(target.id)
+                .ok_or(MoveRefused::Empty)?
+                .gc_item_update();
+            let mut spent = world::character::spend_one(items, &eraser, proto)?;
+            spent.records.insert(
+                0,
+                world::character::MoveRecord::Item(world::character::ItemRecord::Update(update)),
+            );
+            spent.changes.insert(
+                0,
+                world::character::ItemChange::Sockets {
+                    id: target.id,
+                    sockets,
+                },
+            );
+            Ok(spent)
+        })?;
+        if *refused.borrow() {
+            self.tell(vid, actor, CHAT_TYPE_INFO, AURA_ERASE_EMPTY_NOTICE, &[]);
+        }
+        Ok(moved)
+    }
+
     fn water_step(
         &mut self,
         vid: Vid,
@@ -1284,6 +1364,9 @@ impl GameState {
             .map(|item| item.vnum);
         if vnum.is_some_and(|vnum| STONE_WATERS.contains(&vnum)) {
             return Arm::Water;
+        }
+        if vnum.is_some_and(|vnum| vnum == AURA_BOOST_ERASER) {
+            return Arm::Eraser;
         }
         let proto = vnum.and_then(|vnum| self.protos.get(vnum));
         match proto {

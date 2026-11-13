@@ -60982,6 +60982,66 @@ fn a_mythical_peach_gives_alignment_and_refuses_a_second_bite() {
 /// stone out of a sword: the water at cell 2 on the sword at cell 0 sets socket 0 to 1, the
 /// stone comes back by `AutoGiveItem`, and one water spends. A second water on the emptied
 /// sword finds no live stone and chats `[LS;1032]`, spending nothing.
+/// `cg.game.item_use_to_item`: `case ITEM_AURA_BOOST_ITEM_VNUM_BASE + ITEM_AURA_BOOST_ERASER`
+/// (`G/char_item.cpp:5504-5534`) erases the boost: the eraser at cell 2 on the boosted aura
+/// at cell 0 sets socket 2 to 0, and one stackable eraser spends. A second eraser on the
+/// emptied aura chats the line and spends nothing.
+#[test]
+fn an_aura_eraser_erases_the_boost_and_keeps_the_last() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 40, id, 1, 0, 1, 49001 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 41, id, 1, 1, 1, 49981 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 42, id, 1, 2, 2, 49980 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(49_980).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's eraser is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // Given: the booster lands first, stamping socket 2.
+    alpha.send_record(&client_use_to_item(1, 0));
+    let first = alpha.read_game();
+    let second = alpha.read_game();
+    let third = alpha.read_game();
+    let stamped = [first, second, third].iter().any(|record| {
+        record.first() == Some(&ITEM_UPDATE)
+            && record[1..4] == [1, 0, 0]
+            && record[22..26] != [0, 0, 0, 0]
+    });
+    assert!(stamped, "the booster stamps socket 2");
+    // When: Alpha uses the eraser on the aura. Then: socket 2 reads 0.
+    alpha.send_record(&client_use_to_item(2, 0));
+    let aura = alpha.read_game();
+    assert_eq!(aura[..4], [ITEM_UPDATE, 1, 0, 0], "the aura: {aura:02x?}");
+    assert_eq!(aura[22..26], 0_i32.to_le_bytes(), "the boost is gone");
+    // And: one eraser spends.
+    let spend = alpha.read_game();
+    assert_eq!(spend[..4], [ITEM_UPDATE, 1, 2, 0], "the eraser spends");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 42)");
+    // And: a second eraser finds no boost and chats, spending nothing.
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"[Aura] There is no boost in your aura costume.")
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 42)");
+    drop(alpha);
+    drop(server);
+}
+
 #[test]
 fn a_water_breaks_the_top_stone_out_of_a_sword() {
     let Some(database) = ScratchDatabase::create() else {
