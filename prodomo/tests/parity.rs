@@ -60534,6 +60534,144 @@ fn a_nog_pocket_lands_302_and_a_second_is_refused_while_held() {
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
 }
 
+/// `cg.game.item_use`: `case USE_CREATE_STONE` (`G/char_item.cpp:6866-6870`) gives a
+/// metin of `number(28000, 28013)` and spends the scroll. No owner metin lives in
+/// that range, so Alpha's use spends the lone scroll and gives nothing.
+#[test]
+fn a_stone_scroll_spends_and_gives_no_stone() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
+         27999 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(27_999).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 9, "the owner's scroll is USE_CREATE_STONE");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses the scroll. Then: its cell clears, and no stone lands.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game()[..2],
+        [ITEM_SET, common::item_slots::EWindows::Inventory as u8],
+        "the lone scroll clears its cell"
+    );
+    check(&database, "NOT EXISTS (SELECT 1 FROM item)");
+    drop(alpha);
+    drop(server);
+}
+
+/// `cg.game.item_use`: `case USE_RECIPE` (`G/char_item.cpp:6889-6943`) brews value(0)
+/// from two sources and one 50901 bottle, and never spends the scroll. Alpha holds
+/// two sets of the 50905 sources and one bottle: the first use consumes a set and
+/// the bottle, then fails the brew with `[LS;424]` (value(5) is 0); the second
+/// consumes the other set and misses the bottle with `[LS;423]`. The scroll stays.
+#[test]
+fn a_recipe_consumes_its_sources_and_misses_its_bottle() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, count, vnum) in [
+        (30, 0, 1, 50905),
+        (31, 1, 1, 50701),
+        (32, 2, 2, 50702),
+        (33, 3, 1, 50901),
+        (34, 4, 1, 50701),
+        (35, 5, 2, 50702),
+        (36, 6, 1, 50701),
+        (37, 7, 1, 50702),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    let proto = protos.get(50_905).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 23, "the owner's scroll is USE_RECIPE");
+    assert_eq!(
+        proto.values,
+        [50801, 50701, 1, 50702, 2, 0],
+        "the recipe's brew"
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha brews with the bottle. Then: a set and the bottle go, and the
+    // brew fails.
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut failed = false;
+    while std::time::Instant::now() < deadline && !failed {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        failed = record == an_info_line(b"[LS;424]");
+    }
+    assert!(failed, "the brew fails");
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id IN (31, 32, 33))",
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // When: Alpha brews without the bottle. Then: the other set goes, and the
+    // bottle is missed.
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut missed = false;
+    while std::time::Instant::now() < deadline && !missed {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        missed = record == an_info_line(b"[LS;423]");
+    }
+    assert!(missed, "the bottle is missed");
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id IN (34, 35))",
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // When: Alpha brews with a short second source. Then: the first goes, the
+    // short is named, and the scroll stays.
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut short = false;
+    while std::time::Instant::now() < deadline && !short {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        short = record.len() > 18 && record[10..].starts_with(b"[LS;422;");
+    }
+    assert!(short, "the short names its source");
+    check(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 36)");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 37)");
+    // When: Alpha brews with no source left. Then: `[LS;421]`, the scroll kept.
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut missing = false;
+    while std::time::Instant::now() < deadline && !missing {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        missing = record == an_info_line(b"[LS;421]");
+    }
+    assert!(missing, "the missing source is reported");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    drop(alpha);
+    drop(server);
+}
+
 /// `cg.game.item_use`: `UseItemEx`'s head (`G/char_item.cpp:2769-2775`) refuses a
 /// duellist's limited potion while `no_potions_on_pvp` stands. Alice (a
 /// `HIGH_WIZARD`) stands the flag herself, then fights Yankee; she uses the

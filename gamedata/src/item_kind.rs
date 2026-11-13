@@ -144,6 +144,9 @@ pub const USE_ABILITY_UP: i32 = 7;
 /// `USE_AFFECT` (`C/item_length.h:262`): a timed affect by value (50813/50814 ride
 /// the 508xx branch; the rest land in the main switch).
 pub const USE_AFFECT: i32 = 8;
+/// `USE_CREATE_STONE` (`C/item_length.h:263`): a stone-creating scroll (the owner's
+/// 27999), which gives a metin of `number(28000, 28013)`.
+pub const USE_CREATE_STONE: i32 = 9;
 /// `USE_POTION_NODELAY`: a potion whose recovery is immediate.
 pub const USE_POTION_NODELAY: i32 = 11;
 /// `USE_SPECIAL` (`C/item_length.h:264`): 10. The skill books' sub type (all the 230g book
@@ -160,6 +163,9 @@ pub const USE_ADD_ACCESSORY_SOCKET: i32 = 20;
 pub const USE_PUT_INTO_ACCESSORY_SOCKET: i32 = 21;
 /// `USE_ADD_ATTRIBUTE2` (`C/item_length.h:276`): a 5th-bonus add scroll.
 pub const USE_ADD_ATTRIBUTE2: i32 = 22;
+/// `USE_RECIPE` (`C/item_length.h:277`): a recipe scroll (the owner's 50905-50907),
+/// which brews value(0) from two sources and a 50901 bottle.
+pub const USE_RECIPE: i32 = 23;
 /// `USE_CHANGE_ATTRIBUTE2` (`C/item_length.h:278`), behind `__ATTR_6TH_7TH__`: a rare
 /// bonus change scroll.
 pub const USE_CHANGE_ATTRIBUTE2: i32 = 24;

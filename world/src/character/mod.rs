@@ -36,6 +36,7 @@ mod smith_refine;
 mod sort_inventory;
 mod specify_item;
 mod state;
+mod stone_recipe;
 mod toggle;
 mod tool_refine;
 mod trade;
@@ -165,6 +166,7 @@ pub use specify_item::{
     remove_quest_item, remove_specify_item, remove_specify_type_item, set_item_socket,
 };
 pub use state::{Activity, CoreState, Posture};
+pub use stone_recipe::{check_use_scroll, consume_use_scroll, take_recipe_source, RecipeTake};
 pub use toggle::{is_shaman_toggle, use_toggle_item, Toggled};
 pub use tool_refine::{refine_cell, refine_tool, ToolOutcome, ToolRefine};
 pub use trade::{

@@ -166,6 +166,7 @@ mod sort_inventory;
 mod stack_attr;
 mod stat;
 mod state;
+mod stone_recipe;
 mod switchbot;
 mod sync;
 mod tanaka;
@@ -4549,6 +4550,12 @@ impl GameState {
         }
         if self.reversal_at(vid, at) {
             return Some(self.use_reversal_item(vid, actor));
+        }
+        if self.create_stone_at(vid, at) {
+            return Some(self.use_create_stone(vid, at, actor));
+        }
+        if self.recipe_at(vid, at) {
+            return Some(self.use_recipe(vid, at, actor));
         }
         None
     }
