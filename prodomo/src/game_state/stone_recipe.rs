@@ -20,7 +20,7 @@
 use common::vid::Vid;
 use gamedata::item_kind::{ITEM_USE, USE_CREATE_STONE, USE_RECIPE};
 use protocol::gc_actors::GcCharacterGoldChange;
-use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
+use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
 use protocol::gc_fields::GcCreateFly;
 use protocol::gc_vid::GcSpecialEffect;
 use protocol::item_pos::ItemPos;
@@ -81,6 +81,14 @@ const FIREWORK_REFUSAL: &[u8] = b"[LS;1205]";
 /// The stat-reset tonic (`case ITEM_GIVE_STAT_RESET_COUNT_VNUM`,
 /// `G/unique_item.h:43`, `G/char_item.cpp:5110-5116`).
 const STAT_TONIC: u32 = 70014;
+/// The stone detectors (`case 27989` / `case 76006`, `G/char_item.cpp:4226-4292`).
+const STONE_DETECTORS: [u32; 2] = [27_989, 76_006];
+/// The uses a detector survives (`:4278`): socket 0 past 5 breaks it.
+const DETECTOR_USES: i32 = 6;
+/// The near band's ceiling (`:4262`): under 10000 walks 2.
+const DETECT_NEAR: u32 = 10_000;
+/// The middle band's ceiling (`:4263`): under 70000 walks 1, else 3.
+const DETECT_MID: u32 = 70_000;
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -470,6 +478,134 @@ impl GameState {
         let mut record = Vec::new();
         GcCreateFly::new(fly, vid.raw(), vid.raw()).encode_into(&mut record);
         self.packet_around(super::view::EntityKey::Character(vid.raw()), &record, None);
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is a stone detector (`case 27989` / `case 76006`,
+    /// `G/char_item.cpp:4226-4292`).
+    pub(super) fn stone_detector_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| STONE_DETECTORS.contains(&item.vnum))
+    }
+
+    /// The stone detector (`case 27989` / `case 76006`, `G/char_item.cpp:4226-4292`):
+    /// socket 0 counts the uses up by 1, then the nearest live stone on the map is
+    /// found (`FFindStone`, `:65-80`, over the map's characters; a stone at distance
+    /// 0 is skipped, and the seed is the lowest VID, as the `std::map` iterates by
+    /// key). With one, the caller hears `StoneDetect <vid> <val> <degree>` as a
+    /// command line, where `val` is 2 under 10000, 1 under 70000, else 3, and the
+    /// degree is `GetDegreeFromPositionXY` of the caller to the stone; with none,
+    /// `[LS;1461]`. At socket 0 past 5 the line `StoneDetect <vid> 0 0` tells and
+    /// the whole detector leaves (`RemoveItem`, the stack with it).
+    /// The detector's answer for `spot`: the nearest live stone of `stones` names
+    /// its val and degree (`:4240-4272`). The seed is the first stone in VID order;
+    /// only a nearer stone at a nonzero distance replaces it, in legacy's order.
+    fn detector_answer(stones: &[(u32, i32, i32)], spot: super::view::Spot) -> Option<(u32, i32)> {
+        let mut stones = stones.to_vec();
+        stones.sort_by_key(|(vid, _, _)| *vid);
+        let mut target = stones.first().map(|(stone, _, _)| *stone);
+        let mut max = u32::MAX;
+        for (stone, x, y) in &stones {
+            let dist =
+                common::cfloat::f32_to_u32(super::motion::distance_sqrt(spot.x - x, spot.y - y));
+            if dist != 0 && max > dist {
+                max = dist;
+                target = Some(*stone);
+            }
+        }
+        let stone = target?;
+        let (tx, ty) = stones
+            .iter()
+            .find_map(|(vid, x, y)| (*vid == stone).then_some((*x, *y)))
+            .unwrap_or((spot.x, spot.y));
+        let val = if max < DETECT_NEAR {
+            2
+        } else if max < DETECT_MID {
+            1
+        } else {
+            3
+        };
+        let degree =
+            common::cfloat::f32_to_i32(super::motion::rotation_to_xy(tx - spot.x, ty - spot.y));
+        Some((val, degree))
+    }
+
+    pub(super) fn use_stone_detector(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let place = self.place_of(vid.raw());
+        let spot = self.spot_of(vid.raw());
+        let held = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at));
+        let Some(held) = held else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let (id, uses) = (held.id, held.sockets[0].saturating_add(1));
+        let mut stones: Vec<(u32, i32, i32)> = Vec::new();
+        if let Some((channel, map)) = place {
+            if let Some(list) = self.npcs.get(&(channel, map)) {
+                for npc in &list.npcs {
+                    if npc.dead || npc.char_type != gamedata::mob_proto::CHAR_TYPE_STONE {
+                        continue;
+                    }
+                    stones.push((npc.vid, npc.x, npc.y));
+                }
+            }
+        }
+        let target = spot.and_then(|spot| Self::detector_answer(&stones, spot));
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let detector = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(detector.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
+            world::character::use_checks(&detector, proto, rules, gear.points)?;
+            if uses >= DETECTOR_USES {
+                let (done, _) =
+                    world::character::destroy_item(items, at, rules.questing, rules.secured)?;
+                return Ok(done);
+            }
+            Ok(world::character::set_item_socket(items, id, (0, uses)))
+        })?;
+        if uses >= DETECTOR_USES {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_COMMAND,
+                b"StoneDetect %u 0 0",
+                &[Arg::Int(i64::from(vid.raw()))],
+            );
+            return Ok(moved);
+        }
+        match target {
+            Some((val, degree)) => {
+                self.tell(
+                    vid,
+                    actor,
+                    CHAT_TYPE_COMMAND,
+                    b"StoneDetect %u %d %d",
+                    &[
+                        Arg::Int(i64::from(vid.raw())),
+                        Arg::Int(i64::from(val)),
+                        Arg::Int(i64::from(degree)),
+                    ],
+                );
+            }
+            None => {
+                self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;1461]", &[]);
+            }
+        }
         Ok(moved)
     }
 

@@ -62927,3 +62927,67 @@ fn a_cracked_shell_tells_its_band_and_spends_one() {
     wait_for(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
     drop(server);
 }
+
+/// `cg.game.item_use`: `case 27989` / `case 76006` (`G/char_item.cpp:4226-4292`)
+/// sweeps the map's stones: a stone stands at a known point on map 1, Alpha uses
+/// a detector with socket 0 at 2, and hears `StoneDetect <vid> 2 <degree>` as a
+/// command line. The socket rises to 3 and the detector stays.
+#[test]
+fn a_detector_names_the_nearest_stone_and_counts_its_use() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t610\t545\t0\t0\t0\t1\t1s\t100\t1\t8001\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 30, \
+         id, 1, 0, 1, 27989, 2 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(27_989).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's detector is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut told = None;
+    while std::time::Instant::now() < deadline && told.is_none() {
+        let Some(record) = alpha.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.len() > 10 && record[0] == GC_CHAT && record[3] == 5 {
+            let text = &record[10..];
+            if text.starts_with(b"StoneDetect ") {
+                told = Some(text.to_vec());
+            }
+        }
+    }
+    let told = told.expect("the detector tells its line");
+    let words: Vec<&[u8]> = told.split(|&byte| byte == b' ').collect();
+    assert_eq!(
+        words.len(),
+        4,
+        "vid, val and degree: {}",
+        told.escape_ascii()
+    );
+    assert_eq!(words[2], b"2", "under 10000 walks 2");
+    let degree: i32 = std::str::from_utf8(words[3])
+        .expect("a degree")
+        .parse()
+        .expect("a number");
+    assert!((0..360).contains(&degree), "a compass degree: {degree}");
+    // The stone stands at (610, 545) cells, (470600, 950500): 500 east and 500
+    // north of Alpha, so the degree is 45.
+    assert_eq!(degree, 45, "north-east at equal legs");
+    check(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
+    drop(alpha);
+    wait_for(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
+    drop(server);
+}

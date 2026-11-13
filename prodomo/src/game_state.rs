@@ -4578,6 +4578,9 @@ impl GameState {
         if self.firework_at(vid, at) {
             return Some(self.use_firework(vid, at, actor));
         }
+        if self.stone_detector_at(vid, at) {
+            return Some(self.use_stone_detector(vid, at, actor));
+        }
         if self.sky_firework_at(vid, at) {
             return Some(self.use_sky_firework(vid, at, actor));
         }
