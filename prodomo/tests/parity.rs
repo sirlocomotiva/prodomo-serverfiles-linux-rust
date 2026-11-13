@@ -61164,6 +61164,75 @@ fn wonso_fills_a_pool_by_its_gap_and_spends_one() {
     drop(server);
 }
 
+/// `cg.game.item_use`: `case ITEM_ELK_VNUM` (`G/char_item.cpp:5180-5191`) breaks the bar
+/// and pays its socket-0 gold: Alpha, holding 50000, uses the bar worth 25000, hears
+/// `[LS;1269;25000]` and the gold change to 75000, and the bar leaves. The gold saves.
+#[test]
+fn an_elk_bar_pays_its_socket_gold_and_leaves() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 50000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 30, \
+         id, 1, 0, 1, 50026, 25000 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(50_026).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's bar is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses the bar. Then: the line, the gold change, the cell clears.
+    // The gold record runs ahead of the tell, as `ChangeGold` sends before the step.
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut changed = false;
+    let mut cleared = false;
+    let mut lined = false;
+    while std::time::Instant::now() < deadline && (!changed || !cleared || !lined) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record == an_info_line(b"[LS;1269;25000]") {
+            lined = true;
+        } else if record.len() == GOLD_CHANGE_LEN && record[0] == GC_GOLD_CHANGE {
+            assert_eq!(
+                i64::from_le_bytes(record[8..16].try_into().expect("eight bytes")),
+                25_000,
+                "the gain"
+            );
+            assert_eq!(
+                u64::from_le_bytes(record[16..24].try_into().expect("eight bytes")),
+                75_000,
+                "the gold held now"
+            );
+            changed = true;
+        } else if record.len() >= 2
+            && record[..2] == [ITEM_SET, common::item_slots::EWindows::Inventory as u8]
+        {
+            cleared = true;
+        }
+    }
+    assert!(
+        changed && cleared && lined,
+        "the gold pays and the bar leaves"
+    );
+    check(&database, "NOT EXISTS (SELECT 1 FROM item)");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT gold = 75000 FROM player WHERE name = 'Alpha')",
+    );
+    drop(server);
+}
+
 #[test]
 fn a_stone_scroll_spends_and_gives_no_stone() {
     let Some(database) = ScratchDatabase::create() else {

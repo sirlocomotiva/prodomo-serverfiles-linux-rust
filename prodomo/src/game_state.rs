@@ -4572,6 +4572,9 @@ impl GameState {
         if self.wonso_at(vid, at) {
             return Some(self.use_wonso(vid, at, actor));
         }
+        if self.elk_bar_at(vid, at) {
+            return Some(self.use_elk_bar(vid, at, actor));
+        }
         None
     }
 

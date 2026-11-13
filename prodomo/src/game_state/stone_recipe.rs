@@ -19,6 +19,7 @@
 
 use common::vid::Vid;
 use gamedata::item_kind::{ITEM_USE, USE_CREATE_STONE, USE_RECIPE};
+use protocol::gc_actors::GcCharacterGoldChange;
 use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
 use protocol::item_pos::ItemPos;
 use world::character::{number, AutoGiven, MoveDone, RecipeTake};
@@ -55,6 +56,8 @@ const WONSO_BEAN: u32 = 50_020;
 const WONSO_SUGAR: u32 = 50_021;
 /// The wonso fruit (`case 50022`).
 const WONSO_FRUIT: u32 = 50_022;
+/// The elk gold bar (`case ITEM_ELK_VNUM`, `G/char_item.cpp:5180-5191`).
+const ELK_BAR: u32 = 50_026;
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -384,6 +387,76 @@ impl GameState {
                     moved.records.extend(packed.records);
                 }
             }
+        }
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is the elk gold bar (`case ITEM_ELK_VNUM`,
+    /// `G/char_item.cpp:5180-5191`).
+    pub(super) fn elk_bar_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == ELK_BAR)
+    }
+
+    /// The elk gold bar (`case ITEM_ELK_VNUM`, `G/char_item.cpp:5180-5191`): past the
+    /// use's checks, the whole bar leaves (it is removed, not spent), `[LS;1269]` names
+    /// the socket-0 gold, and it pays through `ChangeGold`, whose compiled-in arm the
+    /// build takes (`ENABLE_REMOVE_LIMIT_GOLD` is defined): past the cap the bar is
+    /// still consumed, the gold refuses, and only the line lands.
+    pub(super) fn use_elk_bar(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let bar = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at).cloned());
+        let Some(bar) = bar else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let pays = u64::try_from(bar.sockets[0].max(0)).unwrap_or(u64::MAX);
+        let held = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::gold);
+        let left = held
+            .checked_add(pays)
+            .filter(|left| *left < world::character::GOLD_MAX_MAX);
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let elk = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(elk.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(elk.vnum))?;
+            world::character::use_checks(&elk, proto, rules, gear.points)?;
+            let (done, _) =
+                world::character::destroy_item(items, at, rules.questing, rules.secured)?;
+            Ok(done)
+        })?;
+        self.tell(
+            vid,
+            actor,
+            CHAT_TYPE_INFO,
+            b"[LS;1269;%d]",
+            &[Arg::Int(i64::from(bar.sockets[0]))],
+        );
+        if let Some(left) = left {
+            if let Ok(character) = self.characters.find_by_vid_mut(vid) {
+                character.set_gold(left);
+            }
+            moved.gold = Some(crate::item_move::gold_delta(held, left));
+            let mut frame = Vec::new();
+            GcCharacterGoldChange::new(vid.raw(), i64::try_from(pays).unwrap_or(i64::MAX), left)
+                .encode_into(&mut frame);
+            moved.records.push(frame);
         }
         Ok(moved)
     }
