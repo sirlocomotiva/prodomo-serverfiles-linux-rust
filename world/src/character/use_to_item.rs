@@ -7,8 +7,9 @@ use gamedata::item_kind::{
     ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_SASH, ITEM_ARMOR,
     ITEM_BELT, ITEM_COSTUME, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON,
     LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
-    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_PUT_INTO_ACCESSORY_SOCKET,
-    USE_PUT_INTO_BELT_SOCKET, WEARABLE_BODY, WEARABLE_WEAPON,
+    USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2,
+    USE_CHANGE_ATTRIBUTE_TALISMAN, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET,
+    WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -119,6 +120,10 @@ pub const DS_WINDOW: u8 = 5;
 pub const TALISMAN_ATTR_NOTICE: &str = "You cannot change attribute with this item.";
 /// A talisman under a bonus add scroll (`:6562`).
 pub const TALISMAN_ADD_NOTICE: &str = "You cannot add attribute with this item.";
+/// A talisman already holding five bonuses under its add scroll (`:10674`).
+pub const TALISMAN_FULL_NOTICE: &str = "You cannot add another attribute.";
+/// The talisman's bonus landed (`:10684`, trailing space in the source).
+pub const TALISMAN_ADDED_NOTICE: &str = "Upgrade successfully added. ";
 /// The rare change of an item whose rare slots hold nothing to redraw (`:6539`).
 pub const RARE_UNCHANGED_NOTICE: &str = "Nu exista bonusuri de schimbat";
 /// The 72351's missed 10-in-100 (`:6544`).
@@ -654,8 +659,131 @@ pub fn change_target_attributes(
         USE_PUT_INTO_ACCESSORY_SOCKET | USE_PUT_INTO_BELT_SOCKET => {
             put_into_socket(items, (scroll, scroll_proto), &target, target_proto, dice)
         }
+        USE_ADD_ATTRIBUTE_TALISMAN => add_talisman_target_attribute(
+            items,
+            (scroll, scroll_proto),
+            &target,
+            target_proto,
+            dice,
+            attrs,
+        ),
+        USE_CHANGE_ATTRIBUTE_TALISMAN => change_talisman_target_attribute(
+            items,
+            (scroll, scroll_proto),
+            &target,
+            target_proto,
+            dice,
+            gauss,
+            attrs,
+        ),
         _ => silent(),
     }
+}
+/// The `USE_ADD_ATTRIBUTE_TALISMAN` case (`UseItemTalismanAddAttribute`,
+/// `G/char_item.cpp:10670-10703`): on a talisman with an attribute set and fewer than
+/// five bonuses, the always-100 roll lands one more and chats the success line; the
+/// scroll is spent either way. At five the full line chats and the scroll is kept. A
+/// non-talisman, an exchanging or worn target, or one with no set is silent, as the
+/// `false` return is (`use_target` already refused the exchanging and the worn).
+///
+/// The fail line's Korean is replacement characters in the frozen source
+/// (`:10697-10698`), so its bytes are lost; the roll cannot miss
+/// (`aiItemAttributeAddPercent`, all 100, `G/constants.cpp:879-882`), which is why no
+/// fail line exists here. The trailing `IsEquipped` re-check is dead (the head refused
+/// the worn), as is the buff call behind it.
+fn add_talisman_target_attribute(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    target: &Item,
+    target_proto: &ItemProto,
+    dice: &mut dyn Dice,
+    attrs: &[ItemAttrRecord],
+) -> Result<MoveDone, MoveRefused> {
+    let silent = || Ok(done(MoveKind::Used, Trail::default()));
+    if target_proto.item_type != ITEM_TALISMAN
+        || attribute_set_index(target_proto.item_type, target_proto.sub_type).is_none()
+    {
+        return silent();
+    }
+    if normal_count(&target.attributes) >= 5 {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(TALISMAN_FULL_NOTICE));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    let mut attributes = target.attributes;
+    let mut trail = Trail::default();
+    if number(dice, 1, 100) <= 100 {
+        add_rolled_attribute(dice, target_proto, &mut attributes, attrs);
+        store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
+        let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+        trail
+            .records
+            .push(MoveRecord::Notice(TALISMAN_ADDED_NOTICE));
+        trail.records.push(MoveRecord::Item(ItemRecord::Update(
+            stored.gc_item_update(),
+        )));
+        trail.changes.push(ItemChange::Attributes {
+            id: target.id,
+            attributes: stored.attributes,
+        });
+    }
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+/// The `USE_CHANGE_ATTRIBUTE_TALISMAN` case (`UseItemTalismanChangeAttribute`,
+/// `G/char_item.cpp:10705-10724`): on a talisman with an attribute set and at least one
+/// bonus, the bonuses redraw on the plain change table and the scroll is spent. A
+/// non-talisman, an exchanging or worn target, one with no set, or one with no bonus
+/// is silent. The change-count socket climbs, as `ChangeAttribute` climbs it.
+fn change_talisman_target_attribute(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    target: &Item,
+    target_proto: &ItemProto,
+    dice: &mut dyn Dice,
+    gauss: &mut Gauss,
+    attrs: &[ItemAttrRecord],
+) -> Result<MoveDone, MoveRefused> {
+    let silent = || Ok(done(MoveKind::Used, Trail::default()));
+    if target_proto.item_type != ITEM_TALISMAN
+        || attribute_set_index(target_proto.item_type, target_proto.sub_type).is_none()
+        || normal_count(&target.attributes) == 0
+    {
+        return silent();
+    }
+    let mut attributes = target.attributes;
+    let changed = change_attribute_on(
+        dice,
+        gauss,
+        target_proto,
+        &mut attributes,
+        attrs,
+        &[0, 10, 40, 35, 15],
+    );
+    debug_assert!(changed, "the count was read above");
+    store_attributes(
+        items,
+        target.id,
+        &attributes,
+        target.sockets[CHANGE_SOCKET] + 1,
+    )?;
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    let mut trail = Trail::default();
+    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets: stored.sockets,
+    });
+    trail.changes.push(ItemChange::Attributes {
+        id: target.id,
+        attributes: stored.attributes,
+    });
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
 }
 
 /// The shared normal-scroll refusals: no attribute set, or the talisman's own line.
@@ -2070,5 +2198,246 @@ mod tests {
         let other_proto =
             ItemProto::for_category_rule(50_623, ITEM_USE, USE_PUT_INTO_ACCESSORY_SOCKET);
         assert!(!can_put_into(&other, &other_proto, &low, &low_proto));
+    }
+
+    const TALISMAN: u32 = 9600;
+    const TALISMAN_ADD: u32 = 50_890;
+    const TALISMAN_CHANGE: u32 = 50_889;
+
+    /// The talisman table: the two scrolls, a fire talisman, and a sword for the
+    /// non-talisman silence.
+    fn talisman_protos() -> ItemProtos {
+        let add = ItemProto::for_category_rule(TALISMAN_ADD, ITEM_USE, USE_ADD_ATTRIBUTE_TALISMAN);
+        let change =
+            ItemProto::for_category_rule(TALISMAN_CHANGE, ITEM_USE, USE_CHANGE_ATTRIBUTE_TALISMAN);
+        let talisman = ItemProto::for_category_rule(TALISMAN, ITEM_TALISMAN, 0);
+        let sword = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        ItemProtos::from_rows(vec![add, change, talisman, sword])
+    }
+
+    /// The talisman set's row: apply 1 caps set 8 at 5 with the whole probability.
+    fn talisman_attrs() -> Vec<ItemAttrRecord> {
+        let mut levels = [0u8; 10];
+        levels[8] = 5;
+        vec![ItemAttrRecord {
+            apply_index: 1,
+            prob: 100,
+            values: [6, 6, 8, 10, 12],
+            max_level_by_set: levels,
+            ..ItemAttrRecord::default()
+        }]
+    }
+
+    fn bonused_talisman(id: u32) -> Item {
+        let mut talisman = Item::new(id, TALISMAN);
+        talisman.attributes[0] = ItemAttribute::new(7, 26);
+        talisman
+    }
+
+    /// The talisman add lands a second bonus with the success line and spends the
+    /// scroll; the change redraws the two with the change line, counts socket 3, and
+    /// spends its scroll too.
+    #[test]
+    fn a_talisman_add_lands_and_its_change_redraws_and_counts() {
+        let protos = talisman_protos();
+        let attrs = talisman_attrs();
+        let mut items = holding(&[
+            (0, bonused_talisman(9)),
+            (1, Item::new(10, TALISMAN_ADD)),
+            (2, Item::new(11, TALISMAN_CHANGE)),
+        ]);
+        let add = items.item_at(inv(1)).expect("the add scroll").clone();
+        let add_proto = protos.get(TALISMAN_ADD).expect("the add proto").clone();
+        let mut dice = Script::new(vec![1, 1, 1]);
+        let mut gauss = Gauss::new();
+        let done = change_target_attributes(
+            &mut items,
+            (&add, &add_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the add lands");
+        let kept = items.item(9).expect("the talisman stays");
+        assert_eq!(normal_count(&kept.attributes), 2, "the second bonus lands");
+        assert!(items.item(10).is_none(), "the last add scroll leaves");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(TALISMAN_ADDED_NOTICE))),
+            "the add chats its line"
+        );
+        let change = items.item_at(inv(2)).expect("the change scroll").clone();
+        let change_proto = protos
+            .get(TALISMAN_CHANGE)
+            .expect("the change proto")
+            .clone();
+        let before = items.item(9).expect("the talisman").attributes;
+        let done = change_target_attributes(
+            &mut items,
+            (&change, &change_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the change lands");
+        let kept = items.item(9).expect("the talisman stays");
+        assert_ne!(kept.attributes, before, "the bonuses redraw");
+        assert_eq!(kept.sockets[3], 1, "the change counts itself");
+        assert!(items.item(11).is_none(), "the last change scroll leaves");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(ATTR_CHANGED_NOTICE))),
+            "the change chats"
+        );
+        assert!(
+            done.changes
+                .iter()
+                .any(|change| matches!(change, ItemChange::Attributes { id: 9, .. })),
+            "the attributes store"
+        );
+    }
+
+    /// At five the add chats the full line and keeps the scroll; at four the fifth
+    /// still lands, because the cap is five, not four.
+    #[test]
+    fn a_full_talisman_refuses_while_four_still_lands() {
+        let protos = talisman_protos();
+        let attrs = talisman_attrs();
+        let mut full = bonused_talisman(9);
+        for (index, attribute) in full.attributes.iter_mut().enumerate().take(5) {
+            let apply = u8::try_from(index + 1).expect("a small apply");
+            *attribute = ItemAttribute::new(apply, 6);
+        }
+        let mut items = holding(&[
+            (0, full),
+            (1, Item::new(10, TALISMAN_ADD)),
+            (3, bonused_sword(12)),
+            (4, Item::new(13, TALISMAN_CHANGE)),
+        ]);
+        let add = items.item_at(inv(1)).expect("the add scroll").clone();
+        let add_proto = protos.get(TALISMAN_ADD).expect("the add proto").clone();
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        let done = change_target_attributes(
+            &mut items,
+            (&add, &add_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the full talisman answers");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(TALISMAN_FULL_NOTICE))),
+            "the full line chats"
+        );
+        assert!(items.item(10).is_some(), "the refused scroll stays");
+        // At four the fifth still lands: the cap is five, not four.
+        let mut four = bonused_talisman(14);
+        for (index, attribute) in four.attributes.iter_mut().enumerate().take(4) {
+            let apply = u8::try_from(index + 2).expect("a small apply");
+            *attribute = ItemAttribute::new(apply, 6);
+        }
+        let mut items = holding(&[(0, four), (1, Item::new(10, TALISMAN_ADD))]);
+        let add = items.item_at(inv(1)).expect("the add scroll").clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&add, &add_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the add lands at four");
+        let kept = items.item(14).expect("the talisman stays");
+        assert_eq!(normal_count(&kept.attributes), 5, "the fifth lands");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(TALISMAN_ADDED_NOTICE))),
+            "the add chats its line"
+        );
+    }
+
+    /// A sword under the change scroll, and a bonus-less talisman under it too, are
+    /// silent with the scroll kept: the first is no talisman, the second has nothing
+    /// to redraw.
+    #[test]
+    fn a_sword_and_an_empty_talisman_are_silent_under_the_change() {
+        let protos = talisman_protos();
+        let attrs = talisman_attrs();
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        let mut items = holding(&[(3, bonused_sword(12)), (4, Item::new(13, TALISMAN_CHANGE))]);
+        let change = items.item_at(inv(4)).expect("the change scroll").clone();
+        let change_proto = protos
+            .get(TALISMAN_CHANGE)
+            .expect("the change proto")
+            .clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&change, &change_proto),
+            inv(3),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the sword answers silently");
+        assert!(done.records.is_empty(), "no line for a sword");
+        assert!(items.item(13).is_some(), "the silent scroll stays");
+        // A bonus-less talisman under the change scroll is silent too, with the
+        // scroll kept: there is nothing to redraw.
+        let mut items = holding(&[
+            (0, Item::new(15, TALISMAN)),
+            (4, Item::new(13, TALISMAN_CHANGE)),
+        ]);
+        let change = items.item_at(inv(4)).expect("the change scroll").clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&change, &change_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the empty talisman answers silently");
+        assert!(done.records.is_empty(), "no line for no bonus");
+        assert!(items.item(13).is_some(), "the silent scroll stays");
     }
 }

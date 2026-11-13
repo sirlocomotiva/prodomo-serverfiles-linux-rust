@@ -160,6 +160,12 @@ pub const USE_ADD_ATTRIBUTE2: i32 = 22;
 /// `USE_CHANGE_ATTRIBUTE2` (`C/item_length.h:278`), behind `__ATTR_6TH_7TH__`: a rare
 /// bonus change scroll.
 pub const USE_CHANGE_ATTRIBUTE2: i32 = 24;
+/// `USE_ADD_ATTRIBUTE_TALISMAN` (`C/item_length.h:301`): a talisman bonus-add scroll
+/// (the owner's 50890).
+pub const USE_ADD_ATTRIBUTE_TALISMAN: i32 = 43;
+/// `USE_CHANGE_ATTRIBUTE_TALISMAN` (`C/item_length.h:302`): a talisman bonus-change
+/// scroll (the owner's 50889).
+pub const USE_CHANGE_ATTRIBUTE_TALISMAN: i32 = 44;
 /// `USE_PUT_INTO_BELT_SOCKET` (`C/item_length.h:283`): a jewel for a belt's socket.
 pub const USE_PUT_INTO_BELT_SOCKET: i32 = 29;
 /// `USE_CLEAR` (`C/item_length.h:266`): a bad-affect cure (27124, 27874).
@@ -376,6 +382,11 @@ mod tests {
             (USE_ADD_ATTRIBUTE2, "USE_ADD_ATTRIBUTE2"),
             (USE_CHANGE_ATTRIBUTE2, "USE_CHANGE_ATTRIBUTE2"),
             (USE_PUT_INTO_BELT_SOCKET, "USE_PUT_INTO_BELT_SOCKET"),
+            (USE_ADD_ATTRIBUTE_TALISMAN, "USE_ADD_ATTRIBUTE_TALISMAN"),
+            (
+                USE_CHANGE_ATTRIBUTE_TALISMAN,
+                "USE_CHANGE_ATTRIBUTE_TALISMAN",
+            ),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
         }

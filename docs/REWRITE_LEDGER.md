@@ -55453,3 +55453,32 @@ budgeted 200 ms for a loaded game thread's whole answer, so the battle compute l
 quiet instead (`a_bundle_shop_buy_settles_both_sides`); it now budgets 2 s.
 
 Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5604 passed, 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 654. The talisman scrolls
+
+`cg.game.item_use_to_item` gains the talisman pair (`USE_ADD_ATTRIBUTE_TALISMAN` 43 and
+`USE_CHANGE_ATTRIBUTE_TALISMAN` 44, the owner's 50890/50889; `UseItemEx` routes them at
+`G/char_item.cpp:6100-6120` into `UseItemTalismanAddAttribute` and
+`UseItemTalismanChangeAttribute`, `:10670-10724`). The add lands one more bonus below five
+with the success line (`Upgrade successfully added. `, trailing space in the source) and
+spends the scroll; at five the full line chats and the scroll is kept. The change redraws
+the bonuses on the plain change table (`tmpChangeProb`, all zeros then 10/40/35/15),
+counts socket 3, chats `[LS;399]`, and spends the scroll. A non-talisman, an exchanging or
+worn target, one with no attribute set, or (for the change) one with no bonus is silent,
+as the `false` return is. The row stays `partial`: costumes, hair, gloves and the
+`USE_SET_ATT_*` arms are still out.
+
+Two readings worth recording. The add's fail line is `LC_TEXT` Korean that is already
+replacement characters in the frozen source (`:10697-10698`), so its bytes are lost — but
+the roll is `number(1, 100) <= aiItemAttributeAddPercent[count]`, all 100
+(`G/constants.cpp:879-882`), so the line is unreachable and no fail arm exists. And the
+trailing `IsEquipped` re-check in the add (with its buff call) is dead: the head refused
+the worn target four lines earlier.
+
+The scenario (`a_talisman_add_lands_and_its_change_redraws_and_counts`) uses both scrolls
+on a bonus-less fire talisman (9600) over the wire: the add lands the first bonus with its
+line and spends, the change redraws with `[LS;399]` and socket 3 reads 1, and both rows
+store.
+
+Unit pins: the add lands a second bonus and the change redraws and counts (socket 3 to 1, both scrolls spent); the fifth still lands at four but the full line chats at five with the scroll kept (a mutant capping at four died here); and a sword under the change — and a bonus-less talisman under it — is silent with the scroll kept (a mutant dropping the empty gate died on the `debug_assert`).
+
+Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5607 passed, 0 failed in 46 targets, plus the split-out world unit test (`cargo test -p world --lib` 688 passed) for 5608; `cargo test --workspace --doc --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

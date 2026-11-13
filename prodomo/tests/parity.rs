@@ -52480,6 +52480,88 @@ fn a_bonus_scroll_adds_and_a_costume_refuses() {
     check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 62");
 }
 
+/// `cg.game.item_use_to_item`: Alpha holds a bonus-less fire talisman and both talisman
+/// scrolls in the base inventory. The add scroll lands a bonus with its success line and
+/// spends itself; the change scroll redraws the bonus with `[LS;399]`, counts socket 3,
+/// and spends itself too. Both rows store.
+#[test]
+fn a_talisman_add_lands_and_its_change_redraws_and_counts() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 9600 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 50890 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 62, id, 1, 2, \
+         1, 50889 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 3);
+    let protos = owners_protos();
+    assert_eq!(
+        protos.get(50890).expect("the add scroll").sub_type,
+        gamedata::item_kind::USE_ADD_ATTRIBUTE_TALISMAN,
+        "the owner's add scroll"
+    );
+    assert_eq!(
+        protos.get(50889).expect("the change scroll").sub_type,
+        gamedata::item_kind::USE_CHANGE_ATTRIBUTE_TALISMAN,
+        "the owner's change scroll"
+    );
+    // When: the add scroll is used on the talisman.
+    alice.send_record(&client_use_to_item(1, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"Upgrade successfully added. "),
+        "the add chats: {line:02x?}"
+    );
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the talisman's cell updates: {update:02x?}"
+    );
+    assert_ne!(update[38], 0, "the first bonus type lands: {update:02x?}");
+    let cleared = alice.read_game();
+    assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
+    alice.quiet("the add sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 61");
+    check(&database, "SELECT attrtype0 != 0 FROM item WHERE id = 60");
+    // When: the change scroll is used on the talisman.
+    alice.send_record(&client_use_to_item(2, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
+        "the change chats: {line:02x?}"
+    );
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the talisman's cell updates: {update:02x?}"
+    );
+    let cleared = alice.read_game();
+    assert_eq!(cleared[..4], [ITEM_SET, 1, 2, 0], "the spent scroll clears");
+    alice.quiet("the change sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 62");
+    check(&database, "SELECT socket3 = 1 FROM item WHERE id = 60");
+    drop(alice);
+    drop(server);
+}
+
 /// `cg.game.myshop` and `cmd.close_shop`: Alpha carries a sword and a paper bundle, builds a
 /// bundle shop selling the sword for 500 yang under the sign `Swords`, and the sign reaches
 /// Yankee, who stands beside it; `/close_shop` clears the sign on both wires.
