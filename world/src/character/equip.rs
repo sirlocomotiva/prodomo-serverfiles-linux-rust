@@ -2310,7 +2310,10 @@ mod tests {
         // trails the burst when no effect answers.
         let tail: Vec<&MoveRecord> = done.records.iter().rev().take(2).collect();
         assert!(
-            matches!(tail.as_slice(), [MoveRecord::QuickslotSync(_), MoveRecord::Look(_)]),
+            matches!(
+                tail.as_slice(),
+                [MoveRecord::QuickslotSync(_), MoveRecord::Look(_)]
+            ),
             "the look rides ahead of the sync: {tail:?}"
         );
         assert!(effects(&done).is_empty());

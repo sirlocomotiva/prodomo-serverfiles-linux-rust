@@ -55089,3 +55089,14 @@ No wire burst changes: the marker expands to records only for a slot naming the 
 which honest clients never hold.
 
 Gates (2026-11-13): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5575 passed, 3 failed in 46 targets — the two stale world asserts above (fixed and green since, `world` 685/685) and the known `a_morphed_caller_hears_every_stat_refusal` load flake; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 642. The target row's close
+
+`sys.combat.target` is `ported` with no code change. Its note's last remainder,
+`__SEND_TARGET_INFO__`'s drop list, was ported by ledger 384 (`cg.game.target_info_load`,
+`gc.target_info`, scenario `the_target_window_lists_what_a_monster_may_drop`, re-run
+green here); the systems row simply was never flipped to `ported`. The click target
+(229g), the death clears (229j/k), the HP fan (229l) and the quest arrows (260) were
+already named.
+
+Gates (2026-11-13): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5577 passed, 1 failed in 46 targets — the known `a_morphed_caller_hears_every_stat_refusal` load flake; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass (this slice also carries 641's test-assert reformat, which landed after 641's fmt gate); `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
