@@ -166,6 +166,12 @@ pub const USE_ADD_ATTRIBUTE_TALISMAN: i32 = 43;
 /// `USE_CHANGE_ATTRIBUTE_TALISMAN` (`C/item_length.h:302`): a talisman bonus-change
 /// scroll (the owner's 50889).
 pub const USE_CHANGE_ATTRIBUTE_TALISMAN: i32 = 44;
+/// `USE_ADD_ATTRIBUTE_GLOVE` (`C/item_length.h:303`), behind `ENABLE_GLOVE_SYSTEM`: a
+/// glove bonus-add scroll (the owner's 50891).
+pub const USE_ADD_ATTRIBUTE_GLOVE: i32 = 45;
+/// `USE_CHANGE_ATTRIBUTE_GLOVE` (`C/item_length.h:304`), behind `ENABLE_GLOVE_SYSTEM`:
+/// a glove bonus-change scroll (the owner's 50892).
+pub const USE_CHANGE_ATTRIBUTE_GLOVE: i32 = 46;
 /// `USE_PUT_INTO_BELT_SOCKET` (`C/item_length.h:283`): a jewel for a belt's socket.
 pub const USE_PUT_INTO_BELT_SOCKET: i32 = 29;
 /// `USE_CLEAR` (`C/item_length.h:266`): a bad-affect cure (27124, 27874).
@@ -387,6 +393,8 @@ mod tests {
                 USE_CHANGE_ATTRIBUTE_TALISMAN,
                 "USE_CHANGE_ATTRIBUTE_TALISMAN",
             ),
+            (USE_ADD_ATTRIBUTE_GLOVE, "USE_ADD_ATTRIBUTE_GLOVE"),
+            (USE_CHANGE_ATTRIBUTE_GLOVE, "USE_CHANGE_ATTRIBUTE_GLOVE"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
         }

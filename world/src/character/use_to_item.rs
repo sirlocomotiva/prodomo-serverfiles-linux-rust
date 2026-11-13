@@ -7,9 +7,9 @@ use gamedata::item_kind::{
     ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_SASH, ITEM_ARMOR,
     ITEM_BELT, ITEM_COSTUME, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON,
     LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
-    USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2,
-    USE_CHANGE_ATTRIBUTE_TALISMAN, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET,
-    WEARABLE_BODY, WEARABLE_WEAPON,
+    USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE,
+    USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN,
+    USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET, WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -250,6 +250,22 @@ pub fn use_target(items: &CharacterItems, dest: ItemPos) -> Option<Item> {
         return None;
     }
     Some(target)
+}
+
+/// Whether the scroll's sub-type is one of the socket-scroll case's labels
+/// (`G/char_item.cpp:6287-6295`, with the aura socket out of this port): the
+/// costume-and-glove gate at `:6312-6321` is that case's head, not the kind pairs'.
+fn scroll_subtype_uses_socket_case(sub_type: i32) -> bool {
+    matches!(
+        sub_type,
+        USE_PUT_INTO_BELT_SOCKET
+            | USE_PUT_INTO_ACCESSORY_SOCKET
+            | USE_ADD_ACCESSORY_SOCKET
+            | USE_CHANGE_ATTRIBUTE
+            | USE_CHANGE_ATTRIBUTE2
+            | USE_ADD_ATTRIBUTE
+            | USE_ADD_ATTRIBUTE2
+    )
 }
 
 /// The `ITEM_METIN` arm of `UseItemEx` (`G/char_item.cpp:6965-7034`): the `stone` goes into
@@ -609,8 +625,9 @@ pub fn change_target_attributes(
     let Some(target_proto) = protos.get(target.vnum) else {
         return silent();
     };
-    if target_proto.item_type == ITEM_COSTUME
-        || (target_proto.item_type == ITEM_ARMOR && target_proto.sub_type == ARMOR_GLOVE)
+    if scroll_subtype_uses_socket_case(scroll_proto.sub_type)
+        && (target_proto.item_type == ITEM_COSTUME
+            || (target_proto.item_type == ITEM_ARMOR && target_proto.sub_type == ARMOR_GLOVE))
     {
         let mut trail = Trail::default();
         trail.records.push(MoveRecord::Notice(NO_ATTR_SET_NOTICE));
@@ -659,48 +676,81 @@ pub fn change_target_attributes(
         USE_PUT_INTO_ACCESSORY_SOCKET | USE_PUT_INTO_BELT_SOCKET => {
             put_into_socket(items, (scroll, scroll_proto), &target, target_proto, dice)
         }
-        USE_ADD_ATTRIBUTE_TALISMAN => add_talisman_target_attribute(
+        USE_ADD_ATTRIBUTE_TALISMAN => add_kind_target_attribute(
             items,
             (scroll, scroll_proto),
             &target,
             target_proto,
             dice,
             attrs,
+            is_talisman,
         ),
-        USE_CHANGE_ATTRIBUTE_TALISMAN => change_talisman_target_attribute(
+        USE_ADD_ATTRIBUTE_GLOVE => add_kind_target_attribute(
             items,
             (scroll, scroll_proto),
             &target,
             target_proto,
+            dice,
+            attrs,
+            is_glove,
+        ),
+        USE_CHANGE_ATTRIBUTE_TALISMAN => change_kind_target_attribute(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
             dice,
             gauss,
             attrs,
+            is_talisman,
+        ),
+        USE_CHANGE_ATTRIBUTE_GLOVE => change_kind_target_attribute(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
+            dice,
+            gauss,
+            attrs,
+            is_glove,
         ),
         _ => silent(),
     }
 }
-/// The `USE_ADD_ATTRIBUTE_TALISMAN` case (`UseItemTalismanAddAttribute`,
-/// `G/char_item.cpp:10670-10703`): on a talisman with an attribute set and fewer than
-/// five bonuses, the always-100 roll lands one more and chats the success line; the
-/// scroll is spent either way. At five the full line chats and the scroll is kept. A
-/// non-talisman, an exchanging or worn target, or one with no set is silent, as the
-/// `false` return is (`use_target` already refused the exchanging and the worn).
+
+/// `CItem::IsTalisman` (`G/item.h:347`): a talisman by item type.
+fn is_talisman(proto: &ItemProto) -> bool {
+    proto.item_type == ITEM_TALISMAN
+}
+
+/// `CItem::IsGloves` (`G/item.h:349`), behind `ENABLE_GLOVE_SYSTEM`: armour of the
+/// glove sub-type.
+fn is_glove(proto: &ItemProto) -> bool {
+    proto.item_type == ITEM_ARMOR && proto.sub_type == ARMOR_GLOVE
+}
+/// The `USE_ADD_ATTRIBUTE_TALISMAN` and `USE_ADD_ATTRIBUTE_GLOVE` cases
+/// (`UseItemTalismanAddAttribute`, `G/char_item.cpp:10670-10703`, and
+/// `UseItemGloveAddAttribute`, `:10616-10648`, behind `ENABLE_GLOVE_SYSTEM`): on a
+/// target of the scroll's kind with an attribute set and fewer than five bonuses, the
+/// always-100 roll lands one more and chats the success line; the scroll is spent
+/// either way. At five the full line chats and the scroll is kept. Any other target,
+/// an exchanging or worn one, or one with no set is silent, as the `false` return is
+/// (`use_target` already refused the exchanging and the worn).
 ///
 /// The fail line's Korean is replacement characters in the frozen source
-/// (`:10697-10698`), so its bytes are lost; the roll cannot miss
+/// (`:10697-10698`, `:10642-10643`), so its bytes are lost; the roll cannot miss
 /// (`aiItemAttributeAddPercent`, all 100, `G/constants.cpp:879-882`), which is why no
 /// fail line exists here. The trailing `IsEquipped` re-check is dead (the head refused
 /// the worn), as is the buff call behind it.
-fn add_talisman_target_attribute(
+fn add_kind_target_attribute(
     items: &mut CharacterItems,
     (scroll, scroll_proto): (&Item, &ItemProto),
     target: &Item,
     target_proto: &ItemProto,
     dice: &mut dyn Dice,
     attrs: &[ItemAttrRecord],
+    is_target: fn(&ItemProto) -> bool,
 ) -> Result<MoveDone, MoveRefused> {
     let silent = || Ok(done(MoveKind::Used, Trail::default()));
-    if target_proto.item_type != ITEM_TALISMAN
+    if !is_target(target_proto)
         || attribute_set_index(target_proto.item_type, target_proto.sub_type).is_none()
     {
         return silent();
@@ -731,22 +781,24 @@ fn add_talisman_target_attribute(
     Ok(done(MoveKind::Used, trail))
 }
 
-/// The `USE_CHANGE_ATTRIBUTE_TALISMAN` case (`UseItemTalismanChangeAttribute`,
-/// `G/char_item.cpp:10705-10724`): on a talisman with an attribute set and at least one
-/// bonus, the bonuses redraw on the plain change table and the scroll is spent. A
-/// non-talisman, an exchanging or worn target, one with no set, or one with no bonus
-/// is silent. The change-count socket climbs, as `ChangeAttribute` climbs it.
-fn change_talisman_target_attribute(
+/// The `USE_CHANGE_ATTRIBUTE_TALISMAN` and `USE_CHANGE_ATTRIBUTE_GLOVE` cases
+/// (`UseItemTalismanChangeAttribute`, `G/char_item.cpp:10705-10724`, and
+/// `UseItemGloveChangeAttribute`, `:10650-10667`, behind `ENABLE_GLOVE_SYSTEM`): on a
+/// target of the scroll's kind with an attribute set and at least one bonus, the
+/// bonuses redraw on the plain change table and the scroll is spent. Any other target,
+/// an exchanging or worn one, one with no set, or one with no bonus is silent. The
+/// change-count socket climbs, as `ChangeAttribute` climbs it.
+fn change_kind_target_attribute(
     items: &mut CharacterItems,
     (scroll, scroll_proto): (&Item, &ItemProto),
-    target: &Item,
-    target_proto: &ItemProto,
+    (target, target_proto): (&Item, &ItemProto),
     dice: &mut dyn Dice,
     gauss: &mut Gauss,
     attrs: &[ItemAttrRecord],
+    is_target: fn(&ItemProto) -> bool,
 ) -> Result<MoveDone, MoveRefused> {
     let silent = || Ok(done(MoveKind::Used, Trail::default()));
-    if target_proto.item_type != ITEM_TALISMAN
+    if !is_target(target_proto)
         || attribute_set_index(target_proto.item_type, target_proto.sub_type).is_none()
         || normal_count(&target.attributes) == 0
     {
@@ -2203,6 +2255,9 @@ mod tests {
     const TALISMAN: u32 = 9600;
     const TALISMAN_ADD: u32 = 50_890;
     const TALISMAN_CHANGE: u32 = 50_889;
+    const GLOVE: u32 = 23_000;
+    const GLOVE_ADD: u32 = 50_891;
+    const GLOVE_CHANGE: u32 = 50_892;
 
     /// The talisman table: the two scrolls, a fire talisman, and a sword for the
     /// non-talisman silence.
@@ -2215,10 +2270,29 @@ mod tests {
         ItemProtos::from_rows(vec![add, change, talisman, sword])
     }
 
+    /// The glove table: the two scrolls and a glove.
+    fn glove_protos() -> ItemProtos {
+        let add = ItemProto::for_category_rule(GLOVE_ADD, ITEM_USE, USE_ADD_ATTRIBUTE_GLOVE);
+        let change =
+            ItemProto::for_category_rule(GLOVE_CHANGE, ITEM_USE, USE_CHANGE_ATTRIBUTE_GLOVE);
+        let glove = ItemProto::for_category_rule(GLOVE, ITEM_ARMOR, ARMOR_GLOVE);
+        ItemProtos::from_rows(vec![add, change, glove])
+    }
+
     /// The talisman set's row: apply 1 caps set 8 at 5 with the whole probability.
     fn talisman_attrs() -> Vec<ItemAttrRecord> {
+        set_attrs(8)
+    }
+
+    /// The glove set's row: apply 1 caps set 9 at 5 with the whole probability.
+    fn glove_attrs() -> Vec<ItemAttrRecord> {
+        set_attrs(9)
+    }
+
+    /// One attr row capping `set` at 5 for apply 1 with the whole probability.
+    fn set_attrs(set: usize) -> Vec<ItemAttrRecord> {
         let mut levels = [0u8; 10];
-        levels[8] = 5;
+        levels[set] = 5;
         vec![ItemAttrRecord {
             apply_index: 1,
             prob: 100,
@@ -2232,6 +2306,12 @@ mod tests {
         let mut talisman = Item::new(id, TALISMAN);
         talisman.attributes[0] = ItemAttribute::new(7, 26);
         talisman
+    }
+
+    fn bonused_glove(id: u32) -> Item {
+        let mut glove = Item::new(id, GLOVE);
+        glove.attributes[0] = ItemAttribute::new(7, 26);
+        glove
     }
 
     /// The talisman add lands a second bonus with the success line and spends the
@@ -2438,6 +2518,101 @@ mod tests {
         )
         .expect("the empty talisman answers silently");
         assert!(done.records.is_empty(), "no line for no bonus");
+        assert!(items.item(13).is_some(), "the silent scroll stays");
+    }
+
+    /// The glove add lands a second bonus with the success line and spends the
+    /// scroll; the change redraws the two with the change line, counts socket 3, and
+    /// spends its scroll too. A talisman under the glove change is silent with the
+    /// scroll kept: it is no glove.
+    #[test]
+    fn a_glove_add_lands_and_its_change_redraws_and_counts() {
+        let mut protos = glove_protos();
+        let talisman_proto = ItemProto::for_category_rule(TALISMAN, ITEM_TALISMAN, 0);
+        protos = ItemProtos::from_rows(vec![
+            protos.get(GLOVE_ADD).expect("the add proto").clone(),
+            protos.get(GLOVE_CHANGE).expect("the change proto").clone(),
+            protos.get(GLOVE).expect("the glove proto").clone(),
+            talisman_proto,
+        ]);
+        let attrs = glove_attrs();
+        let mut items = holding(&[
+            (0, bonused_glove(9)),
+            (1, Item::new(10, GLOVE_ADD)),
+            (2, Item::new(11, GLOVE_CHANGE)),
+            (3, bonused_talisman(12)),
+            (4, Item::new(13, GLOVE_CHANGE)),
+        ]);
+        let add = items.item_at(inv(1)).expect("the add scroll").clone();
+        let add_proto = protos.get(GLOVE_ADD).expect("the add proto").clone();
+        let mut dice = Script::new(vec![1, 1, 1]);
+        let mut gauss = Gauss::new();
+        let done = change_target_attributes(
+            &mut items,
+            (&add, &add_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the add lands");
+        let kept = items.item(9).expect("the glove stays");
+        assert_eq!(normal_count(&kept.attributes), 2, "the second bonus lands");
+        assert!(items.item(10).is_none(), "the last add scroll leaves");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(TALISMAN_ADDED_NOTICE))),
+            "the add chats its line"
+        );
+        let change = items.item_at(inv(2)).expect("the change scroll").clone();
+        let change_proto = protos.get(GLOVE_CHANGE).expect("the change proto").clone();
+        let before = items.item(9).expect("the glove").attributes;
+        let done = change_target_attributes(
+            &mut items,
+            (&change, &change_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the change lands");
+        let kept = items.item(9).expect("the glove stays");
+        assert_ne!(kept.attributes, before, "the bonuses redraw");
+        assert_eq!(kept.sockets[3], 1, "the change counts itself");
+        assert!(items.item(11).is_none(), "the last change scroll leaves");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(ATTR_CHANGED_NOTICE))),
+            "the change chats"
+        );
+        let change = items.item_at(inv(4)).expect("the change scroll").clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&change, &change_proto),
+            inv(3),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the talisman answers silently");
+        assert!(done.records.is_empty(), "no line for a talisman");
         assert!(items.item(13).is_some(), "the silent scroll stays");
     }
 }

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 654 (the talisman scrolls).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 655
+Last reviewed: 2026-11-13, after ledger section 655 (the glove scrolls).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 656
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -635,7 +635,9 @@ Since 648 `questlib.locale` is `ported` (the land dialog renders its yes/no over
 Since 649 `quest.sash_mission` and `quest.ship_defense` are `ported`: every reachable branch runs over the wire, and the protoless remainders (85000, 31107) are documented, not ported.
 Since 650 `sys.life.fishing` reads the fish-mind premium: a live premium draws the mind's table and previews the bite.
 Since 651 `sys.combat.core` reads the EXP/ITEM/GOLD premiums: the +50% exp grant and the buyer rates over the wire (`a_premium_kill_pays_half_again_the_monsters_exp`), with the login affects and the tick sync for all five held kinds.
-Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 654 the talisman scrolls run: the add lands below five with its success line, the change redraws on the plain table and counts socket 3, both spend, and a non-talisman or empty change is silent (`a_talisman_add_lands_and_its_change_redraws_and_counts`); the fail line's Korean is lost in the frozen source but its roll cannot miss.
+Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 655 the glove scrolls run behind the always-on glove build: the add lands below five with the same success line, the change redraws and counts socket 3, both spend, and the socket case's costume-and-glove gate narrowed to its own labels, so a plain add still refuses a glove while the kind scrolls land (`a_glove_add_lands_and_its_change_redraws_and_counts`).
+
+Since 654 the talisman scrolls run: the add lands below five with its success line, the change redraws on the plain table and counts socket 3, both spend, and a non-talisman or empty change is silent (`a_talisman_add_lands_and_its_change_redraws_and_counts`); the fail line's Korean is lost in the frozen source but its roll cannot miss.
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
 and the ledger disagree, the most recent ledger section wins; update this page in the same change.
