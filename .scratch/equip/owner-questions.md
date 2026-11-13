@@ -698,3 +698,13 @@ owner answers.
  and its `monthIndex()` and `clear_old_battlepass()` helpers are undefined
  everywhere (named only in `quest_functions` and the quest itself), so both arms
  would abort mid-dialog.
+75. **Four quest libraries load but nothing calls them (ledger 647).** `dungeonFunctions.lua`
+ (19 globals + 3 `dungeonFunctions.*` methods), `dungeonInformationLibrary.lua` (3 methods),
+ `luaFunctions.lua` (11 functions) and `GFquestlib.lua` (7 functions) all load —
+ `questlib.lua:1910-1912` dofiles the first three, `settings.lua:175` dofiles the fourth —
+ but no file outside each one names any of its functions (the `IsInDungeon` hits are a
+ local in `rank_global.lua:8`; `questlib.lua:1925`/`1932` redefine `party_get_member_pids`
+ and `get_time_remaining` rather than call the libs'). Positive control: the sweep does
+ find the live call `TeleportRing.MainWindow` in `_basic/TeleportRing.lua:4`. Waits on it:
+ confirm these four are dead on your server too, so the rows stay `unused`. If any quest
+ you run calls them, name it and the rows come back.

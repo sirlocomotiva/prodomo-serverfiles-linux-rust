@@ -55195,3 +55195,40 @@ the 644 scenario.
 stays `ported`, its note extended with the 646 scenario.
 
 Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5583 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal`, a points record landing in a quiet window under full-suite load — passes alone, same family as the known load flakes, and 646 is test-only so unrelated); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 647. The four dead libraries
+
+Four quest-library rows close as `unused` with no product code, each loaded but never called.
+
+`questlib.dungeonFunctions` (`questlib.lua:1912`): its 19 globals (`ClearDungeon`,
+`isDungeonNPCblocked`, `blockDungeonNPC`, `getDungeonRemaining`, the `Get`/`Set`/`Is` party
+and player index, floor, pid, time and re-entry helpers) and its 3 `dungeonFunctions.*`
+methods (`setWaitTime`, `checkRequire`, `warpToDungeon`) have zero callers outside the file.
+
+`questlib.dungeonInformationLibrary` (`questlib.lua:1911`): its 3 methods
+(`LoadDungeonInformation`, `ReturnDungeonInformation`, `IsInDungeon`) have zero callers
+outside the file; the two `IsInDungeon` hits are a local variable in `rank_global.lua:8-13`.
+
+`questlib.luaFunctions` (`questlib.lua:1910`): 9 of its 11 functions have zero callers
+outside the file (`isNextMultiply`, `isQuestAvailable`, `returnCommaString`,
+`regenWriteLine`, `writeSyserr`, `writeSyslog`, `tableHasValue`, `luaRandom`,
+`tableShuffle`). The other two serve only dead code: `party_get_member_pids` and
+`get_time_format` are named only from `dungeonFunctions.lua`, and `questlib.lua:1925`
+redefines `party_get_member_pids` after the dofile, so the lib's copy is shadowed even
+there.
+
+`questlib.GFquestlib` (`settings.lua:175`; the `questlib.lua:1852` dofile is commented out):
+its 7 functions (`get_random_vnum_from_table`, `get_time_remaining`, `count_item_range`,
+`remove_item_range`, `is_destination_village`, `say_important_title`, `say_important`) have
+zero callers outside the file. `questlib.lua:1932` defines its own `get_time_remaining` with
+a different body (`"%d sec"` where GF's reads `gameforge.locale.time`), which is a
+redefinition, not a call.
+
+The sweeps cover every `.lua` under `locale/europe/quest` plus the locale `.lua` files, by
+function name. Positive controls: the same sweep finds the live call
+`TeleportRing.MainWindow` in `_basic/TeleportRing.lua:4`, and the dofile lines prove the
+files load — inertly, since each file's top level only creates its table and defines its
+functions. Owner question 75 asks for confirmation. If the owner runs a quest that calls
+any of these, the rows come back.
+
+Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
