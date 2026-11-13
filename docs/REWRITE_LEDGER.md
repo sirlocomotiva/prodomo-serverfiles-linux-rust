@@ -55259,3 +55259,26 @@ it builds `mapName` and returns `skillName[map_index]` — so a caller would get
 either way.
 
 Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; the named land scenario re-proved green (`a_guild_master_buys_the_land_by_the_sellers_dialog`); `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 649. The sash and the ship close
+
+Two quest rows close as `ported` with no product code, both re-proved green in this slice. Each
+follows the ring's standard (ledgers 644-646): every branch reachable on the owner's data runs
+over the wire, and the Game-data-blocked remainder is documented in the note, not ported.
+
+`quest.sash_mission` names `a_complete_sash_quest_without_the_material_goes_back_to_the_captain`
+(ledger 263): `__complete`'s click on the marked Theowahdan counts no 85000 and moves back to
+`go_to_disciple`, whose letter marks the captain. On the owner's data that is its only branch:
+85000 has no proto, so the captain's give gives nothing and no character can hold the material.
+The other branch's `pc.give_item2_select` and `item.set_socket` stay bridged with unit tests
+(ledger 266) for data that names the proto.
+
+`quest.ship_defense` names `a_party_boards_starts_and_leaves_the_live_ship_defence` (ledger
+623): the live board's gates, the guest join, the live start and the running leave, all over
+the wire. The kill's wood drop and the mast's take stay out because 31107 is in
+`item_names.txt` but not `item_proto.txt`, so legacy's `CreateItem` returns `NULL` — there is
+no item to drop or take. The rankings arm stays commented out in the source itself.
+
+One partial quest row remains: `questlib.questlib`, the 1970-line core library.
+
+Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; both named scenarios re-proved green (`a_complete_sash_quest_without_the_material_goes_back_to_the_captain`, `a_party_boards_starts_and_leaves_the_live_ship_defence`); `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
