@@ -60621,3 +60621,148 @@ fn a_learned_ward_climbs_by_point_and_the_store_follows() {
         "(SELECT level = 2 FROM player_skill WHERE vnum = 221)",
     );
 }
+
+/// The ring's level refusal: the use lists `menu`, the pick `answer` hears the titled
+/// page naming `low`-`high` and ending `[DONE]`, and the dialog ends.
+fn read_ring_level_refusal(
+    keyed: &mut Keyed,
+    menu: &[u8],
+    answer: u8,
+    low: i32,
+    high: i32,
+    note: &str,
+) {
+    keyed.send_record(&client_item_use(0));
+    assert_eq!(
+        keyed.read_game(),
+        server_script(1, &titled_page(b"Inel Teleportare:", &[], menu))
+    );
+    keyed.send_record(&client_script_answer(answer));
+    let first = format!("Nivelul tau trebuie sa fie intre {low} si {high} pentru");
+    assert_eq!(
+        keyed.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Inel Teleportare:",
+                &[first.as_bytes(), b"a putea intra in aceasta mapa."],
+                b"[DONE]"
+            )
+        ),
+        "{note}"
+    );
+    keyed.still("the refusal ends the dialog");
+}
+
+/// `quest.TeleportRing`'s gated branches (ledger 644; 287 proved the plain warp). Alpha,
+/// level 154, holds the ring (70058): picking Grota Exilului (75-105, ticket 30190) without
+/// the ticket refuses with the item text, and picking Regiunea Beta (90-105) at 154 refuses
+/// with the level text. Beta, level 100 with the ticket, picks Grota: the level passes, the
+/// ticket leaves, and the warp orders (153600, 1203200) with the remove and `GC_WARP`.
+#[test]
+fn the_rings_use_refuses_gated_maps_and_spends_the_ticket() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(73);
+    let (mut server, console) = Server::start_with_console(binary(), database.url(), &channels);
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 100, x = 470000, y = 950000 WHERE name = 'Beta'",
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    Server::write_console(&console, "item give Alpha 70058 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 70_058, 1));
+    let menu = b"[QUESTION 1;Satul I|2;Satul II|3;Valea Seungryong|4;Desertul Yongbi|5;Muntele Sohan - Turnul lui Nemere|6;Turnul Demonilor - Cat. Diavolului|7;Tara de Foc - Purg. lui Razador|8;Taramul Gigantilor|9;Grota Exilului|10;Regiune de Padure|11;Temnitele Paianjenilor - Nivel: 35-75|12;Regiunea Beta - Nivel: 90-105|13;Renunta]";
+
+    // When: Alpha picks Grota Exilului (9th) at 154, then Regiunea Beta (12th).
+    // Then: each hears its level refusal and the dialog ends.
+    read_ring_level_refusal(&mut alpha, menu, 8, 75, 105, "the Grota level refusal");
+    read_ring_level_refusal(&mut alpha, menu, 11, 90, 105, "the Beta level refusal");
+    drop(alpha);
+
+    // Given: Beta, level 100, holds the ring and the ticket.
+    let (mut beta, _character, _items) = load_character(&server, b"alice", 1);
+    let (beta_entered, _cooldown) = enter_game_view_cells(&mut beta);
+    let own = u32::from_le_bytes(beta_entered.add[1..5].try_into().expect("a VID"));
+    Server::write_console(&console, "item give Beta 70058 1");
+    server.wait_for("id 100000001; the client has it");
+    assert_eq!(set_fields(&beta.read_game()), (inventory, 0, 70_058, 1));
+    Server::write_console(&console, "item give Beta 30190 1");
+    server.wait_for("id 100000002; the client has it");
+    // The material bank holds 30190, so the ticket lands at its bank cell 650.
+    assert_eq!(set_fields(&beta.read_game()), (inventory, 650, 30_190, 1));
+
+    // When: Beta picks Grota Exilului with the ticket.
+    beta.send_record(&client_item_use(0));
+    assert_eq!(
+        beta.read_game(),
+        server_script(1, &titled_page(b"Inel Teleportare:", &[], menu))
+    );
+    beta.send_record(&client_script_answer(8));
+    // Then: the ticket leaves its bank cell (byte 21, the set record), the second
+    // title ends the dialog, and the warp orders map 73's exile grotto.
+    assert_eq!(
+        set_fields(&beta.read_game()),
+        (inventory, 650, 0, 0),
+        "the ticket leaves its bank cell"
+    );
+    assert_eq!(
+        beta.read_game(),
+        server_script(1, &titled_page(b"Inel Teleportare:", &[], b"[DONE]")),
+        "the second title ends the dialog"
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&own.to_le_bytes());
+    assert_eq!(beta.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        beta.read_game(),
+        a_warp_record((153_600, 1_203_200), port),
+        "the ring warp names the exile grotto and Channel 1"
+    );
+
+    // When: Beta re-enters on the grotto map — the warp departed the descriptor, so an
+    // honest client re-enters after `GC_WARP` — and rings again, picking Satul I (1st),
+    // then its Shinso sub-index (3rd of three plus the quit).
+    let sub = b"[QUESTION 1;Satul I Jinno|2;Satul I Chunjo|3;Satul I Shinso|4;Renunta]";
+    drop(beta);
+    let (mut beta, _character, _items) = load_character(&server, b"alice", 1);
+    let (beta_back, _cooldown) = enter_game_view_cells(&mut beta);
+    let own = u32::from_le_bytes(beta_back.add[1..5].try_into().expect("a VID"));
+    beta.send_record(&client_item_use(0));
+    assert_eq!(
+        beta.read_game(),
+        server_script(1, &titled_page(b"Inel Teleportare:", &[], menu))
+    );
+    beta.send_record(&client_script_answer(0));
+    assert_eq!(
+        beta.read_game(),
+        server_script(1, &titled_page(b"Inel Teleportare:", &[], sub)),
+        "the sub-index menu"
+    );
+    beta.send_record(&client_script_answer(2));
+    // Then: the script ends with no further say, so the dialog closes with a bare
+    // `[DONE]`, and the warp orders Shinso's village on map 1, because the sub
+    // branch carries no ticket or level gate.
+    assert_eq!(
+        beta.read_game(),
+        server_script(0, b"[DONE]"),
+        "the bare close ends the sub dialog"
+    );
+    let mut removed_again = vec![GC_CHARACTER_DEL];
+    removed_again.extend_from_slice(&own.to_le_bytes());
+    assert_eq!(beta.read_game(), removed_again, "EncodeRemovePacket(this)");
+    assert_eq!(
+        beta.read_game(),
+        a_warp_record((473_900, 954_600), port),
+        "the ring warp names Shinso's village and Channel 1"
+    );
+    beta.still("nothing follows");
+}

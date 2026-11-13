@@ -55112,3 +55112,35 @@ The 268 grand-book scenario needed re-pinning: with 221 hosted, Zulu's read no l
 Mutants (all killed): the inverted `SkillCanUp` gate, PALBANG bound to 237, the boost subtracting, the 230d help call dropped, only 221 kept.
 
 Gates (2026-11-13): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5580 passed, 2 failed in 46 targets — the known `a_morphed_caller_hears_every_stat_refusal` load flake (failed in 642 too) and `a_grade_refine_spends_the_stones_and_lands_a_new_one`, which passes alone and passed in the 642/643a/643b suites (a draw the loaded run missed); doc 1 passed, clippy and rustdoc clean, no `prodomo\_%` database remained, `legacy/` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 644. The ring's gated branches
+
+Ledger 287 proved the ring's plain warp: the use lists the twelve maps and the quit, and Valea
+Seungryong warps to (666300, 855200) with the remove and `GC_WARP`. The level, item and sub-index
+branches waited on "a gated map picked over the wire". This slice picks them.
+
+The scenario is `the_rings_use_refuses_gated_maps_and_spends_the_ticket` (Channel 1 hosts map 73,
+the exile grotto). Alpha, level 154, holds the ring (70058): picking Grota Exilului (level 75-105,
+ticket 30190) hears the level refusal, and picking Regiunea Beta (90-105) hears its own level
+refusal — each a titled page ending `[DONE]`, each ending the dialog. Beta, level 100 with the
+ticket, picks Grota: the level passes, the 30190 leaves its material-bank cell 650 (byte 21, the
+set record, before the second title), and the warp orders (153600, 1203200) with the remove and
+`GC_WARP`. Beta re-enters on the grotto map — the warp departed the descriptor, and an honest
+client always re-enters after `GC_WARP` (a departed descriptor drops what it reads, as the warp
+test's tail records) — rings again, picks Satul I, and takes its Shinso sub-index to (473900,
+954600) on map 1. The sub dialog closes with a bare skin-0 `[DONE]`, because the script ends with
+no further say after the sub select; the quit and the `Renunta` arms need no wire proof beyond
+287's menu.
+
+Two scenario lessons, both honest-client paths, not defects. First, the ticket lands at bank cell
+650, not cell 1: 30190 is a material and the custom bank holds it. Second, Beta's fixture square
+(10000, 1210000) sits inside skipia_dungeon_01 (map 72, the Shared Channel's), so the slice moves
+her to (470000, 950000) on map 1 before she loads; her level 100 sits inside a dungeon window, so
+she enters through `enter_game_view_cells`. `quest.TeleportRing` stays `ported`, now naming the 644 scenario: the `can_warp`-false arm
+("Asteapta 10 secunde") waits on a scenario with a blocking window open at use time.
+
+No product code changed: the lib, the API (`pc.get_level`, `pc.count_item`, `pc.remove_item`,
+`pc.warp`, `pc.can_warp` — all `ported`), the bank routing and the dialog close already did this.
+The row's note names the scenario and the one arm left.
+
+Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5582 passed, 1 failed in 46 targets (`a_gm_purges_the_near_dog_and_all_sweeps_the_view`, a quest-target delete landing in the respawn window under full-suite load — passes alone, same family as the known load flakes, and 644 is test-only so unrelated); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after the refusal-helper split (129 lines); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 643 (the ward climb and the boost).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 644
+Last reviewed: 2026-11-13, after ledger section 644 (the ring's gated branches).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 645
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -627,6 +627,7 @@ kill waits on the kill event reaching quest scripts with a target. Since 578 `sy
 
 Since 643 `sys.skill.extra`'s 7/8 rows host: the sixteen 221-228/236-243 type-6 rows load with their `24*k`/`16*k` polys (229/244 stay out, unread by anything), `SkillLevelUp`'s :738 `SkillCanUp` gate is enforced so a quest-learned ward climbs by point and refuses beside a sibling, and the help functor arm grows each trigger's 230d/230e cast by the caster's learned boost. The ward arms wait for player victims (PvP).
 
+Since 644 `quest.TeleportRing`'s gated branches run over the wire: the level refusals, the ticket spend with its bank-cell clear, and the sub-index menu with its bare-`[DONE]` close and re-entry.
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
 and the ledger disagree, the most recent ledger section wins; update this page in the same change.
