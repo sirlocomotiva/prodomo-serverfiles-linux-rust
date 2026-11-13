@@ -21,6 +21,7 @@ use common::vid::Vid;
 use gamedata::item_kind::{ITEM_USE, USE_CREATE_STONE, USE_RECIPE};
 use protocol::gc_actors::GcCharacterGoldChange;
 use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
+use protocol::gc_vid::GcSpecialEffect;
 use protocol::item_pos::ItemPos;
 use world::character::{number, AutoGiven, MoveDone, RecipeTake};
 
@@ -57,7 +58,18 @@ const WONSO_SUGAR: u32 = 50_021;
 /// The wonso fruit (`case 50022`).
 const WONSO_FRUIT: u32 = 50_022;
 /// The elk gold bar (`case ITEM_ELK_VNUM`, `G/char_item.cpp:5180-5191`).
+/// The firecracker (`case 50107`, `G/char_item.cpp:5118-5140`).
+const FIRECRACKER: u32 = 50_107;
+/// The spinning top (`case 50108`, `G/char_item.cpp:5142-5162`).
+const SPINNING_TOP: u32 = 50_108;
+/// The elk gold bar (`case ITEM_ELK_VNUM`, `G/char_item.cpp:5180-5191`).
 const ELK_BAR: u32 = 50_026;
+/// `SE_CHINA_FIREWORK` (`common/length.h:857`): 9, counted from `SE_NONE`.
+const SE_CHINA_FIREWORK: u8 = 9;
+/// `SE_SPIN_TOP` (`:858`): 10.
+const SE_SPIN_TOP: u8 = 10;
+/// `[LS;1205]`: the arena-map and fighting refusals both tell it.
+const FIREWORK_REFUSAL: &[u8] = b"[LS;1205]";
 /// The stat-reset tonic (`case ITEM_GIVE_STAT_RESET_COUNT_VNUM`,
 /// `G/unique_item.h:43`, `G/char_item.cpp:5110-5116`).
 const STAT_TONIC: u32 = 70014;
@@ -391,6 +403,82 @@ impl GameState {
                 }
             }
         }
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is a firework (`case 50107` / `case 50108`,
+    /// `G/char_item.cpp:5118-5162`): the firecracker or the spinning top.
+    pub(super) fn firework_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == FIRECRACKER || item.vnum == SPINNING_TOP)
+    }
+
+    /// The fireworks (`case 50107` / `case 50108`, `G/char_item.cpp:5118-5162`): an
+    /// arena map refuses with `[LS;1205]`, then a consent-duel fight with the
+    /// `no_potions_on_pvp` flag up refuses with the same line (the vnums are not on
+    /// the allowed list, as `IsAllowedPotionOnPVP` names only blue potions). Past the
+    /// gates and the use's checks the effect goes around (`SE_CHINA_FIREWORK` 9 for
+    /// the firecracker, `SE_SPIN_TOP` 10 for the top) and one firework spends. The
+    /// `ENABLE_FIREWORK_STUN` arm is commented out at the head of `UseItemEx`
+    /// (`:2716`), so no row lands.
+    pub(super) fn use_firework(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let vnum = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map_or(0, |item| item.vnum);
+        if self
+            .place_of(vid.raw())
+            .is_some_and(|(_, map)| self.is_arena_map(map))
+        {
+            self.tell(vid, actor, CHAT_TYPE_INFO, FIREWORK_REFUSAL, &[]);
+            return self.arena_item_refused(vid, actor);
+        }
+        let fighting = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .is_some_and(|character| self.pvp_is_fighting(character.player_id()));
+        let no_potions = self
+            .quests
+            .as_ref()
+            .is_some_and(|quests| quests.manager().event_flag(b"no_potions_on_pvp") != 0);
+        if no_potions && fighting {
+            self.tell(vid, actor, CHAT_TYPE_INFO, FIREWORK_REFUSAL, &[]);
+            return self.arena_item_refused(vid, actor);
+        }
+        let effect = if vnum == SPINNING_TOP {
+            SE_SPIN_TOP
+        } else {
+            SE_CHINA_FIREWORK
+        };
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let firework = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(firework.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(firework.vnum))?;
+            world::character::use_checks(&firework, proto, rules, gear.points)?;
+            world::character::spend_one(items, &firework, proto)
+        })?;
+        let mut record = Vec::new();
+        GcSpecialEffect {
+            effect_type: effect,
+            vid: vid.raw(),
+        }
+        .encode_into(&mut record);
+        self.packet_around(super::view::EntityKey::Character(vid.raw()), &record, None);
         Ok(moved)
     }
 

@@ -4572,6 +4572,9 @@ impl GameState {
         if self.wonso_at(vid, at) {
             return Some(self.use_wonso(vid, at, actor));
         }
+        if self.firework_at(vid, at) {
+            return Some(self.use_firework(vid, at, actor));
+        }
         if self.stat_tonic_at(vid, at) {
             return Some(self.use_stat_tonic(vid, at, actor));
         }

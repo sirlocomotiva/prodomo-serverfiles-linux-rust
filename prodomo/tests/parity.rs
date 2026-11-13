@@ -62765,3 +62765,51 @@ fn a_stat_tonic_raises_the_reset_count_and_spends_one() {
     );
     drop(server);
 }
+
+/// `cg.game.item_use`: `case 50107` / `case 50108` (`G/char_item.cpp:5118-5162`)
+/// lights the fireworks: Alpha lights a firecracker and a spinning top, each pays
+/// its effect around (9, then 10), and each stack shrinks by one.
+#[test]
+fn two_fireworks_light_their_effects_and_spend_one_each() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, \
+         0, 2, 50107 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 31, id, 1, \
+         1, 2, 50108 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    for vnum in [50_107, 50_108] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, 10, "the owner's firework is USE_SPECIAL");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    alpha.send_record(&client_item_use(1));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut effects = Vec::new();
+    while std::time::Instant::now() < deadline && effects.len() < 2 {
+        let Some(record) = alpha.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.len() == SPECIAL_EFFECT_LEN && record[0] == GC_SPECIAL_EFFECT {
+            effects.push(record[1]);
+        }
+    }
+    assert_eq!(effects, vec![9, 10], "the firecracker, then the top");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+    drop(alpha);
+    wait_for(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+    drop(server);
+}
