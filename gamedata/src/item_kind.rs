@@ -169,6 +169,13 @@ pub const USE_RECIPE: i32 = 23;
 /// `USE_CHANGE_ATTRIBUTE2` (`C/item_length.h:278`), behind `__ATTR_6TH_7TH__`: a rare
 /// bonus change scroll.
 pub const USE_CHANGE_ATTRIBUTE2: i32 = 24;
+/// `USE_TIME_CHARGE_PER` (`C/item_length.h:281`): a soul charge by percent of the
+/// duration (the owner's 100000 heart, whose amount is its socket 2, and 100001,
+/// whose amount is value(0)).
+pub const USE_TIME_CHARGE_PER: i32 = 27;
+/// `USE_TIME_CHARGE_FIX` (`C/item_length.h:282`): a soul charge by seconds
+/// (the owner's 100002, whose amount is value(0)).
+pub const USE_TIME_CHARGE_FIX: i32 = 28;
 /// `USE_ADD_ATTRIBUTE_TALISMAN` (`C/item_length.h:301`): a talisman bonus-add scroll
 /// (the owner's 50890).
 pub const USE_ADD_ATTRIBUTE_TALISMAN: i32 = 43;

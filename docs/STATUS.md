@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 660 (the group's line).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 661
+Last reviewed: 2026-11-13, after ledger section 661 (the soul charge).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 662
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -635,7 +635,11 @@ Since 648 `questlib.locale` is `ported` (the land dialog renders its yes/no over
 Since 649 `quest.sash_mission` and `quest.ship_defense` are `ported`: every reachable branch runs over the wire, and the protoless remainders (85000, 31107) are documented, not ported.
 Since 650 `sys.life.fishing` reads the fish-mind premium: a live premium draws the mind's table and previews the bite.
 Since 651 `sys.combat.core` reads the EXP/ITEM/GOLD premiums: the +50% exp grant and the buyer rates over the wire (`a_premium_kill_pays_half_again_the_monsters_exp`), with the login affects and the tick sync for all five held kinds.
-Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 660 `data.mob.group` is `ported` (`a_group_regen_stands_its_leader_and_its_members`; the party was already ported, and legacy has no member-follows-leader walk).
+Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 661 the soul charge lands (`a_percent_charge_fills_a_soul_and_a_second_meets_it_full`, `a_heart_and_a_fix_charge_land_their_seconds`; the heart reads socket 2, the fix adds seconds, the full chats `[LS;1066]`).
+
+Since 661 the soul charge runs: the percent and fix arms charge wear-timed stones with TruncatedI64 rounding and the `[LS;1066]`/`[LS;1093]` lines over the wire (`a_percent_charge_fills_a_soul_and_a_second_meets_it_full`, `a_heart_and_a_fix_charge_land_their_seconds`).
+
+Since 660 `data.mob.group` is `ported` (`a_group_regen_stands_its_leader_and_its_members`; the party was already ported, and legacy has no member-follows-leader walk).
 
 Since 659 the stone spends and the recipes brew (`a_stone_scroll_spends_and_gives_no_stone`, `a_recipe_consumes_its_sources_and_misses_its_bottle`; on the owner's data the stone gives nothing and every brew fails after consuming).
 

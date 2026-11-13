@@ -43,7 +43,8 @@ use gamedata::item_kind::{
     USE_CHANGE_COSTUME_ATTR, USE_CLEAN_SOCKET, USE_DETACHMENT, USE_ELEMENT_CHANGE,
     USE_ELEMENT_DOWNGRADE, USE_ELEMENT_UPGRADE, USE_PUT_INTO_ACCESSORY_SOCKET,
     USE_PUT_INTO_BELT_SOCKET, USE_RESET_COSTUME_ATTR, USE_SET_ATT_COSTUME,
-    USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT, USE_SET_ATT_PET, USE_TUNING,
+    USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT, USE_SET_ATT_PET, USE_TIME_CHARGE_FIX,
+    USE_TIME_CHARGE_PER, USE_TUNING,
 };
 use gamedata::item_proto::ItemProto;
 use protocol::gc_chat::CHAT_TYPE_INFO;
@@ -195,6 +196,9 @@ enum Arm {
     /// charged heart (`EXTRACT_DRAGON_HEART`) or a worn stone is pulled out
     /// (`EXTRACT_DRAGON_SOUL`). Any other sub-type is silent, as legacy's `default` is.
     Extract(i32),
+    /// `USE_TIME_CHARGE_PER` or `USE_TIME_CHARGE_FIX`, with its sub-type: a soul
+    /// charge by percent or by seconds.
+    Charge(i32),
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -395,6 +399,9 @@ impl GameState {
             Arm::Extract(kind) => {
                 return self.extract_step(vid, at, dest, kind, actor);
             }
+            Arm::Charge(kind) => {
+                return self.charge_step(vid, at, dest, kind, actor);
+            }
             Arm::Stone | Arm::CleanSash | Arm::Plain => {
                 return self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
                     let stone = world::character::use_source(items, at)?;
@@ -473,6 +480,57 @@ impl GameState {
             &self.protos,
             &self.locale,
         )
+    }
+
+    /// The soul charge (`case USE_TIME_CHARGE_PER` and `case USE_TIME_CHARGE_FIX`,
+    /// `G/char_item.cpp:3574-3629`, `:3630-3661`) at `dest`: the use's checks, then
+    /// the charge. A heart charger (vnum 100000) reads its percent from its socket
+    /// 2, any other charger from its value(0). A full soul chats `[LS;1066]` with
+    /// the charger kept, a charged one `[LS;1093]` with the seconds, and anything
+    /// else stays silent.
+    fn charge_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        kind: i32,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let per = kind == USE_TIME_CHARGE_PER;
+        let mut outcome = world::character::ChargeOutcome::Silent;
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let charger = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(charger.vnum)
+                .ok_or(MoveRefused::UnknownVnum(charger.vnum))?;
+            world::character::use_checks(&charger, proto, rules, gear.points)?;
+            let amount = if charger.vnum == super::dragon_soul::HEART_VNUM {
+                charger.sockets[super::dragon_soul::CHARGE_SOCKET]
+            } else {
+                proto.values[0]
+            };
+            let (done, landed) =
+                world::character::charge_soul(items, (&charger, proto), dest, protos, per, amount)?;
+            outcome = landed;
+            Ok(done)
+        })?;
+        match outcome {
+            world::character::ChargeOutcome::Charged(seconds) => {
+                self.tell(
+                    vid,
+                    actor,
+                    CHAT_TYPE_INFO,
+                    b"[LS;1093;%d]",
+                    &[crate::chat_line::Arg::Int(i64::from(seconds))],
+                );
+            }
+            world::character::ChargeOutcome::Full => {
+                self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;1066]", &[]);
+            }
+            world::character::ChargeOutcome::Silent => {}
+        }
+        Ok(moved)
     }
 
     /// The heart extractor's use (`ExtractDragonHeart`, `G/DragonSoul.cpp:409-489`): the
@@ -1091,6 +1149,13 @@ impl GameState {
             Some(proto) if proto.item_type == ITEM_METIN => Arm::Stone,
             Some(proto) if proto.item_type == ITEM_TREASURE_KEY => Arm::Key,
             Some(proto) if proto.item_type == ITEM_EXTRACT => Arm::Extract(proto.sub_type),
+            Some(proto)
+                if proto.item_type == ITEM_USE
+                    && (proto.sub_type == USE_TIME_CHARGE_PER
+                        || proto.sub_type == USE_TIME_CHARGE_FIX) =>
+            {
+                Arm::Charge(proto.sub_type)
+            }
             Some(proto)
                 if proto.item_type == ITEM_USE
                     && proto.sub_type == USE_TUNING

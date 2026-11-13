@@ -6,13 +6,13 @@
 use gamedata::item_kind::{
     ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_BODY, COSTUME_MOUNT,
     COSTUME_PET, COSTUME_SASH, COSTUME_WEAPON, ITEM_ARMOR, ITEM_BELT, ITEM_COSTUME, ITEM_PICK,
-    ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON, LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET,
-    USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2, USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN,
-    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE,
-    USE_CHANGE_ATTRIBUTE_TALISMAN, USE_CHANGE_COSTUME_ATTR, USE_CLEAN_SOCKET,
-    USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET, USE_RESET_COSTUME_ATTR,
-    USE_SET_ATT_COSTUME, USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT, USE_SET_ATT_PET,
-    WEARABLE_BODY, WEARABLE_WEAPON,
+    ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON, LIMIT_LEVEL, LIMIT_REAL_TIME,
+    USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2, USE_ADD_ATTRIBUTE_GLOVE,
+    USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2,
+    USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN, USE_CHANGE_COSTUME_ATTR,
+    USE_CLEAN_SOCKET, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET,
+    USE_RESET_COSTUME_ATTR, USE_SET_ATT_COSTUME, USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT,
+    USE_SET_ATT_PET, WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -433,6 +433,111 @@ pub fn detach_stones(
         &mut trail,
     )?;
     Ok((done(MoveKind::Used, trail), stones))
+}
+
+/// What [`charge_soul`] did: the caller chats the line, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChargeOutcome {
+    /// No soul at the destination, or none its proto names: silent, as legacy's
+    /// `return false` is.
+    Silent,
+    /// The soul's remain already fills its duration: `[LS;1066]`, the charger kept.
+    Full,
+    /// The soul gained this many seconds: `[LS;1093;%d]`, the charger spent.
+    Charged(i32),
+}
+
+/// `case USE_TIME_CHARGE_PER` and `case USE_TIME_CHARGE_FIX`
+/// (`G/char_item.cpp:3574-3629`, `:3630-3661`): the charger at the caller's source
+/// gives the dragon soul at `dest` more time, and one charger is spent. `per` names
+/// the percent arm, `amount` its percent (`GiveMoreTime_Per`, `G/item.cpp:2791-2813`)
+/// or its seconds (`GiveMoreTime_Fix`, `:2816-2838`).
+///
+/// The destination is read bare, as legacy reads it: no cell is valid-checked beyond
+/// holding a soul, and an exchanging or equipped soul charges like any other. The
+/// duration is `CItem::GetDuration` (`G/item.cpp:2841-2858`): the first `REAL_TIME`
+/// limit's value, else the wear-timer limit's, else the `(DWORD)-1` legacy's `int`
+/// becomes. The percent arm's `fPercent * duration / 100u` truncates, as the `DWORD`
+/// takes it; a negative amount charges nothing, where legacy's conversion is
+/// undefined.
+///
+/// # Errors
+///
+/// A storage refusal, which changes nothing.
+pub fn charge_soul(
+    items: &mut CharacterItems,
+    (charger, charger_proto): (&Item, &ItemProto),
+    dest: ItemPos,
+    protos: &ItemProtos,
+    per: bool,
+    amount: i32,
+) -> Result<(MoveDone, ChargeOutcome), MoveRefused> {
+    let silent = || {
+        Ok((
+            done(MoveKind::Used, Trail::default()),
+            ChargeOutcome::Silent,
+        ))
+    };
+    let Some(target) = items.item_at(dest).cloned() else {
+        return silent();
+    };
+    let Some(target_proto) = protos.get(target.vnum) else {
+        return silent();
+    };
+    if target_proto.item_type != gamedata::item_kind::ITEM_DS {
+        return silent();
+    }
+    let duration = target_proto
+        .limits
+        .iter()
+        .find(|limit| limit.kind == LIMIT_REAL_TIME)
+        .map(|limit| limit.value)
+        .or_else(|| {
+            target_proto
+                .timer_based_on_wear
+                .and_then(|index| target_proto.limits.get(index))
+                .map(|limit| limit.value)
+        })
+        .map_or(u32::MAX, |value| {
+            u32::try_from(value.max(0)).unwrap_or(u32::MAX)
+        });
+    let remain = u32::try_from(target.sockets[0].max(0)).unwrap_or(u32::MAX);
+    if remain == duration {
+        return Ok((done(MoveKind::Used, Trail::default()), ChargeOutcome::Full));
+    }
+    let given = if per {
+        common::cfloat::f32_to_u32(
+            common::cfloat::i32_to_f32(amount.max(0)) * common::cfloat::u32_to_f32(duration)
+                / 100.0,
+        )
+    } else {
+        u32::try_from(amount.max(0)).unwrap_or(u32::MAX)
+    };
+    let (remain, given) = if given.saturating_add(remain) >= duration {
+        (duration, duration.saturating_sub(remain))
+    } else {
+        (remain + given, given)
+    };
+    let mut trail = Trail::default();
+    let sockets = items
+        .set_socket(target.id, 0, i32::try_from(remain).unwrap_or(i32::MAX))
+        .map_err(|_| MoveRefused::Empty)?;
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets,
+    });
+    super::potion::use_one(
+        items,
+        charger,
+        super::quickslot::chains_when_used_up(charger_proto),
+        &mut trail,
+    )?;
+    let given = i32::try_from(given).unwrap_or(i32::MAX);
+    Ok((done(MoveKind::Used, trail), ChargeOutcome::Charged(given)))
 }
 
 /// `CleanSashAttr` (`G/char.cpp:10481-10500`): the detachment scroll cleans the absorbed
@@ -3354,5 +3459,133 @@ mod tests {
             "the wrong-kind chats"
         );
         assert!(items.item(16).is_some(), "the refused scroll stays");
+    }
+
+    const SOUL: u32 = 110_000;
+    const CHARGER: u32 = 100_001;
+
+    fn charge_protos() -> ItemProtos {
+        let mut soul = ItemProto::for_category_rule(SOUL, gamedata::item_kind::ITEM_DS, 1);
+        soul.limits[0] = gamedata::item_proto::ItemValue {
+            kind: gamedata::item_kind::LIMIT_TIMER_BASED_ON_WEAR,
+            value: 86_400,
+        };
+        soul.timer_based_on_wear = Some(0);
+        let charger = ItemProto::for_category_rule(
+            CHARGER,
+            ITEM_USE,
+            gamedata::item_kind::USE_TIME_CHARGE_PER,
+        );
+        let sword = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        ItemProtos::from_rows(vec![soul, charger, sword])
+    }
+
+    fn soul(id: u32, remain: i32) -> Item {
+        let mut item = Item::new(id, SOUL);
+        item.sockets[0] = remain;
+        item
+    }
+
+    /// A percent charge adds its share of the duration and spends the charger; a fix
+    /// charge caps at the duration; a full soul and a non-soul charge nothing.
+    #[test]
+    fn a_charge_adds_time_and_a_full_soul_charges_nothing() {
+        let protos = charge_protos();
+        let charger_proto = protos.get(CHARGER).expect("the charger proto").clone();
+        let mut items = holding(&[
+            (0, soul(9, 43_200)),
+            (1, Item::new(10, CHARGER)),
+            (2, soul(11, 86_400)),
+            (3, Item::new(12, SWORD)),
+        ]);
+        let charger = items.item_at(inv(1)).expect("the charger").clone();
+        let (_done, outcome) = charge_soul(
+            &mut items,
+            (&charger, &charger_proto),
+            inv(0),
+            &protos,
+            true,
+            50,
+        )
+        .expect("the charge lands");
+        assert_eq!(outcome, ChargeOutcome::Charged(43_200));
+        assert_eq!(items.item_at(inv(0)).expect("the soul").sockets[0], 86_400);
+        assert!(items.item_at(inv(1)).is_none(), "the charger spends");
+        let charger = Item::new(13, CHARGER);
+        items.set(inv(1), &charger).expect("the fixture places");
+        let (done, outcome) = charge_soul(
+            &mut items,
+            (&charger, &charger_proto),
+            inv(2),
+            &protos,
+            true,
+            50,
+        )
+        .expect("the full answers");
+        assert_eq!(outcome, ChargeOutcome::Full);
+        assert!(done.records.is_empty(), "the full stays silent");
+        assert!(items.item_at(inv(1)).is_some(), "the refused charger stays");
+        let (done, outcome) = charge_soul(
+            &mut items,
+            (&charger, &charger_proto),
+            inv(3),
+            &protos,
+            true,
+            50,
+        )
+        .expect("the non-soul answers");
+        assert_eq!(outcome, ChargeOutcome::Silent);
+        assert!(done.records.is_empty(), "the non-soul stays silent");
+        let (done, outcome) = charge_soul(
+            &mut items,
+            (&charger, &charger_proto),
+            inv(9),
+            &protos,
+            true,
+            50,
+        )
+        .expect("the empty answers");
+        assert_eq!(outcome, ChargeOutcome::Silent);
+        assert!(done.records.is_empty(), "the empty stays silent");
+    }
+
+    /// A small percent lands uncapped, pinning the divisor.
+    #[test]
+    fn a_small_percent_lands_uncapped() {
+        let protos = charge_protos();
+        let charger_proto = protos.get(CHARGER).expect("the charger proto").clone();
+        let mut items = holding(&[(0, soul(9, 0)), (1, Item::new(10, CHARGER))]);
+        let charger = items.item_at(inv(1)).expect("the charger").clone();
+        let (_, outcome) = charge_soul(
+            &mut items,
+            (&charger, &charger_proto),
+            inv(0),
+            &protos,
+            true,
+            10,
+        )
+        .expect("the charge lands");
+        assert_eq!(outcome, ChargeOutcome::Charged(8_640));
+        assert_eq!(items.item_at(inv(0)).expect("the soul").sockets[0], 8_640);
+    }
+
+    /// A fix charge caps a near-full soul at its duration and reports the top-up.
+    #[test]
+    fn a_fix_charge_caps_at_the_duration() {
+        let protos = charge_protos();
+        let charger_proto = protos.get(CHARGER).expect("the charger proto").clone();
+        let mut items = holding(&[(0, soul(9, 80_000)), (1, Item::new(10, CHARGER))]);
+        let charger = items.item_at(inv(1)).expect("the charger").clone();
+        let (_, outcome) = charge_soul(
+            &mut items,
+            (&charger, &charger_proto),
+            inv(0),
+            &protos,
+            false,
+            30_000,
+        )
+        .expect("the charge lands");
+        assert_eq!(outcome, ChargeOutcome::Charged(6_400));
+        assert_eq!(items.item_at(inv(0)).expect("the soul").sockets[0], 86_400);
     }
 }

@@ -52921,6 +52921,153 @@ fn a_body_reinforcement_lands_and_a_repeat_is_a_duplicate() {
     drop(server);
 }
 
+/// `cg.game.item_use_to_item`: `case USE_TIME_CHARGE_PER`
+/// (`G/char_item.cpp:3574-3629`) gives a dragon soul half its duration again. Alpha
+/// holds two 100001 chargers (value(0) 50) in the base inventory and a 110000 soul
+/// with 43200 s left in the soul inventory: the first use lands 43200 more with
+/// `[LS;1093;43200]` and spends its charger, and the second meets the full soul
+/// with `[LS;1066]`, the charger kept.
+#[test]
+fn a_percent_charge_fills_a_soul_and_a_second_meets_it_full() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // The chargers' `REAL_TIME` limit owns their socket 0 as the expiry, so both
+    // rows carry a live one; with 0 they would expire on a timer and race the uses.
+    for (id, window, pos, count, vnum, socket0) in [
+        (30, 1, 0, 1, 100_001, 2_147_483_647),
+        (31, 1, 1, 1, 100_001, 2_147_483_647),
+        (32, 5, 1, 1, 110_000, 43_200),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) \
+                 SELECT {id}, id, {window}, {pos}, {count}, {vnum}, {socket0} FROM player WHERE \
+                 name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    let charger = protos.get(100_001).expect("the owner's data has it");
+    assert_eq!(charger.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(
+        charger.sub_type, 27,
+        "the owner's charger is USE_TIME_CHARGE_PER"
+    );
+    assert_eq!(charger.values[0], 50, "the charge percent");
+    let soul = protos.get(DS_STONE).expect("the owner's data has it");
+    assert_eq!(soul.item_type, gamedata::item_kind::ITEM_DS);
+    assert!(soul.timer_based_on_wear.is_some(), "a wear-timed stone");
+    let (mut alpha, _listed) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alpha);
+    // When: Alpha charges the soul. Then: `[LS;1093;43200]`, the remain fills, and
+    // the charger goes.
+    alpha.send_record(&client_use_to_item_pos(1, 0, 5, 1));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut landed = false;
+    while std::time::Instant::now() < deadline && !landed {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        landed = record == an_info_line(b"[LS;1093;43200]");
+    }
+    assert!(landed, "the charge lands its line");
+    check(
+        &database,
+        "(SELECT socket0 = 86400 FROM item WHERE id = 32)",
+    );
+    check(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 30)");
+    // When: Alpha charges the full soul. Then: `[LS;1066]`, the charger kept.
+    alpha.send_record(&client_use_to_item_pos(1, 1, 5, 1));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut full = false;
+    while std::time::Instant::now() < deadline && !full {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        full = record == an_info_line(b"[LS;1066]");
+    }
+    assert!(full, "the full soul is reported");
+    check(
+        &database,
+        "(SELECT socket0 = 86400 FROM item WHERE id = 32)",
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+    drop(alpha);
+    drop(server);
+}
+
+/// `cg.game.item_use_to_item`: the heart reads its percent from its socket 2
+/// (`case USE_TIME_CHARGE_PER`'s `DRAGON_HEART_VNUM` arm, `G/char_item.cpp:3585-3590`),
+/// and `case USE_TIME_CHARGE_FIX` (`:3630-3661`) adds its value(0) seconds. Alpha
+/// holds a 100000 heart with 25 in socket 2, a 100002 fix charger (value(0) 30000),
+/// and two empty souls: the heart lands 21600 with `[LS;1093;21600]`, the fix lands
+/// 30000 with `[LS;1093;30000]`, and both chargers spend.
+#[test]
+fn a_heart_and_a_fix_charge_land_their_seconds() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, window, pos, vnum, socket0, socket2) in [
+        (30, 1, 0, 100_000, 2_147_483_647, 25),
+        (31, 1, 1, 100_002, 2_147_483_647, 0),
+        (32, 5, 1, 110_000, 0, 0),
+        (33, 5, 2, 110_000, 0, 0),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket2) \
+                 SELECT {id}, id, {window}, {pos}, 1, {vnum}, {socket0}, {socket2} FROM player WHERE \
+                 name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    let heart = protos.get(100_000).expect("the owner's data has it");
+    assert_eq!(heart.sub_type, 27, "the heart is USE_TIME_CHARGE_PER");
+    let fix = protos.get(100_002).expect("the owner's data has it");
+    assert_eq!(fix.sub_type, 28, "the fix charger is USE_TIME_CHARGE_FIX");
+    assert_eq!(fix.values[0], 30000, "the fix seconds");
+    let (mut alpha, _listed) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alpha);
+    for (cell, soul, line, remain) in [
+        (0, 1, b"[LS;1093;21600]", 21600),
+        (1, 2, b"[LS;1093;30000]", 30000),
+    ] {
+        alpha.send_record(&client_use_to_item_pos(1, cell, 5, soul));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut landed = false;
+        while std::time::Instant::now() < deadline && !landed {
+            let Some(record) = alpha.read_game_until(deadline) else {
+                break;
+            };
+            landed = record == an_info_line(line);
+        }
+        assert!(landed, "the charge lands {line:?}");
+        check(
+            &database,
+            &format!(
+                "(SELECT socket0 = {remain} FROM item WHERE id = {})",
+                soul + 31
+            ),
+        );
+    }
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id IN (30, 31))",
+    );
+    drop(alpha);
+    drop(server);
+}
+
 /// `cg.game.myshop` and `cmd.close_shop`: Alpha carries a sword and a paper bundle, builds a
 /// bundle shop selling the sword for 500 yang under the sign `Swords`, and the sign reaches
 /// Yankee, who stands beside it; `/close_shop` clears the sign on both wires.
