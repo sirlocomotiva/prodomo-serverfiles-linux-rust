@@ -1114,11 +1114,12 @@ pub fn is_polymorph_ball(proto: &ItemProto) -> bool {
     proto.item_type == ITEM_POLYMORPH && matches!(proto.vnum, 70_104..=70_107 | 71_093 | 50_322)
 }
 
-/// The nine seated `ITEM_USE` arms, in the order `use_special_kind` answers them.
-type SeatedArms = (bool, bool, bool, bool, bool, bool, bool, bool, bool);
+/// The ten seated `ITEM_USE` arms, in the order `use_special_kind` answers them: the
+/// nine consuming arms, then the silent pair.
+type SeatedArms = (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool);
 
 /// The use's classification: the potion, the skill book, the quest item, the
-/// polymorph ball or book, and the nine seated arms.
+/// polymorph ball or book, and the ten seated arms.
 type UseClassed = (bool, bool, bool, bool, bool, SeatedArms);
 
 /// The unported-use refusal for the classified proto, or `None` when some arm
@@ -1126,7 +1127,7 @@ type UseClassed = (bool, bool, bool, bool, bool, SeatedArms);
 /// unanswered type names the type.
 fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
     let (potion, book, forget, quest, ball, seated) = classed;
-    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
+    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged, silent) = seated;
     if !potion
         && !book
         && !clear
@@ -1138,6 +1139,7 @@ fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
         && !barred
         && !caped
         && !nogged
+        && !silent
         && proto.item_type == gamedata::item_kind::ITEM_USE
     {
         return Some(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
@@ -1156,6 +1158,7 @@ fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
         && !barred
         && !caped
         && !nogged
+        && !silent
         && !USED_BY_WEARING.contains(&proto.item_type)
     {
         return Some(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
@@ -1170,10 +1173,10 @@ fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
 fn seated_use_kind(
     book: bool,
     forget: bool,
-    seated: (bool, bool, bool, bool, bool, bool, bool, bool, bool),
+    seated: SeatedArms,
 ) -> Option<super::item_move::MoveKind> {
     use super::item_move::MoveKind;
-    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged) = seated;
+    let (clear, cloak, abled, euro, timed, shop_premium, barred, caped, nogged, _silent) = seated;
     if !(book
         || forget
         || clear
@@ -1217,32 +1220,45 @@ fn seated_use_kind(
 /// `USE_AFFECT` (`:6833-6864`), the 507 premium-shop arm (`:6835-6843`), and the
 /// gold bars (`LINGOURI_SURSA`, `:3328-3370`), the cape of courage
 /// (`case USE_SPECIAL`'s 70038/70057/76007 arm, `:3879-3888`), and the Nog
-/// pocket (50216, `:3787-3811`), in that order. The branch's
+/// pocket (50216, `:3787-3811`), then the silent pair (`USE_BUCKET` and
+/// `USE_CHANGE_ATTRIBUTE_PLUS`, with no arm), in that order. The branch's
 /// `USE_POTION_NODELAY` runs the ordinary nodelay arm, and its `USE_POTION`
 /// answers nothing.
-fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool, bool, bool, bool, bool, bool) {
-    use gamedata::item_kind::{ITEM_USE, USE_ABILITY_UP, USE_AFFECT, USE_CLEAR, USE_INVISIBILITY};
+fn use_special_kind(proto: &ItemProto) -> SeatedArms {
+    use gamedata::item_kind::{
+        ITEM_USE, USE_ABILITY_UP, USE_AFFECT, USE_BUCKET, USE_CHANGE_ATTRIBUTE_PLUS, USE_CLEAR,
+        USE_INVISIBILITY,
+    };
     if proto.item_type != ITEM_USE {
         return (
-            false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false, false, false,
         );
     }
     if (GOLD_BAR_LOW..=GOLD_BAR_HIGH).contains(&proto.vnum) {
-        return (false, false, false, false, false, false, true, false, false);
+        return (
+            false, false, false, false, false, false, true, false, false, false,
+        );
     }
     if CAPE_OF_COURAGE.contains(&proto.vnum) {
-        return (false, false, false, false, false, false, false, true, false);
+        return (
+            false, false, false, false, false, false, false, true, false, false,
+        );
     }
     if proto.vnum == NOG_POCKET {
-        return (false, false, false, false, false, false, false, false, true);
+        return (
+            false, false, false, false, false, false, false, false, true, false,
+        );
     }
     if (50_801..=50_820).contains(&proto.vnum) {
         let euro = proto.sub_type == USE_ABILITY_UP || proto.sub_type == USE_AFFECT;
-        return (false, false, false, euro, false, false, false, false, false);
+        return (
+            false, false, false, euro, false, false, false, false, false, false,
+        );
     }
     let shop_premium =
         proto.sub_type == USE_AFFECT && proto.values[0] == AFFECT_PREMIUM_PRIVATE_SHOP_VALUE;
     let timed = proto.sub_type == USE_AFFECT && !shop_premium;
+    let silent = proto.sub_type == USE_BUCKET || proto.sub_type == USE_CHANGE_ATTRIBUTE_PLUS;
     (
         proto.sub_type == USE_CLEAR,
         proto.sub_type == USE_INVISIBILITY,
@@ -1253,6 +1269,7 @@ fn use_special_kind(proto: &ItemProto) -> (bool, bool, bool, bool, bool, bool, b
         false,
         false,
         false,
+        silent,
     )
 }
 
@@ -1407,6 +1424,18 @@ pub fn use_item(
         // gathers the monsters the same way. The Nog pocket lands its three rows
         // the same way, after the held refusal.
         return consume_one_use(items, &item, proto, kind, &mut stamped);
+    }
+    // `USE_BUCKET` and `USE_CHANGE_ATTRIBUTE_PLUS` have no arm in the subtype switch
+    // (`G/char_item.cpp:3572-7047` has no `default`), so the `case ITEM_USE` falls through
+    // and `UseItemEx` returns true at `:7162`: legacy keeps the item and chats nothing.
+    // The use's checks already ran, and the game state counts the pass hook past the
+    // step, as it does for every landed use.
+    let (_, _, _, _, _, _, _, _, _, silent) = seated;
+    if silent {
+        let mut trail = Trail::default();
+        trail.records.append(&mut stamped.records);
+        trail.changes.append(&mut stamped.changes);
+        return Ok(done(MoveKind::Used, trail));
     }
     let mut equipper = Equipper::new(items, gear, rules.usable_cells);
     let outcome = if super::inventory::is_equip_position(item.pos) {

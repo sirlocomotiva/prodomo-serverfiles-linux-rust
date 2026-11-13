@@ -60864,6 +60864,46 @@ fn a_recipe_consumes_its_sources_and_misses_its_bottle() {
     drop(server);
 }
 
+/// `cg.game.item_use`: `USE_BUCKET` and `USE_CHANGE_ATTRIBUTE_PLUS` have no arm in
+/// the subtype switch (`G/char_item.cpp:3572-7047` has no `default`), so `case
+/// ITEM_USE` falls through and the use succeeds silently: Alpha uses the owner's
+/// 90001 and 71189, hears nothing, and both stay.
+#[test]
+fn a_bucket_and_a_plus_scroll_are_used_and_heard_nowhere() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, vnum) in [(30, 0, 90001), (31, 1, 71189)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    for (vnum, sub) in [(90_001, 15), (71_189, 34)] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, sub, "the owner's subtype");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses the bucket. Then: silence, the bucket kept.
+    alpha.send_record(&client_item_use(0));
+    alpha.quiet("a bucket use is silent");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // When: Alpha uses the plus scroll. Then: silence, the scroll kept.
+    alpha.send_record(&client_item_use(1));
+    alpha.quiet("a plus use is silent");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+    drop(alpha);
+    drop(server);
+}
+
 /// `cg.game.item_use`: `UseItemEx`'s head (`G/char_item.cpp:2769-2775`) refuses a
 /// duellist's limited potion while `no_potions_on_pvp` stands. Alice (a
 /// `HIGH_WIZARD`) stands the flag herself, then fights Yankee; she uses the

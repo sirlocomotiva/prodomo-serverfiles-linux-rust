@@ -144,6 +144,12 @@ pub const USE_ABILITY_UP: i32 = 7;
 /// `USE_AFFECT` (`C/item_length.h:262`): a timed affect by value (50813/50814 ride
 /// the 508xx branch; the rest land in the main switch).
 pub const USE_AFFECT: i32 = 8;
+/// `USE_BUCKET` (`C/item_length.h:269`): 15, with no arm in `UseItemEx`, so a use is a
+/// silent success (the owner's 90001).
+pub const USE_BUCKET: i32 = 15;
+/// `USE_CHANGE_ATTRIBUTE_PLUS` (`C/item_length.h:288`): 34, with no arm in `UseItemEx`,
+/// so a use is a silent success (the owner's 71189).
+pub const USE_CHANGE_ATTRIBUTE_PLUS: i32 = 34;
 /// `USE_CREATE_STONE` (`C/item_length.h:263`): a stone-creating scroll (the owner's
 /// 27999), which gives a metin of `number(28000, 28013)`.
 pub const USE_CREATE_STONE: i32 = 9;
