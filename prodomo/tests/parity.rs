@@ -3945,7 +3945,10 @@ impl Keyed {
     ///
     /// The timer reaches a connection that sees the character twice. The first look update
     /// for a VID with the revive flag (flag 28, bit 27 of word 0) is its entry, and the look
-    /// update with no flags that follows is its expiry. An equipment change made while the
+    /// update with no flags that follows is its expiry. The expiry of a character that ever
+    /// morphed carries the spawn flag (flag 3, bit 2 of word 0) instead of no flags at all:
+    /// `AFF_SPAWN` is never reset (D5), so the end is the revive bit clear, with at most the
+    /// spawn bit beside it. An equipment change made while the
     /// character is still invisible also carries the flag, but its VID is already entered, so
     /// it is not the timer's and is not reported. The entrant's own connection also reads the
     /// affect's `GC_AFFECT_REMOVE` (type 215, apply 0) when it runs out.
@@ -3967,7 +3970,10 @@ impl Keyed {
                         self.timers.push(vid);
                         true
                     }
-                    (false, Some(at)) if flags.iter().all(|&byte| byte == 0) => {
+                    (false, Some(at))
+                        if flags.iter().all(|&byte| byte == 0)
+                            || flags == [0x04, 0, 0, 0, 0, 0, 0, 0] =>
+                    {
                         self.timers.swap_remove(at);
                         true
                     }
@@ -33651,6 +33657,93 @@ fn seed_ds_melt(database: &ScratchDatabase) {
     );
 }
 
+/// The timer table: deck 0's first cell (244) holds a stone with 90 s left.
+fn seed_ds_timer(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 40, id, \
+         1, 244, 1, 110000, 90 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `sys.custom.dragon_soul`: an active deck stone's wear timer ticks its first partial
+/// minute over the wire (90 s falls to 60 at 30 s in) with the row ordered, and at
+/// zero the stone deactivates with socket 2 clear.
+#[test]
+fn an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_ds_timer(&database);
+    // The scenario waits past a minute, so the heartbeat sits its cycle out: otherwise
+    // its 60 s ping and handshake would join the drains.
+    let (server, _console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "ping_event_second_cycle = 600",
+    );
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alice);
+    alice.still("nothing follows the login");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dragon_soul a 0"));
+    let (landed, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(
+        quiet,
+        Quiet::Open,
+        "the connection stays open: {}",
+        server.console()
+    );
+    assert!(
+        landed
+            .iter()
+            .any(|record| record.first() == Some(&GC_AFFECT_ADD)
+                && record.get(1..5) == Some(&541u32.to_le_bytes())),
+        "the 541 add lands: {landed:02x?}"
+    );
+    // The first fire comes 30 s in (90 % 60): socket 0 falls to 60 with its update.
+    let (ticked, quiet) = alice.drain_game(std::time::Duration::from_secs(40), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let fallen: Vec<Vec<i32>> = ticked
+        .iter()
+        .filter(|record| record.first() == Some(&ITEM_UPDATE))
+        .map(|record| update_sockets(record))
+        .collect();
+    assert!(
+        fallen.iter().any(|sockets| sockets[0] == 60),
+        "socket 0 falls to 60: {fallen:?}"
+    );
+    wait_for(&database, "(SELECT socket0 FROM item WHERE id = 40) = 60");
+    // The next fire comes 60 s later: socket 0 writes 0 and the stone deactivates.
+    let (spent, quiet) = alice.drain_game(std::time::Duration::from_secs(75), a_use_item_record);
+    assert_eq!(quiet, Quiet::Open, "the connection stays open");
+    let fallen: Vec<Vec<i32>> = spent
+        .iter()
+        .filter(|record| record.first() == Some(&ITEM_UPDATE))
+        .map(|record| update_sockets(record))
+        .collect();
+    assert!(
+        fallen
+            .iter()
+            .any(|sockets| sockets[0] == 0 && sockets[2] == 0),
+        "zero writes 0 and deactivates: {fallen:?}"
+    );
+    wait_for(
+        &database,
+        "(SELECT socket0 FROM item WHERE id = 40) = 0 AND (SELECT socket2 FROM item WHERE id =          40) = 0",
+    );
+    drop(alice);
+    drop(server);
+}
+
 /// `cmd.dragon_soul` and `cmd.ds_list`: the deck lands its affect and writes socket 2
 /// with the update riding and the row saved, `d` takes it back, and the list names
 /// each held stone. The qualification comes from the login event's own grant.
@@ -33708,7 +33801,7 @@ fn a_deck_lands_its_stone_and_the_list_names_each_held_one() {
         "the list names the held stone"
     );
     alice.still("the list is the line's one answer");
-    // `d`: the remove, the clear's update, and the saved row.
+    // `d`: the remove, the stop's fall update and the clear's update, and the saved row.
     alice.send_record(&client_chat(CHAT_TALKING, b"/dragon_soul d"));
     let (cleared, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
     assert_eq!(quiet, Quiet::Open, "the connection stays open");
@@ -33718,13 +33811,24 @@ fn a_deck_lands_its_stone_and_the_list_names_each_held_one() {
         .map(|record| u32::from_le_bytes(record[1..5].try_into().expect("four bytes")))
         .collect();
     assert_eq!(removes, [541], "the 541 answers its remove packet");
-    let update = cleared
+    let updates: Vec<&Vec<u8>> = cleared
         .iter()
-        .find(|record| record.first() == Some(&ITEM_UPDATE))
-        .expect("the clear's update");
-    assert_eq!(update_fields(update), (2, 244, 1), "the clear's cell");
+        .filter(|record| record.first() == Some(&ITEM_UPDATE))
+        .collect();
     assert_eq!(
-        &update[22..26],
+        updates.len(),
+        2,
+        "the fall and the clear ride: {updates:02x?}"
+    );
+    assert_eq!(update_fields(updates[0]), (2, 244, 1), "the fall's cell");
+    assert!(
+        update_sockets(updates[0])[0] < 3600,
+        "the stop's ran seconds come off: {:?}",
+        update_sockets(updates[0])
+    );
+    assert_eq!(update_fields(updates[1]), (2, 244, 1), "the clear's cell");
+    assert_eq!(
+        &updates[1][22..26],
         &0i32.to_le_bytes(),
         "socket 2 is clear in the update"
     );
@@ -52517,9 +52621,11 @@ fn read_myshop_build(
         assert_eq!(insert[21], 1, "CHAR_TYPE_NPC");
     }
     // The polymorph's battle compute trails the reencode on the seller's wire, as the
-    // open scenario's `/close_shop` loop reads it.
+    // open scenario's `/close_shop` loop reads it. The budget is a loaded game thread's,
+    // not a trail's: under a parallel suite the server can take longer than 200 ms to
+    // answer at all, and the points then land in the quiet below.
     loop {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let Some(trailed) = alice.read_game_raw_until(deadline) else {
             break;
         };

@@ -55408,3 +55408,48 @@ expiry stamped, the worn stone chats and keeps, the passed pull-out lands in its
 box, and the missed pull-out breaks into 30270.
 
 Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5600 passed 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` green; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+## 653. The deck stones' wear timers
+
+An active deck stone's socket 0 now falls while it is worn (`timer_based_on_wear_expire_event`,
+`G/item.cpp:1978-2019`, `StartTimerBasedOnWearExpireEvent`, `G/item.cpp:2197-2225`, armed from
+`DSManager::ActivateDragonSoul`, `G/DragonSoul.cpp:1241`): the first fire comes `remain % 60`
+seconds in (a whole minute when the remain divides 60), each fire subtracts the seconds since
+the last one and refires at `MIN(60, remain)`, and at zero the socket writes 0 and the stone
+deactivates with socket 2 clear (it is not removed, as a non-soul worn item is). The Rewrite
+tracks the Pulse each active stone's minute ends on, set when the stone activates, so a stone
+activated mid-minute ticks on the same edges as legacy's event queue. Each fire's update rides
+to the client and its row is ordered to the store.
+
+The stop keeps the ran partial minute (`StopTimerBasedOnWearExpireEvent`, `G/item.cpp:2245-2255`):
+`d` (and the deck switching away, which deactivates through the same path) subtracts the seconds
+the timer ran from socket 0 before clearing, with the fall's update joining the deactivation's
+own records.
+
+`event.item.timer_based_on_wear_expire_event` moves `unused` to `partial`: the soul arm ports,
+while the non-soul starts stay refused (`EquipTo`'s timer-index arm and the `CreateItem` wear arm
+refuse every timed item at equip and at load, `WornSystem::Timer`, and `ITEM_TOGGLE` has no ported
+use arm). `sys.custom.dragon_soul` stays `partial` with the deck timers named.
+
+The scenario (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`) lands a deck on
+a 90 s stone and watches both edges over the wire: 90 falls to 60 at 30 s in with the row ordered,
+then 0 with socket 2 clear at 90 s. It sets `ping_event_second_cycle = 600`, because the wait spans
+two of the heartbeat's 60 s cycles and the ping and handshake would otherwise join the drains.
+
+Unit pins: the first partial minute falls then deactivates at zero, a remain that divides 60 ticks
+a whole minute first (a mutant that fired at 30 survived until this test), and `d` keeps the ran
+ten seconds with no tick after the stop (mutants in the fall arithmetic and the whole-minute span
+both killed).
+
+The slice also repairs the deck scenario's `d` step: it read the first `ITEM_UPDATE` in the drain,
+which is now the stop's fall update rather than the clear's. It asserts both: the fall (socket 0
+below 3600) and then the clear (socket 2 zero).
+
+Two load races in untouched scenarios failed the suite twice and are fixed test-side (no game
+code): the revive timer's filter demanded all-zero flags on the expiry update, but a character
+that ever morphed carries the never-reset `AFF_SPAWN` bit (D5), so a revive end landing late in a
+`quiet` panicked (`a_morphed_caller_hears_every_stat_refusal`, reproduced 1 in 4 under load); the
+end arm now also takes spawn-bit-only flags. And `read_myshop_build`'s trailing-points drain
+budgeted 200 ms for a loaded game thread's whole answer, so the battle compute landed in the
+quiet instead (`a_bundle_shop_buy_settles_both_sides`); it now budgets 2 s.
+
+Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5604 passed, 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

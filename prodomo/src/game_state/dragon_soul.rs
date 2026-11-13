@@ -2,7 +2,8 @@
 //! `/ds_change_attr` (`G/cmd_general.cpp:3864-3931`).
 
 use common::item_slots::{
-    DRAGON_SOUL_EQUIP_SLOT_END, DRAGON_SOUL_EQUIP_SLOT_START, DRAGON_SOUL_INVENTORY_MAX_NUM,
+    EWindows, DRAGON_SOUL_EQUIP_SLOT_END, DRAGON_SOUL_EQUIP_SLOT_START,
+    DRAGON_SOUL_INVENTORY_MAX_NUM,
 };
 use common::vid::Vid;
 use protocol::gc_chat::CHAT_TYPE_INFO;
@@ -89,6 +90,21 @@ fn time_left(stone: &Item, wear_timed: bool) -> bool {
 fn is_active(stone: &Item) -> bool {
     stone.sockets[ACTIVE_SOCKET] != 0
 }
+/// The first fire of a started wear timer (`StartTimerBasedOnWearExpireEvent`,
+/// `G/item.cpp:2208-2216`): `remain % 60`, a whole minute when the remain divides 60.
+/// A zero remain starts no timer, so it answers 0.
+fn first_wear_tick(remain: i32) -> i32 {
+    if remain <= 0 {
+        0
+    } else {
+        let part = remain % 60;
+        if part == 0 {
+            60
+        } else {
+            part
+        }
+    }
+}
 
 /// `(short)(ceil(value * factor - 0.01))` (`G/DragonSoul.cpp:267,292`): the redrawn
 /// attribute's value. The casts are the C++ expression's own: `float` product, `ceil`,
@@ -167,6 +183,149 @@ impl GameState {
             _ => {}
         }
         Ok(self.finish_dragon_soul(vid, owner, mover, done))
+    }
+
+    /// One Pulse of the deck stones' wear timers (`timer_based_on_wear_expire_event`,
+    /// `G/item.cpp:1978-2019`): an active deck stone's socket 0 falls once a minute, and
+    /// at zero the stone deactivates (it is not removed, as a non-soul worn item is).
+    ///
+    /// The event refires at `MIN(60, remain)` seconds, so the fall is whole minutes down
+    /// to the last partial one: the first fire comes `remain % 60` seconds in (a whole
+    /// minute when the remain divides 60, `StartTimerBasedOnWearExpireEvent`,
+    /// `G/item.cpp:2197-2225`), and each fire subtracts the seconds since the last one.
+    /// The Rewrite tracks the Pulse each active stone's minute ends on, set when the
+    /// stone activates, so a stone activated mid-minute ticks on the same edges.
+    pub(super) fn run_dragon_soul_timers(&mut self, pulse: u64) {
+        let mut ticks: Vec<(Vid, u32)> = Vec::new();
+        for (_, vid) in self.characters.player_names() {
+            let Ok(character) = self.characters.find_by_vid(vid) else {
+                continue;
+            };
+            let deck = self.bodies.get(&vid).map_or(-1, |body| body.active_deck);
+            let Ok(deck) = u16::try_from(deck) else {
+                continue;
+            };
+            let start = DRAGON_SOUL_EQUIP_SLOT_START + DECK_SLOTS * deck;
+            for cell in start..start + DECK_SLOTS {
+                let at = ItemPos::new(EWindows::Inventory as u8, cell);
+                let Some(stone) = character.items().item_at(at) else {
+                    continue;
+                };
+                if !is_active(stone) {
+                    continue;
+                }
+                if self
+                    .ds_timer_due
+                    .get(&stone.id)
+                    .is_some_and(|due| pulse >= *due)
+                {
+                    ticks.push((vid, stone.id));
+                }
+            }
+        }
+        for (vid, id) in ticks {
+            self.tick_dragon_soul_timer(vid, id, pulse);
+        }
+    }
+
+    /// One fire of an active stone's wear timer: socket 0 falls by the seconds since the
+    /// last fire (the first fire by `remain % 60`, a whole minute when it divides), the
+    /// update rides and the row is ordered, and the next fire is `MIN(60, remain)` out.
+    /// At zero the socket is written 0 and the stone deactivates with its points back.
+    fn tick_dragon_soul_timer(&mut self, vid: Vid, id: u32, pulse: u64) {
+        use crate::save::PASSES_PER_SEC;
+        let step = u64::from(PASSES_PER_SEC);
+        let Some(stone) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item(id).cloned())
+        else {
+            self.ds_timer_due.remove(&id);
+            return;
+        };
+        if !is_active(&stone) {
+            self.ds_timer_due.remove(&id);
+            return;
+        }
+        let remain = stone.sockets[REMAIN_SOCKET].max(0);
+        let spent = self
+            .ds_timer_fell
+            .remove(&id)
+            .unwrap_or_else(|| first_wear_tick(remain));
+        let now = remain.saturating_sub(spent);
+        let mut done = MoveDone {
+            kind: MoveKind::Socketed,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        if now <= 0 {
+            let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+                return;
+            };
+            let zeroed = set_item_socket(character.items_mut(), id, (REMAIN_SOCKET, 0));
+            done.records.extend(zeroed.records);
+            done.changes.extend(zeroed.changes);
+            let _ = character;
+            self.ds_timer_due.remove(&id);
+            let cell = stone.pos.cell;
+            self.deactivate_stone(vid, cell, &mut done);
+        } else {
+            let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+                return;
+            };
+            let ticked = set_item_socket(character.items_mut(), id, (REMAIN_SOCKET, now));
+            done.records.extend(ticked.records);
+            done.changes.extend(ticked.changes);
+            let _ = character;
+            let span = u64::from(u32::try_from(now.clamp(1, 60)).unwrap_or(60)) * step;
+            self.ds_timer_due.insert(id, pulse + span);
+            self.ds_timer_fell.insert(id, now.min(60));
+        }
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let owner = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let ticked = MovedItems::new(owner, vid.raw(), done, mover, &self.protos, &self.locale);
+        for record in ticked.records {
+            let _sent = self.write_to_client(vid, record);
+        }
+        if ticked.changes.is_empty() {
+            return;
+        }
+        let Some((channel, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let order = crate::item_move::StoreOrder::default();
+        let _ordered = self.order_the_item_rows(vid, channel, map, ticked.changes, order);
+    }
+    /// `StopTimerBasedOnWearExpireEvent` (`G/item.cpp:2245-2255`) for the stone at `at`:
+    /// the partial minute the timer ran comes off socket 0 (the update joins `done`,
+    /// the row saves with the deactivation's own changes) and the timer clears.
+    /// Nothing runs without a timer.
+    fn stop_ds_timer(&mut self, vid: Vid, id: u32, stone: &Item, done: &mut MoveDone) {
+        let Some(due) = self.ds_timer_due.remove(&id) else {
+            return;
+        };
+        let owed = self.ds_timer_fell.remove(&id).unwrap_or(0);
+        let step = u64::from(crate::save::PASSES_PER_SEC);
+        let left = due.saturating_sub(self.last_pulse) / step;
+        let ran = owed
+            .saturating_sub(i32::try_from(left).unwrap_or(i32::MAX))
+            .max(0);
+        if ran <= 0 {
+            return;
+        }
+        let now = stone.sockets[REMAIN_SOCKET].saturating_sub(ran);
+        let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+            return;
+        };
+        let kept = set_item_socket(character.items_mut(), id, (REMAIN_SOCKET, now));
+        done.records.extend(kept.records);
+        done.changes.extend(kept.changes);
     }
 
     /// The moved step of a `/dragon_soul` line: the socket updates ride, the points the
@@ -313,8 +472,8 @@ impl GameState {
     /// `DSManager::ActivateDragonSoul` (`G/DragonSoul.cpp:1217-1247`) of the stone in the
     /// flat deck `cell`: a stone in the active deck's span with time left and socket 2 clear
     /// applies its points, writes socket 2 to 1 (the update rides, the row is saved), and
-    /// its wear timer starts — which the Rewrite has no machinery for yet, so the wait is
-    /// on the timer, not the line. Anything else answers without touching the stone.
+    /// its wear timer starts on the first edge. Anything else answers without touching
+    /// the stone.
     fn activate_stone(&mut self, vid: Vid, cell: u16, deck: i32, done: &mut MoveDone) {
         let deck = u16::try_from(deck).unwrap_or(0);
         let start = DRAGON_SOUL_EQUIP_SLOT_START + DECK_SLOTS * deck;
@@ -355,11 +514,31 @@ impl GameState {
         let step = set_item_socket(character.items_mut(), stone.id, (ACTIVE_SOCKET, 1));
         done.records.extend(step.records);
         done.changes.extend(step.changes);
+        let _ = character;
+        // `StartTimerBasedOnWearExpireEvent` (`G/item.cpp:2197-2225`): an already-running
+        // timer stays, a real-time stone starts none, and a stone with no wear limit
+        // starts none either. The owner's stones are all wear-timed, so the arm below
+        // is the live one.
+        if self.ds_timer_due.contains_key(&stone.id) || !wear_timed {
+            return;
+        }
+        let first = first_wear_tick(stone.sockets[REMAIN_SOCKET]);
+        if first <= 0 {
+            return;
+        }
+        let due = self.last_pulse.saturating_add(
+            u64::from(u32::try_from(first).unwrap_or(u32::MAX))
+                * u64::from(crate::save::PASSES_PER_SEC),
+        );
+        self.ds_timer_due.insert(stone.id, due);
+        self.ds_timer_fell.insert(stone.id, first);
     }
 
     /// `DSManager::DeactivateDragonSoul(item, true)` (`G/DragonSoul.cpp:1249-1279`): a stone
     /// with socket 2 set writes it back to 0 (the update rides, the row is saved) and
-    /// unapplies its points. The skip flag is always true here, so no refresh runs.
+    /// unapplies its points. The wear timer stops first, keeping the partial minute it
+    /// ran (`StopTimerBasedOnWearExpireEvent`, `G/item.cpp:2245-2255`). The skip flag is
+    /// always true here, so no refresh runs.
     fn deactivate_stone(&mut self, vid: Vid, cell: u16, done: &mut MoveDone) {
         let at =
             protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
@@ -371,6 +550,7 @@ impl GameState {
         else {
             return;
         };
+        self.stop_ds_timer(vid, stone.id, &stone, done);
         if !is_active(&stone) {
             return;
         }
@@ -1252,5 +1432,139 @@ mod tests {
         assert!(results(&frames).is_empty(), "no result for short flames");
         let player = world.characters.find_by_vid(vid).expect("the player");
         assert_eq!(player.gold(), 6_000_000, "no gold spent");
+    }
+
+    /// An active stone's first fire comes `remain % 60` in: a 90 s stone ticks 30 off
+    /// at 30 s, then 60 at 90 s, and at zero the socket writes 0 and the stone
+    /// deactivates with everything riding.
+    #[test]
+    fn an_active_stone_ticks_its_first_partial_minute_then_deactivates_at_zero() {
+        use crate::save::PASSES_PER_SEC;
+        let vid = Vid::new(1);
+        let stone = a_stone(7, STONE, [90, 0, 0, 0, 0, 0]);
+        let (mut world, mut inbox) = entered(&[(deck_cell(), stone)]);
+        qualify(&mut world, vid);
+        while inbox.try_recv().is_ok() {}
+        world.run_dragon_soul(vid, b"a 0").expect("the line runs");
+        let step = u64::from(PASSES_PER_SEC);
+        let held = |world: &GameState| {
+            world
+                .characters
+                .find_by_vid(vid)
+                .expect("the player")
+                .items()
+                .item_at(deck_cell())
+                .expect("the stone is still worn")
+                .sockets
+        };
+        assert_eq!(held(&world)[ACTIVE_SOCKET], 1, "the stone activates");
+        world.run_dragon_soul_timers(29 * step);
+        assert_eq!(held(&world)[REMAIN_SOCKET], 90, "no tick before the edge");
+        world.run_dragon_soul_timers(30 * step);
+        assert_eq!(held(&world)[REMAIN_SOCKET], 60, "the partial minute falls");
+        assert_eq!(held(&world)[ACTIVE_SOCKET], 1, "still active at 60");
+        world.run_dragon_soul_timers(89 * step);
+        assert_eq!(held(&world)[REMAIN_SOCKET], 60, "no tick mid-minute");
+        world.run_dragon_soul_timers(90 * step);
+        let sockets = held(&world);
+        assert_eq!(
+            (sockets[REMAIN_SOCKET], sockets[ACTIVE_SOCKET]),
+            (0, 0),
+            "zero writes 0 and deactivates"
+        );
+        assert!(
+            !world.ds_timer_due.contains_key(&7),
+            "the timer clears at zero"
+        );
+    }
+
+    /// `d` stops the timer with the partial minute kept: a 90 s stone deactivated at
+    /// 10 s reads 80, and no tick fires after.
+    #[test]
+    fn a_deactivation_stops_the_timer_with_the_partial_minute_kept() {
+        use crate::save::PASSES_PER_SEC;
+        let vid = Vid::new(1);
+        let stone = a_stone(7, STONE, [90, 0, 0, 0, 0, 0]);
+        let (mut world, mut inbox) = entered(&[(deck_cell(), stone)]);
+        qualify(&mut world, vid);
+        while inbox.try_recv().is_ok() {}
+        world.run_dragon_soul(vid, b"a 0").expect("the line runs");
+        let step = u64::from(PASSES_PER_SEC);
+        world.last_pulse = 10 * step;
+        let moved = world.run_dragon_soul(vid, b"d").expect("the line runs");
+        let held = world
+            .characters
+            .find_by_vid(vid)
+            .expect("the player")
+            .items()
+            .item_at(deck_cell())
+            .expect("the stone is still worn");
+        assert_eq!(
+            (held.sockets[REMAIN_SOCKET], held.sockets[ACTIVE_SOCKET]),
+            (80, 0),
+            "the ran ten seconds come off"
+        );
+        assert_eq!(moved.records.len(), 2, "the fall and the clear ride");
+        world.run_dragon_soul_timers(30 * step);
+        let held = world
+            .characters
+            .find_by_vid(vid)
+            .expect("the player")
+            .items()
+            .item_at(deck_cell())
+            .expect("the stone is still worn");
+        assert_eq!(held.sockets[REMAIN_SOCKET], 80, "no tick after the stop");
+    }
+
+    /// A remain that divides 60 fires a whole minute out: a 120 s stone ticks 60 off
+    /// at 60 s, not 30, then deactivates at 120 s.
+    #[test]
+    fn a_remain_that_divides_sixty_ticks_a_whole_minute_first() {
+        use crate::save::PASSES_PER_SEC;
+        let vid = Vid::new(1);
+        let stone = a_stone(7, STONE, [120, 0, 0, 0, 0, 0]);
+        let (mut world, mut inbox) = entered(&[(deck_cell(), stone)]);
+        qualify(&mut world, vid);
+        while inbox.try_recv().is_ok() {}
+        world.run_dragon_soul(vid, b"a 0").expect("the line runs");
+        let step = u64::from(PASSES_PER_SEC);
+        world.run_dragon_soul_timers(30 * step);
+        let held = world
+            .characters
+            .find_by_vid(vid)
+            .expect("the player")
+            .items()
+            .item_at(deck_cell())
+            .expect("the stone is still worn");
+        assert_eq!(
+            held.sockets[REMAIN_SOCKET], 120,
+            "no tick at the half minute"
+        );
+        world.run_dragon_soul_timers(60 * step);
+        let held = world
+            .characters
+            .find_by_vid(vid)
+            .expect("the player")
+            .items()
+            .item_at(deck_cell())
+            .expect("the stone is still worn");
+        assert_eq!(
+            (held.sockets[REMAIN_SOCKET], held.sockets[ACTIVE_SOCKET]),
+            (60, 1),
+            "the whole minute falls"
+        );
+        world.run_dragon_soul_timers(120 * step);
+        let held = world
+            .characters
+            .find_by_vid(vid)
+            .expect("the player")
+            .items()
+            .item_at(deck_cell())
+            .expect("the stone is still worn");
+        assert_eq!(
+            (held.sockets[REMAIN_SOCKET], held.sockets[ACTIVE_SOCKET]),
+            (0, 0),
+            "zero writes 0 and deactivates"
+        );
     }
 }

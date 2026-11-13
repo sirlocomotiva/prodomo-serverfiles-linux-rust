@@ -705,6 +705,14 @@ pub struct GameState {
     /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
     /// recovery, the stamina refill and the timed affects. See [`affect`].
     affect_events: HashMap<common::vid::Vid, affect::AffectEvent>,
+    /// The Pulse each active deck stone's wear timer fires on
+    /// (`m_pkTimerBasedOnWearExpireEvent`, `G/item.h:154`), by item id: set when the
+    /// stone activates, cleared when it stops. A session's own: the leave forgets it.
+    ds_timer_due: HashMap<u32, u64>,
+    /// What the next fire of each timed deck stone subtracts from socket 0: the seconds
+    /// since the last fire (`processing_time/passes_per_sec`,
+    /// `G/item.cpp:1993-1994`). Set with the due Pulse, cleared with it.
+    ds_timer_fell: HashMap<u32, i32>,
     /// The account's premium private-shop expiry each online character holds
     /// (`m_aiPremiumTimes[PREMIUM_PRIVATE_SHOP]`): the unix time the 507 use
     /// wrote, 0 when never bought. Seeded at admission, cleared on leave.
@@ -6593,6 +6601,7 @@ impl PulseProcessor for GameState {
         self.run_blend_ticks(pulse);
         self.run_switchbot_ticks(pulse);
         self.run_real_time_expiry(pulse);
+        self.run_dragon_soul_timers(pulse);
         self.run_market_tick(pulse);
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
