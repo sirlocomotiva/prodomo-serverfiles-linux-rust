@@ -55173,3 +55173,25 @@ timer report, the exits home). The row now names the make scenario. Map 210
 reachable, not merely bridged.
 
 Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; the two named forest scenarios re-proved green (`a_party_enters_the_forest_and_its_timer_sends_it_home`, `the_leaders_click_on_the_forest_room_is_refused_for_want_of_a_ticket`); `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 646. The ring's waiting arm
+
+Ledger 644 left one ring branch open: the `can_warp`-false arm ("Asteapta 10 secunde pentru a
+te putea teleporta"), which needs a blocking condition at use time. This slice stages it with
+no product code: `can_warp` false is already reachable honestly, because a hack finding disarms
+the `ABLE` gate (`quests.rs:5735`) and `IsHack` trips on an open browse (`warp_npc.rs:321`).
+
+The scenario is `the_rings_use_while_browsing_says_to_wait_ten_seconds`: Alpha browses the
+keeper's shop on map 3 with the ring (70058) in cell 0, uses it, and picks Valea Seungryong.
+The menu lists the twelve maps, the valley pick reads `pc.can_warp()` false, and the page says
+to wait ten seconds and ends the dialog — no warp record, no spend, silence after. The use path
+carries no browse gate (legacy's `CanHandleItem` blocks the owner's own shop, not a browse),
+so the dialog runs and the gate shows exactly where legacy puts it: in the script's
+`can_warp` read, not in the use. The twelve-map menu is hoisted into `RING_MENU`, shared with
+the 644 scenario.
+
+`questlib.TeleportRingLib` is `ported`: every branch is scenario-covered — the plain warp
+(287), the level, item and sub-index gates (644), and the wait (this slice). `quest.TeleportRing`
+stays `ported`, its note extended with the 646 scenario.
+
+Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5583 passed, 1 failed in 46 targets (`a_morphed_caller_hears_every_stat_refusal`, a points record landing in a quiet window under full-suite load — passes alone, same family as the known load flakes, and 646 is test-only so unrelated); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

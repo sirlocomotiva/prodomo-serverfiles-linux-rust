@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 645 (the pass quest's missing protos).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 646
+Last reviewed: 2026-11-13, after ledger section 646 (the ring's waiting arm).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 647
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -629,6 +629,7 @@ Since 643 `sys.skill.extra`'s 7/8 rows host: the sixteen 221-228/236-243 type-6 
 
 Since 644 `quest.TeleportRing`'s gated branches run over the wire: the level refusals, the ticket spend with its bank-cell clear, and the sub-index menu with its bare-`[DONE]` close and re-entry.
 Since 645 `quest.battle_pass` is `unused` (no proto for 25150-25162, owner question 74) and `quest.enchanted_forest_zone` is `ported` (the 279 note was stale; 280 proved the ticket refusal and the full make).
+Since 646 `questlib.TeleportRingLib` is `ported`: browsing trips `IsHack`, so the valley pick says to wait ten seconds with no warp and no spend.
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
 and the ledger disagree, the most recent ledger section wins; update this page in the same change.

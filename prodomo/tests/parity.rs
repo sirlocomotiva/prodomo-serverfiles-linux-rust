@@ -60622,6 +60622,9 @@ fn a_learned_ward_climbs_by_point_and_the_store_follows() {
     );
 }
 
+/// The ring's twelve-map menu with the quit, as `TeleportRing.InsertWindow` builds it.
+const RING_MENU: &[u8] = b"[QUESTION 1;Satul I|2;Satul II|3;Valea Seungryong|4;Desertul Yongbi|5;Muntele Sohan - Turnul lui Nemere|6;Turnul Demonilor - Cat. Diavolului|7;Tara de Foc - Purg. lui Razador|8;Taramul Gigantilor|9;Grota Exilului|10;Regiune de Padure|11;Temnitele Paianjenilor - Nivel: 35-75|12;Regiunea Beta - Nivel: 90-105|13;Renunta]";
+
 /// The ring's level refusal: the use lists `menu`, the pick `answer` hears the titled
 /// page naming `low`-`high` and ending `[DONE]`, and the dialog ends.
 fn read_ring_level_refusal(
@@ -60679,7 +60682,7 @@ fn the_rings_use_refuses_gated_maps_and_spends_the_ticket() {
     Server::write_console(&console, "item give Alpha 70058 1");
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 70_058, 1));
-    let menu = b"[QUESTION 1;Satul I|2;Satul II|3;Valea Seungryong|4;Desertul Yongbi|5;Muntele Sohan - Turnul lui Nemere|6;Turnul Demonilor - Cat. Diavolului|7;Tara de Foc - Purg. lui Razador|8;Taramul Gigantilor|9;Grota Exilului|10;Regiune de Padure|11;Temnitele Paianjenilor - Nivel: 35-75|12;Regiunea Beta - Nivel: 90-105|13;Renunta]";
+    let menu: &[u8] = RING_MENU;
 
     // When: Alpha picks Grota Exilului (9th) at 154, then Regiunea Beta (12th).
     // Then: each hears its level refusal and the dialog ends.
@@ -60765,4 +60768,70 @@ fn the_rings_use_refuses_gated_maps_and_spends_the_ticket() {
         "the ring warp names Shinso's village and Channel 1"
     );
     beta.still("nothing follows");
+}
+
+/// `quest.TeleportRing`'s waiting arm (ledger 646; 644 proved the gates and the plain warp
+/// with `can_warp` true): Alpha browses the keeper's shop on map 3 with the ring (70058) in
+/// cell 0. The use lists the twelve maps; picking Valea Seungryong reads `pc.can_warp()`
+/// false — the browse trips `IsHack` (`G/char.cpp:8889`, `browsing` in `warp_npc.rs:321`) —
+/// and the page says to wait ten seconds, ending the dialog with no warp and no spend.
+#[test]
+fn the_rings_use_while_browsing_says_to_wait_ten_seconds() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 325500, y = 879400 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHARACTER_ADD);
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    let keepers: Vec<u32> = shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == KEEPER_VNUM.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    let [keeper] = keepers[..] else {
+        panic!("map 3 shows one keeper 20042, not {keepers:?}");
+    };
+    read_enter_tail(&mut alice);
+    Server::write_console(&console, "item give Alpha 70058 1");
+    server.wait_for("id 100000000; the client has it");
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(set_fields(&alice.read_game()), (inventory, 0, 70_058, 1));
+
+    // When: Alpha clicks the keeper and, while browsing, rings the valley.
+    alice.send_record(&client_click(keeper));
+    let start = alice.read_game();
+    assert_eq!(&start[..4], &[GC_SHOP, 0x70, 0x0b, 0], "wSize and START");
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &titled_page(b"Inel Teleportare:", &[], RING_MENU))
+    );
+    alice.send_record(&client_script_answer(2));
+    // Then: the wait page ends the dialog, and no warp follows.
+    assert_eq!(
+        alice.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Inel Teleportare:",
+                &[b"Asteapta 10 secunde pentru a te putea teleporta."],
+                b"[DONE]"
+            )
+        ),
+        "the wait page"
+    );
+    alice.still("no warp follows");
 }
