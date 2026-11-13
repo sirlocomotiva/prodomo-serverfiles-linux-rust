@@ -172,6 +172,12 @@ pub const USE_ADD_ATTRIBUTE_GLOVE: i32 = 45;
 /// `USE_CHANGE_ATTRIBUTE_GLOVE` (`C/item_length.h:304`), behind `ENABLE_GLOVE_SYSTEM`:
 /// a glove bonus-change scroll (the owner's 50892).
 pub const USE_CHANGE_ATTRIBUTE_GLOVE: i32 = 46;
+/// `USE_CHANGE_COSTUME_ATTR` (`C/item_length.h:285`): a costume bonus-change scroll
+/// (the owner's 70064).
+pub const USE_CHANGE_COSTUME_ATTR: i32 = 31;
+/// `USE_RESET_COSTUME_ATTR` (`C/item_length.h:286`): a costume bonus-reset scroll
+/// (the owner's 70063).
+pub const USE_RESET_COSTUME_ATTR: i32 = 32;
 /// `USE_PUT_INTO_BELT_SOCKET` (`C/item_length.h:283`): a jewel for a belt's socket.
 pub const USE_PUT_INTO_BELT_SOCKET: i32 = 29;
 /// `USE_CLEAR` (`C/item_length.h:266`): a bad-affect cure (27124, 27874).
@@ -395,6 +401,8 @@ mod tests {
             ),
             (USE_ADD_ATTRIBUTE_GLOVE, "USE_ADD_ATTRIBUTE_GLOVE"),
             (USE_CHANGE_ATTRIBUTE_GLOVE, "USE_CHANGE_ATTRIBUTE_GLOVE"),
+            (USE_CHANGE_COSTUME_ATTR, "USE_CHANGE_COSTUME_ATTR"),
+            (USE_RESET_COSTUME_ATTR, "USE_RESET_COSTUME_ATTR"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
         }

@@ -9,7 +9,8 @@ use gamedata::item_kind::{
     LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
     USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE,
     USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN,
-    USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET, WEARABLE_BODY, WEARABLE_WEAPON,
+    USE_CHANGE_COSTUME_ATTR, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET,
+    USE_RESET_COSTUME_ATTR, WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -18,8 +19,8 @@ use protocol::item_pos::ItemPos;
 
 use super::dice::{number, Dice};
 use super::drop_item::{
-    add_rolled_attribute, attribute_set_index, change_attribute_on, change_rare_attribute,
-    golden_change_levels, Gauss,
+    add_rolled_attribute, alter_to_magic_item, attribute_set_index, change_attribute_on,
+    change_rare_attribute, golden_change_levels, Gauss,
 };
 use super::equip::Trail;
 use super::equipment::is_accessory_for_socket;
@@ -712,6 +713,21 @@ pub fn change_target_attributes(
             attrs,
             is_glove,
         ),
+        USE_CHANGE_COSTUME_ATTR => change_costume_target_attribute(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
+            dice,
+            gauss,
+            attrs,
+        ),
+        USE_RESET_COSTUME_ATTR => reset_costume_target_attribute(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
+            dice,
+            attrs,
+        ),
         _ => silent(),
     }
 }
@@ -820,6 +836,118 @@ fn change_kind_target_attribute(
         &attributes,
         target.sockets[CHANGE_SOCKET] + 1,
     )?;
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    let mut trail = Trail::default();
+    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets: stored.sockets,
+    });
+    trail.changes.push(ItemChange::Attributes {
+        id: target.id,
+        attributes: stored.attributes,
+    });
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+/// The `USE_CHANGE_COSTUME_ATTR` case (`G/char_item.cpp:6017-6075`): on a costume with
+/// an attribute set and at least one bonus, the bonuses redraw on the plain change
+/// table, the change-count socket climbs, `[LS;399]` chats, and the scroll is spent.
+/// A non-costume, one with no set, or a bonus-less one chats the refusal line
+/// (`[LS;396]` for the kind and the set, `[LS;397]` for the empty), as the arm does;
+/// an exchanging or worn target is silent, as the `false` return is (`use_target`
+/// already refused both).
+fn change_costume_target_attribute(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    (target, target_proto): (&Item, &ItemProto),
+    dice: &mut dyn Dice,
+    gauss: &mut Gauss,
+    attrs: &[ItemAttrRecord],
+) -> Result<MoveDone, MoveRefused> {
+    if target_proto.item_type != ITEM_COSTUME
+        || attribute_set_index(target_proto.item_type, target_proto.sub_type).is_none()
+    {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(NO_ATTR_SET_NOTICE));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    if normal_count(&target.attributes) == 0 {
+        let mut trail = Trail::default();
+        trail
+            .records
+            .push(MoveRecord::Notice(NO_ATTR_TO_CHANGE_NOTICE));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    let mut attributes = target.attributes;
+    let changed = change_attribute_on(
+        dice,
+        gauss,
+        target_proto,
+        &mut attributes,
+        attrs,
+        &[0, 10, 40, 35, 15],
+    );
+    debug_assert!(changed, "the count was read above");
+    store_attributes(
+        items,
+        target.id,
+        &attributes,
+        target.sockets[CHANGE_SOCKET] + 1,
+    )?;
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    let mut trail = Trail::default();
+    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets: stored.sockets,
+    });
+    trail.changes.push(ItemChange::Attributes {
+        id: target.id,
+        attributes: stored.attributes,
+    });
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+/// The `USE_RESET_COSTUME_ATTR` case (`G/char_item.cpp:6017-6075`): under the same gates
+/// as the change, the bonuses clear and one to three roll again on the magic tables
+/// (`AlterToMagicItem`), `[LS;399]` chats, and the scroll is spent. The reset does not
+/// count the change socket: only `ChangeAttribute` climbs it.
+fn reset_costume_target_attribute(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    (target, target_proto): (&Item, &ItemProto),
+    dice: &mut dyn Dice,
+    attrs: &[ItemAttrRecord],
+) -> Result<MoveDone, MoveRefused> {
+    if target_proto.item_type != ITEM_COSTUME
+        || attribute_set_index(target_proto.item_type, target_proto.sub_type).is_none()
+    {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(NO_ATTR_SET_NOTICE));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    if normal_count(&target.attributes) == 0 {
+        let mut trail = Trail::default();
+        trail
+            .records
+            .push(MoveRecord::Notice(NO_ATTR_TO_CHANGE_NOTICE));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    let mut attributes = target.attributes;
+    for attribute in attributes.iter_mut().take(5) {
+        *attribute = ItemAttribute::default();
+    }
+    alter_to_magic_item(dice, target_proto, &mut attributes, attrs);
+    store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
     let mut trail = Trail::default();
     trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
@@ -2258,6 +2386,9 @@ mod tests {
     const GLOVE: u32 = 23_000;
     const GLOVE_ADD: u32 = 50_891;
     const GLOVE_CHANGE: u32 = 50_892;
+    const COSTUME: u32 = 40_101;
+    const COSTUME_CHANGE: u32 = 70_064;
+    const COSTUME_RESET: u32 = 70_063;
 
     /// The talisman table: the two scrolls, a fire talisman, and a sword for the
     /// non-talisman silence.
@@ -2279,6 +2410,15 @@ mod tests {
         ItemProtos::from_rows(vec![add, change, glove])
     }
 
+    /// The costume table: the two scrolls and a costume body.
+    fn costume_protos() -> ItemProtos {
+        let change =
+            ItemProto::for_category_rule(COSTUME_CHANGE, ITEM_USE, USE_CHANGE_COSTUME_ATTR);
+        let reset = ItemProto::for_category_rule(COSTUME_RESET, ITEM_USE, USE_RESET_COSTUME_ATTR);
+        let costume = ItemProto::for_category_rule(COSTUME, ITEM_COSTUME, COSTUME_BODY);
+        ItemProtos::from_rows(vec![change, reset, costume])
+    }
+
     /// The talisman set's row: apply 1 caps set 8 at 5 with the whole probability.
     fn talisman_attrs() -> Vec<ItemAttrRecord> {
         set_attrs(8)
@@ -2287,6 +2427,11 @@ mod tests {
     /// The glove set's row: apply 1 caps set 9 at 5 with the whole probability.
     fn glove_attrs() -> Vec<ItemAttrRecord> {
         set_attrs(9)
+    }
+
+    /// The costume body's row: apply 1 caps set 1 at 5 with the whole probability.
+    fn costume_attrs() -> Vec<ItemAttrRecord> {
+        set_attrs(1)
     }
 
     /// One attr row capping `set` at 5 for apply 1 with the whole probability.
@@ -2312,6 +2457,12 @@ mod tests {
         let mut glove = Item::new(id, GLOVE);
         glove.attributes[0] = ItemAttribute::new(7, 26);
         glove
+    }
+
+    fn bonused_costume(id: u32) -> Item {
+        let mut costume = Item::new(id, COSTUME);
+        costume.attributes[0] = ItemAttribute::new(7, 26);
+        costume
     }
 
     /// The talisman add lands a second bonus with the success line and spends the
@@ -2614,5 +2765,125 @@ mod tests {
         .expect("the talisman answers silently");
         assert!(done.records.is_empty(), "no line for a talisman");
         assert!(items.item(13).is_some(), "the silent scroll stays");
+    }
+
+    /// The costume change redraws the bonus with the change line, counts socket 3, and
+    /// spends its scroll; the reset clears the bonuses and rolls one to three again
+    /// without counting, and spends its scroll too. A sword under the change chats the
+    /// no-set line with the scroll kept.
+    #[test]
+    fn a_costume_change_redraws_and_its_reset_rolls_again() {
+        let protos = costume_protos();
+        let attrs = costume_attrs();
+        let mut items = holding(&[
+            (0, bonused_costume(9)),
+            (1, Item::new(10, COSTUME_CHANGE)),
+            (2, Item::new(11, COSTUME_RESET)),
+        ]);
+        let change = items.item_at(inv(1)).expect("the change scroll").clone();
+        let change_proto = protos
+            .get(COSTUME_CHANGE)
+            .expect("the change proto")
+            .clone();
+        let mut dice = Script::new(vec![1, 1, 1, 1, 50, 50]);
+        let mut gauss = Gauss::new();
+        let before = items.item(9).expect("the costume").attributes;
+        let done = change_target_attributes(
+            &mut items,
+            (&change, &change_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the change lands");
+        let kept = items.item(9).expect("the costume stays");
+        assert_ne!(kept.attributes, before, "the bonus redraws");
+        assert_eq!(kept.sockets[3], 1, "the change counts itself");
+        assert!(items.item(10).is_none(), "the last change scroll leaves");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(ATTR_CHANGED_NOTICE))),
+            "the change chats"
+        );
+        let reset = items.item_at(inv(2)).expect("the reset scroll").clone();
+        let reset_proto = protos.get(COSTUME_RESET).expect("the reset proto").clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&reset, &reset_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the reset lands");
+        let kept = items.item(9).expect("the costume stays");
+        assert!(
+            (1..=3).contains(&normal_count(&kept.attributes)),
+            "one to three roll again"
+        );
+        assert_eq!(kept.sockets[3], 1, "the reset does not count");
+        assert!(items.item(11).is_none(), "the last reset scroll leaves");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(ATTR_CHANGED_NOTICE))),
+            "the reset chats"
+        );
+    }
+
+    /// A sword under the costume change chats the no-set line with the scroll kept: it
+    /// is no costume.
+    #[test]
+    fn a_sword_under_the_costume_change_chats_the_no_set_line() {
+        let sword_proto = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        let base = costume_protos();
+        let protos = ItemProtos::from_rows(vec![
+            base.get(COSTUME_CHANGE).expect("the change proto").clone(),
+            base.get(COSTUME_RESET).expect("the reset proto").clone(),
+            base.get(COSTUME).expect("the costume proto").clone(),
+            sword_proto,
+        ]);
+        let attrs = costume_attrs();
+        let mut items = holding(&[(3, bonused_sword(12)), (4, Item::new(13, COSTUME_CHANGE))]);
+        let change = items.item_at(inv(4)).expect("the change scroll").clone();
+        let change_proto = protos
+            .get(COSTUME_CHANGE)
+            .expect("the change proto")
+            .clone();
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        let done = change_target_attributes(
+            &mut items,
+            (&change, &change_proto),
+            inv(3),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &attrs,
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the sword answers with its line");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(NO_ATTR_SET_NOTICE))),
+            "the sword chats the no-set line"
+        );
+        assert!(items.item(13).is_some(), "the refused scroll stays");
     }
 }

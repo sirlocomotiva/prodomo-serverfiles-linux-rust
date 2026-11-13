@@ -40,8 +40,9 @@ use gamedata::item_kind::{
     ITEM_USE, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
     USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE,
     USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN,
-    USE_DETACHMENT, USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE, USE_ELEMENT_UPGRADE,
-    USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET, USE_TUNING,
+    USE_CHANGE_COSTUME_ATTR, USE_DETACHMENT, USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE,
+    USE_ELEMENT_UPGRADE, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET,
+    USE_RESET_COSTUME_ATTR, USE_TUNING,
 };
 use gamedata::item_proto::ItemProto;
 use protocol::gc_chat::CHAT_TYPE_INFO;
@@ -181,8 +182,9 @@ enum Arm {
     /// `USE_CHANGE_ATTRIBUTE2`, `USE_ADD_ACCESSORY_SOCKET`,
     /// `USE_PUT_INTO_ACCESSORY_SOCKET`, `USE_PUT_INTO_BELT_SOCKET`,
     /// `USE_ADD_ATTRIBUTE_TALISMAN`, `USE_CHANGE_ATTRIBUTE_TALISMAN`,
-    /// `USE_ADD_ATTRIBUTE_GLOVE` or `USE_CHANGE_ATTRIBUTE_GLOVE`: a bonus, socket,
-    /// talisman or glove scroll, with its sub-type.
+    /// `USE_ADD_ATTRIBUTE_GLOVE`, `USE_CHANGE_ATTRIBUTE_GLOVE`,
+    /// `USE_CHANGE_COSTUME_ATTR` or `USE_RESET_COSTUME_ATTR`: a bonus, socket,
+    /// talisman, glove or costume scroll, with its sub-type.
     Bonus(i32),
     /// `ITEM_TREASURE_KEY`: the box at the destination opens.
     Key,
@@ -955,16 +957,17 @@ impl GameState {
         Ok(moved)
     }
 
-    /// The bonus, socket, talisman and glove scrolls (`USE_CHANGE_ATTRIBUTE`,
+    /// The bonus, socket, talisman, glove and costume scrolls (`USE_CHANGE_ATTRIBUTE`,
     /// `USE_ADD_ATTRIBUTE`, `USE_ADD_ATTRIBUTE2`, `USE_CHANGE_ATTRIBUTE2`,
     /// `USE_ADD_ACCESSORY_SOCKET`, `USE_PUT_INTO_ACCESSORY_SOCKET`,
     /// `USE_PUT_INTO_BELT_SOCKET`, `USE_ADD_ATTRIBUTE_TALISMAN`,
     /// `USE_CHANGE_ATTRIBUTE_TALISMAN`, `USE_ADD_ATTRIBUTE_GLOVE`,
-    /// `USE_CHANGE_ATTRIBUTE_GLOVE`) of `UseItemEx` (`G/char_item.cpp:6291-6766`, the
-    /// talisman pair at `:6100-6120`, the glove pair at `:6077-6098`) on the item at
-    /// `dest`. The use's checks run first, as the scroll arm's do; then the cooldown,
-    /// the draw and the spend run in the world's step. The cooldown stamps only what
-    /// the change scroll runs.
+    /// `USE_CHANGE_ATTRIBUTE_GLOVE`, `USE_CHANGE_COSTUME_ATTR`,
+    /// `USE_RESET_COSTUME_ATTR`) of `UseItemEx` (`G/char_item.cpp:6291-6766`, the
+    /// talisman pair at `:6100-6120`, the glove pair at `:6077-6098`, the costume pair
+    /// at `:6017-6075`) on the item at `dest`. The use's checks run first, as the
+    /// scroll arm's do; then the cooldown, the draw and the spend run in the world's
+    /// step. The cooldown stamps only what the change scroll runs.
     ///
     /// The cooldown is the world's before the step: only a mortal (`GM_PLAYER`) outside
     /// the test-server mode with a cycle above 0 (`:6401`) waits on its
@@ -1126,7 +1129,9 @@ impl GameState {
                         || proto.sub_type == USE_ADD_ATTRIBUTE_TALISMAN
                         || proto.sub_type == USE_CHANGE_ATTRIBUTE_TALISMAN
                         || proto.sub_type == USE_ADD_ATTRIBUTE_GLOVE
-                        || proto.sub_type == USE_CHANGE_ATTRIBUTE_GLOVE) =>
+                        || proto.sub_type == USE_CHANGE_ATTRIBUTE_GLOVE
+                        || proto.sub_type == USE_CHANGE_COSTUME_ATTR
+                        || proto.sub_type == USE_RESET_COSTUME_ATTR) =>
             {
                 Arm::Bonus(proto.sub_type)
             }

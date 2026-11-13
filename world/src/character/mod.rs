@@ -72,10 +72,10 @@ pub use combat::{
 pub use death_penalty::{death_penalty_loss, exp_loss_percent};
 pub use dice::{number, Dice, FixedDraw, Pcg32};
 pub use drop_item::{
-    add_rare_attribute, add_rolled_attribute, attribute_set_index, change_attribute,
-    change_attribute_on, change_rare_attribute, gauss_random, golden_change_levels, make_drop_item,
-    sig_vnum_of, stamp_created_sockets, unported_drop, DropAsk, DropMade, DropRefused, Gauss,
-    UnportedDrop, ITEM_FLAG_MAKECOUNT,
+    add_rare_attribute, add_rolled_attribute, alter_to_magic_item, attribute_set_index,
+    change_attribute, change_attribute_on, change_rare_attribute, gauss_random,
+    golden_change_levels, make_drop_item, sig_vnum_of, stamp_created_sockets, unported_drop,
+    DropAsk, DropMade, DropRefused, Gauss, UnportedDrop, ITEM_FLAG_MAKECOUNT,
 };
 pub use equip::{
     check_key_use, consume_giftbox, consume_key_and_box, find_equip_cell, is_equipable, is_female,

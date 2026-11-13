@@ -431,7 +431,7 @@ fn put_attribute(
 /// `CItem::AlterToMagicItem` (`G/item.cpp:1807-1863`): the first attribute always, the
 /// second and third on their rolls. Only weapons, armor and costumes roll; anything
 /// else, and a type with no attribute set, keeps its attributes.
-fn alter_to_magic_item(
+pub fn alter_to_magic_item(
     dice: &mut dyn Dice,
     proto: &ItemProto,
     attributes: &mut [ItemAttribute],

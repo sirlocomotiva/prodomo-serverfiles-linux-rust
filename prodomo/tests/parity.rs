@@ -52644,6 +52644,90 @@ fn a_glove_add_lands_and_its_change_redraws_and_counts() {
     drop(server);
 }
 
+/// `cg.game.item_use_to_item`: Alpha holds a bonused costume hair of vnum 45155 (timeless:
+/// the costume weapons expire in a day) and both costume scrolls in the base inventory. The change scroll redraws the bonus
+/// with `[LS;399]`, counts socket 3, and spends itself; the reset scroll clears the
+/// bonuses, rolls one to three again without counting, and spends itself too. Both
+/// rows store.
+#[test]
+fn a_costume_change_redraws_and_its_reset_rolls_again() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, \
+         attrvalue0) SELECT 60, id, 1, 0, 1, 45155, 7, 26 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 70064 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 62, id, 1, 2, \
+         1, 70063 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 3);
+    let protos = owners_protos();
+    assert_eq!(
+        protos.get(70064).expect("the change scroll").sub_type,
+        gamedata::item_kind::USE_CHANGE_COSTUME_ATTR,
+        "the owner's change scroll"
+    );
+    assert_eq!(
+        protos.get(70063).expect("the reset scroll").sub_type,
+        gamedata::item_kind::USE_RESET_COSTUME_ATTR,
+        "the owner's reset scroll"
+    );
+    // When: the change scroll is used on the costume.
+    alice.send_record(&client_use_to_item(1, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
+        "the change chats: {line:02x?}"
+    );
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the costume's cell updates: {update:02x?}"
+    );
+    let cleared = alice.read_game();
+    assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
+    alice.quiet("the change sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 61");
+    check(&database, "SELECT socket3 = 1 FROM item WHERE id = 60");
+    // When: the reset scroll is used on the costume.
+    alice.send_record(&client_use_to_item(2, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
+        "the reset chats: {line:02x?}"
+    );
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the costume's cell updates: {update:02x?}"
+    );
+    assert_ne!(update[38], 0, "a bonus rolls again: {update:02x?}");
+    let cleared = alice.read_game();
+    assert_eq!(cleared[..4], [ITEM_SET, 1, 2, 0], "the spent scroll clears");
+    alice.quiet("the reset sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 62");
+    check(&database, "SELECT socket3 = 1 FROM item WHERE id = 60");
+    check(&database, "SELECT attrtype0 != 0 FROM item WHERE id = 60");
+    drop(alice);
+    drop(server);
+}
+
 /// `cg.game.myshop` and `cmd.close_shop`: Alpha carries a sword and a paper bundle, builds a
 /// bundle shop selling the sword for 500 yang under the sign `Swords`, and the sign reaches
 /// Yankee, who stands beside it; `/close_shop` clears the sign on both wires.
