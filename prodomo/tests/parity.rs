@@ -60910,6 +60910,74 @@ fn a_nog_pocket_lands_302_and_a_second_is_refused_while_held() {
 /// `cg.game.item_use`: `case USE_CREATE_STONE` (`G/char_item.cpp:6866-6870`) gives a
 /// metin of `number(28000, 28013)` and spends the scroll. No owner metin lives in
 /// that range, so Alpha's use spends the lone scroll and gives nothing.
+/// `cg.game.item_use`: `case 71107` (`G/char_item.cpp:4811-4860`) eats one peach and gains
+/// `value(0) * 10` alignment: 4321 becomes 24321. The gain talks `[LS;383]` and names the
+/// 2000 in `[LS;384]`, the stack shrinks, and the second bite within 8 hours is refused
+/// with `[LS;1034]` (the test Channel's line) and spends nothing.
+#[test]
+fn a_mythical_peach_gives_alignment_and_refuses_a_second_bite() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET alignment = 4321 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2,          71107 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(71_107).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's peach is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha eats one peach. Then: the gain talks and names, the count falls.
+    alpha.send_record(&client_item_use(0));
+    let update = alpha.read_game();
+    assert_eq!(update[0], ITEM_UPDATE, "the stack's row updates");
+    let mut update_frame = false;
+    let mut talked = false;
+    let mut named = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && (!update_frame || !talked || !named) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&GC_CHARACTER_UPDATE) {
+            let frame = protocol::gc_actors::GcCharacterUpdate::decode(&record)
+                .expect("a character update");
+            assert_eq!(frame.s_alignment, 2432, "4321 + 20000 shows in tenths");
+            update_frame = true;
+        } else if record[0] == GC_CHAT {
+            if record[10..] == *b"[LS;383]" {
+                assert_eq!(record[3], CHAT_TYPE_TALKING, "the gain talks");
+                talked = true;
+            } else if record[10..] == *b"[LS;384;2000]" {
+                assert_eq!(record[3], CHAT_TYPE_INFO, "the gain names");
+                named = true;
+            }
+        }
+    }
+    assert!(update_frame && talked && named, "the gain lands");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // A second bite within 8 hours is refused and spends nothing.
+    alpha.send_record(&client_item_use(0));
+    let refused = loop {
+        let record = alpha.read_game_raw();
+        if record[0] == GC_CHAT {
+            break record;
+        }
+    };
+    assert_eq!(refused, an_info_line(b"[LS;1034]"), "the throttle refuses");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    drop(alpha);
+    drop(server);
+}
+
 #[test]
 fn a_stone_scroll_spends_and_gives_no_stone() {
     let Some(database) = ScratchDatabase::create() else {

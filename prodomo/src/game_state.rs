@@ -4563,6 +4563,9 @@ impl GameState {
         if self.poison_apple_at(vid, at) {
             return Some(self.use_poison_apple(vid, at, actor));
         }
+        if self.mythical_peach_at(vid, at) {
+            return Some(self.use_mythical_peach(vid, at, actor));
+        }
         None
     }
 

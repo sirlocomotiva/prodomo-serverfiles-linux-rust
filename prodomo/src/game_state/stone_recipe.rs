@@ -19,7 +19,7 @@
 
 use common::vid::Vid;
 use gamedata::item_kind::{ITEM_USE, USE_CREATE_STONE, USE_RECIPE};
-use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
 use protocol::item_pos::ItemPos;
 use world::character::{number, AutoGiven, MoveDone, RecipeTake};
 
@@ -35,6 +35,12 @@ const STONE_HIGH: i32 = 28_013;
 const RECIPE_BOTTLE: u32 = 50_901;
 /// The poison apple's vnum (`case 27996`, `G/char_item.cpp:4289`).
 const POISON_APPLE: u32 = 27_996;
+/// The mythical peaches (`case 71107` / `case 39032`, `:4811-4860`).
+const MYTHICAL_PEACHES: [u32; 2] = [71_107, 39_032];
+/// The peach's throttle flag (`mythical_peach.last_use_time`, `:4815,4852`).
+const PEACH_LAST_USE_FLAG: &[u8] = b"mythical_peach.last_use_time";
+/// The alignment ceiling the peach refuses at (`:4831-4835`).
+const PEACH_MAX_ALIGNMENT: i32 = 200_000;
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -77,6 +83,112 @@ impl GameState {
             world::character::spend_one(items, &apple, proto)
         })?;
         self.poison_pc(vid, None);
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is a mythical peach (`case 71107` / `case 39032`,
+    /// `G/char_item.cpp:4811-4860`).
+    pub(super) fn mythical_peach_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| MYTHICAL_PEACHES.contains(&item.vnum))
+    }
+
+    /// The mythical peach (`case 71107` / `case 39032`, `G/char_item.cpp:4811-4860`):
+    /// past the use's checks, the throttle refuses within `value(1)` hours of the flag
+    /// (the `[#Unk]` line on a live Channel, `[LS;1034]` on the test Channel), the
+    /// ceiling refuses at 200000, else `value(0) * 10` alignment lands (clamped to the
+    /// ceiling), one peach spends, the flag stamps now, and `[LS;383]` talks with
+    /// `[LS;384]` naming the gain.
+    pub(super) fn use_mythical_peach(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let peach = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at).cloned());
+        let proto = peach
+            .as_ref()
+            .and_then(|item| self.protos.get(item.vnum).cloned());
+        let Some(proto) = proto else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        if peach.is_none() {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        }
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let now = Self::global_time();
+        let last = self
+            .quests
+            .as_ref()
+            .and_then(|quests| quests.manager().quest_flag(pid, PEACH_LAST_USE_FLAG))
+            .unwrap_or(0);
+        let wait = i64::from(proto.values[1]) * 60 * 60;
+        if i64::from(now).saturating_sub(i64::from(last)) < wait {
+            if self.test_server {
+                self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;1034]", &[]);
+            } else {
+                self.tell(
+                    vid,
+                    actor,
+                    CHAT_TYPE_INFO,
+                    b"[#Unk]You cannot use this item yet.",
+                    &[],
+                );
+            }
+            return self.nothing_used(vid, actor);
+        }
+        let shown = self.real_alignment_of(vid.raw());
+        if shown == PEACH_MAX_ALIGNMENT {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"[#Unk]You already have your rank at the maximum.",
+                &[],
+            );
+            return self.nothing_used(vid, actor);
+        }
+        let mut val = proto.values[0];
+        if PEACH_MAX_ALIGNMENT.saturating_sub(shown) < val.saturating_mul(10) {
+            val = PEACH_MAX_ALIGNMENT.saturating_sub(shown) / 10;
+        }
+        self.update_alignment(vid, val.saturating_mul(10));
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let peach = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(peach.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(peach.vnum))?;
+            world::character::use_checks(&peach, proto, rules, gear.points)?;
+            world::character::spend_one(items, &peach, proto)
+        })?;
+        if let Some(quests) = self.quests.as_mut() {
+            quests.manager_mut().set_quest_flag(
+                pid,
+                PEACH_LAST_USE_FLAG,
+                i32::try_from(now).unwrap_or(i32::MAX),
+            );
+        }
+        self.tell(vid, actor, CHAT_TYPE_TALKING, b"[LS;383]", &[]);
+        let mut moved = moved;
+        moved.records.push(crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
+            CHAT_TYPE_INFO,
+            b"[LS;384;%d]",
+            &[crate::chat_line::Arg::Int(i64::from(val))],
+        ));
         Ok(moved)
     }
 
