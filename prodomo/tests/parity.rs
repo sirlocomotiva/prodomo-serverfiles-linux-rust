@@ -23198,9 +23198,12 @@ fn a_gm_lists_the_silences_and_the_vote_stays_quiet() {
 /// The GRAND book 50525 over the wire (`_basic/7and8th_skills.lua:161-298`). Alpha, a shaman
 /// of the second group, is refused at the first rest gate with no no-delay affect; Zulu, with
 /// no rest stamp, is warned, picks ward 221, passes the `-19000+need_alignment` gate through
-/// `pc.get_real_alignment`, and its failed read moves the alignment through
-/// `pc.change_alignment` (`UpdateAlignment`, `G/char_battle.cpp:3477-3565`), which the
-/// disconnect banks, beside the `next_time` flag the confirm set.
+/// `pc.get_real_alignment`, and its read runs the live `LearnGrandMasterSkill`: a failure
+/// moves the alignment through `pc.change_alignment` (`UpdateAlignment`,
+/// `G/char_battle.cpp:3477-3565`), which the disconnect banks, beside the `next_time` flag
+/// the confirm set — and the 1-in-3 success arm climbs 221 to 31 instead, with its own
+/// lines and no alignment move. (Before ledger 643 the read failed for want of a hosted 221
+/// row; now the row answers and the roll decides, as legacy's does.)
 #[test]
 fn the_grand_book_reads_the_alignment_and_moves_it_on_a_failed_read() {
     let Some(database) = ScratchDatabase::create() else {
@@ -23271,6 +23274,82 @@ fn grand_book_refuses_alpha_at_the_rest_gate(
     );
     drop(alpha);
     server.wait_for("Character disconnected; wrote the row");
+}
+
+/// Ledger 643's half of Zulu's read: the Yes runs the live roll, and the first byte 76
+/// branches the rest — 30 pins the failure's `[LS;952]`/`[LS;953]` and the "Darn!" text, 31
+/// the climb's second byte 76, `[LS;954-956]` and the three-line success text. Answers
+/// whether the read failed.
+fn grand_book_zulu_reads(zulu: &mut Keyed, inventory: u8) -> bool {
+    // When: Zulu says yes. Then: the read runs and either arm ends the script.
+    // The read's own records ride first: byte 76 (221 stays GRAND 30 on a
+    // failure, climbs to 31 on the 1-in-3 success), the talking/info lines,
+    // and only then the removal's clear.
+    zulu.send_record(&client_script_answer(0));
+    let stamped = zulu.read_game();
+    assert_eq!(stamped.len(), SKILL_LEVEL_LEN);
+    assert_eq!(stamped[0], GC_SKILL_LEVEL_NEW);
+    let level = stamped[1 + 221 * 6 + 1];
+    assert!(
+        level == 30 || level == 31,
+        "221 stays GRAND 30 or climbs to 31: {level}"
+    );
+    assert_eq!(stamped[1 + 221 * 6], 2, "221 stays GRAND");
+    let failed = level == 30;
+    if failed {
+        assert_eq!(
+            zulu.read_game(),
+            chat_packet(CHAT_TYPE_TALKING, 1, b"[LS;952]")
+        );
+        assert_eq!(zulu.read_game(), an_info_line(b"[LS;953]"));
+    } else {
+        // The climb's own byte 76 rides between the stamp's and the lines.
+        let climbed = zulu.read_game();
+        assert_eq!(climbed.len(), SKILL_LEVEL_LEN);
+        assert_eq!(climbed[0], GC_SKILL_LEVEL_NEW);
+        assert_eq!(&climbed[1 + 221 * 6..][..2], &[2, 31]);
+        assert_eq!(
+            zulu.read_game(),
+            chat_packet(CHAT_TYPE_TALKING, 1, b"[LS;954]")
+        );
+        assert_eq!(
+            zulu.read_game(),
+            chat_packet(CHAT_TYPE_TALKING, 1, b"[LS;955]")
+        );
+        assert_eq!(zulu.read_game(), an_info_line(b"[LS;956]"));
+    }
+    let cleared = zulu.read_game();
+    assert_eq!(cleared.len(), ITEM_SET_LEN);
+    assert_eq!(
+        set_fields(&cleared),
+        (inventory, 0, 0, 0),
+        "the book leaves its cell"
+    );
+    if failed {
+        assert_eq!(
+            zulu.read_game(),
+            server_script(
+                1,
+                &titled_page(
+                    b"Seelenstein+",
+                    &[b"", b"That did not work. Darn!"],
+                    b"[DONE]"
+                )
+            )
+        );
+    } else {
+        let raised: [&[u8]; 4] = [
+            b"",
+            b"You raised Sword Spin Ward to G2.",
+            b"My body is full of power. Something comes out here!",
+            b"You have completed higher level of training successfully.",
+        ];
+        assert_eq!(
+            zulu.read_game(),
+            server_script(1, &titled_page(b"Seelenstein+", &raised, b"[DONE]"))
+        );
+    }
+    failed
 }
 
 /// Ledger 268's second half: Zulu, with no rest stamp, is warned, picks ward 221, passes
@@ -23358,29 +23437,8 @@ fn grand_book_fails_zulu_and_moves_its_alignment(
         )
     );
 
-    // When: Zulu says yes. Then: no row is hosted for the ward, so the read
-    // fails silently, and the failure text ends the script. The removal's
-    // clear lands before the dialog: the give/take records precede the
-    // script's own in the step's answer.
-    zulu.send_record(&client_script_answer(0));
-    let cleared = zulu.read_game();
-    assert_eq!(cleared.len(), ITEM_SET_LEN);
-    assert_eq!(
-        set_fields(&cleared),
-        (inventory, 0, 0, 0),
-        "the book leaves its cell"
-    );
-    assert_eq!(
-        zulu.read_game(),
-        server_script(
-            1,
-            &titled_page(
-                b"Seelenstein+",
-                &[b"", b"That did not work. Darn!"],
-                b"[DONE]"
-            )
-        )
-    );
+    // When: Zulu says yes. Then: the read runs and either arm ends the script.
+    let failed = grand_book_zulu_reads(&mut zulu, inventory);
     // Alpha's own book is still on its row; only Zulu's is gone.
     wait_for(
         database,
@@ -23388,10 +23446,22 @@ fn grand_book_fails_zulu_and_moves_its_alignment(
     );
     drop(zulu);
     server.wait_for("Character disconnected; wrote the row");
-    wait_for(
-        database,
-        "(SELECT alignment BETWEEN -5000 AND -3330 FROM player WHERE name = 'Zulu')",
-    );
+    if failed {
+        wait_for(
+            database,
+            "(SELECT alignment BETWEEN -5000 AND -3330 FROM player WHERE name = 'Zulu')",
+        );
+    } else {
+        wait_for(
+            database,
+            "(SELECT alignment = 0 FROM player WHERE name = 'Zulu')",
+        );
+        wait_for(
+            database,
+            "(SELECT level = 31 FROM player_skill WHERE vnum = 221 AND player_id = (SELECT id \
+             FROM player WHERE name = 'Zulu'))",
+        );
+    }
     // Alpha's seed row shares the name, so Zulu's flag is scoped to its row.
     wait_for(
         database,
@@ -60454,4 +60524,100 @@ fn a_morphed_attacker_adds_its_morphs_range_to_the_swing() {
     drop(alice);
     drop(yankee);
     drop(server);
+}
+
+/// Ledger 643: the ward book's lesson climbs by point. Alpha learns Sword Spin Ward (221)
+/// from the book, then `/skillup 221` spends one skill point and climbs it to 2: the
+/// `SkillCanUp` sibling gate passes (no other ward learned), the hosted type-6 row answers,
+/// and `IsLearnableSkill`'s learned-new arm passes (level 1). The spend and byte 76 go
+/// out, and the store's row climbs.
+#[test]
+fn a_learned_ward_climbs_by_point_and_the_store_follows() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 2, skill_point = 1 WHERE name = 'Alpha'",
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    Server::write_console(&console, "item give Alpha 50515 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 50_515, 1));
+    alpha.send_record(&client_item_use(0));
+    let offer: [&[u8]; 5] = [
+        b"",
+        b"This ancient book seems to be very powerful! It is",
+        b"the key to tremendous skills. But first you must",
+        b"decide! Fighters can only master a single skill.",
+        b"Choose wisely",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Lehrbuch Konter",
+                &offer,
+                b"[QUESTION 1;Sword Spin Ward|2;Ambush Ward|3;Finger Strike Ward|4;Shooting Dragon Ward|5;Spirit Strike Ward|6;Fire Arrow Ward|7;Dark Strike Ward|8;Summon Lightning Ward|9;Wolf's Breath Ward|10;Cancel]"
+            )
+        ),
+        "all nine wards and the Cancel"
+    );
+    alpha.send_record(&client_script_answer(0));
+    let confirm: [&[u8]; 3] = [
+        b"",
+        b"You choose to learn Sword Spin Ward.",
+        b"You're sure about your decision?",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(b"Lehrbuch Konter", &confirm, b"[QUESTION 1;Yes|2;No]")
+        ),
+        "the confirmation"
+    );
+    alpha.send_record(&client_script_answer(0));
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 0, 0));
+    let skills = alpha.read_game();
+    assert_eq!(skills[0], GC_SKILL_LEVEL_NEW);
+    assert_eq!(&skills[1 + 221 * 6..][..6], &[0, 1, 0, 0, 0, 0]);
+    assert_eq!(alpha.read_game(), server_script(0, b"[DONE]"));
+    alpha.still("the script ended");
+
+    // When: Alpha climbs the learned ward by point.
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/skillup 221"));
+    // Then: the point is spent and byte 76 carries 221 at 2.
+    let mut saw_spend = false;
+    let mut saw_levels = false;
+    let end = std::time::Instant::now() + Duration::from_secs(8);
+    while !(saw_spend && saw_levels) {
+        let record = alpha
+            .read_game_until(end)
+            .expect("the spend and the levels land");
+        if record[0] == GC_POINT_CHANGE && record[8] == 28 {
+            assert!(!saw_spend, "one spend");
+            saw_spend = true;
+        } else if record[0] == GC_SKILL_LEVEL_NEW {
+            assert_eq!(record.len(), SKILL_LEVEL_LEN);
+            assert_eq!(&record[1 + 221 * 6..][..6], &[0, 2, 0, 0, 0, 0]);
+            saw_levels = true;
+        } else {
+            assert!(
+                record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
+                "a tick or a flag reshown: {record:02x?}"
+            );
+        }
+    }
+    wait_for(
+        &database,
+        "(SELECT level = 2 FROM player_skill WHERE vnum = 221)",
+    );
 }

@@ -488,7 +488,7 @@ impl GameState {
     /// climbs; inside, every other member of the 221-228 or 236-243 family
     /// must stand at 0, and 229-235 refuse (the `default` arm). The climber's
     /// own level is never read, so a re-set of the standing skill passes.
-    fn skill_can_up(&self, vid: Vid, vnum: u32) -> bool {
+    pub(super) fn skill_can_up(&self, vid: Vid, vnum: u32) -> bool {
         let family = if (SKILL_NEW_FIRST..=SKILL_NEW_LAST).contains(&vnum) {
             SKILL_NEW_FIRST..=SKILL_NEW_LAST
         } else if (SKILL_HELP_FIRST..=SKILL_HELP_LAST).contains(&vnum) {

@@ -158,6 +158,19 @@ pub(super) const SKILL_HELP_FIRST: u32 = 236;
 pub(super) const SKILL_HELP_LAST: u32 = 243;
 /// `SKILL_MAX_NUM` (`C/length.h:72`): the skill array's width.
 pub(super) const SKILL_MAX_NUM: u32 = 255;
+/// The `__7AND8TH_SKILLS__` help/anti trigger vnums (`G/skill.h:51-120`): the
+/// cast vnum selects the caster's boost (236-243) and the victim's ward
+/// (221-228) in `FuncSplashDamage`'s first two arms (`:1641-1751`).
+const HELP_ANTI_TRIGGER: [(u32, u32); 8] = [
+    (2, 236),
+    (31, 237),
+    (61, 238),
+    (92, 239),
+    (16, 240),
+    (48, 241),
+    (76, 242),
+    (107, 243),
+];
 /// `SKILL_TERROR` (`G/skill.h:92`): 64, whose cooling refusal pre-empts the charge.
 const SKILL_TERROR: u32 = 64;
 /// `SKILL_EUNHYUNG` (`G/skill.h:74`): 34.
@@ -541,10 +554,11 @@ impl GameState {
     /// The gates, in legacy order: `CanUseSkill` or the else-switch (horse
     /// 137-140, the 7/8 anti 112-119, 141/142, the 7/8 anti/help 221-228/236-243
     /// — `__7AND8TH_SKILLS__` is ON in `prodomodefines.h:165`), the 112-119
-    /// zero-level refusal (221-243 never refuse: the quest/grand shapes are
-    /// ported, not the unhosted 7/8 types), the unknown-row refusal (a hosted
-    /// row, so the switch's 137-140 and the anti vnums refuse here: none is
-    /// hosted), the `>= 255` refusal,
+    /// zero-level refusal (the quest/grand shapes are ported and the 7/8 types
+    /// are hosted), the `SkillCanUp` sibling refusal on 221-243
+    /// (`:737-742`), the unknown-row refusal (a hosted row, so the switch's
+    /// 137-140 and the 112-119 anti vnums refuse here: none is hosted), the
+    /// `>= 255` refusal,
     /// `IsLearnableSkill`, the GRAND/PERFECT master refusals, the NORMAL +
     /// `DISABLE_BY_POINT_UP` point-method gate, the level limit, the prereq arm,
     /// the `FIX_SECONDARY_SKILL` group gate, the spend (`SUB_SKILL` for type 0,
@@ -631,6 +645,11 @@ impl GameState {
         if (SKILL_ANTI_FIRST..=SKILL_ANTI_LAST).contains(&vnum)
             && self.pc_skill_level(vid.raw(), vnum) == 0
         {
+            return None;
+        }
+        // `SkillLevelUp`'s 7/8 gate (`:737-742`): an anti/help vnum the `SkillCanUp`
+        // sibling check refuses climbs nothing, even at level 0.
+        if (SKILL_NEW_FIRST..=SKILL_HELP_LAST).contains(&vnum) && !self.skill_can_up(vid, vnum) {
             return None;
         }
         let row = self.pc_skill_tables.get(vnum).map(|skill| skill.record)?;
@@ -827,8 +846,8 @@ impl GameState {
     /// 40, a type-0 below its max, a type-5 (140 needs an assassin), else a
     /// grouped row of the job's type, a type-6 anti vnum with no sibling
     /// learned, or a learned new/help vnum (221-228/236-243, the compiled-in
-    /// `__7AND8TH_SKILLS__` arm). No type-5/6 row is hosted, so those arms
-    /// never fire here.
+    /// `__7AND8TH_SKILLS__` arm). No type-5 row is hosted, so that arm never
+    /// fires here; the 112-119 arms never fire either (their rows stay out).
     fn is_learnable_skill(
         &self,
         vid: Vid,
@@ -2833,6 +2852,9 @@ impl GameState {
         amount = battle_damage_floor(&mut self.dice, amount);
         // The non-main splash adjust: a no-SPLASH row hits only the main victim
         // (`m_x`/`m_y` are the victim's spot), so no adjust multiplies.
+        // The help arm (`:1641-1694`): the caster's learned boost grows `iDam`
+        // before the attr arm; the ward arms wait for player victims (PvP).
+        amount = self.skill_help_boost(vid, row.record.vnum, amount);
         let damage = skill_melee_attr(
             amount,
             weapon.as_ref(),
@@ -3102,6 +3124,42 @@ impl GameState {
             victim_dexterity: victim_dex,
             ignore_target_rating: false,
         })
+    }
+
+    /// The `__7AND8TH_SKILLS__` help arm (`G/char_skill.cpp:1641-1694`): when the
+    /// cast vnum names a boost of [`HELP_ANTI_TRIGGER`] and the caster learned
+    /// it, `point` evens with `k = power * max_level / 100` at the caster's
+    /// own job/group (the victim's for the anti arms) and `iDam` grows by the
+    /// percent. The third arm reads the victim's 112-119 anti
+    /// (`:1753-1792`), whose rows stay unhosted, so it never fires. An unlearned
+    /// helper, an unhosted row, or any other vnum leaves the damage alone.
+    fn skill_help_boost(&self, vid: Vid, vnum: u32, damage: i32) -> i32 {
+        let Some((_, helper)) = HELP_ANTI_TRIGGER
+            .iter()
+            .find(|(trigger, _)| *trigger == vnum)
+        else {
+            return damage;
+        };
+        if self.pc_skill_level(vid.raw(), *helper) == 0 {
+            return damage;
+        }
+        let Some(boost) = self.pc_skill_tables.get(*helper) else {
+            return damage;
+        };
+        let Some(body) = self.bodies.get(&vid) else {
+            return damage;
+        };
+        let k = f64::from(self.pc_skill_tables.power(
+            body.card.job,
+            body.card.skill_group,
+            self.pc_skill_level(vid.raw(), *helper),
+            false,
+        )) * f64::from(boost.record.max_level)
+            / 100.0;
+        // `iDam += iDam * (IncreaseAmount / 100.0)`: the percent divides first, in
+        // doubles, and the C++ compound assignment truncates the sum.
+        let percent = boost.point.eval(&BTreeMap::from([("k", k)])) / 100.0;
+        damage + f64_to_i32(f64::from(damage) * percent)
     }
 
     fn compute_skill_on(
@@ -3413,8 +3471,10 @@ impl GameState {
         // The attr arms (`:1549-1600`): MELEE/RANGE/MAGIC with their `dt`. NORMAL
         // never reaches here (no hosted row is NORMAL-attr); the NPC
         // WIND/ELEC/FIRE arms and `COMPUTE_MAGIC_DAMAGE` have no hosted row.
-        // (The HELP/ANTI arms read level 0 on every helper/anti vnum — unhosted —
-        // so they multiply nothing and stay out.)
+        // The ward arms (`:1696-1792`) read the victim's levels, so they wait for
+        // player victims (PvP); mobs hold no PC skill levels, and an unreadable
+        // ward changes nothing.
+        amount = self.skill_help_boost(vid, row.record.vnum, amount);
         let attr = row.record.skill_attr_type;
         let (damage, kind, aggro) = if attr == SKILL_ATTR_RANGE {
             (
@@ -4829,6 +4889,23 @@ mod tests {
         assert!(world.minds.get(ME).is_some());
     }
 
+    /// A PALBANG (2) cast under a learned Sword Spin Boost (236) grows the
+    /// damage: the boost's `16*k` percent (`k = power(236's level) * 1 / 100`,
+    /// the caster's own job/group row) lands on top of the funnelled amount.
+    /// The trigger's own boost must be learned: a PALBANG without it, or any
+    /// other vnum's boost, leaves the damage alone.
+    #[test]
+    fn a_learned_boost_grows_its_trigger_cast_and_nothing_else() {
+        let (_clock, mut world, _inbox) = a_cast();
+        world.set_pc_skill_level(1, 1, 1);
+        world.set_pc_skill_level(1, 236, 1);
+        let grown = world.skill_help_boost(Vid::new(1), 2, 1000);
+        assert!(grown > 1000, "the boost grows PALBANG: {grown}");
+        assert_eq!(world.skill_help_boost(Vid::new(1), 1, 1000), 1000);
+        world.set_pc_skill_level(1, 236, 0);
+        assert_eq!(world.skill_help_boost(Vid::new(1), 2, 1000), 1000);
+    }
+
     /// Past 37 Pulses after the cast, the skill-term gate refuses the `CG_ATTACK`:
     /// the dog is whole.
     #[test]
@@ -5369,6 +5446,62 @@ mod tests {
         assert_eq!(burst[1 + 7], 1);
         assert_eq!(world.skill_up(Vid::new(1), b"1"), Some((1, 2)));
         assert_eq!(world.pc_skill_level(1, 1), 2);
+    }
+
+    /// A learned ward climbs by point while its family stands empty, and refuses
+    /// once a sibling is learned: 221 at 1 climbs to 2, but with 222 learned
+    /// the `SkillCanUp` sibling gate refuses and spends nothing.
+    #[test]
+    fn a_ward_climbs_alone_and_refuses_beside_a_sibling() {
+        let (_clock, mut world, mut inbox) = a_cast();
+        world.change_pc_point(Vid::new(1), point::POINT_SKILL, 2, false);
+        world.set_pc_skill_level(1, 221, 1);
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        assert_eq!(world.skill_up(Vid::new(1), b"221"), Some((221, 2)));
+        world.set_pc_skill_level(1, 222, 1);
+        std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
+        assert_eq!(world.skill_up(Vid::new(1), b"221"), None);
+        assert_eq!(world.pc_skill_level(1, 221), 2);
+        let left = world
+            .characters
+            .find_by_vid(Vid::new(1))
+            .unwrap()
+            .points()
+            .unwrap()
+            .get_point(point::POINT_SKILL);
+        assert_eq!(left, 1);
+    }
+
+    /// A learned boost grows its trigger's landed cast: PALBANG (2) on the dog
+    /// with 236 learned deals strictly more than the same cast without it —
+    /// the functor's help arm read the caster's boost. Both casts land (the
+    /// dog's hit points fall), so the arm only multiplies, never refuses.
+    #[test]
+    fn a_boosted_cast_lands_harder_than_an_unboosted_one() {
+        let plain = {
+            let (_clock, mut world, _inbox) = a_cast();
+            world.set_pc_skill_level(1, 2, 1);
+            world.dice = world::character::Pcg32::new(7, 0);
+            assert!(world.use_skill(Vid::new(1), 2, ME));
+            let before = world.npc_by_vid(ME).unwrap().hp;
+            assert!(world.skill_attack(Vid::new(1), 2, ME));
+            before - world.npc_by_vid(ME).unwrap().hp
+        };
+        let (_clock, mut world, _inbox) = a_cast();
+        world.set_pc_skill_level(1, 2, 1);
+        // 236 at 40: power 135, so `k = 1.35` and `16*k = 21.6` — a fifth more
+        // damage, past any rounding. (At level 1 the percent rounds to 0.)
+        world.set_pc_skill_level(1, 236, 40);
+        world.dice = world::character::Pcg32::new(7, 0);
+        assert!(world.use_skill(Vid::new(1), 2, ME));
+        let before = world.npc_by_vid(ME).unwrap().hp;
+        assert!(world.skill_attack(Vid::new(1), 2, ME));
+        let boosted = before - world.npc_by_vid(ME).unwrap().hp;
+        assert!(plain > 0, "the plain cast lands");
+        assert!(
+            boosted > plain,
+            "the boost grows the cast: {plain} -> {boosted}"
+        );
     }
 
     /// The refusals hold: group 0, no point, a wrong-job vnum, an empty arg,

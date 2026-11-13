@@ -45,6 +45,16 @@ const TYPE_ZERO_KEPT: [u32; 14] = [
     121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142, 164, 165, 166,
 ];
 
+/// The type-6 rows `/skillup` can reach (`do_skillup`'s switch,
+/// `G/cmd_general.cpp:953-969`): the eight wards (221-228) and the eight boosts
+/// (236-243), whose `24*k`/`16*k` point polys the help/anti functor arms read
+/// (`G/char_skill.cpp:1641-1751`). 229 and 244 have rows too, but nothing reads
+/// them: no `do_skillup` case, no functor arm, no `IsLearnableSkill` arm — and
+/// `SkillCanUp(229)` has no case, so even the quest name 229 learns nothing.
+const TYPE_SIX_KEPT: [u32; 16] = [
+    221, 222, 223, 224, 225, 226, 227, 228, 236, 237, 238, 239, 240, 241, 242, 243,
+];
+
 /// `SKILL_COUNT` (`G/char_skill.cpp:4107`): six skills per job and group.
 pub const SKILL_COUNT: usize = 6;
 
@@ -219,7 +229,8 @@ impl PcSkills {
             let skill_type = number_at(&table, row, "bType")?;
             let typed = (PC_TYPE_MIN..=4).contains(&skill_type) && vnum <= PC_VNUM_MAX;
             let sub = skill_type == 0 && TYPE_ZERO_KEPT.contains(&vnum);
-            if !typed && !sub {
+            let extra = skill_type == 6 && TYPE_SIX_KEPT.contains(&vnum);
+            if !typed && !sub && !extra {
                 continue;
             }
             let record = decode_row(&table, row, vnum)?;
@@ -725,7 +736,7 @@ mod tests {
     fn pc_rows_load_and_function_rows_are_refused() {
         let skills = PcSkills::from_dumps(&dump("player.sql"), &dump("common.sql")).unwrap();
         // 48 PC rows (type 1-4, vnum <= 111); the 14 `number(`/`floor(` rows
-        // are refused, so 34 load.
+        // are refused, so 34 load; the 16 type-6 ward/boost rows load below.
         assert_eq!(
             skills.refused(),
             &[31, 32, 46, 48, 50, 51, 66, 76, 77, 78, 80, 106, 107, 108]
@@ -753,6 +764,14 @@ mod tests {
         // Horse (137) and guild (151) rows are not PC rows.
         assert!(skills.get(137).is_none());
         assert!(skills.get(151).is_none());
+        // The 16 type-6 ward/boost rows load with their trigger polys; 229 and
+        // 244 have rows but nothing reads them, so they stay out.
+        for vnum in [221, 228, 236, 243] {
+            let row = skills.get(vnum).unwrap();
+            assert_eq!(row.record.skill_type, 6, "{vnum}");
+        }
+        assert!(skills.get(229).is_none());
+        assert!(skills.get(244).is_none());
     }
     #[test]
     fn type_zero_rows_and_buff_flags_load() {
