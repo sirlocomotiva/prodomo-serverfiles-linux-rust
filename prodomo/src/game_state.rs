@@ -4560,6 +4560,9 @@ impl GameState {
         if self.recipe_at(vid, at) {
             return Some(self.use_recipe(vid, at, actor));
         }
+        if self.poison_apple_at(vid, at) {
+            return Some(self.use_poison_apple(vid, at, actor));
+        }
         None
     }
 

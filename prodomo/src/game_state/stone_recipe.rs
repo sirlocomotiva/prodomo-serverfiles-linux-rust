@@ -33,6 +33,8 @@ const STONE_LOW: i32 = 28_000;
 const STONE_HIGH: i32 = 28_013;
 /// The recipe's bottle (`:6919`).
 const RECIPE_BOTTLE: u32 = 50_901;
+/// The poison apple's vnum (`case 27996`, `G/char_item.cpp:4289`).
+const POISON_APPLE: u32 = 27_996;
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -43,6 +45,39 @@ impl GameState {
     /// Whether the item at `at` is a recipe scroll (`USE_RECIPE`).
     pub(super) fn recipe_at(&self, vid: Vid, at: ItemPos) -> bool {
         self.use_subtype_at(vid, at) == Some(USE_RECIPE)
+    }
+
+    /// Whether the item at `at` is the poison apple (`case 27996`,
+    /// `G/char_item.cpp:4289-4292`).
+    pub(super) fn poison_apple_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == POISON_APPLE)
+    }
+
+    /// The poison apple (`case 27996`, `G/char_item.cpp:4289-4292`): one is spent,
+    /// then the eater is poisoned with no attacker (`AttackedByPoison(NULL)`).
+    pub(super) fn use_poison_apple(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let apple = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(apple.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(apple.vnum))?;
+            world::character::use_checks(&apple, proto, rules, gear.points)?;
+            world::character::spend_one(items, &apple, proto)
+        })?;
+        self.poison_pc(vid, None);
+        Ok(moved)
     }
 
     /// The sub type of the `ITEM_USE` at `at`, or `None` for anything else.

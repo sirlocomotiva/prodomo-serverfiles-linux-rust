@@ -60940,6 +60940,69 @@ fn a_stone_scroll_spends_and_gives_no_stone() {
     drop(server);
 }
 
+/// `cg.game.item_use`: `case 27996` (`G/char_item.cpp:4289-4292`) spends one apple and
+/// poisons the eater with no attacker (`AttackedByPoison(NULL)`). Alpha eats one of
+/// two: the stack shrinks to one, the poison affect lands, and the first tick deals
+/// `maxHP * 50 / 1000` with the poison flag and no killer told.
+#[test]
+fn a_poison_apple_spends_one_and_its_first_tick_burns() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
+         27996 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(27_996).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's apple is USE_SPECIAL");
+    let (mut alpha, listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha eats one apple. Then: the count falls, the affect lands.
+    alpha.send_record(&client_item_use(0));
+    let update = alpha.read_game();
+    assert_eq!(update[0], ITEM_UPDATE, "the stack's row updates");
+    // The flag update runs ahead of the add, as `add_pc_affect` writes it.
+    let mut add = alpha.read_game();
+    if add[0] == GC_CHARACTER_UPDATE {
+        add = alpha.read_game();
+    }
+    assert_eq!(add[0], GC_AFFECT_ADD, "the poison lands");
+    assert_eq!(
+        u32::from_le_bytes(add[1..5].try_into().expect("four bytes")),
+        209,
+        "AFFECT_POISON"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // Then: the first tick burns maxHP * 50 / 1000 with the poison flag.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut tick = None;
+    while std::time::Instant::now() < deadline && tick.is_none() {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record[0] == GC_DAMAGE_INFO
+            && u32::from_le_bytes(record[1..5].try_into().expect("four bytes")) == listed.id
+            && record[5] == DAMAGE_POISON
+        {
+            tick = Some(i32::from_le_bytes(
+                record[6..10].try_into().expect("four bytes"),
+            ));
+        }
+    }
+    let tick = tick.expect("the first tick burns");
+    assert!(tick > 0, "the tick burns");
+    // The exact burn is `maxHP * 50 / 1000`, and max HP carries the level-up
+    // draws, so the scenario pins the flag and the burn, while the formula is
+    // unit-proved (`the_poison_event_ticks_ten_times_and_never_kills`).
+    drop(alpha);
+    drop(server);
+}
+
 /// `cg.game.item_use`: `case USE_RECIPE` (`G/char_item.cpp:6889-6943`) brews value(0)
 /// from two sources and one 50901 bottle, and never spends the scroll. Alpha holds
 /// two sets of the 50905 sources and one bottle: the first use consumes a set and
