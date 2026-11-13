@@ -49,6 +49,12 @@ const COLORANT_LAST_USE_FLAG: &[u8] = b"fix_bug.colorante";
 const COLORANT_WAIT_SECONDS: i64 = 3;
 /// A hair past this one is a dyed one the colorant refuses (`:4951`).
 const HAIR_DYE_CEILING: u16 = 1001;
+/// The wonso bean, sugar and fruit (`case 50020`-`case 50022`, `:5165-5178`).
+const WONSO_BEAN: u32 = 50_020;
+/// The wonso sugar (`case 50021`).
+const WONSO_SUGAR: u32 = 50_021;
+/// The wonso fruit (`case 50022`).
+const WONSO_FRUIT: u32 = 50_022;
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -298,6 +304,86 @@ impl GameState {
         if let Some(frame) = self.update_frame(vid, flags) {
             let me = crate::game_state::view::EntityKey::Character(vid.raw());
             self.packet_around(me, &frame, None);
+        }
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is a wonso bean, sugar or fruit (`case 50020`-
+    /// `case 50022`, `G/char_item.cpp:5165-5178`).
+    pub(super) fn wonso_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| matches!(item.vnum, WONSO_BEAN | WONSO_SUGAR | WONSO_FRUIT))
+    }
+
+    /// The wonso bean, sugar and fruit (`case 50020`-`case 50022`,
+    /// `G/char_item.cpp:5165-5178`): past the use's checks, the bean fills the hit
+    /// points, the sugar the spirit, and the fruit the stamina, each by the gap to
+    /// its maximum, and one is spent.
+    pub(super) fn use_wonso(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let vnum = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map(|item| item.vnum);
+        let kind = match vnum {
+            Some(WONSO_BEAN) => common::point_slot::POINT_HP,
+            Some(WONSO_SUGAR) => common::point_slot::POINT_SP,
+            Some(WONSO_FRUIT) => common::point_slot::POINT_STAMINA,
+            _ => return Err(MoveItemRefused::NoSuchCharacter { vid }),
+        };
+        let (now, max) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or((0, 0), |points| match kind {
+                common::point_slot::POINT_HP => (points.hp(), points.max_hp()),
+                common::point_slot::POINT_SP => (points.sp(), points.max_sp()),
+                _ => (points.stamina(), points.max_stamina()),
+            });
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let wonso = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(wonso.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(wonso.vnum))?;
+            world::character::use_checks(&wonso, proto, rules, gear.points)?;
+            world::character::spend_one(items, &wonso, proto)
+        })?;
+        let gap = max.saturating_sub(now);
+        if let Ok(character) = self.characters.find_by_vid_mut(vid) {
+            if let Some(points) = character.items_and_points_mut().1 {
+                if let Ok(records) = points.point_change(kind, gap, true, false) {
+                    let done = MoveDone {
+                        kind: world::character::MoveKind::Used,
+                        records: records
+                            .into_iter()
+                            .map(world::character::MoveRecord::Point)
+                            .collect(),
+                        changes: Vec::new(),
+                    };
+                    let packed = MovedItems::new(
+                        moved.owner_id,
+                        vid.raw(),
+                        done,
+                        actor,
+                        &self.protos,
+                        &self.locale,
+                    );
+                    moved.records.extend(packed.records);
+                }
+            }
         }
         Ok(moved)
     }

@@ -4569,6 +4569,9 @@ impl GameState {
         if self.hair_colorant_at(vid, at) {
             return Some(self.use_hair_colorant(vid, at, actor));
         }
+        if self.wonso_at(vid, at) {
+            return Some(self.use_wonso(vid, at, actor));
+        }
         None
     }
 

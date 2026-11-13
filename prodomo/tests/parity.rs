@@ -61092,6 +61092,78 @@ fn a_hair_colorant_dyes_and_waits_three_seconds() {
     drop(server);
 }
 
+/// `cg.game.item_use`: `case 50020`-`case 50022` (`G/char_item.cpp:5165-5178`) fill a pool
+/// by the gap to its maximum and spend one: Alpha, stored at 600 HP, 200 SP and 400
+/// stamina, eats a bean, a sugar and a fruit, and each pool fills (1420, 600, 890).
+#[test]
+fn wonso_fills_a_pool_by_its_gap_and_spends_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 600, sp = 200, stamina = 400 WHERE name = 'Alpha'",
+    );
+    for (id, cell, vnum) in [(41, 0, 50_020), (42, 1, 50_021), (43, 2, 50_022)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, \
+                 id, 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    for vnum in [50_020, 50_021, 50_022] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, 10, "the owner's wonso is USE_SPECIAL");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    for (cell, kind, full, gap) in [(0, 5, 1420, 820), (1, 7, 600, 400), (2, 9, 890, 490)] {
+        alpha.send_record(&client_item_use(cell));
+        // The lone item clears its cell and the pool fills by its gap, in either order.
+        // Raw reads: the stamina fill is a refill `read_game_until` skips.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut cleared = false;
+        let mut filled = None;
+        while std::time::Instant::now() < deadline && (!cleared || filled.is_none()) {
+            let Some(record) = alpha.read_game_raw_until(deadline) else {
+                break;
+            };
+            if record.len() >= 2
+                && record[..2] == [ITEM_SET, common::item_slots::EWindows::Inventory as u8]
+            {
+                cleared = true;
+            } else if record.len() == POINT_CHANGE_LEN && record[8] == kind {
+                filled = Some(record);
+            }
+        }
+        assert!(cleared, "the lone wonso clears its cell");
+        let filled = filled.expect("the pool fills");
+        assert_eq!(
+            i64::from_le_bytes(filled[9..17].try_into().expect("eight bytes")),
+            gap,
+            "the fill is the gap"
+        );
+        assert_eq!(
+            i64::from_le_bytes(filled[17..25].try_into().expect("eight bytes")),
+            full,
+            "the pool fills to its maximum"
+        );
+    }
+    check(&database, "NOT EXISTS (SELECT 1 FROM item)");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT (hp, sp, stamina) = (1420, 600, 890) FROM player WHERE name = 'Alpha')",
+    );
+    drop(server);
+}
+
 #[test]
 fn a_stone_scroll_spends_and_gives_no_stone() {
     let Some(database) = ScratchDatabase::create() else {
