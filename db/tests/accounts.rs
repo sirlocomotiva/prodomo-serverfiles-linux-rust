@@ -505,3 +505,28 @@ async fn the_shop_premium_expiry_reads_zero_writes_and_retimes_the_shops() {
         .unwrap();
     assert_eq!(kept, 5, "another account's shops keep their time");
 }
+
+#[tokio::test]
+async fn the_fish_mind_expiry_reads_zero_until_a_premium_is_written() {
+    use db::accounts::fish_mind_expire;
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let id = create(store, "alice", b"password1").await;
+    assert_eq!(
+        fish_mind_expire(store, id).await.unwrap(),
+        0,
+        "never bought reads 0"
+    );
+    sqlx::query("UPDATE account SET fish_mind_expire = 1_800_000_000 WHERE id = $1")
+        .bind(i32::try_from(id.get()).unwrap())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        fish_mind_expire(store, id).await.unwrap(),
+        1_800_000_000,
+        "the written premium reads back"
+    );
+}

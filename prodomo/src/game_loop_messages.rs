@@ -3633,6 +3633,11 @@ pub struct Loaded {
     /// admission on. The descriptor reads it before it sends the admission, as
     /// the auth query reads it with the login (`G/input_auth.cpp:145`).
     pub shop_premium_expire: i64,
+    /// The account's fish-mind premium expiry (`fish_mind_expire`), which the world
+    /// holds as the character's `m_aiPremiumTimes[4]` from the admission on. The
+    /// descriptor reads it before it sends the admission, as the auth query reads it
+    /// with the login (`G/input_auth.cpp:141`).
+    pub fish_mind_expire: i64,
     /// The descriptor's host address, which the multi-farm registry keys on
     /// (`GetHostName`, `G/desc.h:55`).
     pub addr: String,

@@ -55282,3 +55282,35 @@ no item to drop or take. The rankings arm stays commented out in the source itse
 One partial quest row remains: `questlib.questlib`, the 1970-line core library.
 
 Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; both named scenarios re-proved green (`a_complete_sash_quest_without_the_material_goes_back_to_the_captain`, `a_party_boards_starts_and_leaves_the_live_ship_defence`); `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 650. The premium fish mind
+
+`sys.life.fishing` waited on three things; one was already dead, one ports here, one waits on
+the owner. The dead wait is the `fishevent` highscore: `lua.highscore.register` is `unused`
+(no Lua file names it), so no board ever fills. The owner's wait is `FishLog` (question 73).
+This slice ports the premium fish mind.
+
+Legacy reads the account's `fish_mind_expire` at auth into `aiPremiumTimes[4]`
+(`G/input_auth.cpp:141`), and `DetermineFish` draws the mind's table 2 — or 3 while the
+`manwoo` flag is set — for a character whose `GetPremiumRemainSeconds(4)` is positive
+(`G/fishing.cpp:369-380`), while `PredictFish` previews the bite for the same condition
+(`:453-459`). The Rewrite mirrors the shop-expiry path (ledger 587): migration 0044 adds
+`account.fish_mind_expire` (unix time, 0 when never bought, like the stale legacy default),
+`db::accounts::fish_mind_expire` reads it, the admission loads it beside the shop expiry
+(a refused read closes, as a refused load does), and the world holds it per online character
+from the admission on, clearing it on leave. `determine_fish` and `predicts_fish` take the
+same `premium_fish_mind` condition — the held expiry less the wall clock — alongside the
+unique-item arm, and the module doc drops its "not ported".
+
+The scenario is `a_premium_cast_sees_the_biting_fish_before_the_take`: Alice's premium runs
+an hour out, the cast bites, `REACT` goes around and the `FISH` preview with the biting
+vnum reaches her own client — with no mind, no pill and no premium the bite sends `REACT`
+alone, as the 389 scenario shows. The preview proves the condition fires over the wire; the
+condition itself is unit-pinned (`a_future_fish_mind_expiry_predicts_the_fish`: future
+predicts, zero and past do not), and the store round-trips
+(`the_fish_mind_expiry_reads_zero_until_a_premium_is_written`). The table-2 routing shares
+the pinned condition in `determine_fish`; a scenario pin would need the draw to name one of
+the eight column-2-only fish (27810-27815, 50008/50009) against ~9% odds per 10-40 s cast,
+so the unit pin carries it.
+
+Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5586 passed, 1 failed in 46 targets (`a_cape_of_courage_gathers_the_dogs_around`, a quiet-wire timeout under full-suite load — passes alone, same family as the known load flakes); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after the expiry-helper split (`enter_game` 109 lines, `leave_world_by` 101 — both folded into helpers, no `allow`); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

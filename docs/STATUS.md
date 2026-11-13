@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 649 (the sash and the ship close).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 650
+Last reviewed: 2026-11-13, after ledger section 650 (the premium fish mind).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 651
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -633,6 +633,7 @@ Since 646 `questlib.TeleportRingLib` is `ported`: browsing trips `IsHack`, so th
 Since 647 four quest libraries are `unused`: `dungeonFunctions`, `dungeonInformationLibrary`, `luaFunctions` and `GFquestlib` all load but nothing calls them (owner question 75).
 Since 648 `questlib.locale` is `ported` (the land dialog renders its yes/no over the wire) and `questlib.multiLocale` is `unused` (loaded, never called; owner question 76).
 Since 649 `quest.sash_mission` and `quest.ship_defense` are `ported`: every reachable branch runs over the wire, and the protoless remainders (85000, 31107) are documented, not ported.
+Since 650 `sys.life.fishing` reads the fish-mind premium: a live premium draws the mind's table and previews the bite.
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
 and the ledger disagree, the most recent ledger section wins; update this page in the same change.

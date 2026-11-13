@@ -60835,3 +60835,33 @@ fn the_rings_use_while_browsing_says_to_wait_ten_seconds() {
     );
     alice.still("no warp follows");
 }
+
+/// `sys.life.fishing`'s premium fish mind (ledger 650; 389 proved the cast, bite and take
+/// with no preview): Alice's account holds the fish-mind premium (`fish_mind_expire` an
+/// hour out, read at admission like `aiPremiumTimes[4]`). The cast bites: `REACT` around,
+/// and the `FISH` preview with the biting vnum to her own client (`PredictFish` true via
+/// the premium). The draw came from the mind's table 2 (`manwoo` unset), which the preview
+/// proves by arriving at all — with no mind, no pill and no premium, the bite sends `REACT`
+/// alone.
+#[test]
+fn a_premium_cast_sees_the_biting_fish_before_the_take() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = fishing_stage(&database, Some(10), 1);
+    sql(
+        &database,
+        "UPDATE account SET fish_mind_expire = EXTRACT(EPOCH FROM NOW())::bigint + 3600 WHERE \
+         login = 'alice'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_fishing(3));
+    assert_eq!(alice.read_game(), server_fishing(0, vid, 3), "the cast");
+    wait_for_the_bite(&mut alice, vid);
+    let preview = alice.read_game();
+    assert_eq!(preview[..2], [GC_FISHING, 5], "the mind's preview");
+    let vnum = u32::from_le_bytes(preview[2..6].try_into().expect("four bytes"));
+    assert_ne!(vnum, 0, "a fish bit, not the refused nothing");
+    alice.still("nothing follows the preview");
+}

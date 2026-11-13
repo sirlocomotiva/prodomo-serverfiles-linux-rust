@@ -415,6 +415,20 @@ pub async fn private_shop_premium_expire(
         .ok_or(AccountError::NoSuchAccountId(id))
 }
 
+/// Read an account's fish-mind premium expiry: the unix time the premium ran to
+/// (`fish_mind_expire`), 0 when never bought.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`].
+pub async fn fish_mind_expire(store: &Store, id: AccountId) -> Result<i64, AccountError> {
+    sqlx::query_scalar("SELECT fish_mind_expire FROM account WHERE id = $1")
+        .bind(id.to_column()?)
+        .fetch_optional(store.pool())
+        .await?
+        .ok_or(AccountError::NoSuchAccountId(id))
+}
+
 /// Write an account's premium private-shop expiry and retime its shops' rows
 /// (`UPDATE account SET premium_privateshop_expire`, then the cached shops'
 /// `UpdatePremiumTime`, `D/ClientManagerPrivateShop.cpp:2336-2348`): legacy

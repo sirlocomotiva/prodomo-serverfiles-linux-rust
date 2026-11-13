@@ -8564,6 +8564,46 @@ where
 /// visible characters, the NPCs, and the revive-invisible affect, then `SetPhase(PHASE_GAME)`,
 /// then the time, Channel, and event records. The phase change is the boundary between the two
 /// halves of [`EnterGameBurst`], because in legacy it is a `DESC::SetPhase` call.
+/// Read the account's premium private-shop expiry for the admission, as the auth query
+/// reads it with the login (`G/input_auth.cpp:145`): `None` (after the log line) closes, as
+/// a refused load does, and no account reads 0, as no row does.
+async fn shop_premium_expiry_of(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &Held,
+) -> Option<i64> {
+    let Some(account) = held.account.as_ref() else {
+        return Some(0);
+    };
+    match db::accounts::private_shop_premium_expire(&context.store, account.id).await {
+        Ok(expire) => Some(expire),
+        Err(error) => {
+            warn!(%addr, %error, "Premium expiry load failed; closing");
+            None
+        }
+    }
+}
+
+/// Read the account's fish-mind premium expiry for the admission, as the auth query reads
+/// it with the login (`G/input_auth.cpp:141`): `None` (after the log line) closes, as a
+/// refused load does, and no account reads 0, as no row does.
+async fn fish_mind_expiry_of(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &Held,
+) -> Option<i64> {
+    let Some(account) = held.account.as_ref() else {
+        return Some(0);
+    };
+    match db::accounts::fish_mind_expire(&context.store, account.id).await {
+        Ok(expire) => Some(expire),
+        Err(error) => {
+            warn!(%addr, %error, "Fish-mind expiry load failed; closing");
+            None
+        }
+    }
+}
+
 async fn enter_game<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -8641,20 +8681,15 @@ where
     // The account's premium expiry rides the admission, as `aiPremiumTimes` rides
     // the auth answer (`G/input_auth.cpp:145`): a refused read closes, as a refused
     // load does, and no account table reads 0, as no row does.
-    let shop_premium_expire = match held.account.as_ref() {
-        Some(account) => {
-            match db::accounts::private_shop_premium_expire(&context.store, account.id).await {
-                Ok(expire) => expire,
-                Err(error) => {
-                    warn!(%addr, %error, "Premium expiry load failed; closing");
-                    return false;
-                }
-            }
-        }
-        None => 0,
+    let Some(shop_premium_expire) = shop_premium_expiry_of(context, addr, held).await else {
+        return false;
+    };
+    let Some(fish_mind_expire) = fish_mind_expiry_of(context, addr, held).await else {
+        return false;
     };
     let mut loaded = loaded_state(addr, held, Some(show), messenger, account);
     loaded.shop_premium_expire = shop_premium_expire;
+    loaded.fish_mind_expire = fish_mind_expire;
     let Some((world_vid, shown)) =
         join_the_world(context, addr, character, vid, (items, loaded), outbox).await
     else {
@@ -8890,6 +8925,7 @@ fn loaded_state(
             .map_or_else(Vec::new, |character| character.horse.name.clone()),
         account,
         shop_premium_expire: 0,
+        fish_mind_expire: 0,
         addr: addr.ip().to_string(),
     }
 }

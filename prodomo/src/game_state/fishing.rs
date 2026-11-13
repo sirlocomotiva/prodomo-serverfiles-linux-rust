@@ -13,8 +13,8 @@
 //!
 //! The event's first firing is the bite: it stamps the hang time, picks the fish
 //! (`DetermineFish`, `:361-401`), sends `REACT` around, and, to a character who knows the
-//! fish (`PredictFish`, `:451-462`: the fish mind pill's affect or a fish mind unique item;
-//! the premium is not ported, so it never holds), sends `FISH` with the fish's vnum to its
+//! fish (`PredictFish`, `:451-462`: the fish mind pill's affect, a fish mind unique item,
+//! or the fish mind premium), sends `FISH` with the fish's vnum to its
 //! own client. It fires again 6 seconds later: the fish got away, `FAIL` goes around, the
 //! bait is gone (socket 2 of the rod is 0) and the event ends. A firing that finds no rod
 //! in the weapon cell ends the event silently.
@@ -498,7 +498,7 @@ impl GameState {
     }
 
     /// `DetermineFish` (`G/fishing.cpp:361-401`): the fish of the map's column, of the fish
-    /// mind's columns for a character who wears one (2, or 3 while the `manwoo` flag is
+    /// mind's columns for a character who holds one (2, or 3 while the `manwoo` flag is
     /// set), with the `fish_miss_pct` flag's shift of the draw. 0 off the fishing maps.
     fn determine_fish(&mut self, vid: Vid) -> usize {
         let Some(mut prob) = self
@@ -507,7 +507,7 @@ impl GameState {
         else {
             return 0;
         };
-        if self.wears_unique_group(vid, UNIQUE_GROUP_FISH_MIND) {
+        if self.wears_unique_group(vid, UNIQUE_GROUP_FISH_MIND) || self.premium_fish_mind(vid) {
             prob = if self.event_rate(b"manwoo") != 0 {
                 3
             } else {
@@ -538,8 +538,8 @@ impl GameState {
         fish_id
     }
 
-    /// `PredictFish` (`G/fishing.cpp:451-462`): the fish mind pill's affect or a worn fish
-    /// mind unique item. The premium fish mind is not ported.
+    /// `PredictFish` (`G/fishing.cpp:451-462`): the fish mind pill's affect, a worn fish
+    /// mind unique item, or the fish mind premium.
     fn predicts_fish(&self, vid: Vid) -> bool {
         let pill = self.affect_events.get(&vid).is_some_and(|event| {
             event
@@ -547,7 +547,15 @@ impl GameState {
                 .iter()
                 .any(|affect| affect.kind == AFFECT_FISH_MIND_PILL)
         });
-        pill || self.wears_unique_group(vid, UNIQUE_GROUP_FISH_MIND)
+        pill || self.wears_unique_group(vid, UNIQUE_GROUP_FISH_MIND) || self.premium_fish_mind(vid)
+    }
+
+    /// `GetPremiumRemainSeconds(PREMIUM_FISH_MIND) > 0` (`G/char.cpp:8091-8097`): the held
+    /// fish-mind expiry less the wall clock, as the points' getters read it.
+    fn premium_fish_mind(&self, vid: Vid) -> bool {
+        self.fish_mind_expiry
+            .get(&vid)
+            .is_some_and(|expiry| expiry.saturating_sub(i64::from(Self::global_time())) > 0)
     }
 
     /// `IsEquipUniqueGroup` (`G/char_item.cpp:9543-9560`): a unique cell holds an item of the
@@ -1156,6 +1164,26 @@ mod portal_tests {
         let got = std::iter::from_fn(|| orders.try_recv().ok()).collect();
         lease.put_orders(orders);
         got
+    }
+
+    /// The fish-mind premium's condition (`GetPremiumRemainSeconds(4) > 0`): a future
+    /// held expiry predicts the fish, a zero or past one does not.
+    #[test]
+    fn a_future_fish_mind_expiry_predicts_the_fish() {
+        let (mut world, _clock, clients) = field();
+        let lease = join(&mut world, &clients, portal(1, [0; 6]));
+        let _mover = world.own_mover(ALPHA).expect("the body is placed");
+        let now = i64::from(GameState::global_time());
+        world.fish_mind_expiry.insert(ALPHA, now + 3600);
+        assert!(world.predicts_fish(ALPHA), "a future expiry predicts");
+        world.fish_mind_expiry.insert(ALPHA, 0);
+        assert!(!world.predicts_fish(ALPHA), "never bought predicts nothing");
+        world.fish_mind_expiry.insert(ALPHA, now - 1);
+        assert!(
+            !world.predicts_fish(ALPHA),
+            "a past expiry predicts nothing"
+        );
+        drop(lease);
     }
 
     /// A lone town portal marks its own sockets and warps its user to town; the

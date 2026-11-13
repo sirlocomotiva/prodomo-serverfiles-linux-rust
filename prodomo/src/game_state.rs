@@ -709,6 +709,10 @@ pub struct GameState {
     /// (`m_aiPremiumTimes[PREMIUM_PRIVATE_SHOP]`): the unix time the 507 use
     /// wrote, 0 when never bought. Seeded at admission, cleared on leave.
     shop_premium_expiry: HashMap<common::vid::Vid, i64>,
+    /// The account's fish-mind premium expiry each online character holds
+    /// (`m_aiPremiumTimes[PREMIUM_FISH_MIND]`): the unix time the premium ran to,
+    /// 0 when never bought. Seeded at admission, cleared on leave.
+    fish_mind_expiry: HashMap<common::vid::Vid, i64>,
     /// The number of the last affect event started, which orders two events due on one Pulse.
     affect_sequence: u64,
     /// The affect event of each non-player that has one: the timed affects only, no
@@ -3596,6 +3600,7 @@ impl GameState {
         let _expiry = self
             .shop_premium_expiry
             .insert(vid, loaded.shop_premium_expire);
+        let _fish = self.fish_mind_expiry.insert(vid, loaded.fish_mind_expire);
         // `GetBattlePass` (`G/char.cpp:2434-2436`): the stored missions split into
         // the buckets, then both refresh.
         self.install_pass_loaded(vid, &loaded.battle_pass);
@@ -3888,6 +3893,12 @@ impl GameState {
         }
     }
 
+    /// Forget the held premium expiries of the character under `vid`, as its departure does.
+    fn forget_premiums(&mut self, vid: common::vid::Vid) {
+        let _expiry = self.shop_premium_expiry.remove(&vid);
+        let _fish = self.fish_mind_expiry.remove(&vid);
+    }
+
     /// As [`GameState::leave_world`], for a character that leaves by `departure`. A player
     /// stunned or dead stands first with 50 hit points (B5), and its fight's events end; a
     /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
@@ -3912,7 +3923,7 @@ impl GameState {
         // `CHARACTER::Save`, before `Disconnect` ends the character's events).
         let affects = self.saved_affects_of(vid);
         let _event = self.affect_events.remove(&vid);
-        let _expiry = self.shop_premium_expiry.remove(&vid);
+        self.forget_premiums(vid);
         // `event_cancel(&m_pkFishingEvent)` and `event_cancel(&m_pkMiningEvent)` in
         // `CHARACTER::Destroy` (`G/char.cpp:719`, `:733`): silent, unlike `mining_cancel`.
         let _fishing = self.fishing_events.remove(&vid);
@@ -8997,6 +9008,7 @@ mod tests {
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
                 shop_premium_expire: 0,
+                fish_mind_expire: 0,
                 addr: String::new(),
             }),
             outbox,
@@ -9065,6 +9077,7 @@ mod tests {
                 horse_name: Vec::new(),
                 account: crate::game_loop_messages::QuestAccount::default(),
                 shop_premium_expire: 0,
+                fish_mind_expire: 0,
                 addr: String::new(),
             }),
             outbox,
