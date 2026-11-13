@@ -30,8 +30,9 @@
 //! wedding checks `__FIX_COSTUM_NUNTA_PESTE_COSTUM_NORMAL__` repeats (the `ENABLE_WEDDING_FIX`
 //! ones return first), `REAL_TIME_FIRST_USE`, the mount quest and the aura window; the lock
 //! (`IsSecured`) gates the equip and the unequip at legacy's places, with the popup the
-//! game state chats. The quickslot sync and `EquipItem`'s `IsExchanging` (`:8315`) stay out:
-//! the move and the use refuse an offered item before they get here.
+//! game state chats. `EquipItem`'s `IsExchanging` (`:8315`) stays out: the move and the
+//! use refuse an offered item before they get here. The plain equip syncs the quickslots
+//! (`:8525-8531`); the swap and the take-off sync nothing, as legacy's do.
 
 use common::enums::EWearPositions;
 use common::item_slots::{
@@ -978,7 +979,18 @@ impl<'s, 'g> Equipper<'s, 'g> {
             }
             Some(_) => return Err(MoveRefused::Irremovable),
             None => {
+                let from = item.pos.cell;
                 self.put_on(wear, &item)?;
+                // `SyncQuickslot(QUICKSLOT_TYPE_ITEM, bOldCell, iWearCell)`
+                // (`G/char_item.cpp:8525-8531`): the slot is re-pointed at the bare wear
+                // index (10 for a shield), which `SetQuickslot` accepts as an inventory
+                // cell. The swap arm syncs nothing, and neither does the take-off.
+                self.trail.records.push(MoveRecord::QuickslotSync(
+                    super::quickslot::QuickslotSync {
+                        from,
+                        to: super::quickslot::SyncTo::Cell(wear),
+                    },
+                ));
                 false
             }
         };
@@ -2294,10 +2306,12 @@ mod tests {
             case.points.parts()[common::enums::EParts::Weapon as usize],
             11
         );
-        let last = done.records.last().expect("records");
+        // The look rides ahead of the equip's quickslot sync (`:8525-8531`), which
+        // trails the burst when no effect answers.
+        let tail: Vec<&MoveRecord> = done.records.iter().rev().take(2).collect();
         assert!(
-            matches!(last, MoveRecord::Look(_)),
-            "the look is last: {last:?}"
+            matches!(tail.as_slice(), [MoveRecord::QuickslotSync(_), MoveRecord::Look(_)]),
+            "the look rides ahead of the sync: {tail:?}"
         );
         assert!(effects(&done).is_empty());
     }
@@ -2481,6 +2495,62 @@ mod tests {
         let mut case = Case::new(&[(inv(2), Item::new(4, SASH_GRADE_2))]);
         let done = case.run(inv(2), wear_pos(SASH)).expect("equips");
         assert_eq!(effects(&done), vec![SASH_EQUIP_EFFECT]);
+    }
+
+    /// The plain equip's quickslot sync (`G/char_item.cpp:8525-8531`): a slot naming the
+    /// old cell is re-pointed at the bare wear index. The swap arm syncs nothing.
+    ///
+    /// The sync is vacuous for honest clients: slots name `ITEM_USE` cells (the client's
+    /// add refuses anything else, `G/input_main.cpp:1095-1109`) and worn items are never
+    /// `ITEM_USE` (`IsEquipable`, `G/item.cpp:1378-1397`), so no slot ever names the worn
+    /// cell. The record still runs, as legacy's does.
+    #[test]
+    fn a_plain_equip_repoints_the_slot_at_the_wear_index_and_a_swap_syncs_nothing() {
+        use crate::character::quickslot::{Quickslot, QuickslotSync, Quickslots, SyncTo};
+        use common::enums::EQuickSlotType;
+        let mut case = Case::new(&[(inv(5), Item::new(4, ARMOUR))]);
+        let done = case.run(inv(5), wear_pos(BODY)).expect("equips");
+        let syncs: Vec<QuickslotSync> = done
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                MoveRecord::QuickslotSync(sync) => Some(*sync),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            syncs,
+            vec![QuickslotSync {
+                from: 5,
+                to: SyncTo::Cell(BODY),
+            }],
+            "the slot follows the wear index"
+        );
+        let mut slots = Quickslots::default();
+        let mut out = Vec::new();
+        assert!(slots.set(
+            0,
+            Quickslot {
+                kind: EQuickSlotType::Item as u8,
+                pos: 5,
+            },
+            &mut out,
+        ));
+        let applied = slots.sync(syncs[0], &case.items);
+        assert_eq!(applied.len(), 1, "the re-point answers its add");
+        let mut worn = Case::wearing(&[(BODY, Item::new(6, ARMOUR))]);
+        worn.items
+            .set(inv(5), &Item::new(4, HEAVY_ARMOUR))
+            .expect("the heavy armour waits");
+        let done = worn
+            .run(inv(5), wear_pos(EWearPositions::Head as u16))
+            .expect("swaps");
+        assert!(
+            done.records
+                .iter()
+                .all(|record| !matches!(record, MoveRecord::QuickslotSync(_))),
+            "the swap arm syncs nothing"
+        );
     }
 
     #[test]
@@ -2708,7 +2778,10 @@ mod tests {
                 ItemRecord::Set(sword.gc_item_set(wear_pos(WEAPON), 0)),
             ]
         );
-        assert!(matches!(on.records.last(), Some(MoveRecord::Look(_))));
+        assert!(matches!(
+            on.records.last(),
+            Some(MoveRecord::QuickslotSync(_))
+        ));
         assert_eq!(case.at(wear_pos(WEAPON)), Some(7));
 
         // `UnequipItem` puts it back in the first free cell, 0, not the cell it came from.

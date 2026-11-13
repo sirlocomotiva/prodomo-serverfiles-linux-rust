@@ -11078,6 +11078,7 @@ fn read_a_move_within(keyed: &mut Keyed, vid: u32, window: Duration) -> Vec<Seen
                 assert_eq!(&record[2..6], &vid.to_le_bytes(), "the mover's VID");
                 Seen::Effect(record[1])
             }
+
             other => panic!("a record nobody accounted for in a move: header {other}"),
         })
         .collect()
@@ -59494,6 +59495,7 @@ fn read_a_move_with_updates(
                 assert_eq!(&record[2..6], &vid.to_le_bytes(), "the mover's VID");
                 Seen::Effect(record[1])
             }
+
             GC_CHARACTER_UPDATE => {
                 let update = GcCharacterUpdate::decode(record).expect("a character update decodes");
                 assert_eq!(update.dw_vid, vid, "the mover's VID");

@@ -55056,3 +55056,36 @@ dark and light swapped kills the scenario at the setter's ring; the login replay
 sending `light` kills it at the replay. The scenario ran 4/4.
 
 Gates (2026-11-13): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5576 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal`, same lagged record in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 641. The wear quickslot sync
+
+`sys.char.quickslot` is `ported`. The audit swept every `SyncQuickslot` (24 sites),
+`ChainQuickslotItem` and server `SetQuickslot` caller against the port: all were already
+ported except the plain equip's (`G/char_item.cpp:8525-8531`), which is this slice's eight
+lines — the `QuickslotSync` record in `equip_item`'s plain arm, re-pointing the slot at
+the bare wear index (`SyncTo::Cell(wear)`, not the flat cell: legacy passes `iWearCell`,
+so a shield re-points at inventory cell 10, which `SetQuickslot` accepts). The swap arm
+and the take-off sync nothing, as legacy's do (`SwapItem` carries no sync; `UnequipItem`
+carries none).
+
+The sync is vacuous for honest clients, with proof: slots name `ITEM_USE` cells (the
+client's add refuses anything else, `G/input_main.cpp:1095-1109`) while worn items are
+never `ITEM_USE` (`IsEquipable`'s type list, `G/item.cpp:1378-1397`), so no slot ever
+names the worn cell. The six `WEAR_SHIELD` `ITEM_USE` protos (70026, 71068, 71153-71156)
+fail the same type gate — a wire scenario is impossible, so the unit test
+`a_plain_equip_repoints_the_slot_at_the_wear_index_and_a_swap_syncs_nothing` sets the
+slot directly and asserts the re-point record, its applied add, and the swap's silence.
+(The first attempt wrote a wire scenario around the cloak 70026; the wear refused
+silently, which is what forced the reachability proof.)
+
+Mutants (each applied to the pristine file, restored by checksum): the sync record
+dropped kills the test at the record assert; the target as the flat cell
+(`INVENTORY_MAX_NUM + wear`) kills it at the same assert.
+
+The new record broke two stale world asserts (`a_sword_moved_onto_the_weapon_cell_is_worn`,
+`using_a_sword_puts_it_on_and_using_it_again_takes_it_off`), which pinned the look as the
+trail's last record; they now pin legacy's order (look, then the sync, effects after it).
+No wire burst changes: the marker expands to records only for a slot naming the worn cell,
+which honest clients never hold.
+
+Gates (2026-11-13): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5575 passed, 3 failed in 46 targets — the two stale world asserts above (fixed and green since, `world` 685/685) and the known `a_morphed_caller_hears_every_stat_refusal` load flake; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
