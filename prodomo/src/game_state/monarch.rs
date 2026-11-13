@@ -32,14 +32,17 @@
 //! and the candidacy answers (`HEADER_DG_RMCANDIDACY`, `HEADER_DG_ELECT_MONARCH`,
 //! `HEADER_DG_COME_TO_VOTE`) have no game-side case, so no client observes anything.
 
+use common::point_slot as point;
 use common::vid::Vid;
 use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::gc_vid::GcSpecialEffect;
+use protocol::item_pos::ItemPos;
 use tracing::warn;
 
 use super::GameState;
 use crate::chat_line::Arg;
 use crate::command::two_arguments;
-use crate::item_move::Mover;
+use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 use world::character::number;
 
 /// The treasuries the store loaded, by empire slot.
@@ -64,6 +67,8 @@ pub struct SetMonarchLanded {
 /// The powers with a cooldown (`CHARACTER::MONARCH_INDEX`, `G/char.h:1974-1981`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MonarchPower {
+    /// `MI_HEAL`: the 70021 blessing.
+    Heal,
     /// `MI_WARP`: `/mto`.
     Warp,
     /// `MI_TRANSFER`: `/mtr`.
@@ -82,6 +87,43 @@ const CHECK_MONEY_FORMAT: &[u8] = &[
 ];
 /// `c_apszEmpireNames` (`G/constants.cpp:1072-1078`): the info's empire word, by slot.
 const EMPIRE_WORDS: [&[u8]; 4] = [b"[LS;1037]", b"[LS;793]", b"[LS;794]", b"[LS;795]"];
+/// The emperor's blessing (`case 70021`, `G/char_item.cpp:5195-5210`).
+const MONARCH_HEAL_ITEM: u32 = 70_021;
+/// `MonarchHealGold`'s fallback (`:5198-5199`): 2000000.
+const MONARCH_HEAL_PRICE: i64 = 2_000_000;
+/// `FHealMyEmpire`'s line (`G/monarch.cpp:32-50`).
+const HEAL_FUNCTOR_LINE: &[u8] = &[
+    0xb1, 0xba, 0xc1, 0xd6, 0xb0, 0xa1, 0x20, 0xb3, 0xbb, 0xb8, 0xb0, 0x20, 0xc3, 0xe0, 0xba, 0xb9,
+    0xc0, 0xbb, 0xc0, 0xb8, 0xb7, 0xce, 0x20, 0xb8, 0xf0, 0xb5, 0xe7, 0x20, 0xbf, 0xa1, 0xb3, 0xca,
+    0xc1, 0xf6, 0xb0, 0xa1, 0x20, 0xb0, 0xa1, 0xb5, 0xe6, 0x20, 0xc3, 0xa4, 0xbf, 0xf6, 0xc1, 0xfd,
+    0xb4, 0xcf, 0xb4, 0xd9,
+];
+/// `HealMyEmpire`'s non-monarch line (`:61-67`).
+const HEAL_NOT_MONARCH_LINE: &[u8] = &[
+    0xb1, 0xba, 0xc1, 0xd6, 0xc0, 0xc7, 0x20, 0xc0, 0xda, 0xb0, 0xdd, 0xc0, 0xbb, 0x20, 0xb0, 0xa1,
+    0xc1, 0xf6, 0xb0, 0xed, 0x20, 0xc0, 0xd6, 0xc1, 0xf6, 0x20, 0xbe, 0xca, 0xbd, 0xc0, 0xb4, 0xcf,
+    0xb4, 0xd9,
+];
+/// `HealMyEmpire`'s cooldown line (`:70-75`).
+const HEAL_WAIT_LINE: &[u8] = &[
+    b'%', b'd', 0x20, 0xc3, 0xca, 0x20, 0xc8, 0xc4, 0xbf, 0xa1, 0x20, 0xb1, 0xba, 0xc1, 0xd6, 0xc0,
+    0xc7, 0x20, 0xc3, 0xe0, 0xba, 0xb9, 0xc0, 0xbb, 0x20, 0xbb, 0xe7, 0xbf, 0xeb, 0xc7, 0xd2, 0x20,
+    0xbc, 0xf6, 0x20, 0xc0, 0xd6, 0xbd, 0xc0, 0xb4, 0xcf, 0xb4, 0xd9,
+];
+/// `HealMyEmpire`'s short-treasury line (`:77-81`).
+const HEAL_SHORT_LINE: &[u8] = &[
+    0xb1, 0xb9, 0xb0, 0xed, 0xbf, 0xa1, 0x20, 0xb5, 0xb7, 0xc0, 0xcc, 0x20, 0xba, 0xce, 0xc1, 0xb7,
+    0xc7, 0xd5, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e, 0x20, 0xc7, 0xf6, 0xc0, 0xe7, 0x20, 0x3a, 0x20, 0x25,
+    0x75, 0x20, 0xc7, 0xca, 0xbf, 0xe4, 0xb1, 0xdd, 0xbe, 0xd7, 0x20, 0x3a, 0x20, 0x25, 0x75,
+];
+/// The 70021 notice (`:5204`).
+const HEAL_NOTICE_FORMAT: &[u8] =
+    b"[559]When the Blessing of the Emperor is used %s the HP and SP are restored again.";
+/// `SE_SPUP_BLUE` (`C/length.h:853`): 2, counted from `SE_NONE`.
+const SE_SPUP_BLUE: u8 = 2;
+/// `SE_HPUP_RED` (`:852`): 1.
+const SE_HPUP_RED: u8 = 1;
+
 /// `cs_dwMonarchMobVnums` (`G/cmd_general.cpp:2836-2860`): the vnums `/mmob` summons.
 const MONARCH_MOB_VNUMS: [u32; 20] = [
     191, 192, 193, 194, 391, 392, 393, 394, 491, 492, 493, 494, 591, 691, 791, 1304, 1901, 2091,
@@ -219,6 +261,7 @@ impl GameState {
     /// The cooldown's seconds (`CHARACTER::MONARCH_COOLTIME`, `G/char.h:1965-1971`).
     const fn power_seconds(power: MonarchPower) -> u64 {
         match power {
+            MonarchPower::Heal => 10,
             MonarchPower::Warp | MonarchPower::Transfer => 60,
             MonarchPower::Tax => 60 * 60 * 24 * 7,
             MonarchPower::Summon => 60 * 60,
@@ -228,6 +271,7 @@ impl GameState {
     /// The cooldown slot (`CHARACTER::MONARCH_INDEX`, `G/char.h:1974-1981`).
     const fn power_slot(power: MonarchPower) -> usize {
         match power {
+            MonarchPower::Heal => 0,
             MonarchPower::Warp => 1,
             MonarchPower::Transfer => 2,
             MonarchPower::Tax => 3,
@@ -262,7 +306,13 @@ impl GameState {
         let per = u64::from(crate::save::PASSES_PER_SEC);
         self.monarch_cooldowns.entry(vid).or_insert_with(|| {
             let mut set = [pulse; 5];
-            for (slot, seconds) in [(1, 60), (2, 60), (3, 60 * 60 * 24 * 7), (4, 60 * 60)] {
+            for (slot, seconds) in [
+                (0, 10),
+                (1, 60),
+                (2, 60),
+                (3, 60 * 60 * 24 * 7),
+                (4, 60 * 60),
+            ] {
                 set[slot] = pulse.wrapping_sub(seconds * per);
             }
             set
@@ -320,8 +370,8 @@ impl GameState {
     /// The price a warp or a summon charges before it fires.
     const fn power_price(power: MonarchPower) -> i64 {
         match power {
+            MonarchPower::Heal | MonarchPower::Tax => 0,
             MonarchPower::Warp | MonarchPower::Transfer => 10_000,
-            MonarchPower::Tax => 0,
             MonarchPower::Summon => 5_000_000,
         }
     }
@@ -369,6 +419,179 @@ impl GameState {
         self.monarch_money[slot] = money;
         self.stamp_monarch(vid, power);
         money
+    }
+
+    /// Whether the item at `at` is the emperor's blessing (`case 70021`,
+    /// `G/char_item.cpp:5195-5210`).
+    pub(super) fn monarch_heal_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == MONARCH_HEAL_ITEM)
+    }
+
+    /// The emperor's blessing (`case 70021`, `G/char_item.cpp:5195-5210`) through
+    /// `CMonarch::HealMyEmpire` (`G/monarch.cpp:52-97`): the monarch gate (a GM passes
+    /// without being the monarch), the heal cooldown, and the treasury against the
+    /// `MonarchHealGold` flag (2000000 when the flag is 0). On success every PC of
+    /// the caller's empire on the caller's map hears the functor line, refills both
+    /// pools through `PointChange` (whose records land one change each), and shows
+    /// the blue then the red effect around; the treasury is charged, the cooldown
+    /// stamped, the map hears the `[559]` notice, and the caller hears `[LS;570]`.
+    /// The use's checks run first; a refused heal keeps the item, as every failure
+    /// arm returns before the charge. The `[TEST_ONLY]` treasury line is test-server
+    /// mode's, which this build never runs.
+    /// `HealMyEmpire`'s gates (`G/monarch.cpp:60-82`): the monarch with its GM pass,
+    /// the heal cooldown, and the treasury against the `MonarchHealGold` flag
+    /// (2000000 when unset). Answers the price when the heal may fire.
+    fn monarch_heal_gates(&self, vid: Vid, actor: Mover) -> Option<i64> {
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let empire = actor.empire;
+        let caller =
+            self.characters
+                .find_by_vid(vid)
+                .map_or(crate::command::GM_PLAYER, |character| {
+                    character.points().map_or(
+                        crate::command::GM_PLAYER,
+                        world::character::Points::gm_level,
+                    )
+                });
+        let gm = self.test_server || caller != crate::command::GM_PLAYER;
+        if !self.is_monarch(pid, empire) && !gm {
+            self.tell(vid, actor, CHAT_TYPE_INFO, HEAL_NOT_MONARCH_LINE, &[]);
+            warn!(pid, "No Monarch");
+            return None;
+        }
+        if let Some(wait) = self.monarch_wait(vid, MonarchPower::Heal) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                HEAL_WAIT_LINE,
+                &[Arg::Int(i64::try_from(wait).unwrap_or(i64::MAX))],
+            );
+            return None;
+        }
+        let price = self
+            .quests
+            .as_ref()
+            .map_or(0, |quests| quests.manager().event_flag(b"MonarchHealGold"));
+        let price = if price == 0 {
+            MONARCH_HEAL_PRICE
+        } else {
+            i64::from(price)
+        };
+        if i64::from(self.monarch_money_of(empire)) < price {
+            let held = i64::from(self.monarch_money_of(empire));
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                HEAL_SHORT_LINE,
+                &[Arg::Int(held), Arg::Int(price)],
+            );
+            return None;
+        }
+        Some(price)
+    }
+
+    /// `FHealMyEmpire` over the map (`G/monarch.cpp:31-50`, `:83-86`): every PC of
+    /// `empire` on `map` hears the functor line, refills both pools through
+    /// `PointChange`, and shows the blue effect then the red around.
+    fn monarch_heal_land(&mut self, map: i32, empire: u8) {
+        let mut healed: Vec<Vid> = self
+            .bodies
+            .iter()
+            .filter(|(_, body)| body.map == map && body.card.empire == empire)
+            .map(|(healed, _)| *healed)
+            .collect();
+        healed.sort_by_key(|healed| healed.raw());
+        for healed in healed {
+            let Some(fan) = self.own_mover(healed) else {
+                continue;
+            };
+            self.tell(healed, fan, CHAT_TYPE_INFO, HEAL_FUNCTOR_LINE, &[]);
+            let refill = self
+                .pc_points_mut(healed.raw())
+                .map(|points| {
+                    let hp = points
+                        .point_change(point::POINT_HP, points.max_hp() - points.hp(), false, false)
+                        .unwrap_or_default();
+                    let sp = points
+                        .point_change(point::POINT_SP, points.max_sp() - points.sp(), false, false)
+                        .unwrap_or_default();
+                    [hp, sp].concat()
+                })
+                .unwrap_or_default();
+            self.send_point_records(healed, &refill);
+            for effect in [SE_SPUP_BLUE, SE_HPUP_RED] {
+                let mut record = Vec::new();
+                GcSpecialEffect {
+                    effect_type: effect,
+                    vid: healed.raw(),
+                }
+                .encode_into(&mut record);
+                self.packet_around(
+                    super::view::EntityKey::Character(healed.raw()),
+                    &record,
+                    None,
+                );
+            }
+        }
+    }
+
+    pub(super) fn use_monarch_heal(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let empire = actor.empire;
+        let Some(price) = self.monarch_heal_gates(vid, actor) else {
+            return self.nothing_used(vid, actor);
+        };
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let heal = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(heal.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(heal.vnum))?;
+            world::character::use_checks(&heal, proto, rules, gear.points)?;
+            world::character::spend_one(items, &heal, proto)
+        })?;
+        let map = self.place_of(vid.raw()).map_or(0, |(_, map)| map);
+        let slot = usize::from(empire);
+        self.monarch_money[slot] -= price;
+        let money = self.monarch_money[slot];
+        self.stamp_monarch(vid, MonarchPower::Heal);
+        self.monarch_heal_land(map, empire);
+        let nation = Self::heal_empire_name(empire);
+        let mut notice = HEAL_NOTICE_FORMAT.to_vec();
+        if let Some(at) = notice.windows(2).position(|pair| pair == b"%s") {
+            notice.splice(at..at + 2, nation.iter().copied());
+        }
+        self.tell_war_map(map, &notice, false);
+        self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;570]", &[]);
+        let mut moved = moved;
+        moved.monarch_money = Some((empire, money));
+        Ok(moved)
+    }
+
+    /// `EMPIRE_NAME` (`G/start_position.h:14-17`): `LC_TEXT(g_nation_name[e])`, the
+    /// CP949 nation name (`G/start_position.cpp:5-11`), as the three-way war's arm
+    /// reads it: a `LOCALE_YMIR` lookup answers its string as it is.
+    fn heal_empire_name(empire: u8) -> &'static [u8] {
+        match empire {
+            1 => b"\xbd\xc5\xbc\xf6\xb1\xb9".as_slice(),
+            2 => b"\xc3\xb5\xc1\xb6\xb1\xb9".as_slice(),
+            _ => b"\xc1\xf8\xb3\xeb\xb1\xb9".as_slice(),
+        }
     }
 
     /// `ACMD(do_monarch_warpto)`: the gates, then the name, then the target's
@@ -828,5 +1051,60 @@ impl GameState {
                 .saturating_add(u32::from(byte - b'0'));
         }
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HEAL_NOT_MONARCH_LINE, MONARCH_HEAL_ITEM};
+    use crate::game_state::fixtures;
+    use crate::item_move::Mover;
+    use common::vid::Vid;
+    use protocol::item_pos::ItemPos;
+
+    /// `HealMyEmpire`'s first gate (`G/monarch.cpp:60-68`): off the test-server mode, a
+    /// caller who is neither its empire's monarch nor a GM hears the line and the item
+    /// stays. The wire cannot show this: the harness runs the test-server mode, where
+    /// every caller passes as a GM.
+    #[test]
+    fn a_commoners_blessing_is_refused_off_the_test_mode() {
+        let clock = fixtures::TestClock::default();
+        let mut world = fixtures::a_world(&clock).with_test_server(false);
+        let at = ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
+        let heal = world::item::Item::new(31, MONARCH_HEAL_ITEM);
+        let mut inbox = fixtures::enter_on(&mut world, (1, 1), 8, (3300, 3200), 820);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(8))
+            .expect("the caller is online")
+            .items_mut()
+            .set(at, &heal)
+            .expect("the blessing lands");
+        while inbox.try_recv().is_ok() {}
+        let mover = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 0,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            affect_flags: [0; 2],
+            dead: false,
+            killer_mode: false,
+            alignment: 0,
+            view_guild: (0, 0),
+            premium: (0, 0),
+        };
+        let answered = world
+            .use_monarch_heal(Vid::new(8), at, mover)
+            .expect("a refused heal answers");
+        assert!(answered.changes.is_empty(), "the item stays");
+        let line = inbox.try_recv().expect("the caller was told");
+        let want = crate::chat_line::chat_packet(
+            mover.recipient(&world.locale),
+            protocol::gc_chat::CHAT_TYPE_INFO,
+            HEAL_NOT_MONARCH_LINE,
+            &[],
+        );
+        assert_eq!(line, want, "the monarch line lands");
+        assert!(inbox.try_recv().is_err(), "nothing else lands");
     }
 }

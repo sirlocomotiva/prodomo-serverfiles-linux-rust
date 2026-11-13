@@ -50732,6 +50732,80 @@ fn a_monarch_is_named_informed_and_cleared() {
 /// refused, her summon stands its Fox when the treasury holds the 5000000 to
 /// the coin, and the second summon waits out its hour. The spends follow on
 /// the store.
+/// `cg.game.item_use`: `case 70021` through `CMonarch::HealMyEmpire` (`G/char_item.cpp:5195-5210`,
+/// `G/monarch.cpp:52-97`). Naming her monarch refills the treasury, and the blessing heals every
+/// PC of her empire on her map to full pools, chats the `[559]` notice to the map and `[LS;570]`
+/// to her, charges 2000000 off the treasury, and spends one. (The commoner's refusal runs in the
+/// `game_state::monarch` unit test: the harness runs the test-server mode, where every caller
+/// passes the monarch gate as a GM.)
+#[test]
+fn a_monarchs_blessing_heals_her_empire_and_charges_the_treasury() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR'          FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 6000000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, 70021 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    assert!(protos.get(70_021).is_some(), "the owner's data has it");
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    // Given: naming her monarch refills the treasury from her gold.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/setmonarch Alpha"));
+    alice.still("naming lands silently");
+    // When: the monarch uses the blessing. Then: her pools refill, the map hears
+    // the notice, and she hears the success line.
+    alice.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut functor = false;
+    let mut healed = false;
+    let mut noticed = false;
+    let mut thanked = false;
+    while std::time::Instant::now() < deadline && !(functor && healed && noticed && thanked) {
+        let Some(record) = alice.read_game_until(deadline) else {
+            break;
+        };
+        if record == an_info_line(&[
+            0xb1, 0xba, 0xc1, 0xd6, 0xb0, 0xa1, 0x20, 0xb3, 0xbb, 0xb8, 0xb0, 0x20, 0xc3, 0xe0,
+            0xba, 0xb9, 0xc0, 0xbb, 0xc0, 0xb8, 0xb7, 0xce, 0x20, 0xb8, 0xf0, 0xb5, 0xe7, 0x20,
+            0xbf, 0xa1, 0xb3, 0xca, 0xc1, 0xf6, 0xb0, 0xa1, 0x20, 0xb0, 0xa1, 0xb5, 0xe6, 0x20,
+            0xc3, 0xa4, 0xbf, 0xf6, 0xc1, 0xfd, 0xb4, 0xcf, 0xb4, 0xd9,
+        ]) {
+            functor = true;
+        } else if record.first() == Some(&GC_POINT_CHANGE) {
+            healed = true;
+        } else if record == a_notice_line(
+            b"[559]When the Blessing of the Emperor is used \xbd\xc5\xbc\xf6\xb1\xb9 the HP and SP are restored again.",
+        ) {
+            noticed = true;
+        } else if record == an_info_line(b"[LS;570]") {
+            thanked = true;
+        }
+    }
+    assert!(functor, "the functor line lands");
+    assert!(healed, "the pools refill");
+    assert!(noticed, "the map hears the notice");
+    assert!(thanked, "the monarch hears the thanks");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    check(
+        &database,
+        "(SELECT money = 4000000 FROM monarch_money WHERE empire = 1)",
+    );
+    drop(alice);
+    drop(server);
+}
+
 #[test]
 fn a_monarch_warps_summons_and_taxes() {
     let Some(database) = ScratchDatabase::create() else {

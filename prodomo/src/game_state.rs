@@ -4575,6 +4575,9 @@ impl GameState {
         if self.elk_bar_at(vid, at) {
             return Some(self.use_elk_bar(vid, at, actor));
         }
+        if self.monarch_heal_at(vid, at) {
+            return Some(self.use_monarch_heal(vid, at, actor));
+        }
         None
     }
 

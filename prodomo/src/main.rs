@@ -1328,6 +1328,14 @@ where
         // A 507 use landed the account's premium expiry: store it as the DB write
         // does (`D/ClientManagerPrivateShop.cpp:2345`), before the item rows, so a
         // failure closes without a half-written step.
+        // A 70021 heal charged the monarch cell: store it before the item rows.
+        if let Some((empire, money)) = moved.monarch_money {
+            if let Err(error) = db::monarch::store_money(&context.store, empire, money).await {
+                warn!(%addr, %error, empire, money, "The monarch cell could not be stored; closing");
+                return false;
+            }
+            info!(%addr, empire, money, "Monarch cell charged by a heal");
+        }
         if let Some((account_id, expire)) = moved.shop_premium {
             let id = db::accounts::AccountId::new(account_id);
             if let Err(error) =

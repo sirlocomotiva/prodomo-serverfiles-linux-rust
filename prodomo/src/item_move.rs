@@ -143,6 +143,10 @@ pub struct MovedItems {
     /// before it sends (`UPDATE account SET premium_privateshop_expire`,
     /// `D/ClientManagerPrivateShop.cpp:2345`). `None` while the step landed none.
     pub shop_premium: Option<(u32, i64)>,
+    /// The monarch cell a 70021 heal charged: the slot with the landed cell, for the
+    /// descriptor to store before it sends (`db::monarch::store_money`). `None`
+    /// while the step charged none.
+    pub monarch_money: Option<(u8, i64)>,
 }
 
 /// What a used quest item's scripts landed besides the step's records and rows: the GRAND
@@ -250,6 +254,7 @@ impl MovedItems {
             store_order: StoreOrder::default(),
             quest: (Vec::new(), Vec::new(), None),
             shop_premium: None,
+            monarch_money: None,
         }
     }
 
@@ -339,6 +344,7 @@ impl MovedItems {
             store_order: StoreOrder::default(),
             quest: (Vec::new(), Vec::new(), None),
             shop_premium: None,
+            monarch_money: None,
         }
     }
 
