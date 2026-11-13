@@ -55144,3 +55144,32 @@ No product code changed: the lib, the API (`pc.get_level`, `pc.count_item`, `pc.
 The row's note names the scenario and the one arm left.
 
 Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5582 passed, 1 failed in 46 targets (`a_gm_purges_the_near_dog_and_all_sweeps_the_view`, a quest-target delete landing in the respawn window under full-suite load — passes alone, same family as the known load flakes, and 644 is test-only so unrelated); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after the refusal-helper split (129 lines); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 645. The pass quest's missing protos
+
+Two quest rows close with no product code, both found while scoping the next quest slice.
+
+`quest.battle_pass` is `unused`. The quest fires only on `25150.use`-`25161.use` (activate)
+and `25162.use` (reset), and no row of the owner's `item_proto.txt` is any of 25150-25162 or
+holds one in a vnum range — the sweep checks exact rows and `a~b` ranges alike, with the
+forest ticket 30613 at row 3989 as the positive control. Without a proto no character can
+hold the item (the 85000 and 31107 precedent: the give gives nothing), so no `.use` trigger
+ever fires on the owner's data. The names exist (`item_names.txt` names 25150 "BattlePass
+(Ian.)" and 25162 "Curatator BattlePass"), but names without protos stage no item. Owner
+question 74 asks for confirmation. A note for the port if the owner's live protos do name
+them: the quest's `monthIndex()` and `clear_old_battlepass()` helpers are undefined
+everywhere — named only in `quest_functions` (which only `qc` reads) and the quest itself,
+absent from every loaded `.lua` and from the C++ registrations — so both arms would abort
+mid-dialog on an undefined-global call, ending with the error `[DONE]`.
+
+`quest.enchanted_forest_zone` is `ported`. Its "the party branch waits for `party.getf` and
+`d.find`" note (ledger 279) was stale: ledger 280 already proved the leader's ticket refusal
+(`the_leaders_click_on_the_forest_room_is_refused_for_want_of_a_ticket`, with the
+`notEnoughLevelMembers` nil-loop naming nobody, as the Reference client shows against
+legacy too) and the full make (`a_party_enters_the_forest_and_its_timer_sends_it_home`:
+tickets taken, the dungeon of map 210 created, both warped to the entry, the login, the
+timer report, the exits home). The row now names the make scenario. Map 210
+(`metin2_map_dawnmist_dungeon_01`) is row 51 of the owner's index, so the branch is
+reachable, not merely bridged.
+
+Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; the two named forest scenarios re-proved green (`a_party_enters_the_forest_and_its_timer_sends_it_home`, `the_leaders_click_on_the_forest_room_is_refused_for_want_of_a_ticket`); `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

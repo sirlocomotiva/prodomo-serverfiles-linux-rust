@@ -688,3 +688,13 @@ owner answers.
  `GMCommandLog`, `SpeedHackLog`, `LoginLog`, `BootLog`, `LevelLog`, `ChangeNameLog`,
  `ShoutLog`) and drop the per-item spam? Five methods are dead either way (no callers:
  `HackCRCLog`, `PCBangLoginLog`, `CubeLog`, `ChatLog`, `InvalidServerLog`).
+74. **The battle-pass quest's items have no protos (ledger 645).** `battle_pass.lua`
+ fires only on `25150.use`-`25161.use` (activate) and `25162.use` (reset), and no row
+ of your `item_proto.txt` is any of 25150-25162 or holds one in a range (positive
+ control: the forest ticket 30613 is row 3989). Without a proto no character can hold
+ the item (the 85000 and 31107 precedent), so no `.use` trigger ever fires on your
+ data. Waits on it: confirm the pass quest is dead on your server too, so the row
+ stays `unused`. If your live protos name 25150-25162, the quest is a real port —
+ and its `monthIndex()` and `clear_old_battlepass()` helpers are undefined
+ everywhere (named only in `quest_functions` and the quest itself), so both arms
+ would abort mid-dialog.
