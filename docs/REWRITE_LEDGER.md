@@ -55031,3 +55031,28 @@ dropped kills the gates test; the entry stop dropped kills the scenario at the s
 line. The scenario ran 4/4.
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5575 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged record in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 640. The day flag's ring
+
+`sys.world.time` is `ported`, with no code change: the `day` flag's arm and login replay
+were already ported, and the scenario `the_day_flag_rings_dark_and_light_and_a_late_login_hears_dark`
+proves what the unit tests could not — the ring's broadcast to a second online client,
+the unset's `DayMode light`, and the late login's `DayMode dark` replay.
+
+The row's "no day/night driver" gap is not a gap. Legacy has no ticker: `DayMode` is
+driven only by the `day` and `eclipse` event flags (`G/questmanager.cpp:1418-1476`) and
+the wedding map (`G/wedding.cpp:243-245,272`), and `sys.marriage` is `unused`. The
+`global_time_gap` setters both sit in retired DB-peer handlers (the boot stream and the
+time relay, `G/input_db.cpp:773,1642`), so the wall clock is the time, as ledgers 227
+and 527 already back the quest readers on. `GC_TIME` at login is ledger 187's.
+
+The scenario's shape: Alice (HIGH_WIZARD) sets `day 1`, Yankee hears the ring, Carol
+loads and hears the replay, Alice unsets and both hear `light`. Bob enters with the GM
+team list (`Some(b"Alpha")`), as every two-client scenario with a HIGH_WIZARD must, and
+the firework seller the set stands stays out of both views.
+
+Mutants (each applied to the pristine file, restored by checksum): the `day` ring with
+dark and light swapped kills the scenario at the setter's ring; the login replay
+sending `light` kills it at the replay. The scenario ran 4/4.
+
+Gates (2026-11-13): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5576 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal`, same lagged record in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

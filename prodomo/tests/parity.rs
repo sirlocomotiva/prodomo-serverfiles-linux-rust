@@ -26884,6 +26884,85 @@ fn a_gm_sets_a_flag_and_a_late_login_reads_it() {
     alice.sees_enter(burst.character.id, true, None);
 }
 
+/// `sys.world.time`: the `day` flag's ring. A `HIGH_WIZARD` sets `day` to 1: the setter
+/// hears the echo and `DayMode dark`, and an online second client hears the ring; she
+/// unsets it and both hear `DayMode light`. A client loading while the flag stands hears
+/// `DayMode dark` in the login replay. (`SetEventFlag`'s `day` arm and
+/// `BroadcastEventFlagOnLogin`, `G/questmanager.cpp:1456-1476,1725-1727`.)
+#[test]
+fn the_day_flag_rings_dark_and_light_and_a_late_login_hears_dark() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 0,          470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1,          470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login IN ('bob', 'carol')",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD'          FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, None);
+    // The set: the echo answers the setter, and the ring reaches every client. The
+    // firework seller the set stands is out of both views, as is its unset removal.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag day 1"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag day 1"),
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"DayMode dark"),
+        "the setter hears the ring"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"DayMode dark"),
+        "the ring reaches the other client"
+    );
+    // A client loading while the flag stands hears it in the replay.
+    let (mut zulu, _, _list) = select_screen(&server, b"carol");
+    zulu.send_record(&client_select(0));
+    assert_eq!(zulu.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(zulu.read_game(), [GC_ENTITY, 3, 0]);
+    let _ = read_main_character(&mut zulu);
+    assert_eq!(
+        zulu.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"DayMode dark"),
+        "the login replay carries the standing flag"
+    );
+    // The unset rings light to every client.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/eventflag day 0"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag day 0"),
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"DayMode light"),
+    );
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"DayMode light"),
+    );
+}
+
 /// `cmd.xmas_boom`, `cmd.xmas_snow`, `cmd.xmas_santa`, `cmd.eclipse` and `cmd.eventhelper`
 /// (`do_xmas`, `do_eclipse`, `do_event_helper`, `G/cmd_gm.cpp:3270-3294`, `:4460-4520`)
 /// through `SetEventFlag`'s arms (`G/questmanager.cpp:1335-1688`, `G/xmas_event.cpp`):
