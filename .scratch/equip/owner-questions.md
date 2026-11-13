@@ -708,3 +708,11 @@ owner answers.
  find the live call `TeleportRing.MainWindow` in `_basic/TeleportRing.lua:4`. Waits on it:
  confirm these four are dead on your server too, so the rows stay `unused`. If any quest
  you run calls them, name it and the rows come back.
+76. **The multi-locale helper loads but nothing calls it (ledger 648).** `multiLocale.lua`
+ (dofiled from `questlib.lua`) defines three globals — `map_name`, `empire_names`,
+ `get_skill_name_by_vnum` — and no file calls any of them bare (the `locale.lua` hits
+ are that file's own `locale.map_name`/`locale.empire_names` table fields, a different
+ name). Positive control: the same bare-call sweep finds the live `locale.yes` uses in
+ the guild quests. Waits on it: confirm the helper is dead on your server too, so the
+ row stays `unused`. (`map_name` also returns the wrong table — it builds `mapName` and
+ returns `skillName[map_index]` — so a caller would get nothing back.)

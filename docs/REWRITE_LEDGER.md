@@ -55232,3 +55232,30 @@ functions. Owner question 75 asks for confirmation. If the owner runs a quest th
 any of these, the rows come back.
 
 Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 648. The locale table's two rows
+
+Two more quest-library rows close with no product code: one data table that reaches the wire,
+one helper file that nothing calls.
+
+`questlib.locale` is `ported`. `quest/locale.lua` is a data table, not code: 3687 lines building
+the `locale` table from `gameforge.locale` strings. The Rewrite loads legacy's library chain in
+legacy's order (`quest/src/host.rs:224-227`: `settings.lua`, `quest/questlib.lua`,
+`translate.lua`, `quest/locale.lua`, as `G/questlua.cpp:737-790`), so the table exists where
+legacy puts it. And it reaches the wire: `quest.guild_building` renders `locale.yes`/`locale.no`
+through `select()`, and `a_guild_master_buys_the_land_by_the_sellers_dialog` asserts the
+resulting `[QUESTION 1;Da|2;Nu]` twice. The row names that scenario. The sweep discipline
+matters here: the `locale.` hits in the guild quests sort into two buckets — the bare
+`locale.yes`/`locale.no`/`locale.confirm` uses, which are this table, and the
+`gameforge.locale.*` uses, which are `translate.lua`'s table and not this row.
+
+`questlib.multiLocale` is `unused`. The 49-line would-be replacement (`questlib.lua` dofiles
+it) defines three globals — `map_name`, `empire_names`, `get_skill_name_by_vnum` — and no file
+calls any of them bare. The `locale.lua` hits for the first two names are that file's own
+`locale.map_name`/`locale.empire_names` table fields, a different name and the negative
+control; the positive control is the same bare-call sweep finding the live `locale.yes` uses.
+Owner question 76 asks for confirmation, and notes that `map_name` returns the wrong table —
+it builds `mapName` and returns `skillName[map_index]` — so a caller would get nothing back
+either way.
+
+Gates (2026-11-13): row-only change, so the quick gates: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the inventory tests 6 passed; the named land scenario re-proved green (`a_guild_master_buys_the_land_by_the_sellers_dialog`); `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
