@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 663 (the aura booster).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 664
+Last reviewed: 2026-11-13, after ledger section 664 (the shop bundles).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 665
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -636,6 +636,8 @@ Since 649 `quest.sash_mission` and `quest.ship_defense` are `ported`: every reac
 Since 650 `sys.life.fishing` reads the fish-mind premium: a live premium draws the mind's table and previews the bite.
 Since 651 `sys.combat.core` reads the EXP/ITEM/GOLD premiums: the +50% exp grant and the buyer rates over the wire (`a_premium_kill_pays_half_again_the_monsters_exp`), with the login affects and the tick sync for all five held kinds.
 Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 661 the soul charge lands (`a_percent_charge_fills_a_soul_and_a_second_meets_it_full`, `a_heart_and_a_fix_charge_land_their_seconds`; the heart reads socket 2, the fix adds seconds, the full chats `[LS;1066]`).
+
+Since 664 the shop bundles open the panel: the paper and silk bundles open the personal-shop panel without spending, the silk also telling `SetPrivateShopPremiumBuild`, while a shop owner hears the close line (`a_bundle_use_opens_the_panel_and_an_owner_hears_the_close_line`).
 
 Since 663 the aura booster lands: on an unboosted aura costume socket 2 stamps `index * 100000000 + value(1)` with the success line and the scroll spends, while a boosted or non-aura target chats the refusal with the scroll kept (`a_booster_lands_on_an_aura_and_a_second_is_refused`).
 

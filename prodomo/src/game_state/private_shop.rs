@@ -72,7 +72,7 @@ use common::vid::Vid;
 use protocol::cg_private_shop::{
     CgPrivateShopItem, CgPrivateShopSearch, CG_PRIVATE_SHOP_TITLE_FIELD_SIZE,
 };
-use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
 use protocol::gc_private_shop::{
     GcPrivateShop, GcPrivateShopAddEntity, GcPrivateShopBalance, GcPrivateShopDelEntity,
     GcPrivateShopItemData, GcPrivateShopLoad, GcPrivateShopMarketPrice, GcPrivateShopMove,
@@ -457,6 +457,53 @@ impl GameState {
         self.private_searching.insert(vid, mode);
         let mut moved = self.nothing_used(vid, actor)?;
         moved.records.push(GcPrivateShop::new(subheader).encode());
+        Ok(moved)
+    }
+
+    /// Whether `CG_ITEM_USE` at `at` is a personal-shop bundle for the character under
+    /// `vid`: the paper bundle (50200, `case 50200`, `G/char_item.cpp:4362-4375`) or the
+    /// premium silk bundle (71221, `case 71221`, `:4379-4388`).
+    pub(super) fn shop_bundle_at(&self, vid: Vid, at: protocol::item_pos::ItemPos) -> Option<u32> {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map(|item| item.vnum)
+            .filter(|vnum| *vnum == PRIVATE_SHOP_PAPER_BUNDLE || *vnum == PRIVATE_SHOP_SILK_BUNDLE)
+    }
+
+    /// The bundle use (`G/char_item.cpp:4362-4388`, behind `__PREMIUM_PRIVATE_SHOP__`):
+    /// a shop owner hears the close line and the bundle stays; else the panel opens,
+    /// and the silk bundle also tells the client to build premium. Neither bundle
+    /// spends on use: the paper spends at build, the silk never.
+    pub(super) fn use_shop_bundle(
+        &mut self,
+        vid: Vid,
+        vnum: u32,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if self.has_private_shop(vid) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"Close your current personal shop before opening a new one.",
+                &[],
+            );
+            return self.nothing_used(vid, actor);
+        }
+        let mut moved = self.nothing_used(vid, actor)?;
+        moved
+            .records
+            .extend(self.private_panel_open(vid, actor).records);
+        if vnum == PRIVATE_SHOP_SILK_BUNDLE {
+            moved.records.push(crate::chat_line::chat_packet(
+                actor.recipient(&self.locale),
+                CHAT_TYPE_COMMAND,
+                b"SetPrivateShopPremiumBuild",
+                &[],
+            ));
+        }
         Ok(moved)
     }
 

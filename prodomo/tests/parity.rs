@@ -53553,6 +53553,108 @@ fn a_private_shop_builds_and_its_stand_appears() {
     assert_eq!(&entity[50..54], b"Axes");
 }
 
+/// `cg.game.item_use`: `case 50200` and `case 71221` (`G/char_item.cpp:4362-4388`,
+/// behind `__PREMIUM_PRIVATE_SHOP__`) open the personal-shop panel without spending
+/// the bundle. Alice holds the paper bundle in cell 0 and the silk bundle in cell 1:
+/// the paper opens the bare panel, and after its close the silk opens the panel too
+/// and tells the client to build premium. A second use each is silent (the panel is
+/// open), and both bundles stay in the store. Then she builds the `Axes` shop, and a
+/// paper use as an owner hears the close line.
+#[test]
+fn a_bundle_use_opens_the_panel_and_an_owner_hears_the_close_line() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1,          470100, 950100 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    for (id, pos, vnum) in [(60, 0, 50200), (61, 1, 71221), (62, 2, 19)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 3);
+    // When: the paper bundle is used. Then: the bare panel opens, the bundle kept.
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_PRIVATE_SHOP, 4, 0, 7],
+        "OPEN_PANEL"
+    );
+    alice.quiet("the paper use sends nothing more");
+    check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 60");
+    // When: the panel closes and the silk bundle is used. Then: the panel opens and
+    // the client is told to build premium.
+    alice.send_record(&[CG_PRIVATE_SHOP, 3]);
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_PRIVATE_SHOP, 4, 0, 8],
+        "CLOSE_PANEL"
+    );
+    alice.send_record(&client_item_use(1));
+    assert_eq!(
+        alice.read_game(),
+        vec![GC_PRIVATE_SHOP, 4, 0, 7],
+        "OPEN_PANEL"
+    );
+    let premium = alice.read_game();
+    assert_eq!(
+        premium,
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"SetPrivateShopPremiumBuild"),
+        "the premium build: {premium:02x?}"
+    );
+    alice.quiet("the silk use sends nothing more");
+    check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 61");
+    // When: the panel closes, the shop builds, and the paper is used as an owner.
+    // Then: the close line, nothing more.
+    alice.send_record(&[CG_PRIVATE_SHOP, 3]);
+    assert_eq!(alice.read_game(), vec![GC_PRIVATE_SHOP, 4, 0, 8]);
+    let mut build = vec![CG_PRIVATE_SHOP, 0];
+    let mut title = [0u8; 33];
+    title[..4].copy_from_slice(b"Axes");
+    build.extend_from_slice(&title);
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.push(0);
+    build.push(1);
+    build.extend_from_slice(&1u16.to_le_bytes());
+    build.push(1);
+    build.extend_from_slice(&2u16.to_le_bytes());
+    build.extend_from_slice(&500i64.to_le_bytes());
+    build.extend_from_slice(&0u32.to_le_bytes());
+    build.extend_from_slice(&3u16.to_le_bytes());
+    alice.send_record(&build);
+    let load = alice.read_game();
+    assert_eq!(&load[..4], &[GC_PRIVATE_SHOP, 60, 0, 3], "LOAD");
+    let _own_entity = alice.read_game();
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(
+            CHAT_TYPE_INFO,
+            1,
+            b"Close your current personal shop before opening a new one."
+        ),
+        "the owner hears the close line"
+    );
+    alice.quiet("the owner use sends nothing more");
+    check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 60");
+    drop(alice);
+    drop(server);
+}
+
 /// A private build under `Axes`, selling the sword for 500 in slot 3, answering the
 /// stand's entity as the witness hears it.
 fn build_axes_shop(alice: &mut Keyed, yankee: &mut Keyed) -> Vec<u8> {
