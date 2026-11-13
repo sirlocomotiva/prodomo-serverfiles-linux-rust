@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 672 (the monarch's heal).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 673
+Last reviewed: 2026-11-13, after ledger section 673 (the stat-reset tonic).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 674
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -636,6 +636,8 @@ Since 649 `quest.sash_mission` and `quest.ship_defense` are `ported`: every reac
 Since 650 `sys.life.fishing` reads the fish-mind premium: a live premium draws the mind's table and previews the bite.
 Since 651 `sys.combat.core` reads the EXP/ITEM/GOLD premiums: the +50% exp grant and the buyer rates over the wire (`a_premium_kill_pays_half_again_the_monsters_exp`), with the login affects and the tick sync for all five held kinds.
 Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 661 the soul charge lands (`a_percent_charge_fills_a_soul_and_a_second_meets_it_full`, `a_heart_and_a_fix_charge_land_their_seconds`; the heart reads socket 2, the fix adds seconds, the full chats `[LS;1066]`).
+
+Since 673 the stat-reset tonic raises: `case ITEM_GIVE_STAT_RESET_COUNT_VNUM` runs the use's checks, raises the reset count by 1 through the shared counter arm with amount 0, and spends one (`a_stat_tonic_raises_the_reset_count_and_spends_one`); the castle note no longer says the monarch war powers wait for the maps — their only writers are the `unused` quest arms and timers, so the damage tenths never fire.
 
 Since 672 the monarch's blessing heals: `case 70021` through `HealMyEmpire` refills her empire's pools on her map, chats the `[559]` notice and `[LS;570]`, charges the treasury and spends one, with the commoner's refusal proved off the test mode (`a_monarchs_blessing_heals_her_empire_and_charges_the_treasury`).
 

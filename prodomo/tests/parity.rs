@@ -62706,3 +62706,62 @@ fn a_heart_melt_spends_the_pair_and_lands_or_fails() {
     );
     alice.still("nothing follows the melt");
 }
+
+/// `cg.game.item_use`: `case ITEM_GIVE_STAT_RESET_COUNT_VNUM` (`G/char_item.cpp:5110-5116`)
+/// raises the reset count: Alpha, stored with one reset, drinks one of two tonics, sees
+/// kind 112 rise to 2 with amount 0, and the second tonic waits. The row banks the count.
+#[test]
+fn a_stat_tonic_raises_the_reset_count_and_spends_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET stat_reset_count = 1 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, \
+         0, 2, 70014 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(70_014).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's tonic is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut raised = None;
+    while std::time::Instant::now() < deadline && raised.is_none() {
+        let Some(record) = alpha.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.len() == POINT_CHANGE_LEN
+            && record[0..4] == 17i32.to_le_bytes()
+            && record[8] == 112
+        {
+            raised = Some(record);
+        }
+    }
+    let raised = raised.expect("the reset count rises");
+    assert_eq!(
+        i64::from_le_bytes(raised[9..17].try_into().expect("eight bytes")),
+        0,
+        "the amount is 0"
+    );
+    assert_eq!(
+        i64::from_le_bytes(raised[17..25].try_into().expect("eight bytes")),
+        2,
+        "the count rises to 2"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT stat_reset_count = 2 FROM player WHERE name = 'Alpha')",
+    );
+    drop(server);
+}

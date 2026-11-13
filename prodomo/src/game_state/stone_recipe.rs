@@ -58,6 +58,9 @@ const WONSO_SUGAR: u32 = 50_021;
 const WONSO_FRUIT: u32 = 50_022;
 /// The elk gold bar (`case ITEM_ELK_VNUM`, `G/char_item.cpp:5180-5191`).
 const ELK_BAR: u32 = 50_026;
+/// The stat-reset tonic (`case ITEM_GIVE_STAT_RESET_COUNT_VNUM`,
+/// `G/unique_item.h:43`, `G/char_item.cpp:5110-5116`).
+const STAT_TONIC: u32 = 70014;
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -385,6 +388,70 @@ impl GameState {
                         &self.locale,
                     );
                     moved.records.extend(packed.records);
+                }
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is the stat-reset tonic (`case
+    /// ITEM_GIVE_STAT_RESET_COUNT_VNUM`, `G/char_item.cpp:5110-5116`).
+    pub(super) fn stat_tonic_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == STAT_TONIC)
+    }
+
+    /// The stat-reset tonic (`case ITEM_GIVE_STAT_RESET_COUNT_VNUM`,
+    /// `G/char_item.cpp:5110-5116`): past the use's checks, the reset count rises
+    /// by 1 through the shared counter arm (its change record rides, amount 0: legacy
+    /// calls `PointChange` with both flags false), and one tonic spends.
+    pub(super) fn use_stat_tonic(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let tonic = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(tonic.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(tonic.vnum))?;
+            world::character::use_checks(&tonic, proto, rules, gear.points)?;
+            world::character::spend_one(items, &tonic, proto)
+        })?;
+        if let Ok(character) = self.characters.find_by_vid_mut(vid) {
+            if let Some(points) = character.items_and_points_mut().1 {
+                if let Ok(records) =
+                    points.point_change(common::point_slot::POINT_STAT_RESET_COUNT, 1, false, false)
+                {
+                    let done = MoveDone {
+                        kind: world::character::MoveKind::Used,
+                        records: records
+                            .into_iter()
+                            .map(world::character::MoveRecord::Point)
+                            .collect(),
+                        changes: Vec::new(),
+                    };
+                    let packed = MovedItems::new(
+                        moved.owner_id,
+                        vid.raw(),
+                        done,
+                        actor,
+                        &self.protos,
+                        &self.locale,
+                    );
+                    moved.records.extend(packed.records);
+                    moved.points = self
+                        .characters
+                        .find_by_vid(vid)
+                        .ok()
+                        .and_then(|character| character.points().cloned());
                 }
             }
         }
