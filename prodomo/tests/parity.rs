@@ -21110,6 +21110,91 @@ fn flag_war_channels() -> Vec<ChannelSpec> {
     ]
 }
 
+/// `sys.char.horse`: under the `no_mount_at_guild_war` event flag the war's entry
+/// strips the ride. A `HIGH_WIZARD` master mounts her horse in town, sets the flag, and
+/// joins a flag war: the stop's line and the re-show that unmounts land ahead of the
+/// leave and the warp. (`CGuild::GuildWarEntryAccept`, `G/guild_war.cpp:664-671`.)
+#[test]
+fn the_war_entry_strips_the_mount_under_the_no_mount_flag() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1,          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Before the boot: the stored guilds install once, while the gate is closed.
+    seed_war_pair(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD'          FROM account WHERE login = 'alice'",
+    );
+    let channels = flag_war_channels();
+    let server = Server::start_configured(binary(), database.url(), &channels, "");
+    let (mut alice, alpha_listed, _alice_entered) =
+        enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    let (mut yankee, yankee_listed, _yankee_entered) =
+        enter_world_seeing_guilded_with_team(&server, b"bob", 0, 1, Some(b"Alpha"));
+    alice.sees_enter(yankee_listed.id, true, Some(b"Wolves"));
+    let vid = alpha_listed.id;
+    let (alice_index, _yankee_index) = declare_and_accept_a_war_of_type(&mut alice, &mut yankee, 2);
+    // The GM line levels the horse and mounts it after the accept, so the re-show it
+    // leaks into Yankee's view pollutes no read; the flag is set after the mount.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_ride"));
+    let read = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&read, vid), 20_109, "the master's re-show");
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        b"/eventflag no_mount_at_guild_war 1",
+    ));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag no_mount_at_guild_war 1"),
+    );
+    // The member presses the button and says yes: the ride is stripped first,
+    // then the leave and the warp.
+    alice.send_record(&client_script_button(alice_index));
+    let question = alice.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question: {question:02x?}");
+    alice.send_record(&client_script_answer(0));
+    let done = alice.read_game();
+    assert_eq!(&done[6..], b"[DONE]", "the quest's end script");
+    // The entry strips the ride first: the stop's line and the re-show that unmounts
+    // land ahead of the leave and the warp.
+    let port = server.channel(1).port();
+    let warp = a_warp_record(FLAG_MAP_START, port);
+    let mut read = Vec::new();
+    loop {
+        let record = alice.read_game();
+        let last = record == warp;
+        read.push(record);
+        if last {
+            break;
+        }
+    }
+    let stop = read
+        .iter()
+        .position(|record| record == &a_command_line(b"horse_state 25 3 3"))
+        .expect("the stop's line");
+    let mut leave = vec![GC_CHARACTER_DEL];
+    leave.extend_from_slice(&vid.to_le_bytes());
+    let gone = read
+        .iter()
+        .position(|record| record == &leave)
+        .expect("the member leaves its map");
+    assert!(stop < gone, "the strip lands ahead of the leave");
+    assert_eq!(shown_mount(&read, vid), 0, "the strip's re-show unmounts");
+}
+
 /// `sys.guild.war`, `gc.character.add`: a war of the flag type is fought on the flag map
 /// (map 111), and the private copy of it stands the two flags and the two bases up
 /// (`CWarMap::AddFlagBase` and `CWarMap::AddFlag`, `G/war_map.cpp:832-879`). The member

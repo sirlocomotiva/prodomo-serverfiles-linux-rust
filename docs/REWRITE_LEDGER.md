@@ -54995,3 +54995,39 @@ stale M2-mutant binary — restored source, no rebuild; the re-run after a
 clean build is the 8/8 above.)
 
 Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5573 passed, 0 failed in 46 targets; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained (15 scratch databases from the mid-flight suite run killed for the clippy refactor were dropped by hand). No ADR changed.
+
+## 639. The guild-war mount stop
+
+`sys.char.horse` is `ported`. The last live remainder was the `g_NoMountAtGuildWar` stop
+(`G/questmanager.cpp:1618-1621`, under `ENABLE_NEWSTUFF`, which the owner's defines set):
+the `no_mount_at_guild_war` event flag, the war entry's strip, and the two on-map refusals.
+
+The port: `GameState::no_mount_at_guild_war`, set by a `set_event_flag` arm; the entry
+strip in `quest_war_enter` between the position read and the flag set, in legacy order
+(removes, conditional stop, `:664-671` then `:674`); the head gates in `start_riding`
+(`G/char_horse.cpp:19-28`) and `quest_mount` (`G/questlua_horse.cpp:43-51`), which share
+the widened `on_war_map`. Two unit tests pin the entry strip and the on-map silences,
+and the scenario `the_war_entry_strips_the_mount_under_the_no_mount_flag` mounts a
+HIGH_WIZARD master by `/horse_ride` (her re-show rides +2 at 20109, `GetMyHorseVnum`),
+sets the flag, and joins a flag war: the stop's line and the unmounting re-show land
+ahead of the leave and the warp. The mount follows the accept so its re-show leaks only
+into Yankee's unread view.
+
+The row's older remainders are accounted for, not ported. The riding attack-speed bonus
+(`GET_ATTACK_SPEED`, `G/battle.cpp:828`) runs only inside `IS_SPEED_HACK`, and the
+riding combo 1-2 (`G/input_main.cpp:1654`) only inside `CheckComboHack`; both return
+false at once behind `!gHackCheckEnable`, which defaults off (`G/config.cpp:154`), no
+owner CONFIG sets, and the Rewrite defaults off (`common/src/config.rs:579`). The arena
+silences were already ported (`StartRiding`'s arena arm, the quest ride/summon gates,
+`MountSummon`'s arena and OX silence), the stamina drain is live
+(`HorseTimer::Consume`), and the PvP grade-1 gate is ported (ledger 398). A seal mount
+is not reachable on the owner's data — no quest handles `71114.use` — so the wire
+scenario rides the horse and the unit test covers the affect removes.
+
+Mutants (each applied to the pristine file, restored by checksum): the flag arm inverted
+(`!= 0` to `== 0`) kills both unit tests; the entry strip without its stop kills the
+strip test; the `quest_mount` gate dropped kills the gates test; the `start_riding` gate
+dropped kills the gates test; the entry stop dropped kills the scenario at the stop's
+line. The scenario ran 4/4.
+
+Gates (2026-11-12): `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5575 passed, 1 failed in 46 targets — the one (`a_morphed_caller_hears_every_stat_refusal` saw a lagged record in its last quiet) passes alone, so the known load flake, not this slice; doc-tests 1 passed; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` pass; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

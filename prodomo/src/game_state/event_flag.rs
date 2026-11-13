@@ -212,6 +212,7 @@ impl GameState {
             b"mob_gold_pct" => self.mob_rates.gold_drop = value,
             b"user_dam" => self.mob_rates.user_damage = value,
             b"mob_exp" => self.mob_rates.exp = value,
+            b"no_mount_at_guild_war" => self.no_mount_at_guild_war = value != 0,
             b"xmas_snow" | b"xmas_boom" | b"xmas_song" | b"xmas_tree" => {
                 self.command_to_everyone(b"%s %d", &[Arg::Text(name), Arg::Int(value.into())]);
                 self.xmas_arm(name, prev, value);

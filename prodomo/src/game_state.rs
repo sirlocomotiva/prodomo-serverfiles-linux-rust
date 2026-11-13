@@ -871,6 +871,9 @@ pub struct GameState {
         [std::collections::HashMap<u32, empire_priv::CharacterPriv>; empire_priv::MAX_PRIV_NUM],
     /// `CHARACTER_MANAGER`'s rates, which the rate event flags set.
     mob_rates: event_flag::MobRates,
+    /// `g_NoMountAtGuildWar` (`G/questmanager.cpp:1618-1621`), set by the event flag of
+    /// the same name.
+    no_mount_at_guild_war: bool,
     /// `test_server` (`G/config.cpp:72`): the test-server mode, on unless the
     /// configuration turns it off.
     ///

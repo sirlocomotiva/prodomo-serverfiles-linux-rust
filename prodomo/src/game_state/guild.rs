@@ -57,7 +57,8 @@ use crate::chat_line::{chat_packet, format_line, Arg};
 use crate::client_registry::ClientOrder;
 use crate::item_move::{gold_delta, row_changes, Mover};
 use crate::loading_phase::{
-    AFFECT_WAR_FLAG, AFF_WAR_FLAG1, AFF_WAR_FLAG2, AFF_WAR_FLAG3, INFINITE_AFFECT_DURATION,
+    AFFECT_MOUNT, AFFECT_MOUNT_BONUS, AFFECT_WAR_FLAG, AFF_WAR_FLAG1, AFF_WAR_FLAG2, AFF_WAR_FLAG3,
+    INFINITE_AFFECT_DURATION,
 };
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
@@ -6679,6 +6680,15 @@ impl GameState {
         let Some((x, y)) = super::war_map::start_position(map_index, side) else {
             return quiet;
         };
+        // `g_NoMountAtGuildWar == TRUE && GetWarMap()` (`G/guild_war.cpp:664-671`): a
+        // mount ends before the join, under the event flag of the same name.
+        if self.no_mount_at_guild_war {
+            let _mount = self.remove_pc_affect(vid, AFFECT_MOUNT);
+            let _bonus = self.remove_pc_affect(vid, AFFECT_MOUNT_BONUS);
+            if self.is_riding(vid.raw()) {
+                self.stop_riding(vid);
+            }
+        }
         // The flag the join reads (`G/guild_war.cpp:674`): the player joins the team of
         // its guild when it carries it (`CWarMap::IncMember`, `G/war_map.cpp:353`).
         if let Some(quests) = self.quests.as_mut() {
@@ -11315,6 +11325,96 @@ mod tests {
             "the member is warped to the war's start position"
         );
         assert!(orders.try_recv().is_err(), "exactly one order");
+    }
+
+    /// `g_NoMountAtGuildWar` at the war's entry (`G/guild_war.cpp:664-671`): under the
+    /// event flag of the same name the mount and its bonus go and the horse rider gets
+    /// off before the join.
+    #[test]
+    fn the_war_join_strips_the_mount_under_the_no_mount_flag() {
+        let (mut world, _orders, _lease, _master) = a_war_on(" 1");
+        let vid = Vid::new(MASTER_VID);
+        world.set_event_flag(b"no_mount_at_guild_war", 1);
+        world.add_pc_affect(
+            vid,
+            super::super::affect::Affect::buff(AFFECT_MOUNT, 0, 0, 0, 100, 0),
+            false,
+        );
+        {
+            let horse = world
+                .pc_points_mut(MASTER_VID)
+                .expect("the master")
+                .horse_mut();
+            horse.set_level(11, NOW);
+            horse.set_stat(28, 28);
+            assert!(horse.start_riding(), "the master rides");
+        }
+        let judged = world.answer_guild_quest(
+            vid,
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+            "",
+        );
+        assert_eq!(
+            judged.answer,
+            quest::manager::GuildAnswer::None,
+            "the join pushes nothing"
+        );
+        assert!(
+            world
+                .affect_events
+                .get(&vid)
+                .is_some_and(|event| event.affects.iter().all(|affect| {
+                    affect.kind != AFFECT_MOUNT && affect.kind != AFFECT_MOUNT_BONUS
+                })),
+            "the mount and its bonus go"
+        );
+        assert!(!world.is_riding(MASTER_VID), "the rider gets off");
+        assert!(world.no_mount_at_guild_war, "the flag reads set");
+    }
+
+    /// `g_NoMountAtGuildWar` on the war's map (`G/char_horse.cpp:19-28`,
+    /// `G/questlua_horse.cpp:43-51`): under the flag a ride and a quest mount are
+    /// refused, strip what they find, and stay silent.
+    #[test]
+    fn the_no_mount_flag_silences_the_ride_and_the_quest_mount_on_the_wars_map() {
+        let (mut world, mut orders, _lease, _master) = a_war_on(" 1");
+        world.set_event_flag(b"no_mount_at_guild_war", 1);
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        assert!(
+            world.on_war_map(Vid::new(MASTER_VID)),
+            "the master stands on the war's map"
+        );
+        world.add_pc_affect(
+            Vid::new(MASTER_VID),
+            super::super::affect::Affect::buff(AFFECT_MOUNT, 0, 0, 0, 100, 0),
+            false,
+        );
+        world.start_riding(Vid::new(MASTER_VID));
+        assert!(
+            world
+                .affect_events
+                .get(&Vid::new(MASTER_VID))
+                .is_some_and(|event| event.affects.is_empty()),
+            "the ride strips the mount"
+        );
+        assert!(
+            !world.is_riding(MASTER_VID),
+            "the ride on the war's map mounts nothing"
+        );
+        world.quest_mount(Vid::new(MASTER_VID), 20_201, 60);
+        assert!(
+            world
+                .affect_events
+                .get(&Vid::new(MASTER_VID))
+                .is_some_and(|event| event.affects.is_empty()),
+            "the quest mount lays nothing"
+        );
+        assert!(
+            !world.is_riding(MASTER_VID),
+            "the quest mount mounts nothing"
+        );
     }
 
     /// `CGuild::EndWar` (`G/guild_war.cpp:592-627`) with `CWarMap::SetEnded`

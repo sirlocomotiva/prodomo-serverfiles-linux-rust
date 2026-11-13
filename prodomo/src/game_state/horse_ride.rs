@@ -86,6 +86,14 @@ impl GameState {
         let Some(mover) = self.own_mover(vid) else {
             return;
         };
+        if self.no_mount_at_guild_war && self.on_war_map(vid) {
+            let _mount = self.remove_pc_affect(vid, AFFECT_MOUNT);
+            let _bonus = self.remove_pc_affect(vid, AFFECT_MOUNT_BONUS);
+            if self.is_riding(vid.raw()) {
+                self.stop_riding(vid);
+            }
+            return;
+        }
         if self.is_dead(vid.raw()) {
             self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1936]", &[]);
             return;
@@ -234,6 +242,14 @@ impl GameState {
     /// as a second `AFFECT_MOUNT` row, which `IsCube` keys on its point. No war map is
     /// hosted, so the `g_NoMountAtGuildWar` arm never runs.
     pub(super) fn quest_mount(&mut self, vid: Vid, vnum: u32, seconds: i32) {
+        if self.no_mount_at_guild_war && self.on_war_map(vid) {
+            let _mount = self.remove_pc_affect(vid, AFFECT_MOUNT);
+            let _bonus = self.remove_pc_affect(vid, AFFECT_MOUNT_BONUS);
+            if self.is_riding(vid.raw()) {
+                self.stop_riding(vid);
+            }
+            return;
+        }
         let _mount = self.remove_pc_affect(vid, AFFECT_MOUNT);
         let _bonus = self.remove_pc_affect(vid, AFFECT_MOUNT_BONUS);
         if self

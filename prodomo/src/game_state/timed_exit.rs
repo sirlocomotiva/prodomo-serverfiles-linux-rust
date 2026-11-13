@@ -195,7 +195,7 @@ impl GameState {
     /// (`CWarMap::m_set_pkChr`). Legacy's flag-type comparison never holds (the
     /// `bType` is 0 or 1, `GUILD_WAR_TYPE_FLAG` is 2), so every war-map member
     /// skips the gate, on the normal map as on the flag map.
-    fn on_war_map(&self, vid: Vid) -> bool {
+    pub(super) fn on_war_map(&self, vid: Vid) -> bool {
         self.war_maps.values().any(|map| map.present.contains(&vid))
     }
 
