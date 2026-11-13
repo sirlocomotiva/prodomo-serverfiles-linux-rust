@@ -128,6 +128,9 @@ pub const USE_TALISMAN: i32 = 1;
 pub const USE_TUNING: i32 = 2;
 /// `USE_DETACHMENT` (`C/item_length.h:268`): a stone or sash detachment scroll.
 pub const USE_DETACHMENT: i32 = 14;
+/// `USE_CLEAN_SOCKET` (`C/item_length.h:271`): a broken-stone cleaner (the owner's
+/// 39027 and 71083).
+pub const USE_CLEAN_SOCKET: i32 = 17;
 /// `USE_ELEMENT_UPGRADE` (`C/item_length.h:293`): an element upgrade scroll.
 pub const USE_ELEMENT_UPGRADE: i32 = 36;
 /// `USE_ELEMENT_DOWNGRADE` (`C/item_length.h:294`): an element downgrade scroll.
@@ -380,6 +383,7 @@ mod tests {
             (USE_TALISMAN, "USE_TALISMAN"),
             (USE_TUNING, "USE_TUNING"),
             (USE_DETACHMENT, "USE_DETACHMENT"),
+            (USE_CLEAN_SOCKET, "USE_CLEAN_SOCKET"),
             (USE_ABILITY_UP, "USE_ABILITY_UP"),
             (USE_POTION_NODELAY, "USE_POTION_NODELAY"),
             (USE_BAIT, "USE_BAIT"),

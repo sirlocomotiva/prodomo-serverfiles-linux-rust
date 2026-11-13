@@ -9,8 +9,8 @@ use gamedata::item_kind::{
     LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
     USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE,
     USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN,
-    USE_CHANGE_COSTUME_ATTR, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET,
-    USE_RESET_COSTUME_ATTR, WEARABLE_BODY, WEARABLE_WEAPON,
+    USE_CHANGE_COSTUME_ATTR, USE_CLEAN_SOCKET, USE_PUT_INTO_ACCESSORY_SOCKET,
+    USE_PUT_INTO_BELT_SOCKET, USE_RESET_COSTUME_ATTR, WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -50,6 +50,8 @@ pub const BROKEN_STONE_SOCKET: i32 = 28_960;
 /// `ITEM_STONES_MAX_NUM` with `ENABLE_EXTENDED_SOCKETS` (`C/item_length.h:13-15`):
 /// the sockets a detachment scroll reads.
 pub const STONE_SOCKETS: usize = 3;
+/// No broken stone sits in the target (`USE_CLEAN_SOCKET`, `G/char_item.cpp:6345`).
+pub const NO_BROKEN_STONE_NOTICE: &str = "[LS;395]";
 /// `SASH_ABSORBED_SOCKET` (`C/item_length.h:505`): socket 1.
 const ABSORBED_SOCKET: usize = 1;
 /// No attribute set touches this target (`G/char_item.cpp:6383`): a costume or a glove,
@@ -262,6 +264,7 @@ fn scroll_subtype_uses_socket_case(sub_type: i32) -> bool {
         USE_PUT_INTO_BELT_SOCKET
             | USE_PUT_INTO_ACCESSORY_SOCKET
             | USE_ADD_ACCESSORY_SOCKET
+            | USE_CLEAN_SOCKET
             | USE_CHANGE_ATTRIBUTE
             | USE_CHANGE_ATTRIBUTE2
             | USE_ADD_ATTRIBUTE
@@ -728,6 +731,9 @@ pub fn change_target_attributes(
             dice,
             attrs,
         ),
+        USE_CLEAN_SOCKET => {
+            clean_target_sockets(items, (scroll, scroll_proto), (&target, target_proto))
+        }
         _ => silent(),
     }
 }
@@ -961,6 +967,55 @@ fn reset_costume_target_attribute(
     trail.changes.push(ItemChange::Attributes {
         id: target.id,
         attributes: stored.attributes,
+    });
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+/// The `USE_CLEAN_SOCKET` case (`G/char_item.cpp:6326-6379`), under the socket-scroll
+/// case's head: when a broken stone (`28_960`) sits in one of the first
+/// [`STONE_SOCKETS`] sockets, the live sockets compact down from 0, the tail sockets
+/// still past 0 become 1, and the scroll is spent, with no line. Without a broken
+/// stone [`NO_BROKEN_STONE_NOTICE`] chats and the scroll is kept. The entry gate
+/// already refused a costume and a glove, and `use_target` the exchanging and worn.
+fn clean_target_sockets(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    (target, _target_proto): (&Item, &ItemProto),
+) -> Result<MoveDone, MoveRefused> {
+    if !target.sockets[..STONE_SOCKETS].contains(&BROKEN_STONE_SOCKET) {
+        let mut trail = Trail::default();
+        trail
+            .records
+            .push(MoveRecord::Notice(NO_BROKEN_STONE_NOTICE));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    let mut sockets = target.sockets;
+    let mut kept = 0;
+    for index in 0..STONE_SOCKETS {
+        if sockets[index] != BROKEN_STONE_SOCKET && sockets[index] != 0 {
+            sockets[kept] = sockets[index];
+            kept += 1;
+        }
+    }
+    for socket in sockets.iter_mut().take(STONE_SOCKETS).skip(kept) {
+        if *socket > 0 {
+            *socket = 1;
+        }
+    }
+    for (index, value) in sockets.iter().enumerate().take(STONE_SOCKETS) {
+        items
+            .set_socket(target.id, index, *value)
+            .map_err(|_| MoveRefused::Empty)?;
+    }
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    let mut trail = Trail::default();
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets: stored.sockets,
     });
     spend_scroll(items, scroll, scroll_proto, &mut trail)?;
     Ok(done(MoveKind::Used, trail))
@@ -2885,5 +2940,88 @@ mod tests {
             "the sword chats the no-set line"
         );
         assert!(items.item(13).is_some(), "the refused scroll stays");
+    }
+
+    /// The cleaner compacts a sword's live stone down past the broken one, turns the
+    /// tail to 1, and spends its scroll with no line.
+    #[test]
+    fn a_cleaner_compacts_the_live_stone_and_spends_itself_silently() {
+        const CLEANER: u32 = 39_027;
+        let scroll = ItemProto::for_category_rule(CLEANER, ITEM_USE, USE_CLEAN_SOCKET);
+        let sword = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        let protos = ItemProtos::from_rows(vec![scroll, sword]);
+        let mut broken = Item::new(9, SWORD);
+        broken.sockets[0] = BROKEN_STONE_SOCKET;
+        broken.sockets[1] = 28_030;
+        let mut items = holding(&[(0, broken), (1, Item::new(10, CLEANER))]);
+        let scroll = items.item_at(inv(1)).expect("the cleaner").clone();
+        let scroll_proto = protos.get(CLEANER).expect("the cleaner proto").clone();
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &scroll_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &[],
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the clean lands");
+        let kept = items.item(9).expect("the sword stays");
+        assert_eq!(kept.sockets[0], 28_030, "the live stone compacts down");
+        assert_eq!(kept.sockets[1], 1, "the tail opens");
+        assert_eq!(kept.sockets[2], 0, "the empty stays empty");
+        assert!(items.item(10).is_none(), "the last cleaner leaves");
+        assert!(
+            done.records
+                .iter()
+                .all(|record| !matches!(record, MoveRecord::Notice(_))),
+            "no line on a clean"
+        );
+    }
+
+    /// Without a broken stone the cleaner chats the no-broken line and the scroll is
+    /// kept.
+    #[test]
+    fn a_cleaner_with_no_broken_stone_chats_and_keeps_itself() {
+        const CLEANER: u32 = 39_027;
+        let scroll = ItemProto::for_category_rule(CLEANER, ITEM_USE, USE_CLEAN_SOCKET);
+        let sword = ItemProto::for_category_rule(SWORD, ITEM_WEAPON, 0);
+        let protos = ItemProtos::from_rows(vec![scroll, sword]);
+        let mut whole = Item::new(9, SWORD);
+        whole.sockets[0] = 28_030;
+        let mut items = holding(&[(0, whole), (1, Item::new(10, CLEANER))]);
+        let scroll = items.item_at(inv(1)).expect("the cleaner").clone();
+        let scroll_proto = protos.get(CLEANER).expect("the cleaner proto").clone();
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &scroll_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &[],
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the refusal chats");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(NO_BROKEN_STONE_NOTICE))),
+            "the no-broken line chats"
+        );
+        assert!(items.item(10).is_some(), "the refused cleaner stays");
+        let kept = items.item(9).expect("the sword stays");
+        assert_eq!(kept.sockets[0], 28_030, "the live stone stays");
     }
 }

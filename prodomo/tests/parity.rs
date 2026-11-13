@@ -52728,6 +52728,71 @@ fn a_costume_change_redraws_and_its_reset_rolls_again() {
     drop(server);
 }
 
+/// `cg.game.item_use_to_item`: Alpha holds a sword of vnum 11 with a broken stone in
+/// socket 0 and a live stone in socket 1, a cleaner, and a second cleaner. The first
+/// cleaner compacts the live stone to socket 0, opens socket 1, and spends itself
+/// with no line; the second cleaner on the now-whole sword chats `[LS;395]` and is
+/// kept. Both rows store.
+#[test]
+fn a_cleaner_compacts_a_broken_sword_and_a_second_refuses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1) \
+         SELECT 60, id, 1, 0, 1, 11, 28960, 28030 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 39027 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 62, id, 1, 2, \
+         1, 71083 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 3);
+    let protos = owners_protos();
+    assert_eq!(
+        protos.get(39027).expect("the cleaner").sub_type,
+        gamedata::item_kind::USE_CLEAN_SOCKET,
+        "the owner's cleaner"
+    );
+    // When: the cleaner is used on the broken sword.
+    alice.send_record(&client_use_to_item(1, 0));
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the sword's cell updates: {update:02x?}"
+    );
+    let cleared = alice.read_game();
+    assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
+    alice.quiet("the clean sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 61");
+    check(
+        &database,
+        "SELECT socket0 = 28030 AND socket1 = 1 AND socket2 = 0 FROM item WHERE id = 60",
+    );
+    // When: the second cleaner is used on the now-whole sword.
+    alice.send_record(&client_use_to_item(2, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;395]"),
+        "the refusal chats: {line:02x?}"
+    );
+    alice.quiet("the refusal sends nothing more");
+    check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 62");
+    drop(alice);
+    drop(server);
+}
+
 /// `cg.game.myshop` and `cmd.close_shop`: Alpha carries a sword and a paper bundle, builds a
 /// bundle shop selling the sword for 500 yang under the sign `Swords`, and the sign reaches
 /// Yankee, who stands beside it; `/close_shop` clears the sign on both wires.
