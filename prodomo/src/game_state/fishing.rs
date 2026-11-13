@@ -558,21 +558,6 @@ impl GameState {
             .is_some_and(|expiry| expiry.saturating_sub(i64::from(Self::global_time())) > 0)
     }
 
-    /// `IsEquipUniqueGroup` (`G/char_item.cpp:9543-9560`): a unique cell holds an item of the
-    /// special item group `group`.
-    fn wears_unique_group(&self, vid: Vid, group: i32) -> bool {
-        use common::enums::EWearPositions;
-        use world::character::Equipment;
-        let Ok(character) = self.characters.find_by_vid(vid) else {
-            return false;
-        };
-        let equipment = Equipment::of(character.items(), &self.protos);
-        [EWearPositions::Unique1, EWearPositions::Unique2]
-            .into_iter()
-            .filter_map(|wear| equipment.wear(wear as u16))
-            .any(|worn| self.item_groups.unique.get(&worn.item.vnum) == Some(&group))
-    }
-
     /// The rod in the weapon cell of the character under `vid`, if one is there.
     fn worn_rod(&self, vid: Vid) -> Option<Rod> {
         let character = self.characters.find_by_vid(vid).ok()?;

@@ -910,6 +910,8 @@ pub enum EPremiumTypes {
     MarriageFast = 5,
     /// Gold bonus
     Gold = 6,
+    /// Private-shop premium (`__PREMIUM_PRIVATE_SHOP__` is defined).
+    PrivateShop = 7,
     /// Max premium count
     MaxNum = 9,
 }

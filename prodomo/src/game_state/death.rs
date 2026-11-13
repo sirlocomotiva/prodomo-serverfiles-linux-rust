@@ -3543,8 +3543,12 @@ mod tests {
             index: 99,
             ..region()
         };
-        for field in [a_field(false), a_field_recalling(vec![elsewhere], true)] {
-            let mut field = field;
+        for served in [false, true] {
+            let mut field = if served {
+                a_field_recalling(vec![elsewhere.clone()], true)
+            } else {
+                a_field(false)
+            };
             let _alpha = field.join(ALPHA, HERE);
             field.killed(ALPHA);
             field.quiet();

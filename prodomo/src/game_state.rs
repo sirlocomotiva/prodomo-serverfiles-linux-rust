@@ -713,6 +713,18 @@ pub struct GameState {
     /// (`m_aiPremiumTimes[PREMIUM_FISH_MIND]`): the unix time the premium ran to,
     /// 0 when never bought. Seeded at admission, cleared on leave.
     fish_mind_expiry: HashMap<common::vid::Vid, i64>,
+    /// The account's EXP premium expiry each online character holds
+    /// (`m_aiPremiumTimes[PREMIUM_EXP]`): the unix time the premium ran to, 0
+    /// when never bought. Seeded at admission, cleared on leave.
+    exp_premium_expiry: HashMap<common::vid::Vid, i64>,
+    /// The account's ITEM premium expiry each online character holds
+    /// (`m_aiPremiumTimes[PREMIUM_ITEM]`): the unix time the premium ran to, 0
+    /// when never bought. Seeded at admission, cleared on leave.
+    item_premium_expiry: HashMap<common::vid::Vid, i64>,
+    /// The account's GOLD premium expiry each online character holds
+    /// (`m_aiPremiumTimes[PREMIUM_GOLD]`): the unix time the premium ran to, 0
+    /// when never bought. Seeded at admission, cleared on leave.
+    gold_premium_expiry: HashMap<common::vid::Vid, i64>,
     /// The number of the last affect event started, which orders two events due on one Pulse.
     affect_sequence: u64,
     /// The affect event of each non-player that has one: the timed affects only, no
@@ -3601,6 +3613,24 @@ impl GameState {
             .shop_premium_expiry
             .insert(vid, loaded.shop_premium_expire);
         let _fish = self.fish_mind_expiry.insert(vid, loaded.fish_mind_expire);
+        let _exp = self
+            .exp_premium_expiry
+            .insert(vid, loaded.exp_premium_expire);
+        let _item = self
+            .item_premium_expiry
+            .insert(vid, loaded.item_premium_expire);
+        let _gold = self
+            .gold_premium_expiry
+            .insert(vid, loaded.gold_premium_expire);
+        // `SEventLetters`' premium expiries, held for the loop below: the move of
+        // `loaded` takes the fields before it runs.
+        let held_premiums = [
+            loaded.exp_premium_expire,
+            loaded.item_premium_expire,
+            loaded.fish_mind_expire,
+            loaded.gold_premium_expire,
+            loaded.shop_premium_expire,
+        ];
         // `GetBattlePass` (`G/char.cpp:2434-2436`): the stored missions split into
         // the buckets, then both refresh.
         self.install_pass_loaded(vid, &loaded.battle_pass);
@@ -3644,6 +3674,13 @@ impl GameState {
             }
             None => (Vec::new(), None),
         };
+        // `SEventLetters`' premium loop (`G/input_login.cpp:731-742`): every held
+        // premium with time left lays its `AFFECT_PREMIUM_START + index` row with
+        // the seconds left, so the client shows what runs. After the board's line
+        // (legacy `:657-661` runs first, on the shown arm; unshown there is no
+        // line), before the letters. The loop's `<=` reads index 9 past the array
+        // (a Defect, not reproduced).
+        self.seed_premium_affects(vid, held_premiums);
         // `CInputLogin::Entergame` (`G/input_login.cpp:784-785`): a character shown
         // on Meley's map with no participant row is sent out at once, as
         // `Leave(guild, ch, true)` sends it. The show stands first, so the burst
@@ -3897,6 +3934,40 @@ impl GameState {
     fn forget_premiums(&mut self, vid: common::vid::Vid) {
         let _expiry = self.shop_premium_expiry.remove(&vid);
         let _fish = self.fish_mind_expiry.remove(&vid);
+        let _exp = self.exp_premium_expiry.remove(&vid);
+        let _item = self.item_premium_expiry.remove(&vid);
+        let _gold = self.gold_premium_expiry.remove(&vid);
+    }
+
+    /// `SEventLetters`' premium loop (`G/input_login.cpp:731-742`): every held
+    /// premium with time left lays its `AFFECT_PREMIUM_START + index` row on
+    /// `POINT_NONE` with the seconds left. Only the five held kinds (0, 1, 4,
+    /// 6, 7): the others have no stored expiry. The loop's `<= PREMIUM_MAX_NUM`
+    /// reads index 9 past the array (a Defect, not reproduced).
+    fn seed_premium_affects(&mut self, vid: common::vid::Vid, held_premiums: [i64; 5]) {
+        use crate::loading_phase::AFFECT_PREMIUM_START;
+        let now = i64::from(Self::global_time());
+        let [exp, item, fish, gold, shop] = held_premiums;
+        let held = [(0, exp), (1, item), (4, fish), (6, gold), (7, shop)];
+        for (index, expire) in held {
+            let remain = expire.saturating_sub(now);
+            if remain <= 0 {
+                continue;
+            }
+            let duration = i32::try_from(remain).unwrap_or(i32::MAX);
+            self.add_pc_affect(
+                vid,
+                crate::game_state::affect::Affect::buff(
+                    AFFECT_PREMIUM_START + index,
+                    common::point_slot::POINT_NONE,
+                    0,
+                    0,
+                    duration,
+                    0,
+                ),
+                true,
+            );
+        }
     }
 
     /// As [`GameState::leave_world`], for a character that leaves by `departure`. A player
@@ -9009,6 +9080,9 @@ mod tests {
                 account: crate::game_loop_messages::QuestAccount::default(),
                 shop_premium_expire: 0,
                 fish_mind_expire: 0,
+                exp_premium_expire: 0,
+                item_premium_expire: 0,
+                gold_premium_expire: 0,
                 addr: String::new(),
             }),
             outbox,
@@ -9034,6 +9108,59 @@ mod tests {
         assert_eq!(character.gold(), 1_200_000_000_000_000_000 - 1);
         let swapped = slot_answer(&mut state, QuickslotStep::Swap { slot: 6, with: 0 });
         assert_eq!(swapped.quickslots.get(0), Some(skill));
+    }
+
+    /// `SEventLetters`' premium loop (`G/input_login.cpp:731-742`): the admitted
+    /// character's live premiums lay their `AFFECT_PREMIUM_START + index` rows, and a
+    /// dead one lays nothing.
+    #[test]
+    fn the_admission_seeds_the_live_premiums_affects() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let now = i64::from(GameState::global_time());
+        state.apply(GameCommand::EnterWorld {
+            vid: Vid::new(7),
+            player_id: 7,
+            name: "Shaman".to_string(),
+            items: Vec::new(),
+            loaded: Box::new(crate::game_loop_messages::Loaded {
+                points: None,
+                quickslots: world::character::Quickslots::default(),
+                gold: 0,
+                show: None,
+                skills: Vec::new(),
+                quest_flags: Vec::new(),
+                messenger_companions: Vec::new(),
+                messenger_team: Vec::new(),
+                messenger_levels: std::collections::BTreeMap::new(),
+                affects: Vec::new(),
+                fish_board: (Vec::new(), 0),
+                daily_gift: (None, 0),
+                battle_pass: Vec::new(),
+                horse_name: Vec::new(),
+                account: crate::game_loop_messages::QuestAccount::default(),
+                shop_premium_expire: now + 3600,
+                fish_mind_expire: 0,
+                exp_premium_expire: now + 7200,
+                item_premium_expire: 0,
+                gold_premium_expire: now - 1,
+                addr: String::new(),
+            }),
+            outbox,
+            reply,
+        });
+        assert!(answer.blocking_recv().unwrap().is_ok());
+        let kinds: Vec<u32> = state.affect_events[&Vid::new(7)]
+            .affects
+            .iter()
+            .map(|affect| affect.kind)
+            .collect();
+        assert!(kinds.contains(&500), "EXP lays 500: {kinds:?}");
+        assert!(kinds.contains(&507), "the shop lays 507: {kinds:?}");
+        assert!(!kinds.contains(&501), "ITEM is dead: {kinds:?}");
+        assert!(!kinds.contains(&504), "the mind is dead: {kinds:?}");
+        assert!(!kinds.contains(&506), "GOLD is past: {kinds:?}");
     }
 
     /// `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`) and `quest::PC::Save`
@@ -9078,6 +9205,9 @@ mod tests {
                 account: crate::game_loop_messages::QuestAccount::default(),
                 shop_premium_expire: 0,
                 fish_mind_expire: 0,
+                exp_premium_expire: 0,
+                item_premium_expire: 0,
+                gold_premium_expire: 0,
                 addr: String::new(),
             }),
             outbox,

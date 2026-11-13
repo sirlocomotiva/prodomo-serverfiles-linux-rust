@@ -2308,6 +2308,15 @@ fn enter_game_view(keyed: &mut Keyed) -> Entered {
     entered
 }
 
+/// [`enter_game_view`] for an entrant whose account holds live premiums: the premium
+/// adds ride between the board's line and the rank lines.
+fn enter_game_view_with_premiums(keyed: &mut Keyed, kinds: &[u32]) -> Entered {
+    let entered = enter_game_shown(keyed);
+    read_login_event_with_premiums(keyed, kinds);
+    keyed.still("nothing follows");
+    entered
+}
+
 /// [`enter_game_view`] for an entrant the party relinks: the burst's own pair is read
 /// first, then the link's walk is pulled one record at a time — its own ADD, every
 /// member's ADD in PID order, every online LINK in PID order, every member's UPDATE, its
@@ -2436,6 +2445,32 @@ fn enter_game_view_guilded(
 /// ([`read_login_event_blocking`]).
 fn read_login_event(keyed: &mut Keyed) {
     let _marks = read_login_event_blocking(keyed, 0, None);
+}
+
+/// [`read_login_event`] for an entrant whose account holds live premiums: the premium
+/// loop's add packets (`SEventLetters`, `G/input_login.cpp:731-742`) ride between the
+/// board's line and the rank lines, in index order. Each add names its kind on
+/// `POINT_NONE` with the seconds left, which the hour-out write bounds loosely.
+fn read_login_event_with_premiums(keyed: &mut Keyed, kinds: &[u32]) {
+    read_dungeon_cooldown(keyed, b"dungeon_info_cooldown 1 -");
+    for kind in kinds {
+        let add = keyed.read_game();
+        assert_eq!(add[0], GC_AFFECT_ADD, "the premium grants: {add:02x?}");
+        assert_eq!(
+            u32::from_le_bytes(add[1..5].try_into().expect("four bytes")),
+            *kind,
+            "the premium kind: {add:02x?}"
+        );
+        let duration = i32::from_le_bytes(add[14..18].try_into().expect("four bytes"));
+        assert!(
+            (3500..=3600).contains(&duration),
+            "the hour-out seconds left: {add:02x?}"
+        );
+    }
+    read_rank_login_raw(keyed, 0, &[], &[]);
+    read_login_lines_hiding(keyed, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
 }
 
 /// [`read_login_event`] while the moon, hex and fish events run: the three letters
@@ -13885,6 +13920,21 @@ fn enter_equipped_world_with(
     item_count: usize,
 ) -> (Keyed, Listed, Entered) {
     enter_equipped_world_on(server, login, 0, item_count)
+}
+
+/// [`enter_equipped_world_with`] for an entrant holding the fish-mind premium: the 504
+/// add rides between the board's line and the rank lines.
+fn enter_equipped_world_premium(
+    server: &Server,
+    login: &[u8],
+    item_count: usize,
+) -> (Keyed, Listed, Entered) {
+    let (mut keyed, _empire, list) = select_screen(server, login);
+    let character = listed(&list, 0);
+    keyed.send_record(&client_select(0));
+    select_equipped_enter(&mut keyed, item_count);
+    let entered = enter_game_view_with_premiums(&mut keyed, &[504]);
+    (keyed, character, entered)
 }
 /// [`enter_equipped_world_on`] for an entrant inside a window: answers the client,
 /// its row, the burst, and the board's raw login record, for the shape asserts.
@@ -60842,26 +60892,141 @@ fn the_rings_use_while_browsing_says_to_wait_ten_seconds() {
 /// and the `FISH` preview with the biting vnum to her own client (`PredictFish` true via
 /// the premium). The draw came from the mind's table 2 (`manwoo` unset), which the preview
 /// proves by arriving at all — with no mind, no pill and no premium, the bite sends `REACT`
-/// alone.
+/// alone. The table's row 0 (vnum 0, 2100 of 9800) and the never-fished three bite as the
+/// refused nothing, so a nothing-bite takes, rebaits and recasts, up to five casts.
+/// Ledger 651 hardened the loop: the 650 shape asserted on the first cast's luck.
 #[test]
 fn a_premium_cast_sees_the_biting_fish_before_the_take() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = fishing_stage(&database, Some(10), 1);
+    let server = fishing_stage(&database, Some(10), 5);
     sql(
         &database,
         "UPDATE account SET fish_mind_expire = EXTRACT(EPOCH FROM NOW())::bigint + 3600 WHERE \
          login = 'alice'",
     );
-    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let (mut alice, _alpha, entered) = enter_equipped_world_premium(&server, b"alice", 2);
     let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
-    alice.send_record(&client_fishing(3));
-    assert_eq!(alice.read_game(), server_fishing(0, vid, 3), "the cast");
-    wait_for_the_bite(&mut alice, vid);
-    let preview = alice.read_game();
-    assert_eq!(preview[..2], [GC_FISHING, 5], "the mind's preview");
-    let vnum = u32::from_le_bytes(preview[2..6].try_into().expect("four bytes"));
-    assert_ne!(vnum, 0, "a fish bit, not the refused nothing");
-    alice.still("nothing follows the preview");
+    for cast in 1..=5 {
+        alice.send_record(&client_fishing(3));
+        assert_eq!(alice.read_game(), server_fishing(0, vid, 3), "the cast");
+        wait_for_the_bite(&mut alice, vid);
+        let preview = alice.read_game();
+        assert_eq!(preview[..2], [GC_FISHING, 5], "the mind's preview");
+        let vnum = u32::from_le_bytes(preview[2..6].try_into().expect("four bytes"));
+        if vnum != 0 {
+            alice.still("nothing follows the preview");
+            return;
+        }
+        assert!(cast < 5, "five nothing-bites in a row (0.25^5): {cast}");
+        alice.send_record(&client_fishing(3));
+        assert_eq!(
+            alice.read_game(),
+            server_fishing(4, vid, 0),
+            "the nothing misses"
+        );
+        read_practice(&mut alice);
+        alice.send_record(&client_item_use(0));
+        assert_eq!(alice.read_game(), bait_line(420), "the next paste goes on");
+        assert_eq!(read_rod_update(&mut alice)[2], 10);
+        let _cleared = alice.read_game();
+    }
+}
+
+/// The EXP premium's kill (ledger 651; 229n proved the plain grant): Alice's account holds
+/// the EXP premium (`exp_premium_expire` an hour out, read at admission like
+/// `aiPremiumTimes[0]`). Alpha at level 1 with no exp punches the stray dog to death, and
+/// after the death's ownership clears comes the exp record: 22 (15 at the 100% delta row
+/// plus the premium's half again), onto 0, then the exp orb and `GC_DEAD`.
+#[test]
+fn a_premium_kill_pays_half_again_the_monsters_exp() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        DOG_AT_ALPHA,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 1, exp = 0 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET exp_premium_expire = EXTRACT(EPOCH FROM NOW())::bigint + 3600 WHERE \
+         login = 'alice'",
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let alpha_vid = listed.id;
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event_with_premiums(&mut alpha, &[500]);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+    alpha.send_record(&client_attack(dog));
+    let punch = alpha.read_fight();
+    assert_eq!(punch[0], GC_DAMAGE_INFO, "{punch:02x?}");
+    let shown = alpha.read_fight();
+    assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+    loop {
+        alpha.send_record(&client_attack(dog));
+        let _punch = loop {
+            let record = alpha.read_fight();
+            if record[0] == GC_DAMAGE_INFO {
+                break record;
+            }
+            assert_eq!(
+                record[0], GC_POINT_CHANGE,
+                "a heal tick at most: {record:02x?}"
+            );
+        };
+        let mut shown = loop {
+            let record = alpha.read_fight();
+            if record[0] != GC_POINT_CHANGE {
+                break record;
+            }
+        };
+        while shown[0] == GC_OWNERSHIP || shown[0] == GC_DAMAGE_INFO {
+            shown = alpha.read_fight();
+            while shown[0] == GC_POINT_CHANGE {
+                shown = alpha.read_fight();
+            }
+        }
+        assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+        if shown == target_of(dog, 0, 0, DOG_HP, 0) {
+            assert_eq!(alpha.read_fight(), stun_of(dog));
+            assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+            break;
+        }
+        assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+    }
+    alpha.send_record(&client_attack(dog));
+    assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
+    read_exp_death(&mut alpha, alpha_vid, dog, 22);
 }

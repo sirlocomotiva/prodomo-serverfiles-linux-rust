@@ -429,6 +429,51 @@ pub async fn fish_mind_expire(store: &Store, id: AccountId) -> Result<i64, Accou
         .ok_or(AccountError::NoSuchAccountId(id))
 }
 
+/// Read an account's EXP premium expiry: the unix time the premium ran to
+/// (`exp_premium_expire`, legacy's `silver_expire` read into
+/// `aiPremiumTimes[PREMIUM_EXP]`), 0 when never bought.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`].
+pub async fn exp_premium_expire(store: &Store, id: AccountId) -> Result<i64, AccountError> {
+    sqlx::query_scalar("SELECT exp_premium_expire FROM account WHERE id = $1")
+        .bind(id.to_column()?)
+        .fetch_optional(store.pool())
+        .await?
+        .ok_or(AccountError::NoSuchAccountId(id))
+}
+
+/// Read an account's ITEM premium expiry: the unix time the premium ran to
+/// (`item_premium_expire`, legacy's `gold_expire` read into
+/// `aiPremiumTimes[PREMIUM_ITEM]`), 0 when never bought.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`].
+pub async fn item_premium_expire(store: &Store, id: AccountId) -> Result<i64, AccountError> {
+    sqlx::query_scalar("SELECT item_premium_expire FROM account WHERE id = $1")
+        .bind(id.to_column()?)
+        .fetch_optional(store.pool())
+        .await?
+        .ok_or(AccountError::NoSuchAccountId(id))
+}
+
+/// Read an account's GOLD premium expiry: the unix time the premium ran to
+/// (`gold_premium_expire`, legacy's `money_drop_rate_expire` read into
+/// `aiPremiumTimes[PREMIUM_GOLD]`), 0 when never bought.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`].
+pub async fn gold_premium_expire(store: &Store, id: AccountId) -> Result<i64, AccountError> {
+    sqlx::query_scalar("SELECT gold_premium_expire FROM account WHERE id = $1")
+        .bind(id.to_column()?)
+        .fetch_optional(store.pool())
+        .await?
+        .ok_or(AccountError::NoSuchAccountId(id))
+}
+
 /// Write an account's premium private-shop expiry and retime its shops' rows
 /// (`UPDATE account SET premium_privateshop_expire`, then the cached shops'
 /// `UpdatePremiumTime`, `D/ClientManagerPrivateShop.cpp:2336-2348`): legacy

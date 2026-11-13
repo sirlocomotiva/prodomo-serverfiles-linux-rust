@@ -895,6 +895,12 @@ pub(super) struct SessionTail<'s> {
     pub(super) priv_item_drop: i32,
     /// The mob item rate at the step's start (`GetMobItemRate`), for the killee's delta.
     pub(super) mob_item_rate: i32,
+    /// The premium/unique doubling at the step's start (`GetDropPct`'s `:893-895`),
+    /// for the killee's delta.
+    pub(super) drop_doubles: bool,
+    /// The worn double-item at the step's start (`GetDropPct`'s `:906-911`), for the
+    /// killee's range.
+    pub(super) double_item: bool,
     /// Every `game.drop_item` call's vnum and count, in order, for the ground after the
     /// step (legacy lays in the call).
     pub(super) plain_drops: Vec<(u32, i32)>,
@@ -957,6 +963,8 @@ impl<'s> SessionTail<'s> {
             atlas,
             priv_item_drop: pre.priv_item_drop,
             mob_item_rate: pre.mob_item_rate,
+            drop_doubles: pre.drop_doubles,
+            double_item: pre.double_item,
             plain_drops: Vec::new(),
             lands: None,
             object_protos: None,
@@ -3599,15 +3607,19 @@ impl Game for Session<'_> {
         };
         let stone = npc.char_type == gamedata::mob_proto::CHAR_TYPE_STONE;
         let killer_level = self.run_points().map_or(1, world::character::Points::level);
-        let (priv_drop, item_rate) = (self.tail.priv_item_drop, self.tail.mob_item_rate);
+        let killer = DropKiller {
+            priv_drop: self.tail.priv_item_drop,
+            item_rate: self.tail.mob_item_rate,
+            double: self.tail.drop_doubles,
+            double_item: self.tail.double_item,
+        };
         quest_drop_pct(
             self.dice,
             stone,
             npc.fight.rank,
             npc.fight.level,
             killer_level,
-            priv_drop,
-            item_rate,
+            killer,
         )
     }
 
@@ -5382,23 +5394,44 @@ fn given_ownership_secs(anti_flags: u32) -> i32 {
 
 /// The math of `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the
 /// range for a victim of `rank` and `mob_level` against a killer of `killer_level`,
-/// with the reader's live item-drop `priv` and the mob item `item_rate`. The delta is
+/// with the reader's live item-drop `priv`, the mob item `item_rate`, the premium/unique
+/// doubling flag (`:893-895`), and the worn double-item flag (`:906-911`). The delta is
 /// the boss table from rank BOSS up unless the victim is a stone, plus 1000 on
-/// 1-in-50000 else 500 on 1-in-10000, times the rate. The range is `4000000 * 100 /
-/// (100 + priv)`: the precedence Defect at `:906-911` is fixed, and the worn
-/// double-item is 0 (hook). The premium/unique doubling and the `bonus` dead code
-/// never run (hooks). Shared with the kill's [`GameState::drop_pct`](super::reward):
+/// 1-in-50000 else 500 on 1-in-10000, times the rate, doubled when `double` is set. The
+/// range is `4000000 * 100 / (100 + priv + 100 with the double-item worn)`: the
+/// precedence Defect at `:906-911` is fixed. The `bonus` local is written and never
+/// read (dead code, not ported). Shared with the kill's [`GameState::drop_pct`](super::reward):
 /// the quest bridge answers it through a [`Session`], which borrows the dice.
+/// The killer's half of [`quest_drop_pct`]'s inputs: the live item-drop priv, the mob
+/// item rate, the premium/unique doubling, and the worn double-item. Bundled so the
+/// function stays under the argument lint.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DropKiller {
+    /// The live item-drop priv.
+    pub(super) priv_drop: i32,
+    /// The mob item rate (`GetMobItemRate`).
+    pub(super) item_rate: i32,
+    /// The premium/unique doubling (`:893-895`).
+    pub(super) double: bool,
+    /// The worn double-item (`:906-911`).
+    pub(super) double_item: bool,
+}
+
 pub(super) fn quest_drop_pct(
     dice: &mut world::character::Pcg32,
     stone: bool,
     rank: u8,
     mob_level: u8,
     killer_level: u8,
-    priv_drop: i32,
-    item_rate: i32,
+    killer: DropKiller,
 ) -> (i32, i32) {
     use common::enums::EMobRank;
+    let DropKiller {
+        priv_drop,
+        item_rate,
+        double,
+        double_item,
+    } = killer;
     let boss = !stone && rank >= EMobRank::Boss as u8;
     let table = if boss {
         common::levels::PERCENT_BY_DELTA_LEV_BOSS
@@ -5413,7 +5446,11 @@ pub(super) fn quest_drop_pct(
         delta += 500;
     }
     delta = delta * item_rate / 100;
-    let range = 4_000_000 * 100 / (100 + priv_drop);
+    if double {
+        delta += delta;
+    }
+    let extra = if double_item { 100 } else { 0 };
+    let range = 4_000_000 * 100 / (100 + priv_drop + extra);
     (delta, range)
 }
 
@@ -5675,6 +5712,10 @@ pub(super) struct QuestStepState {
     pub(super) priv_item_drop: i32,
     /// The mob item rate.
     pub(super) mob_item_rate: i32,
+    /// The premium/unique doubling.
+    pub(super) drop_doubles: bool,
+    /// The worn double-item.
+    pub(super) double_item: bool,
 }
 
 impl GameState {
@@ -5689,7 +5730,10 @@ impl GameState {
                 self.safebox_open(reader),
             ),
             priv_item_drop: self.priv_of(reader, super::empire_priv::PRIV_ITEM_DROP),
-            mob_item_rate: self.mob_rates.item,
+            mob_item_rate: self.mob_item_rate(reader),
+            drop_doubles: self.premium_runs(reader, common::enums::EPremiumTypes::Item)
+                || self.wears_unique_group(reader, super::reward::UNIQUE_GROUP_DOUBLE_ITEM),
+            double_item: self.wears_unique(reader, super::reward::DOUBLE_ITEM),
         }
     }
 

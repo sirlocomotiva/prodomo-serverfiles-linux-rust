@@ -874,29 +874,38 @@ impl GameState {
         !stripped.is_empty()
     }
 
-    /// The 507 sync (`ProcessAffect`'s premium arm, `G/char_affect.cpp:343-363`):
-    /// a held 507 row with `expiry - now < 0` goes, uncomputed with its remove
-    /// packet; else its `remaining` rewrites to `remain + 1`. Only index 7: the
-    /// other premium kinds have no stored expiry, so a whole-array port would
-    /// rewrite durations it must not touch. Index 9's off-by-one (the `0..=`
-    /// loop reads past the array) is a Defect, not reproduced.
-    fn sync_shop_premium_affect(&mut self, vid: Vid) {
+    /// The premium sync (`ProcessAffect`'s premium arm, `G/char_affect.cpp:343-363`):
+    /// a held premium row with `expiry - now < 0` goes, uncomputed with its remove
+    /// packet; else its `remaining` rewrites to `remain + 1`. Only the five held
+    /// kinds (0, 1, 4, 6, 7): the others have no stored expiry, so a whole-array
+    /// port would rewrite durations it must not touch. Index 9's off-by-one (the
+    /// `0..=` loop reads past the array) is a Defect, not reproduced.
+    fn sync_premium_affects(&mut self, vid: Vid) {
+        let now = i64::from(wall_now());
+        let held = [
+            (0, self.exp_premium_expiry.get(&vid).copied().unwrap_or(0)),
+            (1, self.item_premium_expiry.get(&vid).copied().unwrap_or(0)),
+            (4, self.fish_mind_expiry.get(&vid).copied().unwrap_or(0)),
+            (6, self.gold_premium_expiry.get(&vid).copied().unwrap_or(0)),
+            (7, self.shop_premium_expiry.get(&vid).copied().unwrap_or(0)),
+        ];
+        for (index, expiry) in held {
+            self.sync_premium_affect(vid, index, expiry.saturating_sub(now));
+        }
+    }
+
+    /// One row of [`GameState::sync_premium_affects`]: the row of the premium affect at
+    /// `index`, with `remain < 0`, goes, else its `remaining` rewrites to `remain + 1`.
+    /// A missing row does nothing, as legacy's `FindAffect` miss does.
+    fn sync_premium_affect(&mut self, vid: Vid, index: u32, remain: i64) {
+        use crate::loading_phase::AFFECT_PREMIUM_START;
+        let kind = AFFECT_PREMIUM_START + index;
         let Some(event) = self.affect_events.get_mut(&vid) else {
             return;
         };
-        if !event
-            .affects
-            .iter()
-            .any(|affect| affect.kind == crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP)
-        {
+        if !event.affects.iter().any(|affect| affect.kind == kind) {
             return;
         }
-        let remain = self
-            .shop_premium_expiry
-            .get(&vid)
-            .copied()
-            .unwrap_or(0)
-            .saturating_sub(i64::from(wall_now()));
         if remain < 0 {
             let stripped = take_affects_of_kind(
                 &mut self
@@ -904,7 +913,7 @@ impl GameState {
                     .get_mut(&vid)
                     .expect("the event holds the row")
                     .affects,
-                crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP,
+                kind,
             );
             for affect in &stripped {
                 let _stripped = self.compute_affect(vid, affect, false);
@@ -915,7 +924,7 @@ impl GameState {
         let remain = i32::try_from(remain.saturating_add(1)).unwrap_or(i32::MAX);
         if let Some(event) = self.affect_events.get_mut(&vid) {
             for affect in &mut event.affects {
-                if affect.kind == crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP {
+                if affect.kind == kind {
                     affect.remaining = remain;
                 }
             }
@@ -980,7 +989,7 @@ impl GameState {
         self.validate_horse_name(vid);
         // The premium sync runs before the strip, as `ProcessAffect` syncs the
         // premium rows before anything else (`G/char_affect.cpp:343-363`).
-        self.sync_shop_premium_affect(vid);
+        self.sync_premium_affects(vid);
         // The guild-skill strip runs before the drain, as legacy checks each affect's
         // guild band before its SP cost.
         let _stripped = self.strip_peacetime_guild_affects(vid);
@@ -2192,11 +2201,11 @@ mod tests {
         assert_eq!(removes, 3, "each stripped band row answers its remove");
     }
 
-    /// The tick syncs a live 507 row to `expiry - now + 1` and removes a lapsed
+    /// The tick syncs a live premium row to `expiry - now + 1` and removes a lapsed
     /// one with its remove packet (`ProcessAffect`'s premium arm,
-    /// `G/char_affect.cpp:343-363`).
+    /// `G/char_affect.cpp:343-363`): the 507 rows stand for the five held kinds.
     #[test]
-    fn the_tick_syncs_a_live_507_and_removes_a_lapsed_one() {
+    fn the_tick_syncs_a_live_premium_and_removes_a_lapsed_one() {
         use crate::loading_phase::AFFECT_PREMIUM_PRIVATE_SHOP;
         let clock = TestClock::default();
         let mut world = a_world(&clock);

@@ -3804,7 +3804,7 @@ impl GameState {
             .card
             .empire;
         let map = self.place_of(vid.raw()).expect("the caster stood above").1;
-        let user_rate = self.user_damage_rate();
+        let user_rate = self.user_damage_rate(vid);
         let &(channel, nmap, at) = self
             .npc_of
             .get(&target_vid)
@@ -3869,7 +3869,7 @@ impl GameState {
             .card
             .empire;
         let map = self.place_of(vid.raw()).expect("the caster stood above").1;
-        let user_rate = self.user_damage_rate();
+        let user_rate = self.user_damage_rate(vid);
         let &(channel, nmap, at) = self
             .npc_of
             .get(&target_vid)

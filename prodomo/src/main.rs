@@ -8604,6 +8604,59 @@ async fn fish_mind_expiry_of(
     }
 }
 
+/// Read the account's five premium expiries for the admission, in held order (shop,
+/// fish, exp, item, gold), as the auth query reads them with the login
+/// (`G/input_auth.cpp:137-145`): `None` (after the log line) closes, as a refused load
+/// does. One helper for the five columns, so the enter stays under the line lint.
+async fn admission_premiums(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &Held,
+) -> Option<(i64, i64, i64, i64, i64)> {
+    let shop = shop_premium_expiry_of(context, addr, held).await?;
+    let fish = fish_mind_expiry_of(context, addr, held).await?;
+    let (exp, item, gold) = combat_premium_expiry_of(context, addr, held).await?;
+    Some((shop, fish, exp, item, gold))
+}
+
+/// Read the account's EXP, ITEM and GOLD premium expiries for the admission, as the auth
+/// query reads them with the login (`G/input_auth.cpp:137-143`): `None` (after the log
+/// line) closes, as a refused load does, and no account reads 0, as no row does. One
+/// helper for the three columns, so the enter stays under the line lint.
+async fn combat_premium_expiry_of(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &Held,
+) -> Option<(i64, i64, i64)> {
+    let Some(account) = held.account.as_ref() else {
+        return Some((0, 0, 0));
+    };
+    let store = &context.store;
+    let id = account.id;
+    let exp = match db::accounts::exp_premium_expire(store, id).await {
+        Ok(expire) => expire,
+        Err(error) => {
+            warn!(%addr, %error, "EXP premium expiry load failed; closing");
+            return None;
+        }
+    };
+    let item = match db::accounts::item_premium_expire(store, id).await {
+        Ok(expire) => expire,
+        Err(error) => {
+            warn!(%addr, %error, "ITEM premium expiry load failed; closing");
+            return None;
+        }
+    };
+    let gold = match db::accounts::gold_premium_expire(store, id).await {
+        Ok(expire) => expire,
+        Err(error) => {
+            warn!(%addr, %error, "GOLD premium expiry load failed; closing");
+            return None;
+        }
+    };
+    Some((exp, item, gold))
+}
+
 async fn enter_game<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -8678,18 +8731,20 @@ where
         return false;
     };
     let account = quest_account(context, addr, held).await.unwrap_or_default();
-    // The account's premium expiry rides the admission, as `aiPremiumTimes` rides
-    // the auth answer (`G/input_auth.cpp:145`): a refused read closes, as a refused
-    // load does, and no account table reads 0, as no row does.
-    let Some(shop_premium_expire) = shop_premium_expiry_of(context, addr, held).await else {
-        return false;
-    };
-    let Some(fish_mind_expire) = fish_mind_expiry_of(context, addr, held).await else {
+    // The account's premium expiries ride the admission, as `aiPremiumTimes` rides
+    // the auth answer (`G/input_auth.cpp:137-145`): a refused read closes, as a
+    // refused load does, and no account table reads 0, as no row does.
+    let Some(premiums) = admission_premiums(context, addr, held).await else {
         return false;
     };
     let mut loaded = loaded_state(addr, held, Some(show), messenger, account);
-    loaded.shop_premium_expire = shop_premium_expire;
-    loaded.fish_mind_expire = fish_mind_expire;
+    (
+        loaded.shop_premium_expire,
+        loaded.fish_mind_expire,
+        loaded.exp_premium_expire,
+        loaded.item_premium_expire,
+        loaded.gold_premium_expire,
+    ) = premiums;
     let Some((world_vid, shown)) =
         join_the_world(context, addr, character, vid, (items, loaded), outbox).await
     else {
@@ -8926,6 +8981,9 @@ fn loaded_state(
         account,
         shop_premium_expire: 0,
         fish_mind_expire: 0,
+        exp_premium_expire: 0,
+        item_premium_expire: 0,
+        gold_premium_expire: 0,
         addr: addr.ip().to_string(),
     }
 }

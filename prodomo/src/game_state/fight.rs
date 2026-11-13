@@ -832,7 +832,7 @@ impl GameState {
         let dragon_stones = *self.dragon_stones;
         let dragon_counts = self.dragon_counts(channel, map);
         let empire = self.bodies.get(&vid)?.card.empire;
-        let user_rate = self.user_damage_rate();
+        let user_rate = self.user_damage_rate(vid);
         // `Damage`'s Meley gate runs before the swing's damage: the step's heal,
         // flags and step moves land even though the hit then blocks.
         let blocked = self.meley_blocks_hit(vid, target);
@@ -1095,7 +1095,7 @@ impl GameState {
         let Some(empire) = self.bodies.get(&victim).map(|body| body.card.empire) else {
             return;
         };
-        let user_rate = self.user_damage_rate();
+        let user_rate = self.user_damage_rate(victim);
         let blocked = self.meley_blocks_hit(victim, mob);
         let armada = self.meley_cannot_dead.contains(&mob);
         let statue = self

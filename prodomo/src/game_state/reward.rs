@@ -20,8 +20,9 @@
 //! The damage map is `NpcCombat.damage`, filled by `after_damage` before the recovery
 //! starts. `dead_npc` calls `reward_exp` after the stun cancel and before `GC_DEAD`.
 //! Party attackers group into one row per party, after the solos; there is no stone link
-//! (OQ11), no premium, no mounts, no marriage, and no ring of exp (its group does not
-//! exist). The empire privs feed the exp, gold and drop terms; the guild and character
+//! (OQ11), no mounts, no marriage, and no ring of exp (its group does not
+//! exist). The account's EXP, ITEM and GOLD premiums run through the exp grant, the rates
+//! and the drops, seeded at admission. The empire privs feed the exp, gold and drop terms;
 //! arms are 0, as nothing grants them. The devil-tower arm is dead on a hostile map (no
 //! hosted map is in 660000-669999), `AdjustExpByLevel` is a no-op at level 99 and below,
 //! and the tower of the instant `POINT_EXP` percent is always 0 (Defect D3). What is not
@@ -72,6 +73,13 @@ const MEDAL_PARTS: [u32; 5] = [30265, 30266, 30267, 30268, 30269];
 const LARBOR_MEDAL: u32 = 70_004;
 /// `UNIQUE_ITEM_DOUBLE_EXP` (`G/unique_item.h:36`): worn, it adds 50% experience.
 const DOUBLE_EXP: u32 = 70_005;
+/// `UNIQUE_ITEM_DOUBLE_ITEM` (`G/unique_item.h:37`): worn, it feeds the drop range.
+pub(super) const DOUBLE_ITEM: u32 = 70_043;
+/// `UNIQUE_GROUP_LUCKY_GOLD` (`G/unique_item.h:7`): worn, it doubles the gold percent.
+const UNIQUE_GROUP_LUCKY_GOLD: i32 = 10_024;
+/// `UNIQUE_GROUP_DOUBLE_ITEM` (`G/unique_item.h:12`): worn, it doubles the drop delta
+/// and opens the thief-glove draws.
+pub(super) const UNIQUE_GROUP_DOUBLE_ITEM: i32 = 10_002;
 /// `UNIQUE_ITEM_FASTER_ALIGNMENT_UP_BY_KILL` (`G/unique_item.h:31`): worn, a kill that
 /// raises a negative alignment raises it by 14 instead of 7.
 const FASTER_ALIGNMENT_UP_BY_KILL: u32 = 70_051;
@@ -388,13 +396,16 @@ impl GameState {
         if self.wears_unique(to, DOUBLE_EXP) {
             exp += exp * 50 / 100;
         }
-        // No mount system (hook): both mount arms run 0. No premium (hook): `PREMIUM_EXP`
-        // is 0. The ring of exp is dead: `special_item_group.txt` has no group 10000.
+        // No mount system (hook): both mount arms run 0.
+        if self.premium_runs(to, common::enums::EPremiumTypes::Exp) {
+            exp += exp * 50 / 100;
+        }
+        // The ring of exp is dead: `special_item_group.txt` has no group 10000.
         // No marriage (hook): `GetMarriageBonus` is 0.
         exp += exp * i64::from(ramadan) / 100;
         exp += exp * i64::from(mall) / 100;
         // The instant `POINT_EXP` percent is always 0 (D3, dead; not ported).
-        exp = exp * i64::from(self.mob_exp_rate()) / 100;
+        exp = exp * i64::from(self.mob_exp_rate(to)) / 100;
         exp = exp.min(next_exp / 10);
         // `AdjustExpByLevel` is a no-op at level 99 and below (not ported).
         let conqueror = points.conqueror_level();
@@ -414,11 +425,54 @@ impl GameState {
         self.packet_around(EntityKey::Npc(from), &orb, None);
     }
 
+    /// `GetPremiumRemainSeconds(kind) > 0` (`G/char.cpp:8091-8097`): the held expiry
+    /// of `kind` less the wall clock, as the rate readers judge it.
+    pub(super) fn premium_runs(&self, vid: Vid, kind: common::enums::EPremiumTypes) -> bool {
+        let held = match kind {
+            common::enums::EPremiumTypes::Exp => &self.exp_premium_expiry,
+            common::enums::EPremiumTypes::Item => &self.item_premium_expiry,
+            common::enums::EPremiumTypes::Gold => &self.gold_premium_expiry,
+            common::enums::EPremiumTypes::FishMind => &self.fish_mind_expiry,
+            common::enums::EPremiumTypes::PrivateShop => &self.shop_premium_expiry,
+            _ => return false,
+        };
+        held.get(&vid)
+            .is_some_and(|expiry| expiry.saturating_sub(i64::from(Self::global_time())) > 0)
+    }
+
     /// `CHARACTER_MANAGER::GetMobExpRate` (`G/char_manager.cpp:1035-1058`): 100 until the
-    /// `mob_exp` event flag sets it (`G/questmanager.cpp:1374-1377`), 0 included. No
-    /// premium time exists, so the buyer rate never applies.
-    fn mob_exp_rate(&self) -> i32 {
+    /// `mob_exp` event flag sets it (`G/questmanager.cpp:1374-1377`), 0 included; the
+    /// `mob_exp_buyer` rate while the EXP premium runs. The China arms never run:
+    /// `g_bChinaIntoxicationCheck` is false and no assignment sets it.
+    fn mob_exp_rate(&self, to: Vid) -> i32 {
+        if self.premium_runs(to, common::enums::EPremiumTypes::Exp) {
+            return self.mob_rates.exp_buyer;
+        }
         self.mob_rates.exp
+    }
+
+    /// `CHARACTER_MANAGER::GetMobItemRate` (`G/char_manager.cpp:958-978`): the
+    /// `mob_item_buyer` rate while the ITEM premium runs, else `mob_item`. The
+    /// China arms never run.
+    pub(super) fn mob_item_rate(&self, killer: Vid) -> i32 {
+        if self.premium_runs(killer, common::enums::EPremiumTypes::Item) {
+            return self.mob_rates.item_buyer;
+        }
+        self.mob_rates.item
+    }
+
+    /// `CHARACTER_MANAGER::GetMobGoldDropRate` (`G/char_manager.cpp:1010-1033`) and
+    /// `GetMobGoldAmountRate` (`:985-1008`): the `mob_gold_pct_buyer` and
+    /// `mob_gold_buyer` rates while the GOLD premium runs, else the plain rates.
+    /// The China arms never run.
+    fn mob_gold_rates(&self, attacker: Vid) -> (i32, i32) {
+        if self.premium_runs(attacker, common::enums::EPremiumTypes::Gold) {
+            return (
+                self.mob_rates.gold_drop_buyer,
+                self.mob_rates.gold_amount_buyer,
+            );
+        }
+        (self.mob_rates.gold_drop, self.mob_rates.gold_amount)
     }
 
     /// `CHARACTER_MANAGER::GetMobDamageRate` (`G/char_manager.cpp:980-983`): 100 until the
@@ -430,9 +484,12 @@ impl GameState {
     }
 
     /// `CHARACTER_MANAGER::GetUserDamageRate` (`G/char_manager.cpp:1060-1070`): 100 until
-    /// the `user_dam` event flag sets it (`G/questmanager.cpp:1362-1365`).
-    /// No premium time exists, so the buyer rate never applies.
-    pub(super) fn user_damage_rate(&self) -> i32 {
+    /// the `user_dam` event flag sets it (`G/questmanager.cpp:1362-1365`); the
+    /// `user_dam_buyer` rate while the EXP premium runs.
+    pub(super) fn user_damage_rate(&self, attacker: Vid) -> i32 {
+        if self.premium_runs(attacker, common::enums::EPremiumTypes::Exp) {
+            return self.mob_rates.user_damage_buyer;
+        }
         self.mob_rates.user_damage
     }
 
@@ -462,6 +519,21 @@ impl GameState {
             .into_iter()
             .filter_map(|wear| equipment.wear(wear as u16))
             .any(|worn| worn.item.vnum == vnum)
+    }
+
+    /// `IsEquipUniqueGroup` (`G/char_item.cpp:9543-9560`): a unique cell holds an item of the
+    /// special item group `group`.
+    pub(super) fn wears_unique_group(&self, vid: Vid, group: i32) -> bool {
+        use common::enums::EWearPositions;
+        use world::character::Equipment;
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return false;
+        };
+        let equipment = Equipment::of(character.items(), &self.protos);
+        [EWearPositions::Unique1, EWearPositions::Unique2]
+            .into_iter()
+            .filter_map(|wear| equipment.wear(wear as u16))
+            .any(|worn| self.item_groups.unique.get(&worn.item.vnum) == Some(&group))
     }
 
     /// The alignment arm (`G/char_battle.cpp:794-807`): a kill of a monster at most 10
@@ -541,10 +613,12 @@ impl GameState {
     }
 
     /// The gold half of `Reward`: `RewardGold` (`G/char_battle.cpp:558-749`) for the monster
-    /// under `vid`, killed by `attacker`. Without autoloot (no premium, and unique group
-    /// 10011 does not exist) `GetMovablePosition` around the monster must succeed, else no
+    /// under `vid`, killed by `attacker`. Without autoloot (AUTOLOOT has no stored
+    /// expiry, and unique group 10011 does not exist) `GetMovablePosition` around the
+    /// monster must succeed, else no
     /// gold falls (`:568-569`); the chance is the rank's gold percent through the mall bonus,
-    /// the gold drop rate (100: no premium, no China check), and the level-delta table (the
+    /// the gold drop rate (100, the buyer rate while the GOLD premium runs; no China
+    /// check), and the level-delta table (the
     /// boss table from rank BOSS up, with NO stone exclusion, `:599-603`).
     ///
     /// Every pile is laid with the monster's z (legacy's `pos.z` is uninitialised stack, a
@@ -577,14 +651,19 @@ impl GameState {
             points.get_point(point::POINT_MALL_GOLDBONUS),
             points.get_point(point::POINT_GOLD_DOUBLE_BONUS),
         );
+        let (drop_rate, amount_rate) = self.mob_gold_rates(attacker);
         let mut percent = levels::GOLD_PERCENT_BY_RANK
             .get(usize::from(rank))
             .copied()
             .unwrap_or(0);
         percent += percent * self.priv_of(attacker, super::empire_priv::PRIV_GOLD_DROP) / 100;
         percent += percent * mall / 100;
-        percent = percent * self.mob_rates.gold_drop / 100;
-        // No premium gold (hook).
+        percent = percent * drop_rate / 100;
+        if self.premium_runs(attacker, common::enums::EPremiumTypes::Gold)
+            || self.wears_unique_group(attacker, UNIQUE_GROUP_LUCKY_GOLD)
+        {
+            percent += percent;
+        }
         percent = percent.min(100);
         let boss = rank >= EMobRank::Boss as u8;
         let chance = levels::gold_level_delta_share(killer_level, level, percent, boss);
@@ -611,7 +690,7 @@ impl GameState {
             &mut self.dice,
             wide,
             boss,
-            (low, high, self.mob_rates.gold_amount),
+            (low, high, amount_rate),
             &mut multiplier,
             ten_chance,
         );
@@ -1012,10 +1091,12 @@ impl GameState {
     /// `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the range,
     /// answered by [`super::quests::quest_drop_pct`]. The delta is the boss table from
     /// rank BOSS up unless the victim is a stone, plus 1000 on 1-in-50000 else 500 on
-    /// 1-in-10000, times `GetMobItemRate` (`:891`: 100 until `mob_item` sets it; no
-    /// premium, no China check). The range is `4000000 * 100 / (100 + priv)`: the
-    /// precedence Defect at `:906-911` is fixed, and the worn double-item is 0 (hook).
-    /// The premium/unique doubling and the `bonus` dead code never run (hooks).
+    /// 1-in-10000, times `GetMobItemRate` (`:891`: 100 until `mob_item` sets it, the
+    /// `mob_item_buyer` rate while the ITEM premium runs; no China check),
+    /// doubled while the ITEM premium runs or a double-item unique is worn (`:893-895`).
+    /// The range is `4000000 * 100 / (100 + priv + 100 with the double-item worn)`:
+    /// the precedence Defect at `:906-911` is fixed. The `bonus` local is written and
+    /// never read (dead code, not ported).
     fn drop_pct(
         &mut self,
         stone: bool,
@@ -1025,15 +1106,22 @@ impl GameState {
         killer_level: u8,
     ) -> (i32, i32) {
         let priv_drop = self.priv_of(killer, super::empire_priv::PRIV_ITEM_DROP);
-        let item_rate = self.mob_rates.item;
+        let item_rate = self.mob_item_rate(killer);
+        let double = self.premium_runs(killer, common::enums::EPremiumTypes::Item)
+            || self.wears_unique_group(killer, UNIQUE_GROUP_DOUBLE_ITEM);
+        let double_item = self.wears_unique(killer, DOUBLE_ITEM);
         super::quests::quest_drop_pct(
             &mut self.dice,
             stone,
             rank,
             mob_level,
             killer_level,
-            priv_drop,
-            item_rate,
+            super::quests::DropKiller {
+                priv_drop,
+                item_rate,
+                double,
+                double_item,
+            },
         )
     }
 
@@ -1167,8 +1255,20 @@ impl GameState {
                 }
             }
         }
-        // Thief gloves (`:1234-1260`): no premium and unique group 10002 does not exist,
-        // so the gate is always false (hook) and no draw runs.
+        // Thief gloves (`:1234-1260`): the ITEM premium or a worn double-item group
+        // opens the race's glove draws, each row's percent through the delta.
+        if self.premium_runs(attacker, common::enums::EPremiumTypes::Item)
+            || self.wears_unique_group(attacker, UNIQUE_GROUP_DOUBLE_ITEM)
+        {
+            if let Some(group) = self.drops.mob.gloves.get(&race).cloned() {
+                for row in group.items {
+                    let percent = i32::try_from(row.pct).unwrap_or(i32::MAX) * delta / 100;
+                    if percent >= number(&mut self.dice, 1, range) {
+                        hits.extend(self.make_drop_hit(row.vnum, row.count, -1));
+                    }
+                }
+            }
+        }
         // Etc (`:1262-1277`): the proto's `DROP_ITEM` vnum against the etc map.
         if drop_vnum != 0 {
             if let Some(prob) = self.drops.etc.probs.get(&drop_vnum).copied() {
@@ -1421,7 +1521,145 @@ mod tests {
     use world::character::{number, Pcg32};
     use world::npc::FIRST_NPC_VID;
 
-    use super::super::fixtures::{a_fighter, enter, open_cells, stand_field, TestClock};
+    use super::super::fixtures::{a_fighter, a_world, enter, open_cells, stand_field, TestClock};
+
+    /// The premium conditions (`GetPremiumRemainSeconds(kind) > 0`, `G/char.cpp:8091-8097`):
+    /// a future held expiry runs, a zero or past one does not. The five held kinds answer;
+    /// the rest never run.
+    #[test]
+    fn only_a_future_held_expiry_runs_the_premium() {
+        use common::enums::EPremiumTypes;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let now = i64::from(crate::game_state::GameState::global_time());
+        let here = Vid::new(7);
+        for hold in [
+            &mut world.exp_premium_expiry,
+            &mut world.item_premium_expiry,
+            &mut world.gold_premium_expiry,
+            &mut world.fish_mind_expiry,
+            &mut world.shop_premium_expiry,
+        ] {
+            hold.insert(here, now + 3600);
+        }
+        for kind in [
+            EPremiumTypes::Exp,
+            EPremiumTypes::Item,
+            EPremiumTypes::Gold,
+            EPremiumTypes::FishMind,
+            EPremiumTypes::PrivateShop,
+        ] {
+            assert!(world.premium_runs(here, kind), "{kind:?} runs");
+        }
+        for kind in [
+            EPremiumTypes::Safebox,
+            EPremiumTypes::AutoLoot,
+            EPremiumTypes::MarriageFast,
+            EPremiumTypes::MaxNum,
+        ] {
+            assert!(!world.premium_runs(here, kind), "{kind:?} never runs");
+        }
+        world.exp_premium_expiry.insert(here, 0);
+        assert!(
+            !world.premium_runs(here, EPremiumTypes::Exp),
+            "never bought runs nothing"
+        );
+        world.exp_premium_expiry.insert(here, now - 1);
+        assert!(
+            !world.premium_runs(here, EPremiumTypes::Exp),
+            "a past expiry runs nothing"
+        );
+    }
+
+    /// The buyer rates (`G/char_manager.cpp:958-1070`): the plain rate until the matching
+    /// premium runs, then the buyer rate.
+    #[test]
+    fn the_buyer_rate_answers_while_the_premium_runs() {
+        use common::enums::EPremiumTypes;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let here = Vid::new(7);
+        world.set_event_flag(b"mob_exp", 10);
+        world.set_event_flag(b"mob_exp_buyer", 20);
+        world.set_event_flag(b"mob_item_buyer", 30);
+        world.set_event_flag(b"mob_gold_buyer", 40);
+        world.set_event_flag(b"mob_gold_pct_buyer", 50);
+        world.set_event_flag(b"user_dam", 60);
+        world.set_event_flag(b"user_dam_buyer", 70);
+        assert_eq!(world.mob_exp_rate(here), 10);
+        assert_eq!(world.user_damage_rate(here), 60);
+        let now = i64::from(crate::game_state::GameState::global_time());
+        world.exp_premium_expiry.insert(here, now + 3600);
+        assert_eq!(world.mob_exp_rate(here), 20, "the buyer rate answers");
+        assert_eq!(world.user_damage_rate(here), 70, "EXP drives the user rate");
+        world.item_premium_expiry.insert(here, now + 3600);
+        assert_eq!(world.mob_item_rate(here), 30);
+        world.gold_premium_expiry.insert(here, now + 3600);
+        assert_eq!(world.mob_gold_rates(here), (50, 40));
+        let _ = EPremiumTypes::Exp;
+    }
+
+    /// `GiveExp`'s premium arm (`G/char_battle.cpp:2624-2627`): the EXP premium adds half
+    /// again before the rate, so 22 becomes 33 at the 100% delta row with both rates at
+    /// 100. A buyer rate folds into the grant: 200 doubles it to 66.
+    #[test]
+    fn the_exp_premium_adds_half_and_the_buyer_rate_answers() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _inbox = enter(&mut world, 7, (3200, 3200), 820);
+        let now = i64::from(crate::game_state::GameState::global_time());
+        world.exp_premium_expiry.insert(Vid::new(7), now + 3600);
+        let before = world.pc_points_mut(7).expect("a player").exp();
+        world.give_exp(1, Vid::new(7), 10, 22);
+        let after = world.pc_points_mut(7).expect("a player").exp();
+        assert_eq!(after - before, 33, "22 + 50% at the 100% delta row");
+        world.set_event_flag(b"mob_exp_buyer", 200);
+        world.give_exp(1, Vid::new(7), 10, 22);
+        let doubled = world.pc_points_mut(7).expect("a player").exp();
+        assert_eq!(doubled - after, 66, "the buyer rate doubles the grant");
+    }
+
+    /// `GetDropPct`'s doubling (`G/item_manager.cpp:893-911`): the premium/unique flag
+    /// doubles the delta, and the worn double-item adds 100 to the range's divisor.
+    #[test]
+    fn the_item_premium_doubles_the_delta_and_the_double_item_feeds_the_range() {
+        use super::super::quests::{quest_drop_pct, DropKiller};
+        let plain_killer = DropKiller {
+            priv_drop: 0,
+            item_rate: 100,
+            double: false,
+            double_item: false,
+        };
+        let mut plain = Pcg32::new(9, 0);
+        let (delta, range) = quest_drop_pct(&mut plain, false, 0, 10, 10, plain_killer);
+        let mut doubled = Pcg32::new(9, 0);
+        let (delta2, _) = quest_drop_pct(
+            &mut doubled,
+            false,
+            0,
+            10,
+            10,
+            DropKiller {
+                double: true,
+                ..plain_killer
+            },
+        );
+        assert_eq!(delta2, delta + delta, "the premium doubles the delta");
+        let mut worn = Pcg32::new(9, 0);
+        let (_, range2) = quest_drop_pct(
+            &mut worn,
+            false,
+            0,
+            10,
+            10,
+            DropKiller {
+                double_item: true,
+                ..plain_killer
+            },
+        );
+        assert_eq!(range, 4_000_000, "100 + 0 priv");
+        assert_eq!(range2, 2_000_000, "100 + 0 priv + 100 double-item");
+    }
 
     /// The horse book's `pkKiller->IsHorseRiding() && ...` (`G/item_manager.cpp:1295-1302`):
     /// the rider's kill draws for the book, so its dice stand one draw past the walker's,

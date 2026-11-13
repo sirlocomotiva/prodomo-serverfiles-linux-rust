@@ -3638,6 +3638,24 @@ pub struct Loaded {
     /// descriptor reads it before it sends the admission, as the auth query reads it
     /// with the login (`G/input_auth.cpp:141`).
     pub fish_mind_expire: i64,
+    /// The account's EXP premium expiry (`exp_premium_expire`), which the world
+    /// holds as the character's `m_aiPremiumTimes[0]` (`PREMIUM_EXP`, legacy's
+    /// `silver_expire`) from the admission on. The descriptor reads it before it
+    /// sends the admission, as the auth query reads it with the login
+    /// (`G/input_auth.cpp:137`).
+    pub exp_premium_expire: i64,
+    /// The account's ITEM premium expiry (`item_premium_expire`), which the world
+    /// holds as the character's `m_aiPremiumTimes[1]` (`PREMIUM_ITEM`, legacy's
+    /// `gold_expire`) from the admission on. The descriptor reads it before it
+    /// sends the admission, as the auth query reads it with the login
+    /// (`G/input_auth.cpp:138`).
+    pub item_premium_expire: i64,
+    /// The account's GOLD premium expiry (`gold_premium_expire`), which the world
+    /// holds as the character's `m_aiPremiumTimes[6]` (`PREMIUM_GOLD`, legacy's
+    /// `money_drop_rate_expire`) from the admission on. The descriptor reads it
+    /// before it sends the admission, as the auth query reads it with the login
+    /// (`G/input_auth.cpp:143`).
+    pub gold_premium_expire: i64,
     /// The descriptor's host address, which the multi-farm registry keys on
     /// (`GetHostName`, `G/desc.h:55`).
     pub addr: String,

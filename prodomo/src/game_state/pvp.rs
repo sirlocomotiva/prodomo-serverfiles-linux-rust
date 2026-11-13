@@ -156,7 +156,7 @@ impl GameState {
             .get(&attacker)
             .map_or(0, |body| body.card.empire);
         let map = self.place_of(attacker.raw()).map_or(0, |place| place.1);
-        let user_rate = self.user_damage_rate();
+        let user_rate = self.user_damage_rate(attacker);
         let flags = self.affect_flags_of(victim)[0];
         let Self {
             characters, dice, ..

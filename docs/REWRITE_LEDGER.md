@@ -55314,3 +55314,65 @@ the eight column-2-only fish (27810-27815, 50008/50009) against ~9% odds per 10-
 so the unit pin carries it.
 
 Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5586 passed, 1 failed in 46 targets (`a_cape_of_courage_gathers_the_dogs_around`, a quiet-wire timeout under full-suite load — passes alone, same family as the known load flakes); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after the expiry-helper split (`enter_game` 109 lines, `leave_world_by` 101 — both folded into helpers, no `allow`); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 651. The combat premiums
+
+`sys.combat.core` stops pretending nobody bought a premium. Legacy reads three more
+account columns at auth into `aiPremiumTimes` — and the names lie. `silver_expire`
+reads into `PREMIUM_EXP` (0), `gold_expire` into `PREMIUM_ITEM` (1), and
+`money_drop_rate_expire` into `PREMIUM_GOLD` (6): the auth query's column order
+(`G/input_auth.cpp:137-143`) against the db row order (`G/db.cpp:347-353`) decides,
+not the names. Migration 0045 adds the three columns named for what they hold
+(`exp_premium_expire`, `item_premium_expire`, `gold_premium_expire`; unix times, 0
+when never bought, like the fish mind's), `db::accounts` reads each, the admission
+loads all five held expiries through one helper (`admission_premiums`, so the enter
+stays under the line lint), and the world holds each per online character from the
+admission on, clearing them on leave.
+
+The combat arms follow. `MobRates` gains the five premium rates (100 each,
+`G/char_manager.cpp:57-63`), and the five `*_buyer` event flags set them
+(`G/questmanager.cpp:1370-1393`), in legacy's arm order. Every rate reader takes its
+character and answers the buyer rate while the matching premium runs: EXP drives
+`GetMobExpRate` and `GetUserDamageRate`, ITEM drives `GetMobItemRate`, GOLD drives
+both gold rates. `GiveExp` adds the premium's half again before the rate
+(`:2624-2627`). `RewardGold` doubles the percent on the premium or a worn lucky-gold
+group, and scales the piles by the buyer amount rate. `GetDropPct` doubles the delta
+on the premium or a worn double-item group, feeds the worn double-item into the
+range, and the thief-glove gate draws the race's glove group — which is empty on the
+owner's data (no `thiefgloves` row in `mob_drop_item.txt`), so the gate opens onto no
+draws. The `bonus` local is written and never read; dead code, not ported.
+
+The login and the tick learn the held kinds too. `SEventLetters`' premium loop
+(`G/input_login.cpp:731-742`) lays each live premium's `AFFECT_PREMIUM_START + index`
+row (0, 1, 4, 6, 7) after the board's line, and the affect tick syncs the same five
+rows (`G/char_affect.cpp:343-363`). The loop's `<= PREMIUM_MAX_NUM` reads index 9
+past the array: a Defect, not reproduced. The 650 fish scenario now reads its 504
+add where legacy puts it, through the premium-aware login reader.
+
+What does not run: the China intoxication arms in all five readers
+(`g_bChinaIntoxicationCheck` is false and no assignment sets it — five reads, one
+declaration, no writer), the unique-group arms against groups the owner's
+`special_item_group.txt` does not define (only `Cufar_Lumina_Lunii` exists, so
+`IsEquipUniqueGroup` for 10002/10024 never answers), and the unwritten columns —
+SAFEBOX, AUTOLOOT and MARRIAGE_FAST have no store and no hold, so their conditions
+stay false and the autoloot gate stays shut.
+
+The scenario is `a_premium_kill_pays_half_again_the_monsters_exp`: Alice's EXP premium
+an hour out, Alpha at level 1 with no exp punches the stray dog to death, the burst
+carries the 500 add, and after the death's ownership clears comes the exp record — 22
+(15 at the 100% delta row plus the premium's half), onto 0 — then the orb and
+`GC_DEAD`. The unit pins carry what the wire cannot: the five buyer rates, the
+condition's five held kinds against its four dead ones, the grant's +50% with a 200
+buyer rate, the doubled delta with the halved range, and the seed's live rows against
+its dead ones; the store round-trips all three columns.
+
+The slice also hardens the 650 fish scenario. The mind's table bites the refused
+nothing a quarter of the casts (row 0's vnum 0 holds 2100 of 9800, the never-fished
+three another 350), and the 650 shape asserted on the first cast's luck: it failed
+3 of 7 runs on this tree, and would fail the same on 650's (the login seed draws no
+dice — the affect path, the compute and the event start draw none — so the sequence
+is unchanged; only the seed differs per boot). The scenario now takes a nothing-bite
+(the take misses, as `Compute` refuses fish 0), rebaits and recasts, up to five
+casts, and still asserts the preview arrives on every bite.
+
+Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5592 passed, 2 failed in 46 targets (`a_dug_ore_loses_its_diggers_name_fifteen_seconds_on`, starved past 60 s, and `a_used_ball_morphs_through_the_timed_affect_and_spends_itself`, a tick landing late — both pass alone, same family as the known load flakes, and neither touches a premium path); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after the premium-read fold (`enter_game` back under the line lint), the drop-arg bundle (`DropKiller`), and the death test's sequential fields (no `allow`); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

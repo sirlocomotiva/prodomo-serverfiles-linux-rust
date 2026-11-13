@@ -530,3 +530,39 @@ async fn the_fish_mind_expiry_reads_zero_until_a_premium_is_written() {
         "the written premium reads back"
     );
 }
+
+#[tokio::test]
+async fn the_combat_premiums_read_zero_until_each_is_written() {
+    use db::accounts::{exp_premium_expire, gold_premium_expire, item_premium_expire};
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let id = create(store, "alice", b"password1").await;
+    assert_eq!(exp_premium_expire(store, id).await.unwrap(), 0);
+    assert_eq!(item_premium_expire(store, id).await.unwrap(), 0);
+    assert_eq!(gold_premium_expire(store, id).await.unwrap(), 0);
+    sqlx::query(
+        "UPDATE account SET exp_premium_expire = 1_800_000_001, item_premium_expire = \
+         1_800_000_002, gold_premium_expire = 1_800_000_003 WHERE id = $1",
+    )
+    .bind(i32::try_from(id.get()).unwrap())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        exp_premium_expire(store, id).await.unwrap(),
+        1_800_000_001,
+        "legacy's silver_expire reads as EXP"
+    );
+    assert_eq!(
+        item_premium_expire(store, id).await.unwrap(),
+        1_800_000_002,
+        "legacy's gold_expire reads as ITEM"
+    );
+    assert_eq!(
+        gold_premium_expire(store, id).await.unwrap(),
+        1_800_000_003,
+        "legacy's money_drop_rate_expire reads as GOLD"
+    );
+}

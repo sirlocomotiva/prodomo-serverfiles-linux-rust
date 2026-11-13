@@ -23,8 +23,7 @@
 //! spawn or a removal runs once per Channel world hosting the map, as each core hosting
 //! it ran it.
 //!
-//! Not ported, so their names only set the table: the premium (`_buyer`) rates, which no
-//! character can use (there is no premium time); `crcdisconnect`; the drop events
+//! Not ported, so their names only set the table: `crcdisconnect`; the drop events
 //! (`drop_char_stone*`, `refine_box*`); the four time limits and the three `no_*` switches
 //! (their readers keep the compiled-in values).
 //!
@@ -76,8 +75,10 @@ const NEW_SANTAS: [(i32, i32, i32, i32); 3] = [
     (41, 35_700, 74_300, 140),
 ];
 
-/// The rates `CHARACTER_MANAGER` keeps (`G/char_manager.cpp:51-62`): each starts at 100,
-/// and its event flag sets it to the value, 0 included.
+/// The rates `CHARACTER_MANAGER` keeps (`G/char_manager.cpp:51-63`): each starts at 100,
+/// and its event flag sets it to the value, 0 included. The premium (`_buyer`) rate
+/// answers a character whose matching premium runs, else the plain rate
+/// (`G/char_manager.cpp:958-1070`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct MobRates {
     /// `m_iMobItemRate`: `mob_item`.
@@ -92,6 +93,16 @@ pub(super) struct MobRates {
     pub(super) exp: i32,
     /// `m_iUserDamageRate`: `user_dam`.
     pub(super) user_damage: i32,
+    /// `m_iMobItemRatePremium`: `mob_item_buyer`.
+    pub(super) item_buyer: i32,
+    /// `m_iMobExpRatePremium`: `mob_exp_buyer`.
+    pub(super) exp_buyer: i32,
+    /// `m_iMobGoldAmountRatePremium`: `mob_gold_buyer`.
+    pub(super) gold_amount_buyer: i32,
+    /// `m_iMobGoldDropRatePremium`: `mob_gold_pct_buyer`.
+    pub(super) gold_drop_buyer: i32,
+    /// `m_iUserDamageRatePremium`: `user_dam_buyer`.
+    pub(super) user_damage_buyer: i32,
 }
 
 impl Default for MobRates {
@@ -103,6 +114,11 @@ impl Default for MobRates {
             gold_drop: 100,
             exp: 100,
             user_damage: 100,
+            item_buyer: 100,
+            exp_buyer: 100,
+            gold_amount_buyer: 100,
+            gold_drop_buyer: 100,
+            user_damage_buyer: 100,
         }
     }
 }
@@ -211,7 +227,12 @@ impl GameState {
             b"mob_gold" => self.mob_rates.gold_amount = value,
             b"mob_gold_pct" => self.mob_rates.gold_drop = value,
             b"user_dam" => self.mob_rates.user_damage = value,
+            b"user_dam_buyer" => self.mob_rates.user_damage_buyer = value,
             b"mob_exp" => self.mob_rates.exp = value,
+            b"mob_item_buyer" => self.mob_rates.item_buyer = value,
+            b"mob_exp_buyer" => self.mob_rates.exp_buyer = value,
+            b"mob_gold_buyer" => self.mob_rates.gold_amount_buyer = value,
+            b"mob_gold_pct_buyer" => self.mob_rates.gold_drop_buyer = value,
             b"no_mount_at_guild_war" => self.no_mount_at_guild_war = value != 0,
             b"xmas_snow" | b"xmas_boom" | b"xmas_song" | b"xmas_tree" => {
                 self.command_to_everyone(b"%s %d", &[Arg::Text(name), Arg::Int(value.into())]);
@@ -899,9 +920,18 @@ mod tests {
         world.set_event_flag(b"mob_exp", 0);
         world.set_event_flag(b"mob_item", 250);
         world.set_event_flag(b"mob_exp_buyer", 300);
+        world.set_event_flag(b"mob_item_buyer", 400);
+        world.set_event_flag(b"mob_gold_buyer", 500);
+        world.set_event_flag(b"mob_gold_pct_buyer", 600);
+        world.set_event_flag(b"user_dam_buyer", 700);
         assert_eq!(world.mob_rates.exp, 0, "0 is a rate, not 'unset'");
         assert_eq!(world.mob_rates.item, 250);
         assert_eq!(world.mob_rates.gold_amount, 100);
+        assert_eq!(world.mob_rates.exp_buyer, 300);
+        assert_eq!(world.mob_rates.item_buyer, 400);
+        assert_eq!(world.mob_rates.gold_amount_buyer, 500);
+        assert_eq!(world.mob_rates.gold_drop_buyer, 600);
+        assert_eq!(world.mob_rates.user_damage_buyer, 700);
     }
 
     /// The login lines: one per non-zero flag of the seven, in legacy's order; `day` is
