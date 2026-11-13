@@ -97,6 +97,24 @@ pub const OPEN_MORE_FIRST_NOTICES: [&str; 2] = ["[LS;413]", "[LS;415]"];
 pub const JEWELS_FULL_NOTICE: &str = "[LS;416]";
 /// The jewel for another accessory (`CanPutInto`, `:6765`).
 pub const WRONG_JEWEL_NOTICE: &str = "[LS;417]";
+/// The heart extractor on a worn stone (`ExtractDragonHeart`, `G/DragonSoul.cpp:415`).
+pub const HEART_WORN_NOTICE: &str = "You cannot extract Dragon Soul Stones while wearing them.";
+/// The heart gamble's drawn charge is zero (`:459`).
+pub const HEART_FAIL_NOTICE: &str = "Extraction of the dragon's heart has failed.";
+/// The heart melted (`:485`).
+pub const HEART_SUCCESS_NOTICE: &str = "Extraction of dragon heart was successful.";
+/// The pull-out with no empty box cell (`PullOut`, `G/DragonSoul.cpp:505`).
+pub const PULLOUT_FULL_NOTICE: &str = "There are no empty spaces in your belongings.";
+/// The pull-out's draw passed (`:562`).
+pub const PULLOUT_SUCCESS_NOTICE: &str = "You have succeeded in extracting the Dragon Soul Stone.";
+/// The pull-out's draw missed with no by-product (`:585`, `:588`).
+pub const PULLOUT_FAIL_NOTICE: &str = "Extraction of Dragon Soul Stone failed.";
+/// A grade-6 stone (`GetBasePosition`, `G/DragonSoul.cpp:140-141`).
+pub const DS_GRADES: u8 = 6;
+/// A grade box's cells (`DRAGON_SOUL_BOX_SIZE`, `C/length.h:83`).
+pub const DS_BOX_CELLS: u16 = 32;
+/// The soul inventory's window byte (`DRAGON_SOUL_INVENTORY`, `C/length.h:664`).
+pub const DS_WINDOW: u8 = 5;
 /// A talisman under a normal bonus scroll (`:6396`, `:6562`).
 pub const TALISMAN_ATTR_NOTICE: &str = "You cannot change attribute with this item.";
 /// A talisman under a bonus add scroll (`:6562`).
@@ -135,6 +153,83 @@ pub fn spend_one(
         &mut trail,
     )?;
     Ok(done(MoveKind::Used, trail))
+}
+
+/// Whether `stone` is a dragon soul stone: `CItem::IsDragonSoul`
+/// (`G/item.cpp:2786-2789`) is the type alone.
+#[must_use]
+pub fn is_ds_stone(protos: &ItemProtos, stone: &Item) -> bool {
+    protos
+        .get(stone.vnum)
+        .is_some_and(|proto| proto.item_type == gamedata::item_kind::ITEM_DS)
+}
+
+/// `DSManager::GetBasePosition` (`G/DragonSoul.cpp:130-147`) with
+/// `ENABLE_DRAGONSOUL_ALCHEMY_PLUS`: the sub-type's column of six boxes and the
+/// grade's row. A grade past 6 has no box (`row_type > DRAGON_SOUL_GRADE_MAX`).
+#[must_use]
+pub fn ds_base_cell(vnum: u32, sub_type: i32) -> Option<u16> {
+    let grade = u16::try_from((vnum / 1000) % 10).ok()?;
+    if grade > u16::from(DS_GRADES) {
+        return None;
+    }
+    let column = u16::try_from(sub_type).ok()?;
+    column
+        .checked_mul(u16::from(DS_GRADES) * DS_BOX_CELLS)?
+        .checked_add(grade * DS_BOX_CELLS)
+}
+
+/// Whether `cell` is a valid cell for `stone`: `IsValidCellForThisItem`
+/// (`G/DragonSoul.cpp:113-127`) is the soul window and the stone's own box.
+#[must_use]
+pub fn ds_cell_valid(vnum: u32, sub_type: i32, cell: ItemPos) -> bool {
+    if cell.window_type != DS_WINDOW {
+        return false;
+    }
+    let Some(base) = ds_base_cell(vnum, sub_type) else {
+        return false;
+    };
+    (base..base.saturating_add(DS_BOX_CELLS)).contains(&cell.cell)
+}
+
+/// The heart extractor's checks (`ExtractDragonHeart`, `G/DragonSoul.cpp:409-437`): the
+/// target at `dest`, or `None` for an empty cell or a non-soul target. The worn line
+/// is the caller's: this answers the target either way, with whether it is worn.
+#[must_use]
+pub fn heart_target(
+    items: &CharacterItems,
+    protos: &ItemProtos,
+    dest: ItemPos,
+) -> Option<(Item, bool)> {
+    let target = items.item_at(dest)?.clone();
+    if !is_ds_stone(protos, &target) {
+        return None;
+    }
+    let worn = super::inventory::is_equip_position(target.pos);
+    Some((target, worn))
+}
+
+/// Spend one of the `stone` and one of the `extractor`, both already read: the two
+/// `SetCount(GetCount() - 1)` of the extracts. The kind is the extract's own.
+///
+/// # Errors
+///
+/// A storage refusal of a release or a count, which changes nothing.
+pub fn spend_extract_pair(
+    items: &mut CharacterItems,
+    stone: &Item,
+    extractor: &Item,
+    extractor_proto: &ItemProto,
+) -> Result<MoveDone, MoveRefused> {
+    let mut trail = Trail::default();
+    super::potion::use_one(items, stone, false, &mut trail)?;
+    super::potion::use_one(
+        items,
+        extractor,
+        super::quickslot::chains_when_used_up(extractor_proto),
+        &mut trail,
+    )?;
+    Ok(done(MoveKind::Extracted, trail))
 }
 
 /// The target of an item used on another: the item at `dest`, unless the cell is not a

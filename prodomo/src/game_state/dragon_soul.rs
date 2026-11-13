@@ -45,8 +45,9 @@ const DECK_SLOTS: u16 = 6;
 const ACTIVE_SOCKET: usize = 2;
 
 /// `ITEM_SOCKET_REMAIN_SEC` (`common/src/constants.rs`): socket 0, which
-/// `IsTimeLeftDragonSoul` reads for a wear-timed stone.
-const REMAIN_SOCKET: usize = 0;
+/// `IsTimeLeftDragonSoul` reads for a wear-timed stone, and which a refined stone's
+/// duration fills (`DragonSoulItemInitialize`, `G/DragonSoul.cpp:383-392`).
+pub(super) const REMAIN_SOCKET: usize = 0;
 /// `CHANGE_ATTR_FLAME_VNUM` (`G/DragonSoul.h:7`): the flame the redraw burns.
 const FLAME_VNUM: u32 = 30524;
 
@@ -59,6 +60,13 @@ const NEED_YANG: [u64; 5] = [50_000, 150_000, 450_000, 13_500_000, 4_050_000];
 /// The gold `do_ds_change_attr` spends: `ChangeGold(-5000000)` (`G/cmd_general.cpp:3922`),
 /// whatever the step's check named.
 const SPENT_GOLD: u64 = 5_000_000;
+
+/// `DRAGON_HEART_VNUM` (`G/unique_item.h:114`): the heart a melted stone becomes.
+pub(super) const HEART_VNUM: u32 = 100_000;
+
+/// `ITEM_SOCKET_CHARGING_AMOUNT_IDX` (`item_length.h:65`): the socket that carries the
+/// heart's charge. The same slot an active stone writes its 1 to.
+pub(super) const CHARGE_SOCKET: usize = 2;
 
 /// `DRAGON_SOUL_ADDITIONAL_ATTR_START_IDX` (`G/dragon_soul_table.h:11`): the first
 /// additional attribute's index.
@@ -103,6 +111,20 @@ fn fnumber(dice: &mut dyn Dice, from: f32, to: f32) -> f32 {
 /// `Gamble`'s draw (`G/DragonSoul.cpp:23`): `fnumber(0, range)` for the refine's caller.
 pub(super) fn fnumber_ds(dice: &mut dyn Dice, range: f32) -> f32 {
     fnumber(dice, 0.0, range)
+}
+
+/// The heart's charge (`ExtractDragonHeart`, `G/DragonSoul.cpp:447-449,478`): the drawn
+/// charge scaled by the extractor's bonus, clamped to 0..=100, then `(int)(charge +
+/// 0.5)`. The float floor is the `FLT_EPSILON` compare: a scaled charge under it
+/// melts nothing.
+pub(super) fn heart_charge(drawn: f32, bonus: i32) -> i32 {
+    let scaled = f64::from(drawn) * (100.0 + f64::from(bonus)) / 100.0;
+    let scaled = scaled.clamp(0.0, 100.0);
+    if scaled < f64::from(f32::EPSILON) {
+        0
+    } else {
+        common::cfloat::f64_to_i32(scaled + 0.5)
+    }
 }
 
 impl GameState {

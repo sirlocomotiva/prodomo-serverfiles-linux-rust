@@ -33626,6 +33626,31 @@ fn seed_ds_table(database: &ScratchDatabase) {
     );
 }
 
+/// The melt table: Alpha holds a grade-0 stone in the soul inventory's cell 1 and a
+/// heart extractor (100200) in the base inventory's cell 0.
+fn seed_ds_melt(database: &ScratchDatabase) {
+    create_account_before_boot(database, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    let protos = owners_protos();
+    let extractor = protos.get(100_200).expect("the owner's data has it");
+    assert_eq!(
+        extractor.item_type,
+        gamedata::item_kind::ITEM_EXTRACT,
+        "an extractor"
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 40, id, 5, 1, 1, \
+         110000 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 41, id, 1, 0, 1, \
+         100200 FROM player WHERE name = 'Alpha'",
+    );
+}
+
 /// `cmd.dragon_soul` and `cmd.ds_list`: the deck lands its affect and writes socket 2
 /// with the update riding and the row saved, `d` takes it back, and the list names
 /// each held stone. The qualification comes from the login event's own grant.
@@ -39207,10 +39232,14 @@ fn refine_the_first_cell(alpha: &mut Keyed) -> bool {
 
 /// A `CG_ITEM_USE_TO_ITEM` of the base inventory's `cell` on its `target` cell.
 fn client_use_to_item(cell: u16, target: u16) -> Vec<u8> {
-    let inventory = common::item_slots::EWindows::Inventory as u8;
+    client_use_to_item_pos(1, cell, 1, target)
+}
+
+/// A `CG_ITEM_USE_TO_ITEM` of `window`'s `cell` on `target_window`'s `target` cell.
+fn client_use_to_item_pos(window: u8, cell: u16, target_window: u8, target: u16) -> Vec<u8> {
     protocol::cg_item_use_to_item::CgItemUseToItem::new(
-        protocol::item_pos::ItemPos::new(inventory, cell),
-        protocol::item_pos::ItemPos::new(inventory, target),
+        protocol::item_pos::ItemPos::new(window, cell),
+        protocol::item_pos::ItemPos::new(target_window, target),
     )
     .encode()
 }
@@ -61029,4 +61058,78 @@ fn a_premium_kill_pays_half_again_the_monsters_exp() {
     alpha.send_record(&client_attack(dog));
     assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
     read_exp_death(&mut alpha, alpha_vid, dog, 22);
+}
+
+/// `cg.game.item_use_to_item`, `sys.custom.dragon_soul`: a heart extractor (100200)
+/// used on the soul inventory's grade-0 stone melts it by the grade's gamble: either
+/// the fail line with both spent, or the success line with a charged heart (socket 2
+/// nonzero) auto-given to the inventory. Either way the store follows.
+#[test]
+fn a_heart_melt_spends_the_pair_and_lands_or_fails() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_ds_melt(&database);
+    let (server, _console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    read_login_event(&mut alice);
+    alice.still("nothing follows the login");
+    alice.send_record(&client_use_to_item_pos(1, 0, 5, 1));
+    let (landed, quiet) = alice.drain_game(std::time::Duration::from_secs(5), a_use_item_record);
+    assert_eq!(
+        quiet,
+        Quiet::Open,
+        "the connection stays open: {}",
+        server.console()
+    );
+    let chats: Vec<Vec<u8>> = landed
+        .iter()
+        .filter(|record| record.first() == Some(&GC_CHAT))
+        .map(|record| record[10..].to_vec())
+        .collect();
+    let failed = chats
+        .iter()
+        .any(|text| text == b"Extraction of the dragon's heart has failed.");
+    let succeeded = chats
+        .iter()
+        .any(|text| text == b"Extraction of dragon heart was successful.");
+    assert!(failed != succeeded, "one line or the other: {chats:02x?}");
+    let heart = landed
+        .iter()
+        .find(|record| record.first() == Some(&ITEM_SET) && set_fields(record).2 == 100_000);
+    if succeeded {
+        let heart = heart.expect("the heart sets");
+        let sockets: Vec<i32> = heart[27..51]
+            .chunks(4)
+            .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
+            .collect();
+        assert!(sockets[2] > 0, "the charge rides socket 2: {sockets:?}");
+        let (window, cell, _, _) = set_fields(heart);
+        wait_for(
+            &database,
+            &format!(
+                "(SELECT socket2 FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+                 'Alpha') AND vnum = 100000 AND window_type = {window} AND pos = {cell}) > 0"
+            ),
+        );
+        wait_for(
+            &database,
+            "(SELECT count(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+             'Alpha')) = 1",
+        );
+    } else {
+        assert!(heart.is_none(), "no heart on a fail: {landed:02x?}");
+        wait_for(
+            &database,
+            "(SELECT count(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+             'Alpha')) = 0",
+        );
+    }
+    assert!(
+        !server.logged("The item step could not be stored"),
+        "the step stored: {}",
+        server.console()
+    );
+    alice.still("nothing follows the melt");
 }

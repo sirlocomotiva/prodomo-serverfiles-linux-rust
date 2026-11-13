@@ -1,6 +1,8 @@
-//! The dragon soul refine window: `CG_DRAGON_SOUL_REFINE`
+//! The dragon soul refine window and the two extracts: `CG_DRAGON_SOUL_REFINE`
 //! (`CInputMain::Analyze`, `G/input_main.cpp:3885-3919`), which opens, closes and
-//! refines the alchemy the table reader feeds (`DSManager`, `G/DragonSoul.cpp:599-1155`).
+//! refines the alchemy the table reader feeds (`DSManager`, `G/DragonSoul.cpp:599-1155`),
+//! and the `ITEM_EXTRACT` landings (`DSManager::ExtractDragonHeart` and `PullOut`,
+//! `G/DragonSoul.cpp:409-589`), which an extractor used on a stone runs.
 //!
 //! The request runs with no observer gate (`:3885` sits outside the guarded band) and
 //! no waiting-quest guard. The six handled sub-headers are 0 open, 1 close, 2 grade, 3
@@ -23,7 +25,14 @@
 //! `TOO_MUCH_MATERIAL`, and refuses a stone no weight row lifts with `MAX_REFINE`.
 //! The result vnum is `type * 10000 + grade * 1000 + step * 100 + refine * 11`
 //! (`__FIX_INFO_REFINE_DRAGONSOUL__` is defined). The materials spend by count, the
-//! result is auto-given, and the result record names its cell.
+//! result is auto-given, and the result record names its cell. The two extracts run as
+//! landings of an extractor's use on a stone (`ITEM_EXTRACT`,
+//! `G/char_item.cpp:7111-7141`): the heart extractor melts an unworn stone into a
+//! charged heart by the grade's gamble over the charges (`ExtractDragonHeart`,
+//! `G/DragonSoul.cpp:409-489`), and the soul extractor pulls a worn stone out of its
+//! deck cell past the grade's draw, or breaks it into its by-product (`PullOut`,
+//! `G/DragonSoul.cpp:491-589`). A heart or by-product that would not fit is laid at
+//! the caller's feet, as `AutoGiveItem` lays it.
 //!
 //! New stones roll their attributes like every other creation (`PutAttributes`,
 //! `:302-381`): the basics land scaled by the weight, then up to three distinct
@@ -326,7 +335,7 @@ impl GameState {
 
     /// `Gamble` (`G/DragonSoul.cpp:16-31`): the first probability whose running sum
     /// reaches the draw over the width. `None` when no sum reaches it.
-    fn ds_gamble(&mut self, probs: &[f32]) -> Option<usize> {
+    pub(super) fn ds_gamble(&mut self, probs: &[f32]) -> Option<usize> {
         let range: f32 = probs.iter().sum();
         let rolled = super::dragon_soul::fnumber_ds(&mut self.dice, range);
         Self::ds_pick(probs, rolled)
@@ -507,9 +516,39 @@ impl GameState {
             }
         }
         if item_type == ITEM_DS && duration > 0 {
-            let _ = stone.set_socket(2, duration);
+            let _ = stone.set_socket(super::dragon_soul::REMAIN_SOCKET, duration);
         }
         Some(stone)
+    }
+
+    /// Make the melted heart (`CreateItem(DRAGON_HEART_VNUM)`, `G/DragonSoul.cpp:468`):
+    /// one heart of `charge` percent. The creation stamps the expiry socket, as
+    /// `CreateItem` does for a `LIMIT_REAL_TIME` proto (`G/item_manager.cpp:279-294`):
+    /// the owner's heart carries `REAL_TIME` 86400, so an unstamped heart's socket 0
+    /// reads 0 and the expiry pulse removes it within the second. `None` when no
+    /// proto, no ids, or the charge is zero — the fail arm, which spends the pair
+    /// and melts nothing.
+    pub(super) fn ds_make_heart(&mut self, charge: i32) -> Option<world::item::Item> {
+        if charge <= 0 {
+            return None;
+        }
+        let proto = self.protos.get(super::dragon_soul::HEART_VNUM)?.clone();
+        let id = self.item_ids.as_mut()?.allocate().ok()?;
+        let mut heart = world::item::Item::new(id, super::dragon_soul::HEART_VNUM);
+        heart.count = 1;
+        heart.size = {
+            let [size, ..] = proto.size.to_le_bytes();
+            size
+        };
+        heart.flags = proto.flags;
+        heart.anti_flags = proto.anti_flags;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        world::character::stamp_created_sockets(&mut heart, &proto, now_secs);
+        Some(heart)
     }
 
     /// `MakeDistinctRandomNumberSet` through the game dice, for the made stone's
@@ -549,7 +588,8 @@ impl GameState {
         let Some(stone) = self.ds_make(vnum) else {
             return failed;
         };
-        let Some((given, done)) = self.auto_give_made(vid, stone) else {
+        let questing = self.quest_running(vid);
+        let Some((given, done)) = self.auto_give_made(vid, stone, questing) else {
             return failed;
         };
         let pos = match given {

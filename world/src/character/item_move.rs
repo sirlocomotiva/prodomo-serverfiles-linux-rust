@@ -239,6 +239,9 @@ pub enum MoveKind {
     /// `G/polymorph.cpp:36-115`): the game state lands the morph and the bonus on
     /// a hit, stamps socket 1 down, and keeps the count, which never falls.
     Booked,
+    /// An extractor was used on a dragon soul stone (`case ITEM_EXTRACT`,
+    /// `G/char_item.cpp:7111-7141`): the heart melted or the worn stone pulled out.
+    Extracted,
 }
 
 /// A record the client is sent, in the order legacy sends it.

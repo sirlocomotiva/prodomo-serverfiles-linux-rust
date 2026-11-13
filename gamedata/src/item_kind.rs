@@ -67,6 +67,12 @@ pub const ITEM_COSTUME: i32 = 28;
 pub const ITEM_DS: i32 = 29;
 /// `ITEM_SPECIAL_DS`.
 pub const ITEM_SPECIAL_DS: i32 = 30;
+/// `ITEM_EXTRACT` (31): an extractor used on a dragon soul stone.
+pub const ITEM_EXTRACT: i32 = 31;
+/// `EXTRACT_DRAGON_SOUL`: the extractor that pulls a worn stone out (`PullOut`).
+pub const EXTRACT_DRAGON_SOUL: i32 = 0;
+/// `EXTRACT_DRAGON_HEART`: the extractor that melts a stone into a charged heart.
+pub const EXTRACT_DRAGON_HEART: i32 = 1;
 /// `ITEM_SECONDARY_COIN` (32): the secondary-coin items a renewal buy with a
 /// `SHOPEX_SECONDARY` price spends (`G/shopEx.cpp:180-182`).
 pub const ITEM_SECONDARY_COIN: i32 = 32;
@@ -309,6 +315,7 @@ mod tests {
             (ITEM_COSTUME, "ITEM_COSTUME"),
             (ITEM_DS, "ITEM_DS"),
             (ITEM_SPECIAL_DS, "ITEM_SPECIAL_DS"),
+            (ITEM_EXTRACT, "ITEM_EXTRACT"),
             (ITEM_RING, "ITEM_RING"),
             (ITEM_BELT, "ITEM_BELT"),
             (ITEM_TALISMAN, "ITEM_TALISMAN"),
@@ -384,6 +391,13 @@ mod tests {
             (COSTUME_SASH_SKIN, "COSTUME_SASH_SKIN"),
         ] {
             assert_eq!(value, index(costume, name), "{name}");
+        }
+        let extract = SUB_TYPE[usize::try_from(ITEM_EXTRACT).expect("a small index")];
+        for (value, name) in [
+            (EXTRACT_DRAGON_SOUL, "EXTRACT_DRAGON_SOUL"),
+            (EXTRACT_DRAGON_HEART, "EXTRACT_DRAGON_HEART"),
+        ] {
+            assert_eq!(value, index(extract, name), "{name}");
         }
     }
 

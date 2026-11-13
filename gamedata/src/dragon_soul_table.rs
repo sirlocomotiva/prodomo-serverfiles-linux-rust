@@ -6,10 +6,9 @@
 //! `CGroupTextParseTreeLoader` port: group names are lowercased, keys keep their first value, and
 //! the `#--#` header line maps column names to indexes.
 //!
-//! Only the groups the refines and the redraw read are kept: the type names
-//! (`VnumMapper`), the basic and additional applies, the apply-number settings, the
-//! weight tables, and the three refine tables. The extract groups ride with their
-//! system.
+//! Only the groups the refines, the redraw and the extracts read are kept: the type
+//! names (`VnumMapper`), the basic and additional applies, the apply-number settings,
+//! the weight tables, the three refine tables, and the two extract tables.
 //!
 //! Three legacy behaviours are reproduced rather than improved:
 //!
@@ -75,9 +74,9 @@ pub struct DragonSoulApply {
     pub prob: f32,
 }
 
-/// What the refines and the redraw read of the table: the applies by soul type, the
-/// apply numbers by grade, the weights by grade, step and strength, and the three
-/// refine tables.
+/// What the refines, the redraw and the extracts read of the table: the applies by soul
+/// type, the apply numbers by grade, the weights by grade, step and strength, the three
+/// refine tables, and the two extract tables.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DragonSoulTable {
     /// The basic applies of each soul type, in row order.
@@ -94,6 +93,12 @@ pub struct DragonSoulTable {
     refine_step: Vec<(i32, i32, Vec<f32>)>,
     /// The `(fee, probs)` of each strength refine, by material.
     refine_strength: Vec<(i32, Vec<f32>)>,
+    /// The heart gamble's charges, in draw order.
+    heart_charges: Vec<f32>,
+    /// The heart gamble's probabilities of each grade, in charge order.
+    heart_probs: Vec<Vec<f32>>,
+    /// The `(prob, by_product)` of each grade's stone extract.
+    soul_extract: Vec<(f32, u32)>,
 }
 
 /// Why the dragon soul table could not be read.
@@ -160,6 +165,8 @@ impl DragonSoulTable {
         read_refine_grade(&file, &mut table)?;
         read_refine_step(&file, &mut table)?;
         read_refine_strength(&file, &mut table)?;
+        read_heart_extract(&file, &mut table)?;
+        read_soul_extract(&file, &mut table)?;
         Ok(table)
     }
 
@@ -228,6 +235,25 @@ impl DragonSoulTable {
             .and_then(|grades| grades.get(usize::from(step)))
             .and_then(|steps| steps.get(usize::from(strength)))
             .copied()
+    }
+
+    /// `GetDragonHeartExtValues` (`G/dragon_soul_table.cpp:808-866`): the charges and the
+    /// probabilities of `grade`, in draw order, or `None` past the grades. The soul type
+    /// names no group: the owner's file holds only `default`, which the lookup falls
+    /// back to for every type (`GetGroupRow`, `G/group_text_parse_tree.cpp:218-235`).
+    #[must_use]
+    pub fn heart_extract(&self, grade: u8) -> Option<(&[f32], &[f32])> {
+        let probs = self.heart_probs.get(usize::from(grade))?;
+        Some((self.heart_charges.as_slice(), probs.as_slice()))
+    }
+
+    /// `GetDragonSoulExtValues` (`G/dragon_soul_table.cpp:868-900`): the `(prob,
+    /// by_product)` of `grade`, or `None` past the grades. The soul type names no group,
+    /// as the heart read's note says (`GetGroupValue`,
+    /// `G/group_text_parse_tree.h:197-214`).
+    #[must_use]
+    pub fn soul_extract(&self, grade: u8) -> Option<(f32, u32)> {
+        self.soul_extract.get(usize::from(grade)).copied()
     }
 }
 
@@ -580,6 +606,100 @@ fn read_refine_strength(
     Ok(())
 }
 
+/// `GetDragonHeartExtValues`' rows (`G/dragon_soul_table.cpp:808-866`): the `CHARGING` row
+/// and every grade's probabilities, from the `default` child, in the rows' own order.
+///
+/// Both read by position (`GetRow`): the `CHARGING` values and each grade's row are the
+/// row's whole value list, so the `#--#` header names nothing here. A grade row whose
+/// length differs refuses the table, as the `n != m` check does.
+fn read_heart_extract(
+    file: &TextFile,
+    table: &mut DragonSoulTable,
+) -> Result<(), DragonSoulTableError> {
+    let hearts = file
+        .group(b"dragonheartexttables")
+        .ok_or(DragonSoulTableError::MissingGroup("DragonHeartExtTables"))?;
+    let defaults = hearts
+        .children
+        .iter()
+        .find(|child| child.name == b"default")
+        .ok_or(DragonSoulTableError::MissingGroup("DragonHeartExtTables"))?;
+    let charging = defaults
+        .get(b"charging")
+        .ok_or_else(|| bad("DragonHeartExtTables", b"charging", b"charging"))?;
+    let mut charges = Vec::with_capacity(charging.len());
+    for (index, raw) in charging.iter().enumerate() {
+        charges.push(parse_float(raw).ok_or_else(|| {
+            bad(
+                "DragonHeartExtTables",
+                b"charging",
+                index.to_string().as_bytes(),
+            )
+        })?);
+    }
+    for name in GRADE_NAMES {
+        let row = defaults
+            .get(name.as_bytes())
+            .ok_or_else(|| bad("DragonHeartExtTables", name.as_bytes(), b"charging"))?;
+        if row.len() != charges.len() {
+            return Err(DragonSoulTableError::BadValue {
+                at: format!("DragonHeartExtTables row {name} column charging"),
+            });
+        }
+        let mut probs = Vec::with_capacity(row.len());
+        for (index, raw) in row.iter().enumerate() {
+            probs.push(parse_float(raw).ok_or_else(|| {
+                bad(
+                    "DragonHeartExtTables",
+                    name.as_bytes(),
+                    index.to_string().as_bytes(),
+                )
+            })?);
+        }
+        table.heart_probs.push(probs);
+    }
+    table.heart_charges = charges;
+    Ok(())
+}
+
+/// `GetDragonSoulExtValues`' rows (`G/dragon_soul_table.cpp:868-900`): the `prob` and
+/// `byproduct` of every grade, from the `default` child. The header names the indexes
+/// (lowercased): legacy lowers its column names, and the lowercased compare reads them
+/// off the owner's `Prob` and `ByProduct` spellings.
+fn read_soul_extract(
+    file: &TextFile,
+    table: &mut DragonSoulTable,
+) -> Result<(), DragonSoulTableError> {
+    let souls = file
+        .group(b"dragonsoulexttables")
+        .ok_or(DragonSoulTableError::MissingGroup("DragonSoulExtTables"))?;
+    let defaults = souls
+        .children
+        .iter()
+        .find(|child| child.name == b"default")
+        .ok_or(DragonSoulTableError::MissingGroup("DragonSoulExtTables"))?;
+    for name in GRADE_NAMES {
+        let prob =
+            column(defaults, name.as_bytes(), b"prob", "DragonSoulExtTables").and_then(|raw| {
+                parse_float(&raw)
+                    .ok_or_else(|| bad("DragonSoulExtTables", name.as_bytes(), b"prob"))
+            })?;
+        let by_product = column(
+            defaults,
+            name.as_bytes(),
+            b"byproduct",
+            "DragonSoulExtTables",
+        )
+        .and_then(|raw| {
+            parse_int(&raw)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| bad("DragonSoulExtTables", name.as_bytes(), b"byproduct"))
+        })?;
+        table.soul_extract.push((prob, by_product));
+    }
+    Ok(())
+}
+
 /// The value of `column` in `row`: the header names the index, `from_string` reads the text.
 ///
 /// The header names compare lowercased: legacy lowers them on the way in
@@ -749,6 +869,26 @@ mod tests {
         assert_eq!(table.weight(6, 0, 0), None);
         assert_eq!(table.weight(0, 5, 0), None);
         assert_eq!(table.weight(0, 0, 7), None);
+    }
+
+    #[test]
+    fn the_owner_extract_tables_read() {
+        let table = DragonSoulTable::parse(&owner_bytes()).expect("the owner's table parses");
+        let (charges, probs) = table.heart_extract(0).expect("normal's heart row");
+        assert_eq!(charges, &[0.0, 5.0, 15.0, 30.0, 50.0]);
+        assert_eq!(probs, &[50.0, 35.0, 12.0, 2.0, 1.0]);
+        let (_, probs) = table.heart_extract(5).expect("mythic's heart row");
+        assert_eq!(probs, &[10.0, 20.0, 40.0, 20.0, 10.0]);
+        assert_eq!(table.heart_extract(6), None);
+        assert_eq!(
+            table.soul_extract(0).map(|(prob, by)| (prob.to_bits(), by)),
+            Some((50.0f32.to_bits(), 30_270))
+        );
+        assert_eq!(
+            table.soul_extract(5).map(|(prob, by)| (prob.to_bits(), by)),
+            Some((20.0f32.to_bits(), 30_270))
+        );
+        assert_eq!(table.soul_extract(6), None);
     }
 
     #[test]

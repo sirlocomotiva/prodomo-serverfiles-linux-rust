@@ -55376,3 +55376,35 @@ is unchanged; only the seed differs per boot). The scenario now takes a nothing-
 casts, and still asserts the preview arrives on every bite.
 
 Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; the suite sums 5592 passed, 2 failed in 46 targets (`a_dug_ore_loses_its_diggers_name_fifteen_seconds_on`, starved past 60 s, and `a_used_ball_morphs_through_the_timed_affect_and_spends_itself`, a tick landing late — both pass alone, same family as the known load flakes, and neither touches a premium path); doc-tests 1 passed in 9 targets; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean after the premium-read fold (`enter_game` back under the line lint), the drop-arg bundle (`DropKiller`), and the death test's sequential fields (no `allow`); `RUSTDOCFLAGS="-D warnings" cargo doc` clean; `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 652. The dragon soul extracts
+
+The `ITEM_EXTRACT` arm of `UseItemEx` (`G/char_item.cpp:7111-7141`): the heart
+extractor (100200) melts an unworn stone into a charged heart
+(`DSManager::ExtractDragonHeart`, `G/DragonSoul.cpp:409-489`), and the soul
+extractor (100201) pulls a worn stone out of its deck cell (`DSManager::PullOut`,
+`:491-589`). The two extract tables (`DragonHeartExtTables`, `DragonSoulExtTables`)
+load from the owner's `dragon_soul_table.txt`, read by position with the `default`
+fallback, and the gamble is the refine's own. The heart carries the charge in
+socket 2 and lands by `AutoGiveItem`; the pull-out lands the stone in its grade
+box or breaks it into the by-product with the obtained line.
+
+Two socket findings. The owner's heart (100000) carries `REAL_TIME` 86400, so a
+heart made without `CreateItem`'s expiry stamp reads socket 0 as 0 and the
+real-time pulse deletes it within the second: the first scenario runs showed the
+set with the charge on the wire and zero rows in the store, and a trigger audit
+(`INSERT 100000000` then `DELETE 100000000`) proved the pulse was the deleter.
+`ds_make_heart` now stamps the creation sockets (size, flags, expiry) as
+`CreateItem` does (`G/item_manager.cpp:279-294`). And ledger 489 put the
+refine-made stone's duration in socket 2; legacy's `DragonSoulItemInitialize`
+writes `ITEM_SOCKET_REMAIN_SEC` (`G/DragonSoul.cpp:388-390`), which is socket 0
+(`C/item_length.h:55`), so `ds_make` writes `REMAIN_SOCKET` now. The owner's
+stones carry `TIMER_BASED_ON_WEAR`, which the deck read already uses.
+
+Scenario `a_heart_melt_spends_the_pair_and_lands_or_fails`: the melt spends the
+pair and either fails with the fail line or lands a charged heart whose socket 2
+and cell the store pins (8 of 8). Unit pins: the charged heart lands with the
+expiry stamped, the worn stone chats and keeps, the passed pull-out lands in its
+box, and the missed pull-out breaks into 30270.
+
+Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5600 passed 0 failed in 46 targets; `cargo test --workspace --doc --locked --offline` green; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -263,15 +263,21 @@ impl GameState {
     /// `CHARACTER::AutoGiveItem(item)` (`G/char_item.cpp:9027-9075`) on the character
     /// `vid`: the already-made `item` onto the stacks, into a free cell, or back as
     /// unplaced for the caller to lay with [`Self::lay_auto_given`]. `None` when the
-    /// character is gone.
-    pub(super) fn auto_give_made(&mut self, vid: Vid, item: Item) -> Option<(AutoGiven, MoveDone)> {
+    /// character is gone. The questing rule is the caller's: legacy gives with the
+    /// same character state the use ran under.
+    pub(super) fn auto_give_made(
+        &mut self,
+        vid: Vid,
+        item: Item,
+        questing: bool,
+    ) -> Option<(AutoGiven, MoveDone)> {
         let character = self.characters.find_by_vid_mut(vid).ok()?;
         let usable = usable_inventory_cells(character.inven_point());
         let rules = MoveRules {
             count_limit: self.item_count_limit,
             usable_cells: usable,
             belt_grade: None,
-            questing: false,
+            questing,
             secured: false,
         };
         let protos = std::sync::Arc::clone(&self.protos);
