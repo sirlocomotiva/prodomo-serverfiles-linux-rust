@@ -89,6 +89,77 @@ const DETECTOR_USES: i32 = 6;
 const DETECT_NEAR: u32 = 10_000;
 /// The middle band's ceiling (`:4263`): under 70000 walks 1, else 3.
 const DETECT_MID: u32 = 70_000;
+/// The event-stone detector (`case 50004`, `G/char_item.cpp:4007-4225`).
+const EVENT_DETECTOR: u32 = 50_004;
+/// The arming clamp (`:4018`): the buried point is drawn within 700 of the caller.
+const EVENT_BURY_RANGE: i32 = 700;
+/// The arming tries (`G/sectree_manager.cpp:890-937`): 100 draws per region.
+const EVENT_BURY_TRIES: i32 = 100;
+/// The find's distance (`:4031`): under 1000 the stone is found.
+const EVENT_FIND: f32 = 1000.0;
+/// The near band's ceiling (`:4179`): under 20000 walks 1.
+const EVENT_NEAR: f32 = 20_000.0;
+/// The middle band's ceiling (`:4181`): under 70000 walks 2, else 3.
+const EVENT_MID: f32 = 70_000.0;
+/// The tries an event detector survives (`:4187`): socket 0 past 9 burns out.
+const EVENT_TRIES: i32 = 10;
+/// The burnout's consolation (`:4191`): a 27002.
+const EVENT_CONSOLATION: u32 = 27_002;
+/// The event-stone prizes (`:4047-4108`): vnum, count, weight, by socket-0 band.
+/// The `info_7` table names 27004 twice (the second row should be 27002) and the
+/// three tables sum to 100/89/93, so a high roll in the upper bands wins nothing;
+/// both ride as written.
+const EVENT_PRIZES_4: [(u32, u16, i32); 15] = [
+    (27_001, 10, 0),
+    (27_004, 10, 0),
+    (27_002, 10, 0),
+    (27_005, 10, 0),
+    (27_100, 1, 0),
+    (27_103, 1, 0),
+    (27_101, 1, 0),
+    (27_104, 1, 0),
+    (27_999, 1, 25),
+    (25_040, 1, 0),
+    (27_410, 1, 0),
+    (27_600, 1, 0),
+    (25_100, 1, 15),
+    (50_001, 1, 10),
+    (50_003, 1, 50),
+];
+const EVENT_PRIZES_7: [(u32, u16, i32); 15] = [
+    (27_001, 10, 1),
+    (27_004, 10, 1),
+    (27_004, 10, 9),
+    (27_005, 10, 9),
+    (27_100, 1, 5),
+    (27_103, 1, 5),
+    (27_101, 1, 10),
+    (27_104, 1, 10),
+    (27_999, 1, 14),
+    (25_040, 1, 5),
+    (27_410, 1, 5),
+    (27_600, 1, 5),
+    (25_100, 1, 5),
+    (50_001, 1, 0),
+    (50_003, 1, 5),
+];
+const EVENT_PRIZES_10: [(u32, u16, i32); 15] = [
+    (27_001, 10, 8),
+    (27_004, 10, 6),
+    (27_002, 10, 12),
+    (27_005, 10, 12),
+    (27_100, 1, 9),
+    (27_103, 1, 9),
+    (27_101, 1, 10),
+    (27_104, 1, 10),
+    (27_999, 1, 12),
+    (25_040, 1, 4),
+    (27_410, 1, 0),
+    (27_600, 1, 0),
+    (25_100, 1, 0),
+    (50_001, 1, 0),
+    (50_003, 1, 1),
+];
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -609,6 +680,269 @@ impl GameState {
         Ok(moved)
     }
 
+    /// Whether the item at `at` is the event-stone detector (`case 50004`,
+    /// `G/char_item.cpp:4007-4225`).
+    pub(super) fn event_detector_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == EVENT_DETECTOR)
+    }
+
+    /// Bury the event stone for the detector's first use
+    /// (`GetRandomLocation(map, pos, 700)`, `G/sectree_manager.cpp:876-940`): up to
+    /// 100 draws over the channel's region, each clamped within 700 of the caller;
+    /// the first movable one wins. `None` when the map stood no region or no
+    /// draw lands movable.
+    fn bury_event_stone(&mut self, channel: u8, map: i32, at: (i32, i32)) -> Option<(i32, i32)> {
+        let region = self.regens.region_of(channel, map)?;
+        for _ in 0..EVENT_BURY_TRIES {
+            let mut x = number(&mut self.dice, region.sx + 50, region.ex - 50);
+            let mut y = number(&mut self.dice, region.sy + 50, region.ey - 50);
+            let dx = (x - at.0).abs();
+            if dx > EVENT_BURY_RANGE {
+                x = if x < at.0 {
+                    at.0 - EVENT_BURY_RANGE
+                } else {
+                    at.0 + EVENT_BURY_RANGE
+                };
+            }
+            let dy = (y - at.1).abs();
+            if dy > EVENT_BURY_RANGE {
+                y = if y < at.1 {
+                    at.1 - EVENT_BURY_RANGE
+                } else {
+                    at.1 + EVENT_BURY_RANGE
+                };
+            }
+            if self.is_movable(map, x, y) {
+                return Some((x, y));
+            }
+        }
+        None
+    }
+
+    /// The event-stone prize for socket-0 `uses` and `roll` (`:4113-4150`): the
+    /// band's table (4 at 4 or less, 7 at 7 or less, else 10), walked down while
+    /// the roll exceeds each nonzero weight. `None` when the roll falls past the
+    /// last weight — the upper tables sum below 100 — or names the 50001 lotto
+    /// row, whose DB insert has no Rewrite table (the kill lotto's hook likewise
+    /// holds the draw and grants nothing).
+    fn event_prize(uses: i32, mut roll: i32) -> Option<(u32, u16)> {
+        let table = if uses <= 4 {
+            EVENT_PRIZES_4
+        } else if uses <= 7 {
+            EVENT_PRIZES_7
+        } else {
+            EVENT_PRIZES_10
+        };
+        for (vnum, count, weight) in table {
+            if weight == 0 {
+                continue;
+            }
+            if roll <= weight {
+                return if vnum == 50_001 {
+                    None
+                } else {
+                    Some((vnum, count))
+                };
+            }
+            roll -= weight;
+        }
+        None
+    }
+
+    /// The event-stone detector (`case 50004`, `G/char_item.cpp:4007-4225`): the
+    /// first use buries the stone at a random movable point within 700 (`[LS;154]`
+    /// when none lands) and stamps sockets 0-2; later uses count socket 0 up.
+    /// Within 1000 of the buried point the stone is found (`[LS;165]`), the prize
+    /// table pays, the `StoneDetect <vid> 0 0` line goes around, and the detector
+    /// leaves. Else past 9 tries the detector burns out (`[LS;176]`, a 27002
+    /// consolation, and the detector leaves); otherwise the caller hears
+    /// `StoneDetect <vid> <dist> <degree>` with 1 under 20000, 2 under 70000,
+    /// else 3.
+    pub(super) fn use_event_detector(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let held = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at));
+        let Some(held) = held else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let (id, sockets) = (held.id, held.sockets);
+        let Some(place) = self.place_of(vid.raw()) else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let armed = sockets[0] != 0;
+        let buried = if armed {
+            Some((sockets[1], sockets[2]))
+        } else {
+            self.bury_event_stone(place.0, place.1, (spot.x, spot.y))
+        };
+        let Some((bx, by)) = buried else {
+            self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;154]", &[]);
+            return self.arena_item_refused(vid, actor);
+        };
+        let uses = if armed {
+            sockets[0].saturating_add(1)
+        } else {
+            1
+        };
+        let distance = super::motion::distance_sqrt(spot.x - bx, spot.y - by);
+        if distance < EVENT_FIND {
+            return self.find_event_stone(vid, at, actor, uses);
+        }
+        if uses >= EVENT_TRIES {
+            return self.burn_out_event_detector(vid, at, actor);
+        }
+        let dist = if distance < EVENT_NEAR {
+            1
+        } else if distance < EVENT_MID {
+            2
+        } else {
+            3
+        };
+        let degree =
+            common::cfloat::f32_to_i32(super::motion::rotation_to_xy(bx - spot.x, by - spot.y));
+        let first = !armed;
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let detector = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(detector.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
+            world::character::use_checks(&detector, proto, rules, gear.points)?;
+            let mut done = world::character::set_item_socket(items, id, (0, uses));
+            if first {
+                let x = world::character::set_item_socket(items, id, (1, bx));
+                let y = world::character::set_item_socket(items, id, (2, by));
+                done.records.extend(x.records);
+                done.changes.extend(x.changes);
+                done.records.extend(y.records);
+                done.changes.extend(y.changes);
+            }
+            Ok(done)
+        })?;
+        self.tell(
+            vid,
+            actor,
+            CHAT_TYPE_COMMAND,
+            b"StoneDetect %u %d %d",
+            &[
+                Arg::Int(i64::from(vid.raw())),
+                Arg::Int(i64::from(dist)),
+                Arg::Int(i64::from(degree)),
+            ],
+        );
+        Ok(moved)
+    }
+
+    /// The find (`:4031-4177`): `[LS;165]`, the prize, the `0 0` line around, and
+    /// the detector leaves.
+    fn find_event_stone(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+        uses: i32,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let roll = number(&mut self.dice, 1, 100);
+        let prize = Self::event_prize(uses, roll);
+        let questing = self.quest_running(vid);
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let detector = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(detector.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
+            world::character::use_checks(&detector, proto, rules, gear.points)?;
+            let (done, _) =
+                world::character::destroy_item(items, at, rules.questing, rules.secured)?;
+            Ok(done)
+        })?;
+        if let Some((vnum, count)) = prize {
+            if let Some((outcome, done)) = self.auto_give(vid, (vnum, count), 0, questing) {
+                if let AutoGiven::Unplaced(item) = outcome {
+                    self.lay_auto_given(vid, item);
+                }
+                let packed = MovedItems::new(
+                    moved.owner_id,
+                    vid.raw(),
+                    done,
+                    actor,
+                    &self.protos,
+                    &self.locale,
+                );
+                moved.records.extend(packed.records);
+                moved.changes.extend(packed.changes);
+            }
+        }
+        self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;165]", &[]);
+        let line = crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
+            CHAT_TYPE_COMMAND,
+            b"StoneDetect %u 0 0",
+            &[Arg::Int(i64::from(vid.raw()))],
+        );
+        self.packet_around(super::view::EntityKey::Character(vid.raw()), &line, None);
+        Ok(moved)
+    }
+
+    /// The burnout (`:4187-4193`): `[LS;176]`, a 27002 consolation, and the
+    /// detector leaves.
+    fn burn_out_event_detector(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let questing = self.quest_running(vid);
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let detector = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(detector.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
+            world::character::use_checks(&detector, proto, rules, gear.points)?;
+            let (done, _) =
+                world::character::destroy_item(items, at, rules.questing, rules.secured)?;
+            Ok(done)
+        })?;
+        if let Some((outcome, done)) = self.auto_give(vid, (EVENT_CONSOLATION, 1), 0, questing) {
+            if let AutoGiven::Unplaced(item) = outcome {
+                self.lay_auto_given(vid, item);
+            }
+            let packed = MovedItems::new(
+                moved.owner_id,
+                vid.raw(),
+                done,
+                actor,
+                &self.protos,
+                &self.locale,
+            );
+            moved.records.extend(packed.records);
+            moved.changes.extend(packed.changes);
+        }
+        self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;176]", &[]);
+        Ok(moved)
+    }
+
     /// Whether the item at `at` is a firework (`case 50107` / `case 50108`,
     /// `G/char_item.cpp:5118-5162`): the firecracker or the spinning top.
     pub(super) fn firework_at(&self, vid: Vid, at: ItemPos) -> bool {
@@ -1005,5 +1339,38 @@ impl GameState {
             moved.changes.extend(packed.changes);
         }
         Ok(moved)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The prize walk at 1 use (the 4-band): roll 1 skips the eight zero rows and
+    /// lands the 27999 stone at weight 25; roll 26 lands the 25100 at weight 15;
+    /// roll 100 lands the last row, 50003.
+    #[test]
+    fn the_low_band_pays_stone_map_and_bundle_in_order() {
+        assert_eq!(GameState::event_prize(1, 1), Some((27_999, 1)));
+        assert_eq!(GameState::event_prize(4, 26), Some((25_100, 1)));
+        assert_eq!(GameState::event_prize(4, 100), Some((50_003, 1)));
+    }
+
+    /// The 50001 lotto row pays nothing: at 1 use roll 41..=50 names it (25 + 15
+    /// walked off), and the arm holds the draw with no table to write.
+    #[test]
+    fn the_lotto_row_holds_its_draw() {
+        assert_eq!(GameState::event_prize(1, 41), None);
+        assert_eq!(GameState::event_prize(1, 50), None);
+    }
+
+    /// The upper tables sum below 100, so a roll past their last weight wins
+    /// nothing: roll 100 at 8 uses (the 10-band sums 93) and at 5 uses (the
+    /// 7-band sums 89) both fall through.
+    #[test]
+    fn a_roll_past_the_table_wins_nothing() {
+        assert_eq!(GameState::event_prize(8, 100), None);
+        assert_eq!(GameState::event_prize(5, 100), None);
+        assert_eq!(GameState::event_prize(8, 93), Some((50_003, 1)));
     }
 }

@@ -62991,3 +62991,61 @@ fn a_detector_names_the_nearest_stone_and_counts_its_use() {
     wait_for(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
     drop(server);
 }
+
+/// `cg.game.item_use`: `case 50004` (`G/char_item.cpp:4007-4225`) buries and
+/// finds the event stone at once: a fresh detector buries its stone within 700
+/// of Alpha, which is inside the 1000 find range, so the `StoneDetect 0 0` line
+/// goes around and the detector leaves with its prize paid.
+#[test]
+fn a_fresh_event_detector_buries_and_finds_its_stone_at_once() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, \
+         0, 1, 50004 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(50_004).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's detector is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut told = None;
+    while std::time::Instant::now() < deadline && told.is_none() {
+        let Some(record) = alpha.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.len() > 10 && record[0] == GC_CHAT && record[3] == 5 {
+            let text = &record[10..];
+            if text.starts_with(b"StoneDetect ") {
+                told = Some(text.to_vec());
+            }
+        }
+    }
+    let told = told.expect("the detector tells its line");
+    let words: Vec<&[u8]> = told.split(|&byte| byte == b' ').collect();
+    assert_eq!(
+        words.len(),
+        4,
+        "vid, dist and degree: {}",
+        told.escape_ascii()
+    );
+    // The clamp keeps the buried point within 700 of the caller, so the find
+    // (under 1000) always fires on the first use: `[LS;165]` ahead, the `0 0`
+    // line around, and the detector leaves with its prize paid.
+    assert_eq!(
+        &words[2..],
+        &[b"0".as_slice(), b"0".as_slice()],
+        "found at once: {}",
+        told.escape_ascii()
+    );
+    drop(alpha);
+    wait_for(&database, "(SELECT count(*) = 0 FROM item WHERE id = 30)");
+    drop(server);
+}
