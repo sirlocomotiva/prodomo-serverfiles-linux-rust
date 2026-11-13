@@ -41,6 +41,14 @@ const MYTHICAL_PEACHES: [u32; 2] = [71_107, 39_032];
 const PEACH_LAST_USE_FLAG: &[u8] = b"mythical_peach.last_use_time";
 /// The alignment ceiling the peach refuses at (`:4831-4835`).
 const PEACH_MAX_ALIGNMENT: i32 = 200_000;
+/// The hair colorants (`case 70201`-`case 70206`, `G/char_item.cpp:4937-4967`).
+const HAIR_COLORANTS: [u32; 6] = [70_201, 70_202, 70_203, 70_204, 70_205, 70_206];
+/// The colorant's throttle flag (`fix_bug.colorante`, `:4943,4962`).
+const COLORANT_LAST_USE_FLAG: &[u8] = b"fix_bug.colorante";
+/// The seconds between two colorant uses (`:4945`).
+const COLORANT_WAIT_SECONDS: i64 = 3;
+/// A hair past this one is a dyed one the colorant refuses (`:4951`).
+const HAIR_DYE_CEILING: u16 = 1001;
 
 impl GameState {
     /// Whether the item at `at` is a stone scroll (`USE_CREATE_STONE`).
@@ -189,6 +197,108 @@ impl GameState {
             b"[LS;384;%d]",
             &[crate::chat_line::Arg::Int(i64::from(val))],
         ));
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is a hair colorant (`case 70201`-`case 70206`,
+    /// `G/char_item.cpp:4937-4967`).
+    pub(super) fn hair_colorant_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| HAIR_COLORANTS.contains(&item.vnum))
+    }
+
+    /// A hair colorant (`case 70201`-`case 70206`, `G/char_item.cpp:4937-4967`): past
+    /// the use's checks, the throttle refuses within 3 seconds of
+    /// `fix_bug.colorante`, a hair at or past 1001 refuses as a dyed one, else the
+    /// hair becomes the vnum minus 70201, the neighbourhood sees the update, and the
+    /// flag stamps now. The colorant is never spent (`:4959` is commented out).
+    pub(super) fn use_hair_colorant(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let vnum = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map(|item| item.vnum);
+        let Some(vnum) = vnum else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let colorant = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(colorant.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(colorant.vnum))?;
+            world::character::use_checks(&colorant, proto, rules, gear.points)?;
+            Ok(MoveDone {
+                kind: world::character::MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            })
+        })?;
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let now = Self::global_time();
+        let last = self
+            .quests
+            .as_ref()
+            .and_then(|quests| quests.manager().quest_flag(pid, COLORANT_LAST_USE_FLAG))
+            .unwrap_or(0);
+        if i64::from(now).saturating_sub(i64::from(last)) < COLORANT_WAIT_SECONDS {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You have to wait 3 seconds to use this item again.",
+                &[],
+            );
+            return self.nothing_used(vid, actor);
+        }
+        let hair = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points())
+            .map(|points| points.parts()[common::enums::EParts::Hair as usize]);
+        if hair.is_some_and(|hair| hair >= HAIR_DYE_CEILING) {
+            self.tell(
+                vid,
+                actor,
+                CHAT_TYPE_INFO,
+                b"You cannot dye or bleach your current Hairstyle.",
+                &[],
+            );
+            return self.nothing_used(vid, actor);
+        }
+        let dye = u16::try_from(vnum.saturating_sub(HAIR_COLORANTS[0])).unwrap_or(u16::MAX);
+        if let Ok(character) = self.characters.find_by_vid_mut(vid) {
+            if let Some(points) = character.items_and_points_mut().1 {
+                points.set_part(common::enums::EParts::Hair, dye);
+            }
+        }
+        if let Some(quests) = self.quests.as_mut() {
+            quests.manager_mut().set_quest_flag(
+                pid,
+                COLORANT_LAST_USE_FLAG,
+                i32::try_from(now).unwrap_or(i32::MAX),
+            );
+        }
+        let flags = self.affect_flags_of(vid);
+        if let Some(frame) = self.update_frame(vid, flags) {
+            let me = crate::game_state::view::EntityKey::Character(vid.raw());
+            self.packet_around(me, &frame, None);
+        }
         Ok(moved)
     }
 

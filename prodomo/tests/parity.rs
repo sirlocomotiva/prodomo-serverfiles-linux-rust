@@ -61040,6 +61040,58 @@ fn a_water_breaks_the_top_stone_out_of_a_sword() {
     drop(server);
 }
 
+/// `cg.game.item_use`: `case 70201`-`case 70206` (`G/char_item.cpp:4937-4967`) dye the
+/// hair to the vnum minus 70201 and never spend: Alpha's 70204 sets the hair part to 3
+/// and the update shows it. A second use within 3 seconds is refused with the wait
+/// line. (Alpha's stored hair, 50132, is itself a dyed head the colorant refuses, so
+/// the row first resets to 100.)
+#[test]
+fn a_hair_colorant_dyes_and_waits_three_seconds() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1,          70204 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(70_204).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's colorant is USE_SPECIAL");
+    // Alpha's stored hair is 50132, a dyed one the colorant refuses, so the test
+    // dyes a fresh head: the row's hair becomes 100 before the enter.
+    sql(
+        &database,
+        "UPDATE player SET part_hair = 100 WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses the colorant. Then: the update shows hair 3.
+    alpha.send_record(&client_item_use(0));
+    let update = loop {
+        let record = alpha.read_game();
+        if record[0] == GC_CHARACTER_UPDATE {
+            break record;
+        }
+    };
+    let frame =
+        protocol::gc_actors::GcCharacterUpdate::decode(&update).expect("a character update");
+    assert_eq!(frame.aw_part[3], 3, "the hair dyes to vnum - 70201");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // And: a second use within 3 seconds waits.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"You have to wait 3 seconds to use this item again."),
+        "the throttle refuses"
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    drop(alpha);
+    drop(server);
+}
+
 #[test]
 fn a_stone_scroll_spends_and_gives_no_stone() {
     let Some(database) = ScratchDatabase::create() else {
