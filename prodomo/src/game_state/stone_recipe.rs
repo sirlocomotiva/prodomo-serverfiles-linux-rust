@@ -21,6 +21,7 @@ use common::vid::Vid;
 use gamedata::item_kind::{ITEM_USE, USE_CREATE_STONE, USE_RECIPE};
 use protocol::gc_actors::GcCharacterGoldChange;
 use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
+use protocol::gc_fields::GcCreateFly;
 use protocol::gc_vid::GcSpecialEffect;
 use protocol::item_pos::ItemPos;
 use world::character::{number, AutoGiven, MoveDone, RecipeTake};
@@ -57,9 +58,16 @@ const WONSO_BEAN: u32 = 50_020;
 const WONSO_SUGAR: u32 = 50_021;
 /// The wonso fruit (`case 50022`).
 const WONSO_FRUIT: u32 = 50_022;
-/// The elk gold bar (`case ITEM_ELK_VNUM`, `G/char_item.cpp:5180-5191`).
 /// The firecracker (`case 50107`, `G/char_item.cpp:5118-5140`).
 const FIRECRACKER: u32 = 50_107;
+/// The sky fireworks (`case 50100`-`case 50106`, `G/char_item.cpp:4351-4360`).
+const SKY_FIREWORKS: [u32; 7] = [50_100, 50_101, 50_102, 50_103, 50_104, 50_105, 50_106];
+/// The random sky firework (`case 71013`, `G/char_item.cpp:4346-4349`).
+const RANDOM_FIREWORK: u32 = 71_013;
+/// `FLY_FIREWORK1` (`G/char.h:96`): 7, counted from `FLY_NONE`.
+const FLY_FIREWORK1: u8 = 7;
+/// `FLY_FIREWORK6` (`:101`): 12.
+const FLY_FIREWORK6: u8 = 12;
 /// The spinning top (`case 50108`, `G/char_item.cpp:5142-5162`).
 const SPINNING_TOP: u32 = 50_108;
 /// The elk gold bar (`case ITEM_ELK_VNUM`, `G/char_item.cpp:5180-5191`).
@@ -403,6 +411,65 @@ impl GameState {
                 }
             }
         }
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is a sky firework (`case 50100`-`case 50106` and
+    /// `case 71013`, `G/char_item.cpp:4346-4360`).
+    pub(super) fn sky_firework_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == RANDOM_FIREWORK || SKY_FIREWORKS.contains(&item.vnum))
+    }
+
+    /// The sky fireworks (`case 50100`-`case 50106` and `case 71013`,
+    /// `G/char_item.cpp:4346-4360`): past the use's checks the fly goes around from
+    /// the lighter to herself (`CreateFly`, `G/char_battle.cpp:129-139`), and one
+    /// firework spends. The kind is the vnum less 50100 plus `FLY_FIREWORK1` (7), so
+    /// 50100-50105 fly 7-12 and 50106 flies 13 (`FLY_FIREWORK_CHRISTMAS`); 71013
+    /// rolls `number(7, 12)` instead. No gate guards these arms.
+    pub(super) fn use_sky_firework(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let vnum = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map_or(0, |item| item.vnum);
+        let fly = if vnum == RANDOM_FIREWORK {
+            u8::try_from(number(
+                &mut self.dice,
+                i32::from(FLY_FIREWORK1),
+                i32::from(FLY_FIREWORK6),
+            ))
+            .unwrap_or(FLY_FIREWORK1)
+        } else {
+            u8::try_from(
+                vnum.wrapping_sub(50_100)
+                    .wrapping_add(u32::from(FLY_FIREWORK1)),
+            )
+            .unwrap_or(FLY_FIREWORK1)
+        };
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let firework = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(firework.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(firework.vnum))?;
+            world::character::use_checks(&firework, proto, rules, gear.points)?;
+            world::character::spend_one(items, &firework, proto)
+        })?;
+        let mut record = Vec::new();
+        GcCreateFly::new(fly, vid.raw(), vid.raw()).encode_into(&mut record);
+        self.packet_around(super::view::EntityKey::Character(vid.raw()), &record, None);
         Ok(moved)
     }
 

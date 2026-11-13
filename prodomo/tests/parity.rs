@@ -62813,3 +62813,59 @@ fn two_fireworks_light_their_effects_and_spend_one_each() {
     wait_for(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
     drop(server);
 }
+
+/// `cg.game.item_use`: `case 50100`-`case 50106` (`G/char_item.cpp:4351-4360`) fly
+/// the sky fireworks: Alpha lights the first and the last, each pays its fly
+/// around from herself to herself (7, then 13), and each stack shrinks by one.
+#[test]
+fn two_sky_fireworks_fly_from_the_lighter_to_herself() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, \
+         0, 2, 50100 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 31, id, 1, \
+         1, 2, 50106 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    for vnum in [50_100, 50_106] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, 10, "the owner's firework is USE_SPECIAL");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    alpha.send_record(&client_item_use(1));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut flies = Vec::new();
+    while std::time::Instant::now() < deadline && flies.len() < 2 {
+        let Some(record) = alpha.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.len() == CREATE_FLY_LEN && record[0] == GC_CREATE_FLY {
+            flies.push(record);
+        }
+    }
+    assert_eq!(flies.len(), 2, "both fireworks fly");
+    for (fly, kind) in flies.iter().zip([7u8, 13u8]) {
+        assert_eq!(fly[1], kind, "the fly kind");
+        assert_eq!(
+            u32::from_le_bytes(fly[2..6].try_into().expect("four bytes")),
+            u32::from_le_bytes(fly[6..10].try_into().expect("four bytes")),
+            "from the lighter to herself"
+        );
+    }
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+    drop(alpha);
+    wait_for(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+    drop(server);
+}
