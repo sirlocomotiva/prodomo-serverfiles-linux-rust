@@ -5632,6 +5632,44 @@ fn a_map_shows_its_monsters_and_stones_in_view() {
     alice.quiet("the burst is over");
 }
 
+/// `data.mob.group`: a `g` regen stands its group's leader in the box and each
+/// member in a box around the one before (`SpawnGroup`, `G/char_manager.cpp:595-667`).
+/// The scenario's `npc.txt` adds group 3022 — a 3202 leader with two 3201s — at the
+/// dog's point, and all three are shown in view, races the owner's map 1 never
+/// spawns.
+#[test]
+fn a_group_regen_stands_its_leader_and_its_members() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "g\t600\t525\t1\t1\t0\t0\t60s\t100\t1\t3022\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let groups = owners_mob_groups();
+    let group = groups.group(3022).expect("the owner's data has it");
+    assert_eq!(group.members, [3202, 3201, 3201], "group 3022's line");
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    let mut races: Vec<u16> = entered
+        .shown
+        .monsters
+        .iter()
+        .map(|insert| u16::from_le_bytes([insert[22], insert[23]]))
+        .filter(|race| *race == 3201 || *race == 3202)
+        .collect();
+    races.sort_unstable();
+    assert_eq!(races, [3201, 3201, 3202], "the leader and its members");
+    alice.quiet("the burst is over");
+    drop(alice);
+    drop(server);
+}
+
 /// Charlie enters map 72 on the Shared Channel beside its warp at (99, 33), which is all that is in
 /// view, and the mini-map lists map 72's `npc.txt` alone, in its order.
 fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchDatabase) {
@@ -10345,6 +10383,13 @@ fn the_vnum_this_section_grants_is_in_the_owners_prototypes() {
 }
 
 /// The owner's item prototypes, read by the reader the server uses.
+/// The owner's mob groups, read by the reader the server uses.
+fn owners_mob_groups() -> gamedata::mob_group::MobGroups {
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe");
+    gamedata::mob_group::MobGroups::load(&directory).expect("the owner's mob groups should load")
+}
+
 fn owners_protos() -> gamedata::item_proto::ItemProtos {
     let directory =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
