@@ -36,12 +36,12 @@ use std::ops::RangeInclusive;
 use common::item_slots::EWindows;
 use common::vid::Vid;
 use gamedata::item_kind::{
-    EXTRACT_DRAGON_HEART, EXTRACT_DRAGON_SOUL, ITEM_EXTRACT, ITEM_METIN, ITEM_TREASURE_KEY,
-    ITEM_USE, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
-    USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE,
-    USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN,
-    USE_CHANGE_COSTUME_ATTR, USE_CLEAN_SOCKET, USE_DETACHMENT, USE_ELEMENT_CHANGE,
-    USE_ELEMENT_DOWNGRADE, USE_ELEMENT_UPGRADE, USE_PUT_INTO_ACCESSORY_SOCKET,
+    ARMOR_EAR, ARMOR_NECK, ARMOR_WRIST, EXTRACT_DRAGON_HEART, EXTRACT_DRAGON_SOUL, ITEM_ARMOR,
+    ITEM_EXTRACT, ITEM_METIN, ITEM_TREASURE_KEY, ITEM_USE, ITEM_WEAPON, USE_ADD_ACCESSORY_SOCKET,
+    USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2, USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN,
+    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE,
+    USE_CHANGE_ATTRIBUTE_TALISMAN, USE_CHANGE_COSTUME_ATTR, USE_CLEAN_SOCKET, USE_DETACHMENT,
+    USE_ELEMENT_CHANGE, USE_ELEMENT_DOWNGRADE, USE_ELEMENT_UPGRADE, USE_PUT_INTO_ACCESSORY_SOCKET,
     USE_PUT_INTO_AURA_SOCKET, USE_PUT_INTO_BELT_SOCKET, USE_RESET_COSTUME_ATTR,
     USE_SET_ATT_COSTUME, USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT, USE_SET_ATT_PET,
     USE_TIME_CHARGE_FIX, USE_TIME_CHARGE_PER, USE_TUNING,
@@ -164,6 +164,25 @@ fn arena_potion_refusal(
     }
 }
 
+/// The stone-removal waters (`case 71109` / `case 72719`, `G/char_item.cpp:4862-4935`).
+/// Only 71109 lives in the owner's protos.
+const STONE_WATERS: [u32; 2] = [71_109, 72_719];
+
+/// The highest-index live stone of `sockets`, as the stack the water reads scans them:
+/// a socket past 2 that is not the broken one. Pushing all six and popping answers the
+/// top live one, which the forward scan's last match is.
+fn top_live_stone(sockets: &[i32]) -> Option<(usize, u32)> {
+    let mut picked = None;
+    for (index, socket) in sockets.iter().enumerate() {
+        if *socket > 2 && *socket != world::character::BROKEN_STONE_SOCKET {
+            if let Ok(vnum) = u32::try_from(*socket) {
+                picked = Some((index, vnum));
+            }
+        }
+    }
+    picked
+}
+
 /// The arm of `UseItemEx` an item used on another runs.
 enum Arm {
     /// `ITEM_METIN`.
@@ -199,6 +218,8 @@ enum Arm {
     /// `USE_TIME_CHARGE_PER` or `USE_TIME_CHARGE_FIX`, with its sub-type: a soul
     /// charge by percent or by seconds.
     Charge(i32),
+    /// `case 71109` / `case 72719`: the stone-removal water.
+    Water,
     /// Any other item, used as `CG_ITEM_USE` uses it.
     Plain,
 }
@@ -386,6 +407,9 @@ impl GameState {
             }
             Arm::Detach => {
                 return self.detach_step(vid, at, dest, actor);
+            }
+            Arm::Water => {
+                return self.water_step(vid, at, dest, actor);
             }
             Arm::Key => {
                 return self.key_step(vid, at, dest, actor);
@@ -857,6 +881,119 @@ impl GameState {
         )
     }
 
+    /// The stone-removal water (`case 71109` / `case 72719`, `G/char_item.cpp:4862-4935`):
+    /// the water at `at` breaks the highest-index live stone out of the weapon or armour
+    /// (never an ear, wrist or neck) at `dest` and it comes back by `AutoGiveItem`, with
+    /// its socket set to 1. A held or worn target, one with no socket, or one of another
+    /// type is silent; an ear, wrist or neck, and a target with no live stone, chat
+    /// `[LS;1032]`. The water spends only when the stone comes back. The stack the water
+    /// reads is all six sockets, but only the first three ever hold stones
+    /// (`ITEM_STONES_MAX_NUM`), so a stone above them is unreachable and the scan's
+    /// broken-socket term is (`> 2` and not 28960) exactly.
+    fn water_step(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        dest: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let questing = self.quest_running(vid);
+        let found = std::cell::RefCell::new(None);
+        let refused = std::cell::RefCell::new(false);
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let water = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let proto = protos
+                .get(water.vnum)
+                .ok_or(MoveRefused::UnknownVnum(water.vnum))?;
+            world::character::use_checks(&water, proto, rules, gear.points)?;
+            let silent = || {
+                Ok(MoveDone {
+                    kind: MoveKind::Used,
+                    records: Vec::new(),
+                    changes: Vec::new(),
+                })
+            };
+            let Some(target) = world::character::use_target(items, dest) else {
+                return silent();
+            };
+            let Some(target_proto) = protos.get(target.vnum) else {
+                return silent();
+            };
+            // `GetSocketCount() == 0`: the first socket is 0.
+            if target.sockets.first() == Some(&0) {
+                return silent();
+            }
+            if target_proto.item_type != ITEM_WEAPON && target_proto.item_type != ITEM_ARMOR {
+                return silent();
+            }
+            if target_proto.item_type == ITEM_ARMOR
+                && matches!(target_proto.sub_type, ARMOR_EAR | ARMOR_WRIST | ARMOR_NECK)
+            {
+                *refused.borrow_mut() = true;
+                return silent();
+            }
+            let Some((index, vnum)) = top_live_stone(&target.sockets) else {
+                *refused.borrow_mut() = true;
+                return silent();
+            };
+            let sockets = items
+                .set_socket(target.id, index, 1)
+                .map_err(|_| MoveRefused::Empty)?;
+            let update = items
+                .item(target.id)
+                .ok_or(MoveRefused::Empty)?
+                .gc_item_update();
+            *found.borrow_mut() = Some(vnum);
+            let mut spent = world::character::spend_one(items, &water, proto)?;
+            spent.records.insert(
+                0,
+                world::character::MoveRecord::Item(world::character::ItemRecord::Update(update)),
+            );
+            spent.changes.insert(
+                0,
+                world::character::ItemChange::Sockets {
+                    id: target.id,
+                    sockets,
+                },
+            );
+            Ok(spent)
+        })?;
+        if *refused.borrow() {
+            self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;1032]", &[]);
+        }
+        let mut moved = moved;
+        if let Some(vnum) = *found.borrow() {
+            let Some((given, done)) = self.auto_give(vid, (vnum, 1), 0, questing) else {
+                return Ok(moved);
+            };
+            if let world::character::AutoGiven::Unplaced(item) = given {
+                self.lay_auto_given(vid, item);
+            }
+            let gave = MovedItems::new(
+                moved.owner_id,
+                vid.raw(),
+                done,
+                actor,
+                &self.protos,
+                &self.locale,
+            );
+            moved.records.extend(gave.records);
+            moved.changes.extend(gave.changes);
+            moved.around.extend(gave.around);
+            if gave.ground_at.is_some() {
+                moved.ground_at = gave.ground_at;
+            }
+            if gave.points.is_some() {
+                moved.points = gave.points;
+            }
+            if gave.quickslots.is_some() {
+                moved.quickslots = gave.quickslots;
+            }
+        }
+        Ok(moved)
+    }
+
     /// The `USE_DETACHMENT` arm of `CHARACTER::RefineItem` (`G/char_item.cpp:1996-2040`):
     /// the scroll at `at` breaks the live stones out of the item at `dest` and each
     /// comes back by `AutoGiveItem`, in socket order. The use's checks run first, as
@@ -1139,12 +1276,16 @@ impl GameState {
     }
 
     fn use_arm(&self, vid: Vid, at: ItemPos) -> Arm {
-        let proto = self
+        let vnum = self
             .characters
             .find_by_vid(vid)
             .ok()
             .and_then(|character| character.items().item_at(at))
-            .and_then(|item| self.protos.get(item.vnum));
+            .map(|item| item.vnum);
+        if vnum.is_some_and(|vnum| STONE_WATERS.contains(&vnum)) {
+            return Arm::Water;
+        }
+        let proto = vnum.and_then(|vnum| self.protos.get(vnum));
         match proto {
             Some(proto) if proto.item_type == ITEM_METIN => Arm::Stone,
             Some(proto) if proto.item_type == ITEM_TREASURE_KEY => Arm::Key,

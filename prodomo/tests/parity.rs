@@ -60978,6 +60978,68 @@ fn a_mythical_peach_gives_alignment_and_refuses_a_second_bite() {
     drop(server);
 }
 
+/// `cg.game.item_use_to_item`: `case 71109` (`G/char_item.cpp:4862-4935`) breaks the top
+/// stone out of a sword: the water at cell 2 on the sword at cell 0 sets socket 0 to 1, the
+/// stone comes back by `AutoGiveItem`, and one water spends. A second water on the emptied
+/// sword finds no live stone and chats `[LS;1032]`, spending nothing.
+#[test]
+fn a_water_breaks_the_top_stone_out_of_a_sword() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, cell, count, vnum, socket) in [(41, 0, 1, 10, 28_030), (42, 2, 2, 71_109, 0)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT \
+                 {id}, id, 1, {cell}, {count}, {vnum}, {socket} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    let proto = protos.get(71_109).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's water is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: Alpha uses the water on the sword. Then: the socket reads 1.
+    alpha.send_record(&client_use_to_item(2, 0));
+    let sword = alpha.read_game();
+    assert_eq!(
+        sword[..4],
+        [ITEM_UPDATE, 1, 0, 0],
+        "the sword: {sword:02x?}"
+    );
+    assert_eq!(sword[14..18], 1_i32.to_le_bytes(), "the socket reads 1");
+    // And: the stone and the spent water land, the count falls.
+    let mut gave = false;
+    let mut spent = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && (!gave || !spent) {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&ITEM_SET) {
+            let (window, _cell, vnum, _count) = set_fields(&record);
+            if window == common::item_slots::EWindows::Inventory as u8 && vnum == 28_030 {
+                gave = true;
+            }
+        } else if record.first() == Some(&ITEM_UPDATE) && record[1..4] == [1, 2, 0] {
+            spent = true;
+        }
+    }
+    assert!(gave && spent, "the stone comes back and the water spends");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 42)");
+    // And: a second water finds no live stone and chats, spending nothing.
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1032]"));
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 42)");
+    drop(alpha);
+    drop(server);
+}
+
 #[test]
 fn a_stone_scroll_spends_and_gives_no_stone() {
     let Some(database) = ScratchDatabase::create() else {
