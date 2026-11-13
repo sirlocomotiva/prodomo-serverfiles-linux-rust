@@ -4,15 +4,15 @@
 //! `G/` = `server/server/game/`.
 
 use gamedata::item_kind::{
-    ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_BODY, COSTUME_MOUNT,
-    COSTUME_PET, COSTUME_SASH, COSTUME_WEAPON, ITEM_ARMOR, ITEM_BELT, ITEM_COSTUME, ITEM_PICK,
-    ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON, LIMIT_LEVEL, LIMIT_REAL_TIME,
+    ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_AURA, COSTUME_BODY,
+    COSTUME_MOUNT, COSTUME_PET, COSTUME_SASH, COSTUME_WEAPON, ITEM_ARMOR, ITEM_BELT, ITEM_COSTUME,
+    ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON, LIMIT_LEVEL, LIMIT_REAL_TIME,
     USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2, USE_ADD_ATTRIBUTE_GLOVE,
     USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2,
     USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN, USE_CHANGE_COSTUME_ATTR,
-    USE_CLEAN_SOCKET, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET,
-    USE_RESET_COSTUME_ATTR, USE_SET_ATT_COSTUME, USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT,
-    USE_SET_ATT_PET, WEARABLE_BODY, WEARABLE_WEAPON,
+    USE_CLEAN_SOCKET, USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_AURA_SOCKET,
+    USE_PUT_INTO_BELT_SOCKET, USE_RESET_COSTUME_ATTR, USE_SET_ATT_COSTUME,
+    USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT, USE_SET_ATT_PET, WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -103,6 +103,14 @@ pub const OPEN_MORE_FIRST_NOTICES: [&str; 2] = ["[LS;413]", "[LS;415]"];
 pub const JEWELS_FULL_NOTICE: &str = "[LS;416]";
 /// The jewel for another accessory (`CanPutInto`, `:6765`).
 pub const WRONG_JEWEL_NOTICE: &str = "[LS;417]";
+/// The booster lands (`USE_PUT_INTO_AURA_SOCKET`, `:6778`).
+pub const AURA_BOOST_SET_NOTICE: &str = "<Aura> Aura booster attached successfully.";
+/// The booster on a boosted or non-aura target (`:6789`).
+pub const AURA_BOOST_REFUSED_NOTICE: &str = "<Aura> You cannot add aura boost to this item.";
+/// `ITEM_SOCKET_AURA_BOOST` (`C/item_length.h:475`): socket 2.
+pub const AURA_BOOST_SOCKET: usize = 2;
+/// `ITEM_AURA_BOOST_ITEM_VNUM_BASE` (`G/unique_item.h:26`): 49980.
+pub const AURA_BOOST_VNUM_BASE: u32 = 49_980;
 /// The heart extractor on a worn stone (`ExtractDragonHeart`, `G/DragonSoul.cpp:415`).
 pub const HEART_WORN_NOTICE: &str = "You cannot extract Dragon Soul Stones while wearing them.";
 /// The heart gamble's drawn charge is zero (`:459`).
@@ -786,6 +794,9 @@ pub fn change_target_attributes(
         }
         USE_PUT_INTO_ACCESSORY_SOCKET | USE_PUT_INTO_BELT_SOCKET => {
             put_into_socket(items, (scroll, scroll_proto), &target, target_proto, dice)
+        }
+        USE_PUT_INTO_AURA_SOCKET => {
+            put_into_aura_socket(items, (scroll, scroll_proto), &target, target_proto)
         }
         USE_ADD_ATTRIBUTE_TALISMAN => add_kind_target_attribute(
             items,
@@ -1591,6 +1602,11 @@ fn add_accessory_socket(
 /// [`JEWEL_SET_FAILED_NOTICE`]. The downgrade countdown is socket 2; the expiry
 /// timer that spends it (`accessory_socket_expire_event`) stays `unused`, and a
 /// graded accessory refuses the wear (`WornSystem::AccessoryTimer`).
+///
+/// The aura's expiry is none of this arm's business: the stamped boost ticks only
+/// while worn (`StartAuraBoosterSocketExpireEvent`, `G/item.cpp:2928-2958`, from
+/// `EquipTo` `:1472`), and the port refuses every aura costume at equip and at load
+/// (`WornSystem::Aura`), so the socket just stores the stamp.
 fn put_into_socket(
     items: &mut CharacterItems,
     (scroll, scroll_proto): (&Item, &ItemProto),
@@ -1652,10 +1668,69 @@ fn put_into_socket(
     Ok(done(MoveKind::Used, trail))
 }
 
+/// The `USE_PUT_INTO_AURA_SOCKET` arm of the socket case (`G/char_item.cpp:6768-6791`,
+/// behind `__AURA_SYSTEM__`): on an aura costume whose socket 2 is empty the booster
+/// stamps `index * 100000000 + value(1)` (`GetOriginalVnum - 49980`, value(1) the time),
+/// chats the success line, and spends one (`SetCount(count - 1)`, as only stackables
+/// with count past 1 stay; owner boosters carry `FLAG` `NONE`, so a lone booster is
+/// removed and a stacked one shrinks); any other target chats the refusal with the
+/// scroll kept. `use_target` already refused the exchanging and the worn target, and
+/// the head spared this label the costume-and-glove gate (`:6315-6317`), as the
+/// target must be a costume.
+///
+/// # Errors
+///
+/// [`MoveRefused::Empty`] when the sockets cannot be written.
+fn put_into_aura_socket(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    target: &Item,
+    target_proto: &ItemProto,
+) -> Result<MoveDone, MoveRefused> {
+    let refused = |text: &'static str| {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(text));
+        Ok(done(MoveKind::Used, trail))
+    };
+    let unboosted = target_proto.item_type == ITEM_COSTUME && target_proto.sub_type == COSTUME_AURA;
+    if !unboosted
+        || target.sockets[AURA_BOOST_SOCKET] != 0
+        || !can_put_into(scroll, scroll_proto, target, target_proto)
+    {
+        return refused(AURA_BOOST_REFUSED_NOTICE);
+    }
+    let index = scroll.vnum.saturating_sub(AURA_BOOST_VNUM_BASE);
+    let stamp = i64::from(index)
+        .saturating_mul(100_000_000)
+        .saturating_add(i64::from(scroll_proto.values[1].max(0)));
+    let mut trail = Trail::default();
+    let sockets = items
+        .set_socket(
+            target.id,
+            AURA_BOOST_SOCKET,
+            i32::try_from(stamp).unwrap_or(i32::MAX),
+        )
+        .map_err(|_| MoveRefused::Empty)?;
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    trail
+        .records
+        .push(MoveRecord::Notice(AURA_BOOST_SET_NOTICE));
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Sockets {
+        id: target.id,
+        sockets,
+    });
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
 /// `CItem::CanPutInto` (`G/item.cpp:2514-2631`): whether the `jewel` fits the
 /// `target`. A belt takes a belt jewel (`USE_PUT_INTO_BELT_SOCKET`); a ring never
-/// takes one (`CanPutIntoRing` always fails); an aura's arm is its system's, and any
-/// other non-armour refuses. On a bracelet, necklace or earring the jewel table
+/// takes one (`CanPutIntoRing` always fails); an aura costume takes an aura booster
+/// (any `USE_PUT_INTO_AURA_SOCKET` scroll, `:2525-2528`); any other non-armour
+/// refuses. On a bracelet, necklace or earring the jewel table
 /// decides first (the target's vnum rounded down to ten picks the row, and a wrong
 /// jewel for a row refuses before the ladder runs), then the fallback ladder: the
 /// target's offset from its kind's base over 20 picks the jewel past
@@ -1673,6 +1748,9 @@ fn can_put_into(
     }
     if target_proto.item_type == ITEM_RING {
         return false;
+    }
+    if target_proto.item_type == ITEM_COSTUME && target_proto.sub_type == COSTUME_AURA {
+        return jewel_proto.sub_type == USE_PUT_INTO_AURA_SOCKET;
     }
     if target_proto.item_type != ITEM_ARMOR {
         return false;

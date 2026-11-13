@@ -150,6 +150,9 @@ pub const USE_BUCKET: i32 = 15;
 /// `USE_CHANGE_ATTRIBUTE_PLUS` (`C/item_length.h:288`): 34, with no arm in `UseItemEx`,
 /// so a use is a silent success (the owner's 71189).
 pub const USE_CHANGE_ATTRIBUTE_PLUS: i32 = 34;
+/// `USE_PUT_INTO_AURA_SOCKET` (`C/item_length.h:290`): 35, behind `__AURA_SYSTEM__`.
+/// An aura booster (the owner's 49981-49984) for an unboosted aura costume's socket 2.
+pub const USE_PUT_INTO_AURA_SOCKET: i32 = 35;
 /// `USE_CREATE_STONE` (`C/item_length.h:263`): a stone-creating scroll (the owner's
 /// 27999), which gives a metin of `number(28000, 28013)`.
 pub const USE_CREATE_STONE: i32 = 9;

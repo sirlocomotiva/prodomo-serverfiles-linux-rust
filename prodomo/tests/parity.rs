@@ -52838,6 +52838,85 @@ fn a_cleaner_compacts_a_broken_sword_and_a_second_refuses() {
     drop(server);
 }
 
+/// `cg.game.item_use_to_item`: Alpha holds a timeless aura costume (49011), a weak
+/// booster (49981) and a second booster (49982). The first stamps socket 2 with
+/// `1 * 100000000 + 86400`, chats the success line, and spends itself; the second
+/// on the now-boosted costume chats the refusal and is kept. Both rows store.
+#[test]
+fn a_booster_lands_on_an_aura_and_a_second_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0,          1, 49011 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1,          1, 49981 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 62, id, 1, 2,          1, 49982 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 3);
+    let protos = owners_protos();
+    let costume = protos.get(49_011).expect("the costume");
+    assert_eq!(costume.item_type, gamedata::item_kind::ITEM_COSTUME);
+    assert_eq!(costume.sub_type, gamedata::item_kind::COSTUME_AURA);
+    assert_eq!(
+        protos.get(49_981).expect("the booster").sub_type,
+        gamedata::item_kind::USE_PUT_INTO_AURA_SOCKET,
+        "the owner's booster"
+    );
+    // When: the booster is used on the aura. Then: the line, the stamp, the spend.
+    alice.send_record(&client_use_to_item(1, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(
+            CHAT_TYPE_INFO,
+            1,
+            b"<Aura> Aura booster attached successfully."
+        ),
+        "the success chats: {line:02x?}"
+    );
+    let update = alice.read_game();
+    assert_eq!(update[0], ITEM_UPDATE, "the costume's row updates");
+    assert_eq!(
+        update_sockets(&update)[2],
+        100_086_400,
+        "socket 2 stamps index and time"
+    );
+    let cleared = alice.read_game();
+    assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
+    alice.quiet("the set sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 61");
+    check(
+        &database,
+        "SELECT socket2 = 100086400 FROM item WHERE id = 60",
+    );
+    // When: the second booster is used on the now-boosted aura.
+    alice.send_record(&client_use_to_item(2, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(
+            CHAT_TYPE_INFO,
+            1,
+            b"<Aura> You cannot add aura boost to this item."
+        ),
+        "the refusal chats: {line:02x?}"
+    );
+    alice.quiet("the refusal sends nothing more");
+    check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 62");
+    drop(alice);
+    drop(server);
+}
+
 /// `cg.game.item_use_to_item`: Alpha holds a bonus-less costume body of vnum 41319
 /// (timeless) and two body reinforcements of vnum 50898 in the base inventory. The
 /// first lands apply 1 at 2000 with the success line and spends itself; the second
