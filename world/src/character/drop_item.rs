@@ -303,7 +303,7 @@ fn attribute_count(attributes: &[ItemAttribute]) -> usize {
 
 /// `CItem::HasAttr` (`G/item_attribute.cpp:95-107`): the proto's three applies or the
 /// five normal attributes already hold `apply`.
-fn has_attr(proto: &ItemProto, attributes: &[ItemAttribute], apply: u8) -> bool {
+pub fn has_attr(proto: &ItemProto, attributes: &[ItemAttribute], apply: u8) -> bool {
     proto.applies.iter().any(|slot| {
         let [kind, ..] = slot.kind.to_le_bytes();
         kind == apply

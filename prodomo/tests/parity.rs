@@ -52793,6 +52793,89 @@ fn a_cleaner_compacts_a_broken_sword_and_a_second_refuses() {
     drop(server);
 }
 
+/// `cg.game.item_use_to_item`: Alpha holds a bonus-less costume body of vnum 41319
+/// (timeless) and two body reinforcements of vnum 50898 in the base inventory. The
+/// first lands apply 1 at 2000 with the success line and spends itself; the second
+/// chats the duplicate line and is kept. The row stores. The pet, mount and weapon
+/// arms share the same step and are unit-proved (all owner pets and mounts expire,
+/// and no owner weapon scroll exists).
+#[test]
+fn a_body_reinforcement_lands_and_a_repeat_is_a_duplicate() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 41319 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         1, 50898 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 62, id, 1, 2, \
+         1, 50898 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 3);
+    let protos = owners_protos();
+    let scroll = protos.get(50898).expect("the reinforcement");
+    assert_eq!(
+        scroll.sub_type,
+        gamedata::item_kind::USE_SET_ATT_COSTUME,
+        "the owner's reinforcement"
+    );
+    assert_eq!((scroll.values[0], scroll.values[1]), (1, 2000), "its pair");
+    // When: the reinforcement is used on the body.
+    alice.send_record(&client_use_to_item(1, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(
+            CHAT_TYPE_INFO,
+            1,
+            b"[i] Ranforsarea a fost adaugata cu succes."
+        ),
+        "the success chats: {line:02x?}"
+    );
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the body's cell updates: {update:02x?}"
+    );
+    assert_eq!(update[38], 1, "the apply lands: {update:02x?}");
+    let cleared = alice.read_game();
+    assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
+    alice.quiet("the reinforcement sends nothing more");
+    check(&database, "SELECT COUNT(*) = 0 FROM item WHERE id = 61");
+    check(
+        &database,
+        "SELECT attrtype0 = 1 AND attrvalue0 = 2000 FROM item WHERE id = 60",
+    );
+    // When: the second reinforcement is used on the same body.
+    alice.send_record(&client_use_to_item(2, 0));
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(
+            CHAT_TYPE_INFO,
+            1,
+            b"[i] Nu poti adauga acelasi bonus de 2 ori."
+        ),
+        "the duplicate chats: {line:02x?}"
+    );
+    alice.quiet("the duplicate sends nothing more");
+    check(&database, "SELECT COUNT(*) = 1 FROM item WHERE id = 62");
+    drop(alice);
+    drop(server);
+}
+
 /// `cg.game.myshop` and `cmd.close_shop`: Alpha carries a sword and a paper bundle, builds a
 /// bundle shop selling the sword for 500 yang under the sign `Swords`, and the sign reaches
 /// Yankee, who stands beside it; `/close_shop` clears the sign on both wires.

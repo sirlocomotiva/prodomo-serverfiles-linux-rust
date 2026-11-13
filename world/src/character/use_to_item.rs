@@ -4,13 +4,15 @@
 //! `G/` = `server/server/game/`.
 
 use gamedata::item_kind::{
-    ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_SASH, ITEM_ARMOR,
-    ITEM_BELT, ITEM_COSTUME, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON,
-    LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET, USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2,
-    USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN, USE_CHANGE_ATTRIBUTE,
-    USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE, USE_CHANGE_ATTRIBUTE_TALISMAN,
-    USE_CHANGE_COSTUME_ATTR, USE_CLEAN_SOCKET, USE_PUT_INTO_ACCESSORY_SOCKET,
-    USE_PUT_INTO_BELT_SOCKET, USE_RESET_COSTUME_ATTR, WEARABLE_BODY, WEARABLE_WEAPON,
+    ARMOR_BODY, ARMOR_EAR, ARMOR_GLOVE, ARMOR_NECK, ARMOR_WRIST, COSTUME_BODY, COSTUME_MOUNT,
+    COSTUME_PET, COSTUME_SASH, COSTUME_WEAPON, ITEM_ARMOR, ITEM_BELT, ITEM_COSTUME, ITEM_PICK,
+    ITEM_RING, ITEM_ROD, ITEM_TALISMAN, ITEM_WEAPON, LIMIT_LEVEL, USE_ADD_ACCESSORY_SOCKET,
+    USE_ADD_ATTRIBUTE, USE_ADD_ATTRIBUTE2, USE_ADD_ATTRIBUTE_GLOVE, USE_ADD_ATTRIBUTE_TALISMAN,
+    USE_CHANGE_ATTRIBUTE, USE_CHANGE_ATTRIBUTE2, USE_CHANGE_ATTRIBUTE_GLOVE,
+    USE_CHANGE_ATTRIBUTE_TALISMAN, USE_CHANGE_COSTUME_ATTR, USE_CLEAN_SOCKET,
+    USE_PUT_INTO_ACCESSORY_SOCKET, USE_PUT_INTO_BELT_SOCKET, USE_RESET_COSTUME_ATTR,
+    USE_SET_ATT_COSTUME, USE_SET_ATT_COSTUME_WEAPON, USE_SET_ATT_MOUNT, USE_SET_ATT_PET,
+    WEARABLE_BODY, WEARABLE_WEAPON,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use gamedata::records::ItemAttrRecord;
@@ -20,7 +22,7 @@ use protocol::item_pos::ItemPos;
 use super::dice::{number, Dice};
 use super::drop_item::{
     add_rolled_attribute, alter_to_magic_item, attribute_set_index, change_attribute_on,
-    change_rare_attribute, golden_change_levels, Gauss,
+    change_rare_attribute, golden_change_levels, has_attr, Gauss,
 };
 use super::equip::Trail;
 use super::equipment::is_accessory_for_socket;
@@ -734,6 +736,34 @@ pub fn change_target_attributes(
         USE_CLEAN_SOCKET => {
             clean_target_sockets(items, (scroll, scroll_proto), (&target, target_proto))
         }
+        USE_SET_ATT_COSTUME => set_costume_reinforcement(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
+            COSTUME_BODY,
+            &SET_ATT_COSTUME_LINES,
+        ),
+        USE_SET_ATT_PET => set_costume_reinforcement(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
+            COSTUME_PET,
+            &SET_ATT_PET_LINES,
+        ),
+        USE_SET_ATT_MOUNT => set_costume_reinforcement(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
+            COSTUME_MOUNT,
+            &SET_ATT_MOUNT_LINES,
+        ),
+        USE_SET_ATT_COSTUME_WEAPON => set_costume_reinforcement(
+            items,
+            (scroll, scroll_proto),
+            (&target, target_proto),
+            COSTUME_WEAPON,
+            &SET_ATT_COSTUME_LINES,
+        ),
         _ => silent(),
     }
 }
@@ -1016,6 +1046,103 @@ fn clean_target_sockets(
     trail.changes.push(ItemChange::Sockets {
         id: target.id,
         sockets: stored.sockets,
+    });
+    spend_scroll(items, scroll, scroll_proto, &mut trail)?;
+    Ok(done(MoveKind::Used, trail))
+}
+
+/// One reinforcement arm's four lines: the wrong-kind, full, duplicate and success
+/// lines, in the order the arm chats them.
+struct SetAttLines {
+    /// The line for a target of another kind.
+    wrong_kind: &'static str,
+    /// The line for a target already holding two reinforcements.
+    full: &'static str,
+    /// The line for a target already holding the scroll's bonus.
+    duplicate: &'static str,
+    /// The line for a landed reinforcement.
+    added: &'static str,
+}
+
+/// The body and weapon arms' lines (`G/char_item.cpp:6143-6158`, `:6183-6198`), which
+/// share every byte.
+const SET_ATT_COSTUME_LINES: SetAttLines = SetAttLines {
+    wrong_kind: "[i] Ranforsarea merge adaugata doar pe costum.",
+    full: "[i] Poti adauga doar 2 ranforsari pe costum!",
+    duplicate: "[i] Nu poti adauga acelasi bonus de 2 ori.",
+    added: "[i] Ranforsarea a fost adaugata cu succes.",
+};
+
+/// The pet arm's lines (`:6223-6238`): no space after `[i]` in the duplicate and
+/// success lines.
+const SET_ATT_PET_LINES: SetAttLines = SetAttLines {
+    wrong_kind: "[i] Aceasta ranforsare merge adaugata doar pe pet.",
+    full: "[i] Poti adauga doar 2 ranforsari pe pet.",
+    duplicate: "[i]Nu poti adauga de 2 ori acelasi bonus.",
+    added: "[i] Ranforsarea a fost adaugata cu succes!",
+};
+
+/// The mount arm's lines (`:6265-6280`): no space after `[i]` but in the full line.
+const SET_ATT_MOUNT_LINES: SetAttLines = SetAttLines {
+    wrong_kind: "[i]Ranforsarea merge adaugata doar pe mount.",
+    full: "[i]Poti adauga doar 2 ranforsari pe mount.",
+    duplicate: "[i]Nu poti adauga aceasi ranforsare de 2 ori.",
+    added: "[i]Ranforsarea a fost adaugata cu succes!",
+};
+
+/// The four `USE_SET_ATT_*` cases (`G/char_item.cpp:6123-6283`, behind
+/// `NEW_ATTR_RANFORSARI`): on a costume of `kind` holding fewer than two bonuses and
+/// not already holding the scroll's `VALUE0` apply, the scroll's `VALUE0`/`VALUE1`
+/// pair lands as a fixed bonus at the count index, the success line chats, and the
+/// scroll is spent. A target of another kind, a full one, and a duplicate chat their
+/// lines with the scroll kept; an exchanging or worn target is silent, as the `false`
+/// return is (`use_target` already refused both).
+///
+/// The `VALUE0`/`VALUE1` casts are legacy's `(BYTE)`/`(short)` truncations, spelled
+/// with the low bytes. A zero value writes nothing but still chats and spends, as
+/// `AddAttribute` writes only when `sValue` is nonzero while the arm spends
+/// regardless; the owner's three scrolls all carry nonzero pairs. The count gate
+/// keeps the write below five, so the overflow arm stays out.
+fn set_costume_reinforcement(
+    items: &mut CharacterItems,
+    (scroll, scroll_proto): (&Item, &ItemProto),
+    (target, target_proto): (&Item, &ItemProto),
+    kind: i32,
+    lines: &SetAttLines,
+) -> Result<MoveDone, MoveRefused> {
+    if target_proto.item_type != ITEM_COSTUME || target_proto.sub_type != kind {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(lines.wrong_kind));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    if normal_count(&target.attributes) >= 2 {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(lines.full));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    let [apply, ..] = scroll_proto.values[0].to_le_bytes();
+    if has_attr(target_proto, &target.attributes, apply) {
+        let mut trail = Trail::default();
+        trail.records.push(MoveRecord::Notice(lines.duplicate));
+        return Ok(done(MoveKind::Used, trail));
+    }
+    let [low, high, ..] = scroll_proto.values[1].to_le_bytes();
+    let value = i16::from_le_bytes([low, high]);
+    let mut attributes = target.attributes;
+    if value != 0 {
+        let at = usize::try_from(normal_count(&target.attributes)).unwrap_or(0);
+        attributes[at] = ItemAttribute::new(apply, value);
+    }
+    store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
+    let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
+    let mut trail = Trail::default();
+    trail.records.push(MoveRecord::Notice(lines.added));
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
+    trail.changes.push(ItemChange::Attributes {
+        id: target.id,
+        attributes: stored.attributes,
     });
     spend_scroll(items, scroll, scroll_proto, &mut trail)?;
     Ok(done(MoveKind::Used, trail))
@@ -3023,5 +3150,209 @@ mod tests {
         assert!(items.item(10).is_some(), "the refused cleaner stays");
         let kept = items.item(9).expect("the sword stays");
         assert_eq!(kept.sockets[0], 28_030, "the live stone stays");
+    }
+
+    /// A reinforcement table: the four scrolls with their value pairs and a costume
+    /// of each kind.
+    fn reinforcement_protos() -> ItemProtos {
+        let mut body_scroll = ItemProto::for_category_rule(50_898, ITEM_USE, USE_SET_ATT_COSTUME);
+        body_scroll.values[0] = 1;
+        body_scroll.values[1] = 2000;
+        let mut pet_scroll = ItemProto::for_category_rule(50_897, ITEM_USE, USE_SET_ATT_PET);
+        pet_scroll.values[0] = 17;
+        pet_scroll.values[1] = 10;
+        let mut mount_scroll = ItemProto::for_category_rule(50_896, ITEM_USE, USE_SET_ATT_MOUNT);
+        mount_scroll.values[0] = 15;
+        mount_scroll.values[1] = 10;
+        let mut weapon_scroll =
+            ItemProto::for_category_rule(50_899, ITEM_USE, USE_SET_ATT_COSTUME_WEAPON);
+        weapon_scroll.values[0] = 2;
+        weapon_scroll.values[1] = 30;
+        let body = ItemProto::for_category_rule(41_319, ITEM_COSTUME, COSTUME_BODY);
+        let pet = ItemProto::for_category_rule(52_101, ITEM_COSTUME, COSTUME_PET);
+        let mount = ItemProto::for_category_rule(52_001, ITEM_COSTUME, COSTUME_MOUNT);
+        let weapon = ItemProto::for_category_rule(40_101, ITEM_COSTUME, COSTUME_WEAPON);
+        ItemProtos::from_rows(vec![
+            body_scroll,
+            pet_scroll,
+            mount_scroll,
+            weapon_scroll,
+            body,
+            pet,
+            mount,
+            weapon,
+        ])
+    }
+
+    /// The body reinforcement lands its fixed pair with the success line and spends
+    /// its scroll; a second on the same body chats the duplicate line and is kept,
+    /// and a body already holding two chats the full line.
+    #[test]
+    fn a_body_reinforcement_lands_and_a_repeat_is_a_duplicate() {
+        let protos = reinforcement_protos();
+        let mut full = Item::new(12, 41_319);
+        full.attributes[0] = ItemAttribute::new(3, 8);
+        full.attributes[1] = ItemAttribute::new(5, 12);
+        let mut items = holding(&[
+            (0, Item::new(9, 41_319)),
+            (1, Item::new(10, 50_898)),
+            (2, Item::new(11, 50_898)),
+            (3, full),
+            (4, Item::new(13, 50_898)),
+        ]);
+        let scroll = items.item_at(inv(1)).expect("the scroll").clone();
+        let scroll_proto = protos.get(50_898).expect("the scroll proto").clone();
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &scroll_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &[],
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the reinforcement lands");
+        let kept = items.item(9).expect("the body stays");
+        assert_eq!(
+            kept.attributes[0],
+            ItemAttribute::new(1, 2000),
+            "the fixed pair lands"
+        );
+        assert!(items.item(10).is_none(), "the last scroll leaves");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(line) if *line == SET_ATT_COSTUME_LINES.added)),
+            "the success chats"
+        );
+        let scroll = items.item_at(inv(2)).expect("the scroll").clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &scroll_proto),
+            inv(0),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &[],
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the duplicate chats");
+        assert!(
+            done.records.iter().any(|record| matches!(
+                record,
+                MoveRecord::Notice(line) if *line == SET_ATT_COSTUME_LINES.duplicate
+            )),
+            "the duplicate chats"
+        );
+        assert!(items.item(11).is_some(), "the refused scroll stays");
+        let scroll = items.item_at(inv(4)).expect("the scroll").clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &scroll_proto),
+            inv(3),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &[],
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the full chats");
+        assert!(
+            done.records.iter().any(|record| matches!(
+                record,
+                MoveRecord::Notice(line) if *line == SET_ATT_COSTUME_LINES.full
+            )),
+            "the full chats"
+        );
+        assert!(items.item(13).is_some(), "the refused scroll stays");
+    }
+
+    /// The pet, mount and weapon reinforcements land on their own kinds with their
+    /// own success lines; a pet scroll on a body chats the wrong-kind line.
+    #[test]
+    fn each_kind_answers_its_own_scroll_and_refuses_the_others() {
+        let protos = reinforcement_protos();
+        let mut items = holding(&[
+            (0, Item::new(9, 52_101)),
+            (1, Item::new(10, 52_001)),
+            (2, Item::new(11, 40_101)),
+            (3, Item::new(12, 41_319)),
+            (4, Item::new(13, 50_897)),
+            (5, Item::new(14, 50_896)),
+            (6, Item::new(15, 50_899)),
+            (7, Item::new(16, 50_897)),
+        ]);
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        for (cell, vnum, target, apply, value, added) in [
+            (4, 50_897, 0, 17, 10, SET_ATT_PET_LINES.added),
+            (5, 50_896, 1, 15, 10, SET_ATT_MOUNT_LINES.added),
+            (6, 50_899, 2, 2, 30, SET_ATT_COSTUME_LINES.added),
+        ] {
+            let scroll = items.item_at(inv(cell)).expect("the scroll").clone();
+            let scroll_proto = protos.get(vnum).expect("the scroll proto").clone();
+            let done = change_target_attributes(
+                &mut items,
+                (&scroll, &scroll_proto),
+                inv(target),
+                &protos,
+                &mut dice,
+                &mut gauss,
+                &[],
+                &[],
+                (0, 0),
+                false,
+                false,
+            )
+            .expect("the reinforcement lands");
+            assert!(
+                done.records
+                    .iter()
+                    .any(|record| matches!(record, MoveRecord::Notice(line) if *line == added)),
+                "the success chats for {vnum}"
+            );
+            let id = 9 + u32::from(target);
+            let kept = items.item(id).expect("the target stays");
+            assert_eq!(
+                kept.attributes[0],
+                ItemAttribute::new(apply, value),
+                "the pair lands for {vnum}"
+            );
+        }
+        let scroll = items.item_at(inv(7)).expect("the scroll").clone();
+        let scroll_proto = protos.get(50_897).expect("the scroll proto").clone();
+        let done = change_target_attributes(
+            &mut items,
+            (&scroll, &scroll_proto),
+            inv(3),
+            &protos,
+            &mut dice,
+            &mut gauss,
+            &[],
+            &[],
+            (0, 0),
+            false,
+            false,
+        )
+        .expect("the wrong kind chats");
+        assert!(
+            done.records
+                .iter()
+                .any(|record| matches!(record, MoveRecord::Notice(line) if *line == SET_ATT_PET_LINES.wrong_kind)),
+            "the wrong-kind chats"
+        );
+        assert!(items.item(16).is_some(), "the refused scroll stays");
     }
 }

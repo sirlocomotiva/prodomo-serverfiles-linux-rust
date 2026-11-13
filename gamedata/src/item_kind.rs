@@ -181,6 +181,18 @@ pub const USE_CHANGE_COSTUME_ATTR: i32 = 31;
 /// `USE_RESET_COSTUME_ATTR` (`C/item_length.h:286`): a costume bonus-reset scroll
 /// (the owner's 70063).
 pub const USE_RESET_COSTUME_ATTR: i32 = 32;
+/// `USE_SET_ATT_COSTUME` (`C/item_length.h:297`), behind `NEW_ATTR_RANFORSARI`: a
+/// costume-body reinforcement (the owner's 50898).
+pub const USE_SET_ATT_COSTUME: i32 = 39;
+/// `USE_SET_ATT_PET` (`C/item_length.h:298`), behind `NEW_ATTR_RANFORSARI`: a
+/// costume-pet reinforcement (the owner's 50897).
+pub const USE_SET_ATT_PET: i32 = 40;
+/// `USE_SET_ATT_MOUNT` (`C/item_length.h:299`), behind `NEW_ATTR_RANFORSARI`: a
+/// costume-mount reinforcement (the owner's 50896).
+pub const USE_SET_ATT_MOUNT: i32 = 41;
+/// `USE_SET_ATT_COSTUME_WEAPON` (`C/item_length.h:300`), behind
+/// `NEW_ATTR_RANFORSARI`: a costume-weapon reinforcement (no owner scroll).
+pub const USE_SET_ATT_COSTUME_WEAPON: i32 = 42;
 /// `USE_PUT_INTO_BELT_SOCKET` (`C/item_length.h:283`): a jewel for a belt's socket.
 pub const USE_PUT_INTO_BELT_SOCKET: i32 = 29;
 /// `USE_CLEAR` (`C/item_length.h:266`): a bad-affect cure (27124, 27874).
@@ -407,6 +419,10 @@ mod tests {
             (USE_CHANGE_ATTRIBUTE_GLOVE, "USE_CHANGE_ATTRIBUTE_GLOVE"),
             (USE_CHANGE_COSTUME_ATTR, "USE_CHANGE_COSTUME_ATTR"),
             (USE_RESET_COSTUME_ATTR, "USE_RESET_COSTUME_ATTR"),
+            (USE_SET_ATT_COSTUME, "USE_SET_ATT_COSTUME"),
+            (USE_SET_ATT_PET, "USE_SET_ATT_PET"),
+            (USE_SET_ATT_MOUNT, "USE_SET_ATT_MOUNT"),
+            (USE_SET_ATT_COSTUME_WEAPON, "USE_SET_ATT_COSTUME_WEAPON"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
         }

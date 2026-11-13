@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-13, after ledger section 657 (the socket cleaner).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 658
+Last reviewed: 2026-11-13, after ledger section 658 (the reinforcements).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 659
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -635,7 +635,9 @@ Since 648 `questlib.locale` is `ported` (the land dialog renders its yes/no over
 Since 649 `quest.sash_mission` and `quest.ship_defense` are `ported`: every reachable branch runs over the wire, and the protoless remainders (85000, 31107) are documented, not ported.
 Since 650 `sys.life.fishing` reads the fish-mind premium: a live premium draws the mind's table and previews the bite.
 Since 651 `sys.combat.core` reads the EXP/ITEM/GOLD premiums: the +50% exp grant and the buyer rates over the wire (`a_premium_kill_pays_half_again_the_monsters_exp`), with the login affects and the tick sync for all five held kinds.
-Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 657 the socket cleaner runs: with a broken stone in sockets 0-2 the live sockets compact down, the tail past 0 becomes 1, and the scroll spends with no line, while a whole sword chats `[LS;395]` and keeps it (`a_cleaner_compacts_a_broken_sword_and_a_second_refuses`).
+Since 652 the extractors run: the heart melt lands a charged heart and the soul pull-out lands or breaks, both over the wire (`a_heart_melt_spends_the_pair_and_lands_or_fails`); the heart carries its `CreateItem` expiry stamp, and the refine-made stone's duration moved from socket 2 to socket 0. Since 653 an active deck stone's wear timer ticks: the first fire comes `remain % 60` in, each fire falls a minute with the update riding and the row ordered, zero deactivates with socket 2 clear, and `d` keeps the ran partial minute (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`); the scenario sits the heartbeat's 60 s cycle out, and the non-soul starts stay refused (`WornSystem::Timer`, no `ITEM_TOGGLE` use arm). Since 658 the reinforcements run: on a costume of the scroll's kind below two bonuses and without its apply, the fixed pair lands with the success line and the scroll spends, while the wrong kind, the full and the duplicate chat their Romanian lines with the scroll kept (`a_body_reinforcement_lands_and_a_repeat_is_a_duplicate`; pet/mount/weapon unit-proved).
+
+Since 657 the socket cleaner runs: with a broken stone in sockets 0-2 the live sockets compact down, the tail past 0 becomes 1, and the scroll spends with no line, while a whole sword chats `[LS;395]` and keeps it (`a_cleaner_compacts_a_broken_sword_and_a_second_refuses`).
 
 Since 656 the costume scrolls run: under the kind, set and count gates the change redraws and counts socket 3, the reset clears and rolls one to three without counting, both chat `[LS;399]` and spend (`a_costume_change_redraws_and_its_reset_rolls_again`, on timeless hair 45155, since the costume weapons expire in a day).
 
