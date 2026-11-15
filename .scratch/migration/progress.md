@@ -6,14 +6,16 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 691**, the ward and aid families' climb gate, with the refused `/setskill` now sending byte 76 as legacy does. Package B so far: 687 (sibling vnums, the gold
-  bar cap), 688 (the ability potions), 689 (the apply types), 690 (the arena's potion gate (and the finding that `IsLimitedItem` makes the 508xx arm's own arena gate unreachable)), 691. Before them: 686 (the tail made
+- The last section is **ledger 692**, each skill type's point on a climb and a forget. Package B
+  so far: 687 (sibling vnums, the gold bar cap), 688 (the ability potions), 689 (the apply types),
+  690 (the arena's potion gate), 691 (the ward and aid climb gate, and the refused `/setskill`
+  sending byte 76), 692. Before them: 686 (the tail made
   countable: three generated arm tables and every `partial` and `missing` note ending in
   `Left:`), 685 (the scenario timing), 684 (Rust 1.100.0), 683 (the test hygiene), 682 (the
   cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
-- Parity: 1,532 `ported`, 272 `partial`, 487 `unused`, 40 `missing`, 0 `codec`, of 2,331 rows.
-  **312 items left**; the number only goes down.
-- Tests: 5,668 pass in 46 targets with `DATABASE_URL`; 528 are scenarios.
+- Parity: 1,541 `ported`, 261 `partial`, 489 `unused`, 40 `missing`, 0 `codec`, of 2,331 rows.
+  **301 items left**; the number only goes down.
+- Tests: 5,669 pass in 46 targets with `DATABASE_URL`; 529 are scenarios.
 - **What is next is in `docs/STATUS.md`, "Next steps"**: package B, by families (A2). B9 is the
   arm tables; most of their `partial` rows have Rust code and lack only a scenario.
 
@@ -65,4 +67,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 691 is committed and pushed.
+Nothing is left running. Ledger 692 is committed and pushed.

@@ -52314,6 +52314,161 @@ fn each_ward_and_aid_skill_climbs_only_while_its_family_stands_at_zero() {
     assert_eq!(set(236, 1), 1, "an aid skill climbs beside it");
 }
 
+/// The forget book (`ITEM_SKILLFORGET`) that names its skill in socket 0.
+const FORGET_BOOK: u32 = 70_037;
+
+/// Reads past a `/skillup` or a forget until byte 76: `change`, the typed point's move, lands
+/// once among the point changes and the updates. Answers slot `vnum`'s level.
+fn read_skill_move(client: &mut Keyed, change: &[u8], vnum: usize) -> u8 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut seen = 0;
+    loop {
+        let record = client
+            .read_game_until(deadline)
+            .unwrap_or_else(|| panic!("byte 76 lands for {vnum}"));
+        if record[0] == GC_SKILL_LEVEL_NEW {
+            assert_eq!(seen, 1, "the typed point moves once: {change:02x?}");
+            return skill_slot(&record, vnum);
+        }
+        if record == change {
+            seen += 1;
+        } else {
+            assert!(
+                record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
+                "a compute's change or an update: {record:02x?}"
+            );
+        }
+    }
+}
+
+/// One character's climbs, the first character of `login`: for each `(vnum, kind, from)`,
+/// `/skillup vnum` spends the one point of `kind` and byte 76 shows the skill one higher than
+/// `from`, then the forget book in the next cell refunds the point, drops the skill back, and
+/// tells `[LS;78]`.
+fn climb_and_forget(server: &Server, login: &[u8], climbs: &[(usize, u8, u8)]) -> (Keyed, u32) {
+    let (mut client, listed, _items) = load_character(server, login, 0);
+    let vid = listed.id;
+    let _entered = enter_game_shown(&mut client);
+    read_login_event(&mut client);
+    for (cell, &(vnum, kind, from)) in climbs.iter().enumerate() {
+        client.send_record(&client_chat(
+            CHAT_TALKING,
+            format!("/skillup {vnum}").as_bytes(),
+        ));
+        assert_eq!(
+            read_skill_move(&mut client, &point_change(vid, kind, 0, 0), vnum),
+            from + 1,
+            "{vnum} climbs by a point of kind {kind}"
+        );
+        let cell = u16::try_from(cell).expect("a cell");
+        client.send_record(&client_item_use(cell));
+        let (window, at, _vnum, count) = set_fields(&client.read_game());
+        assert_eq!((window, at, count), (1, cell, 0), "the book goes");
+        assert_eq!(
+            read_skill_move(&mut client, &point_change(vid, kind, 0, 1), vnum),
+            from,
+            "the forget drops {vnum} back and refunds kind {kind}"
+        );
+        assert_eq!(client.read_game(), an_info_line(b"[LS;78]"));
+    }
+    (client, vid)
+}
+
+/// `SkillLevelUp` by point and `SkillLevelDown` (`G/char_skill.cpp:802-907`, `:647-722`) move
+/// the point their skill type names: types 1-4 and 6 the skill points (28), type 0 the
+/// sub-skill points (27). Each job climbs a skill of its first group by one: Echo the warrior 1
+/// (type 1), Beta the assassin 33 (type 2), Delta the sura 61 (type 3), Alpha the shaman 91
+/// (type 4); Alpha also climbs the learned ward 221 (type 6) from 1. A forget book
+/// (`ITEM_SKILLFORGET`, `G/char_item.cpp:3262-3277`) then refunds each. A ward back at level 1 is
+/// never forgotten (`G/char_skill.cpp:681-686`): the book hears `[LS;88]` and stays. Alpha's
+/// leadership (121, type 0) at 1 is forgotten and refunds a sub-skill point.
+#[test]
+fn each_skill_type_climbs_and_forgets_by_its_own_point() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    for login in ["alice", "bob", "carol", "dave"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Echo', 0, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET slot = 0, x = 470000, y = 950000, account_id = (SELECT id FROM \
+         account WHERE login = CASE name WHEN 'Beta' THEN 'carol' ELSE 'dave' END) WHERE name \
+         IN ('Beta', 'Delta')",
+    );
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 1, skill_point = 1, sub_skill_point = 1",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, vnum, 1, 0 \
+         FROM player, unnest(ARRAY[121, 221]) AS vnum WHERE name = 'Alpha'",
+    );
+    let mut id = 70;
+    for (name, vnums) in [
+        ("Echo", &[1][..]),
+        ("Beta", &[33]),
+        ("Delta", &[61]),
+        ("Alpha", &[91, 221, 221, 121]),
+    ] {
+        for (cell, vnum) in vnums.iter().enumerate() {
+            sql(
+                &database,
+                &format!(
+                    "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) \
+                     SELECT {id}, id, 1, {cell}, 1, {FORGET_BOOK}, {vnum} FROM player WHERE \
+                     name = '{name}'"
+                ),
+            );
+            id += 1;
+        }
+    }
+    for (login, vnum) in [(&b"bob"[..], 1), (b"carol", 33), (b"dave", 61)] {
+        drop(climb_and_forget(&server, login, &[(vnum, 28, 0)]).0);
+    }
+    let (mut alpha, vid) = climb_and_forget(&server, b"alice", &[(91, 28, 0), (221, 28, 1)]);
+    // A ward back at 1 is not forgotten: the book in cell 2 stays.
+    alpha.send_record(&client_item_use(2));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;88]"));
+    alpha.quiet_for(
+        "a refused forget keeps its book",
+        Duration::from_millis(500),
+    );
+    // Leadership at 1 is forgotten and refunds a sub-skill point: 1 becomes 2.
+    alpha.send_record(&client_item_use(3));
+    let (window, at, _vnum, count) = set_fields(&alpha.read_game());
+    assert_eq!((window, at, count), (1, 3, 0), "the book goes");
+    assert_eq!(
+        read_skill_move(&mut alpha, &point_change(vid, 27, 0, 2), 121),
+        0,
+        "leadership drops to 0"
+    );
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;78]"));
+    drop(alpha);
+    wait_for(
+        &database,
+        &format!(
+            "(SELECT count(*) = 1 FROM item WHERE vnum = {FORGET_BOOK}) AND (SELECT \
+             array_agg(vnum::text || ':' || level ORDER BY vnum)::text FROM player_skill) = \
+             '{{221:1}}'"
+        ),
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

@@ -56485,3 +56485,40 @@ and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; 
 which read a 41-byte record where it expected a point change; that scenario passed alone and on
 the rerun, whose figures these are. Parity: 1,532 `ported`, 272 `partial`, 487 `unused`, 40 `missing`,
 0 `codec`, of 2,331 rows; 528 scenarios. No ADR changed.
+
+## 692. Each skill type's point on a climb and a forget (B9, `SkillLevelUp`, `SkillLevelDown`)
+
+`SkillLevelUp` by point and `SkillLevelDown` (`G/char_skill.cpp:802-907`, `:647-722`) switch on
+the skill's type to pick the point they move: `POINT_SUB_SKILL` (27) for type 0,
+`POINT_SKILL` (28) for types 1-4 and 6, `POINT_HORSE_SKILL` (113) for type 5. Only one type
+had a scenario, and its rows named it wrongly: `a_skill_up_spends_and_a_cast_heals_over_the_wire`
+and `a_forget_book_drops_the_named_skill_and_a_bad_name_refuses` use 109, which is a type-4
+shaman skill, while the rows said type 1.
+
+`each_skill_type_climbs_and_forgets_by_its_own_point` (shipped mode) gives four characters on
+four accounts one skill point each. Echo the warrior climbs 1 (type 1), Beta the assassin 33
+(type 2), Delta the sura 61 (type 3), and Alpha the shaman 91 (type 4) and the ward 221 (type 6)
+from 1, each with `/skillup`: the point goes to 0 and byte 76 shows the skill one higher. A
+forget book naming each skill then refunds the point, drops the skill back and tells `[LS;78]`.
+A ward back at 1 is not forgotten (`G/char_skill.cpp:681-686`): the next book hears `[LS;88]`
+and stays. Alpha's leadership (121, type 0) at 1 is forgotten and refunds a sub-skill point.
+
+Beta climbs 33, not 31, because the Rewrite loads no skill whose polynomial uses `number(` or
+`floor(` (14 of the 48 job skills, 31 among them; `pc_rows_load_and_function_rows_are_refused`
+lists them), and `/skillup` refuses a vnum with no loaded
+row. The hosted subset (`gamedata::pc_skill_data::PcSkills::from_dumps`) is already recorded on
+`table.skill_proto`. Two arms stay `partial` because of it: legacy climbs the type-0 skills
+156-159 by point (`CanUseSkill` lists them and they lack `DISABLE_BY_POINT_UP`, while every
+hosted type-0 row has the flag), and it climbs and forgets the type-5 horse skills, of which
+none is hosted. Their `Left:` now names the hosting.
+
+Every one of the 119 `skill_proto` rows carries a type from 0 to 6, so both switches' `default`
+arms are `unused`. 9 rows are `ported`, 2 `unused`; the type-1 rows now name the new scenario.
+301 items are left (312 at ledger 691).
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,669
+passed, 0 failed in 46 targets; with it 5,669 passed, 0 failed in 46 targets (460 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,541 `ported`, 261 `partial`, 489 `unused`, 40 `missing`,
+0 `codec`, of 2,331 rows; 529 scenarios. No ADR changed.
