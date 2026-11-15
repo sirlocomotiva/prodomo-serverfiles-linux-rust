@@ -34,19 +34,18 @@ fn lookup(host: &Host, name: &str) -> Value {
 }
 
 #[test]
-fn every_script_but_change_empire_loads() {
+fn every_script_loads() {
     let host = load();
     let refused: Vec<String> = host
         .refused()
         .iter()
         .map(|refused| format!("{}: {}", refused.path.display(), refused.error))
         .collect();
-    assert_eq!(
-        refused,
-        ["_basic/change_empire.lua: line 139: expecting 'when' or 'function'"]
-    );
-    // 50 scripts, two of which declare `guild_building`.
-    assert_eq!(host.quests().len(), 49);
+    // `change_empire.lua` was the one refusal until the owner had its stray `end` removed
+    // (ledger 680).
+    assert_eq!(refused, Vec::<String>::new());
+    // 51 scripts, two of which declare `guild_building`.
+    assert_eq!(host.quests().len(), 50);
     let guild_building = host
         .quests()
         .iter()
@@ -55,7 +54,9 @@ fn every_script_but_change_empire_loads() {
     assert_eq!(guild_building, 1);
     // `quest_list` comes first.
     assert_eq!(host.quest_index(b"dungeoninfo"), Some(1));
-    assert_eq!(host.quest_index(b"change_empire"), None);
+    // The 16 of `quest_list`, then the rest by path: `_basic/` holds `7and8th_skills`,
+    // `TeleportRing`, `aura_system`, `battle_pass` and `cards_event` before it.
+    assert_eq!(host.quest_index(b"change_empire"), Some(22));
     for (index, quest) in host.quests().iter().enumerate() {
         assert_eq!(host.quest_index(&quest.name), u32::try_from(index + 1).ok());
     }
@@ -72,11 +73,13 @@ fn every_script_but_change_empire_loads() {
         empty_conditions += usize::from(empty_condition);
         texts += usize::from(text);
     }
-    // 49 state tables, 38 `when` blocks without a condition, and the arguments of 5 `target`
-    // and 1 `click` blocks.
-    assert_eq!(host.objects().len(), 455);
-    assert_eq!((empty_conditions, texts), (38, 6));
-    assert_eq!(chunks, 455 - 49 - 38 - 6);
+    // 50 state tables, 38 `when` blocks without a condition, and the arguments of 5 `target`
+    // and 1 `click` blocks. `change_empire` brought 5 objects: its state table, the chat
+    // block's script, condition and argument, and the use block's script.
+    assert_eq!(
+        (host.objects().len(), empty_conditions, texts, chunks),
+        (460, 38, 6, 460 - 50 - 38 - 6)
+    );
 }
 
 #[test]

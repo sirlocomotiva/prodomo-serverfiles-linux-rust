@@ -151,14 +151,21 @@ fn omitted_keys_keep_their_documented_defaults() {
 
 #[test]
 fn game_defaults_are_the_legacy_compiled_in_values() {
-    // `game/config.cpp:20-135`, except `adminpage_password` and the two cycles (see the ledger).
+    // `game/config.cpp:20-135`, except `adminpage_password`, the two cycles and `test_server`
+    // (see the ledger; the save cycle and `test_server` are the owner's, ledger 679).
     let game = GameSettings::default();
-    assert!(game.test_server, "config.cpp:72 defaults test_server to 1");
+    assert!(
+        !game.test_server,
+        "legacy's default made every character a game master"
+    );
     assert_eq!(
         game.block_login, "30000705",
         "an empty value would refuse every account"
     );
-    assert_eq!(game.save_event_second_cycle, 120);
+    assert_eq!(
+        game.save_event_second_cycle, 10,
+        "ADR-0003: a crash loses a few seconds"
+    );
     assert_eq!(game.ping_event_second_cycle, 60);
     assert_eq!(game.item_count_limit, 5000);
     assert_eq!(game.item_bonus_change_time, 60);

@@ -129,7 +129,6 @@ quest change_empire begin
 					say("Empire exchange not possible now.")
 					say("You can not change the kingdom, since you were married recently.")
 					say("")
-				end
 				elseif ret == 4 then
 					say("Empire exchange not possible now.")
 					say("You cannot change the empire because you have an active group.")

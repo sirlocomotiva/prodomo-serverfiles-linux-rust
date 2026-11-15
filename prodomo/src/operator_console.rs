@@ -790,14 +790,14 @@ mod tests {
 #[cfg(test)]
 mod pipe_tests {
     use super::{is_a_pipe, open, prepare};
+    use parity::scratch::ScratchDir;
     use std::path::PathBuf;
 
-    /// A path in this test's own directory, so two tests cannot collide.
-    fn a_scratch_path(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("prodomo-console-{}-{name}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join("console")
+    /// A path in a directory of this test's own, and the guard that removes the directory.
+    fn a_scratch_path(name: &str) -> (ScratchDir, PathBuf) {
+        let dir = ScratchDir::new(name);
+        let path = dir.path().join("console");
+        (dir, path)
     }
 
     #[tokio::test]
@@ -820,8 +820,7 @@ mod pipe_tests {
         // wait this reasoning missed into a failure rather than a hang.
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let path = a_scratch_path("echo");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = a_scratch_path("echo");
         prepare(&path).await.expect("the pipe should be created");
         let seen = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let mut both = tokio::fs::OpenOptions::new()
@@ -877,8 +876,7 @@ mod pipe_tests {
         // console's own write end keeps it from ever seeing end-of-file, so it never closes.
         use tokio::io::AsyncBufReadExt as _;
 
-        let path = a_scratch_path("rdwr");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = a_scratch_path("rdwr");
         prepare(&path).await.expect("the pipe should be created");
         let mut reader =
             tokio::io::BufReader::new(open(&path).expect("the console's end should open"));
@@ -903,7 +901,7 @@ mod pipe_tests {
         let _ = std::fs::remove_file(&path);
 
         // The open itself refuses a regular file.
-        let regular = a_scratch_path("rdwr-regular");
+        let (_regular_dir, regular) = a_scratch_path("rdwr-regular");
         std::fs::write(&regular, "item give Shaman 19\n").expect("the file should be writable");
         assert!(
             open(&regular).is_err(),
@@ -917,8 +915,7 @@ mod pipe_tests {
         // The first draft opened the path with `OpenOptions::create_new`, which makes a
         // **regular file** with the mode -- there is no flag for a FIFO. The end-to-end
         // run caught it with `stat`, so this is pinned here where it is cheap to see.
-        let path = a_scratch_path("fifo");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = a_scratch_path("fifo");
         prepare(&path).await.expect("the pipe should be created");
         assert!(
             is_a_pipe(&path),
@@ -933,8 +930,7 @@ mod pipe_tests {
         // A restart finds the previous run's pipe. Removing and recreating it would open
         // a window in which a command written at that moment is lost, so an existing
         // pipe is left alone.
-        let path = a_scratch_path("reuse");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = a_scratch_path("reuse");
         prepare(&path)
             .await
             .expect("the first pipe should be created");
@@ -950,7 +946,7 @@ mod pipe_tests {
         // This is the bug that made the first draft replay every grant forever: a regular
         // file at the console's path was read from the start every time that draft's
         // tail loop reopened it. The refusal is what stops that, so it is tested directly.
-        let path = a_scratch_path("regular");
+        let (_dir, path) = a_scratch_path("regular");
         std::fs::write(&path, "item give Shaman 19\n").expect("the file should be writable");
 
         let error = prepare(&path)

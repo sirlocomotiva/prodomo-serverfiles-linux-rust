@@ -4,7 +4,8 @@ Status: ready-for-agent
 
 Everything the legacy server does that a client can observe, one row per item, each with a
 porting status. Build step 2 (`docs/STATUS.md`). The Rewrite reaches Parity when every row is
-`ported` or `unused` and the owner's play test agrees.
+`ported` or `unused` and the owner's play test agrees. What is left, and in which order, is in
+`docs/STATUS.md`, "Next steps".
 
 ## Tables
 
@@ -12,14 +13,14 @@ porting status. Build step 2 (`docs/STATUS.md`). The Rewrite reaches Parity when
 |---|---|---|---|
 | `client-packets.md` | 111 | generated | A client header handled in one phase, plus the two framing rules (`cg.any.*`) |
 | `sub-headers.md` | 113 | generated | One sub-command a game-phase handler dispatches on |
-| `server-records.md` | 137 | generated | A record the client decodes (from the client's registration table) |
+| `server-records.md` | 134 | generated | A record the client decodes (from the client's registration table) |
 | `commands.md` | 267 | generated | A chat command in the live `cmd_info` table |
 | `quest-api.md` | 699 | generated | A Lua function the quest runtime registers |
 | `timed-events.md` | 99 | generated | A timed event function |
 | `quests.md` | 62 | generated | A quest script (51) or a quest library (11) |
-| `systems.md` | 116 | by hand | A system: the behaviour behind the entry points above |
+| `systems.md` | 115 | by hand | A system: the behaviour behind the entry points above |
 | `gamedata.md` | 45 | by hand | A Game data file or table and its reader |
-| **total** | **1,649** | | |
+| **total** | **1,645** | | |
 
 The generated rows come from the **live** legacy source only: `tools/active.py` runs the C
 preprocessor over each file with the legacy build's defines (FreeBSD, clang, i386, `NDEBUG`,
@@ -43,9 +44,9 @@ generated table. Run it with `PYTHONDONTWRITEBYTECODE=1`, or delete `tools/__pyc
 |---|---|
 | `missing` | Nothing in the Rewrite. |
 | `codec` | The wire codec exists and is golden-byte tested; nothing sends or handles it. |
-| `partial` | Some of the behaviour exists (a reducer, a table rule); no scenario proves it. |
+| `partial` | Some of the behaviour exists; no scenario proves the rest. The note ends with `Left:` and the items still missing, each checkable against the legacy source (direction review, ledger 679). A note that only logs what past sections added says nothing about what is left and is rewritten. |
 | `ported` | A scenario in `prodomo/tests/parity.rs` passes. The `scenario` cell names its test function. |
-| `unused` | Legacy never reaches it. The note gives the evidence, with its controls; the owner confirms before it is dropped. |
+| `unused` | Legacy never reaches it. The note gives the evidence, with its controls. The owner accepted the `unused` rows in bulk on 2026-11-15, without a row-by-row confirmation; a row the play test reaches is reopened. |
 
 A `ported` row must name a scenario, and only a `ported` row may. The test
 `inventory_rows_keep_the_rules` enforces that, that IDs are unique across all tables, and that
@@ -64,6 +65,11 @@ Where a binary scenario is impractical, a world or unit test proves a row instea
 that. Its `scenario` cell is `path::name`, the test's file relative to the workspace root and its
 function, and `inventory_rows_keep_the_rules` checks that the file holds `#[test] fn name()`.
 The row's note says why no binary scenario proves it.
+
+A scenario proves a row in the mode the Rewrite ships: a new scenario runs with
+`test_server = false` and grants the GM level it needs (ADR-0007). The scenarios written before
+ledger 679 still start in the test-server mode through the harness default
+(`parity/src/server.rs`, `SCENARIO_GAME_DEFAULTS`); `docs/STATUS.md` package C4 moves them.
 
 ## Findings for the owner
 

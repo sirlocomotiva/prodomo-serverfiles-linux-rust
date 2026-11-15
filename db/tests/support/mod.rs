@@ -1,12 +1,12 @@
 //! The scratch database every store test runs against.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod lease;
 
 use db::sqlx::{self, Connection, PgConnection};
 use db::store::{Store, StoreConfig};
 
-/// A database created for one test and dropped when the test ends, even on a panic.
+/// A database created for one test and dropped when the test ends, even on a panic. One
+/// left by a test process that was killed is dropped by the next process ([`lease`]).
 pub struct ScratchDatabase {
     admin_url: String,
     name: String,
@@ -16,21 +16,11 @@ pub struct ScratchDatabase {
 impl ScratchDatabase {
     /// Create and migrate a database, or `None` when `DATABASE_URL` is unset.
     pub async fn create() -> Option<Self> {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
         let Ok(admin_url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipped: DATABASE_URL is not set");
             return None;
         };
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock should follow the Unix epoch")
-            .subsec_nanos();
-        // Letters, digits, and underscores only, so the name needs no quoting.
-        let name = format!(
-            "prodomo_test_{}_{}_{nanos}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        );
+        let name = lease::database_name("prodomo_test", &admin_url);
         let mut admin = PgConnection::connect(&admin_url)
             .await
             .expect("DATABASE_URL should accept a connection");

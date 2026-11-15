@@ -619,8 +619,9 @@ pub fn refusal_notice(refused: &MoveRefused, to: Recipient<'_>) -> Option<Vec<u8
 
 /// `g_ItemDropTimeLimitValue`, which `G/questmanager.cpp:1605` makes 1000 ms from an
 /// `item_drop_limit_time` of 1. Only `legacy/gamedata/locale/europe/quest/questlib_extra.lua:139`
-/// sets that flag, and legacy never loads the file (ledger 227), so the owner's value is the stored
-/// event flag the snapshot lacks; this stays 1000 ms until the owner decides.
+/// sets that flag, and legacy never loads the file (ledger 227), so legacy's own value is the
+/// stored event flag the snapshot lacks. The owner left the value to the Rewrite on 2026-11-15:
+/// it is the 1000 ms the one setter in the Game data names (ledger 680).
 pub const DROP_LIMIT: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// What `DropItem` sends inside [`DROP_LIMIT`] (`G/char_item.cpp:7460`).

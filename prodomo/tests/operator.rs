@@ -15,20 +15,20 @@ use common::gm::GmAuthority;
 use db::accounts::{find_credentials, gm_authority};
 use db::credentials::Login;
 use db::store::{Store, StoreConfig};
+use parity::scratch::ScratchDir;
 use support::ScratchDatabase;
-use tempfile::TempDir;
 
 const PASSWORD: &str = "s3cret pass";
 
 /// A configuration naming the scratch database, in its own directory.
 struct Operator {
-    _root: TempDir,
+    _root: ScratchDir,
     config: PathBuf,
 }
 
 impl Operator {
     fn new(database: &ScratchDatabase) -> Self {
-        let root = tempfile::tempdir().expect("a temporary directory should be creatable");
+        let root = ScratchDir::new("operator");
         let config = root.path().join("prodomo.toml");
         fs::write(
             &config,
@@ -276,7 +276,7 @@ fn an_operator_command_names_the_store_it_cannot_use() {
     let Some(admin_url) = support::database_url() else {
         return;
     };
-    let root = tempfile::tempdir().expect("a temporary directory should be creatable");
+    let root = ScratchDir::new("operator");
     let config = root.path().join("prodomo.toml");
     let missing = support::with_database(&admin_url, "prodomo_no_such_database");
     fs::write(

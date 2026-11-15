@@ -7,10 +7,11 @@ use std::io::{BufRead, BufReader, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+
+use crate::scratch::ScratchDir;
 
 /// How long a scenario waits for the server to log a line.
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -59,7 +60,7 @@ pub fn default_channels() -> Vec<ChannelSpec> {
 pub struct Server {
     child: Child,
     binary: PathBuf,
-    root: PathBuf,
+    root: ScratchDir,
     lines: Receiver<String>,
     console: Vec<String>,
 }
@@ -100,7 +101,7 @@ impl Server {
         channels: &[ChannelSpec],
         game: &str,
     ) -> Self {
-        let root = unique_root();
+        let root = ScratchDir::new("server");
         Self::start_in(root, binary, &config_text(store_url, channels, game))
     }
 
@@ -112,7 +113,7 @@ impl Server {
     /// As [`Server::start`].
     #[must_use]
     pub fn start_accessed(binary: &Path, store_url: &str, access: &str) -> Self {
-        let root = unique_root();
+        let root = ScratchDir::new("server");
         Self::start_in(
             root,
             binary,
@@ -167,9 +168,9 @@ impl Server {
         channels: &[ChannelSpec],
         game: &str,
     ) -> Self {
-        let root = unique_root();
+        let root = ScratchDir::new("server");
         let owner = legacy_dir().join("gamedata");
-        let data = root.join("gamedata");
+        let data = root.path().join("gamedata");
         let npc = Path::new("locale/europe/map").join(map).join("npc.txt");
         link_all_but(&owner, &data, &npc);
         let mut text = fs::read(owner.join(&npc)).expect("the map folder should have an npc.txt");
@@ -218,9 +219,9 @@ impl Server {
         channels: &[ChannelSpec],
         game: &str,
     ) -> (Self, PathBuf) {
-        let root = unique_root();
+        let root = ScratchDir::new("server");
         let owner = legacy_dir().join("gamedata");
-        let data = root.join("gamedata");
+        let data = root.path().join("gamedata");
         for (path, bytes) in files {
             let path = Path::new(path);
             link_all_but(&owner, &data, path);
@@ -245,9 +246,9 @@ impl Server {
         files: &[(&str, &[u8])],
         game: &str,
     ) -> (Self, PathBuf) {
-        let root = unique_root();
+        let root = ScratchDir::new("server");
         let owner = legacy_dir().join("gamedata");
-        let data = root.join("gamedata");
+        let data = root.path().join("gamedata");
         for (path, bytes) in files {
             let path = Path::new(path);
             link_all_but(&owner, &data, path);
@@ -278,10 +279,10 @@ impl Server {
         files: &[(&str, &[u8])],
         game: &str,
     ) -> (Self, PathBuf) {
-        let root = unique_root();
+        let root = ScratchDir::new("server");
         let data = legacy_dir().join("gamedata");
         let owner = legacy_dir().join("sql/gamedata");
-        let tables = root.join("tables");
+        let tables = root.path().join("tables");
         for (path, bytes) in files {
             let path = Path::new(path);
             link_all_but(&owner, &tables, path);
@@ -342,8 +343,8 @@ impl Server {
         channels: &[ChannelSpec],
         game: &str,
     ) -> (Self, PathBuf) {
-        let root = unique_root();
-        let console = root.join("operator-console");
+        let root = ScratchDir::new("server");
+        let console = root.path().join("operator-console");
         let mut lines = format!("operator_console = \"{}\"", console.display());
         if !game.is_empty() {
             lines.push('\n');
@@ -356,17 +357,17 @@ impl Server {
 
     /// The rest of [`Server::start_configured`], for a root this method chose itself and the
     /// text of its `prodomo.toml`.
-    fn start_in(root: PathBuf, binary: &Path, text: &str) -> Self {
-        let log_dir = root.join("log");
+    fn start_in(root: ScratchDir, binary: &Path, text: &str) -> Self {
+        let log_dir = root.path().join("log");
         fs::create_dir_all(&log_dir).expect("the scenario directory should be creatable");
-        let config = root.join("prodomo.toml");
+        let config = root.path().join("prodomo.toml");
         fs::write(&config, text).expect("the scenario configuration should be writable");
         let mut child = Command::new(binary)
             .arg("--config")
             .arg(&config)
             .arg("serve")
             .arg("--verbose")
-            .current_dir(&root)
+            .current_dir(root.path())
             .env("LOG_ANSI", "false")
             .env("LOG_DIR", &log_dir)
             .env("RUST_LOG", "info")
@@ -416,9 +417,9 @@ impl Server {
     pub fn operate(&self, args: &[&str], stdin: &str) -> Output {
         let mut child = Command::new(&self.binary)
             .arg("--config")
-            .arg(self.root.join("prodomo.toml"))
+            .arg(self.root.path().join("prodomo.toml"))
             .args(args)
-            .current_dir(&self.root)
+            .current_dir(self.root.path())
             .env("LOG_ANSI", "false")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -568,7 +569,7 @@ impl Server {
     /// `state_user_count`) and writes its log: the `current_dir` it was started in.
     #[must_use]
     pub fn root(&self) -> &Path {
-        &self.root
+        self.root.path()
     }
 
     /// The first listener of Channel `number`.
@@ -592,23 +593,12 @@ impl Drop for Server {
     fn drop(&mut self) {
         drop(self.child.kill());
         drop(self.child.wait());
-        if std::env::var_os("PRODOMO_KEEP_SCENARIO_ROOT").is_none() {
-            drop(fs::remove_dir_all(&self.root));
+        // For a look at a failed scenario's log and configuration. The directory lasts until
+        // the next test process starts, whose sweep removes it (`crate::scratch`).
+        if std::env::var_os("PRODOMO_KEEP_SCENARIO_ROOT").is_some() {
+            self.root.keep();
         }
     }
-}
-
-fn unique_root() -> PathBuf {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock should follow the Unix epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "prodomo-parity-{}-{}-{nanos}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ))
 }
 
 /// The owner's `legacy` folder.
@@ -695,6 +685,17 @@ fn config_text_on(
     )
 }
 
+/// The `[game]` keys every scenario starts from unless its own `game` text names the key.
+///
+/// The scenarios were written while the binary shipped legacy's defaults: the test-server mode,
+/// where every character passes a game-master gate, and the 120-second save event. Ledger 679
+/// changed both shipped defaults; the scenarios keep the old ones here until each is moved to
+/// the shipped mode (`docs/STATUS.md`, next steps), so no scenario changed meaning silently.
+const SCENARIO_GAME_DEFAULTS: [(&str, &str); 2] = [
+    ("test_server", "test_server = true\n"),
+    ("save_event_second_cycle", "save_event_second_cycle = 120\n"),
+];
+
 /// [`config_text`] with `game_data` as the Game data folder and `game_tables` as the
 /// table dumps.
 fn config_text_on_tables(
@@ -708,8 +709,15 @@ fn config_text_on_tables(
         "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"{store_url}\"\n\n[auth]\nport = 0\n",
         data_keys_on_tables(game_data, game_tables)
     );
+    text.push_str("\n[game]\n");
+    for (key, line) in SCENARIO_GAME_DEFAULTS {
+        if !game.contains(key) {
+            text.push_str(line);
+        }
+    }
     if !game.is_empty() {
-        write!(text, "\n[game]\n{game}\n").expect("writing to a String cannot fail");
+        text.push_str(game);
+        text.push('\n');
     }
     for channel in channels {
         let ports = vec!["0"; channel.listeners].join(", ");
@@ -758,6 +766,7 @@ mod tests {
             format!(
                 "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"postgres://h/db\"\n\
                  \n[auth]\nport = 0\n\
+                 \n[game]\ntest_server = true\nsave_event_second_cycle = 120\n\
                  \n[[channel]]\nnumber = 1\nports = [0, 0]\nmaps = [1, 3]\n\
                  \n[[channel]]\nnumber = 99\nports = [0]\nmaps = [72]\n",
                 data_keys()
@@ -766,14 +775,19 @@ mod tests {
     }
 
     #[test]
-    fn game_keys_go_in_their_own_table_before_the_channels() {
-        let text = config_text("postgres://h/db", &[], "ping_event_second_cycle = 1");
+    fn a_scenarios_game_keys_follow_the_scenario_defaults_it_does_not_name() {
+        let text = config_text(
+            "postgres://h/db",
+            &[],
+            "test_server = false\nping_event_second_cycle = 1",
+        );
         assert_eq!(
             text,
             format!(
                 "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"postgres://h/db\"\n\
                  \n[auth]\nport = 0\n\
-                 \n[game]\nping_event_second_cycle = 1\n",
+                 \n[game]\nsave_event_second_cycle = 120\ntest_server = false\n\
+                 ping_event_second_cycle = 1\n",
                 data_keys()
             )
         );

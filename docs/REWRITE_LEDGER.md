@@ -55670,3 +55670,218 @@ Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace
 The scenario (`a_fresh_event_detector_buries_and_finds_its_stone_at_once`) uses a fresh detector over the wire: the 700 clamp always lands inside the 1000 find range, so the `0 0` line goes around and the row leaves. Three unit tests pin the prize walk: the low band's order, the lotto hold, and the fall-through. Both mutants die: the never-find on the missing `0 0` line, and the lotto-pays on the held row.
 
 Gates (2026-11-13): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` 5653 passed, 0 failed in 46 targets; `cargo test --workspace --doc` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean; the slice scenario and the 3 prize tests re-run green after a channel-threading cleanup. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 679. The direction review
+
+The owner asked for a review of the whole effort: check the work, update the ADRs and the next steps, and steer where the direction is off. This section ports nothing. It records what was checked, what the owner decided, the two defaults that changed, and how the work is cut from here.
+
+### 679.1 What was checked
+
+Fifteen read-only audits ran, one per concern (the ADRs' conformance, the Transfers, the quest host, the Parity inventory's claims, the scenarios' depth, the gates, the ledger's trajectory, the per-Pulse cost, the trust boundaries, the documents). Each finding kept below was then checked against the code, the Git history, or a measurement; a finding that could not be checked was dropped.
+
+| claim | evidence | control |
+|---|---|---|
+| Every gate is green on the tree of ledger 678. | `fmt`, `build`, `clippy -D warnings`, the doc-tests and rustdoc clean; 5653 passed, 0 failed in 46 targets without `DATABASE_URL`. | With `DATABASE_URL` the first full run lost `a_premium_cast_sees_the_biting_fish_before_the_take` (5652 of 5653); alone it passes in 57.9 s. That is the "passes alone" class the receipts since section 259 record more than 100 times. |
+| The inventory has no `missing` row. | 1,135 `ported`, 65 `partial`, 445 `unused`, 0 `missing`, 0 `codec` of 1,645, counted from the status cells of the nine tables. | `spec.md` said 1,649 rows (137 server records, 116 systems); the tables hold 134 and 115. |
+| No quest source was edited. | `git log -- legacy/gamedata/locale/europe/quest` and `git log -- legacy` each show one commit, the import. | `git log -- server` shows one commit too, and `git log` as a whole shows hundreds, so the path filter is what narrows it. |
+| The game thread's idle cost is small. | Release build, the example's Channel 1 and Shared Channel, a scratch store: clients accepted 2.4 s after start; `NPCs and monsters stood up spawned=65604 stones=822`; `VmRSS` 594,600 kB; 18 threads; the `game-loop` thread used 0.05 s of CPU in 40.0 s, which is 0.05 ms of each 40 ms Pulse. `SIGTERM` ended it with exit 0 in 0.26 s, `dropped_effects: 0`, `capped_catch_up_batches: 0`. | No player was in the world. No Pulse duration is recorded by the binary (`game_loop.rs` times only the planner), so the cost with players is unmeasured. |
+| Test runs leak. | 15 `prodomo_test_1400298_*` databases and a `target/debug/prodomo --config /tmp/prodomo-parity-3774455-*` process two days old were on the machine before the review ran anything. | The review's own two full runs with `DATABASE_URL` left the count at 15. |
+| The game-to-client count in `AGENTS.md` was stale. | `gc_inventory.rs` pins 134 rows and 125 implemented; `AGENTS.md` said 119. | Of the 9 flagged missing, `REFINE_INFORMATION` and `SYNC_POSITION` have codecs the binary sends (`protocol/src/gc_refine.rs:56`, `gc_position.rs:271`). |
+| The store holds client text as `text` in two columns. | `guild_grade.name` (`0011_guild.sql`) and `guild_comment.content` (`0012_guild_comment.sql`). | The other free-text columns are `bytea`; the `text` columns with a shape CHECK (logins, Names) are not free text. |
+| The quest host has no instruction limit. | No `set_hook`, `HookTriggers`, `set_interrupt` or `set_memory_limit` in `quest/src` or `prodomo/src`. | `mlua` is named in `quest/src`, so the search reads the files. |
+| The README and the example disagree on the store. | `README.md:64-79` uses port 55432 and `change-me`; `config/prodomo.toml.example:35` uses 5432 and `CHANGE-ME`. There is no `compose.yaml`, which `README.md:119` promises. | |
+| No width has been measured since the cross compiler went missing. | `which i686-linux-gnu-g++-12` finds nothing; every receipt of 640 to 678 says "No width was measured". | |
+
+What holds, and is recorded in `docs/STATUS.md` as such: one game thread with no store or file I/O on it and a bounded command queue; a panic on it ends the process; Transfers committed before the client is told; the account-owned safebox and the argon2id prefix behind CHECK constraints; the quest crate reaching the game through one bridged function with no `unsafe`.
+
+### 679.2 What the owner decided (2026-11-15)
+
+Asked five questions in the review, the owner answered:
+
+1. **The play test stays last.** The owner will test with the legacy client, unmodified, once everything is done; the client is not in this repository and has not been ported to Godot. ADR-0001 is amended: the tail is closed first, and every width the Rewrite sends is probe-measured before the play test opens.
+2. **The test-server mode ships off.** New ADR-0007. `[game] test_server` defaults to `false`.
+3. **"A few seconds" is binding.** ADR-0003 is amended; `[game] save_event_second_cycle` defaults to 10. Legacy compiles 120 (`G/config.cpp:31`) and the owner's `CONFIG` files set 180.
+4. **The `unused` rows stand in bulk**, without a row-by-row confirmation. A row the play test reaches is reopened.
+5. **ADR-0006 is accepted.** It had been proposed since ledger 227 with the quest runtime running on it.
+
+### 679.3 What changed in the code
+
+- `common/src/config.rs`: `GameSettings::default` has `test_server: false` and `save_event_second_cycle: 10`. `common/tests/config_test.rs` pins both as the two defaults that are not legacy's compiled-in values.
+- `config/prodomo.toml.example`: `test_server = false`, `save_event_second_cycle = 10`, each with its reason.
+- `parity/src/server.rs`: `SCENARIO_GAME_DEFAULTS`. The 518 scenarios were written against the old defaults, and `test_server` is named on only 12 lines of `prodomo/tests/parity.rs`. So that none changed meaning silently, the harness writes `test_server = true` and `save_event_second_cycle = 120` into a scenario's `[game]` table unless the scenario's own text names the key. This is debt, not the end state: package C4 moves the scenarios to the shipped mode and removes the default.
+- The playtime bank carries its remainder between saves (`prodomo::save::playtime`, pinned by its own tests), so a 10-second cycle banks the same minutes a 120-second cycle did.
+
+No scenario and no rule changed. The save cycle's own scenarios set their cycle to 1 second and are unaffected.
+
+### 679.4 What changed in the documents
+
+- **ADRs.** 0001 (the play test last; widths), 0002 (the bus is a shared registry on purpose; outboxes are unbounded until a cap closes a slow client; the Pulse budget is to be measured), 0003 (a few seconds; no row is proven without `DATABASE_URL`; the two `text` columns; the one `jsonb` exception), 0004 and 0006 (accepted; the host's missing instruction limit; the OX quiz reader's second `Lua`) are amended with dated entries. 0007 is new.
+- **`docs/STATUS.md`** was 1,770 lines and 269 KB, with 686 lines of "Since N" paragraphs above its summary. It is now 1,076 lines: where the Rewrite stands, the review's findings, the next steps as packages A to F with an exit line each, what waits on the owner, the build order, and the registers. The 864 lines it dropped are in `docs/STATUS_HISTORY.md`, unchanged. The Topology section's stale sentences ("`pc.warp` is not ported", the 229f measurement) are corrected, and two Divergence rows are added (the test-server mode, the save cycle).
+- **`AGENTS.md`**: seven ADRs; the game-to-client count; the three decisions above; the rule that STATUS is not a changelog and that a receipt names both runs and every first-run failure.
+- **`.scratch/parity/spec.md`**: the row counts; `partial` notes end with `Left:`; the `unused` rows' bulk acceptance; scenarios in the shipped mode.
+- **`.scratch/equip/`**: `migration-goal.md` re-cut from "one ledger section at a time" to the packages; `progress.md` rewritten (it had stood at ledger 229k); `owner-questions.md` records the decisions and closes question 1.
+
+### 679.5 The steer
+
+The direction is sound and no decision is reversed. Three things change in how the work is done:
+
+1. **Count the tail before porting more of it** (package A). Sections 640 to 678 each port one `case` arm of `UseItemEx`, which has 296 labels, and nothing says how many are left. Every `partial` row gets a `Left:` list, generated from the source where a switch hides behind the row.
+2. **A section is a slice, with a receipt that can be checked.** A family of arms per section; both gate runs named; every first-run failure listed and either fixed or filed.
+3. **Harden before the play test** (package C): the Pulse budget measured under load, the quest host's instruction limit, slow and silent clients, one meaning for the test-server mode, the two `text` columns, the leaking harness, mutation sweeps by risk in place of the 450 deferred per-section sweeps, and the widths.
+
+Gates (2026-11-15), on the changed tree: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` without `DATABASE_URL`: 5653 passed, 0 failed in 46 targets (80 s); the same with `DATABASE_URL=postgres://prodomo:…@127.0.0.1:55432/prodomo`: 5653 passed, 0 failed in 46 targets (492 s), no first-run failure; `cargo test --workspace --doc --locked --offline` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. The toolchain is the `/usr/bin` pair (cargo and rustc 1.85.1). No width was measured: `i686-linux-gnu-g++-12` is not installed. Afterwards 15 `prodomo\_%` databases remained, the same 15 `prodomo_test_1400298_*` that were there before the review (package C6); the review's scratch database `prodomo_director_probe` was dropped. Parity counts are unchanged: 1,135 `ported`, 65 `partial`, 445 `unused`. ADR-0001, 0002, 0003, 0004 and 0006 amended; ADR-0007 added.
+
+## 680. The owner's answers after the review
+
+The owner answered ledger 679's open points on 2026-11-15: this is the strong machine; install the cross compiler; "you decide" which game logs are kept; fix `change_empire.lua`; "you decide" the drop limit; the play test is out of scope for now, "just prepare the docker compose file". This section applies each answer. It ports one quest row and no system.
+
+### 680.1 The cross compiler
+
+`sudo apt-get install g++-12-i686-linux-gnu` installed 12.4.0-5cross1 (`i686-linux-gnu-g++-12 (Debian 12.4.0-5) 12.4.0`). A probe compiled with `-static` under `#pragma pack(1)` from a scratch directory in `/tmp` reads: the packed two-`long` control 8, `long` 4, `bool` 1, `TPacketGCPhase` 2, `TPacketGCHandshake` 13, `TPacketGCLoginFailure` 10 (with `ACCOUNT_STATUS_MAX_LEN = 8` from the legacy headers), against `GC_PHASE_WIRE_SIZE` 2, `GC_HANDSHAKE_WIRE_SIZE` 13 and `GC_LOGIN_FAILURE_WIRE_SIZE` 10 in `protocol/src/gc.rs`. Those three are the controls that the probe works; the sweep of every record the Rewrite sends is package C8 and was not run here. No `*.core` file is in the workspace root.
+
+### 680.2 `_basic/change_empire.lua`
+
+The owner had the source fixed, which ADR-0004 otherwise forbids; the ADR, `AGENTS.md`, ADR-0006 and `legacy/README.md` record it as the one exception. The stray `end` of line 132 (`\t\t\t\tend\r\n`, 9 bytes at offset 3368) was removed byte-exactly and nothing else changed: 3,590 bytes, SHA-256 `bcc3cf2c…c34230` before; 3,581 bytes, `09cde998…b80672` after; still CRLF and ISO-8859.
+
+- Both `qc`s now compile it. The host loads 51 scripts into 50 quests (49 before) and 460 objects (455 before: the state table, the chat block's script, condition and argument, and the use block's script). `quest/src/host.rs`, `quest/tests/host.rs` and `quest/tests/reference.rs` pin the new numbers; the old refusal is kept as a test over the old bytes rebuilt in memory.
+- `change_empire` is quest 22, so every quest after it is one higher: `item_attr67add` 41, `sash` 45, the Yohara letter quest 50, `guild_create` 36. The first full run after the fix lost 465 tests for that reason: 463 at the login letter helper (`prodomo/tests/parity.rs:2695`), `guild_create`'s literal 35, and the object count. The scenarios' three constants and six literals were moved; three of the literals now use the constants.
+- New scenario `the_exchange_scroll_moves_alpha_to_the_yellow_empire`: an Operator grant of 71054, the use block's lines and the three empires, the confirmation, then on "Change" the gold change, the scroll's removal, the last page, the re-show with the yellow empire, the account's empire and change count in the store, no item row, and `next_use_time`. `quest.change_empire` is `ported`; the inventory is 1,136 `ported`, 65 `partial`, 444 `unused`. The `20090.chat` block is behind the `c_e` event flag and no map stands NPC 20090, and `move_pc`'s refusal arms are not walked through this script; the row's note says both.
+- **Finding (package C9, new).** The scenario shows the re-show reaching the client after the page: gold change, `ITEM_SET`, page, then the removal, the add and the additional info. Legacy writes the re-show from inside `pc.change_empire` (`RestartAtSamePos` and `UpdatePacket`, `G/char_change_empire.cpp:119-123`), so before the gold, the scroll and the page, which `SendScript` writes when the script ends. The Rewrite applies a step's world moves after its script, kind by kind (`apply_world_moves`, `prodomo/src/game_state/quests.rs`). The scenario pins today's order and names C9; `docs/STATUS.md` C9 asks for every queued kind to be listed against its legacy call's writes, and for each to send in call order or become a Divergence with the owner's yes. The legacy order is read from the source, not observed.
+
+### 680.3 The drop limit
+
+It stays 1000 ms, now as a decision instead of a wait: the only setter in the Game data (`questlib_extra.lua:139`, never loaded) names `item_drop_limit_time` 1, which `G/questmanager.cpp:1605` makes 1000 ms, and a second drop inside a second has no honest use. The constant's doc in `prodomo/src/item_move.rs`, the Divergence row and question 3 say so. No behaviour and no test changed.
+
+### 680.4 The game logs to keep
+
+`docs/STATUS.md` has the table ("Game logs the Rewrite keeps"); question 73 is closed. A kind is kept when an operator needs it to answer who cheated, who used GM power, where an item or gold went between owners, or what happened to an account or a character: the security, session, character and event methods at every site, and `ItemLog`, `MoneyLog`, `GoldBarLog`, `RefineLog` and `SashLog` where value changes owner or is made or destroyed by a system. Not kept: `FishLog`, `ItemLog` at a drop, pickup or use, and `MoneyLog`'s `MONSTER`, `MONSTER_KILL` and `DROP`. Five methods have no caller in legacy. Each kept kind is to be one `tracing` event on the target `gamelog`; no log table returns (ADR-0001). This is the policy only: porting the sites is `sys.log`, package B8.
+
+### 680.5 The Compose kit
+
+`compose.yaml`, `Dockerfile` and `.dockerignore` are new; `.gitignore` ignores `/.env`; the README has a Compose section; the example's `[store].url` and the README's Podman command now name the same port and placeholder password. The image builds from the tracked lockfile in a `rust:1.85.1-bookworm` stage and runs as a non-root user on `debian:bookworm-slim` (101 MB); `legacy/` is mounted read-only and never copied.
+
+Checked on this machine with Podman's Docker-compatible Compose provider (docker-compose 2.26.1), under a scratch project name that was removed afterwards with its volumes:
+
+- `podman build` succeeded in 120 s. The build stage fetched the locked crates from crates.io: no dependency was added or upgraded and `Cargo.lock` is unchanged. `rust:1.85.1-bookworm` (1.49 GB) and `debian:bookworm-slim` (78 MB) were pulled; they and `localhost/prodomo:local` remain on the machine.
+- `up -d` waited for PostgreSQL's health check; the server reached `Store ready at schema version 45` and `Accepting clients` 1.5 s after it bound its ports, with 65,623 NPCs and monsters stood up (the count differs by a few between boots; a restart stood 65,591).
+- Ports 30001, 30003 and 30005 answered a TCP connect with the handshake phase record and the handshake; 30019 with the phase record in the first read.
+- `compose run --rm -T prodomo account create alice` (password on standard input) and `gm grant alice Admin implementor` printed their results, and the account row holds an `$argon2id$` hash.
+- `compose stop` and `podman stop` ended the server with exit 0 in under a second after `Received SIGTERM` ... `Server shutdown complete`.
+- **`compose restart` did not.** Twice, the log shows the next boot with no `Received SIGTERM` before it, while `podman restart` logged the full sequence. The kit's header and the README say to stop and start instead. The cause on the Podman side was not looked for.
+- Not run: Docker itself, a second machine, and a client login through the published ports (package D's exit line).
+
+### 680.6 First-run losses
+
+Full runs with `DATABASE_URL` in this section, in order: 5188 passed and 465 failed (the renumbering, 680.2); 5649 and 5 (four literals and the new scenario's own order assertion); 5653 and 1 (`a_cape_of_courage_gathers_the_dogs_around`, a socket read that timed out); 5653 and 1 (`an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off`, a 700 ms drain that saw no wait line). The last two pass alone, three runs of three. By next step A2 they are filed, with ledger 679's `a_premium_cast_sees_the_biting_fish_before_the_take`, as `.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md`; the cause is not known and the issue says what would show it.
+
+Gates (2026-11-15), on the final tree: `cargo fmt --all -- --check` clean (a first check failed on two long lines of `prodomo/tests/parity.rs`; `cargo fmt` fixed them); `cargo build --workspace --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` without `DATABASE_URL`: 5654 passed, 0 failed in 46 targets (51 s); the same with `DATABASE_URL=postgres://prodomo:…@127.0.0.1:55432/prodomo`: 5653 passed, 1 failed in 46 targets (491 s), the failure being the auto-potion scenario of 680.6, green alone three times; `cargo test --workspace --doc --locked --offline` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. The toolchain is the `/usr/bin` pair (cargo and rustc 1.85.1). Widths: the three controls of 680.1 only. Afterwards the same 15 `prodomo_test_1400298_*` databases remained that were there before ledger 679 (package C6), and no other. ADR-0004 and ADR-0006 amended; no ADR added.
+
+## 681. Mistakes are fixed, not ported
+
+The owner restated a rule on 2026-11-15: the port stays close to legacy to make sure the actual game is transferred, and fixing bugs and inconsistencies, closing vulnerabilities and removing backdoors while porting is normal, because the port should improve the old source and not copy its mistakes. The rule existed in pieces (the glossary's Defect, the 2026-10-14 standing decision). What it lacked was the consequence: the agents' goal file still said "take the option that follows legacy, mark it provisional, ask", and that is how seven known mistakes came to be reproduced. This section changes documents only; no code, no test and no Game data changed, so no gate was rerun.
+
+- **ADR-0008 is new** (`docs/adr/0008-mistakes-are-fixed-not-ported.md`). A mistake is unsafe behaviour, a backdoor or open door, or an inconsistency between what the code plainly means to do and what it does. It is fixed without a question and recorded: a Defect row, a Divergence row when a player can tell, the ledger, a test. Two things it does not cover: odd but deliberate behaviour, which is a Quirk and the owner's to change; and a difference the Rewrite's own design causes, which is matched to legacy or argued as a Divergence (package C9 is one). A fix that changes numbers every player meets is made and also listed for the owner.
+- **ADR-0004 is amended**: a quest source may be edited only where a mistake stops a script (it does not compile, or a path always raises), by the smallest edit, listed in `legacy/README.md`, with its bytes and hashes in the ledger. Content is never edited. This extends the owner's words to Game data in the narrowest form that lets `guild_war_bet.lua` be fixed; the reply to the owner names it so it can be refused.
+- **`CONTEXT.md`**: Parity is how the Rewrite shows it carries the game over, not a duty to copy; a Quirk is odd but deliberate; a Defect includes a backdoor, a vulnerability and an inconsistency, and is fixed as found.
+- **`AGENTS.md`**: eight ADRs; the ADR-0004 and ADR-0008 bullets; "never leave a Defect reproduced, provisional".
+- **`.scratch/equip/migration-goal.md`**: the rule for what needs the owner is rewritten around the three cases (a mistake, a Quirk, a Rewrite-side difference).
+- **`.scratch/equip/owner-questions.md`**: the open questions are sorted under the rule. Closed with the fix already made and now final: 6, 13, 17, 26, 29, 32. Closed with the fix queued: 23, 24, 33, 36, 38. Closed and listed for the owner: 22, 28. Still the owner's as deliberate behaviour: 30, 35. Untouched: the Rewrite-side differences and the questions about the owner's data.
+- **`docs/STATUS.md`**: package C10 lists the seven mistakes still reproduced, each with its legacy lines: D1 (a group-group's probabilities, `G/mob_manager.cpp:287-293`), D4 (a group entry at one point, `G/regen.cpp:346-353`), D5 (`AFF_SPAWN` never cleared), B5 (`int victim_lv = pkAttacker->GetLevel();`, `G/battle.cpp:282`, read again for this section), a worn piece's attributes written in place, the revive herb, and `guild_war_bet.lua:39` (one argument for three verbs, read again for this section). "Waiting on the owner" gains the table of fixes that change numbers (D1 and B5) and the two Quirks that stay. C9's exit line no longer waits for the owner's yes.
+
+None of the seven fixes is made in this section. Parity counts are unchanged: 1,136 `ported`, 65 `partial`, 444 `unused`.
+
+## 682. The repository cleanup
+
+The owner asked for a cleanup so the repository is clearer for the agents working on it. This section ports nothing and changes no behaviour: the only edits to Rust files are eight doc-comment paths and one citation.
+
+### 682.1 What an agent could misread, and what was done
+
+| finding | evidence | done |
+|---|---|---|
+| Finished work read as open work. | `.scratch/equip/issues/01-equip-reducer.md` (ledger 215) and `.scratch/ledger587/issues/01-shop-premium-arm.md` (ledger 587) still said `Status: ready-for-agent`; both sections landed long ago. | Deleted. `AGENTS.md`: an issue is deleted in the change that lands its work. |
+| Research notes of sections 187 to 209 sat beside the live files. | Nine tracked files, 303 KB: `ledger187/{enter-game,loading-phase,my-notes,notes-parent}.md`, `ledger198-*.md`, `ledger205-*.md`, `ledger209-*.md`, `survey195-storage.md`, `survey196-itemdb.md`. No tracked document outside this ledger cited one. | Deleted; they are in Git at `80ef704a`. An older section of this ledger that names one names a path as it was then. |
+| The agents' goal, progress and owner questions lived in a folder named for one feature, and the goal told agents not to stage it. | `.scratch/equip/`; `git add -A -- . ':!.scratch/tmp' ':!.scratch/equip'` in the goal, which is how `progress.md` stood at ledger 229k in Git while the work reached 678. | Renamed to `.scratch/migration/`; the goal stages it with every section. |
+| Probes were spread over five folders named by ledger or by "probe". | `.scratch/ledger187/`, `ledger188/`, `probe193/`, `probe194/`, `probe475/`; eight doc comments in `protocol/src` and `common/src` cite them. | One folder, `.scratch/probes/<ledger>/`, with a README (what each measures, who cites it, how to build one with the cross compiler). The eight comments name the new paths. The 15 `.cpp` files are unchanged. |
+| The goal named a gate script that only this machine has. | `.scratch/tmp/tools/gates.sh`, in an ignored folder, with the repository path and the test password written into it. | `tools/gates.sh <output-dir>`, tracked: the six gates, the tests without and with `DATABASE_URL`, every failed test by name, leftover scratch databases and core files. It finds the root from its own path and takes `DATABASE_URL` from the caller. This section's receipt is its first run. |
+| Two stray tracked files. | `gamedata/examples_guild_check.rs` (a one-off `main` outside any target, with `\"` in its source, so it never compiled) and `setup-devcontainer.sh` (it installs `liblua5.4-dev` and changes to `/workspace`; ADR-0004 vendors Lua 5.1 through `mlua`, and nothing cites the script). | Deleted. |
+| `.gitignore` was mostly Visual Studio rules for a tree that is never built, plus an exception for them. | 109 lines; rules for `Debug/`, `x86/`, `bin/`, `obj/`, `log/`, `*.pdb` and the like; a re-include for `server/extern/include/` and one for `client/Extern/include/`, a path the repository no longer has; `/.sisyphus/`. | 54 lines: agent state, `.scratch/tmp/`, compiled probes, `target/`, the root `log/`, `prodomo.toml`, `.env`, editor and backup leftovers. `git ls-files -ci --exclude-standard` lists nothing before and after, and `git status` shows no new untracked file under `server/` or `legacy/`. `AGENTS.md` says not to add a build-output directory rule. |
+| `docs/PROTOCOL_NOTES.md` opened with a module map and ended with a module index of 2026-09-26. | They name `game-server`, `db-server` and deleted modules, and 32 of today's 95 files in `protocol/src` appear nowhere in the page. Five more sections describe the retired DB-peer protocol or are receipts of ledgers 162 to 168. | Moved, byte for byte, to `docs/PROTOCOL_NOTES_HISTORY.md` (629 lines): the module map, the coverage history, the DB boot bullets, the section-162 mutation evidence, the module index, M3 and the boot table loader audit. The live page is 771 lines. Two things stayed and were renamed, because they are client-side: the ledger-187 bullets that stood under "DB records and boot" are "The enter-game burst records", and the audit's sub-section on `SetPhase(PHASE_CLOSE)` is its own section. A script checked that every line of the old page from line 40 on is in exactly one of the two pages, apart from those two headings. |
+| A code comment cited the notes by line number. | `protocol/src/gc_item_window.rs:150`, `docs/PROTOCOL_NOTES.md:461`. | It names the section. |
+| Local leftovers. | Seven old gate logs in `.scratch/`, three `log/syslog.*` files (2026-09-27 to 2026-11-03) of a server once run from the root, `COMMIT_MSG_245.txt` and `COMMIT_MSG_246.txt` (both commits are in Git), a compiled `chat_enum`. All ignored. | Deleted. |
+
+### 682.2 Rules added so it stays clean
+
+- `AGENTS.md` ("WORKSPACE") has a table of everything outside the crates: `.scratch/migration/`, `.scratch/parity/`, `.scratch/probes/`, issues, `.scratch/tmp/`, `tools/gates.sh`, the play-test kit.
+- `AGENTS.md` ("REPOSITORY HYGIENE"): a research note, a survey, a finished issue or a one-off script is not kept in the tree; its findings go into the ledger section, `docs/PROTOCOL_NOTES.md` or a code comment, and the file goes in the change that finishes the work. A probe that code cites goes to `.scratch/probes/`. Nothing new goes at the root. Nothing tracked cites a file in `.scratch/tmp/`.
+- The two history pages (`docs/STATUS_HISTORY.md`, `docs/PROTOCOL_NOTES_HISTORY.md`) are named as history in `AGENTS.md`, the README and `docs/agents/domain.md`.
+- The goal's "never touch `legacy/`" line contradicted its own ADR-0004 paragraph; it now names the one exception.
+
+### 682.3 Left as it is
+
+- **`.scratch/tmp/`, 1.8 GB, ignored.** Four clones of the tree at ledger 229 (1.7 GB), the gate logs and backups of sections 215 to 229k, and the old mutation scripts. Nothing in Git cites it any more except package C7's note that the old driver is there. It is not removed without the owner's word: it cannot be brought back, and the notes of 229 in it are not in Git.
+- **The 15 leaked `prodomo_test_1400298_*` databases and the scenario server two days old** stay for package C6, which finds the cause first.
+- **`target/`, 55 GB**, with build output of crates that no longer exist. Disposable; a `cargo clean` costs one full build.
+- **Stale counts in the "Code-quality backlog" of `docs/STATUS.md`** are marked as unmeasured since ledger 210; package F measures them.
+
+Gates (2026-11-15), one run of `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`, on the cleaned tree: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` without `DATABASE_URL`: 5654 passed, 0 failed in 46 targets (80 s); the same with `DATABASE_URL`: 5653 passed, 1 failed in 46 targets (489 s), the failure being `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off` at `prodomo/tests/parity.rs:12064` (0 chats in the 700 ms window), the same loss at the same line as ledger 680's fourth run; it passed alone once, and it is added to `.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md`, which stays open; `cargo test --workspace --doc --locked --offline` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. The toolchain is the `/usr/bin` pair (cargo and rustc 1.85.1). No width was measured. Afterwards the same 15 `prodomo_test_1400298_*` databases remained (package C6), and no core file. Parity counts are unchanged: 1,136 `ported`, 65 `partial`, 444 `unused`. No ADR changed.
+
+
+## 683. The test hygiene
+
+The owner asked for the cleanup to be complete: stale state removed, what is needed moved into Git, and the leaks in the test suites and the procedures fixed. This section ports nothing and changes no server behaviour; the Rust changes are in the test harness and in one scenario.
+
+### 683.1 Why test runs leaked
+
+Every guard in the harness cleaned up in `Drop`: `ScratchDatabase` dropped its database, `parity::Server` killed its server and removed its directory. A test process that is killed (a timeout, a `kill`, a closed terminal, a mutation sweep that was stopped) runs no `Drop`, and nothing ever looked for what an earlier process had left. Found on the test machine: 32,472 `prodomo-parity-*` scenario directories in `/tmp` going back to 2026-11-03, several thousand directories of the other families (`prodomo-console-*`, `prodomo-saveati-*`, `prodomo-preboot-*`, `prodomo-process-*`), 15 `prodomo_test_1400298_*` databases, and one `prodomo` scenario server three days old whose parent was gone. The names were also made in five places by hand (`std::env::temp_dir().join(format!(...))` in `parity/src/server.rs`, `prodomo/tests/process.rs`, `prodomo/tests/parity.rs` twice and `prodomo/src/operator_console.rs`), and `prodomo/tests/operator.rs` used `tempfile`.
+
+### 683.2 The fix: the next run cleans up after a killed one
+
+- **Directories and servers: `parity/src/scratch.rs`** (new). `ScratchDir` and `unique_path` name every directory `prodomo-test-<pid>-<kind>-<n>`. The first directory a process asks for starts a sweep of the temporary folder: a directory whose process no longer exists (`/proc/<pid>`) is removed, after every process whose working directory is inside it is killed, which is how an orphan scenario server is found. `parity::Server`, the process tests, the operator tests, the two hand-made directories of `prodomo/tests/parity.rs` and the pipe tests of `operator_console.rs` all take their directory from it. `tempfile` is no longer a dev-dependency of `prodomo`; `parity` now depends on `rustix` (already in `Cargo.lock`, no fetch) for the kill.
+- **Databases: `db/tests/support/lease.rs`** (new, compiled by `prodomo/tests/support/mod.rs` too through `#[path]`). Each test process takes an owner token and holds a session advisory lock on it while it lives; PostgreSQL frees the lock when the process is gone, however it went. Every scratch database is named `prodomo_(test|proc|async)_<token>_<n>`. Before a process takes its token it tries the lock of every token it finds in a database name and drops the databases whose lock is free.
+- **Proved by killing runs.** A `db` test binary killed with `kill -9` left 16 databases; the next test run left 0. A scenario run killed the same way left 16 databases, 13 directories and their servers; after the next run: 0, 0 and 0.
+- Five unit tests in `parity::scratch` cover the owner in a name, the drop, the sweep of a dead process's directory with a process working in it, the sweeper's own ID, and distinct paths.
+
+### 683.3 The gates fail on anything left
+
+`tools/gates.sh` gives the tests a temporary folder of the run's own (`<output-dir>/tmp`), and after the gates counts what is left: `temp-files` (entries in that folder), `servers` (processes started with a configuration in it), `scratch-dbs` (databases named as above on `prodomo-pg18`) and `cores` (`*.core` in the tree). Any count above 0 fails the run like a failed gate. It also prints `allows`, the number of `#[allow]` attributes in the nine crates, which a receipt may not raise.
+
+### 683.4 What was removed
+
+| what | size | why it was safe |
+|---|---|---|
+| Every `prodomo-*` entry in `/tmp`, the 15 leaked databases, the orphan server | 32,472 scenario directories and the other families | Left by killed test processes; other sessions' files in `/tmp` were not touched. |
+| `.scratch/tmp/` | 1.8 GB | Four clones of the tree at ledger 229, gate logs and backups of sections 215 to 229k, and the old mutation scripts. The driver was rescued first (below). The per-section mutant lists were not kept: their sweeps are not owed (package C7 sweeps by risk). |
+| 13 Git worktrees under `.overlord/` and `.overlord/final` | 47 GB | Each stood at ledger 229l with uncommitted work in progress from 2026-10-17 to 2026-10-19; every path they held that Git did not track exists in `main`, and no process was working in them. Removed with `git worktree remove --force`, then `git worktree prune`. |
+| `target/` | 61.2 GiB, 86,231 files | `cargo clean`; it held output of the retired `game-server` and `db-server` crates. The gates below ran on the rebuild. |
+| The remote branch `commit230` | | An ancestor of `main` (`git merge-base --is-ancestor`), from before the rule that everything lands on `main`. Deleted with this section's push. |
+
+### 683.5 What was moved into Git
+
+- **`tools/mutate.py`**: the mutation driver the sweeps up to ledger 229k used (`mutate_v2.py`), with that machine's paths taken out and a usage text. It now knows all nine crates: a mutant in `protocol/`, `net/` or `parity/` runs that crate's tests first (the old table had five crates, so such a mutant went straight to the scenarios). Smoke on a copy of the tree: two mutants in `parity/src/scratch.rs` apply (`CHECK=1`), `owner-prefix` is killed by `a_name_gives_its_owner_and_any_other_name_gives_none` and `stale-own` by the two sweep tests, and the file's checksum in the copy is the working tree's afterwards.
+- **`.scratch/probes/README.md`** builds a probe into `.scratch/tmp/`, not `/tmp`.
+
+### 683.6 The stale counts
+
+The "Code-quality backlog" of `docs/STATUS.md` was measured again with `command grep -a` over the nine crates (ledger 210's count in brackets): 172 `pub enum ...Error` types (62), 41 `check_exact` functions (42), 18 little-endian reader functions by name (37, by a pattern ledger 210 does not give), 72 `repr(C, packed)` structs in `common/src/tables.rs`, and **133 `#[allow]` attributes (59)**, so 74 were added after `AGENTS.md` banned them. The four stale slot constants of `common/src/constants.rs` are still there and still unread: every user imports the measured values from `common::item_slots` (positive control: the four names resolve in `item_slots.rs` at lines 199, 321, 333 and 350; no file imports them from `constants`). The count of `#[allow]` is now a line of every receipt.
+
+### 683.7 Three first-run losses with a cause, none of them the load
+
+The two full runs of this section lost one scenario each, and the scenario lost twice before was read again. Each failure was read against the legacy rule the scenario tests; in all three the cause is in the scenario, not in the server and not in the load.
+
+| scenario | lost in | cause | fix |
+|---|---|---|---|
+| `a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin` | 683, first run | Unrelated work inside a legacy window. The first `/hide_costume 1` must land inside the 1.5-second move window that starts at Alpha's Show (`G/cmd_general.cpp:3956-3963`); the scenario logged a second character in first, about 1.2 s by the server's log of a run alone, and more in a full run, so the line was answered with the hide. | Yankee enters first; Yankee reads Alpha's enter where Alpha read Yankee's. The assertions are the same. |
+| `a_cape_of_courage_gathers_the_dogs_around` | 680 (third run), 683 (second run) | The rule's own dice. `FuncAggregateMonster` starts each monster on `number(1, 100) <= 50` (`G/char_battle.cpp:3663`, ported as written in `mob_battle.rs`); with five dogs none comes in one run of 32, and the read for the swing times out after 5 s (`parity/src/client.rs:80`), which is the failure both runs show. | Sixteen dogs (none in one run of 65,536). `a_gm_aggregates_and_forgets_the_dogs_around` had the same five and has sixteen too. |
+| `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off` | 680 (fourth run), 682 | The rule's own clock. The use throttle is `get_global_time() - last_use_time < 1` in whole seconds (`G/char_item.cpp:5370`, ported as written in `auto_potion.rs`); the scenario sent its two uses at any moment, so when they straddled a second the second use passed the throttle and toggled the potion off: 0 wait lines, as both losses show. | The pair starts in the first 300 ms of a second (`wait_for_a_fresh_second`). |
+
+Each was green alone afterwards: the hide and the two dog scenarios four runs of four, the potion six of six. The potion's cause was also reproduced on purpose: with the pair aimed 30 ms before a second's end instead, the scenario failed five runs of six with the loss's own message (0 wait lines, 1 expected); aimed 10 ms before it, none of six, so the two uses are handled about one Pulse apart. `a_premium_cast_sees_the_biting_fish_before_the_take` (679) stays unexplained; its output was not kept.
+
+Measured for the issue: one scenario alone takes 5.8 s and 4.4 s of CPU, its server 3.45 s from the configuration to "Accepting clients" in the debug build, and each login 0.31 s in argon2id; 519 scenarios are about 2,300 CPU-seconds, so the 16 cores are full for the whole run. No loss so far needed the load to explain it. `.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md` is rewritten with the three classes and how to sweep the scenarios for them; it stays open until five full runs in a row lose none.
+
+### 683.8 Rules added
+
+- `AGENTS.md`, "TEST HYGIENE": a test run leaves nothing; where a scratch database and a scratch directory get their names; a test that starts a process owns it; the gates fail on anything left; stop a run with SIGTERM to `cargo`; a session's scratch output goes to `.scratch/tmp/` and is deleted when its section lands; a copy of the tree and a worktree are removed when their work ends.
+- The goal file's receipt list names the four leak lines and the `allows` line.
+- `docs/STATUS.md`: C6 is done; C7 names `tools/mutate.py`; the drift table's "Test runs leak" row is closed.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`, three full runs, all on a `target/` rebuilt from nothing after the `cargo clean` except the first. First run (the harness changes, before the clean): fmt, build, clippy, doc-tests and rustdoc clean; without `DATABASE_URL` 5659 passed, 0 failed in 46 targets; with it 5658 passed, 1 failed, `a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin` (683.7, fixed). Second run (after that fix and the clean): the same gates clean; without `DATABASE_URL` 5659 passed, 0 failed; with it 5658 passed, 1 failed, `a_cape_of_courage_gathers_the_dogs_around` (683.7, fixed). Third run, on the final tree: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` without `DATABASE_URL`: 5659 passed, 0 failed in 46 targets (64 s); the same with `DATABASE_URL`: 5659 passed, 0 failed in 46 targets (493 s), no first-run failure; `cargo test --workspace --doc --locked --offline` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. Every run's summary: `temp-files: 0`, `servers: 0`, `scratch-dbs: 0`, `cores: 0`; `allows: 133`. The five new tests are `parity::scratch`'s. The toolchain is the `/usr/bin` pair (cargo and rustc 1.85.1). No width was measured: no record changed. `Cargo.lock` changed by two dependency edges (`tempfile` off `prodomo`, `rustix` onto `parity`), with no crate added and no fetch. Parity counts are unchanged: 1,136 `ported`, 65 `partial`, 444 `unused`. No ADR changed.

@@ -22,3 +22,21 @@ preference. It also means the schema is designed for the Rewrite rather than cop
   flushes on a timer and can lose or duplicate items in a crash.
 - Database tests run only when `DATABASE_URL` is set, against PostgreSQL 18 in Podman, so the
   offline gates stay green without a database.
+
+## Amendments
+
+- **2026-11-15 (owner, direction review, ledger 679).** "At most a few seconds late" is binding.
+  Until ledger 679 the per-character save event ran on legacy's cycle (120 seconds compiled in,
+  180 in the owner's files), so a crash could lose that much experience, points and position;
+  items and gold were already written when they moved. `[game] save_event_second_cycle` now
+  defaults to 10.
+- A test run without `DATABASE_URL` proves no Parity inventory row: every scripted-client scenario
+  returns at its first line and is counted as passed. A gate receipt names the `DATABASE_URL` run
+  and its counts, or says that it did not run.
+- Drift from this decision, to be corrected by a new migration and never by editing an applied
+  one: `guild_comment.content` and `guild_grade.name` are `text` with `char_length` checks
+  (`db/migrations/0012_guild_comment.sql`, `0011_guild.sql`), where Free text is `bytea` with a
+  byte-length check.
+- `player_deleted.player` is `jsonb` holding the whole deleted row
+  (`db/migrations/0003_character_select.sql`). That is an accepted exception: nothing reads it
+  back, and typed columns would have to follow every later `player` migration.

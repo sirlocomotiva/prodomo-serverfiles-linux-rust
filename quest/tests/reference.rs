@@ -62,18 +62,26 @@ fn quest_list_compiles_to_the_reference_objects() {
 }
 
 #[test]
-fn every_script_but_change_empire_compiles_and_no_library_does() {
+fn every_script_compiles_and_no_library_does() {
     let qc = Compiler::new();
     let scripts = sources::scripts(&quest_dir()).unwrap();
     assert_eq!(scripts.len(), 51);
-    let broken = Path::new("_basic/change_empire.lua");
-    for path in scripts.iter().filter(|path| *path != broken) {
+    for path in &scripts {
         compile(&qc, path);
     }
-    // Line 132 closes the `if ret == 1` chain before its `elseif ret == 4`; legacy's `qc`
-    // aborts on it as well, so it never reached `object/`.
-    let source = fs::read(quest_dir().join(broken)).unwrap();
-    let error = qc.compile(&source).unwrap_err();
+    // Until ledger 680 line 132 of `_basic/change_empire.lua` closed the `if ret == 1` chain
+    // before its `elseif ret == 4`, and both `qc`s refused the file; the owner had the line
+    // removed. The broken text still fails the same way.
+    let fixed = fs::read(quest_dir().join("_basic/change_empire.lua")).unwrap();
+    let marker = b"\t\t\t\telseif ret == 4 then".as_slice();
+    let at = fixed
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("the fourth arm");
+    let mut broken = fixed[..at].to_vec();
+    broken.extend_from_slice(b"\t\t\t\tend\r\n");
+    broken.extend_from_slice(&fixed[at..]);
+    let error = qc.compile(&broken).unwrap_err();
     assert_eq!(
         error.to_string(),
         "line 139: expecting 'when' or 'function'"

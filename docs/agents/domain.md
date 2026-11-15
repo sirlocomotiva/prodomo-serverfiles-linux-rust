@@ -24,11 +24,12 @@ Single-context: one glossary and one ADR directory cover the whole Cargo workspa
 
 ## Existing project docs
 
-These predate `CONTEXT.md` and `docs/adr/` and stay authoritative:
+These stay authoritative beside `CONTEXT.md` and `docs/adr/`:
 
-- `docs/STATUS.md`: where the rewrite stands, the build order, and the owner decisions not already in an ADR. Treat each owner decision as an accepted ADR: never contradict one silently, and never reopen one without the owner.
+- `docs/STATUS.md`: where the Rewrite stands, the next steps in order, what waits on the owner, and the Divergence and Defect registers. Treat each owner decision as an accepted ADR: never contradict one silently, and never reopen one without the owner.
 - `docs/PROTOCOL_NOTES.md`: per-record wire findings and legacy defects. Read the relevant section before touching a codec.
 - `docs/REWRITE_LEDGER.md`: the append-only change record. It is history, not a glossary.
+- `docs/STATUS_HISTORY.md` and `docs/PROTOCOL_NOTES_HISTORY.md`: text moved out of the two pages above. History only; never a rule and never updated.
 
 ## Use the glossary's vocabulary
 

@@ -13,19 +13,20 @@ Read these before changing anything:
 | document | what it is for |
 |---|---|
 | `CONTEXT.md` | The glossary. Use its terms (Parity, Quirk, Defect, Divergence, Channel, Shared Channel, Warp, Pulse, Transfer, Operator, and the rest) and avoid the synonyms it lists. |
-| `docs/adr/` | The four architecture decisions. Do not work against one without a new ADR that supersedes it. |
-| `docs/STATUS.md` | Where the Rewrite stands, the build order, and the next step. |
+| `docs/adr/` | The eight architecture decisions and their dated amendments. Do not work against one without a new ADR that supersedes it. |
+| `docs/STATUS.md` | Where the Rewrite stands, the next steps in order, what waits on the owner, and the Divergence and Defect registers. It is not a changelog: a ledger section updates its numbers, its next steps and its registers, and never adds a per-section paragraph. `docs/STATUS_HISTORY.md` holds what it narrated until ledger 678. |
 | `legacy/README.md` | What the owner's deployment snapshot contains and what was removed. |
-| `docs/PROTOCOL_NOTES.md` | Per-record findings for the client wire codecs, legacy defects, and the verification lessons behind the rules below. Its DB-peer and GG sections are history. |
-| `docs/REWRITE_LEDGER.md` | Append-only record of every change and gate receipt. Append a new section for each change; never edit an old one. |
+| `docs/PROTOCOL_NOTES.md` | Per-record findings for the client wire codecs, legacy defects, and the verification lessons behind the rules below. A `client/...` path or a GG note in it is history; the sections about the retired DB-peer protocol and the old module lists are in `docs/PROTOCOL_NOTES_HISTORY.md`, which is never updated. |
+| `docs/REWRITE_LEDGER.md` | Append-only record of every change and gate receipt. Append a new section for each change; never edit an old one. A section is a slice of a package in `docs/STATUS.md`, not one `case` arm. Its receipt names the run with `DATABASE_URL` and the run without it, and lists every test that failed on the first run; "passes alone" does not close a failure. |
 
 Do not call a system ported because it compiles, has a type with the right name, or has a codec. A
 system is ported when its Parity inventory item has a passing scripted-client scenario.
 
 ## THE DECISIONS THAT SHAPE EVERYTHING
 
-Settled by the owner on 2026-09-26. The ADRs hold the reasoning. Do not reopen them without the
-owner.
+ADR-0001 to ADR-0005 were settled by the owner on 2026-09-26; ADR-0006, ADR-0007 and ADR-0008
+were accepted on 2026-11-15, with the amendments of the direction review (ledger 679). The ADRs
+hold the reasoning. Do not reopen them without the owner.
 
 - **ADR-0001: the client protocol is the only contract.** Only the client wire records (every CG
   and GC record, the framing, and the TEA boundaries) and the legacy Game data file formats must
@@ -44,10 +45,26 @@ owner.
   logout, Warp, Channel change, and shutdown.
 - **ADR-0004: quests run on Lua 5.1** through `mlua`, and `qc` is ported to Rust. All 51 quest
   scripts in `legacy/gamedata/locale/europe/quest` are live. A 5.0 idiom that 5.1 lacks gets a
-  shim; a quest source is never edited.
+  shim. A quest source is edited only to fix a mistake that stops a script (it does not compile,
+  or a path always raises): the smallest edit, listed in `legacy/README.md`, with its bytes and
+  hashes in the ledger, as for `_basic/change_empire.lua` (ledger 680). What a working path
+  says, gives or costs is content and is never edited.
 - **ADR-0005: the safebox and the mall belong to the account.** Their item rows carry
   `item.account_id`, never `owner_id`; a checkin or checkout is one Transfer between a character
   and its account. The `safebox` table holds only an argon2id password hash.
+- **ADR-0006: quests keep their dialect and load the way legacy loads them.** The `quest` crate
+  holds the legacy lexer, `qc`, the translator from the 5.0 dialect to Lua 5.1, the shims and the
+  loader. A quest API function no ported system backs stays a "not ported" error with a Parity
+  row.
+- **ADR-0007: the Rewrite ships with the test-server mode off.** `[game] test_server` defaults to
+  `false`, so game masters come only from `prodomo gm`. A new scenario runs in the shipped mode
+  and grants the GM level it needs.
+- **ADR-0008: Parity carries the game over; legacy's mistakes are fixed, not ported.** A bug, an
+  inconsistency, a vulnerability or a backdoor is fixed as the code is ported, without asking,
+  and recorded: a Defect row, a Divergence row when a player can tell, the ledger, and a test.
+  Odd but deliberate behaviour is a Quirk and stays. A difference the Rewrite's own design
+  causes is not an improvement: match legacy or argue the Divergence. A fix that changes
+  numbers every player meets is also listed for the owner, and the work does not wait.
 
 Further owner decisions, recorded in `CONTEXT.md` and `docs/STATUS.md`:
 
@@ -64,8 +81,15 @@ Further owner decisions, recorded in `CONTEXT.md` and `docs/STATUS.md`:
   `SHOWMETHEMONEY`, a Defect).
 - Listener ports are configurable and default to the legacy ones: auth 30001, and the Channel ports
   in `legacy/README.md` (Channel 1: 30003 and 30005, up to the Shared Channel at 30019).
-- Never reproduce a Defect. A bug an honest client can trigger is a Defect unless the owner names it
-  a Quirk. Every deliberate difference is a recorded Divergence.
+- Never reproduce a Defect, and never leave one "reproduced, provisional" (ADR-0008). A bug an
+  honest client can trigger is a Defect unless the owner names it a Quirk. Every deliberate
+  difference is a recorded Divergence.
+- The play test is the last step: the owner tests with the Reference client once every Parity
+  row is `ported`, `unused` or waiting on the owner (2026-11-15).
+- A character is saved every 10 seconds by default, not legacy's compiled 120 or the 180 of the
+  owner's files (2026-11-15, ADR-0003).
+- The `unused` rows stand without a row-by-row confirmation (2026-11-15). A row the play test
+  reaches is reopened.
 
 ## AGENT RUNTIME ENVIRONMENT
 
@@ -85,10 +109,11 @@ DATABASE_URL=postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo \
   cargo test --workspace --all-targets --locked --offline --no-fail-fast
 ```
 
-Each database test creates its own scratch database (`prodomo_test_*` or `prodomo_proc_*`), so the
-role needs `CREATEDB`, and drops it when the test ends, even on a panic. Tests may run in parallel
-against one server. After a run, `SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'`
-should return nothing.
+Each database test creates its own scratch database (`prodomo_test_*`, `prodomo_proc_*` or
+`prodomo_async_*`), so the role needs `CREATEDB`, and drops it when the test ends, even on a
+panic. Tests may run in parallel against one server, all with the same `DATABASE_URL`. After a
+run, `SELECT datname FROM pg_database WHERE datname ~ '^prodomo_(test|proc|async)_'` should
+return nothing ("TEST HYGIENE").
 
 The i686 cross compiler used by the width probe (`i686-linux-gnu-g++-12`) is not installed on every
 machine. Check before relying on it, and say so in the receipt when a width could not be measured.
@@ -98,8 +123,7 @@ when one is missing, say in the receipt that its gate did not run, and check for
 
 ## WORKSPACE
 
-The layout below is the target of build step 1 (see `docs/STATUS.md`). `docs/STATUS.md` records which
-parts exist today.
+The workspace has nine crates:
 
 | crate | contents |
 |---|---|
@@ -118,6 +142,20 @@ parts exist today.
 The Parity inventory is `.scratch/parity/` (`spec.md` explains it). Its generated tables come from
 `python3 .scratch/parity/tools/gen.py`; edit only their `status`, `scenario`, and `note` cells. When a
 change ports a row, set it to `ported`, name the scenario, and add the scenario in the same change.
+
+Outside the crates:
+
+| path | contents |
+|---|---|
+| `.scratch/migration/` | The agents' working files: the goal (`migration-goal.md`), where the work stands (`progress.md`), and the owner's questions and standing decisions (`owner-questions.md`). They are tracked and go into each section's commit. |
+| `.scratch/parity/` | The Parity inventory and its generator. |
+| `.scratch/probes/` | The width and enumeration probes that code comments cite, by ledger section; its `README.md` says how to build one. |
+| `.scratch/<feature>/issues/` | Open issues (see "Agent skills"). |
+| `.scratch/tmp/` | Ignored. A session's scratch output: gate receipts, logs, a copy of the tree for a mutation sweep. Never cite a file there from code or from a tracked document: it exists on one machine only. Delete what a session put there when its section lands. |
+| `tools/gates.sh` | Runs every gate below and writes the receipt: `tools/gates.sh <output-dir>`. |
+| `tools/mutate.py` | The mutation sweep driver; its header says how to run it on a copy of the tree. |
+| `compose.yaml`, `Dockerfile`, `config/prodomo.toml.example` | The play-test kit and the commented configuration. |
+| `legacy/`, `server/` | The owner's deployment snapshot and the frozen legacy source ("LEGACY REFERENCE"). |
 
 ## BUILD AND TEST
 
@@ -140,6 +178,38 @@ The toolchain is Rust 1.85.1. Adding or upgrading a dependency needs an online `
 the owner first, keep new crates compatible with 1.85, record the fetch in the ledger, and run every
 gate offline afterwards. Record a new receipt in the ledger whenever the test counts change.
 
+`tools/gates.sh <output-dir>` runs all six, the tests both without and with `DATABASE_URL`, and
+writes `summary.txt` with every failed test by name, everything the tests left behind, and the
+number of `#[allow]` attributes, which may not rise; a ledger receipt is that summary.
+
+## TEST HYGIENE
+
+A test run leaves nothing behind: no scratch database, no server process, no file in the
+temporary folder, no core file. Ledger 683 found 32,472 scenario directories, 15 databases and a
+server three days old on the test machine. A test process that is killed runs no `Drop`, so
+cleaning up in `Drop` alone is not enough.
+
+- **A scratch database is named by `db/tests/support/lease.rs`** (`lease::database_name`), never
+  by hand. The name carries its process's owner token, and the process holds an advisory lock on
+  that token while it lives; the next test process drops every database whose lock is free.
+- **A scratch directory comes from `parity::scratch`** (`ScratchDir`, or `unique_path` for a
+  caller with its own guard), never from `std::env::temp_dir()` joined by hand. The name carries
+  the process ID; the next test process kills what still runs in a dead process's directory and
+  removes it. `gamedata` and `quest` do not depend on `parity`; their unit tests remove their
+  own files, and a new one must too.
+- **A test that starts a process owns it**: a guard kills and waits for it in `Drop`, as
+  `parity::Server` does.
+- **`tools/gates.sh` fails on anything left.** It gives the tests a temporary folder of the
+  run's own, so its `temp-files`, `servers`, `scratch-dbs` and `cores` lines count what that
+  run left; each must be 0. Do not run it beside another test run on the same database server.
+- **Stop a test run with Ctrl-C or SIGTERM to `cargo`, not `kill -9` on a test binary**; if one
+  was killed anyway, any next test run cleans up after it.
+- `PRODOMO_KEEP_SCENARIO_ROOT=1` keeps each scenario server's directory (log and configuration)
+  for a look; the next test process removes it.
+- A session's own scratch output goes to `.scratch/tmp/`, not to `/tmp`, and is deleted when its
+  section lands. A copy of the tree (for a mutation sweep) is removed when the sweep ends; a Git
+  worktree is removed with `git worktree remove`.
+
 ## PROTOCOL COVERAGE
 
 Key every coverage metric on the **wire byte**, never on an identifier name.
@@ -147,7 +217,7 @@ Key every coverage metric on the **wire byte**, never on an identifier name.
 | direction | registered | implemented | missing |
 |---|---|---|---|
 | client to game | 92 | 91 | 1 (`KEY_AGREEMENT`, dead: `_IMPROVED_PACKET_ENCRYPTION_` is never defined) |
-| game to client | 134 | 119 | 15 (7 fixed-size, 8 dynamic) |
+| game to client | 134 | 125 | 9 (5 fixed-size, 4 dynamic; `REFINE_INFORMATION` and `SYNC_POSITION` have codecs and stale flags, `docs/STATUS.md` C8) |
 
 - The game-to-client registration table was taken from the client's `PythonNetworkStream.cpp`
   while the client source was in the repository. It is recorded in `protocol/src/gc_inventory.rs`.
@@ -346,11 +416,17 @@ final check.
   asks or a plan they confirmed includes the commit.
 - Never run an unrestricted `git clean`, `git checkout .`, or `git stash -u`.
 - Keep the legacy C++ source until the play test demonstrates Parity.
-- Generated output is disposable: root `target/` and enumerated `Debug`/`Release` build trees.
-- `.gitignore` re-includes directories under `server/extern/include/` whose names (`debug/`,
-  `log/`, `x86/`, `win32/`, `arm/`) match build-output rules. Keep that exception when editing ignore
-  rules.
-- `.overlord/` is an ignored agent runtime directory. Do not delete it wholesale when it exists.
+- Generated output is disposable: root `target/`, the root `log/` folder a locally run server
+  writes, and `.scratch/tmp/`.
+- A research note, a survey, a finished issue or a one-off script is not kept in the tree. Its
+  findings go into the ledger section, `docs/PROTOCOL_NOTES.md` or a code comment, and the file is
+  deleted in the change that finishes the work; Git keeps the rest. A probe that code cites goes
+  to `.scratch/probes/`. Nothing new goes at the repository root.
+- `.gitignore` names no build-output directory (`debug/`, `log/`, `x86/`, `bin/`, `obj/`): nothing
+  is built in `server/`, and `server/extern/include/` has tracked directories with such names.
+  Do not add such a rule.
+- `.overlord/` is an ignored agent runtime directory. Do not delete it wholesale while a session
+  uses it; a worktree in it whose work has landed is removed with `git worktree remove`.
 - Stray `.DS_Store` files are ignored; do not add them to Git.
 - Before a large edit to a Rust file, make sure it is committed or copied aside. An edit once left
   `db-server/src/main.rs` truncated while it was untracked, and no copy could restore it.
@@ -364,7 +440,8 @@ final check.
 ### Issue tracker
 
 Issues and specs are local markdown files under `.scratch/<feature>/`. See
-`docs/agents/issue-tracker.md`.
+`docs/agents/issue-tracker.md`. An issue whose work has landed is deleted in that change; a
+`ready-for-agent` file is always work still to do.
 
 ### Triage labels
 

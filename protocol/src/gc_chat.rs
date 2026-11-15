@@ -31,7 +31,7 @@
 //!
 //! The 10-byte fixed part was measured by compiling the verbatim struct body
 //! with `g++ -m32` under `static_assert` next to the repository's known-width
-//! controls; the probe is in `.scratch/ledger187/root-probe/`. A 64-bit reading
+//! controls; the probe is in `.scratch/probes/187/root-probe/`. A 64-bit reading
 //! would be 10 here only by luck, so the control that pins a packed two-`long`
 //! struct at 8 bytes is what makes the number trustworthy.
 //!

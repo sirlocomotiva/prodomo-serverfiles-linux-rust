@@ -3,8 +3,10 @@
 A Linux-native Rust rewrite of the Prodomo Metin2 server. The goal is that the unmodified Prodomo
 5.4 client, pointed at this server, plays exactly as it does against the legacy C++ server.
 
-**It is not playable yet.** The client wire codecs and descriptor reducers are built and tested, but
-no client can log in. See [`docs/STATUS.md`](docs/STATUS.md) for where it stands and what comes next.
+**It has not been played with the real client yet.** The scripted client of the test suite logs
+in, enters the world, fights, trades and runs quests against the real binary; the owner's play
+test with the Prodomo client comes once the remaining systems are closed. See
+[`docs/STATUS.md`](docs/STATUS.md) for where it stands and what comes next.
 
 ## How it differs from the legacy server
 
@@ -15,8 +17,8 @@ Only what the client can see has to match. Everything behind the client protocol
 - **PostgreSQL 18, starting empty.** Passwords are hashed with argon2id. Trades, shop sales, and every
   other exchange of items or gold commit in one transaction, so a crash can never duplicate or lose
   an item.
-- **Lua 5.1 for quests**, with the quest compiler ported to Rust. The quest sources are used
-  unchanged.
+- **Lua 5.1 for quests**, with the quest compiler ported to Rust. The quest sources are used as
+  they are.
 - **TOML configuration**, with the legacy ports as defaults.
 
 The reasons are in [`docs/adr/`](docs/adr/).
@@ -25,16 +27,19 @@ The reasons are in [`docs/adr/`](docs/adr/).
 
 | path | contents |
 |---|---|
-| `protocol/`, `common/`, `net/`, `db/`, `gamedata/`, `world/`, `quest/`, `prodomo/` | The Rust workspace. `prodomo/` is the one server binary; see `AGENTS.md` for what each crate holds. |
+| `protocol/`, `common/`, `net/`, `db/`, `gamedata/`, `world/`, `quest/`, `prodomo/`, `parity/` | The Rust workspace. `prodomo/` is the one server binary and `parity/` the scripted client its scenarios use; see `AGENTS.md` for what each crate holds. |
 | `config/prodomo.toml.example` | The commented configuration, with the legacy ports. Channel 1 and the Shared Channel run; Channels 2-4 are commented out. |
 | `legacy/` | The owner's legacy Game data (protos, maps, quests, locale strings, drop and shop tables), configuration, and SQL schema and table rows. See [`legacy/README.md`](legacy/README.md). |
 | `server/` | The frozen legacy C++ server source. It is the behavioural reference and is never modified or built. |
+| `compose.yaml`, `Dockerfile` | PostgreSQL 18 and the server together, for Podman or Docker. |
+| `tools/gates.sh` | Runs every gate below and writes a summary: `tools/gates.sh <output-dir>`. |
+| `.scratch/` | Working files that are tracked on purpose: the Parity inventory, the agents' goal and progress, the owner's questions, the width probes and open issues. |
 
 ## Documentation
 
 | document | read it for |
 |---|---|
-| [`docs/STATUS.md`](docs/STATUS.md) | Where the rewrite stands, the build order, and the next step. Start here. |
+| [`docs/STATUS.md`](docs/STATUS.md) | Where the rewrite stands, the next steps in order, and what waits on the owner. Start here. |
 | [`CONTEXT.md`](CONTEXT.md) | The glossary: Parity, Quirk, Defect, Divergence, Channel, Warp, Pulse, and the rest. |
 | [`docs/adr/`](docs/adr/) | The architecture decisions and why they were made. |
 | [`AGENTS.md`](AGENTS.md) | Rules for anyone changing the code: build gates, verification method, compatibility and security rules. |
@@ -61,22 +66,43 @@ These gates need no database. Tests that do need one run only when `DATABASE_URL
 PostgreSQL 18 server whose role may create databases; each test creates and drops its own:
 
 ```bash
-DATABASE_URL=postgres://prodomo:change-me@127.0.0.1:55432/prodomo \
+DATABASE_URL=postgres://prodomo:CHANGE-ME@127.0.0.1:55432/prodomo \
   cargo test --workspace --all-targets --locked --offline --no-fail-fast
 ```
 
 ## Running it
 
-The binary starts, binds its ports, prepares the store, and shuts down cleanly, but no client can
-log in yet.
+### With Compose
+
+`compose.yaml` starts PostgreSQL 18 and the server together, with Podman or Docker:
+
+```bash
+printf 'POSTGRES_PASSWORD=%s\n' 'CHANGE-ME' > .env      # pick your own password
+cp config/prodomo.toml.example prodomo.toml
+# in prodomo.toml set public_ip to this machine's address, and
+# [store].url to postgres://prodomo:CHANGE-ME@postgres:5432/prodomo
+podman compose up -d --build                            # or: docker compose up -d --build
+podman compose run --rm prodomo account create alice    # asks for the password twice
+podman compose run --rm prodomo gm grant alice Admin implementor
+podman compose logs -f prodomo
+```
+
+The image build fetches the locked crates once. `legacy/` is mounted read-only, the store keeps
+its data in the `pgdata` volume, and the server's log files go to the `logs` volume. The
+published ports are the legacy ones the client's `serverinfo` names: 30001 (auth), 30003 and
+30005 (Channel 1) and 30019 (the Shared Channel). `podman compose stop` or `podman compose down`
+stops the server with SIGTERM, and it saves every character before it exits. Do not use
+`podman compose restart`: in the test of ledger 680 it ended the server without the SIGTERM.
+
+### From the source tree
 
 Start PostgreSQL 18 (pick your own password; this one is only an example):
 
 ```bash
-podman run -d --name prodomo-pg18 -e POSTGRES_USER=prodomo -e POSTGRES_PASSWORD=change-me \
+podman run -d --name prodomo-pg18 -e POSTGRES_USER=prodomo -e POSTGRES_PASSWORD=CHANGE-ME \
   -e POSTGRES_DB=prodomo -p 127.0.0.1:55432:5432 postgres:18
 cp config/prodomo.toml.example prodomo.toml
-# set [store].url to postgres://prodomo:change-me@127.0.0.1:55432/prodomo
+# [store].url in the example already names this container; put your password in it
 cargo run -p prodomo -- --config prodomo.toml serve
 ```
 
@@ -116,7 +142,7 @@ prodomo gm revoke Admin
 - A balance never goes below zero or above its limit; a change that would is refused and nothing
   is written.
 
-The play test will use a `compose.yaml` that starts PostgreSQL 18 and `prodomo` together.
+Under Compose, run each of these as `podman compose run --rm prodomo account ...`.
 
 ## Contributing
 

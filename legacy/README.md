@@ -42,6 +42,10 @@ partial rebuild: without `_basic` nobody could create a guild. `object/` is the 
 for those 16, kept as a reference for the Rust `qc` port. No script uses a `define`, so the
 `pre_qc.py` preprocessor was a no-op and is removed.
 
+One file differs from the deployment: `_basic/change_empire.lua` had a stray `end` on line 132
+that made both the legacy `qc` and the Rust one refuse it. The owner had the line removed on
+2026-11-15 (ADR-0004, ledger 680); no other byte of the file changed.
+
 ## Encodings
 
 Leave every file's bytes as they are. The proto name column is Korean in a legacy code page,

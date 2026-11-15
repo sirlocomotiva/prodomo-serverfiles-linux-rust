@@ -37,7 +37,7 @@
 //! 4 + 4 * 4 + 4 = 24 bytes on i386, where `long` is 4 bytes. The three-byte
 //! header is 1 + 2, both measured by compiling the verbatim struct bodies for i386
 //! (`g++ -m32`, next to the 8-byte packed two-`long` control; the probe is in
-//! `.scratch/probe475/`). The element count is implicit: `(size - 3) / 24`, and a
+//! `.scratch/probes/475/`). The element count is implicit: `(size - 3) / 24`, and a
 //! `size` that is not `3 + 24 * count` is malformed.
 
 use std::fmt;

@@ -21,7 +21,7 @@
 //! compiler's own numbering was printed. The test pins all 189 of them, so a mistranscribed
 //! constant fails the build. A deployment that changes a switch must regenerate this table,
 //! because legacy would then renumber the slots it sends. The probe that measures the table sits
-//! with this change's research in `.scratch/ledger187/point_enum.cpp`: the verbatim enum body,
+//! with this change's research in `.scratch/probes/187/point_enum.cpp`: the verbatim enum body,
 //! the seven `#define`s this tree compiles with, and a loop that prints `name value` for every
 //! enumerator.
 //!
@@ -633,7 +633,7 @@ mod tests {
     /// printed. That matters because the enumerator mixes auto-incremented members with
     /// explicit values (`POINT_ENERGY = 128`, `POINT_GAYA = 207`) and with members behind
     /// `#ifdef` blocks, so counting the live members gives a different, wrong answer. The
-    /// probe is `.scratch/ledger187/point_enum.cpp`.
+    /// probe is `.scratch/probes/187/point_enum.cpp`.
     ///
     /// Each name is paired with the constant that must carry it, so one test below covers all
     /// 189 and a mistranscribed constant fails the build.

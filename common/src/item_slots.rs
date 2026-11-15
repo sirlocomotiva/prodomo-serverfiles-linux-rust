@@ -69,7 +69,7 @@
 //! [`crate::features::EXTENDED_SAFEBOX`], [`crate::features::ATTR_6TH_7TH`],
 //! [`crate::features::AURA_SYSTEM`], and [`crate::features::ENABLE_SWITCHBOT`] -- and the
 //! compiler's own numbering was printed. The probe is
-//! `.scratch/probe194/slot_space.cpp`; it re-checks every constant against an
+//! `.scratch/probes/194/slot_space.cpp`; it re-checks every constant against an
 //! independently written hand sum and against the contiguity of the ranges, so a
 //! mistranscribed constant fails the build rather than quietly shifting every
 //! later range. A deployment that changes a switch must regenerate this module,
@@ -607,7 +607,7 @@ mod tests {
     /// `BELT_INVENTORY` 7 and `GROUND` 8 where the compiler puts them at 9 and
     /// 10. That is not a hypothetical -- the table this replaces did exactly that,
     /// omitting the three gated members and misnumbering both. The probe is
-    /// `.scratch/probe194/slot_space.cpp`.
+    /// `.scratch/probes/194/slot_space.cpp`.
     const PINNED_WINDOWS: [(&str, u8); 11] = [
         ("RESERVED_WINDOW", 0),
         ("INVENTORY", 1),

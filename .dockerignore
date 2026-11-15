@@ -1,0 +1,15 @@
+# The image build needs the Rust workspace only (see Dockerfile).
+*
+!Cargo.toml
+!Cargo.lock
+!protocol
+!common
+!net
+!db
+!gamedata
+!world
+!quest
+!prodomo
+!parity
+**/target
+**/prodomo.toml

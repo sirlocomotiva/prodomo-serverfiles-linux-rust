@@ -31,8 +31,9 @@ game_tables = "legacy/sql/gamedata"
 
 [store]
 # PostgreSQL 18. The password in this URL is never logged. No connection is opened until the
-# first query.
-url = "postgres://prodomo:CHANGE-ME@127.0.0.1:5432/prodomo"
+# first query. This address is the README's Podman container; under `compose.yaml` the host is
+# `postgres` and the port 5432: postgres://prodomo:CHANGE-ME@postgres:5432/prodomo
+url = "postgres://prodomo:CHANGE-ME@127.0.0.1:55432/prodomo"
 max_connections = 8
 
 [auth]
@@ -145,8 +146,10 @@ item_id_range = [100000000, 200000000]
 # The values set here are the ones the owner's legacy CONFIG files set, identical on every Core.
 view_range = 10000
 # In seconds. Legacy multiplied these by PASSES_PER_SEC while parsing; the Pulse rate is fixed at
-# 25 per second (ADR-0002), so PASSES_PER_SEC is gone.
-save_event_second_cycle = 180
+# 25 per second (ADR-0002), so PASSES_PER_SEC is gone. The save cycle is how much unsaved play a
+# crash can lose (points, experience and position; items and gold are written when they move).
+# The owner's legacy files said 180; ADR-0003 bounds it to a few seconds (owner, 2026-11-15).
+save_event_second_cycle = 10
 ping_event_second_cycle = 180
 max_level = 120
 # CHANGE_ATTR_TIME_LIMIT: 0
@@ -174,8 +177,9 @@ mantie_permanent = true
 # default is 251.
 player_delete_level_limit = 120
 # The legacy CONFIG files never set TEST_SERVER, and legacy defaults it to on (config.cpp:72), so
-# the legacy deployment ran in test-server mode. It is written out here so the choice is visible.
-test_server = true
+# the legacy deployment ran in test-server mode, where every character is a game master. The
+# Rewrite ships it off (owner, 2026-11-15): game masters come only from `prodomo gm`.
+test_server = false
 # Characters in game above which the Channel status list shows busy (2) and full (3). Legacy read
 # them from the state_user_count file, which was empty, so the compiled-in values applied.
 busy_user_count = 650

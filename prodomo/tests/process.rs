@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use support::ScratchDatabase;
 
@@ -57,11 +57,7 @@ impl Drop for ProcessGuard {
 }
 
 fn unique_test_root() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should follow the Unix epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("prodomo-process-{}-{nonce}", std::process::id()))
+    parity::scratch::unique_path("process")
 }
 
 /// The keys naming the owner's legacy Game data folder and table dumps, read in place.

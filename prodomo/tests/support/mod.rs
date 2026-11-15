@@ -2,20 +2,23 @@
 
 //! A PostgreSQL database for one test, for the tests that drive the real binary.
 //!
-//! `db/tests/accounts.rs` has the async twin of this helper; the process tests are synchronous.
+//! `db/tests/support/mod.rs` has the async twin of this helper; the process tests are
+//! synchronous. Both name their databases through `db/tests/support/lease.rs`, which is how
+//! a database left by a killed test process is dropped by the next one.
 //!
 //! Every test binary that says `mod support;` compiles this file for itself and uses a
 //! different part of it, so a helper unused by one binary is a warning rather than a
 //! signal. `#![allow(dead_code)]` is the honest response: the items are used, just not
 //! everywhere.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "../../../db/tests/support/lease.rs"]
+mod lease;
 
 use db::sqlx::postgres::{PgColumn, PgRow};
 use db::sqlx::{self, Column as _, Connection, PgConnection, Row as _};
 
-/// A database created for one test and dropped when the test ends, even on a panic.
+/// A database created for one test and dropped when the test ends, even on a panic. One
+/// left by a test process that was killed is dropped by the next process ([`lease`]).
 pub struct ScratchDatabase {
     admin_url: String,
     name: String,
@@ -27,18 +30,8 @@ impl ScratchDatabase {
     ///
     /// Nothing is migrated: the binary under test does that.
     pub fn create() -> Option<Self> {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
         let admin_url = database_url()?;
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock should follow the Unix epoch")
-            .subsec_nanos();
-        // Letters, digits, and underscores only, so the name needs no quoting.
-        let name = format!(
-            "prodomo_proc_{}_{}_{nanos}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        );
+        let name = lease::database_name("prodomo_proc", &admin_url);
         execute(&admin_url, &format!("CREATE DATABASE {name}"))
             .expect("the test role should be allowed to create databases");
         let url = with_database(&admin_url, &name);
@@ -64,20 +57,10 @@ impl ScratchDatabase {
     ///
     /// [`Self::create`] is synchronous because the process tests are synchronous, and
     /// it starts a runtime with `block_on`. Doing that inside a `#[tokio::test]` panics,
-    /// so the async tests call this instead. The database name comes from the same
-    /// counter, so the two paths cannot collide.
+    /// so the async tests call this instead.
     pub async fn create_async() -> Option<Self> {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
         let admin_url = database_url()?;
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock should follow the Unix epoch")
-            .as_nanos();
-        let name = format!(
-            "prodomo_async_{}_{}_{nanos}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        );
+        let name = lease::database_name("prodomo_async", &admin_url);
         sqlx::query(&format!("CREATE DATABASE {name}"))
             .execute(
                 &mut PgConnection::connect(&admin_url)

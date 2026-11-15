@@ -25,19 +25,22 @@ _Avoid_: port, new server, Rust server (when meaning the whole system)
 
 **Parity**:
 The Rewrite behaves as the Legacy server does in every way the Reference client can observe, apart
-from Defects. Internal mechanisms (storage, process layout, inter-server messages) are not part of
-Parity.
+from Defects. Parity is how the Rewrite shows that it carries the actual game over; it is not a
+duty to copy the Legacy server's mistakes. Internal mechanisms (storage, process layout,
+inter-server messages) are not part of Parity.
 _Avoid_: 1-1, compatibility, bug-for-bug
 
 **Quirk**:
-Legacy behaviour that an unmodified Reference client can reach in normal play and that the Rewrite
-reproduces exactly, even when it looks odd.
+Legacy behaviour that an unmodified Reference client can reach in normal play, that is odd but
+deliberate, and that the Rewrite reproduces exactly.
 _Avoid_: bug (when meaning a Quirk), feature
 
 **Defect**:
-Legacy behaviour the Rewrite never reproduces: crashes, memory corruption, data loss, item
-duplication, injection, and anything reachable only by a modified client. A bug an honest client
-can trigger is a Defect unless the owner names it a Quirk.
+Legacy behaviour the Rewrite never reproduces, because it is a mistake: a crash, memory
+corruption, data loss, item duplication, injection, a backdoor, a vulnerability, anything
+reachable only by a modified client, or an inconsistency between what the code plainly means to
+do and what it does. A Defect is fixed as it is found, without asking, and recorded. A bug an
+honest client can trigger is a Defect unless the owner names it a Quirk.
 _Avoid_: legacy bug, parity bug
 
 **Divergence**:

@@ -31,7 +31,7 @@
 //! the header and 4 + 4 + 12 + 4 + 4 = 28 for one element. Both numbers were
 //! measured by compiling the verbatim struct bodies with `g++ -m32` under
 //! `static_assert`, alongside the repository's known-width controls. The probe
-//! lives in `.scratch/ledger187/root-probe/`.
+//! lives in `.scratch/probes/187/root-probe/`.
 //!
 //! # Scope
 //!

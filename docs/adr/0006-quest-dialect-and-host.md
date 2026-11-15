@@ -1,5 +1,8 @@
 # Quests keep their dialect and load the way legacy loads them
 
+Status: accepted (owner, 2026-11-15; proposed in ledger 227, and the quest runtime has run on it
+since)
+
 ADR-0004 puts quests on Lua 5.1 and keeps their sources unchanged. The sources are not plain
 Lua 5.0: legacy compiles them and loads every library with its own Lua 5.0 lexer
 (`server/server/liblua/llex.c`), which adds the reserved words `quest`, `state`, `with` and
@@ -98,3 +101,14 @@ on it (`expecting 'when' or 'function'`, line 139). It is not in `quest_list` an
   other 34 and refuse `change_empire.lua`, and load every compiled script and every library.
 - The first client-visible trigger is a quest `chat` menu on an NPC click, before its shop.
 - Every API function a ported system cannot back stays a "not ported" error with a STATUS row.
+
+## Amendments
+
+- **2026-11-15 (direction review, ledger 679).** The host sets no instruction limit and no memory
+  limit (`quest/src/host.rs` installs no `mlua` hook). A script that never returns stops the one
+  game thread, and with it every Channel (ADR-0002); `catch_unwind` does not catch a hang. The
+  host gets an instruction-count hook that ends such a run as a script error, before the play
+  test.
+- `quest/src/ox_quiz.rs` reads `oxquiz.lua` in a Lua state of its own (`Lua::new()`, with `mlua`'s
+  default libraries, `io` and `os` among them) and outside the translator. The file is Game data,
+  not player input. It moves onto the host's library set when the reader is next touched.

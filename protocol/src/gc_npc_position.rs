@@ -42,7 +42,7 @@
 //! The five-byte header is 1 + 2 + 2. Both were measured by compiling the
 //! verbatim struct bodies with `g++ -m32` under `static_assert`, next to the
 //! repository's known-width controls; the probe is in
-//! `.scratch/ledger187/root-probe/`.
+//! `.scratch/probes/187/root-probe/`.
 
 use std::fmt;
 

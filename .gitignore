@@ -5,105 +5,50 @@
 .codegraph
 
 # Scratch output and nested experiment clones: local only, never committed.
-# The tracked notes under .scratch/ stay in git.
+# Everything else under .scratch/ is tracked.
 /.scratch/tmp/
 
-# The scratch commit-message drafts the session writes at the root: local only.
-/COMMIT_MSG_*.txt
+# A compiled probe: only the sources and the README of .scratch/probes/ are tracked.
+/.scratch/probes/**
+!/.scratch/probes/**/
+!/.scratch/probes/**/*.cpp
+!/.scratch/probes/README.md
 
-# Superseded planning state
-/.sisyphus/
+# The scratch commit-message drafts a session writes at the root: local only.
+/COMMIT_MSG_*.txt
 
 # Rust/Cargo build output
 /target/
 
+# The server's log folder when `prodomo` runs from the source tree (`LOG_DIR` defaults to ./log).
+/log/
+
 # Local server configuration; it holds the real store password. Not anchored, so a copy under
 # config/ or a scratch tree is ignored too. config/prodomo.toml.example stays tracked.
 prodomo.toml
+# The store password `compose.yaml` reads.
+/.env
 
-# OS metadata
+# OS and editor metadata
 .DS_Store
 Thumbs.db
+.idea/
+.vs/
+.vscode/
 
-# Patch, backup and crash-dump leftovers
+# Patch, backup, log and crash-dump leftovers
 *.orig
 *.rej
 *.bak
 *.swp
+*.log
+*.tmp
 *.core
 core.[0-9]*
-
-# IDE/editor settings
-.vs/
-.idea/
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-*.rsuser
-*.VC.db
-*.VC.VC.opendb
-*.sdf
-*.opensdf
-*.opendb
-*.ncb
-*.cachefile
-*.vsidx
-ipch/
-*.ipch
-*.vcxproj.user
-
-# Build output directories
-**/[Dd]ebug/
-**/[Dd]ebugPublic/
-**/[Rr]elease/
-**/[Rr]eleases/
-**/x64/
-**/x86/
-**/[Ww][Ii][Nn]32/
-**/[Aa][Rr][Mm]/
-**/[Aa][Rr][Mm]64/
-**/[Bb]in/
-**/[Oo]bj/
-**/[Oo]ut/
-**/[Ll]og/
-**/[Ll]ogs/
-**/bld/
-
-# Build artifacts
-*.obj
-*.iobj
-*.pch
-*.pdb
-*.ipdb
-*.idb
-*.ilk
-*.tlog
-*.tlog/
-*.lastbuildstate
-*.Build.CppClean.log
-*.FileListAbsolute.txt
-*.log
-*.rsp
-*.pgc
-*.pgd
-*.tmp
-*.tmp_proj
-*.sbr
-*.tlb
-*.tli
-*.tlh
-*.aps
 
 # Python artifacts
 __pycache__/
 *.pyc
 
-# Compiled probe binary; chat_enum.cpp beside it rebuilds it
-/.scratch/ledger188/chat_enum
-
-# Bundled third-party headers contain directories named debug/, log/, x86/, win32/ and arm/
-# that the build-output rules above would otherwise hide. Re-include those directories only;
-# the file-level rules above (for example .DS_Store) still apply inside them.
-!/server/extern/include/**/
-!/client/Extern/include/**/
+# No rule here names a build-output directory (debug/, log/, x86/, bin/, obj/ and the like):
+# nothing is built in server/, and server/extern/include/ has tracked directories with such names.

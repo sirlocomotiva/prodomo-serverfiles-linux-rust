@@ -386,11 +386,15 @@ pub struct GameSettings {
     pub operator_console: Option<PathBuf>,
 
     /// Seconds between character saves. Legacy multiplied the configured value by
-    /// `passes_per_sec` when parsing; here the value stays in seconds.
+    /// `passes_per_sec` when parsing; here the value stays in seconds. The default is 10, not
+    /// legacy's cycle: ADR-0003 bounds what a crash may lose to a few seconds (owner,
+    /// 2026-11-15, ledger 679).
     pub save_event_second_cycle: u32,
     /// Seconds between pings. Stored in seconds, like `save_event_second_cycle`.
     pub ping_event_second_cycle: u32,
-    /// Test-server mode. Legacy defaults to on (`config.cpp:72`).
+    /// Test-server mode. Legacy defaults to on (`config.cpp:72`), which made every character
+    /// of the owner's deployment a game master; the Rewrite defaults to off, a Divergence
+    /// (owner, 2026-11-15, ledger 679).
     pub test_server: bool,
     /// Whether guild marks are served.
     pub guild_mark_server: bool,
@@ -535,9 +539,9 @@ impl Default for GameSettings {
             adminpage_ips: Vec::new(),
             adminpage_password: Secret::default(),
             operator_console: None,
-            save_event_second_cycle: 120,
+            save_event_second_cycle: 10,
             ping_event_second_cycle: 60,
-            test_server: true,
+            test_server: false,
             guild_mark_server: true,
             guild_mark_min_level: 3,
             no_wander: false,

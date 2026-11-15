@@ -147,8 +147,8 @@
 //!
 //! # The byte-20 record does not match the client
 //!
-//! `docs/PROTOCOL_NOTES.md:461` records, for byte 20, that the client has no
-//! `HEADER_GC_ITEM_DEL` at all and that its only 20 is `HEADER_GC_ITEM_SET`,
+//! `docs/PROTOCOL_NOTES.md` ("Game-to-client module notes") records, for byte 20, that the
+//! client has no `HEADER_GC_ITEM_DEL` at all and that its only 20 is `HEADER_GC_ITEM_SET`,
 //! dispatched to the item-**set** handler. It also recorded that whether the two
 //! widths match "is not determined", because the client's own
 //! `ITEM_SOCKET_SLOT_MAX_NUM` is 3 or 6 at `GameType.h:550-552`.

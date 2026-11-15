@@ -706,11 +706,11 @@ fn create_account(server: &Server, login: &str) {
 fn create_account_before_boot(database: &ScratchDatabase, login: &str) {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
-    // Per database, not per process: the tests run in threads of one binary, so a
-    // PID-and-login name made two concurrent pre-boot commands share one config and
-    // race their database URLs (the guild war scenarios all make `alice`).
-    let dir = std::env::temp_dir().join(format!("prodomo-preboot-{}", database.name()));
-    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    // A directory per call: the tests run in threads of one binary, and two pre-boot
+    // commands sharing one config raced their database URLs (the guild war scenarios all
+    // make `alice`).
+    let dir = parity::scratch::ScratchDir::new("preboot");
+    let dir = dir.path();
     std::fs::write(
         dir.join("prodomo.toml"),
         format!(
@@ -725,7 +725,7 @@ fn create_account_before_boot(database: &ScratchDatabase, login: &str) {
         .arg("--config")
         .arg(dir.join("prodomo.toml"))
         .args(["account", "create", login])
-        .current_dir(&dir)
+        .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -735,7 +735,6 @@ fn create_account_before_boot(database: &ScratchDatabase, login: &str) {
     drop(input.write_all(format!("{password}\n").as_bytes()));
     drop(input);
     let output = child.wait_with_output().expect("the command ends");
-    std::fs::remove_dir_all(&dir).ok();
     assert!(
         output.status.success(),
         "account create failed: {}",
@@ -2612,10 +2611,11 @@ fn read_login_event_past_cooldown(keyed: &mut Keyed) {
     read_login_update(keyed);
 }
 /// The quest numbers of the letters a login sends: the quests of `quest_list`, then every
-/// other script by path, numbered as `qc` met their names.
-const QUEST_ATTR67ADD: u16 = 40;
-const QUEST_SASH: u16 = 44;
-const QUEST_YOHARA: u16 = 49;
+/// other script by path, numbered as `qc` met their names. Each is one more than before
+/// ledger 680, when `_basic/change_empire.lua` began to load as quest 22.
+const QUEST_ATTR67ADD: u16 = 41;
+const QUEST_SASH: u16 = 45;
+const QUEST_YOHARA: u16 = 50;
 
 /// `HEADER_GC_TARGET_DELETE` (`G/packet.h`): the header and the target's `lID`.
 const GC_QUEST_TARGET_DELETE: u8 = 124;
@@ -6365,14 +6365,18 @@ fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
     add_characters(&database);
     let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
 
-    alice.send_record(&client_script_button(40 | SELECT_QUEST));
+    alice.send_record(&client_script_button(
+        u32::from(QUEST_ATTR67ADD) | SELECT_QUEST,
+    ));
     assert_eq!(
         alice.read_game(),
         server_script(1, &[ATTR67ADD_INFO, b"[DONE]"].concat()),
         "the window's entry runs the quest's info page"
     );
     alice.quiet("the page is the press's one answer");
-    alice.unanswered(&client_script_button(40 | SELECT_QUEST));
+    alice.unanswered(&client_script_button(
+        u32::from(QUEST_ATTR67ADD) | SELECT_QUEST,
+    ));
     alice.unanswered(&client_script_button(999 | SELECT_QUEST));
     // `dungeoninfo`, quest 1, ran at the login and has a `button` but no `info`.
     alice.unanswered(&client_script_button(1 | SELECT_QUEST));
@@ -12025,6 +12029,18 @@ fn an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off() {
     drop(alpha);
 }
 
+/// Sleep until the wall clock is in the first 300 ms of a second, for steps that a legacy
+/// rule counted in whole seconds of `get_global_time` must see inside one second.
+fn wait_for_a_fresh_second() {
+    let into = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .subsec_millis();
+    if into >= 300 {
+        std::thread::sleep(Duration::from_millis(u64::from(1_020 - into)));
+    }
+}
+
 /// Past a quiet second, two uses in the same second: the first toggles the row back on
 /// and the second hears the wait line, so the socket stays lit.
 fn throttle_second_use_hears_the_wait_line(keyed: &mut Keyed, database: &ScratchDatabase) {
@@ -12042,6 +12058,11 @@ fn throttle_second_use_hears_the_wait_line(keyed: &mut Keyed, database: &Scratch
         }),
         "only ticks in the quiet second: {records:02x?}"
     );
+    // The throttle compares whole seconds of the wall clock (`get_global_time() -
+    // last_use_time < 1`, `G/char_item.cpp:5370`), so the pair must land inside one: sent
+    // at any moment, it straddled a second now and then and the second use toggled off
+    // instead (ledger 683).
+    wait_for_a_fresh_second();
     keyed.send_record(&client_item_use(0));
     keyed.send_record(&client_item_use(0));
     // The wait line's record is 10 + 13: the `@0949WAIT_BUFF` text rides raw.
@@ -23717,9 +23738,11 @@ fn a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin() {
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
           470000, 950000 FROM account WHERE login = 'bob'",
     );
+    // Yankee enters first, so nothing but Alpha's own enter stands between her Show and
+    // the first line: a second login behind it took about 1.2 s of the 1.5-second window
+    // on an idle machine and all of it in a full run (ledger 683).
+    let (mut yankee, _yankee_listed) = enter_world(&server, b"bob", 0);
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
-    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_enter(yankee_listed.id, true, None);
 
     // Inside the window: the refusal chats, and nothing lands.
     alice.send_record(&client_chat(CHAT_TALKING, b"/hide_costume 1"));
@@ -23728,6 +23751,7 @@ fn a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin() {
         an_info_line(b"[LS;1971]"),
         "the move window refuses the hide"
     );
+    yankee.sees_enter(alpha.id, false, None);
     yankee.quiet("the refusal reaches the caller alone");
     // Past the window: the line hides the body, and the update follows it.
     std::thread::sleep(std::time::Duration::from_millis(1_600));
@@ -31864,7 +31888,9 @@ fn a_gm_aggregates_and_forgets_the_dogs_around() {
         "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
          'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
     );
-    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t5\t101\n";
+    // Sixteen dogs: each joins on a one-in-two draw, so five left none on Alpha in one
+    // run of 32 (ledger 683).
+    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t16\t101\n";
     let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", dogs);
     let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alice);
@@ -31920,7 +31946,7 @@ fn a_gm_aggregates_and_forgets_the_dogs_around() {
 
 /// The first swing on `victim`: its `DAMAGE_INFO`'s damage, skipping by the
 /// same rules as [`read_swing_head`] but without a known attacker. The
-/// tail is not read: `/aggregate` starts up to five dogs, and their tails
+/// tail is not read: `/aggregate` starts up to sixteen dogs, and their tails
 /// interleave.
 fn read_first_swing(keyed: &mut Keyed, victim: u32) -> Swing {
     let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
@@ -37986,9 +38012,8 @@ fn a_gm_saves_a_maps_attributes_as_a_tga() {
     );
     alice.send_record(&slash(b"/saveati 99999 nowhere.tga"));
     assert_eq!(alice.read_game(), an_info_line(b"Failed"), "no such map");
-    let dir = std::env::temp_dir().join(format!("prodomo-saveati-{}", database.name()));
-    std::fs::create_dir_all(&dir).expect("a scratch dir");
-    let path = dir.join("map1.tga");
+    let dir = parity::scratch::ScratchDir::new("saveati");
+    let path = dir.path().join("map1.tga");
     let line = format!("/saveati 1 {}", path.display());
     alice.send_record(&slash(line.as_bytes()));
     assert_eq!(
@@ -42849,6 +42874,153 @@ fn the_empire_exchange_moves_the_account() {
          login = 'alice')) = 1",
     );
     alpha.still("the exchange settles");
+}
+
+/// `say_reward(text)` as `say` sends it (`questlib.lua:145`): the text between
+/// `color256(255, 200, 200)` and `color256(196, 196, 196)`.
+fn reward_line(text: &[u8]) -> Vec<u8> {
+    [
+        &b"[COLOR r;1|g;0.7843137254902|b;0.7843137254902]"[..],
+        text,
+        b"[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039]",
+    ]
+    .concat()
+}
+
+/// A page of `say` lines, each closed by `[ENTER]`, then `end`.
+fn said_page(lines: &[&[u8]], end: &[u8]) -> Vec<u8> {
+    let mut page = Vec::new();
+    for line in lines {
+        page.extend_from_slice(line);
+        page.extend_from_slice(b"[ENTER]");
+    }
+    page.extend_from_slice(end);
+    page
+}
+
+/// Ledger 680: `quest.change_empire`, the owner's own script, over the wire. Until the owner
+/// had the stray `end` of `_basic/change_empire.lua:132` removed, both `qc`s refused the file
+/// and the quest did not exist. Alpha, of the red empire with 600,000 gold, uses the exchange
+/// scroll (71054): `move_pc` passes its four refusals and the gold check, offers the three
+/// empires, and asks again; her yes moves the account to the yellow empire
+/// (`pc.change_empire` answers 999), takes 500,000 gold and the scroll, and sets the
+/// quest's `next_use_time`.
+#[test]
+fn the_exchange_scroll_moves_alpha_to_the_yellow_empire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 600000 WHERE name = 'Alpha'",
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: Alpha holds the exchange scroll.
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let add = enter_game_burst(&mut alpha);
+    Server::write_console(&console, "item give Alpha 71054 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 71_054, 1));
+
+    // When: she uses it. Then: the use block's two lines, then `move_pc` offers the empires
+    // (`change_empire.lua:30-31`, `:91-92`).
+    alpha.send_record(&client_item_use(0));
+    let offer: [&[u8]; 3] = [
+        b"You have successfully changed the kingdom,",
+        b"The rulers of the new kingdom called you welcome!",
+        b"Choose the Empire",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &said_page(&offer, b"[QUESTION 1;Red|2;Yellow|3;Blue|4;Cancel]")
+        ),
+        "the three empires and the Cancel"
+    );
+
+    // When: she picks Yellow. Then: the script asks again (`:96-100`).
+    alpha.send_record(&client_script_answer(1));
+    let treason = reward_line(b"For treason, there is no excuse!");
+    let really = reward_line(b"Do you really want to change the empire?");
+    let confirm: [&[u8]; 4] = [b"", &really, &treason, b""];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &said_page(&confirm, b"[QUESTION 1;Change|2;Don't Change]")
+        ),
+        "the confirmation"
+    );
+    alpha.still("the confirmation waits");
+
+    // When: she says Change. Then: the gold leaves, the scroll leaves its cell, and the
+    // script's last page closes the dialog (`:108-112`).
+    alpha.send_record(&client_script_answer(0));
+    let moved: [&[u8]; 3] = [
+        b"You have successfully changed the empire.",
+        b"Please relog in.",
+        b"",
+    ];
+    let last = server_script(1, &said_page(&moved, b"[DONE]"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (seen, _last) = read_until_record_keeping(&mut alpha, &last, deadline);
+    assert_eq!(
+        seen.iter().map(|record| record[0]).collect::<Vec<_>>(),
+        [GC_GOLD_CHANGE, ITEM_SET],
+        "the gold and the scroll, before the page"
+    );
+    assert_eq!(
+        set_fields(&seen[1]),
+        (inventory, 0, 0, 0),
+        "the scroll leaves its cell"
+    );
+
+    // And: her body is shown again in the yellow empire. The Rewrite sends the re-show behind
+    // the page, because a step's world moves run after its script; legacy sends it from inside
+    // `pc.change_empire` (`RestartAtSamePos`, `G/char_change_empire.cpp:119-123`), before the
+    // gold, the scroll and the page. `docs/STATUS.md`, package C9, owns the order.
+    assert_eq!(
+        alpha.read_game(),
+        [&[GC_CHARACTER_DEL][..], &add[1..5]].concat(),
+        "the removal"
+    );
+    let re_add = alpha.read_game();
+    assert_eq!(re_add[0], GC_CHARACTER_ADD);
+    assert_eq!(re_add[1..5], add[1..5]);
+    let re_info = alpha.read_game();
+    assert_eq!(re_info[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(re_info[1..5], add[1..5]);
+    assert_eq!(re_info[42], 2, "the re-show carries the yellow empire");
+
+    // And: the store holds the move, the count, the flag, and no scroll; the logout's row
+    // holds the gold that is left.
+    wait_for(
+        &database,
+        "(SELECT empire FROM account WHERE login = 'alice') = 2",
+    );
+    check(
+        &database,
+        "(SELECT change_count FROM change_empire WHERE account_id = (SELECT id FROM account WHERE \
+         login = 'alice')) = 1",
+    );
+    wait_for(&database, "(SELECT count(*) = 0 FROM item)");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 100000",
+    );
+    check(
+        &database,
+        "(SELECT count(*) = 1 FROM quest_flag WHERE name = 'change_empire.next_use_time'::bytea \
+         AND value > 0)",
+    );
 }
 
 /// `HEADER_CG_ATTR67_ADD`: the header, the sub-header, and the regist's 6 payload bytes.
@@ -56526,7 +56698,7 @@ fn a_partyless_kill_of_the_orc_lord_moves_guild_create_to_reward() {
         .and_then(|rest| rest.split('|').next())
         .and_then(|idx| idx.parse().ok())
         .expect("the button names its quest");
-    assert_eq!(quest, 35, "guild_create is quest 35");
+    assert_eq!(quest, 36, "guild_create is quest 36");
     alice.send_record(&client_script_button(quest | SELECT_QUEST));
     assert_eq!(
         alice.read_game(),
@@ -56552,13 +56724,13 @@ fn a_partyless_kill_of_the_orc_lord_moves_guild_create_to_reward() {
         alice.read_fight(),
         server_script(
             0,
-            b"[QUESTBUTTON idx;35|name;Ai luat Cartea Intelepciunii][DONE]"
+            b"[QUESTBUTTON idx;36|name;Ai luat Cartea Intelepciunii][DONE]"
         ),
         "the reward letter"
     );
     assert_eq!(
         alice.read_fight(),
-        server_quest_title(35, b"Ai luat Cartea Intelepciunii"),
+        server_quest_title(36, b"Ai luat Cartea Intelepciunii"),
         "the reward title"
     );
     for (want, note) in [
@@ -57745,7 +57917,7 @@ fn a_hydra_kill_moves_yohara_to_its_champion_reward() {
     );
     assert_eq!(
         alice.read_game(),
-        quest_begin_clear(49),
+        quest_begin_clear(QUEST_YOHARA),
         "the letter's `q.done` clears yohara's begin bit"
     );
     read_conqueror_reset(&mut alice, own);
@@ -60867,8 +61039,9 @@ fn a_gold_bar_pays_its_yang_and_uses_one_up() {
 
 /// `cg.game.item_use`: the 70038 cape of courage (`case USE_SPECIAL`,
 /// `G/char_item.cpp:3879-3888`) gathers the monsters around: at least one of the
-/// five dogs starts on Alpha and swings. The cape is used up, and the store keeps
-/// the row's absence.
+/// sixteen dogs starts on Alpha and swings (each joins on a one-in-two draw,
+/// `G/char_battle.cpp:3663`, so five left none in one run of 32; ledger 683). The
+/// cape is used up, and the store keeps the row's absence.
 #[test]
 fn a_cape_of_courage_gathers_the_dogs_around() {
     let Some(database) = ScratchDatabase::create() else {
@@ -60886,7 +61059,7 @@ fn a_cape_of_courage_gathers_the_dogs_around() {
     let proto = protos.get(70_038).expect("the owner's data has it");
     assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
     assert_eq!(proto.sub_type, 10, "the owner's cape is USE_SPECIAL");
-    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t5\t101\n";
+    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t16\t101\n";
     let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", dogs);
     let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alice);

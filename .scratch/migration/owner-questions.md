@@ -12,21 +12,61 @@ owner answers.
   rather than literally. Bugs and backdoors found in the original are fixed directly and recorded
   as Defects, not carried over. A question below that only asks whether to keep a legacy Defect
   can be closed under this decision when its section is next touched.
+- **2026-11-15, the direction review (ledger 679).**
+  - The play test stays the last step: the owner tests with the legacy client, unmodified, once
+    every Parity row is `ported`, `unused` or waiting here. The client is not in this repository.
+    A Godot port of the client is a later project and no constraint on the Rewrite.
+  - The test-server mode ships off (ADR-0007). Game masters come only from `prodomo gm`.
+  - A character is saved every 10 seconds by default (ADR-0003's "a few seconds"), not legacy's
+    120.
+  - The `unused` rows stand in bulk, without a row-by-row confirmation. This closes the
+    questions below that only ask to confirm an `unused` row (37, 39 to 47, 75, 76 among them);
+    a row the play test reaches is reopened.
+  - ADR-0006 is accepted. Question 1 is closed.
+  - The questions that still block work are listed in `docs/STATUS.md`, "Waiting on the owner".
+- **2026-11-15, the owner's answers after the review (ledger 680).**
+  - This machine is the strong machine: the mutation sweeps may run (`docs/STATUS.md`, C7).
+  - `i686-linux-gnu-g++-12` is installed for the width probe (C8).
+  - `_basic/change_empire.lua` is fixed in the source (ADR-0004's one exception). Questions 2
+    and 71 are closed.
+  - The drop limit is the Rewrite's to choose: 1000 ms. Question 3 is closed.
+  - The game logs to keep are the Rewrite's to choose: `docs/STATUS.md`, "Game logs the Rewrite
+    keeps". Question 73 is closed.
+  - The play test is out of scope for now; `compose.yaml` is prepared.
+- **2026-11-15, in chat: mistakes are fixed, not ported (ADR-0008, ledger 681).** The owner:
+  staying close to legacy is there to make sure the actual game is transferred; fixing bugs and
+  inconsistencies, closing vulnerabilities and removing backdoors while porting is normal, and
+  the port should improve the old source, not copy its mistakes. No question is asked before
+  such a fix; it is recorded. Under it the questions below sort as follows.
+  - **Closed, the fix already made stands and is no longer provisional:** 6 (the first 10
+    seconds after boot), 13 (an entry where no sectree is), 17 (a drop where no sectree is), 26
+    (the swapped empire tags, fixed in ledger 229l as B30), 29 (the automatic restart's
+    penalty), 32 (`[LS;901]` said for nothing).
+  - **Closed, the mistake is still reproduced and its fix is queued** (`docs/STATUS.md`, package
+    C10): 23 (a group entry at one point), 24 (`AFF_SPAWN` never cleared), 33 (a worn piece's
+    attributes written in place), 36 (the revive herb), 38 (the guild-war bet quest's
+    `string.format`, fixed in the source under ADR-0004's rule).
+  - **Closed the same way, and listed for the owner because the fix changes numbers every
+    player meets** (`docs/STATUS.md`, "Waiting on the owner"): 22 (a group-group's
+    probabilities), 28 (evasion reads the attacker's level). The owner may name either a Quirk.
+  - **Still the owner's, because the behaviour is deliberate:** 30 (no exp loss at the top
+    level), 35 (the horse refill at every login, which the owner's build switches on). They stay
+    as Quirks unless the owner says otherwise.
+  - **Not touched by it:** the questions about a difference the Rewrite's own design causes (11,
+    12, 15, 16, 18 to 20, 25) and about the owner's data or plans (4, 5, 7 to 10, 27, 70, 72,
+    74). A Rewrite-side difference is not an improvement; it is matched to legacy or argued as a
+    Divergence.
 
 ## Open
 
-1. **ADR-0006 is proposed.** `docs/adr/0006-quest-dialect-and-host.md` (the quest dialect and the
-   host, ledger 227) waits for the owner's acceptance. `AGENTS.md` lists it only once the owner
-   accepts it. Waits on it: nothing blocks today; the quest runtime runs as the ADR proposes.
+1. **ADR-0006 is proposed.** Closed 2026-11-15: the owner accepted it, and `AGENTS.md` lists it.
 
-2. **`_basic/change_empire.lua` does not compile.** The `end` on line 132 closes the `if` before
-   `elseif ret == 4` on line 133, so the script is a syntax error in legacy and in the Rewrite.
-   The owner either fixes the source, or the script stays unloaded as it is today (a test pins
-   that it is the only one). Waits on it: the `quests` row for `change_empire`.
+2. **`_basic/change_empire.lua` does not compile.** Closed 2026-11-15: the owner had the stray
+   `end` on line 132 removed, the quest loads, and `quest.change_empire` is `ported`
+   (`the_exchange_scroll_moves_alpha_to_the_yellow_empire`).
 
-3. **The drop limit.** Only `questlib_extra.lua`, which is never loaded, sets
-   `item_drop_limit_time`. Until the owner picks a value, the Rewrite keeps 1000 ms (a STATUS
-   Divergence row, ledgers 217 and 227). Waits on it: the drop limit's value.
+3. **The drop limit.** Closed 2026-11-15: the owner left the value to the Rewrite. It is the
+   1000 ms that `questlib_extra.lua`, the one setter in the Game data, names.
 
 4. **Two libraries are never loaded:** `questlib_extra.lua` and `questing.lua`, in legacy and in
    the Rewrite (rows `questlib.questlib_extra`, `questlib.questing`). The owner decides whether
@@ -661,16 +701,8 @@ owner answers.
  middle run on your server today (a relog? another path I missed?), or is it dead there?
  If it is dead, the Rewrite's running middle is a recorded Divergence; if it runs, say
  how and the port is re-audited.
-71. **The empire-exchange quest never loads (ledger 562; replaces 227's wait for a source fix).** Its `move_pc`
- (`change_empire.lua:57-140`) is unbalanced even textually: the `:133` `elseif` after
- the `:117` `else` leaves `:137`/`:138` closing the `if` and the function, so `:139`
- lands in `WhenListOrFunction` and both `qc`s refuse the file with `expecting 'when'
- or 'function'` (the loops are identical: `qc.cpp:765ff` vs `qc.rs:648ff`). No other
- quest references `change_empire.*`; the `quest_functions` names are the API list and
- the `translate.lua` strings are stale. Waits on it: confirm the quest is dead on your
- server too (a `qc` log line at boot would show it), or say if your `qc` somehow
- accepts it. If it is dead, the row stays `unused`; the `pc.change_empire` machinery
- underneath stays ported either way.
+71. **The empire-exchange quest never loads (ledger 562).** Closed 2026-11-15 with question 2:
+ the owner had the source fixed.
 72. **The dungeon-info file manager is compiled out (ledger 564).** All of
  `CDungeonInfoManager` — the `dungeon_info.txt` load, the window, the warp and the ranks —
  sits inside `#if defined(__DUNGEON_SYSTEM__)` (`dungeon_info.cpp:20-452`), and that switch
@@ -678,16 +710,10 @@ owner answers.
  the cooldown lines (ledger 512). Waits on it: confirm your build also leaves
  `__DUNGEON_SYSTEM__` undefined, so the file is dead and the row stays `unused`. If your
  build defines it, the file manager is a real port.
-73. **Which game logs must the operator keep (ledger 566)?** Legacy's `LogManager`
- writes 25 log kinds to MySQL (`log.cpp`), from per-drop `ItemLog`/`MoneyLog` rows (tens of
- files call them) to security rows (`HackLog`, `GMCommandLog`, `SpeedHackLog`). The schema is
- ours (ADR-0001), so no MySQL log table comes back; the question is what the tracing log
- keeps. Today the Rewrite traces `CHAR_LOG` (quest `char_log`), one `ITEM_LOG`, one
- `HACK_LOG` and one `MONEY_LOG` site. Waits on it: trace every legacy log call (dozens of
- sites, including per-drop spam), or trace only the security and operator rows (`HackLog`,
- `GMCommandLog`, `SpeedHackLog`, `LoginLog`, `BootLog`, `LevelLog`, `ChangeNameLog`,
- `ShoutLog`) and drop the per-item spam? Five methods are dead either way (no callers:
- `HackCRCLog`, `PCBangLoginLog`, `CubeLog`, `ChatLog`, `InvalidServerLog`).
+73. **Which game logs must the operator keep (ledger 566)?** Closed 2026-11-15: the owner left
+ the choice to the Rewrite. The security, session, character and event rows are kept, the item
+ and gold rows are kept where value changes owner, and the per-drop, per-pickup and per-cast
+ rows are not. The table is in `docs/STATUS.md`, "Game logs the Rewrite keeps".
 74. **The battle-pass quest's items have no protos (ledger 645).** `battle_pass.lua`
  fires only on `25150.use`-`25161.use` (activate) and `25162.use` (reset), and no row
  of your `item_proto.txt` is any of 25150-25162 or holds one in a range (positive
