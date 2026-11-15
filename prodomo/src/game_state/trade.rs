@@ -613,8 +613,7 @@ impl GameState {
         let names = deal.vids.map(|vid| {
             self.characters
                 .find_by_vid(vid)
-                .map(|character| character.name().as_bytes().to_vec())
-                .unwrap_or_default()
+                .map_or_default(|character| character.name().as_bytes().to_vec())
         });
         let Settled {
             traders: [starter, asked],

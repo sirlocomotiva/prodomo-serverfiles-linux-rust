@@ -178,7 +178,9 @@ impl ServerAttr {
                 });
             }
             let cells: Vec<u32> = cells
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|cell| u32::from_le_bytes([cell[0], cell[1], cell[2], cell[3]]))
                 .collect();
             blocks.push(CellBlock::from_cells(&cells));

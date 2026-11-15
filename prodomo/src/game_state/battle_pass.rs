@@ -944,11 +944,11 @@ mod tests {
         let mut points = [0_u8; 4];
         points.copy_from_slice(&bytes[5..9]);
         let rest = &bytes[9..];
-        if rest.len() % 11 != 0 {
+        if !rest.len().is_multiple_of(11) {
             return None;
         }
         let mut rows = Vec::new();
-        for chunk in rest.chunks_exact(11) {
+        for chunk in rest.as_chunks::<11>().0 {
             rows.push(PlayerMission::decode(chunk)?);
         }
         Some((bytes[3], bytes[4] != 0, i32::from_le_bytes(points), rows))

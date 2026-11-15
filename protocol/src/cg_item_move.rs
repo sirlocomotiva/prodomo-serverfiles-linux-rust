@@ -110,14 +110,14 @@ impl CgItemMove {
     pub fn decode_frame(frame: &ClientFrame) -> Result<Self, CgItemMoveError> {
         match frame.payload.len().cmp(&CG_ITEM_MOVE_PAYLOAD_SIZE) {
             std::cmp::Ordering::Less => {
-                let available = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+                let available = frame.payload.len().saturating_add(1);
                 Err(CgItemMoveError::Truncated {
                     needed: CG_ITEM_MOVE_WIRE_SIZE,
                     available,
                 })
             }
             std::cmp::Ordering::Greater => {
-                let actual = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+                let actual = frame.payload.len().saturating_add(1);
                 Err(CgItemMoveError::LengthMismatch {
                     expected: CG_ITEM_MOVE_WIRE_SIZE,
                     actual,
@@ -305,7 +305,7 @@ mod tests {
         }
         for extra in [1usize, 2, 3, 64, 255] {
             let mut long = complete.clone();
-            long.extend(std::iter::repeat(0u8).take(extra));
+            long.extend(std::iter::repeat_n(0u8, extra));
             assert_eq!(
                 CgItemMove::decode(&long),
                 Err(CgItemMoveError::LengthMismatch {
@@ -364,7 +364,7 @@ mod tests {
         }
         for extra in [1usize, 2, 3, 64, 255] {
             let mut payload = packet.to_frame().payload;
-            payload.extend(std::iter::repeat(0u8).take(extra));
+            payload.extend(std::iter::repeat_n(0u8, extra));
             assert_eq!(
                 CgItemMove::decode_frame(&ClientFrame::new(0x0d, payload)),
                 Err(CgItemMoveError::LengthMismatch {

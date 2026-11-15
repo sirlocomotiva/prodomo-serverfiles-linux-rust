@@ -172,9 +172,7 @@ impl GameState {
         bot.finished[slot] = false;
         if !bot.active.iter().any(|active| *active) {
             bot.due = None;
-            for active in &mut bot.active {
-                *active = false;
-            }
+            bot.active.fill(false);
         }
         self.send_switchbot_update(pid, moved);
     }
@@ -412,9 +410,7 @@ impl GameState {
                 } else {
                     if let Some(bot) = self.switchbots.get_mut(&pid) {
                         bot.due = None;
-                        for active in &mut bot.active {
-                            *active = false;
-                        }
+                        bot.active.fill(false);
                     }
                     if let Some(mut moved) = self.empty_switched(pid, vid) {
                         self.send_switchbot_update(pid, &mut moved);
@@ -424,9 +420,7 @@ impl GameState {
             } else if !self.switchbot_funded(vid) {
                 if let Some(bot) = self.switchbots.get_mut(&pid) {
                     bot.due = None;
-                    for active in &mut bot.active {
-                        *active = false;
-                    }
+                    bot.active.fill(false);
                 }
                 if let Some(mut moved) = self.empty_switched(pid, vid) {
                     self.send_switchbot_update(pid, &mut moved);

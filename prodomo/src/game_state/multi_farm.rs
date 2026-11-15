@@ -210,16 +210,12 @@ impl super::GameState {
     /// `CHARACTER_MANAGER::CheckMultiFarmAccounts` (`G/char_manager.cpp:1149-1167`): drop
     /// the address's rows whose PID left the world, and the address with its last row.
     fn prune_multi_farm(&mut self, addr: &str) {
-        let gone: Vec<u32> = self
-            .multi_farm
-            .get(addr)
-            .map(|rows| {
-                rows.iter()
-                    .filter(|row| self.characters.find_by_pid(row.pid).is_err())
-                    .map(|row| row.pid)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let gone: Vec<u32> = self.multi_farm.get(addr).map_or_default(|rows| {
+            rows.iter()
+                .filter(|row| self.characters.find_by_pid(row.pid).is_err())
+                .map(|row| row.pid)
+                .collect()
+        });
         if let Some(rows) = self.multi_farm.get_mut(addr) {
             rows.retain(|row| !gone.contains(&row.pid));
         }

@@ -2213,9 +2213,7 @@ impl Game for Session<'_> {
         self.blocked.pop();
     }
     fn dungeon_lives(&self, index: u32) -> bool {
-        i32::try_from(index)
-            .ok()
-            .is_some_and(|index| self.dungeon_flags.contains_key(&index))
+        i32::try_from(index).is_ok_and(|index| self.dungeon_flags.contains_key(&index))
     }
     /// Staged now and queued for the create and the party's jump after the step:
     /// the staged index becomes the reader's dungeon at once (`GetDungeonForce`,
@@ -2244,14 +2242,16 @@ impl Game for Session<'_> {
         }
     }
     fn dungeon_get_flag(&self, name: &[u8]) -> i32 {
-        (self.dungeon != 0)
-            .then(|| {
+        if self.dungeon != 0 {
+            {
                 self.dungeon_flags
                     .get(&self.dungeon)
                     .and_then(|flags| flags.get(name).copied())
                     .unwrap_or(0)
-            })
-            .unwrap_or(0)
+            }
+        } else {
+            0
+        }
     }
     fn dungeon_flag_from_index(&self, name: &[u8], index: u32) -> i32 {
         i32::try_from(index)
@@ -6115,9 +6115,6 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
     session_head(inputs)
 }
 
-/// The head half of [`build_session`]: the maps, the reader's snapshot, and the armed
-/// item giver, before the literal fills the per-step vectors.
-#[allow(clippy::too_many_arguments)]
 /// The [`session_head`] literal: the [`Session`] from its packed halves and the armed giver.
 #[allow(clippy::too_many_arguments)]
 fn session_literal<'s>(
@@ -6252,6 +6249,8 @@ fn session_literal<'s>(
     }
 }
 
+/// The head half of [`build_session`]: the maps, the reader's snapshot, and the armed
+/// item giver, before the literal fills the per-step vectors.
 fn session_head(packed: SessionInputs<'_>) -> Session<'_> {
     let SessionInputs {
         dungeon_flags,

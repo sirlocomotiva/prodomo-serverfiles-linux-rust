@@ -407,7 +407,7 @@ mod tests {
         }
         for extra in 1..8usize {
             let mut bytes = good.clone();
-            bytes.extend(std::iter::repeat(0xff).take(extra));
+            bytes.extend(std::iter::repeat_n(0xff, extra));
             assert_eq!(
                 CgItemUseToItem::decode(&bytes),
                 Err(CgItemUseToItemError::LengthMismatch {
@@ -450,7 +450,7 @@ mod tests {
             for header in [0x00u8, 0x01, 0x3b, 0x3d, 0xff] {
                 let mut bytes = good.clone();
                 bytes[0] = header;
-                bytes.extend(std::iter::repeat(0xff).take(extra));
+                bytes.extend(std::iter::repeat_n(0xff, extra));
                 assert_eq!(
                     CgItemUseToItem::decode(&bytes),
                     Err(CgItemUseToItemError::LengthMismatch {
@@ -479,7 +479,7 @@ mod tests {
         }
         for extra in 1..8usize {
             let mut payload = good[1..].to_vec();
-            payload.extend(std::iter::repeat(0xff).take(extra));
+            payload.extend(std::iter::repeat_n(0xff, extra));
             let frame = ClientFrame::new(HEADER, payload);
             assert_eq!(
                 CgItemUseToItem::decode_frame(&frame),
@@ -516,7 +516,7 @@ mod tests {
         for extra in 1..8usize {
             for header in [0x00u8, 0x01, 0x3b, 0x3d, 0xff] {
                 let mut payload = good[1..].to_vec();
-                payload.extend(std::iter::repeat(0xff).take(extra));
+                payload.extend(std::iter::repeat_n(0xff, extra));
                 let frame = ClientFrame::new(header, payload);
                 assert_eq!(
                     CgItemUseToItem::decode_frame(&frame),

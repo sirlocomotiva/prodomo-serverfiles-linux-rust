@@ -55885,3 +55885,101 @@ Measured for the issue: one scenario alone takes 5.8 s and 4.4 s of CPU, its ser
 - `docs/STATUS.md`: C6 is done; C7 names `tools/mutate.py`; the drift table's "Test runs leak" row is closed.
 
 Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`, three full runs, all on a `target/` rebuilt from nothing after the `cargo clean` except the first. First run (the harness changes, before the clean): fmt, build, clippy, doc-tests and rustdoc clean; without `DATABASE_URL` 5659 passed, 0 failed in 46 targets; with it 5658 passed, 1 failed, `a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin` (683.7, fixed). Second run (after that fix and the clean): the same gates clean; without `DATABASE_URL` 5659 passed, 0 failed; with it 5658 passed, 1 failed, `a_cape_of_courage_gathers_the_dogs_around` (683.7, fixed). Third run, on the final tree: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` without `DATABASE_URL`: 5659 passed, 0 failed in 46 targets (64 s); the same with `DATABASE_URL`: 5659 passed, 0 failed in 46 targets (493 s), no first-run failure; `cargo test --workspace --doc --locked --offline` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. Every run's summary: `temp-files: 0`, `servers: 0`, `scratch-dbs: 0`, `cores: 0`; `allows: 133`. The five new tests are `parity::scratch`'s. The toolchain is the `/usr/bin` pair (cargo and rustc 1.85.1). No width was measured: no record changed. `Cargo.lock` changed by two dependency edges (`tempfile` off `prodomo`, `rustix` onto `parity`), with no crate added and no fetch. Parity counts are unchanged: 1,136 `ported`, 65 `partial`, 444 `unused`. No ADR changed.
+
+
+## 684. The toolchain
+
+The owner asked whether the project uses the latest Rust (1.100.0, released 2026-11-12) and then
+said to update to it. This section ports nothing and changes no server behaviour: the compiler
+changes from 1.85.1 to 1.100.0, the new Clippy's findings are fixed, and one more scenario that
+lost a full run has its cause fixed. The edition stays 2021; edition 2024 is a separate decision
+for the owner, because it reformats and migrates code across the whole workspace.
+
+### 684.1 Why 1.85.1, and what was on the machine
+
+No section records a reason for 1.85.1. It is the compiler Debian 13 ships in `/usr/bin`, and
+`AGENTS.md` only named it as the toolchain; nothing pinned it. The rustup `stable` toolchain on
+this machine (1.98.1, installed 2026-10-19) is a damaged install with no `cargo`, no `rustfmt` and
+no standard library, so nothing could be measured with it. It was left as it is.
+
+### 684.2 The pin
+
+- `rustup toolchain install 1.100.0 --profile default` (online, with the owner's yes): cargo 1.100.0
+  (3acc79c0c 2026-11-05), rustc 1.100.0 (0ef1bc386 2026-11-09), rustfmt 1.11.0, Clippy 0.1.100.
+- `rust-toolchain.toml` (new) pins channel `1.100.0` with `rustfmt` and `clippy`. rustup's proxies
+  in `~/.cargo/bin` read it; the distribution's `/usr/bin/cargo` (still 1.85.1 on this machine)
+  does not.
+- `tools/gates.sh` used to put `/usr/bin` first (ledger 229j's wrong-compiler run). It now puts
+  `~/.cargo/bin` first and stops with `result: FAILED` when `cargo` or `rustc` is not the pinned
+  version.
+- `Cargo.toml`: `rust-version = "1.100"`.
+- `Dockerfile`: the build stage is `docker.io/library/rust:1.100.0-bookworm` (pulled, 1.6 GB, with
+  the owner's yes). `podman build -t localhost/prodomo:local -f Dockerfile .` builds the release
+  binary with it (102 MB image). The 1.85.1 image is still on the machine.
+- No crate changed version and nothing was fetched for `Cargo.lock`.
+
+### 684.3 What the new compiler reported
+
+`cargo fmt --all -- --check` was clean and `cargo build` passed at once. The first
+`cargo clippy --workspace --all-targets` printed 695 warning lines:
+
+- **Cargo's own lint, `cargo::unused_dependencies`** (new since 1.85): six dependencies no target
+  uses (the lint names one per manifest; the rest were found by search, and the lint passes the
+  result). Removed: `tracing` from `net`; `serde` from `protocol`; `tokio` from `quest`; `tokio`,
+  `tracing` and `serde` from `world`. `Cargo.lock` loses those eight lines. The lint is now
+  `deny` in `[workspace.lints.cargo]`, so the next unused dependency fails the build.
+- **`clippy::assert_is_empty`, 515 findings** (new): it wants `assert_eq!(x, [] as [T; 0])` for
+  every `assert!(x.is_empty())` in the tests. That is harder to read for no gain where the
+  assertion has a message, so the lint is switched off in `[workspace.lints.clippy]` with its
+  reason, the third lint the workspace declines. `cargo clippy --fix` had rewritten 24 of the
+  sites before the decision; those hunks were reversed.
+- **The rest, 143 findings in 35 lints**, were fixed, none with `#[allow]`. Most by
+  `cargo clippy --fix` (two passes): `std::slice::from_ref` for a one-element clone,
+  `std::iter::repeat_n`, `map_or`, `saturating_add` and `i64::midpoint` for hand-written forms,
+  `contains`, `fill`, `is_some_and`, `rfind`. The fix pass left two byte-string comparisons in
+  `prodomo/tests/parity.rs` that did not compile; they were written by hand.
+- By hand: `MovedItems` (2.6 KB) is boxed where it is one arm of a small enum or result
+  (`ShopAnswer::Moved`, `SafeboxAnswer::Moved`, the private shop's `private_refused` and its
+  callers in `prodomo/src/main.rs`); `as_chunks` replaces `chunks_exact` with a constant size
+  (`protocol/src/gc_shop.rs`, the client key in `prodomo/src/main.rs` and the scenarios);
+  two bit masks written in decimal are hexadecimal (`0x8016_4043` in
+  `prodomo/src/descriptor_crypto.rs`, the quest numbers in the scenarios); seven `loop`s are
+  `while let`; two functions the fixes pushed past 100 lines are back under it.
+- **Compiler warnings** (new `unused` analysis): two values assigned and never read in tests
+  (`world/src/character/equip.rs`, `prodomo/src/account_player.rs`) are removed.
+- One `#[allow(clippy::too_many_arguments)]` was written twice on one function
+  (`duplicated_attributes`); the copy is removed, so the count is 132, not 133.
+
+The fixes in non-test code are rewrites to an equal form; no rule changed. 133 files changed,
+120 of them Rust.
+
+### 684.4 One more first-run loss with a cause
+
+The first full gate run on 1.100.0 lost
+`a_biologist_refuses_the_wrong_state_level_and_done_missions` with `DATABASE_URL` (5658 passed,
+1 failed; 5659 without it). The scenario's answer was the previous step's line (state 8's pick
+line) where the overflow line was expected.
+
+Cause: `parity::Server::wait_for` returns at once when the console already holds the line. The
+scenario disconnects four times and each time waited for "Character disconnected; wrote the
+row", so from the second disconnect on it waited for nothing. The next step's `UPDATE` could
+land before the disconnect's save, which then wrote the old row over it. This reads from the
+failure's bytes and the code; it was not reproduced on purpose.
+
+Fix: `Server::wait_for_next` waits for a line not collected before. A sweep of every scenario
+and helper for a literal line waited for twice found four scenarios. Three are fixed (the
+biologist's `bio_banked`, `a_use_reads_and_removes_its_quest_item`,
+`the_grand_book_reads_the_alignment_and_moves_it_on_a_failed_read`); the fourth,
+`an_unlock_knock_spends_keys_and_the_save_keeps_the_rows`, starts a new server between its two
+waits. The three ran green three times alone. The issue
+(`.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md`) has the new class.
+
+### 684.5 Rules changed
+
+- `AGENTS.md`: the toolchain is 1.100.0 from `rust-toolchain.toml`, a toolchain change is its own
+  ledger section, a lint is switched off only in `[workspace.lints]` with its reason and the
+  owner's word, and an unused dependency fails the build.
+- The goal file, `progress.md`, the README and `docs/STATUS.md` name 1.100.0; the "Rust is not
+  pinned" backlog item is closed.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`, cargo 1.100.0 (3acc79c0c 2026-11-05) and rustc 1.100.0 (0ef1bc386 2026-11-09), two full runs. First run (before 684.4's fix): fmt, build, clippy, doc-tests and rustdoc clean; without `DATABASE_URL` 5659 passed, 0 failed in 46 targets; with it 5658 passed, 1 failed, `a_biologist_refuses_the_wrong_state_level_and_done_missions` (684.4, fixed). Second run, on the final tree: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` without `DATABASE_URL`: 5659 passed, 0 failed in 46 targets (70 s); with it: 5659 passed, 0 failed in 46 targets (452 s); `cargo test --workspace --doc --locked --offline` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. Left behind in both runs: temp-files 0, servers 0, scratch-dbs 0, cores 0. Allows: 132 (133 at ledger 683). The Compose image built with `rust:1.100.0-bookworm`. No width was measured. Parity counts unchanged: 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec`. No ADR changed.

@@ -1,0 +1,6 @@
+# The one compiler the gates and the Compose image build with (ledger 684). rustup reads this
+# file; a `cargo` that is not a rustup proxy (a distribution's `/usr/bin/cargo`) ignores it, so
+# `tools/gates.sh` refuses to run with any other version.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]

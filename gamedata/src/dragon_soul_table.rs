@@ -448,7 +448,7 @@ fn read_weights(file: &TextFile, table: &mut DragonSoulTable) -> Result<(), Drag
                 .get(step_name.as_bytes())
                 .ok_or_else(|| bad("WeightTables", step_name.as_bytes(), name.as_bytes()))?;
             let headered = group.get(b"#--#").is_some();
-            for strength in 0..STRENGTHS {
+            for (strength, slot) in table.weights[grade][step].iter_mut().enumerate() {
                 let raw = if headered {
                     let key = strength.to_string().into_bytes();
                     column(group, step_name.as_bytes(), &key, "WeightTables")?
@@ -468,7 +468,7 @@ fn read_weights(file: &TextFile, table: &mut DragonSoulTable) -> Result<(), Drag
                         strength.to_string().as_bytes(),
                     )
                 })?;
-                table.weights[grade][step][strength] = weight;
+                *slot = weight;
             }
         }
     }

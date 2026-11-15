@@ -522,10 +522,7 @@ fn legacy_u32(value: &LandQueryValue, column: usize) -> Result<u32, LandRowError
         // including when the input has a leading minus sign.
         return Ok(u32::MAX);
     }
-    let reduced = match u32::try_from(magnitude) {
-        Ok(value) => value,
-        Err(_) => u32::MAX,
-    };
+    let reduced = u32::try_from(magnitude).unwrap_or(u32::MAX);
     if negative {
         Ok(0_u32.wrapping_sub(reduced))
     } else {

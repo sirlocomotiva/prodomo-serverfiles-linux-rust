@@ -292,30 +292,22 @@ mod tests {
             .guilds
             .install_named_test_guild(3, 7, 10, 0, b"Bonus".to_vec());
         state.guild_bonus_update(vid);
-        let kinds = state
-            .affect_events
-            .get(&vid)
-            .map(|event| {
-                event
-                    .affects
-                    .iter()
-                    .map(|affect| affect.kind)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let kinds = state.affect_events.get(&vid).map_or_default(|event| {
+            event
+                .affects
+                .iter()
+                .map(|affect| affect.kind)
+                .collect::<Vec<_>>()
+        });
         assert_eq!(kinds, [803, 804, 805]);
         state.guild_bonus_remove(vid);
-        let kinds = state
-            .affect_events
-            .get(&vid)
-            .map(|event| {
-                event
-                    .affects
-                    .iter()
-                    .map(|affect| affect.kind)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let kinds = state.affect_events.get(&vid).map_or_default(|event| {
+            event
+                .affects
+                .iter()
+                .map(|affect| affect.kind)
+                .collect::<Vec<_>>()
+        });
         assert_eq!(kinds, [804, 805]);
     }
 }

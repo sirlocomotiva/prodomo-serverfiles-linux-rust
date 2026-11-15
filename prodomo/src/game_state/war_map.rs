@@ -598,7 +598,7 @@ impl WarMap {
     /// looked for twice a second.
     pub(super) fn flag_state_due(&self, pulse: u64) -> bool {
         let since = pulse.saturating_sub(self.started_pulse);
-        since >= FLAG_STATE_PULSES && since % FLAG_STATE_PULSES == 0
+        since >= FLAG_STATE_PULSES && since.is_multiple_of(FLAG_STATE_PULSES)
     }
 }
 

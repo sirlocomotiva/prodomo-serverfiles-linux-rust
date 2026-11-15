@@ -433,7 +433,9 @@ impl Server {
         child.wait_with_output().expect("prodomo should finish")
     }
 
-    /// Collect the console until a line contains `needle`.
+    /// Collect the console until a line contains `needle`. A line collected before counts, so
+    /// this returns at once the second time a scenario waits for the same line: use
+    /// [`Self::wait_for_next`] there.
     ///
     /// # Panics
     ///
@@ -442,11 +444,27 @@ impl Server {
         self.wait_within(needle, PROCESS_TIMEOUT);
     }
 
+    /// Collect the console until a line not collected before contains `needle`: the wait for
+    /// a line the server logs once per event, such as a disconnect's save, on its second and
+    /// later events. Call it right after the event's cause, before any other wait collects
+    /// the line.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the process exits first or [`PROCESS_TIMEOUT`] passes.
+    pub fn wait_for_next(&mut self, needle: &str) {
+        self.collect_until(needle, PROCESS_TIMEOUT);
+    }
+
     /// [`Self::wait_for`] with `timeout` in place of [`PROCESS_TIMEOUT`].
     fn wait_within(&mut self, needle: &str, timeout: Duration) {
-        if self.logged(needle) {
-            return;
+        if !self.logged(needle) {
+            self.collect_until(needle, timeout);
         }
+    }
+
+    /// Read new console lines until one contains `needle`.
+    fn collect_until(&mut self, needle: &str, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().expect("status should be readable") {

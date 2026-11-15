@@ -174,8 +174,7 @@ impl MapIndex {
         Some(
             self.views
                 .get(&me)
-                .map(|view| view.seen.keys().copied().collect())
-                .unwrap_or_default(),
+                .map_or_default(|view| view.seen.keys().copied().collect()),
         )
     }
 
@@ -365,8 +364,7 @@ impl MapIndex {
         let seen: Vec<EntityKey> = self
             .views
             .get(&me)
-            .map(|view| view.seen.keys().copied().collect())
-            .unwrap_or_default();
+            .map_or_default(|view| view.seen.keys().copied().collect());
         for ent in seen {
             self.view_remove(ent, me, false, out);
         }
@@ -413,8 +411,7 @@ impl MapIndex {
         self.spots
             .get(&me)
             .and_then(|spot| spot.tree)
-            .map(|tree| self.around(tree))
-            .unwrap_or_default()
+            .map_or_default(|tree| self.around(tree))
     }
 
     /// Whether `me` is an observer.
@@ -477,8 +474,7 @@ impl MapIndex {
         let seen: Vec<EntityKey> = self
             .views
             .get(&me)
-            .map(|view| view.seen.keys().copied().collect())
-            .unwrap_or_default();
+            .map_or_default(|view| view.seen.keys().copied().collect());
         for ent in seen {
             let fresh = self
                 .views
@@ -534,17 +530,13 @@ impl MapIndex {
                 self.wakes.push(Wake::Start(vid));
             }
         }
-        let stale: Vec<EntityKey> = self
-            .views
-            .get(&me)
-            .map(|view| {
-                view.seen
-                    .iter()
-                    .filter(|(_, seen)| **seen < age)
-                    .map(|(ent, _)| *ent)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let stale: Vec<EntityKey> = self.views.get(&me).map_or_default(|view| {
+            view.seen
+                .iter()
+                .filter(|(_, seen)| **seen < age)
+                .map(|(ent, _)| *ent)
+                .collect()
+        });
         for ent in stale {
             // :212-235: the removal to me, the erase, then the other side's removal.
             out.push(Effect::Remove { of: ent, to: me });
@@ -1182,11 +1174,7 @@ mod tests {
                 }
             }
             for me in pcs.iter().chain(npcs.iter()) {
-                let seen = map
-                    .views
-                    .get(me)
-                    .map(|v| v.seen.clone())
-                    .unwrap_or_default();
+                let seen = map.views.get(me).map_or_default(|v| v.seen.clone());
                 for other in seen.keys() {
                     assert!(map.sees(*other, *me), "{me:?} sees {other:?} alone");
                 }

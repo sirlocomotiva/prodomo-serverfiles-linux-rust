@@ -582,7 +582,7 @@ impl CgEnterGame {
     /// present, or [`CgAccountError::InvalidHeader`] for another header.
     pub fn decode_frame(frame: &ClientFrame) -> Result<Self, CgAccountError> {
         if !frame.payload.is_empty() {
-            let actual = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+            let actual = frame.payload.len().saturating_add(1);
             return Err(CgAccountError::LengthMismatch {
                 expected: CG_ENTER_GAME_WIRE_SIZE,
                 actual,
@@ -673,7 +673,7 @@ fn check_frame_payload(
     if frame.payload.len() == expected_payload {
         return Ok(());
     }
-    let actual = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+    let actual = frame.payload.len().saturating_add(1);
     if frame.payload.len() < expected_payload {
         Err(CgAccountError::Truncated {
             needed: expected_complete,

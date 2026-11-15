@@ -438,9 +438,9 @@ mod tests {
             CgQuickslotSwapError::InvalidHeader { actual: 0x11 },
         ];
         for e in cases {
-            assert!(!e.to_string().is_empty());
+            assert_ne!(e.to_string(), "");
             let dyn_err: &dyn std::error::Error = &e;
-            assert!(!dyn_err.to_string().is_empty());
+            assert_ne!(dyn_err.to_string(), "");
         }
     }
 

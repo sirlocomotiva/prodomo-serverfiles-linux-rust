@@ -338,7 +338,7 @@ impl GameState {
     /// only over open shelves; a lapsed stamp with no shelf refreshes at the next
     /// open instead (`open_gaya_market_window` keeps the first-stamp arm).
     pub(super) fn run_gaya_ticks(&mut self, pulse: u64) {
-        if self.gaya_markets.is_empty() || pulse % 50 != 0 {
+        if self.gaya_markets.is_empty() || !pulse.is_multiple_of(50) {
             return;
         }
         let now = wall_time();

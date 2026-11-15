@@ -1267,14 +1267,13 @@ impl GameState {
             .ok()
             .and_then(|character| self.guild_of(character.player_id()))
             .and_then(|id| self.guilds.by_id.get(&id))
-            .map(|guild| {
+            .map_or_default(|guild| {
                 guild
                     .members
                     .values()
                     .filter_map(|member| member.vid)
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     /// Load every stored guild, as `CGuildManager::Initialize` loads them
@@ -2129,14 +2128,13 @@ impl GameState {
         let join_vid = self.characters.find_by_pid(pid).ok().map(Character::vid);
         let (job, level, name) = join_vid
             .and_then(|vid| self.bodies.get(&vid))
-            .map(|body| {
+            .map_or_default(|body| {
                 (
                     body.card.job,
                     body.card.level,
                     body.card.name.as_bytes().to_vec(),
                 )
-            })
-            .unwrap_or_default();
+            });
         // `AddMember`'s upsert (`:172-184`): a fresh row holds the store's grade,
         // is-general and offer — the judge stored grade 15, a joiner is no general and
         // offers nothing — while a row already there keeps those three and the five
@@ -2178,19 +2176,14 @@ impl GameState {
         // The already-online members, snapshotted before the joiner's link lands: the
         // LIST-one fans to them alone (`SendListOneToAll` at `:182`, before
         // `m_memberOnline.insert` at `:286`).
-        let members: Vec<Vid> = self
-            .guilds
-            .by_id
-            .get(&guild_id)
-            .map(|guild| {
-                guild
-                    .members
-                    .iter()
-                    .filter(|(member_pid, _)| **member_pid != pid)
-                    .filter_map(|(_, member)| member.vid)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let members: Vec<Vid> = self.guilds.by_id.get(&guild_id).map_or_default(|guild| {
+            guild
+                .members
+                .iter()
+                .filter(|(member_pid, _)| **member_pid != pid)
+                .filter_map(|(_, member)| member.vid)
+                .collect()
+        });
         if join_vid.is_none() {
             return GuildJoinAnswer::Committed { own: Vec::new() };
         }
@@ -3156,17 +3149,13 @@ impl GameState {
 
     /// `GetGeneralCount` (`G/guild.h:234`): the members of `id` flagged general.
     fn guild_general_count(&self, id: u32) -> usize {
-        self.guilds
-            .by_id
-            .get(&id)
-            .map(|guild| {
-                guild
-                    .members
-                    .values()
-                    .filter(|member| member.is_general != 0)
-                    .count()
-            })
-            .unwrap_or_default()
+        self.guilds.by_id.get(&id).map_or_default(|guild| {
+            guild
+                .members
+                .values()
+                .filter(|member| member.is_general != 0)
+                .count()
+        })
     }
 
     /// Commit one judged grade-arm step under the stored row: the value lands, the
@@ -4232,18 +4221,13 @@ impl GameState {
         else {
             return;
         };
-        let members: Vec<Vid> = self
-            .guilds
-            .by_id
-            .get(&id)
-            .map(|guild| {
-                guild
-                    .members
-                    .values()
-                    .filter_map(|member| member.vid)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let members: Vec<Vid> = self.guilds.by_id.get(&id).map_or_default(|guild| {
+            guild
+                .members
+                .values()
+                .filter_map(|member| member.vid)
+                .collect()
+        });
         for vid in members {
             self.quest_letter(vid, quest);
         }
@@ -4339,18 +4323,13 @@ impl GameState {
         // to the gainer's online members, then the opp's (`Packet` each, `:217-218`).
         let record = guild_war_score_record(attack, defend, total);
         for id in [attack, defend] {
-            let members: Vec<Vid> = self
-                .guilds
-                .by_id
-                .get(&id)
-                .map(|guild| {
-                    guild
-                        .members
-                        .values()
-                        .filter_map(|member| member.vid)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let members: Vec<Vid> = self.guilds.by_id.get(&id).map_or_default(|guild| {
+                guild
+                    .members
+                    .values()
+                    .filter_map(|member| member.vid)
+                    .collect()
+            });
             for member in members {
                 let _sent = self.write_to_client(member, record.clone());
             }
@@ -4591,7 +4570,7 @@ impl GameState {
             .war_maps
             .get_mut(&index)
             .and_then(|war| war.flags.as_mut())
-            .map(|flags| {
+            .map_or_default(|flags| {
                 flags
                     .flag_vids
                     .iter()
@@ -4599,8 +4578,7 @@ impl GameState {
                     .copied()
                     .flatten()
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         for vid in vids {
             self.destroy_npc(vid);
         }
@@ -4895,8 +4873,7 @@ impl GameState {
         let vids: Vec<Vid> = self
             .war_maps
             .get(&index)
-            .map(|war| war.present.iter().copied().collect())
-            .unwrap_or_default();
+            .map_or_default(|war| war.present.iter().copied().collect());
         for vid in vids {
             self.remove_war_flag_affects(vid);
         }
@@ -5247,18 +5224,13 @@ impl GameState {
         if self.guild_under_any_war(id) {
             return;
         }
-        let members: Vec<Vid> = self
-            .guilds
-            .by_id
-            .get(&id)
-            .map(|guild| {
-                guild
-                    .members
-                    .values()
-                    .filter_map(|member| member.vid)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let members: Vec<Vid> = self.guilds.by_id.get(&id).map_or_default(|guild| {
+            guild
+                .members
+                .values()
+                .filter_map(|member| member.vid)
+                .collect()
+        });
         for member in members {
             for kind in [152, 153, 154, 155, 156, 157] {
                 let _stripped = self.remove_pc_affect(member, kind);
@@ -5484,8 +5456,7 @@ impl GameState {
     fn character_name_of(&self, vid: Vid) -> Vec<u8> {
         self.characters
             .find_by_vid(vid)
-            .map(|character| character.name().as_bytes().to_vec())
-            .unwrap_or_default()
+            .map_or_default(|character| character.name().as_bytes().to_vec())
     }
 
     /// One side's insert (`CGuild::DeclareWar`, `G/guild_war.cpp:372-384`): false when

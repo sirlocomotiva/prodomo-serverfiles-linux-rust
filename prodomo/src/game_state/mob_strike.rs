@@ -905,8 +905,7 @@ impl GameState {
         let state = self
             .bodies
             .get(&victim.vid)
-            .map(|body| body.sync)
-            .unwrap_or_default();
+            .map_or_default(|body| body.sync);
         match judge_sync_ownership(actor, victim, state, actor_at.0, actor_at.1, now) {
             SyncOwnershipOutcome::Refused => false,
             // The owner past the limit keeps the claim as it was and sends nothing.

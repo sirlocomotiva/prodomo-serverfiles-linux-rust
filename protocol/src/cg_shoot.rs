@@ -71,7 +71,7 @@ impl CgShoot {
     /// [`CgShootError::InvalidHeader`] for another header.
     pub fn decode_frame(frame: &ClientFrame) -> Result<Self, CgShootError> {
         if frame.payload.len() != 1 {
-            let available = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+            let available = frame.payload.len().saturating_add(1);
             return if frame.payload.is_empty() {
                 Err(CgShootError::Truncated {
                     needed: CG_SHOOT_WIRE_SIZE,

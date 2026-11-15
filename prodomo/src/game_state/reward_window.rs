@@ -292,8 +292,7 @@ impl GameState {
         let name = self
             .characters
             .find_by_vid(vid)
-            .map(|character| character.name().as_bytes().to_vec())
-            .unwrap_or_default();
+            .map_or_default(|character| character.name().as_bytes().to_vec());
         let killer_level = self.bodies.get(&vid).map_or(0, |body| body.card.level);
         for (key, row_kind, row_sub) in GLOBAL_ROWS {
             if row_kind != kind || (row_sub != 0 && row_sub != sub) {

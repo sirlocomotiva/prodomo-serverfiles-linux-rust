@@ -592,7 +592,7 @@ pub fn decode_sync_position(
     }
 
     let payload_len = frame.payload.len() - 2;
-    if payload_len % SYNC_POSITION_ELEMENT_WIRE_SIZE != 0 {
+    if !payload_len.is_multiple_of(SYNC_POSITION_ELEMENT_WIRE_SIZE) {
         return Err(SyncPositionDecodeError::NonElementAligned {
             declared_size,
             payload_len,
@@ -604,7 +604,10 @@ pub fn decode_sync_position(
     elements
         .try_reserve_exact(element_count)
         .map_err(|_| SyncPositionDecodeError::AllocationFailed)?;
-    for bytes in frame.payload[2..].chunks_exact(SYNC_POSITION_ELEMENT_WIRE_SIZE) {
+    for bytes in frame.payload[2..]
+        .as_chunks::<SYNC_POSITION_ELEMENT_WIRE_SIZE>()
+        .0
+    {
         let vid = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         let x = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         let y = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);

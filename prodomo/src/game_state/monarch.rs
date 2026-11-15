@@ -515,18 +515,15 @@ impl GameState {
                 continue;
             };
             self.tell(healed, fan, CHAT_TYPE_INFO, HEAL_FUNCTOR_LINE, &[]);
-            let refill = self
-                .pc_points_mut(healed.raw())
-                .map(|points| {
-                    let hp = points
-                        .point_change(point::POINT_HP, points.max_hp() - points.hp(), false, false)
-                        .unwrap_or_default();
-                    let sp = points
-                        .point_change(point::POINT_SP, points.max_sp() - points.sp(), false, false)
-                        .unwrap_or_default();
-                    [hp, sp].concat()
-                })
-                .unwrap_or_default();
+            let refill = self.pc_points_mut(healed.raw()).map_or_default(|points| {
+                let hp = points
+                    .point_change(point::POINT_HP, points.max_hp() - points.hp(), false, false)
+                    .unwrap_or_default();
+                let sp = points
+                    .point_change(point::POINT_SP, points.max_sp() - points.sp(), false, false)
+                    .unwrap_or_default();
+                [hp, sp].concat()
+            });
             self.send_point_records(healed, &refill);
             for effect in [SE_SPUP_BLUE, SE_HPUP_RED] {
                 let mut record = Vec::new();

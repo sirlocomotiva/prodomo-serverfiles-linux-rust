@@ -875,7 +875,7 @@ impl GameState {
     /// 3 Pulses each follower runs `Update`, in VID order. A follower whose NPC is
     /// gone drops its entry, as `DeletePet`'s twin drops the actor.
     pub(super) fn run_shaman_ticks(&mut self, pulse: u64) {
-        if pulse % SHAMAN_STATE_PULSES != 0 {
+        if !pulse.is_multiple_of(SHAMAN_STATE_PULSES) {
             return;
         }
         let mut stood: Vec<u32> = self.shaman_npcs.keys().copied().collect();
@@ -1243,8 +1243,7 @@ mod tests {
         let kinds: Vec<u32> = world
             .affect_events
             .get(&Vid::new(KEEPER))
-            .map(|event| event.affects.iter().map(|affect| affect.kind).collect())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.iter().map(|affect| affect.kind).collect());
         assert_eq!(kinds, [94], "the first missing buff casts");
         let cast = world
             .affect_events
@@ -1265,8 +1264,7 @@ mod tests {
         let kinds: Vec<u32> = world
             .affect_events
             .get(&Vid::new(KEEPER))
-            .map(|event| event.affects.iter().map(|affect| affect.kind).collect())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.iter().map(|affect| affect.kind).collect());
         assert_eq!(kinds, [94], "the 3 s stamp holds the next cast");
         // Past the stamp, the next missing buff casts. `shaman_use_skill`
         // clears the owner's 94 row too, so the tick re-casts 94.
@@ -1275,12 +1273,11 @@ mod tests {
         let kinds: Vec<u32> = world
             .affect_events
             .get(&Vid::new(KEEPER))
-            .map(|event| {
+            .map_or_default(|event| {
                 let mut kinds: Vec<u32> = event.affects.iter().map(|affect| affect.kind).collect();
                 kinds.sort_unstable();
                 kinds
-            })
-            .unwrap_or_default();
+            });
         assert_eq!(
             kinds,
             [94],
@@ -1292,8 +1289,7 @@ mod tests {
         let kinds: Vec<u32> = world
             .affect_events
             .get(&Vid::new(KEEPER))
-            .map(|event| event.affects.iter().map(|affect| affect.kind).collect())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.iter().map(|affect| affect.kind).collect());
         assert_eq!(kinds, [94], "death keeps the follow but casts nothing");
     }
 

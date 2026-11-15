@@ -97,14 +97,14 @@ impl CgUseSkill {
     pub fn decode_frame(frame: &ClientFrame) -> Result<Self, CgUseSkillError> {
         match frame.payload.len().cmp(&CG_USE_SKILL_PAYLOAD_SIZE) {
             std::cmp::Ordering::Less => {
-                let available = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+                let available = frame.payload.len().saturating_add(1);
                 Err(CgUseSkillError::Truncated {
                     needed: CG_USE_SKILL_WIRE_SIZE,
                     available,
                 })
             }
             std::cmp::Ordering::Greater => {
-                let actual = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+                let actual = frame.payload.len().saturating_add(1);
                 Err(CgUseSkillError::LengthMismatch {
                     expected: CG_USE_SKILL_WIRE_SIZE,
                     actual,
@@ -263,7 +263,7 @@ mod tests {
         }
         for extra in [1usize, 2, 3, 64, 255] {
             let mut long = complete.clone();
-            long.extend(std::iter::repeat(0u8).take(extra));
+            long.extend(std::iter::repeat_n(0u8, extra));
             assert_eq!(
                 CgUseSkill::decode(&long),
                 Err(CgUseSkillError::LengthMismatch {
@@ -324,7 +324,7 @@ mod tests {
         }
         for extra in [1usize, 2, 3, 64, 255] {
             let mut payload = packet.to_frame().payload;
-            payload.extend(std::iter::repeat(0u8).take(extra));
+            payload.extend(std::iter::repeat_n(0u8, extra));
             assert_eq!(
                 CgUseSkill::decode_frame(&ClientFrame::new(0x34, payload)),
                 Err(CgUseSkillError::LengthMismatch {

@@ -29,6 +29,8 @@ rewrite `.scratch/migration/progress.md`, and start the next one.
 - Ledger 683 is the test hygiene: a killed test run leaves nothing (`parity::scratch`,
   `db/tests/support/lease.rs`), `tools/gates.sh` fails on anything left, and the machine's
   leftovers, worktrees and `.scratch/tmp/` were removed.
+- Ledger 684 is the toolchain: Rust 1.100.0 pinned in `rust-toolchain.toml`, the new Clippy's
+  findings fixed, and a dependency no target uses fails the build.
 - Tests: 5,659 pass in 46 targets with `DATABASE_URL`. There are 519 parity scenarios.
 - Parity: 1,136 ported, 65 partial, 444 unused, 0 missing and 0 codec, out of 1,645 rows.
 - Owner questions: `.scratch/migration/owner-questions.md`; the ones that block work are in
@@ -170,16 +172,17 @@ After each push, rewrite `.scratch/migration/progress.md` with:
 - Only append ledger sections. Never touch `server/`. Touch `legacy/` only for a quest source
   whose mistake stops a script (ADR-0004's rule, "When something needs the owner" above).
 
-**Rust 1.85.1**
+**Rust 1.100.0** (pinned in `rust-toolchain.toml`, ledger 684)
 - clippy pedantic with `-D warnings`.
-- No new `#[allow]`, no `unsafe`, no let-chains, no items after statements.
+- No new `#[allow]`, no `unsafe`, no items after statements.
 - 100 columns, and `try_from` instead of `as`.
 - No new crate without the owner.
+- The edition is 2021. Edition 2024 (and with it let-chains) is the owner's decision, not a
+  section's.
 
 **Tools**
-- Call `/usr/bin/cargo-fmt fmt --all` and
-  `/usr/bin/cargo-clippy clippy -p <crate> --all-targets --locked --offline -- -D warnings`. The
-  rustup 1.98 in `~/.cargo/bin` shadows the cargo subcommands.
+- `cargo` is rustup's proxy (`~/.cargo/bin/cargo`), which reads the pin. `/usr/bin/cargo` is the
+  distribution's 1.85.1 and must not build this tree; check `cargo --version` says 1.100.0.
 - Use `command grep -a`.
 - Gates: run `DATABASE_URL=postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo
   tools/gates.sh $J` in the background, then read `$J/summary.txt`. It covers fmt, build, clippy,

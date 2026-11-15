@@ -2316,8 +2316,6 @@ mod tests {
         let mut case = Case::new(&[(inv(3), sword.clone())]);
         let done = case.run(inv(3), wear_pos(WEAPON)).expect("equips");
         assert_eq!(done.kind, MoveKind::Equipped);
-        let mut worn = sword.clone();
-        worn.pos = wear_pos(WEAPON);
         assert_eq!(
             item_records(&done),
             vec![

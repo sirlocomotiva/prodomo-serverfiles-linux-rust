@@ -982,17 +982,13 @@ mod tests {
                 .is_none(),
             "the spent ball leaves the cell"
         );
-        let rows: Vec<(u32, usize, i32)> = world
-            .affect_events
-            .get(&vid)
-            .map(|event| {
-                event
-                    .affects
-                    .iter()
-                    .map(|affect| (affect.kind, usize::from(affect.apply_on), affect.value))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rows: Vec<(u32, usize, i32)> = world.affect_events.get(&vid).map_or_default(|event| {
+            event
+                .affects
+                .iter()
+                .map(|affect| (affect.kind, usize::from(affect.apply_on), affect.value))
+                .collect()
+        });
         assert!(
             rows.contains(&(AFFECT_POLYMORPH, point::POINT_POLYMORPH, 101)),
             "the morph row lands: {rows:?}"
@@ -1146,10 +1142,8 @@ mod tests {
             .cloned()
             .expect("the book stays");
         assert_eq!(book.sockets[1], 2, "socket 1 stamps down");
-        let rows: Vec<(u32, usize, i32, i32)> = world
-            .affect_events
-            .get(&vid)
-            .map(|event| {
+        let rows: Vec<(u32, usize, i32, i32)> =
+            world.affect_events.get(&vid).map_or_default(|event| {
                 event
                     .affects
                     .iter()
@@ -1162,8 +1156,7 @@ mod tests {
                         )
                     })
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         assert!(
             rows.contains(&(AFFECT_POLYMORPH, point::POINT_POLYMORPH, 101, 10)),
             "the morph row lands: {rows:?}"

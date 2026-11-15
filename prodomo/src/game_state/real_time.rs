@@ -29,7 +29,7 @@ impl GameState {
     /// expiry while the item is offered in a trade waits: legacy's one caller is the
     /// character's own event, and a dying trade item would strand the trade window.
     pub(super) fn run_real_time_expiry(&mut self, pulse: u64) {
-        if pulse % u64::from(PASSES_PER_SEC) != 0 {
+        if !pulse.is_multiple_of(u64::from(PASSES_PER_SEC)) {
             return;
         }
         let now = Self::global_time();

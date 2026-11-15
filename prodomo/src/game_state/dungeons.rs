@@ -96,9 +96,7 @@ impl Dungeons {
     /// Whether a dungeon lives under `index` (`CDungeonManager::FindByMapIndex`,
     /// `G/dungeon.cpp:461-469`): what `d.select` and `d.find` ask.
     pub(super) fn lives(&self, index: u32) -> bool {
-        i32::try_from(index)
-            .ok()
-            .is_some_and(|index| self.by_index.contains_key(&index))
+        i32::try_from(index).is_ok_and(|index| self.by_index.contains_key(&index))
     }
 
     /// `CDungeonManager::Create(map)` (`G/dungeon.cpp:470-501`): the first free

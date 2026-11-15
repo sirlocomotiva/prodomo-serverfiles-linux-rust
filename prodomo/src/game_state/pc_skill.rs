@@ -579,9 +579,9 @@ impl GameState {
             let _sent = self.write_to_client(vid, self.protected_popup(mover));
             return None;
         }
-        let (job, group) = match self.bodies.get(&vid) {
-            Some(body) => (body.card.job, body.card.skill_group),
-            None => return None,
+        let (job, group) = {
+            let body = self.bodies.get(&vid)?;
+            (body.card.job, body.card.skill_group)
         };
         let up = self.skill_level_up(vid, job, group, vnum, SkillUpMethod::Point);
         // `SkillLevelUp`'s polymorph arm (`G/char_skill.cpp:731-736`) talks here,
@@ -3333,7 +3333,7 @@ impl GameState {
             };
             if other == centre {
                 continue;
-            };
+            }
             let Some(npc) = self.npc_by_vid(other) else {
                 continue;
             };
@@ -3773,12 +3773,11 @@ impl GameState {
     ) -> Option<(i32, i32)> {
         // A SELFONLY centre is the caster, not a non-player: the walk starts at the
         // caster's own spot (no target-range measure — the caster is 0 away).
-        let (nx, ny) = match self.npc_by_vid(target_vid) {
-            Some(npc) => (npc.x, npc.y),
-            None => match self.spot_of(target_vid) {
-                Some(at) => (at.x, at.y),
-                None => return None,
-            },
+        let (nx, ny) = if let Some(npc) = self.npc_by_vid(target_vid) {
+            (npc.x, npc.y)
+        } else {
+            let at = self.spot_of(target_vid)?;
+            (at.x, at.y)
         };
         // `pkSk->dwTargetRange && DISTANCE_SQRT(...) >= range + 50`.
         let ok = row.record.target_range == 0
@@ -4057,7 +4056,7 @@ impl GameState {
         };
         if !self.is_attackable(vid, (place.1, spot.x, spot.y), &npc_snapshot) {
             return (None, Vec::new());
-        };
+        }
         match btype {
             0 => self.shoot_bow(vid, target),
             1 => (None, Vec::new()),
@@ -6509,8 +6508,7 @@ mod tests {
         let held = world
             .affect_events
             .get(&me)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.clone());
         assert_eq!(held.len(), 1, "the cloak lands one affect");
         assert_eq!(held[0].kind, crate::loading_phase::AFFECT_INVISIBILITY);
         assert_eq!(held[0].remaining, 300, "the cloak lasts 300 s");
@@ -6653,8 +6651,7 @@ mod tests {
         let held = world
             .affect_events
             .get(&me)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.clone());
         assert_eq!(held.len(), 1, "the potion lands one affect");
         assert_eq!(held[0].kind, crate::loading_phase::AFFECT_ATT_SPEED);
         assert_eq!(held[0].value, 10, "value(2) is the bonus");
@@ -6793,8 +6790,7 @@ mod tests {
         let held = world
             .affect_events
             .get(&me)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.clone());
         assert_eq!(held.len(), 1, "the potion lands one affect");
         assert_eq!(
             held[0].kind,
@@ -6868,8 +6864,7 @@ mod tests {
         let held = world
             .affect_events
             .get(&me)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.clone());
         assert_eq!(held.len(), 1, "the use lands one affect");
         assert_eq!(held[0].kind, crate::loading_phase::AFFECT_MALL);
         assert_eq!(
@@ -6940,8 +6935,7 @@ mod tests {
         let held = world
             .affect_events
             .get(&me)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.clone());
         assert_eq!(held.len(), 1, "the use lands one affect");
         assert_eq!(
             held[0].kind,
@@ -7091,8 +7085,7 @@ mod tests {
         let held = world
             .affect_events
             .get(&me)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.clone());
         assert_eq!(held.len(), 3, "the use lands three rows");
         let kind = crate::loading_phase::AFFECT_NOG_ABILITY;
         assert!(held.iter().all(|row| row.kind == kind));
@@ -7528,8 +7521,7 @@ mod tests {
         let held = world
             .affect_events
             .get(&me)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default();
+            .map_or_default(|event| event.affects.clone());
         assert_eq!(held.len(), 2, "both rows stand");
     }
 }

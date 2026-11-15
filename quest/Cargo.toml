@@ -6,7 +6,6 @@ rust-version.workspace = true
 description = "Metin2 Lua quest system"
 
 [dependencies]
-tokio = { workspace = true }
 tracing = { workspace = true }
 mlua = { workspace = true }
 common = { path = "../common" }

@@ -1355,8 +1355,7 @@ impl GameState {
     fn running_affects(&self, vid: Vid) -> Vec<Affect> {
         self.affect_events
             .get(&vid)
-            .map(|event| event.affects.clone())
-            .unwrap_or_default()
+            .map_or_default(|event| event.affects.clone())
     }
 
     /// `StartRecoveryEvent` of a player (`G/char.cpp:3287-3314`): none while one runs or the
@@ -2433,7 +2432,7 @@ mod tests {
         let died = [unowned(ALPHA), phase(PHASE_DEAD), dead(ALPHA)];
         assert_eq!(
             field.heard(ALPHA),
-            [died.as_slice(), &[end.clone()]].concat()
+            [died.as_slice(), std::slice::from_ref(&end)].concat()
         );
         assert_eq!(field.heard(BRAVO), vec![unowned(ALPHA), dead(ALPHA), end]);
         assert!(field.world.trading.is_empty());

@@ -9,8 +9,8 @@ loss without a cause.
 ## What was seen (2026-11-15, 16 cores, `DATABASE_URL` set, default test threads)
 
 Every full run but one lost one scenario, a different one most times. Each passed alone
-afterwards. Ledger 683 read each failure against the legacy rule the scenario tests, and three of
-the four scenarios had a cause in the scenario itself, none of them the load:
+afterwards. Ledgers 683 and 684 read each failure against what the scenario tests, and four of
+the five scenarios had a cause in the scenario itself, none of them the load:
 
 | run | lost scenario | cause | state |
 |---|---|---|---|
@@ -19,6 +19,7 @@ the four scenarios had a cause in the scenario itself, none of them the load:
 | 680, third run; 683, second run | `a_cape_of_courage_gathers_the_dogs_around` | **The rule's own dice.** `AggregateMonster` starts each monster on a one-in-two draw (`G/char_battle.cpp:3663`); the scenario placed five dogs, so none came in one run of 32 and the read for the swing timed out (`parity/src/client.rs:80`). | fixed in 683: sixteen dogs, here and in `a_gm_aggregates_and_forgets_the_dogs_around`, which had the same five |
 | 680, fourth run; 682 | `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off` | **The rule's own clock.** The use throttle compares whole seconds of the wall clock (`get_global_time() - last_use_time < 1`, `G/char_item.cpp:5370`); the scenario sent its two uses at any moment, and the server handles them about one Pulse apart, so when they straddled a second the second use toggled the potion off instead of hearing the wait line. Reproduced on purpose: aimed 30 ms before a second's end, five failures of six with the same message. | fixed in 683: the pair starts early in a second (`wait_for_a_fresh_second`) |
 | 683, first run | `a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin` | **Unrelated work inside a legacy window.** The first `/hide_costume 1` must land inside the 1.5-second move window that starts at Alpha's Show; the scenario logged a second character in first, about 1.2 s on an idle machine and more in a full run. | fixed in 683: the second character enters first |
+| 684, first run on Rust 1.100.0 | `a_biologist_refuses_the_wrong_state_level_and_done_missions` | **A wait an earlier line had already satisfied.** `Server::wait_for` returns at once when the line was collected before. The scenario disconnects four times and waited for "Character disconnected; wrote the row" each time, so from the second on nothing was waited for: the next step's `UPDATE` landed first and the disconnect's save wrote the old row over it. The failure shows it: the answer was the previous step's line (state 8's pick line), not the overflow line. Not reproduced on purpose. | fixed in 684: `Server::wait_for_next`, here (`bio_banked`) and in the two other scenarios that waited twice for that line |
 
 In the second 680 run `the_quest_window_runs_the_letters_info_and_the_quest_moves_on` failed at
 the `client.rs:80` read, but that run also held a wrong quest number in the scenario, so it is
@@ -40,8 +41,10 @@ so far needed that to explain it.
    - a rule with a draw, tested with too few tries for the draw to be sure;
    - a rule counted in whole seconds of the wall clock, with steps sent at any moment;
    - a legacy window that starts at an enter, a Show or a use, with a login, a `quiet` or a
-     `sleep` between that event and the step that needs the window.
-2. Sweep the scenarios for the same three classes before they lose a run. Where ledger 683
+     `sleep` between that event and the step that needs the window;
+   - a `wait_for` on a line the scenario's server already logged (the answer is then an
+     earlier step's).
+2. Sweep the scenarios for the same classes before they lose a run. Where ledgers 683 and 684
    left it:
    - draws: the only two regen lines with five monsters beside `AggregateMonster` are fixed;
      other draws were not looked for;
@@ -51,7 +54,12 @@ so far needed that to explain it.
      of them item uses (the two potions, two firework pairs); none but the auto potion was
      read against its rule;
    - windows: look for `enter_world` between a character's enter and an "inside the window"
-     step.
+     step;
+   - repeated waits: swept in 684 over every scenario and helper for a literal line waited
+     for twice. Four scenarios did; three are fixed, and
+     `an_unlock_knock_spends_keys_and_the_save_keeps_the_rows` stops its server between the
+     two, so each wait reads a new console. A line built with `format!` (the
+     "Client connection closed addr=" waits) names its own address and cannot repeat.
 3. Only a loss none of these explains is a load question; it waits for C1's Pulse duration
    record.
 4. A receipt keeps naming each first-run loss. This issue closes when five full runs in a row

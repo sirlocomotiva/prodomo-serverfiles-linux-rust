@@ -900,9 +900,7 @@ fn a_console_that_is_not_configured_never_appears() {
 /// Whether `path` is a named pipe.
 fn is_a_fifo(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
-    fs::metadata(path)
-        .map(|metadata| metadata.file_type().is_fifo())
-        .unwrap_or(false)
+    fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_fifo())
 }
 
 /// Wait for `path` to exist, so a test never checks a filesystem fact at a moment it

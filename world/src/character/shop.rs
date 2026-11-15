@@ -359,10 +359,8 @@ pub fn sale_price(proto: &ItemProto, count: u16) -> u64 {
     let each = u64::from(proto.shop_buy_price);
     let price = if proto.flags & ITEM_FLAG_COUNT_PER_1GOLD == 0 {
         each * count
-    } else if each == 0 {
-        count
     } else {
-        count / each
+        count.checked_div(each).unwrap_or(count)
     } / 5;
     price - price * SALE_TAX_PERCENT / 100
 }

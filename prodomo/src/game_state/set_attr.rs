@@ -410,8 +410,7 @@ impl GameState {
             }
             let computed = self
                 .pc_points_mut(target.raw())
-                .map(world::character::Points::compute_battle_points)
-                .unwrap_or_default();
+                .map_or_default(world::character::Points::compute_battle_points);
             self.send_point_records(target, &computed);
         }
     }

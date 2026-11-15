@@ -6,7 +6,8 @@
 # The legacy Game data is not in the image: `compose.yaml` mounts `legacy/` read-only, as the
 # server reads it in place and never writes it.
 
-FROM docker.io/library/rust:1.85.1-bookworm AS build
+# The tag is the compiler `rust-toolchain.toml` pins; change both together.
+FROM docker.io/library/rust:1.100.0-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY protocol protocol

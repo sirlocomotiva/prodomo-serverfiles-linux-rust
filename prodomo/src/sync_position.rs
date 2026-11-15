@@ -991,7 +991,7 @@ mod tests {
             result.close_reason,
             Some(SyncPositionCloseReason::SyncDisplacement)
         );
-        assert!(ports.broadcasts.len() == 1);
+        assert_eq!(ports.broadcasts.len(), 1);
     }
 
     #[test]

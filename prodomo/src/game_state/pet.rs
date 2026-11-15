@@ -287,7 +287,7 @@ impl GameState {
     /// `G/PetSystem.cpp:22-43`): every 12 Pulses each pet runs `Update`, in VID order.
     /// A pet whose NPC is gone drops its entry, as `DeletePet` drops the actor.
     pub(super) fn run_pet_ticks(&mut self, pulse: u64) {
-        if pulse % PET_STATE_PULSES != 0 {
+        if !pulse.is_multiple_of(PET_STATE_PULSES) {
             return;
         }
         let mut stood: Vec<u32> = self.pet_npcs.keys().copied().collect();

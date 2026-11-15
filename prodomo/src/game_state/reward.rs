@@ -203,16 +203,13 @@ impl GameState {
 
     /// `m_map_kDamage` under `vid` as (attacker VID, total) in VID order.
     fn damage_entries(&self, vid: u32) -> Vec<(u32, i32)> {
-        self.npc_combat
-            .get(&vid)
-            .map(|combat| {
-                combat
-                    .damage
-                    .iter()
-                    .map(|(&vid, row)| (vid, row.total))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.npc_combat.get(&vid).map_or_default(|combat| {
+            combat
+                .damage
+                .iter()
+                .map(|(&vid, row)| (vid, row.total))
+                .collect()
+        })
     }
 
     /// `DistributeExp`'s damage-table walk (`G/char_battle.cpp:2839-2904`): the rows, the

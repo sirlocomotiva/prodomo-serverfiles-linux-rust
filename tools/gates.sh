@@ -20,10 +20,12 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 cd "$root" || exit 2
 
-# A rustup proxy in ~/.cargo/bin shadows the distribution's pinned toolchain when it comes first
-# in PATH; one gate run was built with the wrong compiler that way (ledger 229j).
-if [ -x /usr/bin/cargo ]; then
-    PATH=/usr/bin:$PATH
+# The toolchain is the one `rust-toolchain.toml` pins. rustup's proxies read that file; a
+# distribution's `/usr/bin/cargo` does not, and one gate run was built with the wrong compiler
+# that way (ledger 229j). So the proxies come first, and a run with any other compiler stops.
+pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+    PATH=$HOME/.cargo/bin:$PATH
 fi
 export PATH
 
@@ -59,6 +61,12 @@ tests() {
 }
 
 say "toolchain: $(cargo --version 2>&1); $(rustc --version 2>&1)"
+for tool in cargo rustc; do
+    if [ "$($tool --version 2>/dev/null | awk '{print $2}')" != "$pinned" ]; then
+        say "result: FAILED ($tool is not the $pinned that rust-toolchain.toml pins)"
+        exit 1
+    fi
+done
 
 # The tests get a temporary folder of this run's own, so that whatever is in it afterwards was
 # left by this run and by nothing else. A folder an earlier run left here is that run's leak,

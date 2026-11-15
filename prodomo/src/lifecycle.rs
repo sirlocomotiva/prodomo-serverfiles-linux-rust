@@ -1000,7 +1000,7 @@ mod tests {
 
         let close = pong.state.on_tick(300).state.on_tick(400);
         assert_eq!(close.effects, vec![LifecycleEffect::Close]);
-        assert!(close.state.phase() == ClientPhase::Close);
+        assert_eq!(close.state.phase(), ClientPhase::Close);
         assert!(close.state.heartbeat().is_closed());
         assert!(encode_lifecycle_effects(&close.effects).is_empty());
     }

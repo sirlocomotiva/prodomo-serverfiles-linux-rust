@@ -1932,7 +1932,7 @@ impl GameState {
             let mini = self
                 .npc_by_vid(vid)
                 .is_some_and(|npc| MINI_HYDRAS.contains(&npc.vnum))
-                && minis.iter().any(|mini| *mini == Some(vid));
+                && minis.contains(&Some(vid));
             if mini {
                 let spot = self.npc_by_vid(vid).map(|npc| (npc.x, npc.y));
                 let base = self
@@ -1959,7 +1959,7 @@ impl GameState {
             let drop = self.ship.of(leader).is_some_and(|run| {
                 run.mast.is_some_and(|(mast, _, _)| mast == vid)
                     || run.boss.is_some_and(|(boss, _)| boss == vid)
-                    || run.minis.iter().any(|mini| *mini == Some(vid))
+                    || run.minis.contains(&Some(vid))
                     || run.egg == Some(vid)
                     || run.fake == Some(vid)
                     || run.reward == Some(vid)

@@ -6,9 +6,6 @@ rust-version.workspace = true
 description = "Metin2 game world and map management"
 
 [dependencies]
-tokio = { workspace = true }
-tracing = { workspace = true }
-serde = { workspace = true }
 common = { path = "../common" }
 protocol = { path = "../protocol" }
 gamedata = { path = "../gamedata" }

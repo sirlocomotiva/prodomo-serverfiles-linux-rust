@@ -92,8 +92,7 @@ impl Targets {
     pub(super) fn targeting(&self, target: u32) -> Vec<u32> {
         self.by
             .get(&target)
-            .map(|set| set.iter().copied().collect())
-            .unwrap_or_default()
+            .map_or_default(|set| set.iter().copied().collect())
     }
 
     /// Makes `target` the target of `vid`, forgetting its old one.
@@ -124,8 +123,7 @@ impl Targets {
         let targeting: Vec<u32> = self
             .by
             .remove(&vid)
-            .map(|set| set.into_iter().collect())
-            .unwrap_or_default();
+            .map_or_default(|set| set.into_iter().collect());
         for other in &targeting {
             self.of.remove(other);
         }

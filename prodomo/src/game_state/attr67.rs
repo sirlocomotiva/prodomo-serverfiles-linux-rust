@@ -161,10 +161,8 @@ impl GameState {
                     self.attr67_open.insert(vid);
                 }
             }
-            ATTR67_REGIST => {
-                if self.attr67_open(vid) {
-                    self.run_attr67_regist(vid, regist, actor, &mut moved);
-                }
+            ATTR67_REGIST if self.attr67_open(vid) => {
+                self.run_attr67_regist(vid, regist, actor, &mut moved);
             }
             _ => {}
         }

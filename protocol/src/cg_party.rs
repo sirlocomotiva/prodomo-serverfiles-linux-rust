@@ -964,14 +964,23 @@ mod tests {
     #[test]
     fn the_distribution_mode_is_not_range_checked() {
         for v in 0u8..=u8::MAX {
-            assert!(CgPartyParameter::new(v).encode().len() == CG_PARTY_PARAMETER_WIRE_SIZE);
+            assert_eq!(
+                CgPartyParameter::new(v).encode().len(),
+                CG_PARTY_PARAMETER_WIRE_SIZE
+            );
         }
     }
 
     #[test]
     fn no_u32_value_is_rejected() {
-        assert!(CgPartyInvite::new(0).encode().len() == CG_PARTY_INVITE_WIRE_SIZE);
-        assert!(CgPartyRemove::new(u32::MAX).encode().len() == CG_PARTY_REMOVE_WIRE_SIZE);
+        assert_eq!(
+            CgPartyInvite::new(0).encode().len(),
+            CG_PARTY_INVITE_WIRE_SIZE
+        );
+        assert_eq!(
+            CgPartyRemove::new(u32::MAX).encode().len(),
+            CG_PARTY_REMOVE_WIRE_SIZE
+        );
     }
 
     // ---- error display ----------------------------------------------------

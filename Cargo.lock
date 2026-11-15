@@ -943,7 +943,6 @@ version = "0.1.0"
 dependencies = [
  "protocol",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1188,9 +1187,6 @@ dependencies = [
 [[package]]
 name = "protocol"
 version = "0.1.0"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "quest"
@@ -1198,7 +1194,6 @@ version = "0.1.0"
 dependencies = [
  "common",
  "mlua",
- "tokio",
  "tracing",
 ]
 
@@ -2502,9 +2497,6 @@ dependencies = [
  "common",
  "gamedata",
  "protocol",
- "serde",
- "tokio",
- "tracing",
 ]
 
 [[package]]

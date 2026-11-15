@@ -741,7 +741,7 @@ fn lzo_compress_core(
     let mut ip = 0_usize;
     let mut ii = 0_usize;
     // `ip += ti < 4 ? 4 - ti : 0` (`:5006`).
-    ip += if ti < 4 { 4 - ti } else { 0 };
+    ip += 4_usize.saturating_sub(ti);
     // The deterministic search (`:5046-5063`): the loop *enters* at `literal:`, so
     // the first position is skipped before anything is hashed — the search starts
     // at `4 + 1 + ((4 - 0) >> 5)` = 5 for a fresh chunk. After a match the code

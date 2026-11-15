@@ -168,7 +168,7 @@ impl QuestTargets {
             id: self.last_id,
             quest: target.quest,
             name: kept(&target.name),
-            desc: target.desc.as_deref().map(kept).unwrap_or_default(),
+            desc: target.desc.as_deref().map_or_default(kept),
             vid: target.vid,
             send: target.send,
             event: 0,

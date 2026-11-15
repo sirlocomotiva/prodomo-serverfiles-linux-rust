@@ -358,7 +358,7 @@ impl GcSyncPosition {
             });
         }
         let extra = size - GC_SYNC_POSITION_HEAD_WIRE_SIZE;
-        if extra % GC_SYNC_POSITION_ELEMENT_WIRE_SIZE != 0 {
+        if !extra.is_multiple_of(GC_SYNC_POSITION_ELEMENT_WIRE_SIZE) {
             return Err(GcPositionError::Misaligned { extra });
         }
         let count = extra / GC_SYNC_POSITION_ELEMENT_WIRE_SIZE;

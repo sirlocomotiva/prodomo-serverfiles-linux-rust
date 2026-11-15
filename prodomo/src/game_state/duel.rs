@@ -507,16 +507,14 @@ impl GameState {
     pub(super) fn pvp_pid_of(&self, vid: Vid) -> u32 {
         self.characters
             .find_by_vid(vid)
-            .map(world::character::Character::player_id)
-            .unwrap_or(0)
+            .map_or(0, world::character::Character::player_id)
     }
 
     /// The character Name bytes of the character under `vid`, empty when nobody is there.
     fn name_of(&self, vid: Vid) -> Vec<u8> {
         self.characters
             .find_by_vid(vid)
-            .map(|character| Vec::from(character.name().as_bytes()))
-            .unwrap_or_default()
+            .map_or_default(|character| Vec::from(character.name().as_bytes()))
     }
 }
 

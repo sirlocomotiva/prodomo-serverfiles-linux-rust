@@ -469,8 +469,7 @@ impl Relations {
     pub(super) fn companions_of(&self, name: &[u8]) -> Vec<Vec<u8>> {
         self.relation
             .get(name)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default()
+            .map_or_default(|set| set.iter().cloned().collect())
     }
 
     /// Whether a request from `requester` to the character under `vid` waits. The
@@ -542,8 +541,7 @@ fn name_of(state: &GameState, vid: Vid) -> Vec<u8> {
     state
         .characters
         .find_by_vid(vid)
-        .map(|character| Vec::from(character.name().as_bytes()))
-        .unwrap_or_default()
+        .map_or_default(|character| Vec::from(character.name().as_bytes()))
 }
 
 /// The VID of the character that answers to the name, or `None`. `FindPC` matches the

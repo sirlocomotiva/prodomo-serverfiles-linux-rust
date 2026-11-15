@@ -106,8 +106,7 @@ impl GameState {
         let protos = std::sync::Arc::clone(&self.protos);
         let name = protos
             .get(item.vnum)
-            .map(|proto| proto.locale_name.clone())
-            .unwrap_or_default();
+            .map_or_default(|proto| proto.locale_name.clone());
         let real = item.count;
         let count_limit = self.item_count_limit;
         let Ok(character) = self.characters.find_by_vid_mut(owner) else {

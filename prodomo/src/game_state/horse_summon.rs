@@ -385,8 +385,7 @@ impl GameState {
         let name = self
             .protos
             .get(food)
-            .map(|proto| proto.locale_name.clone())
-            .unwrap_or_default();
+            .map_or_default(|proto| proto.locale_name.clone());
         if self.count_specify_item(vid, food) <= 0 {
             self.tell(
                 vid,

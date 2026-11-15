@@ -123,8 +123,7 @@ impl GameState {
         let fighting = self
             .characters
             .find_by_vid(vid)
-            .ok()
-            .is_some_and(|character| self.pvp_is_fighting(character.player_id()));
+            .is_ok_and(|character| self.pvp_is_fighting(character.player_id()));
         if no_potions && fighting && !PVP_ALLOWED.contains(&vnum) {
             self.tell(vid, mover, CHAT_TYPE_INFO, PVP_REFUSAL, &[]);
             return false;
@@ -324,8 +323,7 @@ impl GameState {
         let fighting = self
             .characters
             .find_by_vid(vid)
-            .ok()
-            .is_some_and(|character| self.pvp_is_fighting(character.player_id()));
+            .is_ok_and(|character| self.pvp_is_fighting(character.player_id()));
         if on_arena || (no_potions && fighting && !PVP_ALLOWED.contains(&item.vnum)) {
             let Ok(character) = self.characters.find_by_vid_mut(vid) else {
                 return None;

@@ -345,7 +345,7 @@ pub enum ShopAnswer {
         records: Vec<Vec<u8>>,
     },
     /// A buy or a sale, stored and sent as a move is, with the gold it left.
-    Moved(MovedItems),
+    Moved(Box<MovedItems>),
     /// A buy from a player's shop: both sides, for the store to write in one
     /// transaction, as a trade's settling is.
     Settled(Box<super::trade::TradeSettled>),
@@ -733,7 +733,7 @@ impl GameState {
         // `OnClick`'s hide-and-seek arm (`G/char.cpp:6297-6329`): the box's click pays
         // before the quest click runs.
         if let Some(reward) = self.hide_box_click(vid, target, mover) {
-            return ShopAnswer::Moved(reward);
+            return ShopAnswer::Moved(Box::new(reward));
         }
         // The descriptor's actor carries PEACE: the click's scripts read the world's
         // own PK mode, alignment, guild, flags and dead bit, as an item step's do.
@@ -998,14 +998,14 @@ impl GameState {
                 } else {
                     done
                 };
-                Ok(ShopAnswer::Moved(paid(
+                Ok(ShopAnswer::Moved(Box::new(paid(
                     character,
                     done,
                     left,
                     mover,
                     &self.protos,
                     &self.locale,
-                )))
+                ))))
             }
             Err(refused) => Ok(refusal(refused, mover, &self.locale)),
         }
@@ -1094,14 +1094,14 @@ impl GameState {
                         done.records.push(MoveRecord::Point(record));
                     }
                 }
-                Ok(ShopAnswer::Moved(paid(
+                Ok(ShopAnswer::Moved(Box::new(paid(
                     character,
                     done,
                     left,
                     mover,
                     &self.protos,
                     &self.locale,
-                )))
+                ))))
             }
             Err(refused) => Ok(refusal(refused, mover, &self.locale)),
         }
@@ -1152,14 +1152,14 @@ impl GameState {
         let gold = character.gold();
         match sell_item(character.items_mut(), gold, cell, count, &self.protos) {
             Ok((done, held)) => {
-                let answer = ShopAnswer::Moved(paid(
+                let answer = ShopAnswer::Moved(Box::new(paid(
                     character,
                     done,
                     held,
                     mover,
                     &self.protos,
                     &self.locale,
-                ));
+                )));
                 // Past the sale: the clamped count counts on the sold item
                 // (`RegisterItemMission(MISSION_TYPE_SELL, bCount, ...)`).
                 if matches!(answer, ShopAnswer::Moved(_)) {
@@ -1571,7 +1571,7 @@ mod tests {
 
     fn moved(answer: ShopAnswer) -> MovedItems {
         match answer {
-            ShopAnswer::Moved(moved) => moved,
+            ShopAnswer::Moved(moved) => *moved,
             other => panic!("nothing moved: {other:?}"),
         }
     }
@@ -2008,7 +2008,7 @@ mod tests {
             .set_points(Some(points_at(10, 820, 500)));
         let bought = state.buy_for_exp(SHOPPER, offer, of(1)).unwrap();
         let moved = match bought {
-            ShopAnswer::Moved(moved) => moved,
+            ShopAnswer::Moved(moved) => *moved,
             other => panic!("enough experience buys: {other:?}"),
         };
         assert_eq!(held(&state, 0), Some((19, 1)));

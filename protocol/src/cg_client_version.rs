@@ -120,7 +120,7 @@ impl CgClientVersion {
     pub fn decode_frame(frame: &ClientFrame) -> Result<Self, CgClientVersionError> {
         let expected_payload = CG_CLIENT_VERSION_WIRE_SIZE - 1;
         if frame.payload.len() != expected_payload {
-            let available = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+            let available = frame.payload.len().saturating_add(1);
             return if frame.payload.len() < expected_payload {
                 Err(CgClientVersionError::Truncated {
                     needed: CG_CLIENT_VERSION_WIRE_SIZE,

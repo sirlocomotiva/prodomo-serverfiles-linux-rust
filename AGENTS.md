@@ -117,8 +117,8 @@ return nothing ("TEST HYGIENE").
 
 The i686 cross compiler used by the width probe (`i686-linux-gnu-g++-12`) is not installed on every
 machine. Check before relying on it, and say so in the receipt when a width could not be measured.
-The same goes for `rustfmt` and `cargo-clippy` (installed on the owner's machine since ledger 180):
-when one is missing, say in the receipt that its gate did not run, and check formatting by hand
+The same goes for `rustfmt` and Clippy, which `rust-toolchain.toml` asks rustup to install: when
+one is missing, say in the receipt that its gate did not run, and check formatting by hand
 (rustfmt style, 100 columns). `clippy.toml` lists product names that `doc_markdown` must accept.
 
 ## WORKSPACE
@@ -171,12 +171,19 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline
 ```
 
 `--all-targets` does **not** run doc-tests, so the `--doc` run is a separate gate. Fix Clippy
-findings by refactoring, never by `#[allow]`. `unsafe_code` is forbidden workspace-wide, which is
-why Lua 5.0.3 through FFI was rejected (ADR-0004).
+findings by refactoring, never by `#[allow]`. A lint the whole workspace declines is switched off
+once, in `[workspace.lints]` of `Cargo.toml` with its reason (three are: `module_name_repetitions`,
+`must_use_candidate`, and since ledger 684 `assert_is_empty`); adding one is the owner's decision.
+A dependency that no target uses fails the build (`cargo::unused_dependencies`). `unsafe_code` is
+forbidden workspace-wide, which is why Lua 5.0.3 through FFI was rejected (ADR-0004).
 
-The toolchain is Rust 1.85.1. Adding or upgrading a dependency needs an online `cargo fetch`; ask
-the owner first, keep new crates compatible with 1.85, record the fetch in the ledger, and run every
-gate offline afterwards. Record a new receipt in the ledger whenever the test counts change.
+The toolchain is Rust 1.100.0, pinned in `rust-toolchain.toml` (ledger 684); the `Dockerfile`'s
+base image carries the same version, and the two change together. rustup's `cargo` reads the
+pin; a distribution's `/usr/bin/cargo` does not, and `tools/gates.sh` refuses to run with any
+other compiler. A toolchain change is its own ledger section. Adding or upgrading a dependency
+needs an online `cargo fetch`; ask the owner first, keep new crates compatible with the pinned
+compiler, record the fetch in the ledger, and run every gate offline afterwards. Record a new
+receipt in the ledger whenever the test counts change.
 
 `tools/gates.sh <output-dir>` runs all six, the tests both without and with `DATABASE_URL`, and
 writes `summary.txt` with every failed test by name, everything the tests left behind, and the

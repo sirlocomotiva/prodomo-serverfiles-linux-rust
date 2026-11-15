@@ -521,17 +521,16 @@ impl GameState {
                     questing: false,
                     lands: lands[index],
                 };
-                match drop_penalty_item(items, gear.as_deref_mut(), item.at, to) {
-                    Ok((done, ground)) => {
-                        next_vid = next_vid.wrapping_add(1).max(1);
-                        records.extend(done.records);
-                        changes.extend(done.changes);
-                        ground_items.push(ground);
-                    }
-                    // `AddToGround` finds no tree for the point
-                    // (`G/item.cpp:569-574`; the call is `G/char_battle.cpp:1189`), a
-                    // Defect. The Rewrite keeps it.
-                    Err(_) => {}
+                // An `Err` is `AddToGround` finding no tree for the point
+                // (`G/item.cpp:569-574`; the call is `G/char_battle.cpp:1189`), a
+                // Defect. The Rewrite keeps it.
+                if let Ok((done, ground)) =
+                    drop_penalty_item(items, gear.as_deref_mut(), item.at, to)
+                {
+                    next_vid = next_vid.wrapping_add(1).max(1);
+                    records.extend(done.records);
+                    changes.extend(done.changes);
+                    ground_items.push(ground);
                 }
             }
             Ok(MoveDone {

@@ -368,9 +368,7 @@ async fn make_pipe(path: &Path) -> std::io::Result<()> {
 /// only way that mistake cannot reach a second row.
 fn is_a_pipe(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
-    std::fs::metadata(path)
-        .map(|metadata| metadata.file_type().is_fifo())
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_fifo())
 }
 
 /// Run one line and answer it in the Operator's own words.

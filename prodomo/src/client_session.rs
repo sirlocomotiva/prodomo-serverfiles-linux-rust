@@ -25,11 +25,12 @@ use tokio::io::AsyncRead;
 ///
 /// The numeric values match the `EPhase` enum in the legacy `packet.h`.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientPhase {
     /// The descriptor is closed and consumes no client input.
     Close = 0,
     /// The initial handshake phase.
+    #[default]
     Handshake = 1,
     /// The login phase.
     Login = 2,
@@ -112,12 +113,6 @@ impl ClientPhase {
                 | Self::Dead
                 | Self::Auth
         )
-    }
-}
-
-impl Default for ClientPhase {
-    fn default() -> Self {
-        Self::Handshake
     }
 }
 

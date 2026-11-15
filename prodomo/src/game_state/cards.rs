@@ -385,7 +385,7 @@ impl GameState {
                 value: u32::try_from(value).unwrap_or(u32::MAX),
             };
             let cards = self.cards_of(pid);
-            if cards.drawn.iter().any(|drawn| *drawn == card) {
+            if cards.drawn.contains(&card) {
                 continue;
             }
             if let Some(empty) = cards.drawn.iter().position(|drawn| drawn.kind == 0) {
@@ -664,8 +664,7 @@ impl GameState {
         let name = self
             .characters
             .find_by_vid(vid)
-            .map(|character| character.name().as_bytes().to_vec())
-            .unwrap_or_default();
+            .map_or_default(|character| character.name().as_bytes().to_vec());
         self.card_tables
             .okay
             .games

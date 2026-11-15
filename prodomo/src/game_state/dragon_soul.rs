@@ -554,13 +554,9 @@ impl GameState {
         if !is_active(&stone) {
             return;
         }
-        let applies = self
-            .protos
-            .get(stone.vnum)
-            .map(|proto| {
-                world::character::item_applies(&stone, proto, &self.protos, &self.item_groups)
-            })
-            .unwrap_or_default();
+        let applies = self.protos.get(stone.vnum).map_or_default(|proto| {
+            world::character::item_applies(&stone, proto, &self.protos, &self.item_groups)
+        });
         for (kind, value) in &applies {
             // `ModifyPoints(false)` (`G/item.cpp:781-1010`): each apply unapplied through
             // `ApplyPoint`, except the skill type, which legacy XORs with `0x00800000`
@@ -591,32 +587,31 @@ impl GameState {
         let Some(mover) = self.own_mover(vid) else {
             return;
         };
-        let stones: Vec<(u16, u32, u32)> = self
-            .characters
-            .find_by_vid(vid)
-            .map(|character| {
-                character
-                    .items()
-                    .occupied()
-                    .into_iter()
-                    .filter(|(pos, _)| {
-                        pos.window_type == common::item_slots::EWindows::DragonSoulInventory as u8
-                    })
-                    .filter_map(|(pos, id)| {
-                        character
-                            .items()
-                            .item(id)
-                            .map(|item| (pos.cell, item.vnum, item.id))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let stones: Vec<(u16, u32, u32)> =
+            self.characters
+                .find_by_vid(vid)
+                .map_or_default(|character| {
+                    character
+                        .items()
+                        .occupied()
+                        .into_iter()
+                        .filter(|(pos, _)| {
+                            pos.window_type
+                                == common::item_slots::EWindows::DragonSoulInventory as u8
+                        })
+                        .filter_map(|(pos, id)| {
+                            character
+                                .items()
+                                .item(id)
+                                .map(|item| (pos.cell, item.vnum, item.id))
+                        })
+                        .collect()
+                });
         for (cell, vnum, id) in stones {
             let name = self
                 .protos
                 .get(vnum)
-                .map(|proto| proto.locale_name.clone())
-                .unwrap_or_default();
+                .map_or_default(|proto| proto.locale_name.clone());
             self.tell(
                 vid,
                 mover,

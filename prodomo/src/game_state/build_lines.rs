@@ -885,17 +885,13 @@ impl GameState {
     /// stands at the land center. The disband's land-clear (`ClearLandByGuildID`,
     /// `G/guild.cpp:1045`) calls it too.
     pub(super) fn clear_build_land(&mut self, place: (u8, i32), land_id: u32) {
-        let mut objects = self
-            .building_objects
-            .get(&place)
-            .map(|objects| {
-                objects
-                    .iter()
-                    .filter(|object| object.land_id == land_id)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let mut objects = self.building_objects.get(&place).map_or_default(|objects| {
+            objects
+                .iter()
+                .filter(|object| object.land_id == land_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         objects.sort_by_key(|object| object.id);
         for object in &objects {
             if let Some(npc) = object.npc_vid {
@@ -1041,10 +1037,8 @@ impl GameState {
         if self.build_level(vid) == GM_PLAYER {
             return;
         }
-        let targets: Vec<BuildingObject> = self
-            .building_objects
-            .get(&place)
-            .map(|objects| {
+        let targets: Vec<BuildingObject> =
+            self.building_objects.get(&place).map_or_default(|objects| {
                 objects
                     .iter()
                     .filter(|object| {
@@ -1054,8 +1048,7 @@ impl GameState {
                     })
                     .cloned()
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         for object in &targets {
             self.knock_build_object(place, object);
         }
@@ -1173,10 +1166,8 @@ impl GameState {
         }
         let (word, _) = one_argument(line);
         let set = dword(&word);
-        let targets: Vec<BuildingObject> = self
-            .building_objects
-            .get(&place)
-            .map(|objects| {
+        let targets: Vec<BuildingObject> =
+            self.building_objects.get(&place).map_or_default(|objects| {
                 objects
                     .iter()
                     .filter(|object| {
@@ -1190,8 +1181,7 @@ impl GameState {
                     })
                     .cloned()
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         for object in &targets {
             self.knock_build_object(place, object);
         }

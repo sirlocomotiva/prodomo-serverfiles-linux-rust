@@ -1036,7 +1036,7 @@ mod tests {
         let mut state = ChatState::new();
         for index in 1..=3_u8 {
             let effects = judged(&say(b"hi"), &mut state);
-            assert_eq!(effects.len(), 1, "line {index} must reach the map",);
+            assert_eq!(effects.len(), 1, "line {index} must reach the map");
             assert!(matches!(effects[0], ChatEffect::TalkingToMap { .. }));
         }
         // The fourth line is consumed with nothing sent.

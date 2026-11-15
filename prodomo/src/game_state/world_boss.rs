@@ -445,8 +445,7 @@ impl GameState {
         let before: Vec<u32> = self
             .npcs
             .get(&place)
-            .map(|list| list.npcs.iter().map(|npc| npc.vid).collect())
-            .unwrap_or_default();
+            .map_or_default(|list| list.npcs.iter().map(|npc| npc.vid).collect());
         self.spawn_event_mob_randomly(place, vnum);
         let stood = self
             .npcs
@@ -754,7 +753,7 @@ impl GameState {
             return None;
         }
         let mut sorted = self.world_boss_ranking.clone();
-        sorted.sort_by(|left, right| right.record.cmp(&left.record));
+        sorted.sort_by_key(|row| std::cmp::Reverse(row.record));
         let position = sorted
             .iter()
             .position(|row| row.pid == pid)
@@ -783,7 +782,7 @@ impl GameState {
         };
         let _ = mover;
         let mut sorted = self.world_boss_ranking.clone();
-        sorted.sort_by(|left, right| right.record.cmp(&left.record));
+        sorted.sort_by_key(|row| std::cmp::Reverse(row.record));
         let mut record =
             protocol::gc_world_boss::encode_head(protocol::gc_world_boss::SUB_RANKING).to_vec();
         // `wSize` counts the whole record (`:897`).

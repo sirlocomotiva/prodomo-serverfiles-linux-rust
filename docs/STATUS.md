@@ -6,7 +6,7 @@ This page records where the Rewrite stands, what is left, and what is next. Rule
 next steps, and the Divergence and Defect registers here, and writes its story in the ledger. What
 this page said section by section until ledger 678 is in `docs/STATUS_HISTORY.md`.
 
-Last reviewed: 2026-11-15, the direction review (ledger 679).
+Last reviewed: 2026-11-15, the direction review (ledger 679); the numbers are ledger 684's.
 
 ## Where the Rewrite stands
 
@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 683 |
+| measure | value at ledger 684 |
 |---|---|
 | Parity inventory | 1,645 rows: 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec` |
 | Scenarios | 519 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,659 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 683 has the receipt) |
+| Tests | 5,659 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 684 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 45 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -81,10 +81,10 @@ In this order. A package is done when its exit line holds, not when its sections
    gate run for the section. The receipt names the run with `DATABASE_URL` and the run without
    it, and lists by name every test that failed on the first run. A scenario that fails in the
    full suite is fixed or gets an issue under `.scratch/`; "passes alone" does not close it.
-   Read its failure against the legacy rule before calling it load: of the four scenarios lost
-   in ledgers 679 to 683, three tested a rule with a draw, a wall-clock second or a window in
-   a way that fails now and then on any machine
-   (`.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md`).
+   Read its failure against the legacy rule before calling it load: of the five scenarios lost
+   in ledgers 679 to 684, three tested a rule with a draw, a wall-clock second or a window in
+   a way that fails now and then on any machine, and one waited for a log line its server had
+   already printed (`.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md`).
 3. **This page is not a changelog.** A section changes the table above, this list, and the
    registers below. It does not add a "Since N" paragraph anywhere.
 4. **A new scenario runs in the shipped mode** (`test_server = false`), with a GM grant where it
@@ -1101,13 +1101,14 @@ owner should know about (178.5):
   resolve, so the container publishes its port on `127.0.0.1`; `AGENTS.md` has the commands.
 - The one online `cargo fetch` the owner approved (planning Q23) ran in section 177. The offline
   gates build from the local cache.
-- `rustfmt` 1.8.0 and Clippy 0.1.85 were installed by the owner after section 179; section 180
-  applied `cargo fmt` to the drift that built up while they were missing and cleared every Clippy
-  finding. Both gates run again.
+- The toolchain is Rust 1.100.0 since ledger 684, installed by rustup from `rust-toolchain.toml`
+  with rustfmt 1.11.0 and Clippy 0.1.100. The distribution's 1.85.1 in `/usr/bin` is still on the
+  machine and is not used; the rustup `stable` toolchain (1.98.1) on it is a damaged install.
 - `i686-linux-gnu-g++-12` 12.4.0, used by the width probe, is installed on the current machine
   since ledger 680 (`apt install g++-12-i686-linux-gnu`, with the owner's yes).
-- `docker.io/library/rust:1.85.1-bookworm` and `debian:bookworm-slim` were pulled in ledger 680
-  for the `compose.yaml` image build, which fetches the locked crates inside its build stage.
+- `docker.io/library/rust:1.100.0-bookworm` (ledger 684) and `debian:bookworm-slim` (ledger 680)
+  were pulled for the `compose.yaml` image build, which fetches the locked crates inside its
+  build stage.
 - The **database gate runs on the current machine** as of section 187: `postgres:18` (18.6) is
   already pulled, so a Podman container on `127.0.0.1:55432` and an exported `DATABASE_URL` are
   enough to exercise every store-backed test. Section 187 ran it and left no scratch database
@@ -1140,13 +1141,13 @@ Take these on when a step touches the code. The counts were measured again at le
   `protocol/src/cg_account.rs`, and one each at `protocol/src/cg_attack.rs:134` and
   `prodomo/src/sync_position.rs:303`.
 - **`#[allow]` is banned** (`AGENTS.md`: "Fix Clippy findings by refactoring, never by
-  `#[allow]`"), and **133 of them are checked in**; there were 59 at ledger 210, so 74 were added
-  after the rule. By lint: 39 `clippy::too_many_arguments`, 27 `clippy::cast_possible_truncation`,
-  14 `dead_code`, 12 `clippy::too_many_lines`. By file: 14 each in `protocol/src/gc_actors.rs`
-  and `gamedata/src/records.rs`, 12 in `gamedata/src/renewal_shop.rs`, 11 in
+  `#[allow]`"), and **132 of them are checked in** (133 until ledger 684 removed a doubled one);
+  there were 59 at ledger 210, so 74 were added after the rule. By lint: 38
+  `clippy::too_many_arguments`, 27 `clippy::cast_possible_truncation`, 14 `dead_code`, 12
+  `clippy::too_many_lines`. By file: 14 each in `protocol/src/gc_actors.rs` and
+  `gamedata/src/records.rs`, 12 in `gamedata/src/renewal_shop.rs`, 10 in
   `prodomo/src/game_state/quests.rs`, 9 in `world/src/character/drop_item.rs`. Most of the
   argument counts take a wire struct field by field, so a builder that takes the struct would
   remove them and the field-by-field constructor duplication of the first bullet at once. A new
   one is a violation: the count in a section's receipt may not rise. Remove the old ones when a
   step already touches the file, not as a sweep of their own.
-- **Toolchain:** Rust is not pinned. Consider a `rust-toolchain.toml` for 1.85.1.

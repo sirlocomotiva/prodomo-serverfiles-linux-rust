@@ -474,7 +474,7 @@ impl GameState {
         for (i, vid) in players.iter().enumerate() {
             if let Some(vid) = vid {
                 let opponents = if start {
-                    players[1 - i].map(|v| vec![v.raw()]).unwrap_or_default()
+                    players[1 - i].map_or_default(|v| vec![v.raw()])
                 } else {
                     Vec::new()
                 };

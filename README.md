@@ -48,7 +48,8 @@ The reasons are in [`docs/adr/`](docs/adr/).
 
 ## Prerequisites
 
-- Rust 1.85.1.
+- Rust 1.100.0, through rustup: `rust-toolchain.toml` pins it, and rustup installs it on the
+  first `cargo` call.
 - Podman or Docker, to run PostgreSQL 18 for the database tests and the server.
 
 ## Build and test

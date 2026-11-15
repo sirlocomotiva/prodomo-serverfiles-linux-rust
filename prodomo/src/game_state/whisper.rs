@@ -548,8 +548,7 @@ impl GameState {
             let from = self
                 .characters
                 .find_by_vid(vid)
-                .map(|character| character.name().to_owned())
-                .unwrap_or_default();
+                .map_or_default(|character| character.name().to_owned());
             info!(
                 from,
                 text = String::from_utf8_lossy(text).as_ref(),
@@ -725,8 +724,7 @@ impl GameState {
                 let from = self
                     .characters
                     .find_by_vid(vid)
-                    .map(|character| character.name().to_owned())
-                    .unwrap_or_default();
+                    .map_or_default(|character| character.name().to_owned());
                 self.offline_mail
                     .messages
                     .entry(name.to_vec())
@@ -2171,8 +2169,7 @@ impl GameState {
         let table = self
             .quests
             .as_ref()
-            .map(super::quests::Quests::goto_info)
-            .unwrap_or_default();
+            .map_or_default(super::quests::Quests::goto_info);
         let Some(at) = goto_hit(table, map_index, empire, first) else {
             return GotoOutcome::NoSuchMap;
         };

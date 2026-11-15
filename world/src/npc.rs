@@ -902,17 +902,15 @@ impl<'a> NpcSpawner<'a> {
                 vnum: proto.skills[slot].vnum,
                 level: proto.skills[slot].level,
                 duration_bits: clip.and_then(|clip| clip.duration_s).map(f32::to_bits),
-                splash: clip
-                    .map(|clip| {
-                        clip.splash
-                            .iter()
-                            .map(|entry| MobSplash {
-                                timing_ms: entry.timing_ms,
-                                hit_distance: entry.hit_distance,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                splash: clip.map_or_default(|clip| {
+                    clip.splash
+                        .iter()
+                        .map(|entry| MobSplash {
+                            timing_ms: entry.timing_ms,
+                            hit_distance: entry.hit_distance,
+                        })
+                        .collect()
+                }),
             }
         })
     }

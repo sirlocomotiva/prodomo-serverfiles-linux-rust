@@ -414,7 +414,7 @@ mod tests {
         let mut bytes = vec![0x22, 0x02, 0x01, WHISPER_TYPE_NORMAL];
         bytes.extend_from_slice(&name(b"Bob"));
         bytes.push(1);
-        bytes.extend(std::iter::repeat(b'a').take(258));
+        bytes.extend(std::iter::repeat_n(b'a', 258));
         let decoded = GcWhisper::decode(&bytes).expect("a valid record");
         assert_eq!(decoded.text.len(), 258 - GC_WHISPER_WIRE_SIZE);
     }
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn a_short_size_is_refused() {
         let mut bytes = vec![0x22, 0x1d, 0x00];
-        bytes.extend(std::iter::repeat(0_u8).take(27));
+        bytes.extend(std::iter::repeat_n(0_u8, 27));
         let error = GcWhisper::decode(&bytes).expect_err("the size is under 30");
         assert_eq!(error, GcWhisperError::Size { size: 29 });
     }
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn a_foreign_header_is_refused() {
         let mut bytes = vec![0x04, 0x1e, 0x00];
-        bytes.extend(std::iter::repeat(0_u8).take(27));
+        bytes.extend(std::iter::repeat_n(0_u8, 27));
         let error = GcWhisper::decode(&bytes).expect_err("the header is not a whisper");
         assert_eq!(
             error,

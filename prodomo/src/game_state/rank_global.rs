@@ -142,7 +142,7 @@ fn sorted(rows: &[StoredRank]) -> Vec<Placed> {
                     empire: row.empire,
                 }),
         );
-        placed[start..].sort_by(|a, b| b.count.cmp(&a.count));
+        placed[start..].sort_by_key(|entry| std::cmp::Reverse(entry.count));
     }
     placed
 }

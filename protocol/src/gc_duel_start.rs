@@ -82,7 +82,7 @@ impl GcDuelStart {
         }
         let size = usize::from(u16::from_le_bytes([bytes[1], bytes[2]]));
         if size < GC_DUEL_START_WIRE_SIZE
-            || (size - GC_DUEL_START_WIRE_SIZE) % GC_DUEL_START_ELEMENT_SIZE != 0
+            || !(size - GC_DUEL_START_WIRE_SIZE).is_multiple_of(GC_DUEL_START_ELEMENT_SIZE)
         {
             return Err(GcDuelStartError::Size { size });
         }
@@ -93,7 +93,9 @@ impl GcDuelStart {
             });
         }
         let opponent_vids = bytes[GC_DUEL_START_WIRE_SIZE..size]
-            .chunks_exact(GC_DUEL_START_ELEMENT_SIZE)
+            .as_chunks::<GC_DUEL_START_ELEMENT_SIZE>()
+            .0
+            .iter()
             .map(|vid| u32::from_le_bytes([vid[0], vid[1], vid[2], vid[3]]))
             .collect();
         Ok(Self { opponent_vids })

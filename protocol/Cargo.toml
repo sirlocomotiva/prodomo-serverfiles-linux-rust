@@ -5,8 +5,5 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Metin2 client protocol: CG and GC record codecs, framing, and TEA"
 
-[dependencies]
-serde = { workspace = true }
-
 [lints]
 workspace = true

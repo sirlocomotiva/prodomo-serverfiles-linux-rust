@@ -1729,8 +1729,6 @@ mod tests {
         let mut session = AccountPlayerSession::new(HANDLE);
         let (login_id, _) = start_login(&mut session);
         complete_login(&mut session, login_id, account());
-        let mut expected = account();
-        expected.players[0].id = 0x1112_1314;
         let (_correlation, request) = select_player(&mut session);
         assert_eq!(
             request,

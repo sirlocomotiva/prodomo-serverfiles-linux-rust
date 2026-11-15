@@ -16,7 +16,7 @@
 
 use std::error::Error;
 use std::fmt;
-use std::num::IntErrorKind;
+use std::num::{IntErrorKind, ParseIntError};
 
 use crate::records::{EventTableRecord, EVENT_TYPE_BYTES};
 
@@ -419,14 +419,17 @@ fn numeric_text(value: &EventQueryValue, column: usize) -> Result<&str, EventRow
     })
 }
 
-fn is_integer_overflow(kind: &IntErrorKind) -> bool {
-    matches!(kind, IntErrorKind::PosOverflow | IntErrorKind::NegOverflow)
+fn is_integer_overflow(error: &ParseIntError) -> bool {
+    matches!(
+        error.kind(),
+        IntErrorKind::PosOverflow | IntErrorKind::NegOverflow
+    )
 }
 
 fn decode_u32(value: &EventQueryValue, column: usize) -> Result<u32, EventRowError> {
     let text = numeric_text(value, column)?;
     text.parse::<u32>().map_err(|error| {
-        if is_integer_overflow(error.kind()) {
+        if is_integer_overflow(&error) {
             EventRowError::NumberOverflow {
                 column,
                 value: text.to_owned(),
@@ -445,7 +448,7 @@ fn decode_u32(value: &EventQueryValue, column: usize) -> Result<u32, EventRowErr
 fn decode_i32(value: &EventQueryValue, column: usize) -> Result<i32, EventRowError> {
     let text = numeric_text(value, column)?;
     text.parse::<i32>().map_err(|error| {
-        if is_integer_overflow(error.kind()) {
+        if is_integer_overflow(&error) {
             EventRowError::NumberOverflow {
                 column,
                 value: text.to_owned(),
@@ -484,7 +487,7 @@ fn decode_completed(value: &EventQueryValue, column: usize) -> Result<u8, EventR
         return Ok(0);
     }
     let parsed = text.parse::<i32>().map_err(|error| {
-        if is_integer_overflow(error.kind()) {
+        if is_integer_overflow(&error) {
             EventRowError::NumberOverflow {
                 column,
                 value: text.to_owned(),

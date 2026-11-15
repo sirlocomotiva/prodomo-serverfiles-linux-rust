@@ -162,8 +162,7 @@ impl GameState {
         let name = self
             .characters
             .find_by_vid(vid)
-            .map(|character| character.name().to_owned())
-            .unwrap_or_default();
+            .map_or_default(|character| character.name().to_owned());
         let notice = crate::chat_line::format_line(
             b"Jucatorul %s si-a activat statusul de Premium.",
             &[Arg::Text(name.as_bytes())],
@@ -277,11 +276,9 @@ impl GameState {
                     true,
                 );
             } else if !premium && held {
-                let removed = self
-                    .affect_events
-                    .get_mut(&vid)
-                    .map(|event| super::affect::take_affects_of_kind(&mut event.affects, kind))
-                    .unwrap_or_default();
+                let removed = self.affect_events.get_mut(&vid).map_or_default(|event| {
+                    super::affect::take_affects_of_kind(&mut event.affects, kind)
+                });
                 for affect in &removed {
                     let _stripped = self.compute_affect(vid, affect, false);
                     let frame = super::affect::affect_remove_frame(affect);
@@ -300,7 +297,7 @@ impl GameState {
     /// `StopPremiumPlayersUpdateEvent` (`:11518-11527`). Legacy runs one event per
     /// character; the sweep is the same check over the outboxes.
     pub(super) fn run_premium_ticks(&mut self, pulse: u64) {
-        if pulse % (60 * u64::from(crate::save::PASSES_PER_SEC)) != 0 {
+        if !pulse.is_multiple_of(60 * u64::from(crate::save::PASSES_PER_SEC)) {
             return;
         }
         let vids: Vec<Vid> = self.outboxes.keys().copied().collect();

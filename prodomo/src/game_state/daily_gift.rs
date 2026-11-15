@@ -650,13 +650,10 @@ impl GameState {
     /// The tickets held (`FindSpecifyItem`, `:198-202`): the first stack's count, 0
     /// with none held.
     fn daily_ticket_count(&self, vid: Vid) -> i32 {
-        self.characters
-            .find_by_vid(vid)
-            .map(|character| {
-                let usable = usable_inventory_cells(character.inven_point());
-                world::character::count_specify_item(character.items(), usable, DAILY_GIFT_TICKET)
-            })
-            .unwrap_or(0)
+        self.characters.find_by_vid(vid).map_or(0, |character| {
+            let usable = usable_inventory_cells(character.inven_point());
+            world::character::count_specify_item(character.items(), usable, DAILY_GIFT_TICKET)
+        })
     }
 
     /// Spend one ticket (`RemoveSpecifyItem`, `:203`), answering the rows to store.

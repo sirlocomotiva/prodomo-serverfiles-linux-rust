@@ -192,7 +192,7 @@ pub fn flag_mask(field: &[u8], table: &[&str]) -> Result<u32, TooManyFlagTokens>
     // and is dropped rather than given a bit that legacy never sets.
     let mut mask = 0u32;
     for (bit, entry) in table.iter().take(u32::BITS as usize).enumerate() {
-        if tokens.iter().any(|token| *token == entry.as_bytes()) {
+        if tokens.contains(&entry.as_bytes()) {
             mask |= 1 << bit;
         }
     }

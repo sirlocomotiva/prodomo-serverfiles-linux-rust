@@ -122,11 +122,7 @@ mod tests {
                 u32::MAX,
             );
             state = result.state;
-            if result
-                .effects
-                .iter()
-                .any(|effect| *effect == HandshakeEffect::Close)
-            {
+            if result.effects.contains(&HandshakeEffect::Close) {
                 let frames = encode_handshake_effects(&result.effects);
                 assert_eq!(frames.len(), 1);
                 assert!(frames[0].is_empty());

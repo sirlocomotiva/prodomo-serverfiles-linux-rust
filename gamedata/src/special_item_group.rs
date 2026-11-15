@@ -470,8 +470,7 @@ pub fn read(data: &[u8], protos: &ItemProtos) -> Result<SpecialItemGroups, Group
         let type_word = group
             .get(b"type")
             .and_then(|v| v.first())
-            .map(|w| w.to_ascii_lowercase())
-            .unwrap_or_default();
+            .map_or_default(|w| w.to_ascii_lowercase());
         if type_word == b"attr" {
             insert_first_attr(&mut out.attr, vnum, read_attr_group(group, vnum)?);
             continue;
@@ -1278,9 +1277,10 @@ mod tests {
 
     #[test]
     fn a_bag_over_a_thousand_rows_reports_the_key_truncation_defect() {
+        use std::fmt::Write as _;
         let mut body = String::new();
         for k in 1..=1000 {
-            body.push_str(&format!("\t{k}\t71084\t1\t1\n"));
+            let _ = writeln!(body, "\t{k}\t71084\t1\t1");
         }
         let data = one_group(&body);
         let protos = owners_protos();

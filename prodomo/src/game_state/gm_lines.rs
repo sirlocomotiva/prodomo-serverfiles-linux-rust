@@ -618,8 +618,7 @@ impl GameState {
                 let name = self
                     .protos
                     .get(item.vnum)
-                    .map(|proto| proto.locale_name.clone())
-                    .unwrap_or_default();
+                    .map_or_default(|proto| proto.locale_name.clone());
                 Some((cell, name, item.id))
             })
             .collect();

@@ -763,17 +763,20 @@ mod tests {
 
     /// A dump of shops `(vnum, npc)` and items `(shop, item, count)`.
     fn dump(shops: &[(i64, i64)], items: &[(i64, i64, i64)]) -> Vec<u8> {
+        use std::fmt::Write as _;
         let mut text = String::new();
         for (vnum, npc) in shops {
-            text.push_str(&format!(
-                "INSERT INTO `shop` (`vnum`, `name`, `npc_vnum`) VALUES ({vnum},'s',{npc});\n"
-            ));
+            let _ = writeln!(
+                text,
+                "INSERT INTO `shop` (`vnum`, `name`, `npc_vnum`) VALUES ({vnum},'s',{npc});"
+            );
         }
         for (shop, item, count) in items {
-            text.push_str(&format!(
+            let _ = writeln!(
+                text,
                 "INSERT INTO `shop_item` (`shop_vnum`, `item_vnum`, `count`) \
-                 VALUES ({shop},{item},{count});\n"
-            ));
+                 VALUES ({shop},{item},{count});"
+            );
         }
         text.into_bytes()
     }

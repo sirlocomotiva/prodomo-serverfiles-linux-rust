@@ -115,10 +115,7 @@ impl Client {
                 Ok(0) => panic!("the connection to {} closed", self.address),
                 Ok(n) => buffer.extend_from_slice(&chunk[..n]),
                 Err(error)
-                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
-                {
-                    continue;
-                }
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(error) => panic!("expected {len} bytes from {}: {error}", self.address),
             }
         }

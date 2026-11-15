@@ -3522,7 +3522,7 @@ where
             | ChatEffect::GuildToMembers { .. } => {
                 match relay_chat_line(context, addr, held.world, effect).await {
                     Relayed::Sent(settling) => held.settling = Some(settling),
-                    Relayed::Dropped => continue,
+                    Relayed::Dropped => {}
                     Relayed::Closed => return false,
                 }
             }
@@ -6212,7 +6212,7 @@ where
             info!(%addr, subheader, ?reason, "Private-shop step declined");
             return send_shop_records(session, addr, &records).await;
         }
-        Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(moved)),
+        Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(*moved)),
         Ok(Ok(unexpected)) => {
             warn!(%addr, ?unexpected, "A private-shop step answered what it cannot; closing");
             return false;
@@ -6739,7 +6739,7 @@ where
     let actor = item_actor(held);
     let account = quest_account(context, addr, held).await.unwrap_or_default();
     let answer = match context.game.shop(vid, step, place, actor, account).await {
-        Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(moved)),
+        Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(*moved)),
         Ok(Ok(ShopAnswer::Settled(settled))) => {
             info!(%addr, "Shop buy settled");
             return finish_trade(session, addr, context, held, *settled).await;
@@ -7714,8 +7714,9 @@ where
         return refuse_channel_login(session, addr, refusal).await;
     }
     let mut client_key = [0; 16];
-    for (bytes, word) in client_key.chunks_exact_mut(4).zip(record.client_key) {
-        bytes.copy_from_slice(&word.to_le_bytes());
+    let (words, _) = client_key.as_chunks_mut::<4>();
+    for (bytes, word) in words.iter_mut().zip(record.client_key) {
+        *bytes = word.to_le_bytes();
     }
     if let Err(error) = session.install_client_keys(client_key) {
         warn!(%addr, %error, "Client key could not be installed; closing");
@@ -8779,10 +8780,7 @@ where
             queued: false,
         });
     }
-    if !check_client_version(session, addr, context, held).await {
-        return false;
-    }
-    true
+    check_client_version(session, addr, context, held).await
 }
 
 /// Store the quest empire of an entered character, flag its watch, and send the
@@ -11770,8 +11768,7 @@ fn build_world(
         .channels
         .iter()
         .find(|channel| channel.is_shared())
-        .map(|channel| channel.maps.clone())
-        .unwrap_or_default();
+        .map_or_default(|channel| channel.maps.clone());
     let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_npc_shops(Arc::clone(&data.shops))
@@ -16988,7 +16985,7 @@ where
         SafeboxAnswer::Proceed => return None,
         SafeboxAnswer::Sent(records) => send_shop_records(session, addr, &records).await,
         SafeboxAnswer::Moved(moved) => {
-            finish_item_step(session, addr, context, held, actor, Ok(Ok(moved))).await
+            finish_item_step(session, addr, context, held, actor, Ok(Ok(*moved))).await
         }
         SafeboxAnswer::Rearranged {
             account,

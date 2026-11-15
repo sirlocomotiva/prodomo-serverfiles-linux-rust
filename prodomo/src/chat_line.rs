@@ -106,11 +106,11 @@ pub fn user_rows(names: &[String]) -> Vec<Vec<u8>> {
         let room = 128usize.saturating_sub(line.len() + 1);
         line.extend_from_slice(&cell[..cell.len().min(room)]);
         shown += 1;
-        if shown % 4 == 0 {
+        if shown.is_multiple_of(4) {
             rows.push(std::mem::take(&mut line));
         }
     }
-    if shown % 4 != 0 {
+    if !shown.is_multiple_of(4) {
         rows.push(line);
     }
     rows.push(format!("Total {}", names.len()).into_bytes());

@@ -340,7 +340,7 @@ impl GameState {
     /// player around it (`G/char.cpp:7988-8014`). An NPC that stands in no sectree fires on
     /// nobody (`:7998-8002`).
     pub(super) fn run_warp_npcs(&mut self, pulse: u64) {
-        if pulse == 0 || pulse % WARP_NPC_PULSES != 0 {
+        if pulse == 0 || !pulse.is_multiple_of(WARP_NPC_PULSES) {
             return;
         }
         let Some(clients) = self.clients.clone() else {
@@ -364,8 +364,7 @@ impl GameState {
                 let around = self
                     .maps
                     .get(&(channel, map))
-                    .map(|index| index.around_of(EntityKey::Npc(npc.vid)))
-                    .unwrap_or_default();
+                    .map_or_default(|index| index.around_of(EntityKey::Npc(npc.vid)));
                 for key in around {
                     let EntityKey::Character(raw) = key else {
                         continue;
@@ -451,8 +450,7 @@ impl GameState {
     pub(super) fn warp_npcs_on(&self, channel: u8, map: i32) -> Vec<NpcOrder> {
         self.warp_npcs
             .get(&(channel, map))
-            .map(|npcs| npcs.iter().map(|npc| npc.order).collect())
-            .unwrap_or_default()
+            .map_or_default(|npcs| npcs.iter().map(|npc| npc.order).collect())
     }
 
     /// The VIDs of the warp and goto NPCs standing on one map of one Channel.
@@ -460,8 +458,7 @@ impl GameState {
     pub(super) fn warp_npc_vids_on(&self, channel: u8, map: i32) -> Vec<u32> {
         self.warp_npcs
             .get(&(channel, map))
-            .map(|npcs| npcs.iter().map(|npc| npc.vid).collect())
-            .unwrap_or_default()
+            .map_or_default(|npcs| npcs.iter().map(|npc| npc.vid).collect())
     }
 }
 

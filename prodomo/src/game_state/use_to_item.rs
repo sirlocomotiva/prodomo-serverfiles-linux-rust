@@ -295,8 +295,7 @@ impl GameState {
         let fighting = self
             .characters
             .find_by_vid(vid)
-            .ok()
-            .is_some_and(|character| self.pvp_is_fighting(character.player_id()));
+            .is_ok_and(|character| self.pvp_is_fighting(character.player_id()));
         if no_potions && fighting && duel_limited_potion(vnum) {
             if let Some(mover) = self.own_mover(vid) {
                 self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1205]", &[]);
@@ -1281,13 +1280,12 @@ impl GameState {
         let (pid, mortal) = self
             .characters
             .find_by_vid(vid)
-            .map(|character| {
+            .map_or((0, true), |character| {
                 let mortal = character
                     .points()
                     .is_none_or(|points| points.gm_level() == crate::command::GM_PLAYER);
                 (character.player_id(), mortal)
-            })
-            .unwrap_or((0, true));
+            });
         let cycle = self.item_bonus_change_time;
         let mut cooldown = (0, 0);
         let mut stamp = None;

@@ -1869,22 +1869,14 @@ mod tests {
             let frame = frame_for(name);
             let reversed: Vec<u8> = frame.iter().rev().copied().collect();
             let differs = match name {
-                "GcDigMotion" => GcDigMotion::decode(&reversed)
-                    .map(|r| r.vid != A_U32)
-                    .unwrap_or(true),
-                "GcDamageInfo" => GcDamageInfo::decode(&reversed)
-                    .map(|r| r.vid != A_U32)
-                    .unwrap_or(true),
-                "GcWarp" => GcWarp::decode(&reversed).map(|r| r.x != 1).unwrap_or(true),
-                "GcPremiumPlayers" => GcPremiumPlayers::decode(&reversed)
-                    .map(|r| r.name != [0; 25])
-                    .unwrap_or(true),
-                "GcPartyUpdate" => GcPartyUpdate::decode(&reversed)
-                    .map(|r| r.pid != 1)
-                    .unwrap_or(true),
-                _ => GcDailyGift::decode(&reversed)
-                    .map(|r| r.cash != 1)
-                    .unwrap_or(true),
+                "GcDigMotion" => GcDigMotion::decode(&reversed).map_or(true, |r| r.vid != A_U32),
+                "GcDamageInfo" => GcDamageInfo::decode(&reversed).map_or(true, |r| r.vid != A_U32),
+                "GcWarp" => GcWarp::decode(&reversed).map_or(true, |r| r.x != 1),
+                "GcPremiumPlayers" => {
+                    GcPremiumPlayers::decode(&reversed).map_or(true, |r| r.name != [0; 25])
+                }
+                "GcPartyUpdate" => GcPartyUpdate::decode(&reversed).map_or(true, |r| r.pid != 1),
+                _ => GcDailyGift::decode(&reversed).map_or(true, |r| r.cash != 1),
             };
             assert!(differs, "{name} survived a whole-frame byte reversal");
         }
@@ -2197,9 +2189,7 @@ mod tests {
     fn the_cube_material_counts_stay_signed() {
         for value in [i32::MIN, -65_537, -1, 0, 1, 65_536, i32::MAX] {
             let mut date = sample_date();
-            for slot in &mut date.count_material {
-                *slot = value;
-            }
+            date.count_material.fill(value);
             let mut w = Vec::new();
             date.encode_into(&mut w);
             let r = GcCubeRenewalDate::decode(&w).unwrap();

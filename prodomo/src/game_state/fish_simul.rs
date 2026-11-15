@@ -72,7 +72,10 @@ impl GameState {
             // `Compute` refuses.
             let id = determine(&mut self.dice, table, sum).unwrap_or(MAX_FISH);
             // The time is drawn as `Compute`'s argument, before any of its guards.
-            let ms = (draw(&mut self.dice, 2000, 4000) + draw(&mut self.dice, 2000, 4000)) / 2;
+            let ms = i32::midpoint(
+                draw(&mut self.dice, 2000, 4000),
+                draw(&mut self.dice, 2000, 4000),
+            );
             let ms = u32::try_from(ms).unwrap_or(0);
             let caught = super::fishing::compute(&mut self.dice, fishing.fish(), id, ms, level);
             // Only an item keeps the fish (`if (item)`, `G/fishing.cpp:758`).

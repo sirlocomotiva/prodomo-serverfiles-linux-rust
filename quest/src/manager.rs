@@ -1221,8 +1221,7 @@ impl Manager {
             .iter()
             .find(|candidate| candidate.name == quest)
             .and_then(|quest| quest.states.iter().find(|(_, number)| **number == state))
-            .map(|(name, _)| name.clone())
-            .unwrap_or_default()
+            .map_or_default(|(name, _)| name.clone())
     }
 
     /// `GetQuestStateIndex` (`G/questmanager.cpp:1172-1190`): the number of
@@ -2782,8 +2781,7 @@ impl Run<'_, '_> {
             .ok()
             .and_then(|quest| quest.checked_sub(1))
             .and_then(|position| self.host.quests().get(position))
-            .map(|quest| quest.name.clone())
-            .unwrap_or_default()
+            .map_or_default(|quest| quest.name.clone())
     }
 
     /// `GetQuestStateName`: the empty name for a state the quest does not have.
@@ -2793,8 +2791,7 @@ impl Run<'_, '_> {
             .iter()
             .find(|candidate| candidate.name == quest)
             .and_then(|quest| quest.states.iter().find(|(_, number)| **number == state))
-            .map(|(name, _)| name.clone())
-            .unwrap_or_default()
+            .map_or_default(|(name, _)| name.clone())
     }
 
     /// `CanStartQuest` (`questmanager.cpp:1047`): the quest's `begin_condition`, if it has one.
@@ -8584,9 +8581,15 @@ mod tests {
         // string-like for the names and number-like for the values (`(int)rint`, ties
         // to even), and anything else changes nothing.
         let table = Value::Table(lua.create_table().unwrap());
-        probe.call("q.set_clock_name", &[table.clone()]).unwrap();
-        probe.call("q.set_clock_value", &[table.clone()]).unwrap();
-        probe.call("q.set_counter_name", &[table.clone()]).unwrap();
+        probe
+            .call("q.set_clock_name", std::slice::from_ref(&table))
+            .unwrap();
+        probe
+            .call("q.set_clock_value", std::slice::from_ref(&table))
+            .unwrap();
+        probe
+            .call("q.set_counter_name", std::slice::from_ref(&table))
+            .unwrap();
         probe.call("q.set_counter_value", &[table]).unwrap();
         assert!(
             !probe.window.send.has(SendFlags::CLOCK_NAME)
@@ -8799,6 +8802,7 @@ mod tests {
         let lua = manager.host.lua();
         let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
         let table = Value::Table(lua.create_table().unwrap());
+        let tabled = std::slice::from_ref(&table);
         let number = |value: f64| vec![Value::Number(value)];
         let mut probe = Probe {
             manager: &manager,
@@ -8819,7 +8823,7 @@ mod tests {
         ];
         assert!(probe.call("say", &parts).unwrap().is_empty());
         probe.call("raw_script", &[string(b"[RAW]")]).unwrap();
-        probe.call("raw_script", &[table.clone()]).unwrap();
+        probe.call("raw_script", tabled).unwrap();
         probe.call("setleftimage", &[string(b"l.tga")]).unwrap();
         probe.call("settopimage", &[Value::Nil]).unwrap();
         probe.call("settopimage", &[string(b"t.tga")]).unwrap();
@@ -8864,12 +8868,12 @@ mod tests {
         assert_eq!(probe.text("mob_name", &number(-4_294_947_285.0)), b"Uriel");
         assert!(probe.text("mob_name", &number(f64::NAN)).is_empty());
         assert!(probe.text("mob_name", &number(1e30)).is_empty());
-        assert!(probe.text("mob_name", &[table.clone()]).is_empty());
+        assert!(probe.text("mob_name", tabled).is_empty());
         assert_eq!(probe.text("item_name", &number(11901.0)), b"Smoking");
         assert_eq!(probe.text("item_name", &[string(b"11901")]), b"Smoking");
         assert!(probe.text("item_name", &number(20011.0)).is_empty());
         assert!(probe.text("item_name", &number(f64::NAN)).is_empty());
-        assert!(probe.text("item_name", &[table.clone()]).is_empty());
+        assert!(probe.text("item_name", tabled).is_empty());
         assert_eq!(
             probe.call("npc.get_race", &[]).unwrap(),
             number(f64::from(OX_MANAGER))
@@ -8887,7 +8891,7 @@ mod tests {
             number(1.0)
         );
         assert_eq!(flag(&mut probe, &[string(b"nothing")]), number(0.0));
-        assert_eq!(flag(&mut probe, &[table.clone()]), number(0.0));
+        assert_eq!(flag(&mut probe, tabled), number(0.0));
         for name in ["get_time", "get_global_time"] {
             assert_eq!(probe.call(name, &[]).unwrap(), number(1_790_000_000.0));
         }
@@ -9503,7 +9507,9 @@ mod tests {
         let drop =
             |probe: &mut Probe, args: &[Value]| probe.call("game.drop_item_with_ownership", args);
         assert!(drop(&mut probe, &[]).unwrap().is_empty());
-        assert!(drop(&mut probe, &[table.clone()]).unwrap().is_empty());
+        assert!(drop(&mut probe, std::slice::from_ref(&table))
+            .unwrap()
+            .is_empty());
         assert_eq!(probe.game.drops, [(0, 1, None)]);
         drop(
             &mut probe,
@@ -9706,7 +9712,7 @@ mod tests {
             );
             assert_eq!(count(&mut probe, &[text("Nothing")]), number(0.0));
             let table = Value::Table(lua.create_table().unwrap());
-            assert_eq!(count(&mut probe, &[table.clone()]), number(0.0));
+            assert_eq!(count(&mut probe, std::slice::from_ref(&table)), number(0.0));
             assert_eq!(count(&mut probe, &[table, text("Okey")]), number(0.0));
             assert_eq!(count(&mut probe, &[]), number(0.0));
         }
@@ -9806,14 +9812,17 @@ mod tests {
             Some(&2),
             "each numbered read bumps the count, dworded"
         );
-        assert!(climbed(&mut probe, &[table.clone()]).is_empty());
+        assert!(climbed(&mut probe, std::slice::from_ref(&table)).is_empty());
         assert!(climbed(&mut probe, &[]).is_empty());
         // The Fake answers 40 for a read vnum, 0 else; a non-number logs and answers 0.
         let leveled =
             |probe: &mut Probe, args: &[Value]| probe.call("pc.get_skill_level", args).unwrap();
         assert_eq!(leveled(&mut probe, &number(1.9)), number(40.0));
         assert_eq!(leveled(&mut probe, &number(2.0)), number(0.0));
-        assert_eq!(leveled(&mut probe, &[table.clone()]), number(0.0));
+        assert_eq!(
+            leveled(&mut probe, std::slice::from_ref(&table)),
+            number(0.0)
+        );
         assert_eq!(leveled(&mut probe, &[]), number(0.0));
     }
 
@@ -10675,7 +10684,9 @@ mod tests {
             "the old VID is pushed"
         );
         assert_eq!(
-            probe.call("pc.getqf", &[stamp.clone()]).unwrap(),
+            probe
+                .call("pc.getqf", std::slice::from_ref(&stamp))
+                .unwrap(),
             [num(9.0)],
             "11's stamp reads under 11's quest, not the running one"
         );
@@ -10700,7 +10711,9 @@ mod tests {
             "an unknown VID pushes 0"
         );
         assert_eq!(
-            probe.call("pc.getqf", &[stamp.clone()]).unwrap(),
+            probe
+                .call("pc.getqf", std::slice::from_ref(&stamp))
+                .unwrap(),
             [num(3.0)],
             "an unknown VID switches nothing"
         );
@@ -10815,7 +10828,9 @@ mod tests {
             [Value::Number(0.0)]
         );
         assert_eq!(
-            probe.call("party.getf", &[flag.clone()]).unwrap(),
+            probe
+                .call("party.getf", std::slice::from_ref(&flag))
+                .unwrap(),
             [Value::Number(0.0)],
             "no such flag is 0"
         );
@@ -11356,7 +11371,7 @@ mod tests {
             desc: Some(b"Theowahdan".to_vec()),
             send: true,
         };
-        assert_eq!(game.created, [target.clone()]);
+        assert_eq!(game.created, std::slice::from_ref(&target));
         let button = format!("[QUESTBUTTON idx;{sash}|name;A special cloth][DONE]");
         assert_eq!(game.take(), [(QUEST_SKIN_NOWINDOW, button.clone())]);
         assert_eq!(game.infos.len(), 1);
@@ -11369,7 +11384,7 @@ mod tests {
         manager.load_flags(PID, flags);
         // The sash's own `login` script is `start`'s; other quests' run.
         manager.login(PID, &mut game);
-        assert_eq!(game.created, [target.clone()]);
+        assert_eq!(game.created, std::slice::from_ref(&target));
         assert_eq!(game.targets, [target]);
         let scripts: Vec<_> = game.take().into_iter().map(|(_, text)| text).collect();
         assert!(scripts.contains(&button), "{scripts:?}");
@@ -11651,7 +11666,7 @@ end
             "the race is dworded"
         );
         assert_eq!(find(&mut probe, &number(20433.0)), number(0.0));
-        assert_eq!(find(&mut probe, &[table.clone()]), number(0.0));
+        assert_eq!(find(&mut probe, std::slice::from_ref(&table)), number(0.0));
         assert_eq!(find(&mut probe, &[]), number(0.0));
     }
 
@@ -11778,10 +11793,10 @@ end
         assert_eq!(id(&mut probe, &[string(b"t")]), number(4_294_967_295.0));
         assert_eq!(id(&mut probe, &[Value::Number(5.0)]), number(12.0));
         assert_eq!(id(&mut probe, &[string(b"none")]), number(0.0));
-        assert_eq!(id(&mut probe, &[table.clone()]), number(0.0));
+        assert_eq!(id(&mut probe, std::slice::from_ref(&table)), number(0.0));
 
         assert!(probe
-            .call("target.delete", &[table.clone()])
+            .call("target.delete", std::slice::from_ref(&table))
             .unwrap()
             .is_empty());
         assert!(probe.game.deleted.is_empty(), "no name, no delete");

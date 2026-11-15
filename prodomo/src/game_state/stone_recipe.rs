@@ -983,8 +983,7 @@ impl GameState {
         let fighting = self
             .characters
             .find_by_vid(vid)
-            .ok()
-            .is_some_and(|character| self.pvp_is_fighting(character.player_id()));
+            .is_ok_and(|character| self.pvp_is_fighting(character.player_id()));
         let no_potions = self
             .quests
             .as_ref()

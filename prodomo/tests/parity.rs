@@ -985,8 +985,8 @@ fn client_login2(login: &[u8], key: u32, client_key: [u32; 4]) -> Vec<u8> {
 /// The key bytes of an `adwClientKey`, in memory order.
 fn key_bytes(client_key: [u32; 4]) -> TeaKey {
     let mut key = [0; 16];
-    for (bytes, word) in key.chunks_exact_mut(4).zip(client_key) {
-        bytes.copy_from_slice(&word.to_le_bytes());
+    for (bytes, word) in key.as_chunks_mut::<4>().0.iter_mut().zip(client_key) {
+        *bytes = word.to_le_bytes();
     }
     key
 }
@@ -6377,7 +6377,8 @@ fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
     alice.unanswered(&client_script_button(
         u32::from(QUEST_ATTR67ADD) | SELECT_QUEST,
     ));
-    alice.unanswered(&client_script_button(999 | SELECT_QUEST));
+    // Quest 999, which no script holds.
+    alice.unanswered(&client_script_button(0x3e7 | SELECT_QUEST));
     // `dungeoninfo`, quest 1, ran at the login and has a `button` but no `info`.
     alice.unanswered(&client_script_button(1 | SELECT_QUEST));
 
@@ -7868,7 +7869,7 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
     // `strlcpy` copies at most `iExtraLen + 1` bytes and stops at the first NUL, then
     // `snprintf` builds `"%s : %s"`. There is no `strlen(buf) < 1` arm, so an empty payload
     // and one whose first byte is NUL both become the bare name line and are broadcast.
-    for payload in [&b""[..], &[b'\0', b'x'][..]] {
+    for payload in [&b""[..], &b"\0x"[..]] {
         alice.send_record(&client_chat(CHAT_TALKING, payload));
         let bare = alice.read_game();
         assert_eq!(bare[0], GC_CHAT);
@@ -23567,7 +23568,8 @@ fn grand_book_fails_zulu_and_moves_its_alignment(
         "(SELECT count(*) = 1 FROM item WHERE window_type = 1)",
     );
     drop(zulu);
-    server.wait_for("Character disconnected; wrote the row");
+    // The second disconnect of the scenario: Alpha's logged the same line.
+    server.wait_for_next("Character disconnected; wrote the row");
     if failed {
         wait_for(
             database,
@@ -26098,10 +26100,7 @@ fn a_leader_disconnect_sends_the_near_home_and_the_relog_comes_home() {
     // so the drain runs till the wire idles.
     yankee.send_record(&client_party_remove(yankee_listed.id));
     let idle = std::time::Instant::now() + std::time::Duration::from_millis(500);
-    loop {
-        let Some(record) = yankee.read_game_until(idle) else {
-            break;
-        };
+    while let Some(record) = yankee.read_game_until(idle) {
         if record[0] != GC_POINT_CHANGE {
             yankee.pushed.insert(0, record);
             break;
@@ -28101,10 +28100,7 @@ fn a_party_skill_heals_quiet_and_warns_its_gates() {
     // The dead body answers nothing: every record until the quiet beat must be
     // a stale walk record.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let Some(record) = alice.read_game_until(deadline) else {
-            break;
-        };
+    while let Some(record) = alice.read_game_until(deadline) {
         assert!(
             matches!(
                 record[0],
@@ -28114,10 +28110,7 @@ fn a_party_skill_heals_quiet_and_warns_its_gates() {
         );
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let Some(record) = yankee.read_game_until(deadline) else {
-            break;
-        };
+    while let Some(record) = yankee.read_game_until(deadline) {
         assert!(
             matches!(
                 record[0],
@@ -28283,10 +28276,7 @@ fn read_update_role(who: &mut Keyed, pid: u32, role: u8, note: &str) {
 /// so a refused set answers nothing at all.
 fn quiet_past_party_walk_denying(who: &mut Keyed, pid: u32, role: u8, note: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let Some(record) = who.read_game_until(deadline) else {
-            break;
-        };
+    while let Some(record) = who.read_game_until(deadline) {
         assert!(
             !(record[0] == GC_PARTY_UPDATE
                 && u32::from_le_bytes(record[1..5].try_into().expect("a PID")) == pid
@@ -28673,10 +28663,7 @@ fn an_ungroup_line_quits_silently_or_loud_by_count() {
     charlie.send_record(&client_chat(CHAT_TALKING, b"/ungroup"));
     for (who, note) in [(&mut charlie, "the disbander"), (&mut alice, "the leader")] {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let Some(record) = who.read_game_until(deadline) else {
-                break;
-            };
+        while let Some(record) = who.read_game_until(deadline) {
             assert!(
                 record[0] == GC_POINT_CHANGE
                     || matches!(
@@ -29809,7 +29796,7 @@ fn a_gm_rewarps_in_place() {
 /// pair (`ViewReencode`, `G/char.cpp:1907-1912`).
 fn assert_reencoded_view(tail: &[Vec<u8>], seen: &[[u8; 4]]) {
     let mut resent: Vec<[u8; 4]> = Vec::new();
-    for pair in tail.chunks_exact(2) {
+    for pair in tail.as_chunks::<2>().0 {
         assert_eq!(pair[0][0], GC_CHARACTER_ADD);
         assert_eq!(pair[1][0], GC_CHAR_ADDITIONAL_INFO);
         assert_eq!(&pair[1][1..5], &pair[0][1..5], "the pair's VID");
@@ -30378,11 +30365,10 @@ fn a_gm_toggles_invisibility_and_disables_cooltime() {
     );
     let update = wire
         .iter()
-        .filter(|record| {
+        .rfind(|record| {
             record[0] == GC_CHARACTER_UPDATE
                 && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
         })
-        .last()
         .expect("the caller's update rides");
     assert_ne!(
         u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
@@ -30392,11 +30378,10 @@ fn a_gm_toggles_invisibility_and_disables_cooltime() {
     let seen = yankee.wire_for(std::time::Duration::from_secs(2));
     let update = seen
         .iter()
-        .filter(|record| {
+        .rfind(|record| {
             record[0] == GC_CHARACTER_UPDATE
                 && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
         })
-        .last()
         .expect("the watcher hears the update");
     assert_ne!(
         u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
@@ -30408,19 +30393,17 @@ fn a_gm_toggles_invisibility_and_disables_cooltime() {
     let wire = alice.wire_for(std::time::Duration::from_secs(2));
     let _remove = wire
         .iter()
-        .filter(|record| {
+        .rfind(|record| {
             record[0] == GC_AFFECT_REMOVE
                 && u32::from_le_bytes(record[1..5].try_into().unwrap()) == 203
         })
-        .last()
         .expect("the remove rides");
     let update = wire
         .iter()
-        .filter(|record| {
+        .rfind(|record| {
             record[0] == GC_CHARACTER_UPDATE
                 && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
         })
-        .last()
         .expect("the caller's update rides back");
     assert_eq!(
         u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
@@ -30430,11 +30413,10 @@ fn a_gm_toggles_invisibility_and_disables_cooltime() {
     let seen = yankee.wire_for(std::time::Duration::from_secs(2));
     let update = seen
         .iter()
-        .filter(|record| {
+        .rfind(|record| {
             record[0] == GC_CHARACTER_UPDATE
                 && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
         })
-        .last()
         .expect("the watcher hears the update back");
     assert_eq!(
         u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
@@ -30564,11 +30546,10 @@ fn a_gm_removes_an_affect() {
     );
     let update = wire
         .iter()
-        .filter(|record| {
+        .rfind(|record| {
             record[0] == GC_CHARACTER_UPDATE
                 && u32::from_le_bytes(record[1..5].try_into().unwrap()) == alice_vid
         })
-        .last()
         .expect("the caller's update rides");
     assert_eq!(
         u32::from_le_bytes(update[20..24].try_into().unwrap()) & 0x4,
@@ -34173,14 +34154,12 @@ fn hair_tells_its_affect_and_costume_takes_the_named_piece_off() {
     );
     let hair_name = protos
         .get(45155)
-        .map(|proto| proto.locale_name.clone())
-        .unwrap_or_default();
+        .map_or_default(|proto| proto.locale_name.clone());
     let mut hair_line = b"  HAIR : ".to_vec();
     hair_line.extend_from_slice(&hair_name);
     let body_name = protos
         .get(41319)
-        .map(|proto| proto.locale_name.clone())
-        .unwrap_or_default();
+        .map_or_default(|proto| proto.locale_name.clone());
     let mut body_line = b"  BODY : ".to_vec();
     body_line.extend_from_slice(&body_name);
     alice.send_record(&slash(b"/costume"));
@@ -34500,8 +34479,7 @@ fn seat_alpha_for_state() -> Option<(ScratchDatabase, Server, Keyed, Listed, Vec
     );
     let hair_name = owners_protos()
         .get(45155)
-        .map(|proto| proto.locale_name.clone())
-        .unwrap_or_default();
+        .map_or_default(|proto| proto.locale_name.clone());
     let (alice, alpha_listed) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
     Some((database, server, alice, alpha_listed, hair_name))
 }
@@ -34590,8 +34568,7 @@ fn a_slow_gives_ten_numbered_armours_and_an_ipurge_clears_them() {
     );
     let armour = owners_protos()
         .get(12019)
-        .map(|proto| proto.locale_name.clone())
-        .unwrap_or_default();
+        .map_or_default(|proto| proto.locale_name.clone());
     assert!(!armour.is_empty(), "the owners protos hold 12019");
     let (mut alice, _alpha_listed) =
         enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
@@ -34732,8 +34709,7 @@ fn a_console_opens_and_a_book_names_its_skill_in_socket_zero() {
     );
     let book = owners_protos()
         .get(50300)
-        .map(|proto| proto.locale_name.clone())
-        .unwrap_or_default();
+        .map_or_default(|proto| proto.locale_name.clone());
     assert!(!book.is_empty(), "the owners protos hold 50300");
     let (mut alice, _alpha_listed) = enter_world_as_implementor(&server);
     alice.send_record(&slash(b"/console"));
@@ -38037,8 +38013,10 @@ fn a_gm_saves_a_maps_attributes_as_a_tga() {
     );
     assert!(
         image[18..]
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255]),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [255, 255, 255, 255]),
         "map 1's walls and water paint"
     );
     std::fs::remove_file(&path).expect("the scratch TGA is removed");
@@ -40077,7 +40055,7 @@ fn read_land_lines(keyed: &mut Keyed) -> Vec<Vec<u8>> {
                 "size is the whole record"
             );
             assert!(
-                record.len() >= 3 && (record.len() - 3) % LAND_LIST_ELEMENT_LEN == 0,
+                record.len() >= 3 && (record.len() - 3).is_multiple_of(LAND_LIST_ELEMENT_LEN),
                 "a run of 24-byte elements: {}",
                 record.len()
             );
@@ -41650,8 +41628,7 @@ fn point_value(change: &[u8], vid: u32, slot: u8) -> Option<i64> {
 fn shown_mount(read: &[Vec<u8>], vid: u32) -> u32 {
     let additional = read
         .iter()
-        .filter(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == vid.to_le_bytes())
-        .last()
+        .rfind(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == vid.to_le_bytes())
         .expect("an additional record of the rider");
     additional_mount(additional)
 }
@@ -41760,14 +41737,13 @@ fn a_rider_mounts_by_line_and_quest_and_the_mount_shows_and_pays() {
     let attack = read
         .iter()
         .filter_map(|record| point_value(record, vid, 18))
-        .last()
+        .next_back()
         .expect("the compute's attack grade");
     let floored = 2 * 154 + 2 * 60;
     assert_eq!(attack, floored + floored * 25 / 30, "the mounted attack");
     let additional = read
         .iter()
-        .filter(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == vid.to_le_bytes())
-        .last()
+        .rfind(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == vid.to_le_bytes())
         .expect("the re-show's additional record");
     assert_eq!(additional_mount(additional), 20_107);
     let positions: Vec<usize> = read
@@ -41870,7 +41846,7 @@ fn quest_mounts(alice: &mut Keyed, vein: u32, vid: u32) {
     let speed = read
         .iter()
         .filter_map(|record| point_value(record, vid, 19))
-        .last();
+        .next_back();
     assert_eq!(speed, Some(MOUNTED_SPEED), "the band and the bonus");
 }
 
@@ -42113,7 +42089,7 @@ fn horse_name_add(read: &[Vec<u8>]) -> i32 {
 fn defence_of(read: &[Vec<u8>], vid: u32) -> i64 {
     read.iter()
         .filter_map(|record| point_value(record, vid, 16))
-        .last()
+        .next_back()
         .expect("the compute's defence grade")
 }
 
@@ -42771,7 +42747,7 @@ fn a_use_reads_and_removes_its_quest_item() {
     );
     alpha.still("the script sends no dialog");
     drop(alpha);
-    server.wait_for("Character disconnected; wrote the row");
+    server.wait_for_next("Character disconnected; wrote the row");
     wait_for(&database, "(SELECT count(*) = 0 FROM item)");
 }
 
@@ -46454,10 +46430,7 @@ fn a_wave_strikes_the_mast_while_the_fake_heads_stand_dead() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
     let mut struck = false;
     let mut fake_dead = false;
-    loop {
-        let Some(record) = alice.read_game_until(deadline) else {
-            break;
-        };
+    while let Some(record) = alice.read_game_until(deadline) {
         if record[0] == GC_TARGET && record.get(1..5) == Some(&mast.to_le_bytes()) {
             let hp = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
             if i64::from(hp) < 5_000_000 {
@@ -49190,10 +49163,12 @@ fn bio_enter(server: &Server) -> Keyed {
 }
 
 /// The client leaves and the disconnect banks the row: `condition` is the `SELECT`
-/// the banked row must satisfy.
+/// the banked row must satisfy. The wait is for this disconnect's own line: a scenario
+/// banks more than once, and a wait an earlier line satisfied let the next step's
+/// `UPDATE` land under this disconnect's save (ledger 684).
 fn bio_banked(database: &ScratchDatabase, server: &mut Server, keyed: Keyed, condition: &str) {
     drop(keyed);
-    server.wait_for("Character disconnected; wrote the row");
+    server.wait_for_next("Character disconnected; wrote the row");
     wait_for(database, &format!("({condition})"));
 }
 
@@ -55727,7 +55702,8 @@ fn tanaka_start_and_letter_dialog(server: &mut Server) {
         server_script(1, TANAKA_BUTTON_PAGE),
         "the letter's button"
     );
-    alice.send_record(&client_script_button(14 | SELECT_QUEST));
+    // Quest 14.
+    alice.send_record(&client_script_button(0x0e | SELECT_QUEST));
     assert_eq!(
         alice.read_game(),
         server_script(1, TANAKA_BUTTON_PAGE),
@@ -58651,10 +58627,7 @@ fn a_kingdom_kill_on_the_war_map_fans_the_score() {
     while !landed && swings < 8 {
         alice.send_record(&client_attack(yankee.id));
         swings += 1;
-        loop {
-            let Some(record) = alice.read_game_until(deadline) else {
-                break;
-            };
+        while let Some(record) = alice.read_game_until(deadline) {
             if record == score {
                 landed = true;
                 break;
@@ -63084,7 +63057,7 @@ fn a_cracked_shell_tells_its_band_and_spends_one() {
         };
         if record.len() > 10 && record[0] == GC_CHAT && record[3] == 1 {
             let text = &record[10..];
-            if bands.iter().any(|band| text == *band) {
+            if bands.contains(&text) {
                 told = Some(text.to_vec());
             }
         }

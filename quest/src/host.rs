@@ -813,8 +813,7 @@ impl Host {
     pub fn settings(&self) -> Settings {
         self.lua
             .app_data_ref::<Settings>()
-            .map(|settings| settings.clone())
-            .unwrap_or_default()
+            .map_or_default(|settings| settings.clone())
     }
 
     /// `table.getn(locale.monster_chat[race])`, which `CHARACTER::MonsterChat` draws a line of a

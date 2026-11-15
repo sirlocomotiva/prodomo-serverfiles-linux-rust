@@ -185,7 +185,7 @@ pub enum SafeboxAnswer {
     /// Check the password and load the rows.
     Proceed,
     /// Store this move, then send its records.
-    Moved(MovedItems),
+    Moved(Box<MovedItems>),
     /// Store these account rows, then send the records.
     Rearranged {
         /// The account.
@@ -403,7 +403,7 @@ impl GameState {
         let raw = character.vid().raw();
         let mut carried = MovedItems::new(owner_id, raw, done, mover, &self.protos, &self.locale);
         carried.quickslots = Some(quickslots);
-        SafeboxAnswer::Moved(carried)
+        SafeboxAnswer::Moved(Box::new(carried))
     }
 }
 
@@ -614,7 +614,7 @@ mod tests {
 
     fn moved(answer: SafeboxAnswer) -> MovedItems {
         match answer {
-            SafeboxAnswer::Moved(moved) => moved,
+            SafeboxAnswer::Moved(moved) => *moved,
             other => panic!("nothing moved: {other:?}"),
         }
     }

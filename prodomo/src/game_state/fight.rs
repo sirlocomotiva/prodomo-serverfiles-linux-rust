@@ -1771,10 +1771,7 @@ impl GameState {
         // `Dead`'s world-boss arm (`G/char_battle.cpp:1672-1673`): the boss's death
         // ranks its hunters, before the Meley arm.
         if vid == self.world_boss_vid {
-            let name = self
-                .npc_by_vid(vid)
-                .map(|npc| npc.name.clone())
-                .unwrap_or_default();
+            let name = self.npc_by_vid(vid).map_or_default(|npc| npc.name.clone());
             self.world_boss_kill(&name);
         }
         // `Dead`'s Meley arm (`G/char_battle.cpp:1678-1688`): a stone's or a step-3
@@ -1918,17 +1915,13 @@ impl GameState {
         let Some(&(channel, map, _)) = self.npc_of.get(&vid) else {
             return;
         };
-        let sons: Vec<u32> = self
-            .npcs
-            .get(&(channel, map))
-            .map(|list| {
-                list.npcs
-                    .iter()
-                    .filter(|npc| npc.stone == Some(vid) && !npc.dead)
-                    .map(|npc| npc.vid)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let sons: Vec<u32> = self.npcs.get(&(channel, map)).map_or_default(|list| {
+            list.npcs
+                .iter()
+                .filter(|npc| npc.stone == Some(vid) && !npc.dead)
+                .map(|npc| npc.vid)
+                .collect()
+        });
         for son in sons {
             self.dead_npc(son, None);
             if let Some(son) = self.npc_mut(son) {
@@ -4946,7 +4939,7 @@ mod tests {
         let mut gold = Vec::new();
         GcCharacterGoldChange::new(1, 1, paid).encode_into(&mut gold);
         assert!(
-            heard.iter().any(|record| *record == gold),
+            heard.contains(&gold),
             "the gold record went out: {heard:02x?}"
         );
         let at = heard

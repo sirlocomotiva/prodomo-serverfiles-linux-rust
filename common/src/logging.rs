@@ -117,9 +117,7 @@ pub fn init_from_env() {
 
     let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "./log".to_string());
 
-    let ansi = std::env::var("LOG_ANSI")
-        .map(|s| s.to_lowercase() == "true" || s == "1")
-        .unwrap_or(true);
+    let ansi = std::env::var("LOG_ANSI").map_or(true, |s| s.to_lowercase() == "true" || s == "1");
 
     let config = LogConfig {
         console_level,

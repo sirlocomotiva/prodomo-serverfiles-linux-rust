@@ -515,9 +515,9 @@ mod tests {
         ];
         for e in cases {
             let s = e.to_string();
-            assert!(!s.is_empty());
+            assert_ne!(s, "");
             let dyn_err: &dyn std::error::Error = &e;
-            assert!(!dyn_err.to_string().is_empty());
+            assert_ne!(dyn_err.to_string(), "");
         }
     }
 

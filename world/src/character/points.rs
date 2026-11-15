@@ -619,7 +619,7 @@ pub struct Points {
     /// order: what `RefreshAffect` (`G/char_affect.cpp:769-778`) puts back at the end of
     /// `ComputePoints`. The world owns the affects and keeps this list beside them
     /// ([`Points::affect_point_added`], [`Points::affect_point_removed`]).
-    affect_points: Vec<(u8, i32)>,
+    affects: Vec<(u8, i32)>,
     /// `CBuffOnAttributes` for `POINT_ENERGY` (`G/buff_on_attributes.cpp`): the buff
     /// value (`m_bBuffValue`), the per-type sums (`m_map_additional_attrs`), and the
     /// value whose `On` waits for the worn attributes (`BuffOnAttr_ValueChange` runs
@@ -695,7 +695,7 @@ impl Points {
             mount_vnum: 0,
             mount_group: 0,
             horse: Horse::default(),
-            affect_points: Vec::new(),
+            affects: Vec::new(),
             energy_buff: 0,
             energy_sums: BTreeMap::new(),
             energy_pending: None,
@@ -843,18 +843,18 @@ impl Points {
     /// and is not kept.
     pub fn affect_point_added(&mut self, apply_on: u8, value: i32) {
         if apply_on != 0 {
-            self.affect_points.push((apply_on, value));
+            self.affects.push((apply_on, value));
         }
     }
 
     /// An affect with `value` on point `apply_on` left the list: the first such entry goes.
     pub fn affect_point_removed(&mut self, apply_on: u8, value: i32) {
         if let Some(at) = self
-            .affect_points
+            .affects
             .iter()
             .position(|&entry| entry == (apply_on, value))
         {
-            let _gone = self.affect_points.remove(at);
+            let _gone = self.affects.remove(at);
         }
     }
 
@@ -1244,7 +1244,6 @@ impl Points {
                         value: self.exp,
                         broadcast: false,
                     });
-                    continue;
                 }
                 GainFrame::Grant(grant, shown) => {
                     let next = levels::next_exp(self.level);
@@ -2479,11 +2478,11 @@ impl Points {
         // `RefreshAffect` (`char.cpp:3150`, `G/char_affect.cpp:769-778`): each affect's
         // `ComputeAffect(pkAff, true)` changes its point again. `ComputeAffect`'s guild-skill
         // arm never runs: no guild skill lays an affect here.
-        let affects = std::mem::take(&mut self.affect_points);
+        let affects = std::mem::take(&mut self.affects);
         for &(apply_on, value) in &affects {
             self.nested(usize::from(apply_on), value, records);
         }
-        self.affect_points = affects;
+        self.affects = affects;
         // The energy the affects put back arms its `On` (`BuffOnAttr_ValueChange` inside
         // `RefreshAffect`'s `PointChange`, `G/char.cpp:4723`): the worn attributes run it
         // here, where the recompute still holds the equipment.

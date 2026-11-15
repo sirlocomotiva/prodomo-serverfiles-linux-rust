@@ -381,10 +381,8 @@ impl GcShopStart {
         let body = &bytes[GC_SHOP_WIRE_SIZE..];
         let owner_vid = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
         let mut items = [GcShopItem::default(); SHOP_HOST_ITEM_MAX_NUM];
-        for (item, raw) in items
-            .iter_mut()
-            .zip(body[4..].chunks_exact(GcShopItem::WIRE_SIZE))
-        {
+        let (rows, _) = body[4..].as_chunks::<{ GcShopItem::WIRE_SIZE }>();
+        for (item, raw) in items.iter_mut().zip(rows) {
             *item = GcShopItem::decode(raw)?;
         }
         Ok(Self { owner_vid, items })
@@ -544,7 +542,10 @@ impl GcShopStartEx {
             });
         }
         let mut tabs = Vec::with_capacity(count);
-        for tab in bytes[GC_SHOP_WIRE_SIZE + 4 + 1..size].chunks_exact(GC_SHOP_TAB_WIRE_SIZE) {
+        for tab in bytes[GC_SHOP_WIRE_SIZE + 4 + 1..size]
+            .as_chunks::<GC_SHOP_TAB_WIRE_SIZE>()
+            .0
+        {
             tabs.push(GcShopTab::decode(tab)?);
         }
         Ok(Self { owner_vid, tabs })

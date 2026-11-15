@@ -83,8 +83,9 @@ impl GameState {
         let held = self
             .characters
             .find_by_vid(vid)
-            .map(|character| LETTER_VNUMS.map(|vnum| Self::count_letter(character, vnum)))
-            .unwrap_or([0; 6]);
+            .map_or([0; 6], |character| {
+                LETTER_VNUMS.map(|vnum| Self::count_letter(character, vnum))
+            });
         if held.iter().any(|&count| count <= 0) {
             self.tell(
                 vid,

@@ -106,7 +106,7 @@ impl CgAttack {
     /// bytes, or [`CgAttackError::InvalidHeader`] for another header.
     pub fn decode_frame(frame: &ClientFrame) -> Result<Self, CgAttackError> {
         if frame.payload.len() != CG_ATTACK_PAYLOAD_SIZE {
-            let actual = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+            let actual = frame.payload.len().saturating_add(1);
             return if frame.payload.len() < CG_ATTACK_PAYLOAD_SIZE {
                 Err(CgAttackError::Truncated {
                     needed: CG_ATTACK_WIRE_SIZE,

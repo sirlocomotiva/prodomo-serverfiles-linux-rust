@@ -3210,8 +3210,7 @@ impl GameState {
     /// `G/questpc.cpp:519-590`): the flags a save writes with the character.
     fn quest_flags_of(&self, player_id: u32) -> Vec<(Vec<u8>, i32)> {
         self.quests()
-            .map(|quests| quests.manager().flags_of(player_id))
-            .unwrap_or_default()
+            .map_or_default(|quests| quests.manager().flags_of(player_id))
     }
 
     /// The saved affects of the character under `vid` (`SaveAffect`,
@@ -3220,30 +3219,27 @@ impl GameState {
     /// writes them; an expired row is already gone from the event, so it is gone from
     /// the save too.
     fn saved_affects_of(&self, vid: common::vid::Vid) -> Vec<db::player_affects::StoredAffect> {
-        self.affect_events
-            .get(&vid)
-            .map(|event| {
-                event
-                    .affects
-                    .iter()
-                    .filter(|affect| {
-                        !(crate::loading_phase::AFFECT_PREMIUM_START
-                            ..=crate::loading_phase::AFFECT_PREMIUM_END)
-                            .contains(&affect.kind)
-                            && affect.kind != crate::loading_phase::AFFECT_WAR_FLAG
-                            && affect.kind != crate::loading_phase::AFFECT_REVIVE_INVISIBLE
-                    })
-                    .map(|affect| db::player_affects::StoredAffect {
-                        affect_type: affect.kind,
-                        apply_on: affect.apply_on,
-                        apply_value: affect.value,
-                        flag: affect.flag,
-                        duration: affect.remaining,
-                        sp_cost: affect.sp_cost,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.affect_events.get(&vid).map_or_default(|event| {
+            event
+                .affects
+                .iter()
+                .filter(|affect| {
+                    !(crate::loading_phase::AFFECT_PREMIUM_START
+                        ..=crate::loading_phase::AFFECT_PREMIUM_END)
+                        .contains(&affect.kind)
+                        && affect.kind != crate::loading_phase::AFFECT_WAR_FLAG
+                        && affect.kind != crate::loading_phase::AFFECT_REVIVE_INVISIBLE
+                })
+                .map(|affect| db::player_affects::StoredAffect {
+                    affect_type: affect.kind,
+                    apply_on: affect.apply_on,
+                    apply_value: affect.value,
+                    flag: affect.flag,
+                    duration: affect.remaining,
+                    sp_cost: affect.sp_cost,
+                })
+                .collect()
+        })
     }
     /// Run the `/skillup` line and answer with what climbed, or nothing when a
     /// gate refused.
@@ -4063,8 +4059,7 @@ impl GameState {
         let quest_flags = self
             .characters
             .find_by_vid(vid)
-            .map(|character| self.quest_flags_of(character.player_id()))
-            .unwrap_or_default();
+            .map_or_default(|character| self.quest_flags_of(character.player_id()));
         if departure == Departure::Disconnect {
             if let Ok(character) = self.characters.find_by_vid(vid) {
                 let pid = character.player_id();
@@ -6620,7 +6615,7 @@ impl PulseProcessor for GameState {
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         // `CClientManager::OfflineMessageGarbage` (`server/server/db/ClientManager.cpp:4637-4654`)
         // drops the lines that have waited for five hours, once an hour.
-        if pulse % (60 * 60 * u64::from(PASSES_PER_SEC)) == 0 {
+        if pulse.is_multiple_of(60 * 60 * u64::from(PASSES_PER_SEC)) {
             self.expire_offline_messages();
         }
         self.destroy_expired(pulse);

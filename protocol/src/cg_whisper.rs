@@ -290,7 +290,7 @@ mod tests {
     fn the_size_word_is_little_endian() {
         let mut payload = vec![0x02, 0x01];
         payload.extend_from_slice(&name(b"Bob"));
-        payload.extend(std::iter::repeat(b'a').take(258));
+        payload.extend(std::iter::repeat_n(b'a', 258));
         let decoded = CgWhisper::decode(&frame(&payload)).expect("a valid whisper");
         assert_eq!(decoded.declared_size, 0x0102);
         assert_eq!(usize::from(decoded.declared_size), 258);

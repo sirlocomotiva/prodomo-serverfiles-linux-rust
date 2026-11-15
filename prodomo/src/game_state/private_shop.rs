@@ -577,7 +577,7 @@ impl GameState {
         build: PrivateBuild,
         tables: &[CgPrivateShopItem],
         actor: Mover,
-    ) -> Result<Result<PrivateShopBuilt, MovedItems>, MoveItemRefused> {
+    ) -> Result<Result<PrivateShopBuilt, Box<MovedItems>>, MoveItemRefused> {
         let character = self
             .characters
             .find_by_vid(vid)
@@ -729,9 +729,10 @@ impl GameState {
         self.private_wares(vid, tables, actor)
     }
 
-    /// An empty answer for a refused build: the chats went out immediately.
-    fn private_refused(&self, vid: Vid, pid: u32, actor: Mover) -> MovedItems {
-        MovedItems::new(
+    /// An empty answer for a refused build: the chats went out immediately. Boxed, as the
+    /// answer is 2.6 KB beside results a few words wide.
+    fn private_refused(&self, vid: Vid, pid: u32, actor: Mover) -> Box<MovedItems> {
+        Box::new(MovedItems::new(
             pid,
             vid.raw(),
             world::character::MoveDone {
@@ -742,7 +743,7 @@ impl GameState {
             actor,
             &self.protos,
             &self.locale,
-        )
+        ))
     }
 
     /// The trade-window gates of a personal-shop step (`CheckTradeWindows`,
@@ -1439,7 +1440,7 @@ impl GameState {
     /// equivalent in one process (ADR-0002), where the world holds the prices the
     /// requests read.
     pub(super) fn run_market_tick(&mut self, pulse: u64) {
-        if pulse % PRIVATE_SHOP_MARKET_UPDATE_PULSES != 0 {
+        if !pulse.is_multiple_of(PRIVATE_SHOP_MARKET_UPDATE_PULSES) {
             return;
         }
         let pending = std::mem::take(&mut self.private_market.pending);
@@ -1596,7 +1597,7 @@ impl GameState {
         vid: Vid,
         pos: u16,
         actor: Mover,
-    ) -> Result<Result<PrivateShopBought, MovedItems>, MoveItemRefused> {
+    ) -> Result<Result<PrivateShopBought, Box<MovedItems>>, MoveItemRefused> {
         let character = self
             .characters
             .find_by_vid(vid)
@@ -1671,7 +1672,7 @@ impl GameState {
         vid: Vid,
         picks: Vec<Option<protocol::cg_private_shop::CgPrivateShopSearchPick>>,
         actor: Mover,
-    ) -> Result<Result<Vec<PrivateShopBought>, MovedItems>, MoveItemRefused> {
+    ) -> Result<Result<Vec<PrivateShopBought>, Box<MovedItems>>, MoveItemRefused> {
         let character = self
             .characters
             .find_by_vid(vid)
@@ -1846,7 +1847,7 @@ impl GameState {
         pos: u16,
         ware: &PrivateShopWare,
         actor: Mover,
-    ) -> Result<PrivateShopBought, MovedItems> {
+    ) -> Result<PrivateShopBought, Box<MovedItems>> {
         let buyer = self
             .characters
             .find_by_vid(vid)
@@ -2091,7 +2092,7 @@ impl GameState {
         &mut self,
         vid: Vid,
         actor: Mover,
-    ) -> Result<Result<PrivateShopClosed, MovedItems>, MoveItemRefused> {
+    ) -> Result<Result<PrivateShopClosed, Box<MovedItems>>, MoveItemRefused> {
         let character = self
             .characters
             .find_by_vid(vid)
@@ -2204,7 +2205,7 @@ impl GameState {
         vid: Vid,
         pid: u32,
         actor: Mover,
-    ) -> Result<PrivateShopClosed, MovedItems> {
+    ) -> Result<PrivateShopClosed, Box<MovedItems>> {
         use world::character::{ItemChange, ItemRecord, MoveRecord};
         let Some(shop) = self.private_shops.get(&vid) else {
             return Err(self.private_refused(vid, pid, actor));
@@ -2310,7 +2311,7 @@ impl GameState {
         &mut self,
         vid: Vid,
         actor: Mover,
-    ) -> Result<Result<PrivateShopWithdrawn, MovedItems>, MoveItemRefused> {
+    ) -> Result<Result<PrivateShopWithdrawn, Box<MovedItems>>, MoveItemRefused> {
         use world::character::MoveRecord;
         let character = self
             .characters
@@ -2459,7 +2460,7 @@ impl GameState {
         &mut self,
         vid: Vid,
         actor: Mover,
-    ) -> Result<Result<PrivateShopFlipped, MovedItems>, MoveItemRefused> {
+    ) -> Result<Result<PrivateShopFlipped, Box<MovedItems>>, MoveItemRefused> {
         let character = self
             .characters
             .find_by_vid(vid)
@@ -2786,27 +2787,23 @@ impl GameState {
             .map_or(0, |proto| proto.size);
         // The DB lifts the ware out of its old cell before trying the new one
         // (`D/PrivateShop.cpp:377-385`); the cells the others hold grid the answer.
-        let placed: Vec<(usize, i32)> = self
-            .private_shops
-            .get(&vid)
-            .map(|shop| {
-                shop.wares
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(slot, ware)| {
-                        let ware = ware.as_ref()?;
-                        (slot != at).then(|| {
-                            (
-                                slot,
-                                self.protos
-                                    .get(ware.item.vnum)
-                                    .map_or(0, |proto| proto.size),
-                            )
-                        })
+        let placed: Vec<(usize, i32)> = self.private_shops.get(&vid).map_or_default(|shop| {
+            shop.wares
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, ware)| {
+                    let ware = ware.as_ref()?;
+                    (slot != at).then(|| {
+                        (
+                            slot,
+                            self.protos
+                                .get(ware.item.vnum)
+                                .map_or(0, |proto| proto.size),
+                        )
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
+                })
+                .collect()
+        });
         if to >= PRIVATE_SHOP_WINDOW_SLOTS || !Self::private_cell_free(&placed, to, size) {
             self.tell(
                 vid,
@@ -3055,7 +3052,7 @@ impl GameState {
         actor: Mover,
         src_pos: u16,
         dst_pos: i32,
-    ) -> Result<Result<PrivateShopCheckedOut, MovedItems>, MoveItemRefused> {
+    ) -> Result<Result<PrivateShopCheckedOut, Box<MovedItems>>, MoveItemRefused> {
         use world::character::{ItemChange, ItemRecord, MoveRecord};
         let character = self
             .characters
@@ -3689,7 +3686,7 @@ impl GameState {
         let protos = self.protos.clone();
         let done = {
             let Ok(character) = self.characters.find_by_vid_mut(vid) else {
-                return self.private_refused(vid, pid, actor);
+                return *self.private_refused(vid, pid, actor);
             };
             let usable = usable_inventory_cells(character.inven_point());
             let (items, _, slots) = character.items_points_and_quickslots_mut();
@@ -3746,7 +3743,7 @@ fn private_grouped(price: i64) -> String {
     let digits = price.unsigned_abs().to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.bytes().enumerate() {
-        if index != 0 && (digits.len() - index) % 3 == 0 {
+        if index != 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push('.');
         }
         grouped.push(char::from(digit));

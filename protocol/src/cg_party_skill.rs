@@ -92,7 +92,7 @@ impl CgPartyUseSkill {
     /// bytes, or [`CgPartyUseSkillError::InvalidHeader`] for another header.
     pub fn decode_frame(frame: &ClientFrame) -> Result<Self, CgPartyUseSkillError> {
         if frame.payload.len() != CG_PARTY_USE_SKILL_WIRE_SIZE - 1 {
-            let available = frame.payload.len().checked_add(1).unwrap_or(usize::MAX);
+            let available = frame.payload.len().saturating_add(1);
             return if frame.payload.len() < CG_PARTY_USE_SKILL_WIRE_SIZE - 1 {
                 Err(CgPartyUseSkillError::Truncated {
                     needed: CG_PARTY_USE_SKILL_WIRE_SIZE,

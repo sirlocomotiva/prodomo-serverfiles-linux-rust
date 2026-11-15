@@ -604,7 +604,7 @@ fn flag_mask(field: &[u8], table: &[&str]) -> Result<u32, usize> {
         .collect();
     let mut mask = 0;
     for (bit, entry) in table.iter().enumerate() {
-        if read.iter().any(|token| *token == entry.as_bytes()) {
+        if read.contains(&entry.as_bytes()) {
             mask |= 1 << bit;
         }
     }

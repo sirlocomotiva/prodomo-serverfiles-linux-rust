@@ -213,7 +213,7 @@ impl GameState {
         let rows: Vec<(i32, i32, i32, i32, i32)> = self
             .stack_attributes
             .get(i32::try_from(worn.vnum).unwrap_or(i32::MAX))
-            .map(|entry| {
+            .map_or_default(|entry| {
                 entry
                     .rows
                     .iter()
@@ -227,8 +227,7 @@ impl GameState {
                         )
                     })
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         for (index, (feed_vnum, ..)) in rows.iter().enumerate() {
             if *feed_vnum != 0 && *feed_vnum != fed_vnum {
                 continue;

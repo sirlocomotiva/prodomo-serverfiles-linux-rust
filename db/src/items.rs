@@ -1788,6 +1788,9 @@ fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(),
     match change {
         RowChange::Moved {
             id, window_type, ..
+        }
+        | RowChange::Retrieved {
+            id, window_type, ..
         } => check_window(*id, *window_type)?,
         RowChange::Given {
             id,
@@ -1803,9 +1806,6 @@ fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(),
                 )));
             }
         }
-        RowChange::Retrieved {
-            id, window_type, ..
-        } => check_window(*id, *window_type)?,
         RowChange::Count { count, .. } => check_count(*count)?,
         RowChange::Created(row) => {
             let _count = check(row)?;

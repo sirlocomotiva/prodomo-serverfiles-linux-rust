@@ -193,16 +193,13 @@ impl Parties {
     /// every member hears (`ChatPacketToAllMember`, `G/party.cpp:350-373`). Empty with no
     /// such party.
     pub(super) fn linked_vids(&self, leader: CharacterId) -> Vec<Vid> {
-        self.by_leader
-            .get(&leader)
-            .map(|party| {
-                party
-                    .members
-                    .values()
-                    .filter_map(|member| member.vid)
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.by_leader.get(&leader).map_or_default(|party| {
+            party
+                .members
+                .values()
+                .filter_map(|member| member.vid)
+                .collect()
+        })
     }
 
     /// `ForEachOnMapMember`'s PIDs for the party led by `leader`
@@ -296,14 +293,13 @@ impl GameState {
             .ok()
             .and_then(|character| self.party_leader_of(character.player_id()))
             .and_then(|leader| self.parties.by_leader.get(&leader))
-            .map(|party| {
+            .map_or_default(|party| {
                 party
                     .members
                     .values()
                     .filter_map(|member| member.vid)
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     /// `GetLeaderCharacter`'s PID for the killer under `vid` (`G/questmanager.cpp:596-600`):
@@ -602,18 +598,13 @@ impl GameState {
         if !is_leader {
             return;
         }
-        let linked: Vec<Vid> = self
-            .parties
-            .by_leader
-            .get(&leader)
-            .map(|party| {
-                party
-                    .members
-                    .values()
-                    .filter_map(|member| member.vid)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let linked: Vec<Vid> = self.parties.by_leader.get(&leader).map_or_default(|party| {
+            party
+                .members
+                .values()
+                .filter_map(|member| member.vid)
+                .collect()
+        });
         for other in linked {
             self.zero_role_points(other, true);
         }
@@ -638,21 +629,16 @@ impl GameState {
         if !self.dungeons.lives(u32::try_from(map).unwrap_or(0)) {
             return;
         }
-        let nears: Vec<Vid> = self
-            .parties
-            .by_leader
-            .get(&leader)
-            .map(|party| {
-                party
-                    .members
-                    .values()
-                    .filter_map(|member| match member.vid {
-                        Some(near) if member.near && near != vid => Some(near),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let nears: Vec<Vid> = self.parties.by_leader.get(&leader).map_or_default(|party| {
+            party
+                .members
+                .values()
+                .filter_map(|member| match member.vid {
+                    Some(near) if member.near && near != vid => Some(near),
+                    _ => None,
+                })
+                .collect()
+        });
         for near in nears {
             let Some(exit) = self
                 .dungeons
@@ -845,34 +831,26 @@ impl GameState {
 
     /// The online members' `(pid, vid, role, near)` in PID order.
     fn online_party_roles(&self, leader: CharacterId) -> Vec<(CharacterId, Vid, u8, bool)> {
-        self.parties
-            .by_leader
-            .get(&leader)
-            .map(|party| {
-                party
-                    .members
-                    .iter()
-                    .filter_map(|(pid, member)| {
-                        member.vid.map(|vid| (*pid, vid, member.role, member.near))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.parties.by_leader.get(&leader).map_or_default(|party| {
+            party
+                .members
+                .iter()
+                .filter_map(|(pid, member)| {
+                    member.vid.map(|vid| (*pid, vid, member.role, member.near))
+                })
+                .collect()
+        })
     }
 
     /// The online members' VIDs in PID order.
     fn online_party_vids(&self, leader: CharacterId) -> Vec<Vid> {
-        self.parties
-            .by_leader
-            .get(&leader)
-            .map(|party| {
-                party
-                    .members
-                    .values()
-                    .filter_map(|member| member.vid)
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.parties.by_leader.get(&leader).map_or_default(|party| {
+            party
+                .members
+                .values()
+                .filter_map(|member| member.vid)
+                .collect()
+        })
     }
 
     /// `m_dwPartyStartTime` of the leader's party, 0 when gone.
@@ -1096,8 +1074,7 @@ impl GameState {
             .parties
             .by_leader
             .get(&leader)
-            .map(|party| party.members.keys().copied().collect())
-            .unwrap_or_default();
+            .map_or_default(|party| party.members.keys().copied().collect());
         for pid in pids {
             let mut record = Vec::new();
             self.build_party_update(leader, pid)
@@ -1785,20 +1762,14 @@ impl GameState {
             .parties
             .by_leader
             .get(&leader)
-            .map(|party| party.members.keys().copied().collect())
-            .unwrap_or_default();
-        let vids: Vec<Vid> = self
-            .parties
-            .by_leader
-            .get(&leader)
-            .map(|party| {
-                party
-                    .members
-                    .values()
-                    .filter_map(|member| member.vid)
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map_or_default(|party| party.members.keys().copied().collect());
+        let vids: Vec<Vid> = self.parties.by_leader.get(&leader).map_or_default(|party| {
+            party
+                .members
+                .values()
+                .filter_map(|member| member.vid)
+                .collect()
+        });
         for vid in vids {
             self.zero_role_points(vid, true);
         }
@@ -2206,7 +2177,7 @@ impl GameState {
             .by_leader
             .get(&leader)
             .and_then(|party| party.members.get(&pid));
-        let offline = member.is_none() || member.is_some_and(|member| member.vid.is_none());
+        let offline = member.is_none_or(|member| member.vid.is_none());
         if offline {
             self.info_to(leader_vid, b"[LS;685]", &[]);
             return;
@@ -2766,8 +2737,7 @@ mod tests {
             .iter()
             .filter(|record| record[0] == HEADER_GC_PARTY_UPDATE)
             .filter_map(|record| GcPartyUpdate::decode(record).ok())
-            .filter(|packet| packet.pid == pid)
-            .next_back()
+            .rfind(|packet| packet.pid == pid)
             .expect("an UPDATE for the member")
     }
 

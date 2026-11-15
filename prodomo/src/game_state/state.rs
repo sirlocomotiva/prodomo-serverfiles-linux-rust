@@ -686,8 +686,7 @@ impl GameState {
             .map_or(b"<NONE>".to_vec(), |item| {
                 self.protos
                     .get(item.vnum)
-                    .map(|proto| proto.locale_name.clone())
-                    .unwrap_or_default()
+                    .map_or_default(|proto| proto.locale_name.clone())
             })
     }
 }

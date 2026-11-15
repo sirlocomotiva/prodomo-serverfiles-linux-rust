@@ -56,8 +56,7 @@ impl GameState {
         let name = self
             .characters
             .find_by_vid(vid)
-            .map(|character| character.name().as_bytes().to_vec())
-            .unwrap_or_default();
+            .map_or_default(|character| character.name().as_bytes().to_vec());
         for member in self.parties.linked_vids(party) {
             let Some(mover) = self.own_mover(member) else {
                 continue;

@@ -110,7 +110,7 @@ impl RegenEntry {
 /// `(a + b) / 2` in C `int` arithmetic, which truncates toward zero. [`load_file`] refuses a box
 /// whose sum leaves an `int`, so the sum here is exact in 64 bits and the answer fits.
 fn midpoint(a: i32, b: i32) -> i32 {
-    i32::try_from((i64::from(a) + i64::from(b)) / 2).unwrap_or(i32::MAX)
+    i32::try_from(i64::midpoint(i64::from(a), i64::from(b))).unwrap_or(i32::MAX)
 }
 
 /// Why a regen file was refused.

@@ -1178,9 +1178,8 @@ mod tests {
             LifecycleInputBoundary::LegacyTea
         );
 
-        let error = match LiveClientSession::new(socket().0, lifecycle) {
-            Ok(_) => panic!("a TEA lifecycle must not accept a plaintext cipher"),
-            Err(error) => error,
+        let Err(error) = LiveClientSession::new(socket().0, lifecycle) else {
+            panic!("a TEA lifecycle must not accept a plaintext cipher");
         };
         assert!(
             matches!(

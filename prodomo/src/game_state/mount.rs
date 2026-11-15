@@ -448,7 +448,7 @@ impl GameState {
     /// order. A follower whose NPC is gone drops its entry, as `DeleteMount` drops the
     /// actor.
     pub(super) fn run_mount_ticks(&mut self, pulse: u64) {
-        if pulse % MOUNT_STATE_PULSES != 0 {
+        if !pulse.is_multiple_of(MOUNT_STATE_PULSES) {
             return;
         }
         let mut stood: Vec<u32> = self.mount_npcs.keys().copied().collect();

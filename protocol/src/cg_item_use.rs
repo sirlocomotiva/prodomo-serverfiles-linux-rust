@@ -302,7 +302,7 @@ mod tests {
         }
         for extra in [1usize, 2, 3, 64, 255] {
             let mut long = complete.clone();
-            long.extend(std::iter::repeat(0u8).take(extra));
+            long.extend(std::iter::repeat_n(0u8, extra));
             assert_eq!(
                 CgItemUse::decode(&long),
                 Err(CgItemUseError::LengthMismatch {
@@ -346,7 +346,7 @@ mod tests {
         }
         for extra in [1usize, 2, 3, 64, 255] {
             let mut long = payload.clone();
-            long.extend(std::iter::repeat(0u8).take(extra));
+            long.extend(std::iter::repeat_n(0u8, extra));
             assert_eq!(
                 CgItemUse::decode_frame(&ClientFrame::new(0x0b, long)),
                 Err(CgItemUseError::LengthMismatch {

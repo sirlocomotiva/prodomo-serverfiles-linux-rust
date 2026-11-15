@@ -289,8 +289,7 @@ impl GameState {
             let name = self
                 .protos
                 .get(item.vnum)
-                .map(|proto| proto.locale_name.clone())
-                .unwrap_or_default();
+                .map_or_default(|proto| proto.locale_name.clone());
             self.tell(vid, mover, CHAT_TYPE_INFO, label, &[Arg::Text(&name)]);
             if with_attrs {
                 self.tell_costume_attrs(vid, mover, &item.attributes);

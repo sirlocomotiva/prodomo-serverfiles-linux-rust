@@ -607,7 +607,7 @@ impl GameState {
             };
             if found.char_type == gamedata::mob_proto::CHAR_TYPE_PC {
                 continue;
-            };
+            }
             if !all
                 && crate::sync_position::distance_approx(found.x - spot.x, found.y - spot.y) >= 1000
             {

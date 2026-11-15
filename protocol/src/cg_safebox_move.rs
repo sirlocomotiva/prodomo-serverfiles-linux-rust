@@ -501,7 +501,7 @@ mod tests {
         }
         for extra in 1..5 {
             let mut w = rec(0).encode();
-            w.extend(std::iter::repeat(0xaa).take(extra));
+            w.extend(std::iter::repeat_n(0xaa, extra));
             let mut w2 = w.clone();
             w2[0] = 0xff;
             assert_eq!(

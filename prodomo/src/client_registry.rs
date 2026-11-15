@@ -248,14 +248,13 @@ impl ChannelClients {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&channel)
-            .map(|members| {
+            .map_or_default(|members| {
                 members
                     .iter()
                     .filter(|member| member.entry.map == map)
                     .map(|member| (member.id, member.entry.clone()))
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     /// Hand one order to the descriptor that holds lease `id` on `channel`.
@@ -278,16 +277,13 @@ impl ChannelClients {
         let Ok(channels) = self.inner.lock() else {
             return Vec::new();
         };
-        channels
-            .get(&channel)
-            .map(|members| {
-                members
-                    .iter()
-                    .filter(|member| member.entry.map == map)
-                    .map(|member| member.entry.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+        channels.get(&channel).map_or_default(|members| {
+            members
+                .iter()
+                .filter(|member| member.entry.map == map)
+                .map(|member| member.entry.clone())
+                .collect()
+        })
     }
 
     /// The `(channel, lease)` pairs whose entry carries `vid`, in Channel order.
@@ -326,15 +322,12 @@ impl ChannelClients {
         let Ok(channels) = self.inner.lock() else {
             return Vec::new();
         };
-        channels
-            .get(&channel)
-            .map(|members| {
-                members
-                    .iter()
-                    .map(|member| member.entry.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+        channels.get(&channel).map_or_default(|members| {
+            members
+                .iter()
+                .map(|member| member.entry.name.clone())
+                .collect()
+        })
     }
 
     /// The counts `/who` reports (`do_who`, `G/cmd_gm.cpp:1682-1692`): the

@@ -89,7 +89,7 @@ fn legacy_myevan_key_and_count() -> (TeaKey, usize) {
         if index >= usize::from(limit) {
             break;
         }
-        seed ^= 2_148_941_891;
+        seed ^= 0x8016_4043;
         seed = seed.wrapping_add(3_592_385_981);
         let start = index * 4;
         table[start..start + 4].copy_from_slice(&seed.to_le_bytes());

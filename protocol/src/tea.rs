@@ -136,7 +136,7 @@ pub fn decrypt_block(ciphertext: &TeaBlock, key: &TeaKey) -> TeaBlock {
 pub fn encrypt_aligned(data: &[u8], key: &TeaKey) -> Result<Vec<u8>, TeaError> {
     check_alignment(data.len())?;
     let mut output = Vec::with_capacity(data.len());
-    for chunk in data.chunks_exact(TEA_BLOCK_SIZE) {
+    for chunk in data.as_chunks::<TEA_BLOCK_SIZE>().0 {
         let mut block = [0_u8; TEA_BLOCK_SIZE];
         block.copy_from_slice(chunk);
         output.extend_from_slice(&encrypt_block(&block, key));
@@ -157,7 +157,7 @@ pub fn encrypt_aligned(data: &[u8], key: &TeaKey) -> Result<Vec<u8>, TeaError> {
 pub fn decrypt_aligned(data: &[u8], key: &TeaKey) -> Result<Vec<u8>, TeaError> {
     check_alignment(data.len())?;
     let mut output = Vec::with_capacity(data.len());
-    for chunk in data.chunks_exact(TEA_BLOCK_SIZE) {
+    for chunk in data.as_chunks::<TEA_BLOCK_SIZE>().0 {
         let mut block = [0_u8; TEA_BLOCK_SIZE];
         block.copy_from_slice(chunk);
         output.extend_from_slice(&decrypt_block(&block, key));
@@ -201,7 +201,7 @@ pub fn encrypt_padded(data: &[u8], key: &TeaKey) -> Result<OwnedTeaCiphertext, T
     bytes
         .try_reserve_exact(wire_len)
         .map_err(|_| TeaError::AllocationFailed)?;
-    for chunk in padded.chunks_exact(TEA_BLOCK_SIZE) {
+    for chunk in padded.as_chunks::<TEA_BLOCK_SIZE>().0 {
         let mut block = [0_u8; TEA_BLOCK_SIZE];
         block.copy_from_slice(chunk);
         bytes.extend_from_slice(&encrypt_block(&block, key));
@@ -439,7 +439,7 @@ impl From<TeaError> for TeaStreamError {
 }
 
 fn check_alignment(length: usize) -> Result<(), TeaError> {
-    if length % TEA_BLOCK_SIZE == 0 {
+    if length.is_multiple_of(TEA_BLOCK_SIZE) {
         Ok(())
     } else {
         Err(TeaError::UnalignedLength { length })

@@ -446,7 +446,7 @@ pub fn splash_of(clip: &str, file: &str) -> Result<ClipSkill, MsaError> {
                 file: file.to_string(),
                 what: "short Position",
             });
-        };
+        }
         let timing_ms = 100 + common::cfloat::f32_to_u32(time * 1000.0);
         let negated = common::cfloat::f32_to_i32(numbers[1]).wrapping_neg();
         let hit_distance = u32::from_ne_bytes(negated.to_ne_bytes());

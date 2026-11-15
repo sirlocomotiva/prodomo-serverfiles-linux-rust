@@ -267,7 +267,7 @@ mod tests {
         // 0x0102 must read as 258, not 513. A 258-byte total leaves 254 text
         // bytes, so both halves are checked: the word and the text arithmetic.
         let mut payload = vec![0x02, 0x01, 0x00];
-        payload.extend(std::iter::repeat(b'a').take(258));
+        payload.extend(std::iter::repeat_n(b'a', 258));
         let decoded = CgChat::decode(&frame(&payload)).expect("a valid line");
         assert_eq!(decoded.declared_size, 0x0102);
         assert_eq!(usize::from(decoded.declared_size), 258);
@@ -347,7 +347,7 @@ mod tests {
         let long = 600_u16;
         let mut payload = (long + 4).to_le_bytes().to_vec();
         payload.push(0x00);
-        payload.extend(std::iter::repeat(b'z').take(long as usize));
+        payload.extend(std::iter::repeat_n(b'z', long as usize));
         let decoded = CgChat::decode(&frame(&payload)).expect("a valid line");
         assert_eq!(decoded.text.len(), CHAT_TEXT_MAX);
     }
@@ -357,7 +357,7 @@ mod tests {
         let size = u16::try_from(CHAT_TEXT_MAX + 4).expect("the text bound fits the size word");
         let mut payload = size.to_le_bytes().to_vec();
         payload.push(0x00);
-        payload.extend(std::iter::repeat(b'y').take(CHAT_TEXT_MAX));
+        payload.extend(std::iter::repeat_n(b'y', CHAT_TEXT_MAX));
         let decoded = CgChat::decode(&frame(&payload)).expect("a valid line");
         assert_eq!(decoded.text.len(), CHAT_TEXT_MAX);
     }
