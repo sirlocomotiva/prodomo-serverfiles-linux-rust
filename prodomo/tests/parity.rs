@@ -29175,6 +29175,108 @@ fn an_ability_potion_lands_and_a_second_is_refused_while_held() {
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
 }
 
+/// `cg.game.item_use`: every ability potion of the owner's data lands its own affect
+/// (`USE_ABILITY_UP`, `G/char_item.cpp:3373-3422` and `:5780-5859`). Outside 50801-50820
+/// the potion's `value(0)` picks the affect: 27054 moving speed (200 on `POINT_MOV_SPEED`),
+/// 27870 strength (204 on `POINT_ST`), 27873 dexterity (205 on `POINT_DX`), 50093 the
+/// attack grade (202 on `POINT_ATT_GRADE_BONUS`) and 50094 the defence grade (226 on
+/// `POINT_DEF_GRADE_BONUS`), each with `value(2)` for `value(1)` seconds. Inside 50801-50820
+/// every potion lands 516 on its apply's point: 50801 moving speed, 50802 strength, 50817
+/// and 50818 the grades, 50819 the magic resistance. Each potion is spent. A second 27054
+/// while 200 is held hears the violet line and stays.
+#[test]
+fn every_ability_potion_lands_its_own_affect() {
+    use common::point_slot::{
+        POINT_ATT_GRADE_BONUS, POINT_DEF_GRADE_BONUS, POINT_DX, POINT_MOV_SPEED,
+        POINT_RESIST_MAGIC, POINT_ST,
+    };
+    // (vnum, affect, point, value, seconds)
+    let potions: [(u32, u32, usize, i32, i32); 10] = [
+        (27_054, 200, POINT_MOV_SPEED, 10, 600),
+        (27_870, 204, POINT_ST, 10, 600),
+        (27_873, 205, POINT_DX, 10, 600),
+        (50_093, 202, POINT_ATT_GRADE_BONUS, 10, 30),
+        (50_094, 226, POINT_DEF_GRADE_BONUS, 10, 30),
+        (50_801, 516, POINT_MOV_SPEED, 15, 180),
+        (50_802, 516, POINT_ST, 5, 180),
+        (50_817, 516, POINT_ATT_GRADE_BONUS, 50, 180),
+        (50_818, 516, POINT_DEF_GRADE_BONUS, 70, 180),
+        (50_819, 516, POINT_RESIST_MAGIC, 10, 180),
+    ];
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let protos = owners_protos();
+    for (cell, (vnum, ..)) in potions.iter().enumerate() {
+        let proto = protos
+            .get(*vnum)
+            .expect("the owner's data has every potion");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, 7, "the owner's {vnum} is USE_ABILITY_UP");
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 2, {vnum} FROM player WHERE name = 'Alpha'",
+                30 + cell
+            ),
+        );
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    for (cell, (vnum, affect, point, value, seconds)) in potions.into_iter().enumerate() {
+        // When: Alpha drinks the potion. Then: its affect, and one of two goes.
+        let cell = u16::try_from(cell).expect("a small cell");
+        alpha.send_record(&client_item_use(cell));
+        let (mut spent, mut landed) = (false, false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !(spent && landed) {
+            let record = alpha
+                .read_game_until(deadline)
+                .unwrap_or_else(|| panic!("{vnum} lands (spent {spent}, affect {landed})"));
+            if record.first() == Some(&ITEM_UPDATE) {
+                let (window, at, count) = update_fields(&record);
+                if window == common::item_slots::EWindows::Inventory as u8 && at == cell {
+                    assert_eq!(count, 1, "{vnum} spends one of two");
+                    spent = true;
+                }
+            }
+            if record.first() == Some(&GC_AFFECT_ADD)
+                && record.len() == AFFECT_ADD_LEN
+                && record[1..5] == affect.to_le_bytes()
+                && usize::from(record[5]) == point
+            {
+                let got = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+                let dur = i32::from_le_bytes(record[14..18].try_into().expect("four bytes"));
+                assert_eq!(
+                    (got, dur),
+                    (value, seconds),
+                    "{vnum}: value(2) for value(1)"
+                );
+                landed = true;
+            }
+        }
+    }
+    // When: a second 27054 while 200 is held. Then: the violet line, the row kept.
+    alpha.send_record(&client_item_use(0));
+    let _before = read_up_to(&mut alpha, &an_info_line(b"Folosesti deja licoare violet"));
+    drop(alpha);
+    for cell in 0..potions.len() {
+        wait_for(
+            &database,
+            &format!("(SELECT count = 1 FROM item WHERE id = {})", 30 + cell),
+        );
+    }
+    drop(server);
+}
+
 /// `cg.game.item_use`: a `USE_INVISIBILITY` cloak (27877) cloaks for 300 s, and the
 /// mirror (70026) cloaks once and refuses within ten minutes. Alpha uses the cloak
 /// at cell 0: the single goes (the clear), the `GC_AFFECT_ADD` of kind 203 lands

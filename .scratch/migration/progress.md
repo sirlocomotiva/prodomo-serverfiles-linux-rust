@@ -12,9 +12,9 @@ file is rewritten after every section and goes into the section's commit.
   `Left:`), 685 (the
   scenario timing, `AGENTS.md` "SCENARIO TIMING"), 684 (Rust 1.100.0), 683 (the test hygiene),
   682 (the cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
-- Parity: 1,261 `ported`, 555 `partial`, 475 `unused`, 40 `missing`, 0 `codec`, of 2,331 rows.
-  **595 items left**; the number only goes down.
-- Tests: 5,663 pass in 46 targets with `DATABASE_URL`; 523 are scenarios.
+- Parity: 1,273 `ported`, 536 `partial`, 482 `unused`, 40 `missing`, 0 `codec`, 0 `codec`, of 2,331 rows.
+  **576 items left**; the number only goes down.
+- Tests: 5,664 pass in 46 targets with `DATABASE_URL`; 524 are scenarios.
 - **What is next is in `docs/STATUS.md`, "Next steps"**: package B, by families (A2). B9 is the
   arm tables; most of their `partial` rows have Rust code and lack only a scenario.
 
@@ -66,4 +66,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 687 is committed and pushed.
+Nothing is left running. Ledger 688 is committed and pushed.

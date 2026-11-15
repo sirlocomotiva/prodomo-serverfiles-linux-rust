@@ -56332,3 +56332,36 @@ passed, 0 failed in 46 targets; with it 5,663 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,261 `ported`, 555 `partial`, 475 `unused`, 40 `missing`,
 0 `codec`, of 2,331 rows; 523 scenarios. No ADR changed.
+
+## 688. The ability potions (B9, `USE_ABILITY_UP`)
+
+`USE_ABILITY_UP` has two arms: the 50801-50820 one lands `AFFECT_EXP_BONUS_EURO_FREE` (516) on
+the apply's point (`G/char_item.cpp:3373-3422`), and the general one picks the affect by
+`value(0)` (`:5780-5859`). `pc_skill.rs::land_ability_up` ported both; one potion of each had a
+scenario. No product code changed.
+
+`every_ability_potion_lands_its_own_affect` (shipped mode) drinks ten of the owner's potions in
+turn and reads each `GC_AFFECT_ADD` (kind, point, value, seconds) and the spend: 27054 (200 on
+`POINT_MOV_SPEED`), 27870 (204 on `POINT_ST`), 27873 (205 on `POINT_DX`), 50093 (202 on
+`POINT_ATT_GRADE_BONUS`, 30 s), 50094 (226 on `POINT_DEF_GRADE_BONUS`, 30 s), then 50801,
+50802, 50817, 50818 and 50819 (516 on moving speed, strength, both grades and the magic
+resistance, 180 s). A second 27054 while 200 is held hears the violet line and stays.
+
+Seven arms are `unused`, each with the proto search as evidence: the owner's 32
+`USE_ABILITY_UP` rows carry `value(0)` 0, 5, 6, 7, 8, 37, 53 and 54, so `APPLY_CON` (3),
+`APPLY_INT` (4) and `APPLY_CAST_SPEED` (9) are reached by neither arm, and the 50801-50820 range
+(5, 7, 8, 37, 53, 54) never reaches the first arm's `APPLY_DEX` either. The control is the same
+search, whose other values are the arms the scenarios prove.
+
+One row ledger 686 got wrong is corrected: the first arm's `APPLY_ATT_SPEED` row named
+`an_ability_potion_lands_and_a_second_is_refused_while_held`, whose 27053 runs the general arm;
+it now names `a_508xx_potion_lands_516_and_a_second_is_refused_while_held` (50820).
+
+12 rows are `ported` and 7 `unused`; 576 items are left (595 at ledger 687).
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,664
+passed, 0 failed in 46 targets; with it 5,664 passed, 0 failed in 46 targets (460 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,273 `ported`, 536 `partial`, 482 `unused`, 40 `missing`,
+0 `codec`, of 2,331 rows; 524 scenarios. No ADR changed.
