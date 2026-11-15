@@ -52104,6 +52104,151 @@ fn a_gm_lists_starts_and_ends_an_arena_duel() {
     check_arena_return(&database);
 }
 
+/// The potions of [`the_arena_refuses_each_potion_by_its_list_and_the_flags`] at cells 1 to 13:
+/// the six listed `USE_POTION`, an unlisted one, the four listed `USE_POTION_NODELAY`, an
+/// unlisted one, and a 508xx one.
+const ARENA_POTIONS: [u32; 13] = [
+    27_001, 27_002, 27_003, 27_004, 27_005, 27_006, 27_051, 70_020, 71_018, 71_019, 71_020, 27_875,
+    50_804,
+];
+
+/// Two same-empire GMs, Alpha holding [`ARENA_POTIONS`], and the arena map 112 on the Shared
+/// Channel, in shipped mode.
+fn arena_potion_server(database: &ScratchDatabase) -> Server {
+    for login in ["alice", "bob"] {
+        create_account_before_boot(database, login);
+    }
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470100, 950000 FROM account WHERE login = 'bob'",
+    );
+    for (login, name) in [("alice", "Alpha"), ("bob", "Yankee")] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO gm_grant (account_id, name, authority) SELECT id, '{name}', \
+                 'HIGH_WIZARD' FROM account WHERE login = '{login}'"
+            ),
+        );
+    }
+    for (index, vnum) in ARENA_POTIONS.iter().enumerate() {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, 1, \
+                 {}, 1, {vnum} FROM player WHERE name = 'Alpha'",
+                40 + index,
+                1 + index
+            ),
+        );
+    }
+    let mut channels = default_channels();
+    channels
+        .iter_mut()
+        .find(|channel| channel.number == 99)
+        .expect("the Shared Channel")
+        .maps
+        .push(112);
+    Server::start_configured(binary(), database.url(), &channels, "test_server = false")
+}
+
+/// `cg.game.item_use`: the arena's potion gate (`G/char_item.cpp:5579-5608`, `:5683-5713`).
+/// On an arena map a potion is refused with `[LS;403]` while the `arena_potion_limit` flag is
+/// set; otherwise the listed potions (27001-27006, and the `USE_POTION_NODELAY` 70020 and
+/// 71018-71020) are refused with `[LS;122]` while the duelist has no potions left and
+/// `arena_potion_limit_count` is below 10000, and every other potion with `[LS;403]`. A 508xx
+/// potion (50804) never reaches its arm's own arena gate (`G/char_item.cpp:3441-3470`):
+/// `IsLimitedItem` refuses every 50801-50826 on an arena map first, with `[LS;1205]`
+/// (`G/char_item.cpp:2764-2768`, `G/arena.cpp:1131-1171`).
+///
+/// Alpha holds [`ARENA_POTIONS`] and duels Yankee in the first arena with the default count
+/// of 0. After the countdown each potion hears its line and stays. With `arena_potion_limit`
+/// set, the listed ones hear `[LS;403]` too. With the flag cleared and the count at 10000, a
+/// listed potion passes the gate and, at full hit points, does nothing at all
+/// (`G/char_item.cpp:5622`, `:5737`), while an unlisted one still hears `[LS;403]`.
+#[test]
+fn the_arena_refuses_each_potion_by_its_list_and_the_flags() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = arena_potion_server(&database);
+    let (mut alice, alpha, mut yankee, yankee_listed) = enter_arena_pair(&server, 1);
+    start_arena_pair(&server, &mut alice, alpha.id, &mut yankee, yankee_listed.id);
+    close_arena_pair(&mut server, alice, yankee);
+    let (mut alice, alpha, mut yankee, yankee_listed) = enter_arena_pair(&server, 99);
+    read_arena_countdown(&mut alice, alpha.id, &mut yankee, yankee_listed.id);
+
+    let cell = |vnum: u32| {
+        1 + u16::try_from(
+            ARENA_POTIONS
+                .iter()
+                .position(|&at| at == vnum)
+                .expect("a potion"),
+        )
+        .expect("a cell")
+    };
+    let hears = |alice: &mut Keyed, yankee: &mut Keyed, vnum: u32, line: &[u8]| {
+        alice.send_record(&client_item_use(cell(vnum)));
+        let wanted = an_info_line(line);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            read_until_record_pumping(alice, yankee, &wanted, deadline),
+            wanted,
+            "{vnum} hears {}",
+            String::from_utf8_lossy(line)
+        );
+    };
+    // When: no flag is set and Alpha has no potions left.
+    for vnum in [
+        27_001, 27_002, 27_003, 27_004, 27_005, 27_006, 70_020, 71_018, 71_019, 71_020,
+    ] {
+        hears(&mut alice, &mut yankee, vnum, b"[LS;122]");
+    }
+    for vnum in [27_051, 27_875] {
+        hears(&mut alice, &mut yankee, vnum, b"[LS;403]");
+    }
+    hears(&mut alice, &mut yankee, 50_804, b"[LS;1205]");
+    // When: `arena_potion_limit` is set, the listed ones are refused before their list.
+    alice.send_record(&client_chat(
+        CHAT_TALKING,
+        b"/eventflag arena_potion_limit 1",
+    ));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"RequestSetEventFlag arena_potion_limit 1")
+    );
+    for vnum in [27_001, 70_020] {
+        hears(&mut alice, &mut yankee, vnum, b"[LS;403]");
+    }
+    hears(&mut alice, &mut yankee, 50_804, b"[LS;1205]");
+    // When: the flag is cleared and the count reaches 10000, a listed potion passes the
+    // gate and finds the hit points full; an unlisted one is still refused.
+    for line in [
+        b"/eventflag arena_potion_limit 0".as_slice(),
+        b"/eventflag arena_potion_limit_count 10000",
+    ] {
+        alice.send_record(&client_chat(CHAT_TALKING, line));
+        let answer = [b"RequestSetEventFlag ".as_slice(), &line[11..]].concat();
+        assert_eq!(alice.read_game(), an_info_line(&answer));
+    }
+    for vnum in [27_001, 70_020] {
+        alice.send_record(&client_item_use(cell(vnum)));
+        alice.quiet("a full duelist's potion passes the gate and does nothing");
+    }
+    hears(&mut alice, &mut yankee, 27_051, b"[LS;403]");
+
+    // Then: every potion is still there.
+    check(
+        &database,
+        "(SELECT count(*) = 13 AND bool_and(count = 1) FROM item WHERE id BETWEEN 40 AND 52)",
+    );
+    end_named_arena_pair(&server, &mut alice, alpha.id, &mut yankee, yankee_listed.id);
+    close_arena_pair(&mut server, alice, yankee);
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

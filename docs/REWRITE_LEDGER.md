@@ -56417,3 +56417,37 @@ passed, 0 failed in 46 targets; with it 5,666 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,504 `ported`, 305 `partial`, 482 `unused`, 40 `missing`,
 0 `codec`, of 2,331 rows; 526 scenarios. No ADR changed.
+
+## 690. The arena's potion gate (B9, `USE_POTION` and `USE_POTION_NODELAY`)
+
+On an arena map `UseItemEx` gates the two potion sub-types before the drink
+(`G/char_item.cpp:5579-5608`, `:5683-5713`): `arena_potion_limit` refuses every potion with
+`[LS;403]`; otherwise the listed vnums (27001-27006; the `USE_POTION_NODELAY` 70020 and
+71018-71020) are refused with `[LS;122]` while the duelist has no potions left and
+`arena_potion_limit_count` is below 10000, and every other potion hears `[LS;403]`.
+`use_to_item.rs::arena_potion_refusal` ported it with unit tests; no scenario drove it. No
+product code changed.
+
+`the_arena_refuses_each_potion_by_its_list_and_the_flags` (shipped mode) gives Alpha 13
+potions and starts the first arena against Yankee with the default count of 0. After the
+countdown the ten listed potions hear `[LS;122]`, 27051 and 27875 hear `[LS;403]`, and each
+stays. With `arena_potion_limit` set, 27001 and 70020 hear `[LS;403]`. With the flag cleared and
+the count at 10000, 27001 and 70020 pass the gate and, at full hit points, do nothing
+(`G/char_item.cpp:5622`, `:5737`), while 27051 still hears `[LS;403]`. No row is spent.
+
+The 508xx arm has an arena gate of its own (`G/char_item.cpp:3441-3470`), with a list of
+vnums outside its range. It never runs: `IsLimitedItem` refuses every 50801-50826 on an arena
+map with `[LS;1205]` before any arm (`G/char_item.cpp:2764-2768`, `G/arena.cpp:1131-1171`), and
+the scenario's 50804 hears exactly that. Its five vnum and default rows are `unused` with that
+evidence; 27875, which reaches the general arm's gate on the same map, is the control.
+
+12 rows are `ported` and 5 `unused`; the three parent rows stay `partial`, each `Left:` now
+naming only the drink (the SP branch of `USE_POTION`, the bodies of both `USE_POTION_NODELAY`
+arms). 328 items are left (345 at ledger 689).
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,667
+passed, 0 failed in 46 targets; with it 5,667 passed, 0 failed in 46 targets (452 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,516 `ported`, 288 `partial`, 487 `unused`, 40 `missing`,
+0 `codec`, of 2,331 rows; 527 scenarios. No ADR changed.
