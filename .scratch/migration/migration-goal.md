@@ -34,8 +34,11 @@ rewrite `.scratch/migration/progress.md`, and start the next one.
 - Ledger 685 is the scenario timing: every scenario that lost a full run had its cause in the
   scenario, all 519 were swept for the same classes, and `AGENTS.md` ("SCENARIO TIMING") has
   the rules a new scenario follows.
+- Ledger 686 made the tail countable: every `partial` and `missing` note ends in `Left:`, and
+  the large switches are generated arm tables.
 - Tests: 5,659 pass in 46 targets with `DATABASE_URL`. There are 519 parity scenarios.
-- Parity: 1,136 ported, 65 partial, 444 unused, 0 missing and 0 codec, out of 1,645 rows.
+- Parity: 1,244 ported, 572 partial, 475 unused, 40 missing and 0 codec, out of 2,331 rows;
+  612 items left.
 - Owner questions: `.scratch/migration/owner-questions.md`; the ones that block work are in
   `docs/STATUS.md`, "Waiting on the owner".
 - `progress.md` has the details, and supersedes this section once it is newer.

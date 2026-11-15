@@ -14,9 +14,9 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 685 |
+| measure | value at ledger 686 |
 |---|---|
-| Parity inventory | 1,645 rows: 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec` |
+| Parity inventory | 2,331 rows: 1,244 `ported`, 572 `partial`, 475 `unused`, 40 `missing`, 0 `codec`; **612 items left** (the `partial` and `missing` rows, each note ending in `Left:`) |
 | Scenarios | 519 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
 | Tests | 5,659 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 685 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
@@ -27,7 +27,7 @@ the tail is closed.
 A client can do what the `ported` rows say: log in, choose and create characters, enter the
 world, move, chat, fight monsters and players, die and restart, use and trade items, shop, store,
 join parties and guilds, fight guild wars, run quests, and use the GM commands. What it cannot do
-yet is what the 65 `partial` rows still lack (next steps, package B).
+yet is what the 612 rows left still lack (next steps, package B).
 
 ## Direction review, 2026-11-15
 
@@ -68,14 +68,14 @@ step.
 
 In this order. A package is done when its exit line holds, not when its sections are written.
 
-### A. Make the tail countable (first, a day's work)
+### A. Make the tail countable
 
-1. **One list for what is left.** For each `partial` row, end its note with `Left:` and the
-   items still missing, each one checkable against the legacy source; delete a ledger log that
-   says nothing about what is left. Where a row hides a large switch, generate the list from the
-   source as the other tables are generated: the `case` labels of `UseItemEx`
-   (`G/char_item.cpp:2718-7164`), the skill switches of `G/char_skill.cpp`, and the arms of
-   `PointChange` and `ApplyPoint`. *Exit:* a number of items left exists, and it only goes down.
+1. **One list for what is left.** Done in ledger 686. Every `partial` and `missing` note ends
+   with `Left:` and the items still missing, each checkable against the legacy source. The large
+   switches are generated tables (`.scratch/parity/tools/gen.py`): `item-use.md` (the `case`
+   labels of `UseItemEx`, `G/char_item.cpp:2718-7164`, and its limit checks), `points.md` (the
+   arms of `PointChange` and `ApplyPoint`) and `skill-arms.md` (the per-skill switches of
+   `G/char_skill.cpp`). *Exit:* 612 items left at ledger 686; the number only goes down.
 2. **A ledger section is a slice of a package, not one arm.** Port a family of arms together (the
    fireworks, the detectors, the scrolls of one kind), with one scenario per behaviour and one
    gate run for the section. The receipt names the run with `DATABASE_URL` and the run without
@@ -94,23 +94,25 @@ In this order. A package is done when its exit line holds, not when its sections
 4. **A new scenario runs in the shipped mode** (`test_server = false`), with a GM grant where it
    plays a game master (ADR-0007).
 
-### B. Close the 65 `partial` rows
+### B. Close the rows left
 
 By what a player meets first. Each row is `ported` when its `Left:` list is empty and a scenario
 proves the last item; a row that waits on the owner's data says so and moves to the owner's list.
+A row of the generated arm tables (B9) closes with the family it belongs to (A2).
 
 | package | rows |
 |---|---|
 | B1. Items (10) | `cg.game.item_use`, `cg.game.item_use_to_item`, `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`, `sys.item.core`, `sys.item.refine`, `data.item.special_group`, `table.item_attr`, `event.item.timer_based_on_wear_expire_event` |
 | B2. Monsters, combat, drops (10) | `sys.combat.core`, `sys.mob.ai`, `sys.mob.proto`, `data.proto.mob`, `data.drop.mob`, `data.drop.common`, `data.drop.etc`, `data.drop.group`, `data.map.regen`, `sys.world.regen` |
 | B3. Skills (6) | `sys.skill.core`, `sys.skill.extra`, `cg.game.add_fly_targeting`, `cg.game.fly_targeting`, `table.skill_proto`, `data.motion` |
-| B4. Character and world (11) | `sys.char.points`, `sys.char.save`, `sys.char.pk`, `sys.char.multi_language`, `sys.world.map`, `sys.world.move`, `sys.world.warp`, `sys.world.objects`, `cg.game.on_click`, `sys.npc.safebox`, `table.shopex` |
+| B4. Character and world (10) | `sys.char.points`, `sys.char.save`, `sys.char.pk`, `sys.char.multi_language`, `sys.world.map`, `sys.world.move`, `sys.world.warp`, `sys.world.objects`, `cg.game.on_click`, `sys.npc.safebox` |
 | B5. Guild and the cross-Channel paths (4) | `sys.guild.core`, `sys.guild.war`, `sys.guild.dungeon`, `sys.bus` |
-| B6. Quests, dungeons, events (10) | `sys.quest.runtime`, `questlib.questlib`, `sys.dungeon.core`, `sys.dungeon.dragon_lair`, `data.regen.dungeon`, `sys.event.manager`, `sys.event.arena`, `sys.event.xmas`, `sys.event.castle_monarch`, `sys.event.threeway_war` |
+| B6. Quests, dungeons, events (11) | `sys.quest.runtime`, `questlib.questlib`, `sys.dungeon.core`, `sys.dungeon.ship_defense`, `sys.dungeon.dragon_lair`, `data.regen.dungeon`, `sys.event.manager`, `sys.event.arena`, `sys.event.xmas`, `sys.event.castle_monarch`, `sys.event.threeway_war` |
 | B7. Life skills and custom systems (4) | `sys.life.fishing`, `sys.life.mining`, `sys.custom.dragon_soul`, `sys.custom.new_set_bonus` |
-| B8. Network, login, GM, logs, data (10) | `sys.net.framing`, `sys.net.handshake`, `sys.login.by_key`, `sys.login.enter`, `sys.gm.core`, `sys.log`, `data.proto.item`, `data.locale.strings`, `data.locale.names`, `data.map.index` |
+| B8. Login, logs, data (7) | `sys.login.by_key`, `sys.login.enter`, `sys.log`, `data.proto.item`, `data.locale.strings`, `data.locale.names`, `data.map.index` |
+| B9. The arm tables (550) | `item-use.md`: 165 `partial`, 35 `missing`; `points.md`: 278 `partial`, 2 `missing`; `skill-arms.md`: 67 `partial`, 3 `missing`. Most `partial` arms have Rust code and lack only a scenario; the `missing` ones (`ITEM_UNIQUE`, `ITEM_HAIR`, `ITEM_DS`, `ITEM_FISH`, the no-op types, the seasonal `USE_SPECIAL` vnums, 70008, 70009, 70102, the marriage ring, the ramadan candy, the hit caps of 46, 139 and 140, `COSTUME_ATTR_BONUS`) have none |
 
-*Exit:* no `partial` row is left; each is `ported`, `unused`, or on the owner's list.
+*Exit:* no `partial` or `missing` row is left; each is `ported`, `unused`, or on the owner's list.
 
 ### C. Harden what the review found (alongside B; all of it before D)
 

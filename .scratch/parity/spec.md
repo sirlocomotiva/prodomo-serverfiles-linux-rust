@@ -18,9 +18,12 @@ porting status. Build step 2 (`docs/STATUS.md`). The Rewrite reaches Parity when
 | `quest-api.md` | 699 | generated | A Lua function the quest runtime registers |
 | `timed-events.md` | 99 | generated | A timed event function |
 | `quests.md` | 62 | generated | A quest script (51) or a quest library (11) |
-| `systems.md` | 115 | by hand | A system: the behaviour behind the entry points above |
+| `item-use.md` | 292 | generated | One `case` arm of `UseItemEx`, or one of its limit checks |
+| `points.md` | 320 | generated | One arm of `PointChange` (190) or `ApplyPoint` (130) |
+| `skill-arms.md` | 73 | generated | One arm of a per-skill switch in `G/char_skill.cpp` |
+| `systems.md` | 116 | by hand | A system: the behaviour behind the entry points above |
 | `gamedata.md` | 45 | by hand | A Game data file or table and its reader |
-| **total** | **1,645** | | |
+| **total** | **2,331** | | |
 
 The generated rows come from the **live** legacy source only: `tools/active.py` runs the C
 preprocessor over each file with the legacy build's defines (FreeBSD, clang, i386, `NDEBUG`,
@@ -42,7 +45,7 @@ generated table. Run it with `PYTHONDONTWRITEBYTECODE=1`, or delete `tools/__pyc
 
 | status | meaning |
 |---|---|
-| `missing` | Nothing in the Rewrite. |
+| `missing` | Nothing in the Rewrite. The note ends with `Left:`, as a `partial` note does. |
 | `codec` | The wire codec exists and is golden-byte tested; nothing sends or handles it. |
 | `partial` | Some of the behaviour exists; no scenario proves the rest. The note ends with `Left:` and the items still missing, each checkable against the legacy source (direction review, ledger 679). A note that only logs what past sections added says nothing about what is left and is rewritten. |
 | `ported` | A scenario in `prodomo/tests/parity.rs` passes. The `scenario` cell names its test function. |

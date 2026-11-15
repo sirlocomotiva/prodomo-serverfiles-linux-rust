@@ -6,21 +6,16 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 685**, the scenario timing: every scenario that lost a full run
-  has its cause read against the legacy rule, all 519 were swept for the same classes, the 54
-  the ledger ever called a load flake were run 48 times each, and `AGENTS.md` ("SCENARIO
-  TIMING") has the rules a new scenario follows. A failing scenario now prints its server's
-  last 400 console lines (`SERVER ...`) beside its `GAME` records. It ported nothing and
-  changed no server code. Before it: 684 (Rust 1.100.0, pinned in `rust-toolchain.toml`), 683
-  (the test hygiene: a killed test run leaves nothing, `tools/gates.sh` fails on anything
-  left), 682 (the repository cleanup), 681 (ADR-0008, mistakes are fixed, not ported, which
-  queued seven fixes as package C10), 680 (the owner's answers) and 679 (the direction
-  review).
-- Parity: 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec`, of 1,645 rows.
+- The last section is **ledger 686**, the tail made countable (package A1): three generated
+  arm tables (`item-use.md`, `points.md`, `skill-arms.md`) and every `partial` and `missing`
+  note ending in `Left:`. It ported nothing and changed no Rust code. Before it: 685 (the
+  scenario timing, `AGENTS.md` "SCENARIO TIMING"), 684 (Rust 1.100.0), 683 (the test hygiene),
+  682 (the cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
+- Parity: 1,244 `ported`, 572 `partial`, 475 `unused`, 40 `missing`, 0 `codec`, of 2,331 rows.
+  **612 items left**; the number only goes down.
 - Tests: 5,659 pass in 46 targets with `DATABASE_URL`; 519 are scenarios.
-- **What is next is in `docs/STATUS.md`, "Next steps"**, in order: package A (make the tail
-  countable) comes before any further `case` arm. Ledger 685 added C11 there: a Warp ordered
-  for a whole party leaves in no fixed order, where legacy has one.
+- **What is next is in `docs/STATUS.md`, "Next steps"**: package B, by families (A2). B9 is the
+  arm tables; most of their `partial` rows have Rust code and lack only a scenario.
 
 ## Where things are
 
@@ -70,4 +65,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 685 is committed and pushed.
+Nothing is left running. Ledger 686 is committed and pushed.

@@ -358,6 +358,100 @@ def quest_scripts():
     return rows
 
 
+# --- switch arms ---------------------------------------------------------------------------------
+
+def strip_code(line):
+    """`line` without its comment, string and character literals."""
+    code = re.sub(r'//.*', '', line)
+    code = re.sub(r'"(\\.|[^"\\])*"', '""', code)
+    return re.sub(r"'(\\.|[^'\\])'", "''", code)
+
+
+def case_arms(path, signature, keep):
+    """Every live `case` and `default` label in the function whose definition matches
+    `signature`, as (line, labels): the label of each enclosing switch `keep` accepts, from the
+    outermost to this one. Labels of a switch `keep` refuses neither make a row nor a step."""
+    lines = read(path)
+    live = active_lines(path)
+    start = next(i for i, line in enumerate(lines) if re.match(signature, line))
+    first, last = function_body(lines, start)
+    depth = 0
+    stack = []
+    pending = None
+    arms = []
+    for index in range(first, last + 1):
+        if index + 1 not in live:
+            continue
+        code = strip_code(lines[index])
+        match = re.search(r'\bswitch\s*\((.*)\)', code)
+        if match:
+            pending = match.group(1).strip()
+        for token in re.finditer(r'\bcase\s+([^:]+?)\s*:(?!:)|\bdefault\s*:(?!:)|[{}]', code):
+            text = token.group(0)
+            if text == '{':
+                depth += 1
+                if pending is not None:
+                    stack.append([pending, depth, None])
+                    pending = None
+            elif text == '}':
+                if stack and stack[-1][1] == depth:
+                    stack.pop()
+                depth -= 1
+            elif stack:
+                stack[-1][2] = token.group(1).strip() if token.group(1) else 'default'
+                if keep(stack[-1][0]):
+                    arms.append((index + 1, [s[2] for s in stack if keep(s[0])]))
+    return arms
+
+
+def arm_rows(prefix, path, arms):
+    """One row per arm; a path met twice (one label in two switches) is numbered."""
+    rows = []
+    seen = {}
+    for number, labels in arms:
+        ident = prefix + '.'.join(re.sub(r'[^A-Za-z0-9]+', '_', label).strip('_').lower()
+                                  for label in labels)
+        seen[ident] = seen.get(ident, 0) + 1
+        if seen[ident] > 1:
+            ident += '.%d' % seen[ident]
+        what = ' → '.join('`%s`' % label for label in labels)
+        rows.append((ident, cite(path, number), what, 'missing', ''))
+    return rows
+
+
+def item_use():
+    path = os.path.join(GAME, 'char_item.cpp')
+    limits = case_arms(path, r'bool CHARACTER::UseItemEx\(', lambda e: e.startswith('item->GetProto()'))
+    arms = case_arms(path, r'bool CHARACTER::UseItemEx\(',
+                     lambda e: e.startswith('item->') and not e.startswith('item->GetProto()'))
+    return arm_rows('use.limit.', path, limits) + arm_rows('use.', path, arms)
+
+
+def points():
+    path = os.path.join(GAME, 'char.cpp')
+    change = case_arms(path, r'void CHARACTER::PointChange\(', lambda e: e == 'type')
+    apply = case_arms(path, r'void CHARACTER::ApplyPoint\(', lambda e: e == 'bApplyType')
+    return arm_rows('point.change.', path, change) + arm_rows('point.apply.', path, apply)
+
+
+SKILL_SWITCHES = [
+    ('learn_by_book', r'bool CHARACTER::LearnSkillByBook\('),
+    ('level_down', r'bool CHARACTER::SkillLevelDown\('),
+    ('level_up', r'void CHARACTER::SkillLevelUp\('),
+    ('can_up', r'bool CHARACTER::SkillCanUp\('),
+    ('can_use', r'bool CHARACTER::CanUseSkill\('),
+    ('hit_count', r'bool CHARACTER::CheckSkillHitCount\('),
+]
+
+
+def skill_arms():
+    path = os.path.join(GAME, 'char_skill.cpp')
+    rows = []
+    for name, signature in SKILL_SWITCHES:
+        rows += arm_rows('skill.%s.' % name, path, case_arms(path, signature, lambda e: True))
+    return rows
+
+
 INTRO = {
     'client-packets.md': """
 Every client-to-server header each legacy analyzer handles, one row per phase in which it is
@@ -393,6 +487,23 @@ Every quest script in `legacy/gamedata/locale/europe/quest` (`quest.*`), and eve
 quest runtime loads before them (`questlib.*`). All are live in the Rewrite (ADR-0004); `object/`
 is legacy `qc` output and is not listed.
 """,
+    'item-use.md': """
+Every arm of `CHARACTER::UseItemEx` (`G/char_item.cpp`): the limit checks (`use.limit.*`), then
+each `case` of the switches on the used item's type, sub-type, vnum and values, from the
+outermost label to the arm's own. A parent arm is ported when what it does before its inner
+switch is; each inner arm is a row of its own. This is the list `cg.game.item_use` and
+`sys.item.core` count down (direction review, ledger 679).
+""",
+    'points.md': """
+Every arm of `CHARACTER::PointChange` (`point.change.*`, the switch on the point type) and of
+`CHARACTER::ApplyPoint` (`point.apply.*`, the switch on the apply type), in `G/char.cpp`. This is
+the list `sys.char.points` counts down.
+""",
+    'skill-arms.md': """
+Every arm of the per-skill switches in `G/char_skill.cpp`: learning by book, level down and up,
+whether a skill can be raised or used, and the hit count per skill. This is the list
+`sys.skill.core` counts down for the switches; the per-skill effects come from `skill_proto`.
+""",
 }
 
 if __name__ == '__main__':
@@ -407,4 +518,7 @@ if __name__ == '__main__':
     total += write('quest-api.md', 'Quest API', INTRO['quest-api.md'], quest_api())
     total += write('timed-events.md', 'Timed events', INTRO['timed-events.md'], timed_events())
     total += write('quests.md', 'Quest scripts', INTRO['quests.md'], quest_scripts())
+    total += write('item-use.md', 'Item use arms', INTRO['item-use.md'], item_use())
+    total += write('points.md', 'Point arms', INTRO['points.md'], points())
+    total += write('skill-arms.md', 'Skill arms', INTRO['skill-arms.md'], skill_arms())
     print('generated rows:', total)

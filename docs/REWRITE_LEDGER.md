@@ -56214,3 +56214,85 @@ the first series of five lost two scenarios in its first run and two in its thir
 above), and the stress lost one run of 2,592. No width was measured. Parity is unchanged:
 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec`, of 1,645 rows; 519
 scenarios. No ADR changed.
+
+## 686. The tail made countable (package A1)
+
+`docs/STATUS.md` package A1 asked for one list of what is left: every `partial` note ending in
+`Left:` with items checkable against the legacy source, and the large switches generated from
+the source as the other tables are. This section does that. It ported nothing and changed no Rust
+code.
+
+### 686.1 Three generated arm tables
+
+`.scratch/parity/tools/gen.py` gains a switch-arm extractor: `strip_code` blanks comments and
+strings, `case_arms(path, signature, keep)` walks a function's `switch` statements on the
+preprocessed live source and names each `case` label by its enclosing labels, and `arm_rows`
+writes one row per arm (a path met twice gets a `.2` suffix). Three tables come of it, each
+counted by the inventory loader like the others:
+
+| table | rows | what one row is |
+|---|---|---|
+| `item-use.md` | 292 | a `case` arm of `UseItemEx` (`G/char_item.cpp:2718-7164`), or one of its limit checks (`use.limit.*`) |
+| `points.md` | 320 | an arm of `PointChange` (190, `G/char.cpp:3872-4824`) or `ApplyPoint` (130, `:4826-5043`) |
+| `skill-arms.md` | 73 | an arm of a per-skill switch of `G/char_skill.cpp` (learn by book, level down and up, can-up, can-use, hit count) |
+
+The tables already in place regenerate unchanged.
+
+### 686.2 The audit
+
+Each of the 685 arm rows and each of the 65 `partial` rows was audited by a read-only agent
+against the legacy arm, the Rust site and `prodomo/tests/parity.rs`, in 30 chunks. Their output
+was evidence, not the result; it was checked before it was written:
+
+- **IDs.** Two agents named rows by their own spelling (`point.apply.ATTBONUS_BOSS`,
+  `apply_fire`, vnum ranges such as `55610_55615`). Each was mapped back to its generated ID by
+  hand; the ambiguous short names (`apply_fire`: resist or enchant) by the note's own words.
+- **`unused`.** Every claim was rechecked against `legacy/gamedata/proto/item_proto.txt`, with a
+  control present in the same search. Two `ported` claims fell to it: 27987 is `ITEM_GIFTBOX`,
+  so its `USE_SPECIAL` case is unreachable (the clam opens by the giftbox path, which its
+  scenario proves), and 55610-55615 have no proto row at all (control: 27989). Both are `unused`.
+- **`ported`.** A row is `ported` only when its scenario exists in `prodomo/tests/parity.rs`;
+  `sys.net.framing` named a unit test and now names
+  `an_undersized_variable_frame_closes_the_connection`.
+- **`missing`.** An arm whose behaviour exists in Rust and lacks only a scenario is `partial`,
+  not `missing`: the 35 `ApplyPoint` arms behind `world/src/character/apply.rs`'s `APPLY_POINT`
+  and six skill arms (the horse type's level up and down, the four `HELP_*` can-up gates) moved there.
+- **Notes.** The 65 hand rows keep their ledger notes; only their `Left:` clause is new or
+  replaced. Stale claims were corrected: `sys.char.save` no longer waits on "the game thread of
+  ADR-0002", and `sys.world.move` names the move-duration recomputes ledger 229e left open
+  (`G/char.cpp:3812-3814`, `G/char_skill.cpp:1827`, `:1945`, `G/char_battle.cpp:3741`,
+  `G/BlueDragon_Skill.h:327`).
+- **A row the hand list missed.** `sys.dungeon.ship_defense` began with a space, so `grep '^| `'`
+  never saw it, though the loader always counted it. Its note now ends with what ledger 623 left:
+  the voyage past the start, which only `ship.rs`'s unit tests pin.
+
+Four hand rows close as `ported` with scenarios that already passed: `table.shopex`,
+`sys.net.framing`, `sys.net.handshake` and `sys.gm.core`.
+
+### 686.3 The count
+
+| status | before | after |
+|---|---|---|
+| `ported` | 1,136 | 1,244 |
+| `partial` | 65 | 572 |
+| `unused` | 444 | 475 |
+| `missing` | 0 | 40 |
+| rows | 1,645 | 2,331 |
+
+**612 items are left**: the `partial` and `missing` rows, each note ending in `Left:` (checked by a
+script over every table). `.scratch/parity/spec.md` now asks `Left:` of a `missing` note too.
+`docs/STATUS.md` marks A1 done with the number, renames package B "Close the rows left", moves the
+four closed rows out, adds `sys.dungeon.ship_defense` to B6, and adds B9 for the arm tables
+(550 rows). The 40 `missing` rows: `ITEM_UNIQUE` and its arms, `ITEM_HAIR`, `ITEM_DS`,
+`ITEM_SPECIAL_DS`, `ITEM_FISH`, the no-op types (`ITEM_AUTOUSE`, `ITEM_MATERIAL`, `ITEM_SPECIAL`,
+`ITEM_TOOL`, `ITEM_LOTTERY`, `ITEM_NONE`), `ITEM_TOTEM`, the seasonal `USE_SPECIAL` vnums
+(50023-50025, 50031, 50032), 70008, 70009, 70102, the marriage ring, the ramadan candy, the hit
+caps of skills 46, 139 and 140, and `COSTUME_ATTR_BONUS` in both switches.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 (3acc79c0c 2026-11-05) and rustc 1.100.0 (0ef1bc386 2026-11-09): fmt, build and
+Clippy clean; without `DATABASE_URL` 5,659 passed, 0 failed in 46 targets; with it 5,659
+passed, 0 failed in 46 targets (455 s); doc-tests and `cargo doc` clean; `temp-files` 0,
+`servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No test failed on the first run. The
+generator was run again after the cells were written and kept every one. No width was measured.
+519 scenarios. No ADR changed.
