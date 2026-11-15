@@ -22,6 +22,8 @@ pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
 /// their servers together and missed it too, to the end of the run.
 pub const START_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How many of a failing scenario's last server lines its output keeps.
+const CONSOLE_TAIL: usize = 400;
 
 const LISTENING: &str = "Listening for ";
 /// The line `prodomo serve` logs when its gate opens.
@@ -611,6 +613,22 @@ impl Drop for Server {
     fn drop(&mut self) {
         drop(self.child.kill());
         drop(self.child.wait());
+        // A failing scenario prints its server's last lines beside its own records, so a
+        // loss in a full run can be read without running it again (ledger 685). The
+        // forwarding thread ends when the killed process's stdout closes.
+        if thread::panicking() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while let Ok(line) = self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                self.console.push(line);
+            }
+            let from = self.console.len().saturating_sub(CONSOLE_TAIL);
+            for line in &self.console[from..] {
+                println!("SERVER {line}");
+            }
+        }
         // For a look at a failed scenario's log and configuration. The directory lasts until
         // the next test process starts, whose sweep removes it (`crate::scratch`).
         if std::env::var_os("PRODOMO_KEEP_SCENARIO_ROOT").is_some() {

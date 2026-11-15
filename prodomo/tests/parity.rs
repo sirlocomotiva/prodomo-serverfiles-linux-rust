@@ -538,8 +538,10 @@ fn the_ping_cycle_closes_a_silent_client() {
         }
     }
     // `get_dword_time` counts milliseconds, so two handshakes one cycle apart are ~1000 apart.
+    // Each is stamped when its tick is handled, so a first tick handled late in a full run
+    // shortens the gap: the bounds tell one cycle from none and from two, no closer.
     let apart = times[1].wrapping_sub(times[0]);
-    assert!((900..=1_500).contains(&apart), "{apart} between two cycles");
+    assert!((700..=1_500).contains(&apart), "{apart} between two cycles");
 
     // No pong after the second ping: the third cycle closes without writing.
     assert_eq!(client.expect_closed(), Vec::<u8>::new());
@@ -881,10 +883,18 @@ fn the_auth_login_grants_a_key_or_names_the_first_failed_check() {
         "UPDATE account SET status = 'BLOCK', available_at = now() + interval '1 day', \
          created_at = '2999-12-31' WHERE login = 'alice'",
     );
-    assert_eq!(
-        log_in(&mut client, b"alice", b"wrong", 1),
-        Err("WRONGPWD".into())
-    );
+    // `other`'s close frees the login a moment after the drop, and `ALREADY` is checked
+    // before the password.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let wrong = loop {
+        match log_in(&mut client, b"alice", b"wrong", 1) {
+            Err(status) if status == "ALREADY" && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            answer => break answer,
+        }
+    };
+    assert_eq!(wrong, Err("WRONGPWD".into()));
     assert_eq!(log_in(&mut client, b"alice", pw, 1), Err("NOTAVAIL".into()));
     sql(
         &database,
@@ -8137,38 +8147,55 @@ fn a_tenth_whisper_in_a_run_closes_the_connection() {
     // walk strays are hers to keep, and the `closes` walk skips what an NPC
     // does on its own. `yankee.quiet` proves the tenth line reached no target
     // and `wait_for` proves the counter refused it.
-    for _ in 0..9 {
-        alice.send_record(&client_whisper(b"Yankee", b"hello"));
-    }
-    alice.send_record(&client_whisper(b"Yankee", b"one too many"));
-    let stray_deadline = std::time::Instant::now() + QUIET_WINDOW * 2;
-    let mut delivered = 0;
-    while delivered < 9 {
-        let record = yankee
-            .read_game_raw_until(stray_deadline)
-            .expect("the nine lines arrive");
-        if record == whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"hello") {
-            delivered += 1;
-        } else {
+    //
+    // The count goes back to zero when the Pulse enters a later window of 125
+    // (`CHAT_COUNTER_WINDOW_PULSES`), wherever the run started, so ten lines that
+    // straddle a window's end all pass and the tenth reaches Yankee. That run is
+    // waited out past its window and the ten go out once more.
+    for attempt in 0..2 {
+        for _ in 0..9 {
+            alice.send_record(&client_whisper(b"Yankee", b"hello"));
+        }
+        alice.send_record(&client_whisper(b"Yankee", b"one too many"));
+        let stray_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut delivered = 0;
+        while delivered < 9 {
+            let record = yankee
+                .read_game_raw_until(stray_deadline)
+                .expect("the nine lines arrive");
+            if record == whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"hello") {
+                delivered += 1;
+            } else {
+                assert!(
+                    is_stamina_refill(&record)
+                        || yankee.timer_end(&record)
+                        || record[0] == HEADER_GC_OWNERSHIP.value()
+                        || record[0] == GC_CHARACTER_DEL,
+                    "{record:02x?}"
+                );
+            }
+        }
+        let mut straddled = false;
+        let quiet_deadline = std::time::Instant::now() + QUIET_WINDOW;
+        while let Some(record) = yankee.read_game_raw_until(quiet_deadline) {
+            if record == whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"one too many") {
+                straddled = true;
+                continue;
+            }
             assert!(
                 is_stamina_refill(&record)
+                    || is_farm_line(&record)
                     || yankee.timer_end(&record)
                     || record[0] == HEADER_GC_OWNERSHIP.value()
                     || record[0] == GC_CHARACTER_DEL,
                 "{record:02x?}"
             );
         }
-    }
-    let quiet_deadline = std::time::Instant::now() + QUIET_WINDOW;
-    while let Some(record) = yankee.read_game_raw_until(quiet_deadline) {
-        assert!(
-            is_stamina_refill(&record)
-                || is_farm_line(&record)
-                || yankee.timer_end(&record)
-                || record[0] == HEADER_GC_OWNERSHIP.value()
-                || record[0] == GC_CHARACTER_DEL,
-            "{record:02x?}"
-        );
+        if !straddled {
+            break;
+        }
+        assert_eq!(attempt, 0, "two runs in a row straddled a window's end");
+        std::thread::sleep(Duration::from_millis(5_200));
     }
     server.wait_for("Whisper refused by the chat counter");
     // Alice's own walk strays may land after the tenth line went out, and the
@@ -8299,7 +8326,8 @@ fn a_new_session_restores_the_block_byte_from_its_flags_after_the_waiting_lines(
     set_block_mode(&mut alice, 8);
     let old = alice.client.local_addr();
     drop(alice);
-    server.wait_for(&format!("Client connection closed addr={old}"));
+    // The save writes the block flags the next session restores.
+    server.wait_for(&format!("Character disconnected; wrote the row addr={old}"));
     let mut alice = enter_world_blocking(&server, b"alice", 8, Some(whisper_block));
     alice.send_record(&client_whisper(b"Yankee", b"blocked"));
     let notice = alice.read_game();
@@ -8334,7 +8362,7 @@ fn a_new_session_restores_the_block_byte_from_its_flags_after_the_waiting_lines(
     );
     let old = alice.client.local_addr();
     drop(alice);
-    server.wait_for(&format!("Client connection closed addr={old}"));
+    server.wait_for(&format!("Character disconnected; wrote the row addr={old}"));
     let mut alice = enter_world_blocking(&server, b"alice", 0, None);
     alice.send_record(&client_whisper(b"Yankee", b"third"));
     assert_eq!(
@@ -12954,7 +12982,8 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     zulu.quiet_allowing_farm("and out of Zulu's");
 
     // When: once the second has passed, Alpha drops the rest whole and shouts, in one write.
-    std::thread::sleep(Duration::from_millis(1100).saturating_sub(dropped_at.elapsed()));
+    // The server stamped the first drop after `dropped_at`, by a reply's delay.
+    std::thread::sleep(Duration::from_millis(1500).saturating_sub(dropped_at.elapsed()));
     let mut both = client_item_drop(0, None);
     both.extend(client_chat(prodomo::chat::CHAT_SHOUT, b"hi"));
     alpha.send_record(&both);
@@ -13037,9 +13066,10 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go()
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
     alpha.sees_enter(zulu_listed.id, false, None);
 
-    // When: Alpha drops the stack whole.
-    alpha.send_record(&client_item_drop(0, None));
+    // When: Alpha drops the stack whole. The clock starts before the send, so the server's
+    // stamp is never ahead of it.
     let dropped_at = std::time::Instant::now();
+    alpha.send_record(&client_item_drop(0, None));
     // Then: it falls under ground VID 1 and both clients see it.
     assert_eq!(alpha.read_game(), a_clear_record(0));
     assert_eq!(alpha.read_game(), a_ground_add(1, stackable));
@@ -14981,8 +15011,10 @@ fn a_target_4800_away_is_dropped_by_the_next_recovery_run() {
         target_of(yankee_listed.id, 100, 650, 650, 0)
     );
     assert_eq!(alice.read_game(), target_of(0, 0, 0, 0, 0));
+    // The run after the click, not the one after it: under 4 s, since a click just after a
+    // run waits the whole 3 s and the record's way back is not free in a full run.
     assert!(
-        clicked.elapsed() < Duration::from_secs(3) + QUIET_WINDOW,
+        clicked.elapsed() < Duration::from_secs(4),
         "one run, 75 Pulses: {:?}",
         clicked.elapsed()
     );
@@ -15700,11 +15732,12 @@ fn read_swing_head(
     let mut first = true;
     let mut effects = Vec::new();
     let (damage, flag) = loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "a swing within the window"
-        );
-        let record = keyed.read_game_raw();
+        // The window is the caller's, not the wire's five-second beat: a monster that
+        // cannot see a player just entered (`AFF_REVIVE_INVISIBLE`, 5 s) looks again
+        // 1 to 3 s later, and nothing else need be sent meanwhile (ledger 685).
+        let record = keyed
+            .read_game_raw_until(deadline)
+            .expect("a swing within the window");
         if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
             continue;
         }
@@ -15852,11 +15885,9 @@ fn swing_tail(
 fn read_heal_tick(keyed: &mut Keyed, mob: u32, victim: u32, hp_now: i64, due: std::time::Instant) {
     let mut hp_now = hp_now;
     loop {
-        assert!(
-            std::time::Instant::now() < due,
-            "a heal tick within four seconds of the first swing"
-        );
-        let record = keyed.read_game_raw();
+        let record = keyed
+            .read_game_raw_until(due)
+            .expect("a heal tick within four seconds of the first swing");
         if is_heartbeat_record(&record)
             || keyed.timer_record(&record)
             || is_stamina_refill(&record)
@@ -15922,12 +15953,10 @@ fn npc_move_of(
     early: &mut Option<Swing>,
 ) -> Vec<u8> {
     loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "a move of {mob} with func {func} within the window"
-        );
         // Below the chatter filter: the wanted move is the monster's own.
-        let record = keyed.read_wire();
+        let record = keyed
+            .read_wire_until(deadline)
+            .unwrap_or_else(|| panic!("a move of {mob} with func {func} within the window"));
         if record[0] == GC_PING
             || keyed.timer_record(&record)
             || is_stamina_refill(&record)
@@ -16869,8 +16898,9 @@ fn a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds() {
     );
     assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, boar));
 
-    // Then: the first swing within 2 s, in legacy's record order.
-    let first_due = std::time::Instant::now() + Duration::from_secs(2);
+    // Then: the first swing within 2 s of the hit (3 s here: a full run's reply is not
+    // free), in legacy's record order.
+    let first_due = std::time::Instant::now() + Duration::from_secs(3);
     let first = read_swing(&mut alpha, boar, alpha_vid, first_due);
     assert_eq!(
         first.flag, DAMAGE_NORMAL,
@@ -16904,7 +16934,7 @@ fn a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds() {
     );
     let gap = second.time.wrapping_sub(first.time);
     assert!(
-        (1990..=3000).contains(&gap),
+        (1800..=3000).contains(&gap),
         "the 50-Pulse swing on the server's clock: {gap}"
     );
     // Legacy sends the claim on every accepted swing, even with the owner unchanged: the
@@ -16937,11 +16967,9 @@ fn read_until(
     deadline: std::time::Instant,
 ) -> Vec<u8> {
     loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "a record {header} within the window"
-        );
-        let record = keyed.read_game_raw();
+        let record = keyed
+            .read_game_raw_until(deadline)
+            .unwrap_or_else(|| panic!("a record {header} within the window"));
         if record[0] == GC_PING
             || keyed.timer_record(&record)
             || is_stamina_refill(&record)
@@ -20317,8 +20345,9 @@ fn walk_info_names_the_land(entered: &Entered) {
 /// the land with the guild — REMOVE, the object's removal, the ownerless list,
 /// the claim stone with its summary — and the store empties.
 fn master_disbands_and_its_land_clears(database: &ScratchDatabase, alice: Keyed, server: Server) {
-    drop(alice);
+    // The server goes first, so the master's session is never saved over the rows below.
     drop(server);
+    drop(alice);
     // The guild reclaims the land straight into the store, an object stands on it
     // again, and the disband clears it with the guild: the REMOVE rides first, then
     // the object's removal, then the cleared land's list with no owner.
@@ -23297,10 +23326,12 @@ fn a_gm_lists_the_silences_and_the_vote_stays_quiet() {
     assert_eq!(&notice[10..], b"[LS;852]", "the notice chats first");
     let _added = yankee.read_game();
     alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat_list"));
-    assert_eq!(
-        alice.read_game(),
-        an_info_line(b"Yankee 90 sec"),
-        "the one silence's line"
+    // Yankee's affect event may already be running (the revive's), and its next tick
+    // counts the new silence down too, so the line reads 90 or, a tick later, 89.
+    let silence = alice.read_game();
+    assert!(
+        silence == an_info_line(b"Yankee 90 sec") || silence == an_info_line(b"Yankee 89 sec"),
+        "the one silence's line: {silence:02x?}"
     );
     yankee.quiet("the list reaches only the caller");
 
@@ -25281,6 +25312,20 @@ fn forest_dialog_spends_the_tickets(party: ForestParty, guardian: u32) -> Forest
     }
 }
 
+/// `who`'s own removal on a Warp the game thread ordered for the whole party. Each member's
+/// descriptor carries its Warp out, in no fixed order (`docs/STATUS.md`, next steps, C11), so
+/// a member still standing may hear `other` go first.
+fn read_own_removal(who: &mut Keyed, own: u32, other: u32) {
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&other.to_le_bytes());
+    let mut record = who.read_game();
+    if record == removed {
+        record = who.read_game();
+    }
+    removed[1..5].copy_from_slice(&own.to_le_bytes());
+    assert_eq!(record, removed, "EncodeRemovePacket(this)");
+}
+
 fn forest_jump_lands_at_the_entry(
     server: &Server,
     database: &ScratchDatabase,
@@ -25298,12 +25343,20 @@ fn forest_jump_lands_at_the_entry(
         port: _,
     } = party;
     let port = server.channel(1).port();
-    for (who, vid) in [(&mut alice, alpha_vid), (&mut yankee, yankee_vid)] {
+    let jumpers = [
+        (&mut alice, alpha_vid, yankee_vid),
+        (&mut yankee, yankee_vid, alpha_vid),
+    ];
+    for (who, vid, other) in jumpers {
         let mut removed = vec![GC_CHARACTER_DEL];
         removed.extend_from_slice(&vid.to_le_bytes());
         let got = loop {
             let record = who.read_game();
             if record[0] == GC_CHARACTER_DEL {
+                // The other member's descriptor may have left first (`read_own_removal`).
+                if record[1..5] == other.to_le_bytes() {
+                    continue;
+                }
                 break record;
             }
             if record[0] == ITEM_SET {
@@ -25672,7 +25725,7 @@ fn forest_tail_kills_the_dog(party: ForestParty) -> (ForestParty, u32) {
 /// create naming Theowahdan on a nonzero VID, and the letters, or nothing.
 fn read_home_marks(who: &mut Keyed, what: &str) {
     let next = who
-        .read_game_until(std::time::Instant::now() + QUIET_WINDOW)
+        .read_game_until(std::time::Instant::now() + Duration::from_secs(5))
         .expect("the update or the old mark");
     if next[0] == GC_CHARACTER_UPDATE {
         who.unread(vec![next]);
@@ -25749,7 +25802,11 @@ fn forest_tail_sends_the_party_home(
         yankee_vid,
         port,
     } = party;
-    for (who, what, empire) in [(&mut alice, "Alpha", 1), (&mut yankee, "Yankee", 2)] {
+    let leavers = [
+        (&mut alice, "Alpha", 1, alpha_vid, yankee_vid),
+        (&mut yankee, "Yankee", 2, yankee_vid, alpha_vid),
+    ];
+    for (who, what, empire, own, other) in leavers {
         let going = loop {
             let record = who.read_game();
             if record[0] == GC_CHAT {
@@ -25788,11 +25845,7 @@ fn forest_tail_sends_the_party_home(
             chat_packet(CHAT_TYPE_NOTICE, empire, b"going"),
             "{what} hears the tail exit"
         );
-        let removal = who.read_game();
-        assert_eq!(
-            removal[0], GC_CHARACTER_DEL,
-            "{what} leaves: {removal:02x?}"
-        );
+        read_own_removal(who, own, other);
         assert_eq!(
             who.read_game(),
             a_warp_record((470_000, 950_000), port),
@@ -25884,11 +25937,17 @@ fn a_party_enters_the_forest_and_its_timer_sends_it_home() {
     let ForestParty {
         mut alice,
         mut yankee,
+        alpha_vid,
+        yankee_vid,
         port,
         ..
     } = party;
     // The cleared exit never fires; the second notices and sends both home.
-    for (who, what) in [(&mut alice, "Alpha"), (&mut yankee, "Yankee")] {
+    let leavers = [
+        (&mut alice, "Alpha", alpha_vid, yankee_vid),
+        (&mut yankee, "Yankee", yankee_vid, alpha_vid),
+    ];
+    for (who, what, own, other) in leavers {
         let second = loop {
             let record = who.read_game();
             if record[0] == GC_CHAT {
@@ -25907,11 +25966,7 @@ fn a_party_enters_the_forest_and_its_timer_sends_it_home() {
             chat_packet(CHAT_TYPE_NOTICE, 1, b"second"),
             "{what} hears only the second exit"
         );
-        let removal = who.read_game();
-        assert_eq!(
-            removal[0], GC_CHARACTER_DEL,
-            "{what} leaves: {removal:02x?}"
-        );
+        read_own_removal(who, own, other);
         assert_eq!(
             who.read_game(),
             a_warp_record((470_000, 950_000), port),
@@ -25966,7 +26021,8 @@ fn forest_both_hear_the_landing(mut party: ForestParty) -> ForestParty {
 
 /// One party tick runs with both linked inside, nearing Yankee; its update proves it.
 fn forest_tick_nears_while_both_inside(mut party: ForestParty) -> ForestParty {
-    std::thread::sleep(std::time::Duration::from_secs(4));
+    // The tick is 3 s apart; its update waits in the socket if it lands first.
+    std::thread::sleep(std::time::Duration::from_secs(6));
     for _ in 0..32 {
         let record = party.yankee.read_game();
         if record[0] == GC_PARTY_UPDATE {
@@ -28314,7 +28370,7 @@ fn a_party_leader_sets_and_unsets_a_role() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let mut server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     create_account(&server, "bob");
     add_characters(&database);
@@ -28350,14 +28406,15 @@ fn a_party_leader_sets_and_unsets_a_role() {
     // Leadership 10: the set lands on both members, and the unset lands too. A relog
     // with the skill row stored teaches the leader; the 3 s Update then opens the caps.
     drop(alice);
-    wait_for(&database, "SELECT TRUE FROM player WHERE name = 'Alpha'");
+    server.wait_for("Character disconnected; wrote the row");
     sql(
         &database,
         "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 121, 10, 0 FROM          player WHERE name = 'Alpha'",
     );
     let (mut alice, _alpha, _entered) = enter_world_seeing(&server, b"alice", 0);
     drain_leader_relog(&mut yankee);
-    std::thread::sleep(std::time::Duration::from_secs(4));
+    // One 3 s Update and a full run's late Pulses.
+    std::thread::sleep(std::time::Duration::from_secs(6));
     alice.send_record(&client_party_set_state(guest_pid, 2, 1));
     read_update_role(&mut yankee, guest_pid, 2, "the guest reads the role");
     read_update_role(&mut alice, guest_pid, 2, "the leader reads the role");
@@ -28510,8 +28567,10 @@ fn a_mount_line_is_empty_standing_and_scolded_dead() {
     alice.send_record(&client_chat(CHAT_TALKING, b"/mount"));
     alice.quiet("the empty body stays quiet");
     // A dead caller is scolded before the body: weaken Alpha and let the boar kill it.
-    drop(alice);
+    // The server is killed with Alpha still in the game, so this session saves nothing:
+    // a save that landed would bank its quest state and mark Theowahdan at the next login.
     drop(server);
+    drop(alice);
     sql(
         &database,
         "UPDATE player SET level = 1, hp = 1 WHERE name = 'Alpha'",
@@ -30673,14 +30732,21 @@ fn read_purge_all(keyed: &mut Keyed, shown: &Shown) {
 
 /// After `/purge all`: the regens whose `regen_event` fires within the
 /// quiet window stand their NPCs again (insert, summary, move or mode),
-/// then silence. Anything else fails the nothing-follows check.
+/// then silence. The captain's mark ends at its event's next check, not with
+/// the sweep (`target_event`, `G/target.cpp:57-132`), so its delete may land
+/// here as well as between the pairs. Anything else fails the
+/// nothing-follows check.
 fn read_respawns_past_purge(keyed: &mut Keyed) {
     let deadline = std::time::Instant::now() + QUIET_WINDOW;
     while let Some(record) = keyed.read_game_until(deadline) {
         assert!(
             matches!(
                 record[0],
-                GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE
+                GC_CHARACTER_ADD
+                    | GC_CHAR_ADDITIONAL_INFO
+                    | GC_MOVE
+                    | GC_WALK_MODE
+                    | GC_QUEST_TARGET_DELETE
             ),
             "only a respawn follows the purge all: {record:02x?}"
         );
@@ -31311,7 +31377,7 @@ fn a_gm_mobs_a_stray_dog_around() {
         "a vnum with no row is the miss"
     );
     alice.send_record(&client_chat(CHAT_TALKING, b"/mob 101"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut dog = 0u32;
     while dog == 0 {
         let record = alice
@@ -31484,7 +31550,7 @@ fn a_gm_mob_lds_a_stray_dog_at_metres() {
         "the empty line answers the same usage as /mob"
     );
     alice.send_record(&client_chat(CHAT_TALKING, b"/mob_ld 101 4701 9500"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut dog = 0u32;
     let mut at = (0, 0);
     while dog == 0 {
@@ -31583,7 +31649,7 @@ fn a_gm_flags_a_stray_dog_aggressive_and_coward() {
         "a vnum with no row is the miss"
     );
     alice.send_record(&client_chat(CHAT_TALKING, b"/ma 101"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut hunter = 0u32;
     while hunter == 0 {
         let record = alice
@@ -31616,7 +31682,7 @@ fn a_gm_flags_a_stray_dog_aggressive_and_coward() {
 /// from where it stood, never a 300-700 idle walk and never a swing.
 fn a_coward_dog_flees(alice: &mut Keyed, victim: u32) {
     alice.send_record(&client_chat(CHAT_TALKING, b"/mc 101"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut coward = 0u32;
     let mut stood = (0, 0);
     while coward == 0 {
@@ -31639,11 +31705,12 @@ fn a_coward_dog_flees(alice: &mut Keyed, victim: u32) {
         i32::from_le_bytes(flee[12..16].try_into().expect("y")),
     );
     let distance = distance_approx(to.0 - stood.0, to.1 - stood.1);
-    // `DISTANCE_APPROX` reads up to 0.7% high (`G/utils.h:17-40`), so a 5000
-    // escape measures up to 5032. An idle walk (300-700) never reaches 700
-    // of its own; 750 splits the two with room on both sides.
+    // `DISTANCE_APPROX` weighs the longer side 246/256 and the shorter 102/256
+    // (`G/utils.h:17-40`), so it reads from 3.9% low to 4.1% high: a 5000 escape
+    // measures up to 5201 (5111, 5125 and 5128 were seen), a 1000 one from 961, and
+    // an idle walk (300-700) at most 728. 750 splits the two.
     assert!(
-        (750..=5100).contains(&distance),
+        (750..=5210).contains(&distance),
         "the first wait is a coward escape, not an idle walk: {distance}"
     );
 }
@@ -31712,7 +31779,7 @@ fn a_gm_mob_maps_a_stray_dog_somewhere() {
         "a name is 0 and fails: no name reads"
     );
     alice.send_record(&client_chat(CHAT_TALKING, b"/mm 101"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut line = Vec::new();
     let mut others = Vec::new();
     while line.is_empty() {
@@ -31814,7 +31881,7 @@ fn a_gm_spawns_a_group_and_a_random_one() {
     alice.send_record(&client_chat(CHAT_TALKING, b"/group 999999"));
     alice.quiet("a vnum with no group is silent");
     alice.send_record(&client_chat(CHAT_TALKING, b"/group 101"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut stood = 0;
     while stood < 3 {
         let record = alice
@@ -31827,7 +31894,7 @@ fn a_gm_spawns_a_group_and_a_random_one() {
         stood += 1;
     }
     alice.send_record(&client_chat(CHAT_TALKING, b"/grrandom 101"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let first = alice
         .read_game_raw_until(deadline)
         .expect("the random group rides the burst");
@@ -31869,9 +31936,9 @@ fn a_gm_aggregates_and_forgets_the_dogs_around() {
         "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
          'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
     );
-    // Sixteen dogs: each joins on a one-in-two draw, so five left none on Alpha in one
-    // run of 32 (ledger 683).
-    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t16\t101\n";
+    // Twenty-four dogs: each joins on a one-in-two draw, so five left none on Alpha in
+    // one run of 32 and sixteen in one of 65,536 (ledgers 683 and 685).
+    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t24\t101\n";
     let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", dogs);
     let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alice);
@@ -31900,7 +31967,7 @@ fn a_gm_aggregates_and_forgets_the_dogs_around() {
         swing.damage
     );
     alice.send_record(&client_chat(CHAT_TALKING, b"/forgetme"));
-    let deadline = std::time::Instant::now() + QUIET_WINDOW;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let add = loop {
         let record = alice
             .read_game_raw_until(deadline)
@@ -31927,18 +31994,16 @@ fn a_gm_aggregates_and_forgets_the_dogs_around() {
 
 /// The first swing on `victim`: its `DAMAGE_INFO`'s damage, skipping by the
 /// same rules as [`read_swing_head`] but without a known attacker. The
-/// tail is not read: `/aggregate` starts up to sixteen dogs, and their tails
+/// tail is not read: `/aggregate` starts up to twenty-four dogs, and their tails
 /// interleave.
 fn read_first_swing(keyed: &mut Keyed, victim: u32) -> Swing {
     let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut effects = Vec::new();
     let (damage, flag) = loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "a swing within the window"
-        );
-        let record = keyed.read_game_raw();
+        let record = keyed
+            .read_game_raw_until(deadline)
+            .expect("a swing within the window");
         if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
             continue;
         }
@@ -32089,6 +32154,8 @@ fn monsterlog_off_then_detaillog(alice: &mut Keyed, yankee: Keyed, thief: u32, l
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_POINT_CHANGE => POINT_CHANGE_LEN,
         GC_OWNERSHIP => OWNERSHIP_LEN,
+        // The thief's swing back can be a critical one (its `ENCHANT_CRITICAL` is 1).
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
         other => panic!("the off toggle answers nothing: header {other}"),
     });
     assert_eq!(quiet, Quiet::Open, "the off toggle keeps the connection");
@@ -32211,7 +32278,16 @@ fn a_gm_pulls_the_dogs_and_attracts_the_ranger() {
          'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
     );
     let npcs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\nm\t610\t560\t0\t0\t0\t1\t1000s\t100\t1\t101\nm\t602\t532\t0\t0\t0\t1\t1000s\t100\t1\t302\n";
-    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", npcs);
+    // `no_wander`: the archer must stand where its line puts it. Idle, it walks 300 to
+    // 700 one time in 7; a walk toward Alpha before the pull left the pull to land it
+    // inside the cut range, where it shoots with no step in (ledger 685).
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        npcs,
+        "no_wander = true",
+    );
     let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alice);
     read_god_login_event(&mut alice);
@@ -32246,8 +32322,9 @@ fn a_gm_pulls_the_dogs_and_attracts_the_ranger() {
     alice.send_record(&client_chat(CHAT_TALKING, b"/attract_ranger"));
     // `FuncAggregateMonster` draws `number(1, 100) <= 50` for each victimless monster
     // (`G/char_battle.cpp:3644-3669`), so one line leaves the archer idle half the time.
-    // Each line draws again for it until it fights, and then its victim keeps it out.
-    for _ in 0..10 {
+    // Each line draws again for it until it fights, and then its victim keeps it out:
+    // twenty lines leave it idle one run in a million (ten did one in 1024).
+    for _ in 0..20 {
         alice.send_record(&client_chat(CHAT_TALKING, b"/aggregate"));
     }
     let due = std::time::Instant::now() + Duration::from_secs(30);
@@ -32322,11 +32399,9 @@ fn read_archer_step(
     deadline: std::time::Instant,
 ) -> Vec<u8> {
     loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "a step of {mob} within the window"
-        );
-        let record = keyed.read_wire();
+        let record = keyed
+            .read_wire_until(deadline)
+            .unwrap_or_else(|| panic!("a step of {mob} within the window"));
         if record[0] == GC_PING
             || keyed.timer_record(&record)
             || is_stamina_refill(&record)
@@ -32381,11 +32456,9 @@ fn read_archer_swing(
     let mut damage = None;
     let mut aimed = false;
     loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the archer swings within the window"
-        );
-        let record = keyed.read_game_raw();
+        let record = keyed
+            .read_game_raw_until(deadline)
+            .expect("the archer swings within the window");
         if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
             let dealt = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
             if aimed {
@@ -33971,13 +34044,14 @@ fn a_funded_redraw_lands_and_spends_and_short_gold_refuses() {
         "(SELECT gold FROM player WHERE name = 'Alpha') = 1000000",
     );
     check(&database, "(SELECT count FROM item WHERE id = 42) = 2");
-    // Short gold refuses with its own line and no spend; an empty cell is silent.
+    // Short gold refuses with its own line and no spend; an empty cell is silent. The
+    // server is killed first: a save of the live Alpha would write its million back.
+    drop(server);
+    drop(alice);
     sql(
         &database,
         "UPDATE player SET gold = 40000 WHERE name = 'Alpha'",
     );
-    drop(alice);
-    drop(server);
     let (server, _console) =
         Server::start_with_console(binary(), database.url(), &default_channels());
     let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
@@ -37401,8 +37475,10 @@ fn a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks() {
 
     alice.send_record(&slash(b"/sort_inventory"));
     let wait = read_chat_line(&mut alice);
+    // The wait counts whole seconds from the sort's stamp, and the drain above took one
+    // and more, two and more in a full run.
     assert!(
-        [14, 15].iter().any(|secs| wait
+        [12, 13, 14, 15].iter().any(|secs| wait
             == an_info_line(
                 format!("Please wait {secs} seconds to sort your inventory again").as_bytes()
             )),
@@ -40300,7 +40376,10 @@ fn a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses() {
         let (window, cell, set_vnum, count) = set_fields(&alice.read_game());
         assert_eq!((window, set_vnum, count), (1, vnum, 1), "the fish lands");
         let length = update_sockets(&alice.read_game())[0];
-        assert!(length > 0, "the fish's length");
+        // Eleven of the map's catches are not fish (a ring, the bleach, the dyes and four
+        // more) and measure nothing: 675 of the table's 9950 (`fishing.txt`, the length
+        // columns).
+        assert!(length >= 0, "the catch's length: {length}");
         read_practice(&mut alice);
         wait_for(
             &database,
@@ -41435,11 +41514,12 @@ fn a_summoned_horse_dies(alice: &mut Keyed) {
 /// `/horse_summon` of the dead horse stands it near, lying dead, with `GC_DEAD`; a minute
 /// later `horse_dead_event` sends it back: the state hides and the horse goes.
 fn a_dead_horse_goes_after_a_minute(alice: &mut Keyed) {
+    // The minute runs from the summon, so the clock starts before its line is sent.
+    let summoned = std::time::Instant::now();
     alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
     let read = read_until_all(alice, &[a_command_line(b"horse_state 25 0 0")]);
     let (dead, _) = added_horse_named(&read, b"Alpha's \0");
     assert!(read.contains(&header_and_vid_record(GC_DEAD, dead)));
-    let summoned = std::time::Instant::now();
     alice.quiet("a dead horse lies still");
     let deadline = summoned + Duration::from_secs(75);
     let mut gone = Vec::new();
@@ -43318,7 +43398,7 @@ fn a_probe_reports_the_party_near_count_two_then_none() {
     drain_party_walk(&mut alice, "the leader", 4, 2, true);
     // The first Update runs a full tick after the party's birth; both then stand
     // side by side, so the probe sees two.
-    std::thread::sleep(std::time::Duration::from_secs(4));
+    std::thread::sleep(std::time::Duration::from_secs(6));
     let teacher = shown_vid(&alice_entered, 20_300, "the teacher stands in view");
     // The first Update's resend reaches both members: the near-count change. The
     // drain stops at the join walk's own UPDATE, so the walk's tail (one more LINK
@@ -43350,7 +43430,9 @@ fn a_probe_reports_the_party_near_count_two_then_none() {
     let sent = std::time::Instant::now();
     yankee.send_record(&client_move(FUNC_MOVE, 0, 0, 476_000, 950_000, 0x7000));
     assert_insert_move(&alice.read_game(), yankee_vid, (476_000, 950_000), 14_000);
-    wait_out_walk(sent, 14_000);
+    // The Update that sees Yankee out of range runs up to 3 s after the crossing, which
+    // may be the walk's last step: one more period is waited out before the drain.
+    wait_out_walk(sent, 17_000);
     // The walk outlasts several Updates; each member's resends arrive mixed with the
     // exp-bonus PARAMETERs, the walked view's own records, and the walker's attack
     // and defence rolls' grade changes (16-23). Reads run until the wire holds nothing
@@ -44683,8 +44765,8 @@ fn a_select_hears_the_maps_music() {
     assert_eq!(&main[7..32], name_field(b"Beta"), "szName");
     assert_eq!(&main[32..50], b"enter_the_east.mp3", "szBGMName");
     assert_eq!(&main[57..61], &0.5f32.to_le_bytes(), "fBGMVol");
-    drop(alice);
     drop(server);
+    drop(alice);
     // The Shared Channel hosts map 72, which `settings.lua` names no music for.
     sql(
         &database,
@@ -44698,8 +44780,8 @@ fn a_select_hears_the_maps_music() {
     let main = alice.read_game();
     assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE, "map 72 is silent");
     assert_eq!(main.len(), MAIN_CHARACTER_LEN);
-    drop(alice);
     drop(server);
+    drop(alice);
     // Without the volume line the same map-1 select hears the 71-byte record.
     sql(
         &database,
@@ -45450,10 +45532,10 @@ fn meley_leave_asks_and_warps(server: &Server, database: &ScratchDatabase) {
         load_with_quickslots_on(server, 1, b"bob", 0, ENGLISH);
     bob.send_record(&client_enter_game());
     let mut out = Vec::new();
+    // The login's check is judged on a Pulse, late now and then in a full run: each
+    // record gets the read's own 5 s.
     while out.len() < 2 {
-        let record = bob
-            .read_game_until(std::time::Instant::now() + QUIET_WINDOW)
-            .expect("the check warps the stranger out");
+        let record = bob.read_game();
         if record[0] == GC_CHARACTER_DEL || record[0] == GC_WARP {
             out.push(record);
         }
@@ -51046,9 +51128,12 @@ fn a_monarch_warps_summons_and_taxes() {
     monarch_taxes(&mut alice);
     alice.send_record(&client_chat(CHAT_TALKING, b"/mmob 101"));
     let wait = read_info_past_ambient(&mut alice);
+    // The wait counts whole seconds from the summon, and the steps since took one or two
+    // of them, three in a full run.
+    let waits = [&b"[LS;551;3600]"[..], b"[LS;551;3599]", b"[LS;551;3598]"];
     assert!(
-        wait == an_info_line(b"[LS;551;3600]") || wait == an_info_line(b"[LS;551;3599]"),
-        "the summon waits out its hour: {wait:02x?}"
+        waits.iter().any(|line| wait == an_info_line(line)),
+        "{wait:02x?}"
     );
     check(
         &database,
@@ -51542,6 +51627,7 @@ fn close_arena_pair(server: &mut Server, alice: Keyed, yankee: Keyed) {
     let old_yankee = yankee.client.local_addr();
     drop(alice);
     drop(yankee);
+    // An arena leaves by a Warp, which wrote the rows; the close is all that is left.
     server.wait_for(&format!("Client connection closed addr={old_alice}"));
     server.wait_for(&format!("Client connection closed addr={old_yankee}"));
 }
@@ -52285,22 +52371,24 @@ fn a_kill_feeds_the_worn_skin_and_the_flood_refuses_a_use() {
     );
     assert_eq!(updates[0][1], (0, 25), "slot 1 counts to 25 first");
     assert_eq!(updates[1][0], (63, 1), "slot 0 grants apply 63 at 1 after");
-    wait_for(
-        &database,
-        "EXISTS (SELECT 1 FROM item WHERE id = 30 AND attrvalue1 = 25 AND attrtype0 = 63 \
-         AND attrvalue0 = 1)",
-    );
-
-    // And: a drink at once is refused with the flood's line; a second later it lands.
+    // And: a drink at once is refused with the flood's line (25 Pulses from the feed, so
+    // it goes out before the store is asked); a second later it lands. It lands only
+    // while the dog's bites are still unhealed (a full pool refuses a potion silently),
+    // so the store's check waits behind it.
     beta.send_record(&client_item_use(0));
     let (wire, _) = beta.drain_game(Duration::from_secs(1), game_len);
     assert!(wire.contains(&an_info_line(b"You need to wait 1 second to do that.")));
-    std::thread::sleep(Duration::from_millis(1100));
+    std::thread::sleep(Duration::from_millis(500));
     beta.send_record(&client_item_use(0));
     let (wire, _) = beta.drain_game(Duration::from_secs(1), game_len);
     assert!(
         wire.iter().any(|record| record[0] == ITEM_UPDATE),
         "the drink lands a second out: {wire:02x?}"
+    );
+    wait_for(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 30 AND attrvalue1 = 25 AND attrtype0 = 63 \
+         AND attrvalue0 = 1)",
     );
     drop(server);
 }
@@ -52594,10 +52682,19 @@ fn a_grade_refine_spends_the_stones_and_lands_a_new_one() {
         "(SELECT count(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
          'Alpha') AND window_type = 5) = 0",
     );
+    // The normal grade's row draws 70 to stay, 25 for the next grade and 5 for the one
+    // after (`dragon_soul_table.txt`, `RefineGradeTables`): the result says which side.
+    let landed_vnums = if results[0] == DS_REFINE_SUCCEED {
+        "(111000, 112000)"
+    } else {
+        "(110000)"
+    };
     check(
         &database,
-        "(SELECT vnum FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
-         'Alpha') AND window_type = 1 AND pos = 0) IN (110000, 111000)",
+        &format!(
+            "(SELECT vnum FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+             'Alpha') AND window_type = 1 AND pos = 0) IN {landed_vnums}"
+        ),
     );
     alice.still("nothing follows the refine");
 }
@@ -54154,7 +54251,7 @@ fn a_private_shop_reprices_moves_checks_in_and_out() {
     let _ = (owner_vid, yankee_listed);
     alice.send_record(&[CG_PRIVATE_SHOP, 8]);
     let _flipped = alice.read_game();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     // The price reprices the ware at slot 3.
     let mut price = vec![CG_PRIVATE_SHOP, 10, 3, 0];
     price.extend_from_slice(&700i64.to_le_bytes());
@@ -54175,7 +54272,7 @@ fn a_private_shop_reprices_moves_checks_in_and_out() {
         &database,
         "EXISTS (SELECT 1 FROM private_shop_item WHERE id = 60 AND gold = 700)",
     );
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     // The move re-slots the ware from 3 to 5.
     alice.send_record(&[CG_PRIVATE_SHOP, 11, 3, 0, 5, 0]);
     let moved = alice.read_game();
@@ -54188,7 +54285,7 @@ fn a_private_shop_reprices_moves_checks_in_and_out() {
         &database,
         "EXISTS (SELECT 1 FROM private_shop_item WHERE id = 60 AND pos = 5)",
     );
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     // The checkin shelves the second sword from cell 1 at slot 7.
     let mut checkin = vec![CG_PRIVATE_SHOP, 12, 1, 1, 0];
     checkin.extend_from_slice(&900i64.to_le_bytes());
@@ -54211,7 +54308,7 @@ fn a_private_shop_reprices_moves_checks_in_and_out() {
         "EXISTS (SELECT 1 FROM private_shop_item WHERE id = 61 AND pos = 7 AND gold = 900) \
          AND NOT EXISTS (SELECT 1 FROM item WHERE id = 61)",
     );
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     // The checkout unshelves slot 7 back to the window.
     let mut checkout = vec![CG_PRIVATE_SHOP, 13, 7, 0];
     checkout.extend_from_slice(&(-1i32).to_le_bytes());
@@ -54256,7 +54353,7 @@ fn a_private_shop_renames_and_unlocks_its_slots() {
     let _window = yankee.read_game();
     alice.send_record(&[CG_PRIVATE_SHOP, 8]);
     let _flipped = alice.read_game();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     // The rename retitles the shop to `Swords`.
     let mut rename = vec![CG_PRIVATE_SHOP, 14];
     let mut title = [0u8; 33];
@@ -55572,7 +55669,7 @@ fn a_click_looses_the_tanaka_pirates_onto_the_desert() {
     alice.quiet("the start ends");
     std::thread::sleep(std::time::Duration::from_secs(3));
     drop(alice);
-    server.wait_for("Character left the world");
+    server.wait_for("Character disconnected; wrote the row");
     sql(
         &database,
         "UPDATE player SET x = 253700, y = 505500, map_index = 63 WHERE name = 'Alpha'",
@@ -55585,7 +55682,7 @@ fn a_click_looses_the_tanaka_pirates_onto_the_desert() {
     assert!(has_tanaka(&entered), "round 1 shows its pirates");
     alice.quiet("the view ends");
     drop(alice);
-    server.wait_for_count("Character left the world", 2);
+    server.wait_for_count("Character disconnected; wrote the row", 2);
     sql(
         &database,
         "UPDATE player SET x = 471800, y = 951600, map_index = 1 WHERE name = 'Alpha'",
@@ -55673,7 +55770,7 @@ fn tanaka_second_draw_is_six(server: &mut Server, database: &ScratchDatabase) {
     );
     alice.quiet("the roll ends");
     drop(alice);
-    server.wait_for_count("Character left the world", 4);
+    server.wait_for_count("Character disconnected; wrote the row", 4);
 }
 
 /// The start half of [`the_tanaka_letters_dialog_and_yonahs_exchange_run`]: the
@@ -55711,7 +55808,7 @@ fn tanaka_start_and_letter_dialog(server: &mut Server) {
     );
     alice.quiet("the presses end");
     drop(alice);
-    server.wait_for("Character left the world");
+    server.wait_for("Character disconnected; wrote the row");
 }
 
 /// The scold half of [`the_tanaka_letters_dialog_and_yonahs_exchange_run`]: a relog
@@ -55741,7 +55838,7 @@ fn tanaka_scold_without_ear(server: &mut Server, database: &ScratchDatabase) {
     );
     alice.quiet("the scold ends");
     drop(alice);
-    server.wait_for_count("Character left the world", 2);
+    server.wait_for_count("Character disconnected; wrote the row", 2);
 }
 
 /// `quest.tanaka_event`'s letter and reward arms over the wire: with the event
@@ -55830,7 +55927,7 @@ fn the_tanaka_letters_dialog_and_yonahs_exchange_run() {
         "the ear is gone and the missed roll stores no reward (was {before})"
     );
     drop(alice);
-    server.wait_for_count("Character left the world", 3);
+    server.wait_for_count("Character disconnected; wrote the row", 3);
     tanaka_second_draw_is_six(&mut server, &database);
     drop(server);
 }
@@ -55871,7 +55968,7 @@ fn fish_scold_with_no_minnows(server: &mut Server, database: &ScratchDatabase) {
     );
     alice.quiet("the scold ends");
     drop(alice);
-    server.wait_for_count("Character left the world", 2);
+    server.wait_for_count("Character disconnected; wrote the row", 2);
 }
 
 /// Ledger 604's start half: the teacher starts the moon, hex and fish events, and
@@ -55929,7 +56026,7 @@ fn fish_drop_starts(server: &mut Server) {
     }
     alice.quiet("the reads end");
     drop(alice);
-    server.wait_for("Character left the world");
+    server.wait_for("Character disconnected; wrote the row");
 }
 
 /// `quest.fishing_event`, `quest.moonlight_drop_event` and `quest.hexegonal_drop_event`
@@ -56027,7 +56124,7 @@ fn the_fishermans_exchange_runs_and_the_drop_letters_read() {
         "the box is stored"
     );
     drop(alice);
-    server.wait_for_count("Character left the world", 3);
+    server.wait_for_count("Character disconnected; wrote the row", 3);
     drop(server);
 }
 
@@ -56193,7 +56290,7 @@ fn siege_letter_and_join(server: &mut Server, mut alice: Keyed) -> Keyed {
     );
     alice.quiet("the set ends");
     drop(alice);
-    server.wait_for("Character left the world");
+    server.wait_for("Character disconnected; wrote the row");
     let (mut alice, _alpha, _quickslots, _items) =
         load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
     let _entered = enter_game_shown(&mut alice);
@@ -58088,7 +58185,7 @@ fn a_click_finds_the_hidden_box_and_its_click_moves_it() {
 
     // Onto the hinted spot: the box's insert shows in the fresh view.
     drop(alice);
-    server.wait_for("Character left the world");
+    server.wait_for("Character disconnected; wrote the row");
     sql(
         &database,
         &format!(
@@ -58109,7 +58206,7 @@ fn a_click_finds_the_hidden_box_and_its_click_moves_it() {
     // Back to the teacher: its click ends the event. The first leave is already logged,
     // so the wait counts two.
     drop(alice);
-    server.wait_for_count("Character left the world", 2);
+    server.wait_for_count("Character disconnected; wrote the row", 2);
     sql(
         &database,
         "UPDATE player SET x = 471800, y = 951600, map_index = 1 WHERE name = 'Alpha'",
@@ -58624,7 +58721,8 @@ fn a_kingdom_kill_on_the_war_map_fans_the_score() {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut landed = false;
     let mut swings = 0;
-    while !landed && swings < 8 {
+    // The cap only ends a run whose swings never kill; the level-20 punches take a few.
+    while !landed && swings < 40 {
         alice.send_record(&client_attack(yankee.id));
         swings += 1;
         while let Some(record) = alice.read_game_until(deadline) {
@@ -59530,13 +59628,14 @@ fn an_autogive_nobody_picks_up_is_destroyed_on_its_own_lifetime() {
     let (mut alice, _, _, _) = load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
     let entered = enter_game_view(&mut alice);
     let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
+    // The clock starts before the click: the server stamps the lay before it answers.
+    let laid = std::time::Instant::now();
     alice.send_record(&client_click(teacher));
     assert_eq!(
         alice.read_game(),
         server_script(1, b"given=0[ENTER][DONE]"),
         "none held: it lies"
     );
-    let laid = std::time::Instant::now();
     let add = alice.read_game();
     assert_eq!(add[0], GROUND_ADD, "it lies at her feet: {add:02x?}");
     assert_eq!(
@@ -59594,8 +59693,8 @@ fn a_dropped_gold_pile_nobody_picks_up_is_destroyed_on_its_own_lifetime() {
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
     alpha.sees_enter(zulu_listed.id, false, None);
     let cell = protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, 0);
-    alpha.send_record(&protocol::cg_item_drop::CgItemDrop::new(cell, 1000).encode());
     let dropped_at = std::time::Instant::now();
+    alpha.send_record(&protocol::cg_item_drop::CgItemDrop::new(cell, 1000).encode());
     assert_eq!(
         alpha.read_game(),
         gold_change(alpha_listed.id, 0, 5_000_000 - 1000),
@@ -59642,7 +59741,9 @@ fn a_dug_ore_loses_its_diggers_name_fifteen_seconds_on() {
         "mining stands at 40"
     );
     let mut ore = Vec::new();
-    for _ in 0..4 {
+    // A dig lands at 81% (20, 11 for mining 40, 50 for the +9 pick): twelve miss together
+    // one run in 450 million, where four did one in 770 and eight one in 600,000.
+    for _ in 0..12 {
         let started = std::time::Instant::now();
         let strokes = u64::from(start_digging(&mut alice, vid, vein));
         let deadline = started + Duration::from_secs(2 * strokes + 2);
@@ -59667,7 +59768,11 @@ fn a_dug_ore_loses_its_diggers_name_fifteen_seconds_on() {
             );
         }
     }
-    assert_eq!(ore[0], GROUND_ADD, "four digs at 81% land an ore");
+    assert_eq!(
+        ore.first(),
+        Some(&GROUND_ADD),
+        "twelve digs at 81% land an ore"
+    );
     let field = |at: usize| i32::from_le_bytes(ore[at..at + 4].try_into().expect("four"));
     assert_eq!(field(17), 50_601, "the vein's raw ore");
     let mut owned = vec![GC_ITEM_OWNERSHIP];
@@ -60876,10 +60981,12 @@ fn a_shop_premium_use_lands_507_stores_the_expiry_and_refuses_the_second() {
     assert!(premium, "the 507 affect lands");
     assert!(increased, "the increased line tells");
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    // The expiry is the use's whole second plus the week; the check may run a full run's
+    // late replies after it.
     check(
         &database,
         "(SELECT private_shop_premium_expire BETWEEN \
-         EXTRACT(EPOCH FROM now())::bigint + 604799 AND \
+         EXTRACT(EPOCH FROM now())::bigint + 604740 AND \
          EXTRACT(EPOCH FROM now())::bigint + 604805 FROM account WHERE login = 'alice')",
     );
     // When: the second use, maxed. Then: the reached-max line first (it queued
@@ -61012,7 +61119,7 @@ fn a_gold_bar_pays_its_yang_and_uses_one_up() {
 
 /// `cg.game.item_use`: the 70038 cape of courage (`case USE_SPECIAL`,
 /// `G/char_item.cpp:3879-3888`) gathers the monsters around: at least one of the
-/// sixteen dogs starts on Alpha and swings (each joins on a one-in-two draw,
+/// twenty-four dogs starts on Alpha and swings (each joins on a one-in-two draw,
 /// `G/char_battle.cpp:3663`, so five left none in one run of 32; ledger 683). The
 /// cape is used up, and the store keeps the row's absence.
 #[test]
@@ -61032,7 +61139,7 @@ fn a_cape_of_courage_gathers_the_dogs_around() {
     let proto = protos.get(70_038).expect("the owner's data has it");
     assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
     assert_eq!(proto.sub_type, 10, "the owner's cape is USE_SPECIAL");
-    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t16\t101\n";
+    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t24\t101\n";
     let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", dogs);
     let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alice);
@@ -61997,7 +62104,8 @@ fn a_level_to_120_grants_the_top_row_and_a_move_off_fells_it() {
         321,
         "the fallen row is the granted one"
     );
-    check(&database, "(SELECT COUNT(*) FROM player_top) = 0");
+    // The row falls after the remove record is sent.
+    wait_for(&database, "(SELECT COUNT(*) FROM player_top) = 0");
     drop(alice);
     drop(yankee);
 }
@@ -62641,14 +62749,15 @@ fn the_rings_use_while_browsing_says_to_wait_ten_seconds() {
 /// the premium). The draw came from the mind's table 2 (`manwoo` unset), which the preview
 /// proves by arriving at all — with no mind, no pill and no premium, the bite sends `REACT`
 /// alone. The table's row 0 (vnum 0, 2100 of 9800) and the never-fished three bite as the
-/// refused nothing, so a nothing-bite takes, rebaits and recasts, up to five casts.
+/// refused nothing (2450 of 9800), so a nothing-bite takes, rebaits and recasts, up to ten
+/// casts: five lost one run in 1024 (ledger 685).
 /// Ledger 651 hardened the loop: the 650 shape asserted on the first cast's luck.
 #[test]
 fn a_premium_cast_sees_the_biting_fish_before_the_take() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = fishing_stage(&database, Some(10), 5);
+    let server = fishing_stage(&database, Some(10), 10);
     sql(
         &database,
         "UPDATE account SET fish_mind_expire = EXTRACT(EPOCH FROM NOW())::bigint + 3600 WHERE \
@@ -62656,7 +62765,7 @@ fn a_premium_cast_sees_the_biting_fish_before_the_take() {
     );
     let (mut alice, _alpha, entered) = enter_equipped_world_premium(&server, b"alice", 2);
     let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
-    for cast in 1..=5 {
+    for cast in 1..=10 {
         alice.send_record(&client_fishing(3));
         assert_eq!(alice.read_game(), server_fishing(0, vid, 3), "the cast");
         wait_for_the_bite(&mut alice, vid);
@@ -62667,7 +62776,7 @@ fn a_premium_cast_sees_the_biting_fish_before_the_take() {
             alice.still("nothing follows the preview");
             return;
         }
-        assert!(cast < 5, "five nothing-bites in a row (0.25^5): {cast}");
+        assert!(cast < 10, "ten nothing-bites in a row (0.25^10): {cast}");
         alice.send_record(&client_fishing(3));
         assert_eq!(
             alice.read_game(),

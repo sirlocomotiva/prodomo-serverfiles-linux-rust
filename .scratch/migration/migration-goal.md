@@ -31,6 +31,9 @@ rewrite `.scratch/migration/progress.md`, and start the next one.
   leftovers, worktrees and `.scratch/tmp/` were removed.
 - Ledger 684 is the toolchain: Rust 1.100.0 pinned in `rust-toolchain.toml`, the new Clippy's
   findings fixed, and a dependency no target uses fails the build.
+- Ledger 685 is the scenario timing: every scenario that lost a full run had its cause in the
+  scenario, all 519 were swept for the same classes, and `AGENTS.md` ("SCENARIO TIMING") has
+  the rules a new scenario follows.
 - Tests: 5,659 pass in 46 targets with `DATABASE_URL`. There are 519 parity scenarios.
 - Parity: 1,136 ported, 65 partial, 444 unused, 0 missing and 0 codec, out of 1,645 rows.
 - Owner questions: `.scratch/migration/owner-questions.md`; the ones that block work are in
@@ -115,8 +118,9 @@ grows past what one commit can review, it becomes two ledger sections.
 6. **Run the gates**, with `DATABASE_URL` and without it, then append the ledger section with its
    receipt:
    - both runs' test counts and target counts;
-   - every test that failed on a first run, by name, and what was done about it (a fix, or an
-     issue under `.scratch/`); "passes alone" does not close it;
+   - every test that failed on a first run, by name, with its cause read against the legacy
+     rule (`AGENTS.md`, "SCENARIO TIMING") and its fix, or an issue under `.scratch/` that
+     keeps the failure's output; "passes alone" does not close it;
    - the toolchain, and whether a width was measured;
    - the parity counts and the number of `Left:` items before and after;
    - the `temp-files`, `servers`, `scratch-dbs` and `cores` lines of the summary, each 0
@@ -203,5 +207,8 @@ After each push, rewrite `.scratch/migration/progress.md` with:
 - A test that runs the binary reads its stdout and stderr while it waits. A pipe here can hold
   8 KiB (229f.7).
 - A new scenario runs with `test_server = false` and grants the GM level it needs (ADR-0007).
+- A new scenario follows `AGENTS.md`, "SCENARIO TIMING": enough tries for a draw, whole
+  seconds from a fresh second, nothing unrelated inside a legacy window, and the save line
+  before SQL on a saved column.
 - A rule that needs only a character, a map and the Game data goes in `world`, not in
   `prodomo/src/game_state/` (`docs/STATUS.md`, package F).

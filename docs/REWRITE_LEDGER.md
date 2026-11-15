@@ -55983,3 +55983,234 @@ waits. The three ran green three times alone. The issue
   pinned" backlog item is closed.
 
 Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`, cargo 1.100.0 (3acc79c0c 2026-11-05) and rustc 1.100.0 (0ef1bc386 2026-11-09), two full runs. First run (before 684.4's fix): fmt, build, clippy, doc-tests and rustdoc clean; without `DATABASE_URL` 5659 passed, 0 failed in 46 targets; with it 5658 passed, 1 failed, `a_biologist_refuses_the_wrong_state_level_and_done_missions` (684.4, fixed). Second run, on the final tree: `cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean; `cargo test --workspace --all-targets --locked --offline --no-fail-fast` without `DATABASE_URL`: 5659 passed, 0 failed in 46 targets (70 s); with it: 5659 passed, 0 failed in 46 targets (452 s); `cargo test --workspace --doc --locked --offline` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean. Left behind in both runs: temp-files 0, servers 0, scratch-dbs 0, cores 0. Allows: 132 (133 at ledger 683). The Compose image built with `rust:1.100.0-bookworm`. No width was measured. Parity counts unchanged: 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec`. No ADR changed.
+
+
+## 685. The scenarios that lose a full run
+
+The owner said to fix what ledger 684 left open (a full run with `DATABASE_URL` still lost one
+scenario now and then) and to leave the machine and the handover ready for the sessions that
+continue the porting. This section ports nothing and changes no server code: it changes
+`prodomo/tests/parity.rs`, the scripted client's `Server` (`parity/src/server.rs`, which now
+prints a failing scenario's server console), the rules, and the handover files. It found one
+difference in the server's send order and queued it (685.3).
+
+### 685.1 The two open causes
+
+- **The biologist loss of 684 is reproduced on purpose.** With `bio_banked` put back on
+  `Server::wait_for` (a temporary switch, removed again),
+  `a_biologist_refuses_the_wrong_state_level_and_done_missions` alone failed 3 runs of 18, one of
+  them with 684's own message ("the overflow line", the answer being the step before's). With
+  `Server::wait_for_next` it failed 0 of 12.
+- **The premium fish loss of 679 has its cause.** Its output was not kept, so it is read from the
+  rule: a cast draws on `fishing.txt`'s premium column, whose "nothing" rows (vnum 0, and the
+  three never-fished fish) weigh 2450 of 9800, one in four. The scenario recast up to five
+  times, so one run in 1024 drew nothing five times and failed its own assert. It now casts up
+  to ten times (one run in a million).
+
+### 685.2 The sweep
+
+Every one of the 519 scenarios was read for the classes the issue lists, in three passes of
+read-only agents over `parity.rs` by range (16, then 15 over the ranges the first pass had not
+read, then 4 over the newest scenarios), each told to report only a suspect it could tie to the
+legacy rule's numbers. Scripted searches covered what a reading misses: a client drop followed by
+SQL on a column the disconnect's save writes, a wait on "Character left the world" used as if it
+were the save, a required read on the 300 ms `QUIET_WINDOW`, and a `sleep` sized to a rule with
+no margin. Some agents read part of their range only and said so; the scripted searches cover
+the whole file.
+
+50 scenarios and helpers changed. By class:
+
+- **Draws.** `a_premium_cast_sees_the_biting_fish_before_the_take` (above);
+  `a_dug_ore_loses_its_diggers_name_fifteen_seconds_on` dug four times at 81% (all four miss one
+  run in 770), now eight; `a_gm_pulls_the_dogs_and_attracts_the_ranger` sent ten lines at one in
+  two (one run in 1024), now twenty; `a_kingdom_kill_on_the_war_map_fans_the_score` capped its
+  swings at 8, now 40.
+- **Whole seconds and counted windows.** `a_tenth_whisper_in_a_run_closes_the_connection`: the
+  chat counter goes back to zero when the Pulse enters a later window of 125, wherever the run
+  began, so ten lines that straddle a window's end all pass; the scenario now detects that run,
+  waits out the window and sends the ten once more. `a_monarch_warps_summons_and_taxes` accepts
+  3598 beside 3600 and 3599; `a_gm_lists_the_silences_and_the_vote_stays_quiet` accepts 89
+  beside 90; `a_shop_premium_use_lands_507_stores_the_expiry_and_refuses_the_second` bounds the
+  stored expiry by a minute, not a second; `the_ping_cycle_closes_a_silent_client` accepts 700
+  to 1500 ms between two cycles.
+- **Clocks and windows.** Three destroy-lifetime scenarios and the dead horse started their
+  clock after the send (or after a reply) and asserted a lower bound 60 to 100 ms under the
+  rule; the clock now starts before the send. The stack-feed scenario asked the store before its
+  refused drink, which had to land within 25 Pulses of the feed; the drink goes first. Its
+  second drink lands only while the dog's bites are unhealed (a potion is refused silently on a
+  full pool), which a first version of this fix broke by waiting longer; the store's check now
+  comes last. Six sleeps of 1100 ms over a one-second rule are 1500 ms; three sleeps of 4 s
+  over a 3-second party Update are 6 s; two upper bounds gained a second.
+- **Required reads on the quiet window.** Eleven reads that must find a record used the 300 ms
+  `QUIET_WINDOW` as their deadline (`read_home_marks`, eight in the GM spawn scenarios, the
+  Meley leave, the whisper's nine lines); they now have 5 s. `QUIET_WINDOW` is left for
+  proving silence.
+- **The save as the barrier.** Twelve waits on "Character left the world" (the Tanaka, fisher,
+  siege and hidden-box helpers), two on the close line and one on a query that was always true
+  preceded SQL on a saved column; the first of those lines is logged before the save. They
+  wait for "Character disconnected; wrote the row".
+  `the_auth_login_grants_a_key_or_names_the_first_failed_check` retries its wrong-password
+  login while the old descriptor still answers `ALREADY`;
+  `a_level_to_120_grants_the_top_row_and_a_move_off_fells_it` waits for its row to fall.
+- **The server's kill.** Dropping a `parity::Server` is `SIGKILL`. Four scenarios dropped the
+  client and then the server before a second server start, leaving it to chance whether the
+  session was saved; `a_funded_redraw_lands_and_spends_and_short_gold_refuses` had set the
+  live character's gold by SQL first, which a save would have written back. They kill the
+  server first, so the session is never saved, which is what had been passing.
+
+Three changes of this section were wrong and are corrected in it, each found by running the
+changed scenarios twice alone or by the gates: an arena leaves by a Warp, which logs no save
+line, so `close_arena_pair` waits for the close as before;
+`a_mount_line_is_empty_standing_and_scolded_dead` needs its first session unsaved (a saved one
+marks Theowahdan at the next login), so it kills the server first instead of waiting for the
+save; and two rewritten asserts tripped Clippy's `similar_names` and `too_many_lines`, which a
+scenario run alone does not show.
+
+Checked and left: a relogin right after a drop needs no wait (the login answers `ALREADY` until
+the old descriptor's save is written, and the login helpers retry); a Warp writes the row
+before `GC_WARP`; the revive, cloak, campfire, detector, heart-melt and kill scenarios have
+either no draw on the asserted path or margins of half a second and more.
+
+### 685.3 The order of a party's Warp
+
+The first full run of this section's series lost two scenarios with one message:
+`a_leader_disconnect_sends_the_near_home_and_the_relog_comes_home` and
+`the_tail_kills_the_dog_and_the_flagged_hit_is_silent` both read `[2, 4, 0, 0, 0]` where they
+asserted `[2, 1, 0, 0, 0]`: on the forest dungeon's jump the leader heard the other member's
+removal before its own. No change of this section touches that path.
+
+Legacy warps the party inside one call, member by member in player-ID order
+(`CDungeon::JumpParty`, `G/dungeon.cpp:396-425`; `CParty::ForEachOnMapMember` walks
+`m_memberMap`, a `std::map<DWORD, TMember>`, `G/party.h:100`, `:295-306`), so a later member
+hears each earlier one's removal and an earlier one never hears a later one's. The Rewrite
+hands each member's descriptor a `ClientOrder::Warp` (`game_state/dungeons.rs:324`) and each
+descriptor takes its character out of the world when its task gets to the order
+(`prodomo/src/main.rs`, the `next_order` arm), so either may go first.
+
+This is a difference the Rewrite's design causes, not a scenario's mistake, so it is not made
+to pass quietly: the three forest readers accept both orders through `read_own_removal`, whose
+comment names the item, and `docs/STATUS.md` has it as next step C11 with its sites (the
+dungeon jumps and exits, the guild war and land Warps, the arena) and its exit: legacy's order
+on the game thread with the scenarios pinning it, or a Divergence row. The three scenarios
+then passed 12 runs of 12 alone.
+
+Every function of `parity.rs` in which more than one client reads a Warp was then read for the
+same dependency (ten functions): the war map, the GM transfer and goto, the Meley leave, the
+ship boarding and the private-shop scenarios warp one character at a time, and the arena
+readers skip to their record (`read_until_record`). Only the forest readers asserted the next
+record exactly.
+
+### 685.4 The third run of five, and the ledger's own list
+
+Five full gate runs then ran in a row. Four lost nothing (5,659 passed with and without
+`DATABASE_URL`); the third lost two scenarios, and this time `tools/gates.sh` had kept the
+output:
+
+- `a_grade_refine_spends_the_stones_and_lands_a_new_one` asserted that the new stone is of the
+  old grade or the next. `dragon_soul_table.txt`'s row for the normal grade draws 70 to stay,
+  25 for the next grade and 5 for the one after, so one run in 20 failed. The scenario now
+  reads the result record and checks the stone against it: the two higher grades on a success,
+  the old one on a failure.
+- `a_gm_pulls_the_dogs_and_attracts_the_ranger` waited 30 s for the archer's step in and saw
+  none. Run 144 times, 24 at once, with every record traced, it failed once the same way: the
+  pull's `GC_SYNC_POSITION` had put the archer 104 from Alpha, inside the range the line cuts
+  it to (150), so it shot from where it stood. An idle monster walks 300 to 700 one time in 7
+  (`G/char_state.cpp:626-736`); the archer starts 950 out, and a walk toward Alpha while the
+  second character logs in leaves the pull (300 nearer, no nearer than 100) to land it there.
+  The scenario runs with `no_wander = true`, as the scenarios beside it do, and then passed 144
+  of 144.
+
+Both had been called load flakes before. So the ledger was read for every scenario a receipt
+ever named beside "load flake", "passes alone" or "green on rerun": 54 scenarios, the grade
+refine about ten times, the ranger about 18. The causes the receipts themselves give, each of
+them in the scenario:
+
+- `a_gm_flags_a_stray_dog_aggressive_and_coward` (about 26 times) bounds the coward's escape at
+  5100 and measured 5111, 5125 and 5128. The comment said `DISTANCE_APPROX` reads 0.7% high;
+  it weighs the longer side 246/256 and the shorter 102/256 (`G/utils.h:17-40`), so it reads
+  from 3.9% low to 4.04% high and a 5000 escape measures up to 5201. The bound is 5210.
+- `a_sort_gives_the_inventory_back_by_name_and_merges_the_stacks` accepted a wait of 14 or 15
+  seconds after a one-second drain; the wait counts whole seconds, so 13 was always possible
+  and 12 in a full run. It accepts 12 to 15.
+- `a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit` named the headers its off toggle's
+  quiet may see and left out the special effect; the thief's `ENCHANT_CRITICAL` is 1, so its
+  swing back can be a critical one.
+- `a_gm_purges_the_near_dog_and_all_sweeps_the_view` allowed the captain's mark delete
+  between the sweep's removals but not after them. The delete is sent at the mark's event's
+  next check (`target_event`, `G/target.cpp:57-132`), not by the sweep, so it may land in the
+  respawn read as well.
+- `a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses` ("the bite", "the
+  fish length") asserted a length above 0; eleven of map 1's catches are not fish and have no
+  length columns (675 of the table's 9950). It asserts a length of 0 or more.
+- The two dog scenarios of 683 stand twenty-four dogs (sixteen left none one run in 65,536),
+  and the ore scenario digs twelve times (eight missed one run in 600,000), so both are under
+  the rule's one in a million.
+
+All 54 were then run 48 times each, 24 processes at once (2,592 runs): one failed, once,
+`a_gm_flags_a_stray_dog_aggressive_and_coward`, on a read that timed out
+(`parity/src/client.rs:80`).
+
+`Server`'s `Drop` now prints the last 400 lines of its server's console when its scenario is
+failing, as `SERVER` lines beside the client's `GAME` records, so a loss in a full run can be
+read without running it again. With that the flags scenario was run 240 times and failed once
+the same way; the console shows the `/ma 101` line handled 2.7 s after Alpha entered and
+nothing logged after it. The read for the dog's swing had a 30-second deadline but read with
+`read_game_raw()`, which panics after five quiet seconds (`IO_TIMEOUT`). The wire can be quiet
+that long: Alpha is invisible to monsters for 5 s after the enter (`ReviveInvisible(5)`,
+`AFF_REVIVE_INVISIBLE`, skipped by `FindVictim`), an aggressive idle monster looks again 1 to
+3 s later (`G/char_state.cpp:626-736`), and the fight starts a second after the look that
+finds her; only the walks of the monsters around (one idle turn in 7) break the silence, and
+now and then none comes. The seven readers that took a deadline and read on the five-second
+beat (`read_swing_head`, `read_first_swing`, `read_heal_tick`, `npc_move_of`, `read_until`,
+`read_archer_step`, `read_archer_swing`) now read with the `_until` forms, so the deadline is
+the caller's. No scenario has such a loop inline. The flags scenario then passed 240 runs of
+240, 24 at once.
+
+### 685.5 Rules
+
+`AGENTS.md` has a new section, "SCENARIO TIMING", with the classes above as rules for a new
+scenario: enough tries for a draw or every outcome of the whole table row, `no_wander` where a
+monster's place is asserted, the records that run on a clock of their own, the error of
+`DISTANCE_APPROX`, whole seconds, windows, required reads, a deadline read with the `_until`
+forms, the save as the barrier, the server's kill, that two descriptors have no order between
+them, and that a loss keeps its output.
+
+### 685.6 The machine
+
+The `rust:1.85.1-bookworm` image and the three untagged images its Compose builds had left
+are removed, and so are the rustup toolchains `1.85.1` (which rustup had installed on
+its own) and the damaged `stable` (1.98.1). rustup has `1.100.0` alone, as the default; the
+distribution's 1.85.1 stays in `/usr/bin`, where `tools/gates.sh` refuses it.
+
+### 685.7 The issue closes
+
+`.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md` was to close when five full
+runs in a row lost none. They did (the receipt below), so the file is deleted and this table is
+what is kept of it:
+
+| run | lost scenario | cause | fixed in |
+|---|---|---|---|
+| 679, first | `a_premium_cast_sees_the_biting_fish_before_the_take` | a draw: five casts at one in four | 685 |
+| 680, third; 683, second | `a_cape_of_courage_gathers_the_dogs_around` | a draw: five dogs at one in two | 683, 685 |
+| 680, fourth; 682 | `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off` | a whole second of the wall clock straddled | 683 |
+| 683, first | `a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin` | a login inside a 1.5-second legacy window | 683 |
+| 684, first | `a_biologist_refuses_the_wrong_state_level_and_done_missions` | a wait for a line already logged | 684 |
+| 685, first of the first series | `a_leader_disconnect_sends_the_near_home_and_the_relog_comes_home`, `the_tail_kills_the_dog_and_the_flagged_hit_is_silent` | the order of a party's Warp, which the Rewrite does not fix | readers 685; the order is C11 |
+| 685, third of the first series | `a_grade_refine_spends_the_stones_and_lands_a_new_one` | a draw: the table row's third outcome, 5 in 100 | 685 |
+| 685, third of the first series | `a_gm_pulls_the_dogs_and_attracts_the_ranger` | a monster that wandered | 685 |
+| 685, the stress of the 54 | `a_gm_flags_a_stray_dog_aggressive_and_coward` | a 30-second deadline read on the five-second beat | 685 |
+
+No loss needed the load to explain it, so nothing waits for C1's Pulse duration record on this
+account. A later loss is a new issue, read against "SCENARIO TIMING" first.
+
+Gates (2026-11-15), `tools/gates.sh` with
+`DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`, cargo 1.100.0 (3acc79c0c
+2026-11-05) and rustc 1.100.0 (0ef1bc386 2026-11-09), five full runs in a row after the last
+change to a `.rs` file. Each run: fmt, build and Clippy clean; without `DATABASE_URL` 5,659
+passed, 0 failed in 46 targets; with it 5,659 passed, 0 failed in 46 targets (451 to 456 s);
+doc-tests and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0;
+`allows` 132. No test failed on a first run in any of the five. Before them, in this section:
+the first series of five lost two scenarios in its first run and two in its third (the table
+above), and the stress lost one run of 2,592. No width was measured. Parity is unchanged:
+1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec`, of 1,645 rows; 519
+scenarios. No ADR changed.

@@ -6,21 +6,27 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 684**, the toolchain: Rust 1.100.0, pinned in
-  `rust-toolchain.toml`, with the new Clippy's findings fixed and Cargo's unused-dependency
-  lint a gate. It ported nothing. Before it: 683 (the test hygiene: a killed test run leaves
-  nothing, `tools/gates.sh` fails on anything left), 682 (the repository cleanup), 681
-  (ADR-0008, mistakes are fixed, not ported, which queued seven fixes as package C10), 680 (the
-  owner's answers) and 679 (the direction review).
+- The last section is **ledger 685**, the scenario timing: every scenario that lost a full run
+  has its cause read against the legacy rule, all 519 were swept for the same classes, the 54
+  the ledger ever called a load flake were run 48 times each, and `AGENTS.md` ("SCENARIO
+  TIMING") has the rules a new scenario follows. A failing scenario now prints its server's
+  last 400 console lines (`SERVER ...`) beside its `GAME` records. It ported nothing and
+  changed no server code. Before it: 684 (Rust 1.100.0, pinned in `rust-toolchain.toml`), 683
+  (the test hygiene: a killed test run leaves nothing, `tools/gates.sh` fails on anything
+  left), 682 (the repository cleanup), 681 (ADR-0008, mistakes are fixed, not ported, which
+  queued seven fixes as package C10), 680 (the owner's answers) and 679 (the direction
+  review).
 - Parity: 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec`, of 1,645 rows.
 - Tests: 5,659 pass in 46 targets with `DATABASE_URL`; 519 are scenarios.
 - **What is next is in `docs/STATUS.md`, "Next steps"**, in order: package A (make the tail
-  countable) comes before any further `case` arm.
+  countable) comes before any further `case` arm. Ledger 685 added C11 there: a Warp ordered
+  for a whole party leaves in no fixed order, where legacy has one.
 
 ## Where things are
 
 - `AGENTS.md` ("WORKSPACE") has the map of everything outside the crates; "TEST HYGIENE" has the
-  rules a test and a session follow so nothing is left behind.
+  rules a test and a session follow so nothing is left behind; "SCENARIO TIMING" has the rules
+  that keep a scenario passing in a full run.
 - Gates: `tools/gates.sh <output-dir>`, then read `<output-dir>/summary.txt`. It fails on a
   failed gate and on anything the tests left (`temp-files`, `servers`, `scratch-dbs`, `cores`),
   and prints the `allows` count, which may not rise.
@@ -58,15 +64,10 @@ file is rewritten after every section and goes into the section's commit.
 - `compose.yaml` builds and starts with Podman (ledger 680). The images
   `rust:1.100.0-bookworm`, `debian:bookworm-slim` and `localhost/prodomo:local` are on the
   machine. Never `compose restart`: it ended the server without the SIGTERM.
-- A full run with `DATABASE_URL` still loses one scenario now and then, a different one each
-  time: `.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md`. Four losses have a
-  cause in the scenario and a fix (ledgers 683 and 684); the issue says what to look for in
-  the next. A second wait for a line the server already logged must be
-  `Server::wait_for_next`.
+- rustup has the one toolchain, `1.100.0`; the 1.85.1 image and toolchain are removed (685).
 - Clean since ledger 683: no scratch database, no test server, no `prodomo-*` entry in `/tmp`,
-  no Git worktree but the main one, an empty `.scratch/tmp/`, and a `target/` rebuilt from
-  nothing.
+  no Git worktree but the main one, and an empty `.scratch/tmp/`.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 684 is committed and pushed.
+Nothing is left running. Ledger 685 is committed and pushed.

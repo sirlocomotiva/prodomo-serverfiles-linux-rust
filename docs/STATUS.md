@@ -6,7 +6,7 @@ This page records where the Rewrite stands, what is left, and what is next. Rule
 next steps, and the Divergence and Defect registers here, and writes its story in the ledger. What
 this page said section by section until ledger 678 is in `docs/STATUS_HISTORY.md`.
 
-Last reviewed: 2026-11-15, the direction review (ledger 679); the numbers are ledger 684's.
+Last reviewed: 2026-11-15, the direction review (ledger 679); the numbers are ledger 685's.
 
 ## Where the Rewrite stands
 
@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 684 |
+| measure | value at ledger 685 |
 |---|---|
 | Parity inventory | 1,645 rows: 1,136 `ported`, 65 `partial`, 444 `unused`, 0 `missing`, 0 `codec` |
 | Scenarios | 519 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,659 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 684 has the receipt) |
+| Tests | 5,659 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 685 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 45 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -81,10 +81,14 @@ In this order. A package is done when its exit line holds, not when its sections
    gate run for the section. The receipt names the run with `DATABASE_URL` and the run without
    it, and lists by name every test that failed on the first run. A scenario that fails in the
    full suite is fixed or gets an issue under `.scratch/`; "passes alone" does not close it.
-   Read its failure against the legacy rule before calling it load: of the five scenarios lost
-   in ledgers 679 to 684, three tested a rule with a draw, a wall-clock second or a window in
-   a way that fails now and then on any machine, and one waited for a log line its server had
-   already printed (`.scratch/suite-flakes/issues/01-full-suite-first-run-losses.md`).
+   Read its failure against the legacy rule before calling it load: every scenario lost in
+   ledgers 679 to 685 had its cause in the scenario (a draw, a wall-clock second, a window, a
+   log line its server had already printed, a monster that wandered, a read cut short by five
+   quiet seconds) or in an order the Rewrite does not fix (C11), and none in the load; seven
+   of the 54 scenarios the receipts before 679 called load flakes had such a cause too (48
+   runs of each under a full run's load found the last), and five full runs in a row then
+   lost none. `AGENTS.md`, "SCENARIO TIMING", has the rules a new scenario follows; ledger
+   685.7 has each loss.
 3. **This page is not a changelog.** A section changes the table above, this list, and the
    registers below. It does not add a "Since N" paragraph anywhere.
 4. **A new scenario runs in the shipped mode** (`test_server = false`), with a GM grant where it
@@ -170,6 +174,19 @@ proves the last item; a row that waits on the owner's data says so and moves to 
       owner below: D1, a group-group weighs each member by the probability its file gives
       (`G/mob_manager.cpp:287-293`); and B5, a victim's evasion reads the victim's level, not
       the attacker's (`G/battle.cpp:282`).
+11. **A Warp the game thread orders for several characters.** Legacy warps a party, a guild or
+    an arena pair inside one call, member by member in player-ID order
+    (`ForEachOnMapMember`, `G/party.h:295`, `CDungeon::JumpParty`, `G/dungeon.cpp:396-425`):
+    a later member hears each earlier member's removal, and an earlier one never hears a
+    later one's. The Rewrite hands each member's descriptor a `ClientOrder::Warp` and each
+    descriptor leaves the world when it gets to it, so either member may go first and the
+    first by player ID can hear a removal legacy never sends it. Found in ledger 685: two
+    forest scenarios lost a full run on it; their readers (`read_own_removal`) now accept
+    both orders and name this item. The sites are the dungeon jumps and exits
+    (`game_state/dungeons.rs`), the guild war and land Warps (`guild.rs`) and the arena
+    (`arena.rs`). *Exit:* the members leave the world in legacy's order on the game thread
+    and the scenarios pin it, or the order is a Divergence row with its reason. This is a
+    difference the Rewrite's design causes, so ADR-0008 does not make it an improvement.
 
 ### D. The play-test kit (opens step 5; the play test itself is out of scope for now)
 

@@ -217,6 +217,66 @@ cleaning up in `Drop` alone is not enough.
   section lands. A copy of the tree (for a mutation sweep) is removed when the sweep ends; a Git
   worktree is removed with `git worktree remove`.
 
+## SCENARIO TIMING
+
+A scenario that fails in the full run and passes alone has a defect of its own until its
+failure has been read against the legacy rule it tests. Ledgers 683 to 685 read every such loss
+and swept all 519 scenarios: each cause was in the scenario or in an order the Rewrite does not
+fix, none was the load (ledger 685.7 has each one). A full run keeps 16 cores busy, so a reply
+can be a second late and a Pulse can be stepped late; a scenario must pass anyway.
+
+- **A rule that draws gets enough tries.** Size the tries so that all of them missing is rarer
+  than one run in a million, and write the odds in the comment (twenty-four dogs for
+  `AggregateMonster`'s one in two, ten casts for the fish table's one in four, twelve digs at
+  81%). Or accept every outcome the draw allows and assert each one's own records: read the
+  whole table row first, its rare columns included (the grade refine's third outcome is 5%,
+  and eleven catches of `fishing.txt` have no length).
+- **A monster whose place is asserted stands still**: start the server with
+  `no_wander = true`. Idle, a monster walks 300 to 700 one time in 7, so the longer a scenario
+  takes to reach its step the further its monsters are from their lines.
+- **A record sent on a clock of its own may land in any later read**: a revive's end, a
+  mark's delete at its event's next check, a critical hit's effect on a swing back, a heal
+  tick. A reader that names every header it allows names these too.
+- **A bound on `DISTANCE_APPROX` allows its error**, 3.9% low to 4.04% high
+  (`G/utils.h:17-40`), not the true distance.
+- **A rule counted in whole seconds of the wall clock** (`get_global_time() - x < n`,
+  `time(0)`) is tested either from the start of a second (`wait_for_a_fresh_second`) or with
+  every value the straddle allows. An expiry read back from the store is bounded by a full
+  run's delay, not by one second.
+- **A legacy window starts at its event.** Nothing unrelated (a second login, a `quiet`, a
+  `sleep`) goes between the event and the step that must land inside the window. A clock that
+  proves a lower bound starts before the send that makes the server stamp.
+- **A required record is read with `read_game()`** or a deadline of seconds. `QUIET_WINDOW`
+  (300 ms) proves silence only; a wait sized to a Pulse count leaves half a second over it.
+- **A reader that takes a deadline reads with the `_until` forms** (`read_game_raw_until`,
+  `read_wire_until`). `read_game()` and `read_wire()` panic after five quiet seconds
+  (`IO_TIMEOUT`) whatever the deadline says, and a wire can be quiet that long: a monster
+  cannot see a player for 5 s after the enter (`AFF_REVIVE_INVISIBLE`) and looks again only
+  every 1 to 3 s.
+- **After a client is dropped, SQL on a column the save writes waits for the save**:
+  `server.wait_for("Character disconnected; wrote the row")`. "Character left the world" is
+  logged before the save and is not a barrier. A second wait for a line the server already
+  logged is `Server::wait_for_next`, since `wait_for` returns at once on a collected line. A
+  character that left by a Warp logs no save line (the Warp wrote the row); wait for its
+  "Client connection closed addr=" line.
+- **A relogin needs no wait.** The login answers `ALREADY` until the old descriptor's save is
+  written, and the login helpers retry it.
+- **Dropping a `Server` kills it** (`SIGKILL`), so nothing is saved. Kill the server before
+  dropping the client when a scenario wants the session unsaved, and wait for the save line
+  when it wants it saved; `drop(client); drop(server);` leaves it to chance.
+- **Name the state a step depends on.** A potion is refused silently on a full pool, so a
+  drink that must land goes before the bites heal.
+- **Two descriptors have no order between them.** Records one Pulse sends to one client keep
+  their order; what two clients' descriptors each do on their own (a Warp ordered for a whole
+  party, two saves) happens in either order. A reader accepts both (`read_own_removal`), and
+  where legacy has one order the difference is a `docs/STATUS.md` item (C11), not a wider
+  assert kept quiet.
+- **A loss keeps its output.** `tools/gates.sh` keeps `test-db.log`; read the panic, the
+  client's `GAME` records and the server's `SERVER` lines (a failing scenario prints its
+  server's last 400 console lines) before running the scenario again. To reproduce one, run
+  the built test binary many times at once (`seq 1 144 | xargs -P 24 ...` from `prodomo/`),
+  which is the load a full run gives it.
+
 ## PROTOCOL COVERAGE
 
 Key every coverage metric on the **wire byte**, never on an identifier name.
