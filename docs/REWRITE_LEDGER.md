@@ -56365,3 +56365,55 @@ passed, 0 failed in 46 targets; with it 5,664 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,273 `ported`, 536 `partial`, 482 `unused`, 40 `missing`,
 0 `codec`, of 2,331 rows; 524 scenarios. No ADR changed.
+
+## 689. The apply types (B9, `ApplyPoint` and `PointChange`)
+
+`ApplyPoint` hands 120 of its 130 apply types straight to `PointChange` on the point
+`aApplyInfo` names (`G/char.cpp:4896-5037`), and most of those points have the plain
+`PointChange` arm: add the amount, send the total. `Points::apply_point` and
+`Points::point_change` ported them; no scenario observed them. No product code changed.
+
+`every_plain_apply_type_raises_its_own_point_while_worn` (shipped mode) gives Alpha, a shaman,
+18 rows of the level-0 shaman hat 12620. A hat has no proto applies, so each row's seven
+attribute columns carry seven of the 120 types (`ModifyPoints`, `G/item.cpp:1034-1037`). Each hat
+is worn on the head cell and taken off again, and for every type the scenario reads the
+`GC_CHARACTER_POINT_CHANGE` of its point in both moves: the last total the wear sends less the
+last total the take-off sends is the attribute's value. Reading both moves means a point with a
+base (strength, the speeds, the defence grade) needs no hand sum. `APPLY_MAGIC_ATTBONUS_PER`
+(83) is the exception the scenario pins: its point has no `PointChange` arm, so legacy's
+`default` returns before the send (`G/char.cpp:4773-4775`), and neither move carries it.
+
+The equip gate reads only the last attack and skill times (`G/char_item.cpp:8417-8423`), so
+only the first wear waits out the 1.5 s the select arms; the 36 moves take about 30 s, and the
+scenario sets a 600 s ping cycle so a slow run cannot meet a ping inside a move.
+
+`every_apply_type_with_its_own_arm_moves_its_points_as_legacy` (shipped mode) takes the types
+with an arm of their own, one hat each, worn and taken off twice. It keeps the client's view of
+every point from the records in the order they come and checks each type's records against it:
+`APPLY_CON` raises `POINT_HT`, `POINT_MAX_HP` by 40 times the value and `POINT_MAX_STAMINA` by 5
+times it (a shaman's row, `G/constants.cpp:22`); `APPLY_INT` raises `POINT_IQ` and
+`POINT_MAX_SP` by 20 times it; `APPLY_MAX_HP`, `APPLY_MAX_SP` and their percentages send the new
+maximum (`real + MIN(3500, real * pct / 100)`, 800 for the spell points), the percentage, and
+the points moved by the maximum's ratio in `float` and capped by what the new maximum leaves
+(`G/char.cpp:4247-4263`, `4302-4342`); and each of the four grade bonuses sends its grade, raised
+by the same amount, before its own record. Alpha starts below both maxima, so the ratio moves
+real points. A hat carrying `APPLY_EXTRACT_HP_PCT` (75) and type 200 sends exactly what the bare
+hat sends: legacy's `default` arm changes nothing.
+
+`points.md`: 125 `point.apply.*` rows and 106 `point.change.*` rows are `ported`: the plain arms
+of the points the 120 types name (the four `SUNGMA` arms among them), the two percentages, the
+four grade bonuses and the two magic grades they chain into, and both `default` arms. The arms
+with more than these moves stay `partial` with their `Left:` notes: the four immunity flags,
+the nine bonuses capped at 100, and the second-switch `ComputeBattlePoints` rows.
+
+231 rows are `ported`; 345 items are left (576 at ledger 688).
+
+The first gate run failed Clippy on the scenario (`too_many_lines`, `format_push_string`); the
+table moved to the module-level `PLAIN_APPLIES` and the receipt below is the second run.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,666
+passed, 0 failed in 46 targets; with it 5,666 passed, 0 failed in 46 targets (452 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,504 `ported`, 305 `partial`, 482 `unused`, 40 `missing`,
+0 `codec`, of 2,331 rows; 526 scenarios. No ADR changed.

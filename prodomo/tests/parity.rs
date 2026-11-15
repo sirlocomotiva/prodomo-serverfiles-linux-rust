@@ -11361,6 +11361,471 @@ fn an_armour_is_worn_swapped_and_taken_off_and_the_store_follows() {
     );
 }
 
+/// The level-0 shaman hat 12620, which has no proto applies, so the attribute columns of its
+/// rows are the only applies it makes.
+const SHAMAN_HAT: u32 = 12_620;
+
+/// (apply type, point kind, value) for the 120 types `ApplyPoint` hands straight to
+/// `PointChange`: the `aApplyInfo` row of each, with rows 90 and 91 exchanged.
+const PLAIN_APPLIES: [(u8, u8, i16); 120] = [
+    (5, 12, 2),     // APPLY_STR -> POINT_ST
+    (6, 14, 3),     // APPLY_DEX -> POINT_DX
+    (7, 17, 4),     // APPLY_ATT_SPEED -> POINT_ATT_SPEED
+    (8, 19, 5),     // APPLY_MOV_SPEED -> POINT_MOV_SPEED
+    (9, 21, 6),     // APPLY_CAST_SPEED -> POINT_CASTING_SPEED
+    (10, 32, 7),    // APPLY_HP_REGEN -> POINT_HP_REGEN
+    (11, 33, 8),    // APPLY_SP_REGEN -> POINT_SP_REGEN
+    (12, 37, 3),    // APPLY_POISON_PCT -> POINT_POISON_PCT
+    (13, 38, 4),    // APPLY_STUN_PCT -> POINT_STUN_PCT
+    (14, 39, 5),    // APPLY_SLOW_PCT -> POINT_SLOW_PCT
+    (15, 40, 6),    // APPLY_CRITICAL_PCT -> POINT_CRITICAL_PCT
+    (16, 41, 7),    // APPLY_PENETRATE_PCT -> POINT_PENETRATE_PCT
+    (17, 43, 8),    // APPLY_ATTBONUS_HUMAN -> POINT_ATTBONUS_HUMAN
+    (18, 44, 9),    // APPLY_ATTBONUS_ANIMAL -> POINT_ATTBONUS_ANIMAL
+    (19, 45, 4),    // APPLY_ATTBONUS_ORC -> POINT_ATTBONUS_ORC
+    (20, 46, 5),    // APPLY_ATTBONUS_MILGYO -> POINT_ATTBONUS_MILGYO
+    (21, 47, 6),    // APPLY_ATTBONUS_UNDEAD -> POINT_ATTBONUS_UNDEAD
+    (22, 48, 7),    // APPLY_ATTBONUS_DEVIL -> POINT_ATTBONUS_DEVIL
+    (23, 63, 8),    // APPLY_STEAL_HP -> POINT_STEAL_HP
+    (24, 64, 9),    // APPLY_STEAL_SP -> POINT_STEAL_SP
+    (25, 65, 10),   // APPLY_MANA_BURN_PCT -> POINT_MANA_BURN_PCT
+    (26, 66, 2),    // APPLY_DAMAGE_SP_RECOVER -> POINT_DAMAGE_SP_RECOVER
+    (27, 67, 3),    // APPLY_BLOCK -> POINT_BLOCK
+    (28, 68, 4),    // APPLY_DODGE -> POINT_DODGE
+    (29, 69, 5),    // APPLY_RESIST_SWORD -> POINT_RESIST_SWORD
+    (30, 70, 6),    // APPLY_RESIST_TWOHAND -> POINT_RESIST_TWOHAND
+    (31, 71, 7),    // APPLY_RESIST_DAGGER -> POINT_RESIST_DAGGER
+    (32, 72, 8),    // APPLY_RESIST_BELL -> POINT_RESIST_BELL
+    (33, 73, 3),    // APPLY_RESIST_FAN -> POINT_RESIST_FAN
+    (34, 74, 4),    // APPLY_RESIST_BOW -> POINT_RESIST_BOW
+    (35, 75, 5),    // APPLY_RESIST_FIRE -> POINT_RESIST_FIRE
+    (36, 76, 6),    // APPLY_RESIST_ELEC -> POINT_RESIST_ELEC
+    (37, 77, 7),    // APPLY_RESIST_MAGIC -> POINT_RESIST_MAGIC
+    (38, 78, 8),    // APPLY_RESIST_WIND -> POINT_RESIST_WIND
+    (39, 79, 9),    // APPLY_REFLECT_MELEE -> POINT_REFLECT_MELEE
+    (40, 80, 4),    // APPLY_REFLECT_CURSE -> POINT_REFLECT_CURSE
+    (41, 81, 5),    // APPLY_POISON_REDUCE -> POINT_POISON_REDUCE
+    (42, 82, 6),    // APPLY_KILL_SP_RECOVER -> POINT_KILL_SP_RECOVER
+    (43, 83, 7),    // APPLY_EXP_DOUBLE_BONUS -> POINT_EXP_DOUBLE_BONUS
+    (44, 84, 8),    // APPLY_GOLD_DOUBLE_BONUS -> POINT_GOLD_DOUBLE_BONUS
+    (45, 85, 9),    // APPLY_ITEM_DROP_BONUS -> POINT_ITEM_DROP_BONUS
+    (46, 86, 10),   // APPLY_POTION_BONUS -> POINT_POTION_BONUS
+    (47, 87, 2),    // APPLY_KILL_HP_RECOVER -> POINT_KILL_HP_RECOVERY
+    (48, 88, 3),    // APPLY_IMMUNE_STUN -> POINT_IMMUNE_STUN
+    (49, 89, 4),    // APPLY_IMMUNE_SLOW -> POINT_IMMUNE_SLOW
+    (50, 90, 5),    // APPLY_IMMUNE_FALL -> POINT_IMMUNE_FALL
+    (52, 34, 6),    // APPLY_BOW_DISTANCE -> POINT_BOW_DISTANCE
+    (53, 95, 7),    // APPLY_ATT_GRADE_BONUS -> POINT_ATT_GRADE_BONUS
+    (54, 96, 8),    // APPLY_DEF_GRADE_BONUS -> POINT_DEF_GRADE_BONUS
+    (55, 97, 3),    // APPLY_MAGIC_ATT_GRADE -> POINT_MAGIC_ATT_GRADE_BONUS
+    (56, 98, 4),    // APPLY_MAGIC_DEF_GRADE -> POINT_MAGIC_DEF_GRADE_BONUS
+    (57, 42, 5),    // APPLY_CURSE_PCT -> POINT_CURSE_PCT
+    (58, 10, 6),    // APPLY_MAX_STAMINA -> POINT_MAX_STAMINA
+    (59, 54, 7),    // APPLY_ATTBONUS_WARRIOR -> POINT_ATTBONUS_WARRIOR
+    (60, 55, 8),    // APPLY_ATTBONUS_ASSASSIN -> POINT_ATTBONUS_ASSASSIN
+    (61, 56, 9),    // APPLY_ATTBONUS_SURA -> POINT_ATTBONUS_SURA
+    (62, 57, 4),    // APPLY_ATTBONUS_SHAMAN -> POINT_ATTBONUS_SHAMAN
+    (63, 53, 5),    // APPLY_ATTBONUS_MONSTER -> POINT_ATTBONUS_MONSTER
+    (64, 93, 6),    // APPLY_MALL_ATTBONUS -> POINT_ATT_BONUS
+    (65, 115, 7),   // APPLY_MALL_DEFBONUS -> POINT_MALL_DEFBONUS
+    (66, 116, 8),   // APPLY_MALL_EXPBONUS -> POINT_MALL_EXPBONUS
+    (67, 117, 9),   // APPLY_MALL_ITEMBONUS -> POINT_MALL_ITEMBONUS
+    (68, 118, 10),  // APPLY_MALL_GOLDBONUS -> POINT_MALL_GOLDBONUS
+    (71, 121, 2),   // APPLY_SKILL_DAMAGE_BONUS -> POINT_SKILL_DAMAGE_BONUS
+    (72, 122, 3),   // APPLY_NORMAL_HIT_DAMAGE_BONUS -> POINT_NORMAL_HIT_DAMAGE_BONUS
+    (73, 123, 4),   // APPLY_SKILL_DEFEND_BONUS -> POINT_SKILL_DEFEND_BONUS
+    (74, 124, 5),   // APPLY_NORMAL_HIT_DEFEND_BONUS -> POINT_NORMAL_HIT_DEFEND_BONUS
+    (76, 59, 6),    // APPLY_RESIST_WARRIOR -> POINT_RESIST_WARRIOR
+    (77, 60, 7),    // APPLY_RESIST_ASSASSIN -> POINT_RESIST_ASSASSIN
+    (78, 61, 8),    // APPLY_RESIST_SURA -> POINT_RESIST_SURA
+    (79, 62, 3),    // APPLY_RESIST_SHAMAN -> POINT_RESIST_SHAMAN
+    (80, 128, 4),   // APPLY_ENERGY -> POINT_ENERGY
+    (81, 16, 5),    // APPLY_DEF_GRADE -> POINT_DEF_GRADE
+    (83, 131, 6),   // APPLY_MAGIC_ATTBONUS_PER -> POINT_MAGIC_ATT_BONUS_PER
+    (84, 132, 7),   // APPLY_MELEE_MAGIC_ATTBONUS_PER -> POINT_MELEE_MAGIC_ATT_BONUS_PER
+    (85, 133, 8),   // APPLY_RESIST_ICE -> POINT_RESIST_ICE
+    (86, 134, 9),   // APPLY_RESIST_EARTH -> POINT_RESIST_EARTH
+    (87, 135, 4),   // APPLY_RESIST_DARK -> POINT_RESIST_DARK
+    (88, 136, 5),   // APPLY_ANTI_CRITICAL_PCT -> POINT_RESIST_CRITICAL
+    (89, 137, 6),   // APPLY_ANTI_PENETRATE_PCT -> POINT_RESIST_PENETRATE
+    (90, 147, 7),   // APPLY_ATTBONUS_BOSS -> POINT_ATTBONUS_BOSS
+    (91, 146, 8),   // APPLY_ATTBONUS_METIN -> POINT_ATTBONUS_METIN
+    (92, 148, 9),   // APPLY_ENCHANT_ELECT -> POINT_ENCHANT_ELECT
+    (93, 149, 10),  // APPLY_ENCHANT_FIRE -> POINT_ENCHANT_FIRE
+    (94, 150, 2),   // APPLY_ENCHANT_ICE -> POINT_ENCHANT_ICE
+    (95, 151, 3),   // APPLY_ENCHANT_WIND -> POINT_ENCHANT_WIND
+    (96, 152, 4),   // APPLY_ENCHANT_EARTH -> POINT_ENCHANT_EARTH
+    (97, 153, 5),   // APPLY_ENCHANT_DARK -> POINT_ENCHANT_DARK
+    (98, 169, 6),   // APPLY_SUNGMA_STR -> POINT_SUNGMA_STR
+    (99, 170, 7),   // APPLY_SUNGMA_HP -> POINT_SUNGMA_HP
+    (100, 171, 8),  // APPLY_SUNGMA_MOVE -> POINT_SUNGMA_MOVE
+    (101, 172, 3),  // APPLY_SUNGMA_IMMUNE -> POINT_SUNGMA_IMMUNE
+    (102, 178, 4),  // APPLY_ATTBONUS_ANIMAL_PCT -> POINT_ATTBONUS_ANIMAL_PCT
+    (103, 179, 5),  // APPLY_ATTBONUS_UNDEAD_PCT -> POINT_ATTBONUS_UNDEAD_PCT
+    (104, 180, 6),  // APPLY_ATTBONUS_DEVIL_PCT -> POINT_ATTBONUS_DEVIL_PCT
+    (105, 181, 7),  // APPLY_ATTBONUS_ORC_PCT -> POINT_ATTBONUS_ORC_PCT
+    (106, 182, 8),  // APPLY_ATTBONUS_MILGYO_PCT -> POINT_ATTBONUS_MILGYO_PCT
+    (107, 183, 9),  // APPLY_ATTBONUS_DESERT_PCT -> POINT_ATTBONUS_DESERT_PCT
+    (108, 184, 4),  // APPLY_ATTBONUS_INSECT_PCT -> POINT_ATTBONUS_INSECT_PCT
+    (109, 185, 5),  // APPLY_ATTBONUS_TREE_PCT -> POINT_ATTBONUS_TREE_PCT
+    (110, 186, 6),  // APPLY_ATTBONUS_BOSS_PCT -> POINT_ATTBONUS_BOSS_PCT
+    (111, 187, 7),  // APPLY_ATTBONUS_METIN_PCT -> POINT_ATTBONUS_METIN_PCT
+    (112, 188, 8),  // APPLY_ATTBONUS_CZ_PCT -> POINT_ATTBONUS_CZ_PCT
+    (113, 189, 9),  // APPLY_ATTBONUS_HUMAN_PCT -> POINT_ATTBONUS_HUMAN_PCT
+    (114, 190, 10), // APPLY_ATTBONUS_MONSTER_PCT -> POINT_ATTBONUS_MONSTER_PCT
+    (115, 191, 2),  // APPLY_ENCHANT_ELECT_PCT -> POINT_ENCHANT_ELECT_PCT
+    (116, 192, 3),  // APPLY_ENCHANT_FIRE_PCT -> POINT_ENCHANT_FIRE_PCT
+    (117, 193, 4),  // APPLY_ENCHANT_ICE_PCT -> POINT_ENCHANT_ICE_PCT
+    (118, 194, 5),  // APPLY_ENCHANT_WIND_PCT -> POINT_ENCHANT_WIND_PCT
+    (119, 195, 6),  // APPLY_ENCHANT_EARTH_PCT -> POINT_ENCHANT_EARTH_PCT
+    (120, 196, 7),  // APPLY_ENCHANT_DARK_PCT -> POINT_ENCHANT_DARK_PCT
+    (121, 197, 8),  // APPLY_RESIST_ELECT_PCT -> POINT_RESIST_ELECT_PCT
+    (122, 198, 3),  // APPLY_RESIST_FIRE_PCT -> POINT_RESIST_FIRE_PCT
+    (123, 199, 4),  // APPLY_RESIST_ICE_PCT -> POINT_RESIST_ICE_PCT
+    (124, 200, 5),  // APPLY_RESIST_WIND_PCT -> POINT_RESIST_WIND_PCT
+    (125, 201, 6),  // APPLY_RESIST_EARTH_PCT -> POINT_RESIST_EARTH_PCT
+    (126, 202, 7),  // APPLY_RESIST_DARK_PCT -> POINT_RESIST_DARK_PCT
+    (127, 203, 8),  // APPLY_RESIST_HUMAN_PCT -> POINT_RESIST_HUMAN_PCT
+    (128, 204, 9),  // APPLY_RESIST_FALL -> POINT_RESIST_FALL
+    (129, 205, 4),  // APPLY_RESIST_COMBAT -> POINT_RESIST_COMBAT
+];
+
+/// `point.apply.*`: every apply type `ApplyPoint` hands straight to `PointChange`
+/// (`G/char.cpp:4896-5037`) raises the point `aApplyInfo` names for it by its value, and
+/// taking the item off takes the value back.
+///
+/// Alpha (a shaman) holds 18 rows of the level-0 shaman hat 12620, each carrying seven of
+/// the 120 apply types in its attribute columns; a hat has no proto applies, so the
+/// attributes are all `ModifyPoints` adds (`G/item.cpp:1034-1037`). Each hat
+/// is moved onto the head cell (181) and back to its own cell. For every type the
+/// `GC_CHARACTER_POINT_CHANGE` of its point is read in both moves: the last value the wear
+/// sends less the last value the take-off sends is the attribute's value. The take-off is read
+/// as well as the wear so a point with a base (strength, the speeds) needs no hand sum. The
+/// first wear waits out the 1.5 s gate the select arms (`G/char_item.cpp:8417-8423`), which
+/// reads the last attack and skill times only, so no later move waits. Rows 90 and 91 follow
+/// the Rewrite's exchanged boss and metin rows (`world::character::apply`). One type is the
+/// exception: `APPLY_MAGIC_ATTBONUS_PER` (83) names `POINT_MAGIC_ATT_BONUS_PER`, which has no
+/// `PointChange` arm, so legacy's `default` returns before the send (`G/char.cpp:4773-4775`)
+/// and neither move carries that point.
+#[test]
+fn every_plain_apply_type_raises_its_own_point_while_worn() {
+    const HAT: u32 = SHAMAN_HAT;
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let protos = owners_protos();
+    let hat = protos.get(HAT).expect("the owner's data has the hat");
+    assert_eq!(hat.item_type, gamedata::item_kind::ITEM_ARMOR);
+    assert!(
+        hat.applies.iter().all(|apply| apply.kind == 0),
+        "no proto applies"
+    );
+    assert_eq!(hat.limits[0].value, 0, "a level-0 hat");
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        // The 36 moves take half a minute; a slow run must not meet the ping inside a move.
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (cell, chunk) in PLAIN_APPLIES.chunks(7).enumerate() {
+        let columns = (0..chunk.len())
+            .map(|slot| format!("attrtype{slot}, attrvalue{slot}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = chunk
+            .iter()
+            .map(|(apply, _, value)| format!("{apply}, {value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id = 30 + cell;
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, {columns}) \
+                 SELECT {id}, id, 1, {cell}, 1, {HAT}, {values} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _character, _quickslots, items) =
+        load_with_quickslots_in(&server, b"alice", 0, GERMAN);
+    assert_eq!(items.len(), 18);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    let last = |seen: &[Seen], kind: u8| {
+        seen.iter().rev().find_map(|seen| match seen {
+            Seen::Point(at, value) if *at == kind => Some(*value),
+            _ => None,
+        })
+    };
+    for (cell, chunk) in PLAIN_APPLIES.chunks(7).enumerate() {
+        let cell = u16::try_from(cell).expect("a cell");
+        if cell == 0 {
+            std::thread::sleep(Duration::from_millis(1600));
+        }
+        alpha.send_record(&client_item_move(cell, 181, 0));
+        let worn = read_a_move(&mut alpha, vid);
+        assert_eq!(
+            worn[..2],
+            [Seen::Set(cell, 0), Seen::Set(181, HAT)],
+            "the hat is worn"
+        );
+        alpha.send_record(&client_item_move(181, cell, 0));
+        let off = read_a_move(&mut alpha, vid);
+        assert!(
+            off.contains(&Seen::Set(cell, HAT)),
+            "the hat is back at {cell}: {off:?}"
+        );
+        for &(apply, kind, value) in chunk {
+            if apply == 83 {
+                assert_eq!(
+                    (last(&worn, kind), last(&off, kind)),
+                    (None, None),
+                    "point {kind} has no arm"
+                );
+                continue;
+            }
+            let (Some(on), Some(bare)) = (last(&worn, kind), last(&off, kind)) else {
+                panic!("apply {apply} sends point {kind} both ways: {worn:?} / {off:?}");
+            };
+            assert_eq!(
+                on - bare,
+                i64::from(value),
+                "apply {apply} raises point {kind}"
+            );
+        }
+    }
+}
+
+/// The apply types of [`every_apply_type_with_its_own_arm_moves_its_points_as_legacy`]
+/// and the value each hat carries.
+const SPECIAL_APPLIES: [(u8, i16); 10] = [
+    (3, 5),   // APPLY_CON
+    (4, 6),   // APPLY_INT
+    (1, 300), // APPLY_MAX_HP
+    (69, 7),  // APPLY_MAX_HP_PCT
+    (2, 200), // APPLY_MAX_SP
+    (70, 9),  // APPLY_MAX_SP_PCT
+    (53, 11), // APPLY_ATT_GRADE_BONUS
+    (54, 12), // APPLY_DEF_GRADE_BONUS
+    (55, 13), // APPLY_MAGIC_ATT_GRADE
+    (56, 14), // APPLY_MAGIC_DEF_GRADE
+];
+
+/// The `GC_CHARACTER_POINT_CHANGE` records of a move, kind and value, in the order they came.
+fn point_records(seen: &[Seen]) -> Vec<(u8, i64)> {
+    seen.iter()
+        .filter_map(|seen| match seen {
+            Seen::Point(kind, value) => Some((*kind, *value)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The point kinds a special apply type's records carry, in the order legacy sends them:
+/// `HT`, `MAX_HP`, `MAX_STAMINA` for `APPLY_CON`; the maximum, the percentage and the points
+/// for the two percentages; a grade before its bonus.
+fn special_apply_kinds(apply: u8) -> &'static [u8] {
+    match apply {
+        3 => &[13, 6, 10],
+        4 => &[15, 8],
+        1 => &[6, 5],
+        69 => &[6, 119, 5],
+        2 => &[8, 7],
+        70 => &[8, 120, 7],
+        53 => &[18, 95],
+        54 => &[20, 16, 96],
+        55 => &[22, 97],
+        _ => &[23, 98],
+    }
+}
+
+/// The hit or spell points after `ApplyPoint` moved the maximum from `before` to `after`:
+/// `GetHP() * fRatio - GetHP()` in `float`, then capped by what the new maximum leaves
+/// (`G/char.cpp:4247-4263`).
+fn points_after_ratio(points: i64, before: i64, after: i64) -> i64 {
+    let float = |value: i64| i32_to_f32(i32::try_from(value).expect("an int"));
+    let moved = f32_to_i32(float(points) * (float(after) / float(before)) - float(points));
+    points + i64::from(moved).min(after - points)
+}
+
+/// The values the records of [`special_apply_kinds`] carry when a hat with `apply` at
+/// `value` is worn (`sign` 1) or taken off (-1), given the client's view `get` of the points
+/// and the real maxima `real` before the wear. `None` while a point has not been seen.
+fn special_apply_values(
+    (apply, value): (u8, i16),
+    sign: i64,
+    real: (i64, i64),
+    get: impl Fn(u8) -> Option<i64>,
+) -> Option<Vec<i64>> {
+    let s = sign * i64::from(value);
+    Some(match apply {
+        3 => vec![get(13)? + s, get(6)? + 40 * s, get(10)? + 5 * s],
+        4 => vec![get(15)? + s, get(8)? + 20 * s],
+        1 | 2 => {
+            let (max, points) = if apply == 1 { (6, 5) } else { (8, 7) };
+            let after = get(max)? + s;
+            vec![after, points_after_ratio(get(points)?, get(max)?, after)]
+        }
+        69 | 70 => {
+            let (max, pct, points, real, cap) = if apply == 69 {
+                (6, 119, 5, real.0, 3500)
+            } else {
+                (8, 120, 7, real.1, 800)
+            };
+            let after = if sign > 0 {
+                real + (real * i64::from(value) / 100).min(cap)
+            } else {
+                real
+            };
+            vec![
+                after,
+                get(pct).unwrap_or(0) + s,
+                points_after_ratio(get(points)?, get(max)?, after),
+            ]
+        }
+        54 => vec![get(20)? + s, get(16)? + s, get(96).unwrap_or(0) + s],
+        _ => {
+            let kinds = special_apply_kinds(apply);
+            vec![get(kinds[0])? + s, get(kinds[1]).unwrap_or(0) + s]
+        }
+    })
+}
+
+/// `point.apply.*`: the apply types with an arm of their own in `ApplyPoint`
+/// (`G/char.cpp:4830-4893`), the grade bonuses that chain into their grade
+/// (`G/char.cpp:4674-4696`), and the types `ApplyPoint` has no arm for.
+///
+/// Alpha (a shaman) holds [`SHAMAN_HAT`] twelve times: bare, with two types no arm takes
+/// (`APPLY_EXTRACT_HP_PCT`, 75, and 200, past `MAX_APPLY_NUM`), and once for each of
+/// [`SPECIAL_APPLIES`], which it wears and takes off twice. The scenario keeps the client's
+/// view of every point from the `GC_CHARACTER_POINT_CHANGE` records in the order they come, and
+/// checks the records each type sends ([`special_apply_kinds`]) against it
+/// ([`special_apply_values`]):
+///
+/// - `APPLY_CON` raises `POINT_HT` by the value, `POINT_MAX_HP` by 40 times it and
+///   `POINT_MAX_STAMINA` by 5 times it, a shaman's `hp_per_ht` and `stamina_per_con`
+///   (`G/constants.cpp:22`); `APPLY_INT` raises `POINT_IQ` and `POINT_MAX_SP` by 20 times it.
+/// - `APPLY_MAX_HP` and `APPLY_MAX_HP_PCT` change the maximum, then move the hit points by
+///   the maximum's ratio. The percentage adds `MIN(3500, real * pct / 100)` to the real
+///   maximum (`G/char.cpp:4302-4318`), and its own record follows the maximum's, which its arm
+///   sends first (`G/char.cpp:4337-4342`). The spell points do the same with a cap of 800.
+/// - A grade bonus sends its grade's record before its own, and the defence grade sends the
+///   shown grade's first.
+///
+/// The types without an arm send what the bare hat sends, record for record. The first wear
+/// of each hat learns the points it had not seen; every later move is checked in full. Alpha
+/// starts at 500 hit and 300 spell points, below both maxima.
+#[test]
+fn every_apply_type_with_its_own_arm_moves_its_points_as_legacy() {
+    use std::collections::HashMap;
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 500, sp = 300 WHERE name = 'Alpha'",
+    );
+    let mut hats = vec![
+        (0, "0, 0, 0, 0".to_owned()),
+        (1, "75, 9, 200, 9".to_owned()),
+    ];
+    for (index, (apply, value)) in SPECIAL_APPLIES.iter().enumerate() {
+        hats.push((index + 2, format!("{apply}, {value}, 0, 0")));
+    }
+    for (cell, values) in &hats {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, \
+                 attrvalue0, attrtype1, attrvalue1) SELECT {}, id, 1, {cell}, 1, {SHAMAN_HAT}, \
+                 {values} FROM player WHERE name = 'Alpha'",
+                30 + cell
+            ),
+        );
+    }
+    let (mut alpha, _character, _quickslots, items) =
+        load_with_quickslots_in(&server, b"alice", 0, GERMAN);
+    assert_eq!(items.len(), 12);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    std::thread::sleep(Duration::from_millis(1600));
+    let mut move_hat = |from: u16, to: u16| {
+        alpha.send_record(&client_item_move(from, to, 0));
+        read_a_move(&mut alpha, vid)
+    };
+
+    // The types no arm takes: the wear and the take-off send what the bare hat's do, less
+    // the cells and any regeneration of the hit, spell or stamina points.
+    let quiet = |seen: Vec<Seen>| -> Vec<Seen> {
+        seen.into_iter()
+            .filter(|seen| !matches!(seen, Seen::Set(..) | Seen::Point(5 | 7 | 9, _)))
+            .collect()
+    };
+    let bare = (quiet(move_hat(0, 181)), quiet(move_hat(181, 0)));
+    let armless = (quiet(move_hat(1, 181)), quiet(move_hat(181, 1)));
+    assert_eq!(armless, bare, "types 75 and 200 change nothing");
+
+    // The ten types with an arm, against the client's view of the points.
+    let mut state: HashMap<u8, i64> = HashMap::new();
+    let mut checked = 0;
+    for (index, &special) in SPECIAL_APPLIES.iter().enumerate() {
+        let (apply, cell) = (special.0, u16::try_from(index + 2).expect("a cell"));
+        let kinds = special_apply_kinds(apply);
+        let mut real = (0, 0);
+        for round in 0..4 {
+            let sign = if round % 2 == 0 { 1 } else { -1 };
+            let seen = if sign > 0 {
+                move_hat(cell, 181)
+            } else {
+                move_hat(181, cell)
+            };
+            let points = point_records(&seen);
+            let at = points
+                .windows(kinds.len())
+                .position(|window| {
+                    window
+                        .iter()
+                        .map(|(kind, _)| *kind)
+                        .eq(kinds.iter().copied())
+                })
+                .unwrap_or_else(|| panic!("apply {apply} sends {kinds:?}: {seen:?}"));
+            state.extend(points[..at].iter().copied());
+            if sign > 0 {
+                real = (
+                    state.get(&6).copied().unwrap_or(0),
+                    state.get(&8).copied().unwrap_or(0),
+                );
+            }
+            let want = special_apply_values(special, sign, real, |kind| state.get(&kind).copied());
+            let sent: Vec<i64> = points[at..at + kinds.len()]
+                .iter()
+                .map(|(_, value)| *value)
+                .collect();
+            if let Some(want) = want {
+                assert_eq!(sent, want, "apply {apply} round {round}: {seen:?}");
+                checked += 1;
+            } else {
+                assert_eq!(round, 0, "apply {apply} knows its points after a wear");
+            }
+            state.extend(points[at..].iter().copied());
+        }
+    }
+    assert!(
+        checked >= 30,
+        "every move after the first wear is checked: {checked}"
+    );
+}
 /// `sys.item.costume`: a fan is worn, a costume weapon covers it, `/hide_costume 5`
 /// shows the fan again, and taking the weapon off first takes the costume off.
 ///
