@@ -176,8 +176,8 @@ pub(super) fn str_to_wrapping_int(text: &[u8]) -> i32 {
 impl GameState {
     /// `ACMD(do_setskill)`: the caller's skill becomes the line's level.
     /// Answers the landed set for the store, or `None` for a line that runs
-    /// nothing. `SetSkillLevel`'s 7/8 gate refuses silently: the caller heard
-    /// nothing either way, and legacy sends no compute then.
+    /// nothing or a set `SetSkillLevel`'s 7/8 gate refuses; that one still
+    /// sends the compute and byte 76.
     pub(super) fn run_setskill(&mut self, vid: Vid, rest: &[u8]) -> Option<SetSkillLanded> {
         let mover = self.own_mover(vid)?;
         let (first, back) = crate::command::one_argument(rest);
@@ -464,20 +464,22 @@ impl GameState {
 
     /// `SetSkillLevel` + `ComputePoints` + `SkillLevelPacket`: the level
     /// plants (past the 7/8 gate), then the compute and byte 76 go out.
+    /// `SetSkillLevel` is `void`, so a set the gate refuses still computes and
+    /// sends byte 76 (`G/char_skill.cpp:196-200`, `G/cmd_gm.cpp:2605-2607`).
     /// Answers the landed set for the store, or `None` when the gate refuses.
     fn set_skill_level(&mut self, vid: Vid, vnum: u8, level: u8) -> Option<SetSkillLanded> {
-        if level != 0 && !self.skill_can_up(vid, u32::from(vnum)) {
-            return None;
-        }
+        let refused = level != 0 && !self.skill_can_up(vid, u32::from(vnum));
         let landed = level.min(40);
         let state = self.pc_skills.entry(vid.raw()).or_default();
-        state.levels[usize::from(vnum)] = landed;
+        if !refused {
+            state.levels[usize::from(vnum)] = landed;
+        }
         let next_read = state.next_read[usize::from(vnum)];
         let points = self.pc_points_mut(vid.raw())?;
         let computed = points.compute_points();
         self.send_point_records(vid, &computed);
         self.send_skill_levels(vid);
-        Some(SetSkillLanded {
+        (!refused).then_some(SetSkillLanded {
             vnum,
             level: landed,
             next_read,
@@ -700,7 +702,8 @@ mod tests {
 
     /// The 7/8 gate: 221 climbs while its family stands at 0, 222 refuses
     /// beside it, the re-set of 221 passes, 0 always lands, and 229 refuses
-    /// any nonzero level through the `default` arm.
+    /// any nonzero level through the `default` arm. A refused set still sends
+    /// byte 76 (`SetSkillLevel` is `void`; `G/cmd_gm.cpp:2605-2607`).
     #[test]
     fn a_setskill_holds_the_new_family_line() {
         let clock = TestClock::default();
@@ -715,7 +718,12 @@ mod tests {
             world.run_setskill(Vid::new(VID), b"222 20").is_none(),
             "222 refuses beside 221"
         );
-        assert!(inbox.try_recv().is_err(), "the refusal is silent");
+        let last = std::iter::from_fn(|| inbox.try_recv().ok()).last();
+        assert_eq!(
+            last.map(|record| record[0]),
+            Some(76),
+            "the refusal sends byte 76"
+        );
         let set = world
             .run_setskill(Vid::new(VID), b"221 30")
             .expect("221 re-sets");
@@ -729,7 +737,12 @@ mod tests {
             world.run_setskill(Vid::new(VID), b"229 20").is_none(),
             "229 refuses through default"
         );
-        assert!(inbox.try_recv().is_err(), "the refusal is silent");
+        let last = std::iter::from_fn(|| inbox.try_recv().ok()).last();
+        assert_eq!(
+            last.map(|record| record[0]),
+            Some(76),
+            "the refusal sends byte 76"
+        );
         assert_eq!(world.pc_skill_level(VID, 222), 0);
         assert_eq!(world.pc_skill_level(VID, 229), 0);
     }

@@ -52249,6 +52249,71 @@ fn the_arena_refuses_each_potion_by_its_list_and_the_flags() {
     close_arena_pair(&mut server, alice, yankee);
 }
 
+/// `SkillCanUp` (`G/char_skill.cpp:909-1144`): a skill of the ward family (221-228) or the aid
+/// family (236-243) may be set above 0 only while every other member of its own family stands
+/// at 0, and 229, inside the gated range but in no family, never (the `default` arm).
+///
+/// Alpha, an implementor, sets each member to 1 with `/setskill`, which runs `SetSkillLevel`'s
+/// gate (`G/char_skill.cpp:196-200`) and answers with byte 76 whatever the gate decides
+/// (`G/cmd_gm.cpp:2605-2607`). With the member standing, every sibling's set leaves the sibling
+/// at 0, and a set of the member back to 0 passes the gate. A standing ward does not stop an aid
+/// skill: the families are apart.
+#[test]
+fn each_ward_and_aid_skill_climbs_only_while_its_family_stands_at_zero() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    let (mut alice, _) = enter_world_as_implementor(&server);
+    let mut set = |vnum: usize, level: u8| -> u8 {
+        alice.send_record(&client_chat(
+            CHAT_TALKING,
+            format!("/setskill {vnum} {level}").as_bytes(),
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let record = alice
+                .read_game_until(deadline)
+                .expect("byte 76 follows every set");
+            if record[0] == GC_SKILL_LEVEL_NEW {
+                return skill_slot(&record, vnum);
+            }
+        }
+    };
+    for family in [221..=228, 236..=243] {
+        for vnum in family.clone() {
+            assert_eq!(
+                set(vnum, 1),
+                1,
+                "{vnum} climbs while its family stands at 0"
+            );
+            for sibling in family.clone().filter(|sibling| *sibling != vnum) {
+                assert_eq!(
+                    set(sibling, 1),
+                    0,
+                    "{sibling} stays at 0 while {vnum} stands"
+                );
+            }
+            assert_eq!(set(vnum, 0), 0, "a set to 0 passes the gate");
+        }
+    }
+    assert_eq!(set(229, 1), 0, "229 is gated and no arm takes it");
+    assert_eq!(set(221, 1), 1, "a ward stands");
+    assert_eq!(set(236, 1), 1, "an aid skill climbs beside it");
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

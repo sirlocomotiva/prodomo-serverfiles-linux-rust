@@ -56451,3 +56451,37 @@ passed, 0 failed in 46 targets; with it 5,667 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,516 `ported`, 288 `partial`, 487 `unused`, 40 `missing`,
 0 `codec`, of 2,331 rows; 527 scenarios. No ADR changed.
+
+## 691. The ward and aid families' climb gate (B9, `SkillCanUp`)
+
+`SkillCanUp` (`G/char_skill.cpp:909-1144`) lets a skill of the ward family (221-228) or the aid
+family (236-243) rise above 0 only while every other member of its own family stands at 0; 229,
+inside the range its callers gate (`G/char_skill.cpp:196-200` for `SetSkillLevel`, `:738-742`
+for `SkillLevelUp`) but in neither family, falls to the `default` arm and never rises. Only the
+221 arm had a scenario (ledger 643).
+
+The scenario found a Defect in the Rewrite. `SetSkillLevel` is `void`: when its gate refuses, it
+returns, and `do_setskill` and `do_setskillother` still run `ComputePoints` and
+`SkillLevelPacket` (`G/cmd_gm.cpp:2605-2607`, `:2569-2571`). The Rewrite's
+`GameState::set_skill_level` (`prodomo/src/game_state/skill_admin.rs`) returned before the
+compute, so a refused set sent nothing. It now computes and sends byte 76 either way, and still
+answers `None`, so the store writes nothing for a refused set. The unit test
+`skill_admin::tests::a_setskill_holds_the_new_family_line` pinned the silence; it now asserts
+that the refusal sends byte 76.
+
+`each_ward_and_aid_skill_climbs_only_while_its_family_stands_at_zero` (shipped mode): Alpha, an
+implementor, sets each family member to 1 with `/setskill`. Byte 76 shows it at 1; every other
+member's set then leaves that member at 0; the set back to 0 passes the gate. `/setskill 229 1`
+leaves 229 at 0, and with ward 221 standing, aid skill 236 still climbs.
+
+16 rows of `skill-arms.md` are `ported`: the seven ward arms 222-228, the eight aid arms
+236-243, and `default`. 312 items are left (328 at ledger 690).
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,668
+passed, 0 failed in 46 targets; with it 5,668 passed, 0 failed in 46 targets (450 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. The first run failed
+`a_setskill_holds_the_new_family_line` (fixed above) and `a_gaya_craft_spends_and_a_market_opens`,
+which read a 41-byte record where it expected a point change; that scenario passed alone and on
+the rerun, whose figures these are. Parity: 1,532 `ported`, 272 `partial`, 487 `unused`, 40 `missing`,
+0 `codec`, of 2,331 rows; 528 scenarios. No ADR changed.

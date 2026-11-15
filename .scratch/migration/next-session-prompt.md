@@ -1,9 +1,9 @@
-# Next session (after ledger 686)
+# Next session (after ledger 690)
 
 Run `/goal .scratch/migration/migration-goal.md`.
 
 Read `.scratch/migration/progress.md`, then `docs/STATUS.md` from its top to the end of "Waiting on
-the owner". Package A1 is done: 612 items are left, each a `partial` or `missing` row whose note
+the owner". Package A1 is done; package B is under way. The items left (the count is in `progress.md`) are each a `partial` or `missing` row whose note
 ends in `Left:`. Work package B by families (A2): one ledger section, one gate run, one commit.
 
 Prodomo is a from-scratch rewrite. There is no live server, no player data and no owner
