@@ -2443,8 +2443,9 @@ impl GameState {
 
     /// The gold bar's two refusals (`LINGOURI_SURSA`, `G/char_item.cpp:3352-3360`):
     /// with the safebox, a trade, the own shop or the cube open the Romanian
-    /// window line tells, and within the bar's gold of the cap the Romanian
-    /// cap line tells; both keep the bar. Anything else passes.
+    /// window line tells, and when the bar would take the gold to the cap or past it
+    /// (`GOLD_MAX_MAX - amount <= GetGold()`) the Romanian cap line tells; both keep
+    /// the bar. Anything else passes.
     pub(super) fn gold_bar_use_allowed(
         &mut self,
         vid: Vid,
@@ -2477,7 +2478,7 @@ impl GameState {
             .characters
             .find_by_vid(vid)
             .map_or(0, world::character::Character::gold);
-        if u64::from(pays) > world::character::GOLD_MAX_MAX.saturating_sub(held) {
+        if held >= world::character::GOLD_MAX_MAX.saturating_sub(u64::from(pays)) {
             self.tell(vid, mover, CHAT_TYPE_INFO, GOLD_BAR_CAP_LINE, &[]);
             return false;
         }
@@ -7320,8 +7321,9 @@ mod tests {
         );
     }
 
-    /// A gold bar used within its gold of the cap is refused with the Romanian
-    /// cap line, the bar kept (`LINGOURI_SURSA`, `G/char_item.cpp:3357-3361`).
+    /// A gold bar that would take the gold exactly to the cap is refused with the
+    /// Romanian cap line, the bar kept (`GOLD_MAX_MAX - amount <= GetGold()`,
+    /// `LINGOURI_SURSA`, `G/char_item.cpp:3357-3361`).
     #[test]
     fn a_full_purse_refuses_the_gold_bar() {
         use common::item_slots::EWindows;
@@ -7346,7 +7348,7 @@ mod tests {
             .characters
             .find_by_vid_mut(me)
             .expect("the caster is online")
-            .set_gold(world::character::GOLD_MAX_MAX - 1);
+            .set_gold(world::character::GOLD_MAX_MAX - 500_000);
         let mover = Mover {
             recently_fought: false,
             empire: 1,

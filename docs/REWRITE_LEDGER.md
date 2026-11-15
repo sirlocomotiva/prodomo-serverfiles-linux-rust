@@ -56296,3 +56296,39 @@ passed, 0 failed in 46 targets (455 s); doc-tests and `cargo doc` clean; `temp-f
 `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No test failed on the first run. The
 generator was run again after the cells were written and kept every one. No width was measured.
 519 scenarios. No ADR changed.
+
+## 687. The sibling vnums: gold bars, colorants, sky fireworks, the second detector (B9)
+
+The first family slice of package B (A2). Each arm below was already ported and proved for one
+vnum; its other vnums were `partial` in `item-use.md` for want of a scenario. Four scenarios
+prove them, all in the shipped mode (`test_server = false`, ADR-0007), and one of them found a
+boundary the Rewrite got wrong.
+
+### 687.1 The gold bar's cap
+
+Legacy refuses a bar when `GOLD_MAX_MAX - amount <= GetGold()` (`G/char_item.cpp:3357-3361`):
+a bar that would take the gold exactly to the cap is refused, as `ChangeGold` never lets a
+character reach `GOLD_MAX_MAX` (`world::character::GOLD_MAX_MAX`'s own doc). The Rewrite
+refused only past the cap (`pays > GOLD_MAX_MAX - held`), so the bar that lands on it paid.
+`GameState::gold_bar_use_allowed` (`prodomo/src/game_state/pc_skill.rs`) now reads
+`held >= GOLD_MAX_MAX - pays`. The unit test `a_full_purse_refuses_the_gold_bar` moves from one
+below the cap to exactly 500 000 below it, the boundary; with the old comparison put back it
+fails (checked once, the file restored by checksum).
+
+### 687.2 The scenarios
+
+| scenario | rows | what it proves |
+|---|---|---|
+| `every_gold_bar_pays_its_own_yang_and_one_that_reaches_the_cap_is_refused` | `use.item_use.80004`-`80008` | each bar pays its `sGold` entry with its `ChangeGold` record and is spent; Alpha starts 15 000 000 below the cap, so the 80003 after the five would land on it and hears the cap line, pays nothing, and stays |
+| `each_hair_colorant_dyes_its_own_hair_and_stays` | `use.item_use.use_special.70201`-`70203`, `70205`, `70206` | each dyes the hair to its vnum minus 70201 and is never spent; the uses are 3.2 seconds apart, which always clears the whole-second `fix_bug.colorante` wait |
+| `every_sky_firework_flies_its_own_kind_and_the_random_one_draws_one` | `use.item_use.use_special.50101`-`50105`, `71013` | 50101-50105 fly kinds 8-12, 71013 one of 7-12, each from the lighter to herself, each stack shrinking by one |
+| `the_second_detector_names_the_nearest_stone_and_counts_its_use` | `use.item_use.use_special.76006` | 76006 shares 27989's sweep: the stone at 45 degrees, socket 0 from 2 to 3 |
+
+The 17 rows are `ported`. 595 items are left (612 at ledger 686).
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,663
+passed, 0 failed in 46 targets; with it 5,663 passed, 0 failed in 46 targets (455 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,261 `ported`, 555 `partial`, 475 `unused`, 40 `missing`,
+0 `codec`, of 2,331 rows; 523 scenarios. No ADR changed.

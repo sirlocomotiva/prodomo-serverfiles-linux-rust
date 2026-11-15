@@ -61117,6 +61117,94 @@ fn a_gold_bar_pays_its_yang_and_uses_one_up() {
     );
 }
 
+/// `cg.game.item_use`: every gold bar pays its own yang (`LINGOURI_SURSA`,
+/// `G/char_item.cpp:3335-3365`): 80004 1 000 000, 80005 500 000, 80006 1 000 000, 80007
+/// 2 000 000 and 80008 10 000 000, each with its `ChangeGold` record, each bar spent. Alpha
+/// starts so far below `GOLD_MAX_MAX` that the five bars leave her exactly 500 000 under it,
+/// and the 80003 bar after them is refused with the cap line and kept: legacy refuses when
+/// `GOLD_MAX_MAX - amount <= gold` (`:3357-3361`), so a bar that would land exactly on the cap
+/// is refused too.
+#[test]
+fn every_gold_bar_pays_its_own_yang_and_one_that_reaches_the_cap_is_refused() {
+    const GOLD_MAX_MAX: u64 = 1_200_000_000_000_000_000;
+    const BARS: [(u16, u32, u64); 5] = [
+        (0, 80_004, 1_000_000),
+        (1, 80_005, 500_000),
+        (2, 80_006, 1_000_000),
+        (3, 80_007, 2_000_000),
+        (4, 80_008, 10_000_000),
+    ];
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let protos = owners_protos();
+    for (cell, vnum, _) in BARS.iter().copied().chain([(5, 80_003, 500_000)]) {
+        let proto = protos.get(vnum).expect("the owner's data has every bar");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, 10, "the owner's bar {vnum} is USE_SPECIAL");
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'",
+                40 + u32::from(cell)
+            ),
+        );
+    }
+    let paid: u64 = BARS.iter().map(|(_, _, gold)| gold).sum();
+    let start = GOLD_MAX_MAX - 500_000 - paid;
+    sql(
+        &database,
+        &format!("UPDATE player SET gold = {start} WHERE name = 'Alpha'"),
+    );
+    let (mut alpha, listed) = enter_world(&server, b"alice", 0);
+    let vid = listed.id;
+    let mut held = start;
+    // When: Alpha uses each bar. Then: each pays its own gold.
+    for (cell, vnum, gold) in BARS {
+        alpha.send_record(&client_item_use(cell));
+        held += gold;
+        let _before = read_up_to(
+            &mut alpha,
+            &gold_change(vid, i64::try_from(gold).expect("a bar's gold"), held),
+        );
+        wait_for(
+            &database,
+            &format!("NOT EXISTS (SELECT 1 FROM item WHERE vnum = {vnum})"),
+        );
+    }
+    assert_eq!(
+        held,
+        GOLD_MAX_MAX - 500_000,
+        "the five bars leave 500 000 to the cap"
+    );
+    // When: the 80003 bar would land on the cap. Then: the cap line, and the bar stays.
+    alpha.send_record(&client_item_use(5));
+    let before = read_up_to(
+        &mut alpha,
+        &an_info_line(b"Nu poti detine mai mult de x Yang."),
+    );
+    assert!(
+        before
+            .iter()
+            .all(|record| record.first() != Some(&GC_GOLD_CHANGE)),
+        "the refused bar pays nothing: {before:?}"
+    );
+    wait_for(
+        &database,
+        &format!("(SELECT gold = {held} FROM player WHERE name = 'Alpha')"),
+    );
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 45)");
+}
+
 /// `cg.game.item_use`: the 70038 cape of courage (`case USE_SPECIAL`,
 /// `G/char_item.cpp:3879-3888`) gathers the monsters around: at least one of the
 /// twenty-four dogs starts on Alpha and swings (each joins on a one-in-two draw,
@@ -61475,6 +61563,92 @@ fn a_hair_colorant_dyes_and_waits_three_seconds() {
         "the throttle refuses"
     );
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    drop(alpha);
+    drop(server);
+}
+
+/// `cg.game.item_use`: the other five colorants of `case 70201`-`case 70206`
+/// (`G/char_item.cpp:4937-4967`) each dye the hair to the vnum minus 70201 and stay:
+/// Alpha uses 70201, 70202, 70203, 70205 and 70206 in turn, 3 seconds apart (the
+/// `fix_bug.colorante` wait counts whole seconds of `get_global_time`, so 3.2 seconds
+/// always clear it), and each update shows its hair, 0 to 5 but 3.
+#[test]
+fn each_hair_colorant_dyes_its_own_hair_and_stays() {
+    const COLORANTS: [(u16, u32); 5] = [
+        (0, 70_201),
+        (1, 70_202),
+        (2, 70_203),
+        (3, 70_205),
+        (4, 70_206),
+    ];
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let protos = owners_protos();
+    for (cell, vnum) in COLORANTS {
+        let proto = protos
+            .get(vnum)
+            .expect("the owner's data has every colorant");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(
+            proto.sub_type, 10,
+            "the owner's colorant {vnum} is USE_SPECIAL"
+        );
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'",
+                30 + u32::from(cell)
+            ),
+        );
+    }
+    // Alpha's stored hair, 50132, is a dyed head the colorant refuses.
+    sql(
+        &database,
+        "UPDATE player SET part_hair = 100 WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    for (at, (cell, vnum)) in COLORANTS.into_iter().enumerate() {
+        if at > 0 {
+            std::thread::sleep(Duration::from_millis(3_200));
+        }
+        // When: Alpha uses the colorant. Then: the update shows its hair.
+        alpha.send_record(&client_item_use(cell));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let update = loop {
+            let record = alpha
+                .read_game_until(deadline)
+                .unwrap_or_else(|| panic!("{vnum}'s update lands"));
+            if record[0] == GC_CHARACTER_UPDATE {
+                break record;
+            }
+        };
+        let frame =
+            protocol::gc_actors::GcCharacterUpdate::decode(&update).expect("a character update");
+        assert_eq!(
+            u32::from(frame.aw_part[3]),
+            vnum - 70_201,
+            "{vnum} dyes to its vnum - 70201"
+        );
+    }
+    for (cell, _) in COLORANTS {
+        check(
+            &database,
+            &format!(
+                "(SELECT count = 1 FROM item WHERE id = {})",
+                30 + u32::from(cell)
+            ),
+        );
+    }
     drop(alpha);
     drop(server);
 }
@@ -63125,6 +63299,92 @@ fn two_sky_fireworks_fly_from_the_lighter_to_herself() {
     drop(server);
 }
 
+/// `cg.game.item_use`: the middle sky fireworks and the random one (`case 50100`-`case
+/// 50106` and `case 71013`, `G/char_item.cpp:4346-4360`): 50101 to 50105 fly their vnum
+/// minus 50100 plus `FLY_FIREWORK1` (8 to 12), 71013 flies one of `FLY_FIREWORK1` to
+/// `FLY_FIREWORK6` (7 to 12) drawn by `number`, each from Alpha to herself, and each stack
+/// shrinks by one.
+#[test]
+fn every_sky_firework_flies_its_own_kind_and_the_random_one_draws_one() {
+    const FIREWORKS: [(u16, u32); 6] = [
+        (0, 50_101),
+        (1, 50_102),
+        (2, 50_103),
+        (3, 50_104),
+        (4, 50_105),
+        (5, 71_013),
+    ];
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let protos = owners_protos();
+    for (cell, vnum) in FIREWORKS {
+        let proto = protos
+            .get(vnum)
+            .expect("the owner's data has every firework");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(
+            proto.sub_type, 10,
+            "the owner's firework {vnum} is USE_SPECIAL"
+        );
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 2, {vnum} FROM player WHERE name = 'Alpha'",
+                30 + u32::from(cell)
+            ),
+        );
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    for (cell, vnum) in FIREWORKS {
+        // When: Alpha lights the firework. Then: its fly, from her to herself.
+        alpha.send_record(&client_item_use(cell));
+        let fly = loop {
+            let record = alpha
+                .read_game_raw_until(deadline)
+                .unwrap_or_else(|| panic!("{vnum} flies"));
+            if record.len() == CREATE_FLY_LEN && record[0] == GC_CREATE_FLY {
+                break record;
+            }
+        };
+        if vnum == 71_013 {
+            assert!(
+                (7..=12).contains(&fly[1]),
+                "the random fly kind: {}",
+                fly[1]
+            );
+        } else {
+            assert_eq!(u32::from(fly[1]), vnum - 50_100 + 7, "{vnum}'s fly kind");
+        }
+        assert_eq!(
+            u32::from_le_bytes(fly[2..6].try_into().expect("four bytes")),
+            u32::from_le_bytes(fly[6..10].try_into().expect("four bytes")),
+            "from the lighter to herself"
+        );
+    }
+    drop(alpha);
+    for (cell, _) in FIREWORKS {
+        wait_for(
+            &database,
+            &format!(
+                "(SELECT count = 1 FROM item WHERE id = {})",
+                30 + u32::from(cell)
+            ),
+        );
+    }
+    drop(server);
+}
+
 /// `cg.game.item_use`: `case 27987` (`G/char_item.cpp:4294-4344`) cracks the clam
 /// shell: Alpha cracks one of two, hears one of the five shell lines, and the
 /// stack shrinks. The dice seed is random per boot, so the band is whichever the
@@ -63242,6 +63502,58 @@ fn a_detector_names_the_nearest_stone_and_counts_its_use() {
     // north of Alpha, so the degree is 45.
     assert_eq!(degree, 45, "north-east at equal legs");
     check(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
+    drop(alpha);
+    wait_for(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
+    drop(server);
+}
+
+/// `cg.game.item_use`: `case 76006` shares `case 27989`'s sweep (`G/char_item.cpp:4226-4292`):
+/// the second detector, socket 0 at 2, names the stone 500 east and 500 north of Alpha at
+/// 45 degrees, and its socket rises to 3.
+#[test]
+fn the_second_detector_names_the_nearest_stone_and_counts_its_use() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t610\t545\t0\t0\t0\t1\t1s\t100\t1\t8001\n",
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 30, \
+         id, 1, 0, 1, 76006, 2 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(76_006).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 10, "the owner's detector is USE_SPECIAL");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let told = loop {
+        let record = alpha
+            .read_game_raw_until(deadline)
+            .expect("the detector tells its line");
+        if record.len() > 10 && record[0] == GC_CHAT && record[3] == 5 {
+            let text = &record[10..];
+            if text.starts_with(b"StoneDetect ") {
+                break text.to_vec();
+            }
+        }
+    };
+    let words: Vec<&[u8]> = told.split(|&byte| byte == b' ').collect();
+    assert_eq!(
+        &words[2..],
+        &[b"2".as_slice(), b"45".as_slice()],
+        "{}",
+        told.escape_ascii()
+    );
     drop(alpha);
     wait_for(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
     drop(server);

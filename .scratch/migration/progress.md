@@ -6,14 +6,15 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 686**, the tail made countable (package A1): three generated
-  arm tables (`item-use.md`, `points.md`, `skill-arms.md`) and every `partial` and `missing`
-  note ending in `Left:`. It ported nothing and changed no Rust code. Before it: 685 (the
+- The last section is **ledger 687**, the first package B slice: the sibling vnums of four
+  ported `USE_SPECIAL` families, and the gold bar's cap boundary fixed. Before it: 686 (the tail
+  made countable: three generated arm tables and every `partial` and `missing` note ending in
+  `Left:`), 685 (the
   scenario timing, `AGENTS.md` "SCENARIO TIMING"), 684 (Rust 1.100.0), 683 (the test hygiene),
   682 (the cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
-- Parity: 1,244 `ported`, 572 `partial`, 475 `unused`, 40 `missing`, 0 `codec`, of 2,331 rows.
-  **612 items left**; the number only goes down.
-- Tests: 5,659 pass in 46 targets with `DATABASE_URL`; 519 are scenarios.
+- Parity: 1,261 `ported`, 555 `partial`, 475 `unused`, 40 `missing`, 0 `codec`, of 2,331 rows.
+  **595 items left**; the number only goes down.
+- Tests: 5,663 pass in 46 targets with `DATABASE_URL`; 523 are scenarios.
 - **What is next is in `docs/STATUS.md`, "Next steps"**: package B, by families (A2). B9 is the
   arm tables; most of their `partial` rows have Rust code and lack only a scenario.
 
@@ -65,4 +66,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 686 is committed and pushed.
+Nothing is left running. Ledger 687 is committed and pushed.
