@@ -52912,6 +52912,88 @@ const BASIC_BOOKS: [u32; 10] = [
     50_302, 50_303, 50_311, 50_061, 50_306, 50_304, 50_305, 50_312, 50_313, 50_301,
 ];
 
+/// The passive books' ladder (`G/char_item.cpp:4553-4633`): each vnum names its skill
+/// (`:4575-4600`), then the level, the 40 cap, the low and the high bound refuse in turn, and a
+/// read rolls the book's `value2`. Alpha, at level 154, holds polymorph (129) at 25, the monster
+/// bonus (164) at 35, the stone bonus (165) at 5 and the boss bonus (166) at 40. Polymorph books
+/// 50314 (0 to 20) and 50316 (30 to 40) refuse with `[LS;371]` and `[LS;274]`; monster book
+/// 50336 (20 to 30) with `[LS;371]`; stone book 50338 (20 to 30) with `[LS;274]`; boss books
+/// 50339 and 50340 with `[LS;948]`. Each stays. Polymorph book 50315 (20 to 30, 40%) and stone
+/// book 50337 (0 to 20, 80%) read: each climbs its skill by one or misses, and is spent.
+#[test]
+fn each_passive_book_gates_by_its_own_skill() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, vnum, s.level, \
+         0 FROM player, unnest(ARRAY[129, 164, 165, 166], ARRAY[25, 35, 5, 40]) AS s(vnum, \
+         level) WHERE name = 'Alpha'",
+    );
+    for (cell, vnum) in PASSIVE_BOOKS.iter().enumerate() {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'",
+                60 + cell
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    for (cell, skill, line) in [
+        (0, 129, &b"[LS;371]"[..]),
+        (1, 129, b"[LS;274]"),
+        (2, 164, b"[LS;371]"),
+        (3, 165, b"[LS;274]"),
+        (4, 166, b"[LS;948]"),
+        (5, 166, b"[LS;948]"),
+    ] {
+        let read = read_book(&mut alpha, cell, skill);
+        assert_eq!(read.lines, [info(line)], "book {cell} refuses");
+        assert!(read.shown.is_empty() && !read.spent, "book {cell} stays");
+    }
+    for (cell, skill, from) in [(6, 129, 25), (7, 165, 5)] {
+        let read = read_book(&mut alpha, cell, skill);
+        assert!(read.spent, "book {cell} is spent either way");
+        if read.shown.is_empty() {
+            assert_eq!(
+                read.lines,
+                [talking(b"[LS;952]"), info(b"[LS;953]")],
+                "book {cell} misses"
+            );
+        } else {
+            assert_eq!(read.shown, [from + 1], "book {cell} climbs {skill}");
+            assert_eq!(
+                read.lines,
+                [
+                    talking(b"[LS;954]"),
+                    talking(b"[LS;955]"),
+                    info(b"[LS;964]")
+                ],
+                "book {cell} climbs"
+            );
+        }
+    }
+    drop(alpha);
+}
+
+/// The passive books in cells 0 to 7 of `each_passive_book_gates_by_its_own_skill`.
+const PASSIVE_BOOKS: [u32; 8] = [
+    50_314, 50_316, 50_336, 50_338, 50_339, 50_340, 50_315, 50_337,
+];
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

@@ -56648,3 +56648,35 @@ passed, 0 failed in 46 targets; with it 5,673 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,583 `ported`, 219 `partial`, 492 `unused`, 37 `missing`,
 0 `codec`, of 2,331 rows; 533 scenarios. No ADR changed.
+## 697. The passive books' ladder by skill (B9, `USE_SPECIAL`)
+
+The passive books (`G/char_item.cpp:4553-4633`) share one body. An inner switch (`:4575-4600`)
+names the skill: 50314-50316 polymorph (129), 50335-50336 the monster bonus (164), 50337-50338
+the stone bonus (165), 50339-50340 the boss bonus (166). The body then refuses in this order:
+below the level in `value3` with `[LS;350]`, at 40 with `[LS;948]`, below `value0` with
+`[LS;274]`, and at or above `value1` with `[LS;371]`. A read that passes rolls `value2`. Only
+50335 had a scenario.
+
+`each_passive_book_gates_by_its_own_skill` (shipped mode) gives Alpha, at level 154, polymorph
+at 25, the monster bonus at 35, the stone bonus at 5 and the boss bonus at 40. These levels
+make each refusal name the skill its book maps to:
+
+- 50314 refuses with `[LS;371]` and 50316 with `[LS;274]`.
+- 50336 refuses with `[LS;371]` and 50338 with `[LS;274]`.
+- 50339 and 50340 refuse with `[LS;948]`.
+- 50315 reads at 40% and 50337 at 80%. Each climbs its skill by one or misses, and is spent
+  either way. Every outcome is accepted with its own records.
+
+The Rewrite already behaved this way; no code changed. 16 rows are `ported`: the eight outer
+vnum arms and their eight inner skill arms.
+
+The level gate (`[LS;350]`) needs a reader below level 35 and is not reached. The craft books
+50902-50904 stay `partial`: their skill (123) is not among the hosted rows, so a read cannot
+climb it.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,674
+passed, 0 failed in 46 targets; with it 5,674 passed, 0 failed in 46 targets (455 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,599 `ported`, 203 `partial`, 492 `unused`, 37 `missing`,
+0 `codec`, of 2,331 rows; 534 scenarios. No ADR changed.
