@@ -53680,6 +53680,71 @@ fn each_wearable_type_is_worn_and_taken_off_by_its_use() {
     );
 }
 
+/// `UseItemEx`'s limit checks (`G/char_item.cpp:2725-2756`) and `case ITEM_TREASURE_BOX`
+/// (`:3093-3097`). Delta, a level-1 sura with no conqueror level, uses the belt 18000 (level
+/// 50) and hears `[LS;1013]`, then the sword 335 (champion 15) and hears the champion line;
+/// both stay. A treasure box's own use returns false: the 50006 box sends nothing and stays.
+#[test]
+fn a_use_below_its_level_or_champion_limit_is_refused_and_a_box_alone_does_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Delta stands beside Alpha, on a map Channel 1 hosts.
+    sql(
+        &database,
+        "UPDATE player SET x = 470000, y = 950000 WHERE name = 'Delta'",
+    );
+    for (id, pos, vnum) in [(30, 0, 18000), (31, 1, 335), (32, 2, 50006)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Delta'"
+            ),
+        );
+    }
+    check(
+        &database,
+        "(SELECT level = 1 AND conqueror_level = 0 FROM player WHERE name = 'Delta')",
+    );
+    let (mut delta, _listed) = enter_world(&server, b"alice", 3);
+    // Past the 1.5 s the entry counts as a fight (`IsRecentlyFought`).
+    std::thread::sleep(Duration::from_millis(1600));
+    for (cell, line) in [
+        (0, &b"[LS;1013]"[..]),
+        (
+            1,
+            b"Nivelul tau campion este prea mic pentru a putea purta acest item!",
+        ),
+    ] {
+        delta.send_record(&client_item_use(cell));
+        let refused = delta.read_game();
+        assert_eq!(refused[0], GC_CHAT, "a refusal line: {refused:02x?}");
+        assert_eq!(
+            (refused[3], refused[10..].to_vec()),
+            info(line),
+            "cell {cell}'s limit refuses"
+        );
+        delta.quiet("the item stays");
+    }
+    delta.send_record(&client_item_use(2));
+    delta.quiet("a treasure box's own use does nothing");
+    drop(delta);
+    wait_for(
+        &database,
+        "(SELECT count(*) = 3 FROM item WHERE id BETWEEN 30 AND 32 AND window_type = 1 AND pos \
+         = id - 30)",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

@@ -57016,3 +57016,31 @@ run failed `every_apply_type_with_its_own_arm_moves_its_points_as_legacy` and
 `a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit`, read and fixed above;
 this is the second run. Parity: 1,623 `ported`, 194 `partial`, 509 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 542 scenarios. No ADR changed.
+## 707. A use refused by its level or champion limit, and a box used alone (B9)
+
+`UseItemEx` reads the item's limits before its type arm (`G/char_item.cpp:2725-2756`):
+
+- `LIMIT_LEVEL` refuses a character below the value with `[LS;1013]`;
+- `LIMIT_CHAMPION` refuses a conqueror level below the value with its Romanian line.
+
+`case ITEM_TREASURE_BOX` (`:3093-3097`) returns false: a box opens only through a key used on
+it. The Rewrite had these checks (`use_checks`) and the silent box, with unit tests only.
+
+`a_use_below_its_level_or_champion_limit_is_refused_and_a_box_alone_does_nothing` runs in
+shipped mode. Delta, a level-1 sura with conqueror level 0, is moved beside Alpha.
+
+- The belt 18000 (level 50) answers `[LS;1013]`.
+- The sword 335 (champion 15, one of the owner's three champion items) answers the champion
+  line.
+- The box 50006 answers nothing.
+
+The store keeps all three on their cells.
+
+3 `partial` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,684
+passed, 0 failed in 46 targets; with it 5,684 passed, 0 failed in 46 targets (460 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,626 `ported`, 191 `partial`, 509 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 543 scenarios. No ADR changed.
