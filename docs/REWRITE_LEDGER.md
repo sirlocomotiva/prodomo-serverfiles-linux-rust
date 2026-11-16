@@ -57095,3 +57095,40 @@ and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; 
 run failed `a_gaya_craft_spends_and_a_market_opens`, read and fixed above; this is the
 second run. Parity: 1,631 `ported`, 186 `partial`, 509 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 544 scenarios. No ADR changed.
+## 709. The shaman unlock line, the grilled-perch cure, and the continue potion (B9)
+
+**The unlock line.** `USE_UNLOCK_SHAMAN` (`G/char_item.cpp:6944-6964`) has its upgrade commented
+out. It answers `LC_TEXT("You upgrade your buff successfully")` and returns false with the item
+kept.
+
+That key is in no locale file. A sweep of the main table and the 12 country files found it
+nowhere; the positive control was "Everyone will be teleported into the city shortly.", found in
+both the main table and `country/en`. So europe's `locale_find` answers `@0949` and the key
+(`G/locale.cpp:244-255`).
+
+`use_shaman_premium` (`prodomo/src/game_state/shaman.rs`) sent the bare key. It now sends the
+`@0949` form, as the fish lines and `WAIT_BUFF` already do.
+
+`a_shaman_unlock_answers_its_line_and_stays` (shipped mode): Alpha's 69699 answers the
+`@0949` line and stays.
+
+**The grilled perch.** `case USE_CLEAR` names 27874 and falls through to the default's
+`RemoveBadAffect` (`:5540-5548`). `a_cure_used_on_a_poison_strips_it_and_uses_one_up` now gives
+Yankee both cures. He is poisoned and cured once with 27124 and once with 27874. Each time, one
+of two goes and the poison's remove lands with its flag update.
+
+The second `/poison` reader skips a record left from the first round's own clock until the
+poison's add, and still requires the flag update before it.
+
+**The continue potion.** No owner proto has sub-type `USE_POTION_CONTINUE`. The same search
+counts 2 `USE_CLEAR` and 28 `USE_POTION_NODELAY` rows, its positive controls. Its row is
+`unused`.
+
+2 `partial` rows are `ported` and 1 is `unused`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,686
+passed, 0 failed in 46 targets; with it 5,686 passed, 0 failed in 46 targets (460 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,633 `ported`, 183 `partial`, 510 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 545 scenarios. No ADR changed.

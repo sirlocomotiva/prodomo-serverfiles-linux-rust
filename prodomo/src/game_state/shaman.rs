@@ -203,7 +203,9 @@ impl GameState {
 
     /// `USE_UNLOCK_SHAMAN` (`G/char_item.cpp:6944-6964`): the success line, and the
     /// item kept — its training arm is commented out, so nothing else runs. The use
-    /// answers as one that was never run, as the read's refusal does.
+    /// answers as one that was never run, as the read's refusal does. The line's
+    /// `LC_TEXT` key is in no locale file, so europe's `locale_find` answers `@0949` and
+    /// the key (`G/locale.cpp:244-255`).
     pub(super) fn use_shaman_premium(
         &mut self,
         vid: Vid,
@@ -214,7 +216,7 @@ impl GameState {
             vid,
             actor,
             protocol::gc_chat::CHAT_TYPE_INFO,
-            b"You upgrade your buff successfully",
+            b"@0949You upgrade your buff successfully",
             &[],
         );
         let character = self

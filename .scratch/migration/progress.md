@@ -6,16 +6,16 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 708**, the craft, mining and horse books. Package B
+- The last section is **ledger 709**, the shaman unlock line and the grilled-perch cure. Package B
   so far: 687 (sibling vnums, the gold bar cap), 688 (the ability potions), 689 (the apply types),
   690 (the arena's potion gate), 691 (the ward and aid climb gate, and the refused `/setskill`
-  sending byte 76), 692 (each skill type's point on a climb and a forget), 693 (each skill's hit cap on one victim), 694 (the master arms of a climb by point), 695 (each automatic potion's kind of row), 696 (the basic books and two book-read bugs), 697 (the passive books' ladder), 698 (the sibling capes and peach), 699 (the white flag and the treasure box), 700 (the zen bean), 701 (the no-op item types), 702 (the seasonal boxes), 703 (a unique worn by its use), 704 (the ramadan candy and the marriage ring), 705 (a fish's use), 706 (the wearable types worn by their use), 707 (a use refused by its limits), 708. Before them: 686 (the tail made
+  sending byte 76), 692 (each skill type's point on a climb and a forget), 693 (each skill's hit cap on one victim), 694 (the master arms of a climb by point), 695 (each automatic potion's kind of row), 696 (the basic books and two book-read bugs), 697 (the passive books' ladder), 698 (the sibling capes and peach), 699 (the white flag and the treasure box), 700 (the zen bean), 701 (the no-op item types), 702 (the seasonal boxes), 703 (a unique worn by its use), 704 (the ramadan candy and the marriage ring), 705 (a fish's use), 706 (the wearable types worn by their use), 707 (a use refused by its limits), 708 (the craft, mining and horse books), 709. Before them: 686 (the tail made
   countable: three generated arm tables and every `partial` and `missing` note ending in
   `Left:`), 685 (the scenario timing), 684 (Rust 1.100.0), 683 (the test hygiene), 682 (the
   cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
-- Parity: 1,631 `ported`, 186 `partial`, 509 `unused`, 5 `missing`, 0 `codec`, of 2,331 rows.
-  **191 items left**; the number only goes down.
-- Tests: 5,685 pass in 46 targets with `DATABASE_URL`; 544 are scenarios.
+- Parity: 1,633 `ported`, 183 `partial`, 510 `unused`, 5 `missing`, 0 `codec`, of 2,331 rows.
+  **188 items left**; the number only goes down.
+- Tests: 5,686 pass in 46 targets with `DATABASE_URL`; 545 are scenarios.
 - **What is next is in `docs/STATUS.md`, "Next steps"**: package B, by families (A2). B9 is the
   arm tables; most of their `partial` rows have Rust code and lack only a scenario.
 
@@ -67,4 +67,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 708 is committed and pushed.
+Nothing is left running. Ledger 709 is committed and pushed.

@@ -29870,10 +29870,12 @@ fn a_cloak_cloaks_and_a_mirror_refuses_within_ten_minutes() {
     check(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
 }
 
-/// `cg.game.item_use`: a `USE_CLEAR` cure (27124) strips a landed poison. Yankee is
-/// poisoned by `/poison` (the flag update, the `GC_AFFECT_ADD` of kind 209), then
-/// uses the cure at cell 0: one of the two goes (the update record), the poison's
-/// `GC_AFFECT_REMOVE` lands with its flag update, and the row reads count 1.
+/// `cg.game.item_use`: a `USE_CLEAR` cure strips a landed poison, whether its vnum is the
+/// grilled perch 27874 that `case USE_CLEAR` names or one of the default's, 27124 (both run
+/// `RemoveBadAffect`, `G/char_item.cpp:5540-5548`). For each, Yankee is poisoned by `/poison`
+/// (the flag update, the `GC_AFFECT_ADD` of kind 209), then uses the cure: one of the two goes
+/// (the update record), the poison's `GC_AFFECT_REMOVE` lands with its flag update, and the
+/// row reads count 1.
 #[test]
 fn a_cure_used_on_a_poison_strips_it_and_uses_one_up() {
     let Some(database) = ScratchDatabase::create() else {
@@ -29895,58 +29897,70 @@ fn a_cure_used_on_a_poison_strips_it_and_uses_one_up() {
     );
     sql(
         &database,
-        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
-         27124 FROM player WHERE name = 'Yankee'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30 + pos, id, 1, \
+         pos, 2, vnum FROM player, (VALUES (0, 27124), (1, 27874)) AS cure (pos, vnum) WHERE \
+         name = 'Yankee'",
     );
     let protos = owners_protos();
-    let proto = protos.get(27_124).expect("the owner's data has it");
-    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
-    assert_eq!(proto.sub_type, 12, "the owner's cure is USE_CLEAR");
+    for vnum in [27_124, 27_874] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+        assert_eq!(proto.sub_type, 12, "the owner's {vnum} is USE_CLEAR");
+    }
     let server = Server::start(binary(), database.url());
     let (mut alice, _) = enter_world_as_implementor(&server);
     let (mut yankee, yankee_listed) =
         enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
     alice.sees_enter(yankee_listed.id, true, None);
-    // When: Alpha poisons Yankee. Then: the flag update and the poison's add.
-    alice.send_record(&client_chat(CHAT_TALKING, b"/poison Yankee"));
-    assert_eq!(
-        yankee.read_game()[0],
-        GC_CHARACTER_UPDATE,
-        "the poison's flag update"
-    );
-    let added = yankee.read_game();
-    assert_eq!(added[0], GC_AFFECT_ADD);
-    assert_eq!(&added[1..5], &209u32.to_le_bytes(), "the poison's kind");
-    // When: Yankee uses the cure. Then: one of two goes, and the poison's remove
-    // lands with its flag update.
-    yankee.send_record(&client_item_use(0));
-    let mut updated = false;
-    let mut removed = false;
-    let mut reshown = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline && !(updated && removed && reshown) {
-        let Some(record) = yankee.read_game_until(deadline) else {
-            break;
+    for cell in [0, 1] {
+        // When: Alpha poisons Yankee. Then: the flag update and the poison's add.
+        alice.send_record(&client_chat(CHAT_TALKING, b"/poison Yankee"));
+        // A record of the first round's own clock (a point change) may still come first.
+        let mut flagged = false;
+        let added = loop {
+            let record = yankee.read_game();
+            match record[0] {
+                GC_CHARACTER_UPDATE => flagged = true,
+                GC_AFFECT_ADD => break record,
+                _ => {}
+            }
         };
-        if record.first() == Some(&ITEM_UPDATE) {
-            let (window, cell, count) = update_fields(&record);
-            if window == common::item_slots::EWindows::Inventory as u8 && cell == 0 {
-                assert_eq!(count, 1, "one of two goes");
-                updated = true;
+        assert!(flagged, "the poison's flag update");
+        assert_eq!(&added[1..5], &209u32.to_le_bytes(), "the poison's kind");
+        // When: Yankee uses the cure. Then: one of two goes, and the poison's remove
+        // lands with its flag update.
+        yankee.send_record(&client_item_use(cell));
+        let mut updated = false;
+        let mut removed = false;
+        let mut reshown = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !(updated && removed && reshown) {
+            let Some(record) = yankee.read_game_until(deadline) else {
+                break;
+            };
+            if record.first() == Some(&ITEM_UPDATE) {
+                let (window, at, count) = update_fields(&record);
+                if window == common::item_slots::EWindows::Inventory as u8 && at == cell {
+                    assert_eq!(count, 1, "one of two goes");
+                    updated = true;
+                }
+            }
+            if record == affect_remove_of(209) {
+                removed = true;
+            }
+            if record.first() == Some(&GC_CHARACTER_UPDATE) {
+                reshown = true;
             }
         }
-        if record == affect_remove_of(209) {
-            removed = true;
-        }
-        if record.first() == Some(&GC_CHARACTER_UPDATE) {
-            reshown = true;
-        }
+        assert!(updated, "the use spends one of the stack");
+        assert!(removed, "the strip removes the poison");
+        assert!(reshown, "the strip re-shows the flags");
     }
-    assert!(updated, "the use spends one of the stack");
-    assert!(removed, "the strip removes the poison");
-    assert!(reshown, "the strip re-shows the flags");
     alice.quiet("the cure reaches nobody's caller");
-    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    check(
+        &database,
+        "(SELECT count(*) = 2 AND bool_and(count = 1) FROM item WHERE id IN (30, 31))",
+    );
 }
 
 /// `cmd.kill` and `cmd.poison` (`do_kill` and `do_poison`,
@@ -53827,6 +53841,44 @@ fn the_craft_books_stay_and_the_mining_and_horse_books_read_or_miss() {
         &database,
         "(SELECT count(*) = 3 FROM item WHERE id IN (60, 61, 62)) AND (SELECT count(*) = 0 FROM \
          item WHERE id IN (63, 64))",
+    );
+}
+
+/// `USE_UNLOCK_SHAMAN` (`G/char_item.cpp:6944-6964`): the arm's upgrade is commented out, so
+/// a use of the owner's 69699 only answers `LC_TEXT("You upgrade your buff successfully")`
+/// and returns false with the item kept. The key is in no locale file, so europe's
+/// `locale_find` answers `@0949` and the key (`G/locale.cpp:244-255`).
+#[test]
+fn a_shaman_unlock_answers_its_line_and_stays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
+         69699 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    let line = alpha.read_game();
+    assert_eq!(line[0], GC_CHAT, "the line: {line:02x?}");
+    assert_eq!(
+        (line[3], line[10..].to_vec()),
+        info(b"@0949You upgrade your buff successfully")
+    );
+    alpha.quiet("the item stays");
+    drop(alpha);
+    check(
+        &database,
+        "(SELECT count(*) = 1 FROM item WHERE id = 30 AND pos = 0)",
     );
 }
 
