@@ -53291,6 +53291,108 @@ fn the_seasonal_boxes_refuse_their_sex_and_draw_nothing_without_a_group() {
     );
 }
 
+/// `case ITEM_UNIQUE`'s default arm (`G/char_item.cpp:3000-3038`): a unique outside
+/// `USE_SPECIAL` is worn by its use, and a worn one is taken off. Alpha, stored with
+/// alignment 4321, uses the hide-alignment cloak 70048 at cell 0: it lands on the first
+/// unique cell (187) and the shown alignment falls from 432 to 0. Using it there takes it off
+/// to cell 0 and shows 432 again. A `USE_SPECIAL` unique other than 71049 has no case in the
+/// vnum switch: the use of 72007 keeps it and sends nothing.
+#[test]
+fn a_unique_is_worn_and_taken_off_by_its_use() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET alignment = 4321 WHERE name = 'Alpha'",
+    );
+    for (id, pos, vnum) in [(30, 0, 70048), (31, 1, 72007)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    for (vnum, sub) in [(70_048, 0), (72_007, 10)] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(
+            (proto.item_type, proto.sub_type),
+            (gamedata::item_kind::ITEM_UNIQUE, sub),
+            "{vnum} is a unique of the owner's data"
+        );
+    }
+    let entered_at = std::time::Instant::now();
+    let (mut alpha, _character, _quickslots, _load_sets) =
+        load_with_quickslots_in(&server, b"alice", 0, ENGLISH);
+    let entered = enter_game_view(&mut alpha);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    // Past the equip's 1.5 s window and the revive's five seconds, as the move scenario
+    // waits.
+    std::thread::sleep(Duration::from_millis(1600).saturating_sub(entered_at.elapsed()));
+    drain_revive_end(&mut alpha, entered_at);
+
+    // When: the cloak is used. Then: it moves onto the first unique cell and hides.
+    alpha.send_record(&client_item_use(0));
+    let (seen, updates) = read_a_move_with_updates(&mut alpha, vid);
+    let sets = seen
+        .iter()
+        .filter(|seen| matches!(seen, Seen::Set(..)))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(sets, [Seen::Set(0, 0), Seen::Set(187, 70_048)], "the wear");
+    let shown = updates
+        .iter()
+        .map(|update| update.s_alignment)
+        .collect::<Vec<_>>();
+    assert_eq!(shown, [432, 0], "the wear step's look, then the hide");
+
+    // When: the worn cloak is used. Then: it comes off to cell 0 and the alignment shows.
+    alpha.send_record(&client_item_use(187));
+    let (seen, updates) = read_a_move_with_updates(&mut alpha, vid);
+    let sets = seen
+        .iter()
+        .filter(|seen| matches!(seen, Seen::Set(..)))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sets,
+        [Seen::Set(187, 0), Seen::Set(0, 70_048)],
+        "the take-off"
+    );
+    let shown = updates
+        .iter()
+        .map(|update| update.s_alignment)
+        .collect::<Vec<_>>();
+    assert_eq!(shown, [0, 432], "the take-off step's look, then the show");
+
+    // When: 72007 is used. Then: nothing.
+    alpha.send_record(&client_item_use(1));
+    alpha.quiet("a USE_SPECIAL unique with no case is silent");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    assert!(
+        !server.logged("Item step refused"),
+        "no use is refused: {}",
+        server.console()
+    );
+    check(
+        &database,
+        "(SELECT pos = 0 AND window_type = 1 FROM item WHERE id = 30) AND (SELECT count = 1 \
+         FROM item WHERE id = 31)",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

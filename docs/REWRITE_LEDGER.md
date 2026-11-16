@@ -56833,3 +56833,50 @@ passed, 0 failed in 46 targets; with it 5,679 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,612 `ported`, 200 `partial`, 497 `unused`, 22 `missing`,
 0 `codec`, of 2,331 rows; 538 scenarios. No ADR changed.
+## 703. A unique worn by its use (B9, `case ITEM_UNIQUE`)
+
+`case ITEM_UNIQUE` (`G/char_item.cpp:2939-3038`) has two arms.
+
+- **`USE_ABILITY_UP`.** It lands an `AFFECT_UNIQUE_ABILITY` and spends one.
+- **The default arm.** A `USE_SPECIAL` unique runs a vnum switch whose one case, 71049, opens
+  the silk botary. Any other unique is worn by its use, or taken off when it is already worn.
+
+The Rewrite refused every unique use as not ported. A unique could be worn only through
+`CG_ITEM_MOVE`.
+
+`use_ported` (`world/src/character/equip.rs`) now lets a unique whose sub type is neither
+`USE_SPECIAL` nor `USE_ABILITY_UP` reach the use's `EquipItem`/`UnequipItem` fallback
+(`unique_worn_by_use`). That is the same `Equipper` the move uses, so its refusals are the
+move's: a real-time or grouped unique still refuses as not ported. A `USE_SPECIAL` unique other
+than 71049 joins the silent arm. 71049's `UseSilkBotary` needs the stored price list and the shop
+command, which are not ported, so it is still refused and its row stays `missing`.
+
+The item use's tail (`prodomo/src/game_state.rs`) now runs `sync_hide_alignment` before `sync_unique_expire`, as `move_item`
+does. Before this change no use could wear a unique, so the use path never needed the sync.
+Without it a cloak worn by its use would have kept showing the alignment.
+
+The unit test `a_use_of_another_type_or_from_another_window_is_not_ported` pinned a plain
+unique's use as not ported. It now pins a real-time unique's use, which the wear refuses. The
+comment in `the_hide_alignment_cloak_wears` now names both paths.
+
+The scenario `a_unique_is_worn_and_taken_off_by_its_use` runs in shipped mode with Alpha stored at
+alignment 4321.
+
+- Using the 70048 cloak at cell 0 sets it on cell 187, and the looks show 432 and then 0.
+- Using it on cell 187 sets it back on cell 0, and the looks show 0 and then 432.
+- Using 72007 (a `USE_SPECIAL` unique) sends nothing, and the item stays.
+- The console logs no refused step.
+
+The `USE_ABILITY_UP` arm and its ten apply rows are `unused`. `USE_ABILITY_UP` (7) is `UNIQUE_7` in
+the unique sub-type table (`D/ProtoReader.cpp:213-223`). The owner's 105 `ITEM_UNIQUE` rows are
+101 `UNIQUE_NONE` and 4 `USE_SPECIAL` (71049, 72007-72009). Those 105 rows are the positive
+control for the search that found no `UNIQUE_7`.
+
+2 `missing` rows are `ported` and 11 are `unused`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,680
+passed, 0 failed in 46 targets; with it 5,680 passed, 0 failed in 46 targets (459 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,614 `ported`, 200 `partial`, 508 `unused`, 9 `missing`,
+0 `codec`, of 2,331 rows; 539 scenarios. No ADR changed.

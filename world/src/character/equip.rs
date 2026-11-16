@@ -1160,11 +1160,26 @@ fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
         && !nogged
         && !silent
         && !USED_BY_WEARING.contains(&proto.item_type)
+        && !unique_worn_by_use(proto)
     {
         return Some(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
     None
 }
+
+/// `case ITEM_UNIQUE`'s default arm wears a unique whose sub type is not `USE_SPECIAL`, or
+/// takes a worn one off (`G/char_item.cpp:3000-3038`). Its `USE_ABILITY_UP` arm (`:2943-2999`)
+/// is not ported: no owner proto has that sub type.
+fn unique_worn_by_use(proto: &ItemProto) -> bool {
+    use gamedata::item_kind::USE_ABILITY_UP;
+    proto.item_type == ITEM_UNIQUE
+        && proto.sub_type != USE_SPECIAL
+        && proto.sub_type != USE_ABILITY_UP
+}
+
+/// The silk botary (`case 71049`, `G/char_item.cpp:3008`), the one `USE_SPECIAL` unique with
+/// a case: its `UseSilkBotary` (the stored price list and the shop window) is not ported.
+const SILK_BOTARY: u32 = 71_049;
 
 /// The consumed kind of the seated `ITEM_USE` arms (or the skill book, or the
 /// forget book), or `None` when the use is no seated arm: the cure, the cloak, the ability potion, the
@@ -1234,7 +1249,8 @@ fn use_special_kind(proto: &ItemProto) -> SeatedArms {
     };
     if proto.item_type != ITEM_USE {
         // `case ITEM_AUTOUSE` .. `case ITEM_LOTTERY` are a bare `break`
-        // (`G/char_item.cpp:7050-7055`).
+        // (`G/char_item.cpp:7050-7055`), as is a `USE_SPECIAL` unique the vnum switch has no
+        // case for (`:3002-3024`).
         let silent = [
             ITEM_AUTOUSE,
             ITEM_MATERIAL,
@@ -1242,7 +1258,10 @@ fn use_special_kind(proto: &ItemProto) -> SeatedArms {
             ITEM_TOOL,
             ITEM_LOTTERY,
         ]
-        .contains(&proto.item_type);
+        .contains(&proto.item_type)
+            || (proto.item_type == ITEM_UNIQUE
+                && proto.sub_type == USE_SPECIAL
+                && proto.vnum != SILK_BOTARY);
         return (
             false, false, false, false, false, false, false, false, false, silent,
         );
@@ -2759,8 +2778,8 @@ mod tests {
     #[test]
     fn the_hide_alignment_cloak_wears() {
         let mut case = Case::new(&[(inv(3), Item::new(7, HIDE_ALIGNMENT_CLOAK))]);
-        // `CG_ITEM_USE` knows no unique arm (`USED_BY_WEARING` has no `ITEM_UNIQUE`),
-        // so the wear goes through the move path, as the scenario's does.
+        // The move path wears it here; `CG_ITEM_USE` reaches the same `EquipItem` through
+        // `case ITEM_UNIQUE`'s default arm.
         let done = case
             .run(inv(3), wear_pos(EWearPositions::Unique1 as u16))
             .expect("the cloak wears");
@@ -2986,10 +3005,12 @@ mod tests {
             case.use_refused(inv(3)),
             MoveRefused::NotPorted(Unported::UseSubType(10))
         );
-        let mut case = Case::new(&[(inv(3), Item::new(7, UNIQUE))]);
+        // A unique's use tries the wear (`case ITEM_UNIQUE`'s default arm), which a
+        // real-time unique's unported expiry refuses.
+        let mut case = Case::new(&[(inv(3), Item::new(7, REAL_TIME_UNIQUE))]);
         assert_eq!(
             case.use_refused(inv(3)),
-            MoveRefused::NotPorted(Unported::Use(ITEM_UNIQUE))
+            MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique))
         );
         let mut case = Case::new(&[]);
         assert_eq!(case.use_refused(inv(3)), MoveRefused::Empty);

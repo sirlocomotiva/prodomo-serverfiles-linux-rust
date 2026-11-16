@@ -4706,6 +4706,9 @@ impl GameState {
         // as the premium arm does, so only a run step reaches here.
         self.stack_on_use(vid, actor, used_vnum, &mut moved);
         moved.climbed = climbed;
+        // A unique worn or taken off by its use (`case ITEM_UNIQUE`'s default arm) syncs
+        // the hide-alignment cloak and the unique expiry as the move does.
+        self.sync_hide_alignment(vid, &mut moved);
         self.sync_unique_expire(vid, &mut moved);
         Ok(moved)
     }
