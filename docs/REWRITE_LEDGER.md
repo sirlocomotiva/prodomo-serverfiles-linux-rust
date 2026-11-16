@@ -56700,3 +56700,39 @@ passed, 0 failed in 46 targets; with it 5,674 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,602 `ported`, 200 `partial`, 492 `unused`, 37 `missing`,
 0 `codec`, of 2,331 rows; 534 scenarios. No ADR changed.
+## 699. The white flag and the treasure box (B9, `USE_SPECIAL`)
+
+Two `USE_SPECIAL` arms were not ported, so their uses were refused as not ported. The white flag
+70008 (`G/char_item.cpp:3892-3895`) spends one and runs `ForgetMyAttacker`
+(`G/char_battle.cpp:3748-3757`): every monster around whose victim is the user forgets it, and
+the user hides for 5 seconds. The treasure box 70009 (`:3897-3898`) is a bare `break`, so its
+use spends nothing and sends nothing.
+
+`world/src/character/equip.rs` now classifies the flag with the cape's consuming arm
+(`MoveKind::Caped`). On that kind, `land_item_use_kind` (`prodomo/src/game_state.rs`) runs
+`forget_my_attacker` for the flag and the gather for a cape. Before this change
+`forget_my_attacker` had only the `/forgetme` caller. The box joins the silent arms, beside
+`USE_BUCKET` and `USE_CHANGE_ATTRIBUTE_PLUS`.
+
+`a_white_flag_forgets_the_dogs_and_a_treasure_box_does_nothing` (shipped mode) has a cape
+gather twenty-four dogs on Alpha until one swings. The flag then spends one of two, hides Alpha
+(`GC_AFFECT_ADD` 215 for 5 s), and no swing lands in the next 5 seconds. The box then sends
+nothing, and the store keeps it and the flag's last one.
+
+2 `missing` rows are `ported`.
+
+The first gate run lost `a_gaya_craft_spends_and_a_market_opens` (it had passed alone at ledger
+691 and on reruns). Its buy read the Gaya purse's refusal (`[Gaya] Nu deții suficientă Gaya`, a
+41-byte line) where it expected the price's point record. Every price in `gaya.txt` is at most
+300, so the 1,000 the scenario grants had been lost. The scenario waited for the stored gold to
+read 95,000 as its barrier before granting the Gaya. A background save can store that gold
+before the disconnect's own save, which then writes the Gaya back to 0 over the grant. It now
+waits for the disconnect's save line (`wait_for_next`), as the scenario timing rules require, and
+checks the gold after. The second run is the receipt below.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,675
+passed, 0 failed in 46 targets; with it 5,675 passed, 0 failed in 46 targets (455 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. The
+first run failed only `a_gaya_craft_spends_and_a_market_opens` (read above). Parity: 1,604 `ported`, 200 `partial`, 492 `unused`, 35 `missing`,
+0 `codec`, of 2,331 rows; 535 scenarios. No ADR changed.

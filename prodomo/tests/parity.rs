@@ -49528,7 +49528,7 @@ fn gaya_market_guards(keyed: &mut Keyed) {
 // Ten unlocks stand the slot-3 unlock behind: the unlock clears the stack and
 // re-sends the markers with slot 3 open; the refresh spends nothing short of its
 // refreshers, then re-rolls with the slots kept.
-fn gaya_unlock_and_refresh(server: &Server, database: &ScratchDatabase, keyed: Keyed) -> Keyed {
+fn gaya_unlock_and_refresh(server: &mut Server, database: &ScratchDatabase, keyed: Keyed) -> Keyed {
     use protocol::gc_item_window::GcItemSet;
     // The tenth unlock lands in the store; the relog loads it, and the market reopens
     // fresh (the shelf is per-login).
@@ -49583,9 +49583,12 @@ fn gaya_unlock_and_refresh(server: &Server, database: &ScratchDatabase, keyed: K
     // first item line. The relog's login burst carries the purse first: the points
     // record's Gaya slot is asserted on the way in.
     // The disconnect banks the shelf's unlock; the grant lands once the save is done
-    // (the save would overwrite it), and the relog loads 1,000.
+    // (the save would overwrite it), and the relog loads 1,000. The save line is the
+    // barrier: the stored gold can read 95,000 from a background save while the
+    // disconnect's save, which writes the Gaya back to 0, is still to come.
     drop(keyed);
-    wait_for(
+    server.wait_for_next("Character disconnected; wrote the row");
+    check(
         database,
         "(SELECT gold FROM player WHERE name = 'Alpha') = 95000",
     );
@@ -49650,7 +49653,7 @@ fn gaya_unlock_and_refresh(server: &Server, database: &ScratchDatabase, keyed: K
 /// its guards refuse, the slot-3 unlock lands, and the refresh names its refreshers.
 #[test]
 fn a_gaya_craft_spends_and_a_market_opens() {
-    let Some((database, server)) = gaya_seed_stones() else {
+    let Some((database, mut server)) = gaya_seed_stones() else {
         return;
     };
     let (mut keyed, _alpha, _items) = load_character(&server, b"alice", 0);
@@ -49660,7 +49663,7 @@ fn a_gaya_craft_spends_and_a_market_opens() {
     gaya_no_shelf(&mut keyed);
     gaya_open_market(&mut keyed, seon, b"GayaMarketSlotsDesblock 0 0 0 0 0 0");
     gaya_market_guards(&mut keyed);
-    let keyed = gaya_unlock_and_refresh(&server, &database, keyed);
+    let keyed = gaya_unlock_and_refresh(&mut server, &database, keyed);
     gaya_command_line(keyed);
 }
 
@@ -52993,6 +52996,98 @@ fn each_passive_book_gates_by_its_own_skill() {
 const PASSIVE_BOOKS: [u32; 8] = [
     50_314, 50_316, 50_336, 50_338, 50_339, 50_340, 50_315, 50_337,
 ];
+
+/// The white flag and the treasure box (`case USE_SPECIAL`, `G/char_item.cpp:3892-3898`). A
+/// cape gathers the twenty-four dogs on Alpha (each joins on a one-in-two draw; sixteen left
+/// none in one run of 65,536, ledger 685). The 70008 flag then spends one of two, drops Alpha as
+/// its attackers' victim and hides Alpha (`ForgetMyAttacker`, `G/char_battle.cpp:3748-3757`:
+/// `GC_AFFECT_ADD` 215 for 5 s), so no swing lands in 5 quiet seconds. The 70009 box is a bare
+/// `break`: it sends nothing and stays.
+#[test]
+fn a_white_flag_forgets_the_dogs_and_a_treasure_box_does_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    for (id, cell, count, vnum) in [(30, 0, 1, 70_038), (31, 1, 2, 70_008), (32, 2, 1, 70_009)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {cell}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t24\t101\n";
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        dogs,
+        "test_server = false",
+    );
+    let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
+    alice.send_record(&client_item_use(0));
+    assert_eq!(
+        alice.read_game()[..2],
+        [ITEM_SET, common::item_slots::EWindows::Inventory as u8],
+        "the lone cape clears its cell"
+    );
+    let swing = read_first_swing(&mut alice, listed.id);
+    assert!(swing.damage > 0, "a gathered dog swings: {}", swing.damage);
+    // When: the flag. Then: one of two spends, and the hide rides the burst.
+    alice.send_record(&client_item_use(1));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut spent = false;
+    let add = loop {
+        let record = alice
+            .read_game_raw_until(deadline)
+            .expect("the hide rides the burst");
+        if record[0] == ITEM_UPDATE {
+            let (window, cell, count) = update_fields(&record);
+            if (window, cell) == (1, 1) {
+                assert_eq!(count, 1, "the flag spends one of two");
+                spent = true;
+            }
+        }
+        if record[0] == GC_AFFECT_ADD {
+            break record;
+        }
+    };
+    assert!(spent, "the flag spends before the hide");
+    assert_eq!(
+        &add[..],
+        &revive_invisible_add()[..],
+        "the hide is 215 for 5 seconds: {add:02x?}"
+    );
+    let due = std::time::Instant::now() + Duration::from_secs(5);
+    while let Some(record) = alice.read_game_raw_until(due) {
+        assert_ne!(
+            record[0], GC_DAMAGE_INFO,
+            "no swing lands once forgotten: {record:02x?}"
+        );
+    }
+    // When: the box. Then: nothing, and it stays.
+    alice.send_record(&client_item_use(2));
+    let due = std::time::Instant::now() + Duration::from_millis(700);
+    while let Some(record) = alice.read_fight_until(due) {
+        assert!(
+            record[0] == GC_POINT_CHANGE
+                || record[0] == GC_CHARACTER_UPDATE
+                || is_revive_end(&record),
+            "the box sends nothing: {record:02x?}"
+        );
+    }
+    wait_for(
+        &database,
+        "(SELECT count FROM item WHERE id = 32) = 1 AND (SELECT count FROM item WHERE id = 31) = 1",
+    );
+    drop(alice);
+}
 
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {

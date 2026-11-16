@@ -4755,7 +4755,11 @@ impl GameState {
             self.land_gold_bar(vid, used_vnum, moved);
         }
         if kind == world::character::MoveKind::Caped {
-            self.aggregate_monster(vid);
+            if used_vnum == world::character::UNIQUE_ITEM_WHITE_FLAG {
+                self.forget_my_attacker(vid);
+            } else {
+                self.aggregate_monster(vid);
+            }
         }
         if kind == world::character::MoveKind::Nogged {
             self.land_nog_ability(vid, used_vnum);

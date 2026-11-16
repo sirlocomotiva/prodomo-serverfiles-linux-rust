@@ -1249,7 +1249,7 @@ impl GameState {
     /// or dead monster is skipped (B26). The dropped victim's damage row goes too: with no
     /// row the next hit re-inserts `(dam, 0)` instead of adding to a stale grudge.
     ///
-    /// No live caller yet besides `/forgetme`: the white flag 70008 waits for `USE_SPECIAL`.
+    /// Its callers are `/forgetme` and the white flag 70008 (`G/char_item.cpp:3892-3895`).
     pub(super) fn forget_my_attacker(&mut self, vid: Vid) {
         let Some(place) = self.place_of(vid.raw()) else {
             return;
