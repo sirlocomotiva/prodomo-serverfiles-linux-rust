@@ -40450,6 +40450,8 @@ fn an_element_scroll_upgrades_and_a_hex_scroll_downgrades() {
     alpha.send_record(&client_refine_element(4));
     let scroll = alpha.read_game();
     assert_eq!(scroll[..6], [ITEM_UPDATE, 1, 2, 0, 1, 0], "one scroll left");
+    // `ChangeGold` sends the fee at once, before the draw (`G/char_item.cpp:10336-10341`).
+    assert_eq!(alpha.read_game(), gold_change(own, 0, 17_000_000));
     let sword = alpha.read_game();
     assert_eq!(sword[..4], [ITEM_UPDATE, 1, 0, 0], "the sword updates");
     let element = u32::from_le_bytes(sword[6..10].try_into().expect("an element"));
@@ -40461,8 +40463,7 @@ fn an_element_scroll_upgrades_and_a_hex_scroll_downgrades() {
         server_refine_element(2, 0, 10),
         "the landed answer"
     );
-    assert_eq!(alpha.read_game(), gold_change(own, 0, 17_000_000));
-    alpha.quiet("the upgrade's records end with the fee");
+    alpha.quiet("the upgrade's records end with the answer");
     // The landed element is stored on the row, not only on the wire.
     check(
         &database,
@@ -40480,6 +40481,7 @@ fn an_element_scroll_upgrades_and_a_hex_scroll_downgrades() {
         [ITEM_SET, 1, 3, 0, 0, 0, 0, 0],
         "the hex scroll clears"
     );
+    assert_eq!(alpha.read_game(), gold_change(own, 0, 7_000_000));
     let bare = alpha.read_game();
     assert_eq!(bare[..4], [ITEM_UPDATE, 1, 0, 0], "the sword updates");
     assert_eq!(
@@ -40492,8 +40494,7 @@ fn an_element_scroll_upgrades_and_a_hex_scroll_downgrades() {
         server_refine_element(3, 0, 12),
         "the landed downgrade"
     );
-    assert_eq!(alpha.read_game(), gold_change(own, 0, 7_000_000));
-    alpha.quiet("the downgrade's records end with the fee");
+    alpha.quiet("the downgrade's records end with the answer");
 
     // When: Alpha uses the scroll on the +6 sword. Then: the min-level line only.
     alpha.send_record(&client_use_to_item(2, 4));
@@ -54382,6 +54383,161 @@ fn each_reinforcement_lands_on_its_own_costume_and_refuses_the_rest() {
         "(SELECT attrtype0 = 17 AND attrvalue0 = 10 FROM item WHERE id = 30) AND (SELECT \
          attrtype0 = 15 AND attrvalue0 = 10 FROM item WHERE id = 31) AND (SELECT count(*) = 1 \
          FROM item WHERE id IN (33, 34, 35))",
+    );
+}
+
+/// `case ITEM_GIFTBOX` (`G/char_item.cpp:3180-3258`) for the boxes the owner gives no group.
+/// The owner's `special_item_group.txt` has one group, the moonlight box's (50011, its draw is
+/// `a_moonlight_box_draws_its_group_and_tells_the_gift`). Any other box finds no group, talks
+/// `[LS;56]` and is kept. A dragon-soul box (51501, inside the arm's `> 51500 && < 52000`)
+/// asks `DragonSoul_IsQualified` first, but the owner's `_basic/dragon_soul.lua` gives every
+/// character the qualification at login, so its `[LS;1094]` never answers: the box talks
+/// `[LS;56]` as any other does.
+#[test]
+fn a_box_with_no_group_talks_and_is_kept() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, vnum) in [(30, 0, 51_501), (31, 1, 25_102)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    for vnum in [51_501, 25_102] {
+        assert_eq!(
+            protos.get(vnum).expect("the owner's box").item_type,
+            gamedata::item_kind::ITEM_GIFTBOX,
+            "{vnum} is a giftbox"
+        );
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    for cell in [0, 1] {
+        alpha.send_record(&client_item_use(cell));
+        assert_eq!(
+            alpha.read_game(),
+            chat_packet(CHAT_TALKING, 1, b"[LS;56]"),
+            "box {cell} has no group"
+        );
+        alpha.quiet("the box stays");
+    }
+    drop(alpha);
+    check(
+        &database,
+        "(SELECT count(*) = 2 FROM item WHERE id IN (30, 31) AND count = 1)",
+    );
+}
+
+/// `case USE_ELEMENT_CHANGE` (`G/char_item.cpp:3748-3778`) and the change arm of
+/// `DoRefineElement` (`:10244-10424`), with the owner's 56009. On a sword with no element
+/// the scroll stands nothing (`!GetRefineElementPlus()` returns false). On Alpha's +7 sword
+/// holding lightning +1 it stands the change window; an answer of element 0 is out of the
+/// category range and closes it with nothing spent. Stood again and answered with fire (3),
+/// the scroll goes, then the 10,000,000 fee (`ChangeGold` sends at once), then the sword's
+/// element turns to fire with its plus and values kept, then the change's landed answer.
+#[test]
+fn a_change_scroll_turns_an_element_and_keeps_its_plus() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 20000000 WHERE name = 'Alpha'",
+    );
+    // `%d%d%02d%02d%d%02d`: lightning, +1, bonus 5, attack 5, last 5 and 5.
+    for (id, cell, vnum, element) in [(41, 0, 17, 110_505_505), (42, 1, 17, 0), (43, 2, 56_009, 0)]
+    {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, refine_element) \
+                 SELECT {id}, id, 1, {cell}, 1, {vnum}, {element} FROM player WHERE name = \
+                 'Alpha'"
+            ),
+        );
+    }
+    assert_eq!(
+        owners_protos()
+            .get(56_009)
+            .expect("the change scroll")
+            .sub_type,
+        gamedata::item_kind::USE_ELEMENT_CHANGE,
+        "the owner's 56009"
+    );
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let own = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_use_to_item(2, 1));
+    alpha.quiet("a sword with no element stands nothing");
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_element(2, 0, 2),
+        "the change window"
+    );
+    alpha.send_record(&client_refine_element(0));
+    alpha.quiet("element 0 is out of range");
+    alpha.send_record(&client_refine_element(3));
+    alpha.quiet("the window closed with the refusal");
+    alpha.send_record(&client_use_to_item(2, 0));
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_element(2, 0, 2),
+        "the window again"
+    );
+    alpha.send_record(&client_refine_element(3));
+    let scroll = alpha.read_game();
+    assert_eq!(
+        scroll[..8],
+        [ITEM_SET, 1, 2, 0, 0, 0, 0, 0],
+        "the scroll clears"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        gold_change(own, 0, 10_000_000),
+        "the fee"
+    );
+    let sword = alpha.read_game();
+    assert_eq!(sword[..4], [ITEM_UPDATE, 1, 0, 0], "the sword updates");
+    assert_eq!(
+        u32::from_le_bytes(sword[6..10].try_into().expect("an element")),
+        310_505_505,
+        "fire +1, its values kept"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_element(2, 0, 13),
+        "the landed change"
+    );
+    alpha.quiet("the change sends nothing more");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT refine_element = 310505505 FROM item WHERE id = 41) AND (SELECT gold = \
+         10000000 FROM player WHERE name = 'Alpha')",
     );
 }
 

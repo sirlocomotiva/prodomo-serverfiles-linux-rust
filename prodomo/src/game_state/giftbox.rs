@@ -57,8 +57,9 @@ use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 
-/// The dragon-soul boxes (`:3204`): a caller without the qualification opens none.
-const DRAGON_SOUL_BOX_MIN: u32 = 51_500;
+/// The dragon-soul boxes (`:3204`, `dwBoxVnum > 51500 && dwBoxVnum < 52000`): a caller
+/// without the qualification opens none.
+const DRAGON_SOUL_BOX_MIN: u32 = 51_501;
 /// The dragon-soul boxes (`:3204`): a caller without the qualification opens none.
 const DRAGON_SOUL_BOX_MAX: u32 = 52_000;
 /// The clam shell (`case 27987`, `G/char_item.cpp:4294-4344`): an `ITEM_GIFTBOX`

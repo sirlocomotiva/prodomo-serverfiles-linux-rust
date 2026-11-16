@@ -311,19 +311,19 @@ impl GameState {
         let Some(plan) = self.element_plan(vid, src, dst, request, arg) else {
             return;
         };
-        // The scroll and the gold leave before the draw, but the gold record rides last,
-        // after the landed answer.
-        let gold = self.take_element_fee(vid, plan.fee, moved);
+        // The scroll leaves (`SetCount`), then the fee (`ChangeGold`, which sends its
+        // record at once under `ENABLE_REMOVE_LIMIT_GOLD`, `G/char.cpp:3823-3848`), and
+        // only then the draw and the landing (`G/char_item.cpp:10336-10345`).
         self.spend_element_scroll(vid, actor, plan.at, moved);
+        let gold = self.take_element_fee(vid, plan.fee, moved);
+        self.send_element_gold(vid, actor, gold, moved);
         if world::character::number(&mut self.dice, 1, 100) > 100 {
             Self::element_send(src, dst, REFINE_ELEMENT_FAILED, moved);
-            self.send_element_gold(vid, actor, gold, moved);
             return;
         }
         let packed = self.element_pack(&plan);
         self.set_element(vid, actor, plan.target, packed, moved);
         Self::element_send(src, dst, plan.done, moved);
-        self.send_element_gold(vid, actor, gold, moved);
     }
 
     /// One `GC_REFINE_ELEMENT` folded into `moved`.

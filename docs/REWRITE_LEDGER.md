@@ -57326,3 +57326,53 @@ passed, 0 failed in 46 targets; with it 5,692 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,652 `ported`, 162 `partial`, 512 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 551 scenarios. No ADR changed.
+## 714. The giftbox with no group, the element change, and the order of the element fee (B9)
+
+**The giftbox.** The owner's `special_item_group.txt` has one group, the moonlight box's
+(50011), which `a_moonlight_box_draws_its_group_and_tells_the_gift` draws. Every other
+`ITEM_GIFTBOX` misses `GiveItemFromSpecialItemGroup`, talks `[LS;56]` and is kept
+(`G/char_item.cpp:3180-3258`).
+
+`a_box_with_no_group_talks_and_is_kept` runs in shipped mode with 51501 and 25102. Both talk
+`[LS;56]` and stay.
+
+The dragon-soul gate (`> 51500 && < 52000`, `[LS;1094]` for the unqualified) does not answer for
+a player. The owner's `_basic/dragon_soul.lua` runs `ds.give_qualification()` on every login.
+The first draft of the scenario expected `[LS;1094]` from Delta (level 1) and got `[LS;56]`;
+that is how the quest was found.
+
+The Rewrite's range started at 51500. Legacy excludes it. `DRAGON_SOUL_BOX_MIN` is now 51501.
+No owner proto has 51500, so no player could tell.
+
+**The element change.** `case USE_ELEMENT_CHANGE` (`:3748-3778`) and the change arm of
+`DoRefineElement` (`:10244-10424`). `a_change_scroll_turns_an_element_and_keeps_its_plus` runs in
+shipped mode with the owner's 56009:
+
+- on a sword with no element it stands nothing;
+- on a +7 sword holding lightning +1 (`110505505`) it stands the change window;
+- the answer element 0 is outside `REFINE_ELEMENT_CATEGORY_NONE..MAX` and closes the window,
+  with nothing spent;
+- stood again and answered with fire, the scroll goes, then the 10,000,000 fee, then the sword
+  turns to fire with its plus and values kept (`310505505`), then `REFINE_ELEMENT_CHANGE_DONE`.
+
+**The fee's place.** `DoRefineElement` spends the scroll (`SetCount`), then the fee. The fee is
+`ChangeGold` under `ENABLE_REMOVE_LIMIT_GOLD` (`prodomodefines.h:157`), which sends
+`GC_CHARACTER_GOLD_CHANGE` at once (`G/char.cpp:3823-3848`). Only then does it draw and land
+(`:10336-10345`).
+
+The Rewrite held the gold record back until after the landed answer. Ledger 450 had recorded
+that order without a legacy reason. `do_refine_element` (`prodomo/src/game_state/refine_element.rs`)
+now sends the scroll, then the gold, then the landing. A player could tell only by watching the
+order of the records.
+
+`an_element_scroll_upgrades_and_a_hex_scroll_downgrades` now reads the fee right after the scroll,
+for both the upgrade and the downgrade.
+
+2 `partial` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,694
+passed, 0 failed in 46 targets; with it 5,694 passed, 0 failed in 46 targets (464 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,654 `ported`, 160 `partial`, 512 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 553 scenarios. No ADR changed.
