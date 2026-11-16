@@ -57433,3 +57433,47 @@ passed, 0 failed in 46 targets; with it 5,695 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,656 `ported`, 158 `partial`, 512 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 554 scenarios. No ADR changed.
+## 716. The tuning and detachment scrolls on the upper stones (B9)
+
+**The detachment scroll on a +3 or +4 stone was silent in the Rewrite.** `UseItemEx` takes
+`USE_TUNING` and `USE_DETACHMENT` in one arm (`G/char_item.cpp:5959-6013`):
+
+1. the target is looked up; an exchanging or worn one is refused silently (`@fixme114`, `:5967`);
+2. a +3 stone (28330-28343) is refused with `[#Unk] Stones +3 cannot be improved with this item.`;
+3. a +4 stone (28430-28443) under any scroll but 71056 is refused with
+   `Stones cannot be improved with  this item.` (legacy's double space);
+4. anything else goes to `RefineItem`.
+
+The Rewrite ran steps 2 and 3 only for the tuning scroll (`scroll_window`). The detachment scroll
+went straight to `detach_stones`, which found no `ITEM_FLAG_REFINEABLE` on a stone and sent
+nothing. Both arms now share `stone_refusal` in `prodomo/src/game_state/use_to_item.rs`, and
+`detach_step` sends its line after the use's checks, spending nothing. A player could tell the
+difference (a line against silence), and the mistake was the Rewrite's own, so it is recorded
+here and in the rows, not as a Defect row.
+
+**The scenario.** `a_tuning_scroll_refuses_the_upper_stones_and_stands_the_scroll_window` runs in
+shipped mode. Alpha holds the stones 28330 and 28430, the blessing scroll 25040 (`VALUE0` 0), the
+detachment scroll 25100, the sword 149 (refine set 501) and the sword 10, and has the leather
+30613 in its weapon cell.
+
+- 25040 on 28330 and 25100 on 28330 hear the +3 line; 25040 on 28430 hears the +4 line.
+- 25040 on the sword 149 is silent (`RefineItem`'s set-501 refusal, `:1992`), and on the worn
+  leather (inventory cell 184) silent.
+- 25040 on the sword 10 opens the `REFINE_TYPE_SCROLL` window (type 2) for the +1 recipe.
+- The store still holds all seven items after the logout.
+
+The worn item is a material and not a sword because a worn sword changes the points record the
+login helpers pin; the equipped check comes before any type check, so the material proves it.
+
+Two branches cannot be reached with the owner's data. 71056, the one scroll that refines a +4
+stone, is `ITEM_UNIQUE`. No owner `USE_TUNING` proto has `VALUE0` 6 (`BDRAGON_SCROLL`); the same
+count finds 20 `USE_TUNING` protos across the values 0 to 5, which is the positive control.
+
+`use.item_use.use_tuning` and `use.item_use.use_detachment` are now `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,696
+passed, 0 failed in 46 targets; with it 5,696 passed, 0 failed in 46 targets (467 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,658 `ported`, 156 `partial`, 512 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 555 scenarios. No ADR changed.

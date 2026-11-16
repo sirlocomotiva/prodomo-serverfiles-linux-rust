@@ -54621,6 +54621,83 @@ fn a_first_use_ring_starts_its_clock_once_and_counts_its_uses() {
     );
 }
 
+/// `REFINE_TYPE_SCROLL`, the type of a plain scroll's window.
+const REFINE_TYPE_SCROLL: u8 = 2;
+
+/// The `USE_TUNING` and `USE_DETACHMENT` arm's refusals (`G/char_item.cpp:5959-6013`) and
+/// `RefineItem`'s plain scroll (`:1970-1995`). Alpha holds the +3 stone 28330, the +4 stone
+/// 28430, the blessing scroll 25040 (value 0), the detachment scroll 25100, the sword 149 of
+/// refine set 501 and the sword 10, and has the leather 30613 in its weapon cell (an item that
+/// changes no point, so the load stays the plain one). The blessing on the +3 stone hears
+/// the +3 line, on the +4 stone the +4 line (only 71056, which the owner has as no tuning
+/// scroll, refines one), and the detachment scroll on the +3 stone the +3 line. On the set-501
+/// sword and on the worn leather it is refused silently (`@fixme114`, `:5967`). On the sword 10 it stands the scroll's
+/// refine window (`REFINE_TYPE_SCROLL`). Nothing is spent.
+#[test]
+fn a_tuning_scroll_refuses_the_upper_stones_and_stands_the_scroll_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, window, cell, vnum) in [
+        (30, 1, 0, 28_330),
+        (31, 1, 1, 28_430),
+        (32, 1, 2, 25_040),
+        (33, 1, 3, 25_100),
+        (34, 1, 4, 149),
+        (35, 1, 5, 10),
+        (36, 2, 4, 30_613),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 {window}, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    assert_eq!(owners_protos().get(149).expect("the sword").refine_set, 501);
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    let plus_three: &[u8] = b"[#Unk] Stones +3 cannot be improved with this item.";
+    for (scroll, stone, line) in [
+        (2, 0, plus_three),
+        (
+            2,
+            1,
+            b"Stones cannot be improved with  this item.".as_slice(),
+        ),
+        (3, 0, plus_three),
+    ] {
+        alpha.send_record(&client_use_to_item(scroll, stone));
+        assert_eq!(alpha.read_game(), an_info_line(line), "{scroll} on {stone}");
+        alpha.quiet("a refused stone changes nothing");
+    }
+    // The set-501 sword, then the worn leather (wear cell 4 is inventory cell 184).
+    alpha.send_record(&client_use_to_item(2, 4));
+    alpha.quiet("a scroll on a set-501 sword is refused silently");
+    alpha.send_record(&client_use_to_item(2, 184));
+    alpha.quiet("a scroll on a worn item is refused silently");
+    alpha.send_record(&client_use_to_item(2, 5));
+    let mut window = server_refine_information(5, (10, 11), (600, 90), &[]);
+    window[1] = REFINE_TYPE_SCROLL;
+    assert_eq!(alpha.read_game(), window, "the scroll's window");
+    alpha.quiet("the window spends nothing");
+    drop(alpha);
+    drop(server);
+    check(
+        &database,
+        "(SELECT count(*) = 7 FROM item WHERE id BETWEEN 30 AND 36)",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

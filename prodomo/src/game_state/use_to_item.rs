@@ -83,9 +83,22 @@ const PLUS_FOUR_STONES: RangeInclusive<u32> = 28_430..=28_443;
 /// The scroll that refines a +4 stone.
 const STONE_SCROLL: u32 = 71_056;
 /// A +3 stone under a scroll.
-const PLUS_THREE_NOTICE: &[u8] = b"[#Unk] Stones +3 cannot be improved with this item.";
+const PLUS_THREE_NOTICE: &str = "[#Unk] Stones +3 cannot be improved with this item.";
 /// A +4 stone under another scroll; legacy's text has the double space.
-const PLUS_FOUR_NOTICE: &[u8] = b"Stones cannot be improved with  this item.";
+const PLUS_FOUR_NOTICE: &str = "Stones cannot be improved with  this item.";
+
+/// The line `UseItemEx`'s `USE_TUNING` and `USE_DETACHMENT` arm refuses the stone `target`
+/// with under the scroll `scroll` (`G/char_item.cpp:5992-6008`): every +3 stone, and a +4
+/// stone under any scroll but [`STONE_SCROLL`].
+fn stone_refusal(target: u32, scroll: u32) -> Option<&'static str> {
+    if PLUS_THREE_STONES.contains(&target) {
+        Some(PLUS_THREE_NOTICE)
+    } else if PLUS_FOUR_STONES.contains(&target) && scroll != STONE_SCROLL {
+        Some(PLUS_FOUR_NOTICE)
+    } else {
+        None
+    }
+}
 /// The refine set a black dragon scroll refines (`:1987`).
 const BDRAGON_SET: u16 = 702;
 /// The refine set a plain scroll does not refine (`:1992`).
@@ -1073,7 +1086,9 @@ impl GameState {
         Ok(moved)
     }
 
-    /// The `USE_DETACHMENT` arm of `CHARACTER::RefineItem` (`G/char_item.cpp:1996-2040`):
+    /// The `USE_DETACHMENT` arm of `UseItemEx` (`G/char_item.cpp:5959-6013`) and of
+    /// `CHARACTER::RefineItem` (`:1996-2040`): a +3 or +4 stone is refused with its line
+    /// ([`stone_refusal`]), as under a tuning scroll; otherwise
     /// the scroll at `at` breaks the live stones out of the item at `dest` and each
     /// comes back by `AutoGiveItem`, in socket order. The use's checks run first, as
     /// the stone arm's do; a stone that would not fit is laid at the caller's feet,
@@ -1095,6 +1110,15 @@ impl GameState {
                 .get(scroll.vnum)
                 .ok_or(MoveRefused::UnknownVnum(scroll.vnum))?;
             world::character::use_checks(&scroll, proto, rules, gear.points)?;
+            let refused = world::character::use_target(items, dest)
+                .and_then(|target| stone_refusal(target.vnum, scroll.vnum));
+            if let Some(notice) = refused {
+                return Ok(MoveDone {
+                    kind: MoveKind::Used,
+                    records: vec![world::character::MoveRecord::Notice(notice)],
+                    changes: Vec::new(),
+                });
+            }
             let (done, found) =
                 world::character::detach_stones(items, (&scroll, proto), dest, protos)?;
             *stones.borrow_mut() = found;
@@ -1459,11 +1483,8 @@ impl GameState {
         let Some(target) = world::character::use_target(items, dest) else {
             return Vec::new();
         };
-        if PLUS_THREE_STONES.contains(&target.vnum) {
-            return vec![self.refine_line(actor, CHAT_TYPE_INFO, PLUS_THREE_NOTICE)];
-        }
-        if PLUS_FOUR_STONES.contains(&target.vnum) && scroll_vnum != STONE_SCROLL {
-            return vec![self.refine_line(actor, CHAT_TYPE_INFO, PLUS_FOUR_NOTICE)];
+        if let Some(notice) = stone_refusal(target.vnum, scroll_vnum) {
+            return vec![self.refine_line(actor, CHAT_TYPE_INFO, notice.as_bytes())];
         }
         let refine_set = self
             .protos
