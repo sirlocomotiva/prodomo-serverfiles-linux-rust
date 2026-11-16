@@ -1244,20 +1244,23 @@ fn seated_use_kind(
 /// answers nothing.
 fn use_special_kind(proto: &ItemProto) -> SeatedArms {
     use gamedata::item_kind::{
-        ITEM_AUTOUSE, ITEM_LOTTERY, ITEM_MATERIAL, ITEM_SPECIAL, ITEM_TOOL, ITEM_USE,
-        USE_ABILITY_UP, USE_AFFECT, USE_BUCKET, USE_CHANGE_ATTRIBUTE_PLUS, USE_CLEAR,
-        USE_INVISIBILITY,
+        ITEM_AUTOUSE, ITEM_CONTAINER, ITEM_LOTTERY, ITEM_MATERIAL, ITEM_RESOURCE, ITEM_SPECIAL,
+        ITEM_TOOL, ITEM_USE, USE_ABILITY_UP, USE_AFFECT, USE_BUCKET, USE_CHANGE_ATTRIBUTE_PLUS,
+        USE_CLEAR, USE_INVISIBILITY,
     };
     if proto.item_type != ITEM_USE {
         // `case ITEM_AUTOUSE` .. `case ITEM_LOTTERY` are a bare `break`
         // (`G/char_item.cpp:7050-7055`), as is a `USE_SPECIAL` unique the vnum switch has no
-        // case for (`:3002-3024`).
+        // case for (`:3002-3024`). `ITEM_CONTAINER` and `ITEM_RESOURCE` have no case: the
+        // switch's `default` logs and returns false (`:7158-7161`), which sends nothing.
         let silent = [
             ITEM_AUTOUSE,
             ITEM_MATERIAL,
             ITEM_SPECIAL,
             ITEM_TOOL,
             ITEM_LOTTERY,
+            ITEM_CONTAINER,
+            ITEM_RESOURCE,
         ]
         .contains(&proto.item_type)
             || (proto.item_type == ITEM_UNIQUE

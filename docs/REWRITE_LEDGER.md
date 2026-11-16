@@ -57132,3 +57132,43 @@ passed, 0 failed in 46 targets; with it 5,686 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,633 `ported`, 183 `partial`, 510 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 545 scenarios. No ADR changed.
+## 710. A use with no arm (B9, the `default` of `UseItemEx`)
+
+`UseItemEx`'s type switch ends in `default: sys_log(...); return false;`
+(`G/char_item.cpp:7158-7161`). The use sends nothing and the item stays.
+
+The owner's protos were compared with every `case ITEM_*` label between `:2760` and `:7162`.
+Three types reach the `default`:
+
+- `ITEM_RESOURCE`: 21 rows;
+- `ITEM_CONTAINER`: one row, 27998;
+- `ITEM_ELK`: one row, gold, which never sits in an inventory.
+
+The Rewrite refused the first two as not ported. For the player that was the same silence, but
+the server logged a refusal and the item never reached legacy's path.
+
+`use_special_kind` (`world/src/character/equip.rs`) now treats both as silent, next to the
+bare-`break` types of ledger 701. `gamedata::item_kind` gains `ITEM_CONTAINER` (11) and
+`ITEM_RESOURCE` (14) (`C/item_length.h:81`, `:84`).
+
+`a_use_of_a_type_with_no_arm_sends_nothing_and_keeps_the_item` runs in shipped mode. Alpha uses
+the fish bone 27799 and the container 27998:
+
+- each use is followed by silence;
+- the server logs no "not ported yet";
+- both items stay.
+
+With the two types taken back out of the silent list, the scenario fails on its log assertion,
+and the server logged `not ported yet: Use(14)`.
+
+`use.item_extract.default` is `unused`. The owner's two `ITEM_EXTRACT` protos are
+`EXTRACT_DRAGON_HEART` and `EXTRACT_DRAGON_SOUL`, which are the search's positive controls.
+
+1 `partial` row is `ported` and 1 is `unused`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,687
+passed, 0 failed in 46 targets; with it 5,687 passed, 0 failed in 46 targets (460 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,634 `ported`, 181 `partial`, 511 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 546 scenarios. No ADR changed.

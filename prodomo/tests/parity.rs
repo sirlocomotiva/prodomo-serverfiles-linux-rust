@@ -53882,6 +53882,55 @@ fn a_shaman_unlock_answers_its_line_and_stays() {
     );
 }
 
+/// `UseItemEx`'s `default` (`G/char_item.cpp:7158-7161`): a type the switch has no case for
+/// logs and returns false, so the item stays and nothing is sent. The owner's protos reach it
+/// with `ITEM_RESOURCE` (21 rows) and `ITEM_CONTAINER` (one, 27998). Alpha uses the fish bone
+/// 27799 and the 27998 container: each sends nothing and stays, and the server refuses
+/// neither as not ported.
+#[test]
+fn a_use_of_a_type_with_no_arm_sends_nothing_and_keeps_the_item() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, vnum) in [(30, 0, 27799), (31, 1, 27998)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    for (vnum, kind) in [(27_799, 14), (27_998, 11)] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, kind, "the owner's type of {vnum}");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    for cell in [0, 1] {
+        alpha.send_record(&client_item_use(cell));
+        alpha.quiet("a use with no arm sends nothing");
+    }
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    assert!(
+        !server.logged("not ported yet"),
+        "the uses ran legacy's default, not a refusal"
+    );
+    check(
+        &database,
+        "(SELECT count(*) = 2 FROM item WHERE id IN (30, 31) AND pos = id - 30)",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

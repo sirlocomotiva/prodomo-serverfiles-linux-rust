@@ -38,10 +38,15 @@ pub const ITEM_LOTTERY: i32 = 8;
 pub const ITEM_ELK: i32 = 9;
 /// `ITEM_METIN`, a stone that sits in another item's socket.
 pub const ITEM_METIN: i32 = 10;
+/// `ITEM_CONTAINER` (11): a type `UseItemEx` has no case for, so its use runs the switch's
+/// `default` (`G/char_item.cpp:7158-7161`).
+pub const ITEM_CONTAINER: i32 = 11;
 /// `ITEM_FISH`, a caught fish, which the campfire grills.
 pub const ITEM_FISH: i32 = 12;
 /// `ITEM_ROD`, a fishing rod.
 pub const ITEM_ROD: i32 = 13;
+/// `ITEM_RESOURCE` (14): as [`ITEM_CONTAINER`], a type whose use runs the `default`.
+pub const ITEM_RESOURCE: i32 = 14;
 /// `FISH_ALIVE`.
 pub const FISH_ALIVE: i32 = 0;
 /// `FISH_DEAD`.
