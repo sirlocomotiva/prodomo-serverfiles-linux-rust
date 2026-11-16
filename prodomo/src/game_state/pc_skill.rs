@@ -1706,6 +1706,22 @@ impl GameState {
         if horse_skill != (row.record.skill_type == SKILL_TYPE_HORSE) {
             return false;
         }
+        // The level gate (`:2963-2964`), before the charge and the combo arms.
+        let level = self.pc_skill_level(vid.raw(), skill_vnum);
+        if level == 0 {
+            return false;
+        }
+        // The rod/pick refusal (`:2971-2973`): no mining is ported, so no
+        // equipped rod or pick can refuse.
+        // `TargetVIDMap.clear()` (`:2977`): a cast past the gates above forgets every
+        // victim's hit count, even one the cooldown stamp then refuses.
+        if let Some(stamped) = self
+            .pc_skills
+            .get_mut(&vid.raw())
+            .and_then(|state| state.uses.get_mut(&skill_vnum))
+        {
+            stamped.hits_per_victim.clear();
+        }
         // The charge arm (`:2979-2995`): with the DASH held, or a victim that is
         // not the caster, the cast strikes at once. Without the DASH the caster
         // first dashes (the recursive self-cast, which charges and stamps);
@@ -1729,36 +1745,11 @@ impl GameState {
             let _dashed = self.remove_pc_affect(vid, skill_vnum);
             return true;
         }
-        // The combo toggle (`:2996-3006`): the index flips between 0 and the
-        // level, the client is told, and the cast ends before the level gate
-        // (a level-0 combo still chats `combo 0`), the charge and the stamp.
-        // The hack check the motion carries is anti-cheat and never ported.
+        // The combo toggle (`:2996-3006`): the cast ends before the charge and the stamp.
         if skill_vnum == SKILL_COMBO {
-            let level = self.pc_skill_level(vid.raw(), SKILL_COMBO);
-            let state = self.pc_skill_state(vid.raw());
-            if state.combo_index != 0 {
-                state.combo_index = 0;
-            } else {
-                state.combo_index = level;
-            }
-            let index = self.pc_skills[&vid.raw()].combo_index;
-            if let Some(mover) = self.own_mover(vid) {
-                self.tell(
-                    vid,
-                    mover,
-                    CHAT_TYPE_COMMAND,
-                    format!("combo {index}").as_bytes(),
-                    &[],
-                );
-            }
+            self.toggle_combo(vid, level);
             return true;
         }
-        let level = self.pc_skill_level(vid.raw(), skill_vnum);
-        if level == 0 {
-            return false;
-        }
-        // The rod/pick refusal (`:2971-2973`): no mining is ported, so no
-        // equipped rod or pick can refuse.
         let (toggle, affect_flag) = {
             let skill = self
                 .pc_skill_tables
@@ -1779,6 +1770,24 @@ impl GameState {
         }
         self.remove_revive_invisible(vid);
         self.cast_skill(vid, job, group, skill_vnum, target_vid, level)
+    }
+
+    /// The combo toggle (`G/char_skill.cpp:2996-3006`): the index flips between 0
+    /// and the level, and the client is told. The hack check the motion carries is
+    /// anti-cheat and never ported.
+    fn toggle_combo(&mut self, vid: Vid, level: u8) {
+        let state = self.pc_skill_state(vid.raw());
+        state.combo_index = if state.combo_index != 0 { 0 } else { level };
+        let index = state.combo_index;
+        if let Some(mover) = self.own_mover(vid) {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_COMMAND,
+                format!("combo {index}").as_bytes(),
+                &[],
+            );
+        }
     }
 
     /// `UseSkill`'s charge-and-stamp half (`:3021-3130`): the SP charge (with
@@ -2696,22 +2705,17 @@ impl GameState {
             .npc_by_vid(target_vid)
             .expect("the victim stood above")
             .clone();
-        // `battle_is_attackable` (`G/battle.cpp:165`): beyond it the attack is `BATTLE_NONE`
-        // and sends nothing. There is no melee reach here: `ComputeSkill`'s target-range
-        // arm (`+ 50`) below is the only distance gate.
-        if !self.is_attackable(vid, (place.1, spot.x, spot.y), &npc_snapshot) {
-            return false;
-        }
-        // `CheckSkillHitCount` (`G/char_skill.cpp:4184-4254`): an unused skill refuses;
-        // YONGKWON 62/HWAYEOMPOK 77/DAEJINGAK 18/PAERYONG 93 refuse the attack record;
-        // then each victim's count is capped (3 for SAMYEON=1/CHARYUN=33; the 230d rows
-        // keep the default 1 — the YEONSA-7/HORSE_WILDATTACK_RANGE-5/HORSE_ESCAPE-10
-        // arms have no hosted caster and stay out).
+        // `CheckSkillHitCount` (`G/char_skill.cpp:4184-4254`), before `Attack`: an unused
+        // skill refuses; YONGKWON 62/HWAYEOMPOK 77/DAEJINGAK 18/PAERYONG 93 refuse the attack
+        // record; then each victim's count is capped (3 for SAMYEON=1/CHARYUN=33, 10 for
+        // HORSE_ESCAPE=139, else 1). The YEONSA-7/HORSE_WILDATTACK_RANGE-5 arms are
+        // unreachable: both skills are on the shoot list, refused here before the count.
         if matches!(skill_vnum, 62 | 77 | 18 | 93) {
             return false;
         }
         let max_hits = u32::from(match skill_vnum {
             1 | 33 => 3_u8,
+            SKILL_HORSE_ESCAPE => 10,
             _ => 1,
         });
         let seen = self
@@ -2735,6 +2739,12 @@ impl GameState {
         count
             .hits_per_victim
             .insert(target_vid, seen.saturating_add(1));
+        // `battle_is_attackable` (`G/battle.cpp:165`): beyond it the attack is `BATTLE_NONE`
+        // and sends nothing. There is no melee reach here: `ComputeSkill`'s target-range
+        // arm (`+ 50`) below is the only distance gate.
+        if !self.is_attackable(vid, (place.1, spot.x, spot.y), &npc_snapshot) {
+            return false;
+        }
         // `Attack(bType)`'s skill-term gate (`G/char_battle.cpp:297-304`): past 1500 ms
         // after `m_dwLastSkillTime` the cast is refused. `use_skill` stamps the pulse,
         // so the `>` fires past 37 Pulses.
@@ -4735,15 +4745,13 @@ mod tests {
         assert_eq!(texts(&frames), [b"combo 0".to_vec()]);
     }
 
-    /// A level-0 combo still toggles: the arm sits before the level gate, so the
-    /// cast chats `combo 0` and answers true.
+    /// A level-0 combo refuses: the level gate (`G/char_skill.cpp:2963-2964`) sits
+    /// before the toggle, so the cast chats nothing and answers false.
     #[test]
-    fn a_level_zero_combo_still_chats() {
+    fn a_level_zero_combo_refuses() {
         let (_clock, mut world, mut inbox) = a_cast();
-        assert!(world.use_skill(Vid::new(1), SKILL_COMBO, 0));
-        assert_eq!(world.pc_skills.get(&1).unwrap().combo_index, 0);
-        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
-        assert_eq!(texts(&frames), [b"combo 0".to_vec()]);
+        assert!(!world.use_skill(Vid::new(1), SKILL_COMBO, 0));
+        assert!(inbox.try_recv().is_err(), "nothing is told");
     }
 
     /// The charge's first cast dashes: level-1 5 on the caster charges the SP,

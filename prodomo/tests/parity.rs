@@ -52469,6 +52469,126 @@ fn each_skill_type_climbs_and_forgets_by_its_own_point() {
     );
 }
 
+/// A metin stone (8001: `NOMOVE`, no swing, 14,550 hit points) at regen point (605, 540),
+/// where Alpha enters.
+const STONE_AT_ALPHA: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t8001\n";
+
+/// The hit-count stage's casters, one account each: login, Name, job, group and the skill
+/// learned at 1.
+const HIT_CASTERS: [(&str, &str, u8, u8, u32); 6] = [
+    ("alice", "Alpha", 0, 1, 1),
+    ("bob", "Bravo", 1, 1, 33),
+    ("carol", "Carla", 0, 2, 18),
+    ("dave", "Dario", 2, 1, 62),
+    ("erin", "Erina", 2, 2, 77),
+    ("finn", "Finna", 3, 1, 93),
+];
+
+/// One caster of [`HIT_CASTERS`] enters beside the stone, casts its skill on it once per
+/// round and sends `attacks` `CG_ATTACK` records of the skill's type after each cast. Answers
+/// the `GC_DAMAGE_INFO` records on the stone that follow each round's attacks.
+fn hits_after_casts(
+    server: &Server,
+    login: &str,
+    vnum: u32,
+    attacks: usize,
+    rounds: usize,
+) -> Vec<usize> {
+    let (mut client, _listed, _items) = load_character(server, login.as_bytes(), 0);
+    let entered = enter_game_shown(&mut client);
+    read_login_event(&mut client);
+    let stone = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    // A non-player's damage record goes only to the attacker whose target it is
+    // (`G/char_battle.cpp:1720-1742`), as a real client's attacker has it.
+    client.send_record(&client_target(stone));
+    let clicked = client.read_fight();
+    assert_eq!(clicked[0], GC_TARGET, "{clicked:02x?}");
+    let mut cast = vec![CG_USE_SKILL];
+    cast.extend_from_slice(&vnum.to_le_bytes());
+    cast.extend_from_slice(&stone.to_le_bytes());
+    let attack = client_attack_typed(u8::try_from(vnum).expect("a skill byte"), stone);
+    let mut landed = Vec::new();
+    for round in 0..rounds {
+        if round > 0 {
+            // Past the last cast's 12 s cooldown (`szCooldownPoly` 12 for 1 and 33).
+            std::thread::sleep(Duration::from_millis(12_500));
+        }
+        client.send_record(&cast);
+        // The cast's own records, and the damage of a skill that strikes on the cast.
+        let _cast = records_within(&mut client, Duration::from_millis(400));
+        for _ in 0..attacks {
+            client.send_record(&attack);
+        }
+        let wire = records_within(&mut client, Duration::from_millis(800));
+        let on_stone =
+            |record: &&Vec<u8>| record[0] == GC_DAMAGE_INFO && record[1..5] == stone.to_le_bytes();
+        landed.push(wire.iter().filter(on_stone).count());
+    }
+    landed
+}
+
+/// Every record that arrives within `window`, past the pings and the effects.
+fn records_within(client: &mut Keyed, window: Duration) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + window;
+    std::iter::from_fn(|| client.read_fight_until(deadline)).collect()
+}
+
+/// `CheckSkillHitCount` (`G/char_skill.cpp:4184-4254`), reached only from a `CG_ATTACK` with a
+/// skill type (`G/input_main.cpp:1989-1993`). Each caster casts its skill on a stone, then
+/// sends four attack records of that type. Three-Way Cut (1) and Rolling Dagger (33) land three
+/// and the fourth is refused, their cap of 3 a victim (`:4221-4223`); a second cast clears the
+/// count (`TargetVIDMap.clear()`, `G/char_skill.cpp:2977`) and three more land. Spirit Strike
+/// (18), Dragon Swirl (62), Flame Strike (77) and the shaman's 93 refuse every attack record
+/// (`:4204-4210`), whatever their cast did.
+#[test]
+fn a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        STONE_AT_ALPHA,
+        "no_wander = true\ntest_server = false\nping_event_second_cycle = 600",
+    );
+    for (login, name, job, group, vnum) in HIT_CASTERS {
+        create_account(&server, login);
+        sql(
+            &database,
+            &format!("UPDATE account SET empire = 1 WHERE login = '{login}'"),
+        );
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO player (account_id, slot, name, job, level, x, y, skill_group, sp) \
+                 SELECT id, 0, '{name}', {job}, 154, 470000, 950000, {group}, 150 FROM account \
+                 WHERE login = '{login}'"
+            ),
+        );
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, {vnum}, \
+                 1, 0 FROM player WHERE name = '{name}'"
+            ),
+        );
+    }
+    for (login, _, _, _, vnum) in HIT_CASTERS {
+        let capped = matches!(vnum, 1 | 33);
+        let rounds = if vnum == 1 { 2 } else { 1 };
+        let expected = vec![if capped { 3 } else { 0 }; rounds];
+        assert_eq!(
+            hits_after_casts(&server, login, vnum, 4, rounds),
+            expected,
+            "{vnum}'s attack records landed"
+        );
+    }
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

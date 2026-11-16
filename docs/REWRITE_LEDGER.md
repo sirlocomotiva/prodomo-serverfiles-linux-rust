@@ -56522,3 +56522,44 @@ passed, 0 failed in 46 targets; with it 5,669 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,541 `ported`, 261 `partial`, 489 `unused`, 40 `missing`,
 0 `codec`, of 2,331 rows; 529 scenarios. No ADR changed.
+## 693. Each skill's hit cap on one victim (B9, `CheckSkillHitCount`)
+
+`CheckSkillHitCount` (`G/char_skill.cpp:4184-4254`) gates a CG_ATTACK record that carries a
+skill type. YONGKWON 62, HWAYEOMPOK 77, DAEJINGAK 18 and PAERYONG 93 refuse every such record
+(`:4204-4210`); SAMYEON 1 and CHARYUN 33 land at most three per victim (`:4221-4223`); every
+other skill lands one. Each cast clears the counts: `UseSkill` empties `TargetVIDMap` at `:2977`,
+after the level and mining gates and before the charge and the cooldown stamp.
+
+`a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit` (shipped mode) puts a
+metin stone (8001) beside Alpha and six casters on six accounts, each with one skill at level 1:
+Alpha 1, Bravo 33, Carla 18, Dario 62, Erina 77, Finna 93. Each targets the stone, casts, and
+sends four CG_ATTACK records of its skill type; the stone's GC_DAMAGE_INFO records are counted.
+1 and 33 land three. The four named skills land none. Alpha casts 1 again 12.5 s later, past
+its 12 s cooldown, and lands three more.
+
+Two parity bugs are fixed in `use_skill` (`prodomo/src/game_state/pc_skill.rs`):
+
+- The Rewrite never cleared the per-victim counts, so a second cast of 1 or 33 landed nothing
+  on a victim the first cast had struck three times. The cast now clears them at the legacy
+  position.
+- The level gate (`:2963-2964`) ran after the charge and combo arms, so a client could toggle
+  an unlearned combo (`combo 0`) or strike with an unlearned charge. It now runs first. Unit test
+  `a_level_zero_combo_still_chats` pinned the wrong order; it is replaced by
+  `a_level_zero_combo_refuses`. The combo arm moved to `toggle_combo` to keep `use_skill` short.
+
+`skill_attack` also caps HORSE_ESCAPE 139 at ten hits (`:4234`), which it held at one. Its row
+stays `partial`: no horse skill row is hosted, and the scenario needs a rider on a grade-3 horse. YEONSA 46 and
+HORSE_WILDATTACK_RANGE 140 are `unused`: `CheckSkillHitCount` has one caller, the CG_ATTACK
+arm (`G/input_main.cpp:1990`), and both skills are on the shoot list that returns before it
+unless the header is CG_SHOOT (`:1940-1963`); the CG_SHOOT arm calls only `Shoot`.
+
+`skill_attack` now counts before `battle_is_attackable`, as legacy counts in
+`CInputMain::Attack` before `CHARACTER::Attack` refuses; a record on a victim that is not
+attackable still uses up one of the cast's hits.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,670
+passed, 0 failed in 46 targets; with it 5,670 passed, 0 failed in 46 targets (454 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,547 `ported`, 256 `partial`, 491 `unused`, 37 `missing`,
+0 `codec`, of 2,331 rows; 530 scenarios. No ADR changed.
