@@ -2008,7 +2008,7 @@ impl GameState {
 
     /// Whether the character under `vid` holds an affect of `kind` (`FindAffect`,
     /// `G/char_affect.cpp:129-142`).
-    fn holds_affect(&self, vid: Vid, kind: u32) -> bool {
+    pub(super) fn holds_affect(&self, vid: Vid, kind: u32) -> bool {
         self.affect_events
             .get(&vid)
             .is_some_and(|event| event.affects.iter().any(|affect| affect.kind == kind))

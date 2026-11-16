@@ -53393,6 +53393,89 @@ fn a_unique_is_worn_and_taken_off_by_its_use() {
     );
 }
 
+/// `case ITEM_MARRIAGE_RING` (`G/char_item.cpp:3841-3878`) and `case ITEM_RAMADAN_CANDY`
+/// (`:3814-3840`). Alpha is not married, so the 70302 ring says `[LS;143]` and stays. Her first
+/// 50183 candy lands three `AFFECT_RAMADAN_ABILITY` (300) rows for its `value0` 1800 s: move
+/// speed (19) +10 with the speed-potion flag (13), mall attack (114) +5 and mall experience
+/// (116) +10, and one of her two candies spends. The second, with the affect running, says
+/// `[LS;99]` and stays (`@fixme147`).
+#[test]
+fn a_marriage_ring_needs_a_spouse_and_a_ramadan_candy_lands_its_three_rows_once() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, count, vnum) in [(30, 0, 1, 70302), (31, 1, 2, 50183)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: the ring is used. Then: no spouse, so the line, and the ring stays.
+    alpha.send_record(&client_item_use(0));
+    let line = alpha.read_game();
+    assert_eq!(
+        (line[0], line[3], line[10..].to_vec()),
+        (GC_CHAT, info(b"[LS;143]").0, info(b"[LS;143]").1),
+        "the ring has no spouse"
+    );
+    alpha.quiet("the ring stays");
+    // When: the first candy is used. Then: the three rows, and one candy spends.
+    alpha.send_record(&client_item_use(1));
+    let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+    let mut adds = Vec::new();
+    let mut counts = Vec::new();
+    while let Some(record) = alpha.read_fight_until(deadline) {
+        match record[0] {
+            GC_AFFECT_ADD => adds.push((
+                u32::from_le_bytes(record[1..5].try_into().expect("four bytes")),
+                record[5],
+                i32::from_le_bytes(record[6..10].try_into().expect("four bytes")),
+                u32::from_le_bytes(record[10..14].try_into().expect("four bytes")),
+                i32::from_le_bytes(record[14..18].try_into().expect("four bytes")),
+            )),
+            ITEM_UPDATE => counts.push(update_fields(&record).2),
+            GC_CHAT => panic!("the first candy says nothing: {record:02x?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        adds,
+        [
+            (300, 19, 10, 13, 1800),
+            (300, 114, 5, 0, 1800),
+            (300, 116, 10, 0, 1800)
+        ],
+        "the three rows"
+    );
+    assert_eq!(counts, [1], "one candy spends");
+    // When: the second candy is used. Then: the running affect refuses it.
+    alpha.send_record(&client_item_use(1));
+    let line = alpha.read_game();
+    assert_eq!(
+        (line[0], line[3], line[10..].to_vec()),
+        (GC_CHAT, info(b"[LS;99]").0, info(b"[LS;99]").1),
+        "the candy's affect runs"
+    );
+    alpha.quiet("the second candy stays");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT count FROM item WHERE id = 30) = 1 AND (SELECT count FROM item WHERE id = 31) = 1",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

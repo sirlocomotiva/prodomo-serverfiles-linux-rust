@@ -56880,3 +56880,39 @@ passed, 0 failed in 46 targets; with it 5,680 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,614 `ported`, 200 `partial`, 508 `unused`, 9 `missing`,
 0 `codec`, of 2,331 rows; 539 scenarios. No ADR changed.
+## 704. The ramadan candy and the marriage ring (B9, `USE_SPECIAL`)
+
+Two `USE_SPECIAL` vnums were refused as not ported.
+
+- **The marriage ring 70302** (`G/char_item.cpp:3841-3878`). It warps a married user to the
+  spouse. With no marriage it says `[LS;143]` and keeps the ring. No character of this build is
+  married (`sys.marriage` is `unused`, and `pc.is_married` answers false), so only that line is
+  reachable.
+- **The ramadan candy 50183** (`:3814-3840`). It refuses with `[LS;99]` while its affect runs
+  (`@fixme147`). Otherwise it adds three `AFFECT_RAMADAN_ABILITY` (300) rows for `value0`
+  seconds: `value1` move speed with `AFF_MOV_SPEED_POTION`, `value2` mall attack and `value3` mall
+  experience. Each row replaces only its own point's row (`IsCube`), and one candy is spent.
+
+`use_candy_or_ring` (`prodomo/src/game_state/stone_recipe.rs`) ports both beside the zen bean. The
+candy runs the use's checks and the spend before the affects, so a refused use lands nothing.
+`holds_affect` (`pc_skill.rs`) is now shared.
+
+The scenario `a_marriage_ring_needs_a_spouse_and_a_ramadan_candy_lands_its_three_rows_once` runs
+in shipped mode.
+
+- Alpha's ring says `[LS;143]` and stays.
+- Her first candy (the owner's values 1800, 10, 5 and 10) adds three rows of kind 300:
+  - point 19, +10, flag 13;
+  - point 114, +5;
+  - point 116, +10.
+  Each lasts 1800 s, and the candy count falls from 2 to 1.
+- The second candy says `[LS;99]` and stays.
+
+2 `missing` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,681
+passed, 0 failed in 46 targets; with it 5,681 passed, 0 failed in 46 targets (459 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,616 `ported`, 200 `partial`, 508 `unused`, 7 `missing`,
+0 `codec`, of 2,331 rows; 540 scenarios. No ADR changed.

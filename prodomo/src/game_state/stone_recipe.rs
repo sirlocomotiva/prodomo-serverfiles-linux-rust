@@ -47,6 +47,12 @@ const PEACH_MAX_ALIGNMENT: i32 = 200_000;
 /// The zen bean (`case 70102`, `G/char_item.cpp:4790-4809`); its sibling 70103 is no
 /// `ITEM_USE` on the owner's data.
 const ZEN_BEAN: u32 = 70_102;
+/// `ITEM_RAMADAN_CANDY` (`G/unique_item.h:96`).
+const RAMADAN_CANDY: u32 = 50_183;
+/// `AFFECT_RAMADAN_ABILITY` (`G/affect.h:117`): the candy's three rows.
+const AFFECT_RAMADAN_ABILITY: u32 = 300;
+/// `ITEM_MARRIAGE_RING` (`G/unique_item.h:81`).
+const MARRIAGE_RING: u32 = 70_302;
 /// The hair colorants (`case 70201`-`case 70206`, `G/char_item.cpp:4937-4967`).
 const HAIR_COLORANTS: [u32; 6] = [70_201, 70_202, 70_203, 70_204, 70_205, 70_206];
 /// The colorant's throttle flag (`fix_bug.colorante`, `:4943,4962`).
@@ -366,6 +372,79 @@ impl GameState {
                 b"[LS;384;%d]",
                 &[crate::chat_line::Arg::Int(i64::from(delta / 10))],
             ));
+        }
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is the ramadan candy or the marriage ring
+    /// (`G/char_item.cpp:3814-3878`), and which.
+    pub(super) fn candy_or_ring_at(&self, vid: Vid, at: ItemPos) -> Option<u32> {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .map(|item| item.vnum)
+            .filter(|vnum| *vnum == RAMADAN_CANDY || *vnum == MARRIAGE_RING)
+    }
+
+    /// The ramadan candy (`case ITEM_RAMADAN_CANDY`, `G/char_item.cpp:3814-3840`) or the
+    /// marriage ring (`case ITEM_MARRIAGE_RING`, `:3841-3878`).
+    ///
+    /// The candy refuses with `[LS;99]` while its affect runs (`@fixme147`). Else, past the
+    /// use's checks, one candy spends and three `AFFECT_RAMADAN_ABILITY` rows land for
+    /// `value(0)` seconds: `value(1)` move speed with the speed-potion flag, `value(2)` mall
+    /// attack and `value(3)` mall experience, each replacing only its own point's row (the
+    /// `IsCube` add).
+    ///
+    /// The ring warps to the spouse; with no marriage it says `[LS;143]` and stays. No
+    /// character of this build is married (`sys.marriage` is `unused`), so only that line is
+    /// reachable.
+    pub(super) fn use_candy_or_ring(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+        vnum: u32,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if vnum == MARRIAGE_RING {
+            self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;143]", &[]);
+            return self.nothing_used(vid, actor);
+        }
+        if self.holds_affect(vid, AFFECT_RAMADAN_ABILITY) {
+            self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;99]", &[]);
+            return self.nothing_used(vid, actor);
+        }
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let candy = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(candy.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(candy.vnum))?;
+            world::character::use_checks(&candy, proto, rules, gear.points)?;
+            world::character::spend_one(items, &candy, proto)
+        })?;
+        let values = self
+            .protos
+            .get(RAMADAN_CANDY)
+            .map_or([0; 6], |proto| proto.values);
+        let [time, speed, attack, exp, ..] = values;
+        for (on, value, flag) in [
+            (
+                common::point_slot::POINT_MOV_SPEED,
+                speed,
+                crate::loading_phase::AFF_MOV_SPEED_POTION,
+            ),
+            (common::point_slot::POINT_MALL_ATTBONUS, attack, 0),
+            (common::point_slot::POINT_MALL_EXPBONUS, exp, 0),
+        ] {
+            self.add_pc_affect_keyed(
+                vid,
+                super::affect::Affect::buff(AFFECT_RAMADAN_ABILITY, on, value, flag, time, 0),
+                true,
+                true,
+            );
         }
         Ok(moved)
     }

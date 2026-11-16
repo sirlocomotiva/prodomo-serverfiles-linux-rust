@@ -4570,6 +4570,9 @@ impl GameState {
         if let Some(seasonal) = self.seasonal_box_at(vid, at) {
             return Some(self.use_seasonal_box(vid, at, actor, seasonal));
         }
+        if let Some(vnum) = self.candy_or_ring_at(vid, at) {
+            return Some(self.use_candy_or_ring(vid, at, actor, vnum));
+        }
         if self.hair_colorant_at(vid, at) {
             return Some(self.use_hair_colorant(vid, at, actor));
         }
