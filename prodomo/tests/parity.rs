@@ -53156,6 +53156,59 @@ fn a_zen_bean_lifts_a_negative_alignment_up_to_zero() {
     );
 }
 
+/// `cg.game.item_use`: `case ITEM_MATERIAL` and `case ITEM_SPECIAL` share the bare `break` of
+/// the no-op types (`G/char_item.cpp:7050-7055`): each use succeeds and changes nothing.
+/// Alpha uses the owner's leather 30041 (two) and the map 25106: she hears nothing, both
+/// stay, and no step is refused.
+#[test]
+fn a_material_and_a_special_item_are_used_and_change_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, count, vnum) in [(30, 0, 2, 30041), (31, 1, 1, 25106)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    for (vnum, kind) in [
+        (30_041, gamedata::item_kind::ITEM_MATERIAL),
+        (25_106, gamedata::item_kind::ITEM_SPECIAL),
+    ] {
+        let proto = protos.get(vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, kind, "the owner's type of {vnum}");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    for (cell, what) in [(0, "the leather"), (1, "the map")] {
+        alpha.send_record(&client_item_use(cell));
+        alpha.quiet(what);
+    }
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    assert!(
+        !server.logged("Item step refused"),
+        "every use passes: {}",
+        server.console()
+    );
+    check(
+        &database,
+        "(SELECT count FROM item WHERE id = 30) = 2 AND (SELECT count FROM item WHERE id = 31) \
+         = 1",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

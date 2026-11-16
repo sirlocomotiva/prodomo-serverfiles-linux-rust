@@ -37,9 +37,9 @@ rewrite `.scratch/migration/progress.md`, and start the next one.
 - Ledger 686 made the tail countable: every `partial` and `missing` note ends in `Left:`, and
   the large switches are generated arm tables.
 - Ledger 687 is the first package B slice (the sibling vnums of four `USE_SPECIAL` families).
-- Tests: 5,676 pass in 46 targets with `DATABASE_URL`. There are 536 parity scenarios.
-- Parity: 1,605 ported, 200 partial, 492 unused, 34 missing and 0 codec, out of 2,331 rows;
-  234 items left.
+- Tests: 5,677 pass in 46 targets with `DATABASE_URL`. There are 537 parity scenarios.
+- Parity: 1,607 ported, 200 partial, 496 unused, 28 missing and 0 codec, out of 2,331 rows;
+  228 items left.
 - Owner questions: `.scratch/migration/owner-questions.md`; the ones that block work are in
   `docs/STATUS.md`, "Waiting on the owner".
 - `progress.md` has the details, and supersedes this section once it is newer.

@@ -25,6 +25,15 @@ pub const ITEM_ARMOR: i32 = 2;
 pub const ITEM_USE: i32 = 3;
 /// `ITEM_MATERIAL`, a refine material.
 pub const ITEM_MATERIAL: i32 = 5;
+/// `ITEM_SPECIAL` (6): a map or a quest token whose use changes nothing.
+pub const ITEM_SPECIAL: i32 = 6;
+/// `ITEM_AUTOUSE` (4): with `ITEM_MATERIAL`, `ITEM_SPECIAL`, `ITEM_TOOL` and `ITEM_LOTTERY`,
+/// a type whose use arm is a bare `break` (`G/char_item.cpp:7050-7055`).
+pub const ITEM_AUTOUSE: i32 = 4;
+/// `ITEM_TOOL` (7).
+pub const ITEM_TOOL: i32 = 7;
+/// `ITEM_LOTTERY` (8).
+pub const ITEM_LOTTERY: i32 = 8;
 /// `ITEM_ELK`, gold as an item, which `CreateItem` neither numbers nor counts.
 pub const ITEM_ELK: i32 = 9;
 /// `ITEM_METIN`, a stone that sits in another item's socket.
@@ -352,6 +361,10 @@ mod tests {
             (ITEM_ARMOR, "ITEM_ARMOR"),
             (ITEM_USE, "ITEM_USE"),
             (ITEM_MATERIAL, "ITEM_MATERIAL"),
+            (ITEM_AUTOUSE, "ITEM_AUTOUSE"),
+            (ITEM_SPECIAL, "ITEM_SPECIAL"),
+            (ITEM_TOOL, "ITEM_TOOL"),
+            (ITEM_LOTTERY, "ITEM_LOTTERY"),
             (ITEM_ELK, "ITEM_ELK"),
             (ITEM_METIN, "ITEM_METIN"),
             (ITEM_FISH, "ITEM_FISH"),

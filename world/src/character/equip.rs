@@ -1222,17 +1222,29 @@ fn seated_use_kind(
 /// (`case USE_SPECIAL`'s 70038/70057/76007 arm, `:3879-3888`) with the 70008 white flag
 /// beside it (`:3892-3895`), and the Nog pocket (50216, `:3787-3811`), then the silent
 /// arms (`USE_BUCKET` and `USE_CHANGE_ATTRIBUTE_PLUS`, with no arm, and the 70009 treasure
-/// box's bare `break`), in that order. The branch's
+/// box's bare `break`), in that order; outside `ITEM_USE`, the no-op types are silent
+/// too. The branch's
 /// `USE_POTION_NODELAY` runs the ordinary nodelay arm, and its `USE_POTION`
 /// answers nothing.
 fn use_special_kind(proto: &ItemProto) -> SeatedArms {
     use gamedata::item_kind::{
-        ITEM_USE, USE_ABILITY_UP, USE_AFFECT, USE_BUCKET, USE_CHANGE_ATTRIBUTE_PLUS, USE_CLEAR,
+        ITEM_AUTOUSE, ITEM_LOTTERY, ITEM_MATERIAL, ITEM_SPECIAL, ITEM_TOOL, ITEM_USE,
+        USE_ABILITY_UP, USE_AFFECT, USE_BUCKET, USE_CHANGE_ATTRIBUTE_PLUS, USE_CLEAR,
         USE_INVISIBILITY,
     };
     if proto.item_type != ITEM_USE {
+        // `case ITEM_AUTOUSE` .. `case ITEM_LOTTERY` are a bare `break`
+        // (`G/char_item.cpp:7050-7055`).
+        let silent = [
+            ITEM_AUTOUSE,
+            ITEM_MATERIAL,
+            ITEM_SPECIAL,
+            ITEM_TOOL,
+            ITEM_LOTTERY,
+        ]
+        .contains(&proto.item_type);
         return (
-            false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false, false, silent,
         );
     }
     if (GOLD_BAR_LOW..=GOLD_BAR_HIGH).contains(&proto.vnum) {
@@ -1441,7 +1453,8 @@ pub fn use_item(
     }
     // `USE_BUCKET` and `USE_CHANGE_ATTRIBUTE_PLUS` have no arm in the subtype switch
     // (`G/char_item.cpp:3572-7047` has no `default`), so the `case ITEM_USE` falls through
-    // and `UseItemEx` returns true at `:7162`: legacy keeps the item and chats nothing.
+    // and `UseItemEx` returns true at `:7162`: legacy keeps the item and chats nothing. The
+    // 70009 box and the no-op types (`:7050-7055`) do the same.
     // The use's checks already ran, and the game state counts the pass hook past the
     // step, as it does for every landed use.
     let (_, _, _, _, _, _, _, _, _, silent) = seated;

@@ -56766,3 +56766,34 @@ passed, 0 failed in 46 targets; with it 5,676 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,605 `ported`, 200 `partial`, 492 `unused`, 34 `missing`,
 0 `codec`, of 2,331 rows; 536 scenarios. No ADR changed.
+## 701. The no-op item types (B9, `UseItemEx`)
+
+In `UseItemEx`, `case ITEM_AUTOUSE`, `ITEM_MATERIAL`, `ITEM_SPECIAL`, `ITEM_TOOL` and
+`ITEM_LOTTERY` are a bare `break` (`G/char_item.cpp:7050-7055`). Each use returns true, keeps the
+item and sends nothing. The Rewrite refused all five as not ported, which the server logged as
+`Item step refused`.
+
+`use_special_kind` (`world/src/character/equip.rs`) now gives these types the silent arm. That is
+the arm `USE_BUCKET`, `USE_CHANGE_ATTRIBUTE_PLUS` and, since 699, the 70009 box already use. The
+use's checks still run first. `gamedata::item_kind` gains `ITEM_AUTOUSE`, `ITEM_SPECIAL`,
+`ITEM_TOOL` and `ITEM_LOTTERY`, pinned by `each_item_type_is_its_name_index`.
+
+`a_material_and_a_special_item_are_used_and_change_nothing` (shipped mode) has Alpha use the
+owner's leather 30041 (two of them) and the map 25106. She hears nothing, both stay, and the
+console logs no refused step. Before the change the scenario failed on that console check, which
+is its negative control.
+
+The owner's data has no proto of type `ITEM_AUTOUSE`, `ITEM_TOOL` or `ITEM_LOTTERY`. The
+positive control is the same search, which finds the `ITEM_MATERIAL` and `ITEM_SPECIAL` rows.
+Their three rows are `unused`. `case ITEM_NONE` (`:7154-7156`) only logs. The owner's nine
+`ITEM_NONE` protos (38001-38014) are all size 0, and the item load refuses such a row, so no
+cell can hold one. That row is `unused` too, and the type stays outside the silent arm.
+
+2 `missing` rows are `ported` and 4 are `unused`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,677
+passed, 0 failed in 46 targets; with it 5,677 passed, 0 failed in 46 targets (456 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,607 `ported`, 200 `partial`, 496 `unused`, 28 `missing`,
+0 `codec`, of 2,331 rows; 537 scenarios. No ADR changed.
