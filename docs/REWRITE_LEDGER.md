@@ -56680,3 +56680,23 @@ passed, 0 failed in 46 targets; with it 5,674 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,599 `ported`, 203 `partial`, 492 `unused`, 37 `missing`,
 0 `codec`, of 2,331 rows; 534 scenarios. No ADR changed.
+## 698. The sibling capes and peach (B9, `USE_SPECIAL`)
+
+The cape arm (`G/char_item.cpp:3879-3888`) serves 70038, 70057 and 76007, and the peach arm
+(`:4811-4860`) serves 71107 and 39032. Only 70038 and 71107 had a scenario.
+
+`a_cape_of_courage_gathers_the_dogs_around` now runs once for each cape, each on a server of its
+own: the use clears the cape's cell, a gathered dog swings on Alpha, and the row is gone from the
+store. `a_mythical_peach_gives_alignment_and_refuses_a_second_bite` runs once for each peach: a
+bite gains 20000 alignment with `[LS;383]` and `[LS;384;2000]`, and a second bite is refused with
+`[LS;1034]`. The owner's protos give the siblings the same `value0`; the capes' `value1` differs
+but the arm does not read it.
+
+The Rewrite already behaved this way; no code changed. 3 rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,674
+passed, 0 failed in 46 targets; with it 5,674 passed, 0 failed in 46 targets (456 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,602 `ported`, 200 `partial`, 492 `unused`, 37 `missing`,
+0 `codec`, of 2,331 rows; 534 scenarios. No ADR changed.

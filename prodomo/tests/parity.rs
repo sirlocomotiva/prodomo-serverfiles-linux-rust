@@ -62662,26 +62662,37 @@ fn every_gold_bar_pays_its_own_yang_and_one_that_reaches_the_cap_is_refused() {
     check(&database, "(SELECT count = 1 FROM item WHERE id = 45)");
 }
 
-/// `cg.game.item_use`: the 70038 cape of courage (`case USE_SPECIAL`,
-/// `G/char_item.cpp:3879-3888`) gathers the monsters around: at least one of the
-/// twenty-four dogs starts on Alpha and swings (each joins on a one-in-two draw,
-/// `G/char_battle.cpp:3663`, so five left none in one run of 32; ledger 683). The
-/// cape is used up, and the store keeps the row's absence.
+/// `cg.game.item_use`: the capes of courage (`case USE_SPECIAL`, `G/char_item.cpp:3879-3888`),
+/// 70038, 70057 and 76007, each on a server of its own, gather the monsters around: at least
+/// one of the twenty-four dogs starts on Alpha and swings (each joins on a one-in-two draw,
+/// `G/char_battle.cpp:3663`, so five left none in one run of 32; ledger 683). The cape is used
+/// up, and the store keeps the row's absence.
 #[test]
 fn a_cape_of_courage_gathers_the_dogs_around() {
+    for vnum in [70_038, 70_057, 76_007] {
+        if !cape_gathers_the_dogs(vnum) {
+            return;
+        }
+    }
+}
+
+/// One cape of `vnum` gathers the dogs around Alpha; false without a database.
+fn cape_gathers_the_dogs(vnum: u32) -> bool {
     let Some(database) = ScratchDatabase::create() else {
-        return;
+        return false;
     };
     create_account_before_boot(&database, "alice");
     add_characters(&database);
     sql(&database, "UPDATE account SET empire = 1");
     sql(
         &database,
-        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
-         70038 FROM player WHERE name = 'Alpha'",
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, \
+             1, {vnum} FROM player WHERE name = 'Alpha'"
+        ),
     );
     let protos = owners_protos();
-    let proto = protos.get(70_038).expect("the owner's data has it");
+    let proto = protos.get(vnum).expect("the owner's data has it");
     assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
     assert_eq!(proto.sub_type, 10, "the owner's cape is USE_SPECIAL");
     let dogs = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t24\t101\n";
@@ -62695,12 +62706,13 @@ fn a_cape_of_courage_gathers_the_dogs_around() {
     assert_eq!(
         alice.read_game()[..2],
         [ITEM_SET, common::item_slots::EWindows::Inventory as u8],
-        "the lone cape clears its cell"
+        "the lone {vnum} clears its cell"
     );
     let swing = read_first_swing(&mut alice, listed.id);
     assert!(swing.damage > 0, "a gathered dog swings: {}", swing.damage);
     check(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 30)");
     drop(alice);
+    true
 }
 
 /// `cg.game.item_use`: the 50216 Nog pocket (`case USE_SPECIAL`,
@@ -62782,14 +62794,24 @@ fn a_nog_pocket_lands_302_and_a_second_is_refused_while_held() {
 /// `cg.game.item_use`: `case USE_CREATE_STONE` (`G/char_item.cpp:6866-6870`) gives a
 /// metin of `number(28000, 28013)` and spends the scroll. No owner metin lives in
 /// that range, so Alpha's use spends the lone scroll and gives nothing.
-/// `cg.game.item_use`: `case 71107` (`G/char_item.cpp:4811-4860`) eats one peach and gains
-/// `value(0) * 10` alignment: 4321 becomes 24321. The gain talks `[LS;383]` and names the
+/// `cg.game.item_use`: `case 71107` and `case 39032` (`G/char_item.cpp:4811-4860`), each on a
+/// server of its own, eat one peach and gain `value(0) * 10` alignment: 4321 becomes 24321. The gain talks `[LS;383]` and names the
 /// 2000 in `[LS;384]`, the stack shrinks, and the second bite within 8 hours is refused
 /// with `[LS;1034]` (the test Channel's line) and spends nothing.
 #[test]
 fn a_mythical_peach_gives_alignment_and_refuses_a_second_bite() {
+    for vnum in [71_107, 39_032] {
+        if !peach_gives_alignment(vnum) {
+            return;
+        }
+    }
+}
+
+/// One stack of two `vnum` peaches: a bite gains, a second bite is refused; false without a
+/// database.
+fn peach_gives_alignment(vnum: u32) -> bool {
     let Some(database) = ScratchDatabase::create() else {
-        return;
+        return false;
     };
     let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
@@ -62800,10 +62822,13 @@ fn a_mythical_peach_gives_alignment_and_refuses_a_second_bite() {
     );
     sql(
         &database,
-        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2,          71107 FROM player WHERE name = 'Alpha'",
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, \
+             2, {vnum} FROM player WHERE name = 'Alpha'"
+        ),
     );
     let protos = owners_protos();
-    let proto = protos.get(71_107).expect("the owner's data has it");
+    let proto = protos.get(vnum).expect("the owner's data has it");
     assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
     assert_eq!(proto.sub_type, 10, "the owner's peach is USE_SPECIAL");
     let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
@@ -62848,6 +62873,7 @@ fn a_mythical_peach_gives_alignment_and_refuses_a_second_bite() {
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
     drop(alpha);
     drop(server);
+    true
 }
 
 /// `cg.game.item_use_to_item`: `case 71109` (`G/char_item.cpp:4862-4935`) breaks the top
