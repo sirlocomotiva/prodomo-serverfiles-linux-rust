@@ -57044,3 +57044,54 @@ passed, 0 failed in 46 targets; with it 5,684 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,626 `ported`, 191 `partial`, 509 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 543 scenarios. No ADR changed.
+## 708. The craft, mining and horse books (B9)
+
+`case USE_SPECIAL` has its own arms for these books (`G/char_item.cpp:4647-4762`):
+
+- the craft books 50902, 50903 and 50904 train `SKILL_CREATE` (123);
+- the mining book 50600 trains `SKILL_MINING` (124);
+- the horse book 50060 runs its own body.
+
+The Rewrite's arms were in `pc_skill.rs::book_arm_gates`. The world's `BOOK_VNUMS`
+(`world/src/character/equip.rs`), which decides whether a use reads a book, lacked the three craft
+books. A use of one therefore went to the `USE_SPECIAL` step and was refused as not ported, so no
+read ran. The three vnums are added.
+
+Through the read, the owner's `skill_proto` decides the outcome. It has no row for 123; it has the
+row for 124, which is the positive control. Legacy's `LearnSkillByBook` returns false before any
+line when the skill has no proto (`G/char_skill.cpp:470-473`), so a craft book sends nothing and
+stays. The Rewrite's `learn_skill_by_book` does the same. Before this change the player saw the
+same silence, but the book never reached legacy's path.
+
+`the_craft_books_stay_and_the_mining_and_horse_books_read_or_miss` runs in shipped mode. Alpha is a
+level-154 shaman.
+
+- The three craft books send nothing and stay.
+- 50600 is spent either way. It climbs 124 to 1 with `[LS;954]`, `[LS;955]` and `[LS;964]`, or
+  misses with `[LS;952]` and `[LS;953]`.
+- 50060 is spent either way. It climbs the horse level with `[LS;379]` and `[LS;380]`, or misses
+  with `[LS;382]`.
+
+The store keeps the craft books and has neither of the other two. Twelve runs at once passed.
+
+The first gate run lost `a_gaya_craft_spends_and_a_market_opens`. The buy answered "not
+enough Gaya" (`[Gaya] Nu de...`) where the points record was due, so the 1,000 Gaya grant had
+been overwritten again.
+
+Ledger 699's barrier was the cause. `wait_for_next` waits for the first save line not yet
+collected. The scenario's first drop, before the relog, had logged its save line and nobody had
+collected it, so the wait returned on that line before the second disconnect's save. The grant
+then raced that save.
+
+The barrier now waits for the scenario's second save line
+(`wait_for_count(..., 2)`); no earlier login in the scenario saves. 24 runs at once passed.
+
+5 `partial` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,685
+passed, 0 failed in 46 targets; with it 5,685 passed, 0 failed in 46 targets (459 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. The first
+run failed `a_gaya_craft_spends_and_a_market_opens`, read and fixed above; this is the
+second run. Parity: 1,631 `ported`, 186 `partial`, 509 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 544 scenarios. No ADR changed.

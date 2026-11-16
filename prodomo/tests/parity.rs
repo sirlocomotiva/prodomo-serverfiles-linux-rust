@@ -49629,9 +49629,11 @@ fn gaya_unlock_and_refresh(server: &mut Server, database: &ScratchDatabase, keye
     // The disconnect banks the shelf's unlock; the grant lands once the save is done
     // (the save would overwrite it), and the relog loads 1,000. The save line is the
     // barrier: the stored gold can read 95,000 from a background save while the
-    // disconnect's save, which writes the Gaya back to 0, is still to come.
+    // disconnect's save, which writes the Gaya back to 0, is still to come. It is the
+    // scenario's second: the first drop's save line was never collected, so a wait for the
+    // next line would take that one.
     drop(keyed);
-    server.wait_for_next("Character disconnected; wrote the row");
+    server.wait_for_count("Character disconnected; wrote the row", 2);
     check(
         database,
         "(SELECT gold FROM player WHERE name = 'Alpha') = 95000",
@@ -53742,6 +53744,89 @@ fn a_use_below_its_level_or_champion_limit_is_refused_and_a_box_alone_does_nothi
         &database,
         "(SELECT count(*) = 3 FROM item WHERE id BETWEEN 30 AND 32 AND window_type = 1 AND pos \
          = id - 30)",
+    );
+}
+
+/// The craft, mining and horse books (`G/char_item.cpp:4647-4762`), read by Alpha, a level-154
+/// shaman. The craft books 50902, 50903 and 50904 train `SKILL_CREATE` (123), which the owner's
+/// `skill_proto` has no row for (it has 124's): `LearnSkillByBook` returns false before a line
+/// (`G/char_skill.cpp:470-473`), so each sends nothing and stays. The mining book 50600 trains
+/// `SKILL_MINING` (124) at its own chance: it climbs 124 to 1 with `[LS;954]`, `[LS;955]` and
+/// `[LS;964]` or misses with `[LS;952]` and `[LS;953]`, and is spent either way. The horse book
+/// 50060 runs its own body: at level 50 and horse level 0 it climbs the horse level with
+/// `[LS;379]` and `[LS;380]` or misses with `[LS;382]`, and is spent either way.
+#[test]
+fn the_craft_books_stay_and_the_mining_and_horse_books_read_or_miss() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (cell, vnum) in [50_902, 50_903, 50_904, 50_600, 50_060].iter().enumerate() {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'",
+                60 + cell
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let climbed_or_missed = |read: &BookRead, cell: u16| {
+        assert!(read.spent, "book {cell} is spent either way");
+        if read.shown.is_empty() {
+            assert_eq!(
+                read.lines,
+                [talking(b"[LS;952]"), info(b"[LS;953]")],
+                "book {cell} misses"
+            );
+        } else {
+            assert_eq!(read.shown, [1], "book {cell} climbs to 1");
+            assert_eq!(
+                read.lines,
+                [
+                    talking(b"[LS;954]"),
+                    talking(b"[LS;955]"),
+                    info(b"[LS;964]")
+                ],
+                "book {cell} climbs"
+            );
+        }
+    };
+    for cell in [0, 1, 2] {
+        let read = read_book(&mut alpha, cell, 123);
+        assert!(
+            read.lines.is_empty() && read.shown.is_empty() && !read.spent,
+            "craft book {cell} sends nothing and stays: {:?}",
+            read.lines
+        );
+    }
+    climbed_or_missed(&read_book(&mut alpha, 3, 124), 3);
+    let read = read_book(&mut alpha, 4, 130);
+    assert!(read.spent, "the horse book is spent either way");
+    assert!(
+        read.shown.is_empty(),
+        "the horse level is a point, not a skill slot"
+    );
+    assert!(
+        read.lines == [info(b"[LS;379]"), info(b"[LS;380]")] || read.lines == [info(b"[LS;382]")],
+        "the horse book climbs or misses: {:?}",
+        read.lines
+    );
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT count(*) = 3 FROM item WHERE id IN (60, 61, 62)) AND (SELECT count(*) = 0 FROM \
+         item WHERE id IN (63, 64))",
     );
 }
 

@@ -1084,11 +1084,12 @@ const USED_BY_WEARING: [i32; 8] = [
 /// The book vnums `read_skill_book` arms (`G/char_item.cpp:4407-4790`), plus every
 /// `ITEM_SKILLBOOK` (the socket/value arm, `:3282-3331`). A book-shaped item of another
 /// vnum runs no read: the consume below would eat a book legacy reads as nothing.
-const BOOK_VNUMS: [u32; 50] = [
+const BOOK_VNUMS: [u32; 53] = [
     50060, 50061, 50600, 50301, 50302, 50303, 50304, 50305, 50306, 50311, 50312, 50313, 50314,
     50315, 50316, 50323, 50324, 50325, 50326, 50335, 50336, 50337, 50338, 50339, 50340, 50401,
     50402, 50403, 50404, 50405, 50406, 50407, 50408, 50409, 50410, 50411, 50412, 50413, 50414,
-    50415, 50416, 50417, 50418, 50419, 50420, 50421, 50422, 50423, 50424, 50425,
+    50415, 50416, 50417, 50418, 50419, 50420, 50421, 50422, 50423, 50424, 50425, 50902, 50903,
+    50904,
 ];
 
 /// Whether `CG_ITEM_USE` on an item of this prototype reads a skill book (230g).
