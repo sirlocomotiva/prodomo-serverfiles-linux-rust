@@ -56563,3 +56563,24 @@ passed, 0 failed in 46 targets; with it 5,670 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,547 `ported`, 256 `partial`, 491 `unused`, 37 `missing`,
 0 `codec`, of 2,331 rows; 530 scenarios. No ADR changed.
+## 694. The master arms of a climb by point (B9, `SkillLevelUp`)
+
+`SkillLevelUp` (`G/char_skill.cpp:767-907`) refuses a perfect master by every method and a grand
+master by every method but the quest one (`:773-779`). A normal skill that reaches 17 jumps to
+20 (`:856-861`): `ENABLE_FORCE2MASTERSKILL` is defined (`:31`), so the jump is not a draw. None of
+the three arms had a scenario.
+
+`a_skill_point_climb_refuses_the_top_masters_and_jumps_a_normal_skill_at_17` (shipped mode)
+gives Echo the warrior three skill points and skills 1 at 40, 2 at 31, 3 at 16 and 4 at 5, then
+sends `/skillup` for each. The first two send nothing. Skill 3 spends a point and byte 76 shows
+it at 20; skill 4 spends a point and shows 6. The store ends with one point and
+`1:40, 2:31, 3:20, 4:6`. The Rewrite already behaved this way; no code changed.
+
+3 rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,671
+passed, 0 failed in 46 targets; with it 5,671 passed, 0 failed in 46 targets (457 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,550 `ported`, 253 `partial`, 491 `unused`, 37 `missing`,
+0 `codec`, of 2,331 rows; 531 scenarios. No ADR changed.

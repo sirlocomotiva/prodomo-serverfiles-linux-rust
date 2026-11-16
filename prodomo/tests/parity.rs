@@ -52539,8 +52539,9 @@ fn records_within(client: &mut Keyed, window: Duration) -> Vec<Vec<u8>> {
 /// `CheckSkillHitCount` (`G/char_skill.cpp:4184-4254`), reached only from a `CG_ATTACK` with a
 /// skill type (`G/input_main.cpp:1989-1993`). Each caster casts its skill on a stone, then
 /// sends four attack records of that type. Three-Way Cut (1) and Rolling Dagger (33) land three
-/// and the fourth is refused, their cap of 3 a victim (`:4221-4223`); a second cast clears the
-/// count (`TargetVIDMap.clear()`, `G/char_skill.cpp:2977`) and three more land. Spirit Strike
+/// and the fourth is refused, their cap of 3 a victim (`:4221-4223`); a second cast of 1, past
+/// its cooldown, clears the count (`TargetVIDMap.clear()`, `G/char_skill.cpp:2977`) and three
+/// more land. Spirit Strike
 /// (18), Dragon Swirl (62), Flame Strike (77) and the shaman's 93 refuse every attack record
 /// (`:4204-4210`), whatever their cast did.
 #[test]
@@ -52587,6 +52588,85 @@ fn a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit() {
             "{vnum}'s attack records landed"
         );
     }
+}
+
+/// `SkillLevelUp`'s master arms on a climb by point (`G/char_skill.cpp:767-907`). Echo the
+/// warrior holds three skill points: 1 is a perfect master (40) and 2 a grand master (31), so
+/// `/skillup` refuses both silently (`:773-779`). 3 at 16 climbs to 17 and, still a normal
+/// skill, jumps to 20 (`:856-861`, `ENABLE_FORCE2MASTERSKILL`). 4 at 5 climbs to 6. Only the
+/// two climbs spend a point.
+#[test]
+fn a_skill_point_climb_refuses_the_top_masters_and_jumps_a_normal_skill_at_17() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "bob");
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y, skill_group, \
+         skill_point) SELECT id, 0, 'Echo', 0, 154, 470000, 950000, 1, 3 FROM account WHERE \
+         login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, vnum, s.level, \
+         0 FROM player, unnest(ARRAY[1, 2, 3, 4], ARRAY[40, 31, 16, 5]) AS s(vnum, level) WHERE \
+         name = 'Echo'",
+    );
+    let (mut echo, listed, _items) = load_character(&server, b"bob", 0);
+    let vid = listed.id;
+    let _entered = enter_game_shown(&mut echo);
+    read_login_event(&mut echo);
+    for vnum in 1..=4 {
+        echo.send_record(&client_chat(
+            CHAT_TALKING,
+            format!("/skillup {vnum}").as_bytes(),
+        ));
+    }
+    for (spent_to, levels) in [(2, [40, 31, 20, 5]), (1, [40, 31, 20, 6])] {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut spent = 0;
+        let record = loop {
+            let record = echo
+                .read_game_until(deadline)
+                .expect("byte 76 lands for a climb");
+            if record[0] == GC_SKILL_LEVEL_NEW {
+                break record;
+            }
+            if record == point_change(vid, 28, 0, spent_to) {
+                spent += 1;
+            } else {
+                assert!(
+                    record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
+                    "a compute's change or an update: {record:02x?}"
+                );
+            }
+        };
+        assert_eq!(spent, 1, "one point a climb, down to {spent_to}");
+        let shown: Vec<u8> = (1..=4).map(|vnum| skill_slot(&record, vnum)).collect();
+        assert_eq!(
+            shown, levels,
+            "the skills after the climb to {spent_to} points"
+        );
+    }
+    echo.quiet_for(
+        "the refused climbs send nothing",
+        Duration::from_millis(500),
+    );
+    drop(echo);
+    wait_for(
+        &database,
+        "(SELECT skill_point FROM player WHERE name = 'Echo') = 1 AND (SELECT \
+         array_agg(vnum::text || ':' || level ORDER BY vnum)::text FROM player_skill) = \
+         '{1:40,2:31,3:20,4:6}'",
+    );
 }
 
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
