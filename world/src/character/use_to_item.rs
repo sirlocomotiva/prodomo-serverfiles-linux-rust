@@ -934,12 +934,12 @@ fn add_kind_target_attribute(
         add_rolled_attribute(dice, target_proto, &mut attributes, attrs);
         store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
         let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
-        trail
-            .records
-            .push(MoveRecord::Notice(TALISMAN_ADDED_NOTICE));
         trail.records.push(MoveRecord::Item(ItemRecord::Update(
             stored.gc_item_update(),
         )));
+        trail
+            .records
+            .push(MoveRecord::Notice(TALISMAN_ADDED_NOTICE));
         trail.changes.push(ItemChange::Attributes {
             id: target.id,
             attributes: stored.attributes,
@@ -990,7 +990,6 @@ fn change_kind_target_attribute(
     )?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
     let mut trail = Trail::default();
-    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
     trail.records.push(MoveRecord::Item(ItemRecord::Update(
         stored.gc_item_update(),
     )));
@@ -1053,10 +1052,10 @@ fn change_costume_target_attribute(
     )?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
     let mut trail = Trail::default();
-    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
     trail.records.push(MoveRecord::Item(ItemRecord::Update(
         stored.gc_item_update(),
     )));
+    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
     trail.changes.push(ItemChange::Sockets {
         id: target.id,
         sockets: stored.sockets,
@@ -1102,10 +1101,10 @@ fn reset_costume_target_attribute(
     store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
     let mut trail = Trail::default();
-    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
     trail.records.push(MoveRecord::Item(ItemRecord::Update(
         stored.gc_item_update(),
     )));
+    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
     trail.changes.push(ItemChange::Sockets {
         id: target.id,
         sockets: stored.sockets,
@@ -1252,10 +1251,10 @@ fn set_costume_reinforcement(
     store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
     let mut trail = Trail::default();
-    trail.records.push(MoveRecord::Notice(lines.added));
     trail.records.push(MoveRecord::Item(ItemRecord::Update(
         stored.gc_item_update(),
     )));
+    trail.records.push(MoveRecord::Notice(lines.added));
     trail.changes.push(ItemChange::Attributes {
         id: target.id,
         attributes: stored.attributes,
@@ -1345,10 +1344,10 @@ fn change_normal_attribute(
     )?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
     let mut trail = Trail::default();
-    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
     trail.records.push(MoveRecord::Item(ItemRecord::Update(
         stored.gc_item_update(),
     )));
+    trail.records.push(MoveRecord::Notice(ATTR_CHANGED_NOTICE));
     trail.changes.push(ItemChange::Sockets {
         id: target.id,
         sockets: stored.sockets,
@@ -1400,14 +1399,14 @@ fn change_rare_target_attribute(
     store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
     let mut trail = Trail::default();
+    trail.records.push(MoveRecord::Item(ItemRecord::Update(
+        stored.gc_item_update(),
+    )));
     trail.records.push(MoveRecord::Notice(if writes.is_empty() {
         RARE_UNCHANGED_NOTICE
     } else {
         ATTR_CHANGED_NOTICE
     }));
-    trail.records.push(MoveRecord::Item(ItemRecord::Update(
-        stored.gc_item_update(),
-    )));
     trail.changes.push(ItemChange::Attributes {
         id: target.id,
         attributes: stored.attributes,
@@ -1450,10 +1449,10 @@ fn add_normal_target_attribute(
         add_rolled_attribute(dice, target_proto, &mut attributes, attrs);
         store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
         let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
-        trail.records.push(MoveRecord::Notice(ATTR_ADDED_NOTICE));
         trail.records.push(MoveRecord::Item(ItemRecord::Update(
             stored.gc_item_update(),
         )));
+        trail.records.push(MoveRecord::Notice(ATTR_ADDED_NOTICE));
         trail.changes.push(ItemChange::Attributes {
             id: target.id,
             attributes: stored.attributes,
@@ -1506,10 +1505,10 @@ fn add_fifth_target_attribute(
         }
         store_attributes(items, target.id, &attributes, target.sockets[CHANGE_SOCKET])?;
         let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
-        trail.records.push(MoveRecord::Notice(ATTR_ADDED_NOTICE));
         trail.records.push(MoveRecord::Item(ItemRecord::Update(
             stored.gc_item_update(),
         )));
+        trail.records.push(MoveRecord::Notice(ATTR_ADDED_NOTICE));
         trail.changes.push(ItemChange::Attributes {
             id: target.id,
             attributes: stored.attributes,
@@ -1573,10 +1572,10 @@ fn add_accessory_socket(
             .set_socket(target.id, 1, target.sockets[1].clamp(0, 3) + 1)
             .map_err(|_| MoveRefused::Empty)?;
         let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
-        trail.records.push(MoveRecord::Notice(SOCKET_ADDED_NOTICE));
         trail.records.push(MoveRecord::Item(ItemRecord::Update(
             stored.gc_item_update(),
         )));
+        trail.records.push(MoveRecord::Notice(SOCKET_ADDED_NOTICE));
         trail.changes.push(ItemChange::Sockets {
             id: target.id,
             sockets,
@@ -1651,10 +1650,10 @@ fn put_into_socket(
             .set_socket(target.id, 2, countdown)
             .map_err(|_| MoveRefused::Empty)?;
         let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
-        trail.records.push(MoveRecord::Notice(JEWEL_SET_NOTICE));
         trail.records.push(MoveRecord::Item(ItemRecord::Update(
             stored.gc_item_update(),
         )));
+        trail.records.push(MoveRecord::Notice(JEWEL_SET_NOTICE));
         trail.changes.push(ItemChange::Sockets {
             id: target.id,
             sockets,
@@ -1712,12 +1711,12 @@ fn put_into_aura_socket(
         )
         .map_err(|_| MoveRefused::Empty)?;
     let stored = items.item(target.id).ok_or(MoveRefused::Empty)?;
-    trail
-        .records
-        .push(MoveRecord::Notice(AURA_BOOST_SET_NOTICE));
     trail.records.push(MoveRecord::Item(ItemRecord::Update(
         stored.gc_item_update(),
     )));
+    trail
+        .records
+        .push(MoveRecord::Notice(AURA_BOOST_SET_NOTICE));
     trail.changes.push(ItemChange::Sockets {
         id: target.id,
         sockets,
@@ -2894,10 +2893,11 @@ mod tests {
         assert_eq!(kept.sockets[3], 1, "the change counts itself");
         assert!(items.item(11).is_none(), "the last change scroll leaves");
         assert!(
-            done.records
+            !done
+                .records
                 .iter()
-                .any(|record| matches!(record, MoveRecord::Notice(ATTR_CHANGED_NOTICE))),
-            "the change chats"
+                .any(|record| matches!(record, MoveRecord::Notice(_))),
+            "the change sends no line (`G/char_item.cpp:10705-10724`)"
         );
         assert!(
             done.changes
@@ -3108,10 +3108,11 @@ mod tests {
         assert_eq!(kept.sockets[3], 1, "the change counts itself");
         assert!(items.item(11).is_none(), "the last change scroll leaves");
         assert!(
-            done.records
+            !done
+                .records
                 .iter()
-                .any(|record| matches!(record, MoveRecord::Notice(ATTR_CHANGED_NOTICE))),
-            "the change chats"
+                .any(|record| matches!(record, MoveRecord::Notice(_))),
+            "the change sends no line (`G/char_item.cpp:10650-10667`)"
         );
         let change = items.item_at(inv(4)).expect("the change scroll").clone();
         let done = change_target_attributes(

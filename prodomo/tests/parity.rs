@@ -40324,18 +40324,22 @@ fn a_socket_scroll_and_a_jewel_are_used_on_a_bracelet() {
     read_login_event(&mut alpha);
 
     // When: Alpha uses the first socket scroll on the bracelet. Then: the scroll
-    // clears, and the bracelet gains a socket or the miss chats.
+    // clears, and the bracelet gains a socket before its line, as
+    // `SetAccessorySocketMaxGrade` sends it ahead of `[LS;406]`, or the miss chats.
     alpha.send_record(&client_use_to_item(2, 0));
     let first = alpha.read_game();
-    let opened = first == an_info_line(b"[LS;406]");
-    if opened {
-        let bracelet = alpha.read_game();
+    if first[0] == ITEM_UPDATE {
         assert_eq!(
-            bracelet[..4],
+            first[..4],
             [ITEM_UPDATE, 1, 0, 0],
-            "the bracelet: {bracelet:02x?}"
+            "the bracelet: {first:02x?}"
         );
-        assert_eq!(bracelet[18..22], 2_i32.to_le_bytes(), "socket 1 opens");
+        assert_eq!(first[18..22], 2_i32.to_le_bytes(), "socket 1 opens");
+        assert_eq!(
+            alpha.read_game(),
+            an_info_line(b"[LS;406]"),
+            "the add chats"
+        );
     } else {
         assert_eq!(first, an_info_line(b"[LS;407]"), "the miss chats");
     }
@@ -40358,21 +40362,26 @@ fn a_socket_scroll_and_a_jewel_are_used_on_a_bracelet() {
     );
 
     // When: Alpha uses the fitted jewel on the bracelet. Then: the first stone sets
-    // or the miss chats, and the jewel is spent either way.
+    // before its line (`SetAccessorySocketGrade` ahead of `[LS;410]`) or the miss
+    // chats, and the jewel is spent either way.
     alpha.send_record(&client_use_to_item(4, 0));
     let jewel = alpha.read_game();
-    if jewel == an_info_line(b"[LS;410]") {
-        let bracelet = alpha.read_game();
+    if jewel[0] == ITEM_UPDATE {
         assert_eq!(
-            bracelet[..4],
+            jewel[..4],
             [ITEM_UPDATE, 1, 0, 0],
-            "the bracelet: {bracelet:02x?}"
+            "the bracelet: {jewel:02x?}"
         );
-        assert_eq!(bracelet[14..18], 1_i32.to_le_bytes(), "socket 0 sets");
+        assert_eq!(jewel[14..18], 1_i32.to_le_bytes(), "socket 0 sets");
         assert_eq!(
-            bracelet[22..26],
+            jewel[22..26],
             86_400_i32.to_le_bytes(),
             "the countdown starts"
+        );
+        assert_eq!(
+            alpha.read_game(),
+            an_info_line(b"[LS;410]"),
+            "the set chats"
         );
     } else {
         assert_eq!(jewel, an_info_line(b"[LS;411]"), "the miss chats");
@@ -53931,6 +53940,126 @@ fn a_use_of_a_type_with_no_arm_sends_nothing_and_keeps_the_item() {
     );
 }
 
+/// `case 60005` (`G/char_item.cpp:4396-4399`): the trading glass opens the shop search in
+/// `MODE_TRADING` (`OpenShopSearch`, `G/char.cpp:12669-12689`). Alpha, with no trade window
+/// open, uses it: the bare open answers with `SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE`
+/// (22), and the glass stays, as the arm consumes nothing.
+#[test]
+fn a_trading_glass_opens_the_search_in_trade_mode_and_stays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 30, id, \
+         1, 0, 1, 60005, 2000000000 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    alpha.send_record(&client_item_use(0));
+    let opened = alpha.read_game();
+    assert_eq!(
+        opened,
+        [GC_PRIVATE_SHOP, 4, 0, 22],
+        "OPEN_TRADE: {opened:02x?}"
+    );
+    alpha.quiet("the glass stays");
+    drop(alpha);
+    check(
+        &database,
+        "(SELECT count(*) = 1 FROM item WHERE id = 30 AND pos = 0 AND count = 1)",
+    );
+}
+
+/// `case USE_CHANGE_ATTRIBUTE` (`G/char_item.cpp:6382-6500`) with the owner's 71084, on
+/// Alpha's swords. A sword with no bonus refuses with `[LS;397]`. A sword with one redraws
+/// its bonuses (`ChangeAttribute`, whose records come first), then `[LS;399]`, then one of
+/// the three scrolls goes. A second change at once refuses with `[LS;398;60;n]`: a player
+/// off the test server waits `g_dwItemBonusChangeTime` (60 s, `G/config.cpp:42`) between
+/// changes, and `n` is what is left of it. Each refused scroll stays.
+#[test]
+fn a_change_scroll_redraws_a_bonus_and_waits_out_its_minute() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, attrvalue0) \
+         VALUES (30, (SELECT id FROM player WHERE name = 'Alpha'), 1, 0, 1, 19, 1, 500), (31, \
+         (SELECT id FROM player WHERE name = 'Alpha'), 1, 1, 1, 19, 0, 0), (32, (SELECT id FROM \
+         player WHERE name = 'Alpha'), 1, 2, 3, 71084, 0, 0)",
+    );
+    assert_eq!(
+        owners_protos().get(71_084).expect("the switcher").sub_type,
+        gamedata::item_kind::USE_CHANGE_ATTRIBUTE,
+        "the owner's 71084"
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // Past the 1.5 s the entry counts as a fight (`IsRecentlyFought`).
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_use_to_item(2, 1));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;397]"),
+        "a sword with no bonus refuses"
+    );
+    alpha.quiet("the scroll stays");
+    alpha.send_record(&client_use_to_item(2, 0));
+    let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+    let records: Vec<Vec<u8>> = std::iter::from_fn(|| alpha.read_fight_until(deadline)).collect();
+    let line = records
+        .iter()
+        .position(|record| *record == chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"))
+        .unwrap_or_else(|| panic!("the change line: {records:02x?}"));
+    let (redrawn, spent) = records.split_at(line);
+    assert!(
+        !redrawn.is_empty()
+            && redrawn
+                .iter()
+                .all(|record| record[0] == ITEM_UPDATE && update_fields(record) == (1, 0, 1)),
+        "the sword's redraw comes first: {records:02x?}"
+    );
+    assert_eq!(
+        spent[1..]
+            .iter()
+            .map(|record| update_fields(record))
+            .collect::<Vec<_>>(),
+        [(1, 2, 2)],
+        "then one scroll goes: {records:02x?}"
+    );
+    alpha.send_record(&client_use_to_item(2, 0));
+    let wait = alpha.read_game();
+    let text = String::from_utf8_lossy(&wait[10..]).into_owned();
+    let left: u32 = text
+        .strip_prefix("[LS;398;60;")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|left| left.parse().ok())
+        .unwrap_or_else(|| panic!("the wait line: {text:?}"));
+    assert!((58..=60).contains(&left), "the minute's rest: {left}");
+    alpha.quiet("the scroll stays");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT count = 2 FROM item WHERE id = 32) AND (SELECT attrtype0 != 0 FROM item WHERE \
+         id = 30)",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(
@@ -55202,12 +55331,6 @@ fn a_bonus_scroll_adds_and_a_costume_refuses() {
     let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 4);
     // When: the add scroll is used on the bouquet.
     alice.send_record(&client_use_to_item(1, 0));
-    let line = alice.read_game();
-    assert_eq!(
-        line,
-        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;400]"),
-        "the add chats: {line:02x?}"
-    );
     let update = alice.read_game();
     assert_eq!(
         update_fields(&update),
@@ -55215,6 +55338,12 @@ fn a_bonus_scroll_adds_and_a_costume_refuses() {
         "the bouquet's cell updates: {update:02x?}"
     );
     assert_ne!(update[38], 0, "the first bonus type lands: {update:02x?}");
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;400]"),
+        "the add chats: {line:02x?}"
+    );
     let cleared = alice.read_game();
     assert_eq!(
         cleared[..4],
@@ -55238,9 +55367,10 @@ fn a_bonus_scroll_adds_and_a_costume_refuses() {
 }
 
 /// `cg.game.item_use_to_item`: Alpha holds a bonus-less fire talisman and both talisman
-/// scrolls in the base inventory. The add scroll lands a bonus with its success line and
-/// spends itself; the change scroll redraws the bonus with `[LS;399]`, counts socket 3,
-/// and spends itself too. Both rows store.
+/// scrolls in the base inventory. The add scroll lands a bonus, then its success line, and
+/// spends itself; the change scroll redraws the bonus with no line
+/// (`UseItemTalismanChangeAttribute` sends none), counts socket 3, and spends itself too.
+/// Both rows store. Each update comes before its line, as `SetAttribute` sends it.
 #[test]
 fn a_talisman_add_lands_and_its_change_redraws_and_counts() {
     let Some(database) = ScratchDatabase::create() else {
@@ -55278,12 +55408,6 @@ fn a_talisman_add_lands_and_its_change_redraws_and_counts() {
     );
     // When: the add scroll is used on the talisman.
     alice.send_record(&client_use_to_item(1, 0));
-    let line = alice.read_game();
-    assert_eq!(
-        line,
-        chat_packet(CHAT_TYPE_INFO, 1, b"Upgrade successfully added. "),
-        "the add chats: {line:02x?}"
-    );
     let update = alice.read_game();
     assert_eq!(
         update_fields(&update),
@@ -55291,6 +55415,12 @@ fn a_talisman_add_lands_and_its_change_redraws_and_counts() {
         "the talisman's cell updates: {update:02x?}"
     );
     assert_ne!(update[38], 0, "the first bonus type lands: {update:02x?}");
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"Upgrade successfully added. "),
+        "the add chats: {line:02x?}"
+    );
     let cleared = alice.read_game();
     assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
     alice.quiet("the add sends nothing more");
@@ -55298,12 +55428,6 @@ fn a_talisman_add_lands_and_its_change_redraws_and_counts() {
     check(&database, "SELECT attrtype0 != 0 FROM item WHERE id = 60");
     // When: the change scroll is used on the talisman.
     alice.send_record(&client_use_to_item(2, 0));
-    let line = alice.read_game();
-    assert_eq!(
-        line,
-        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
-        "the change chats: {line:02x?}"
-    );
     let update = alice.read_game();
     assert_eq!(
         update_fields(&update),
@@ -55320,9 +55444,10 @@ fn a_talisman_add_lands_and_its_change_redraws_and_counts() {
 }
 
 /// `cg.game.item_use_to_item`: Alpha holds a bonus-less glove of vnum 23000 and both
-/// glove scrolls in the base inventory. The add scroll lands a bonus with its success
-/// line and spends itself; the change scroll redraws the bonus with `[LS;399]`, counts
-/// socket 3, and spends itself too. Both rows store.
+/// glove scrolls in the base inventory. The add scroll lands a bonus, then its success
+/// line, and spends itself; the change scroll redraws the bonus with no line
+/// (`UseItemGloveChangeAttribute` sends none), counts socket 3, and spends itself too.
+/// Both rows store.
 #[test]
 fn a_glove_add_lands_and_its_change_redraws_and_counts() {
     let Some(database) = ScratchDatabase::create() else {
@@ -55360,12 +55485,6 @@ fn a_glove_add_lands_and_its_change_redraws_and_counts() {
     );
     // When: the add scroll is used on the glove.
     alice.send_record(&client_use_to_item(1, 0));
-    let line = alice.read_game();
-    assert_eq!(
-        line,
-        chat_packet(CHAT_TYPE_INFO, 1, b"Upgrade successfully added. "),
-        "the add chats: {line:02x?}"
-    );
     let update = alice.read_game();
     assert_eq!(
         update_fields(&update),
@@ -55373,6 +55492,12 @@ fn a_glove_add_lands_and_its_change_redraws_and_counts() {
         "the glove's cell updates: {update:02x?}"
     );
     assert_ne!(update[38], 0, "the first bonus type lands: {update:02x?}");
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"Upgrade successfully added. "),
+        "the add chats: {line:02x?}"
+    );
     let cleared = alice.read_game();
     assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
     alice.quiet("the add sends nothing more");
@@ -55380,12 +55505,6 @@ fn a_glove_add_lands_and_its_change_redraws_and_counts() {
     check(&database, "SELECT attrtype0 != 0 FROM item WHERE id = 60");
     // When: the change scroll is used on the glove.
     alice.send_record(&client_use_to_item(2, 0));
-    let line = alice.read_game();
-    assert_eq!(
-        line,
-        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
-        "the change chats: {line:02x?}"
-    );
     let update = alice.read_game();
     assert_eq!(
         update_fields(&update),
@@ -55443,17 +55562,17 @@ fn a_costume_change_redraws_and_its_reset_rolls_again() {
     );
     // When: the change scroll is used on the costume.
     alice.send_record(&client_use_to_item(1, 0));
-    let line = alice.read_game();
-    assert_eq!(
-        line,
-        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
-        "the change chats: {line:02x?}"
-    );
     let update = alice.read_game();
     assert_eq!(
         update_fields(&update),
         (1, 0, 1),
         "the costume's cell updates: {update:02x?}"
+    );
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
+        "the change chats: {line:02x?}"
     );
     let cleared = alice.read_game();
     assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
@@ -55462,12 +55581,6 @@ fn a_costume_change_redraws_and_its_reset_rolls_again() {
     check(&database, "SELECT socket3 = 1 FROM item WHERE id = 60");
     // When: the reset scroll is used on the costume.
     alice.send_record(&client_use_to_item(2, 0));
-    let line = alice.read_game();
-    assert_eq!(
-        line,
-        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
-        "the reset chats: {line:02x?}"
-    );
     let update = alice.read_game();
     assert_eq!(
         update_fields(&update),
@@ -55475,6 +55588,12 @@ fn a_costume_change_redraws_and_its_reset_rolls_again() {
         "the costume's cell updates: {update:02x?}"
     );
     assert_ne!(update[38], 0, "a bonus rolls again: {update:02x?}");
+    let line = alice.read_game();
+    assert_eq!(
+        line,
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
+        "the reset chats: {line:02x?}"
+    );
     let cleared = alice.read_game();
     assert_eq!(cleared[..4], [ITEM_SET, 1, 2, 0], "the spent scroll clears");
     alice.quiet("the reset sends nothing more");
@@ -55586,6 +55705,13 @@ fn a_booster_lands_on_an_aura_and_a_second_is_refused() {
     );
     // When: the booster is used on the aura. Then: the line, the stamp, the spend.
     alice.send_record(&client_use_to_item(1, 0));
+    let update = alice.read_game();
+    assert_eq!(update[0], ITEM_UPDATE, "the costume's row updates");
+    assert_eq!(
+        update_sockets(&update)[2],
+        100_086_400,
+        "socket 2 stamps index and time"
+    );
     let line = alice.read_game();
     assert_eq!(
         line,
@@ -55595,13 +55721,6 @@ fn a_booster_lands_on_an_aura_and_a_second_is_refused() {
             b"<Aura> Aura booster attached successfully."
         ),
         "the success chats: {line:02x?}"
-    );
-    let update = alice.read_game();
-    assert_eq!(update[0], ITEM_UPDATE, "the costume's row updates");
-    assert_eq!(
-        update_sockets(&update)[2],
-        100_086_400,
-        "socket 2 stamps index and time"
     );
     let cleared = alice.read_game();
     assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
@@ -55669,6 +55788,13 @@ fn a_body_reinforcement_lands_and_a_repeat_is_a_duplicate() {
     assert_eq!((scroll.values[0], scroll.values[1]), (1, 2000), "its pair");
     // When: the reinforcement is used on the body.
     alice.send_record(&client_use_to_item(1, 0));
+    let update = alice.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the body's cell updates: {update:02x?}"
+    );
+    assert_eq!(update[38], 1, "the apply lands: {update:02x?}");
     let line = alice.read_game();
     assert_eq!(
         line,
@@ -55679,13 +55805,6 @@ fn a_body_reinforcement_lands_and_a_repeat_is_a_duplicate() {
         ),
         "the success chats: {line:02x?}"
     );
-    let update = alice.read_game();
-    assert_eq!(
-        update_fields(&update),
-        (1, 0, 1),
-        "the body's cell updates: {update:02x?}"
-    );
-    assert_eq!(update[38], 1, "the apply lands: {update:02x?}");
     let cleared = alice.read_game();
     assert_eq!(cleared[..4], [ITEM_SET, 1, 1, 0], "the spent scroll clears");
     alice.quiet("the reinforcement sends nothing more");

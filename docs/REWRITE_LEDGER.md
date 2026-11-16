@@ -57172,3 +57172,71 @@ passed, 0 failed in 46 targets; with it 5,687 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,634 `ported`, 181 `partial`, 511 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 546 scenarios. No ADR changed.
+## 711. The trading glass, the bonus change, and the order of a scroll's records (B9)
+
+**The trading glass.** `case 60005` (`G/char_item.cpp:4396-4399`) runs
+`OpenShopSearch(MODE_TRADING)`.
+
+`a_trading_glass_opens_the_search_in_trade_mode_and_stays` runs in shipped mode. Alpha's 60005
+answers `GC_PRIVATE_SHOP` with sub-header 22 (`SUBHEADER_GC_PRIVATE_SHOP_SEARCH_OPEN_TRADE_MODE`),
+and the glass stays.
+
+**The bonus change.** `case USE_CHANGE_ATTRIBUTE` (`:6382-6500`), scenario
+`a_change_scroll_redraws_a_bonus_and_waits_out_its_minute`, shipped mode, owner's 71084:
+
+- on a sword with no bonus, it answers `[LS;397]` and the scroll stays;
+- on a sword with a bonus, the sword's update comes first, then `[LS;399]`, then one of three
+  scrolls goes;
+- a second change at once answers `[LS;398;60;n]` and the scroll stays. A player off the test
+  server waits `g_dwItemBonusChangeTime` (60 s, `G/config.cpp:42`) between changes.
+
+**The order of a scroll's records.** Legacy changes the item first and chats after.
+`SetAttribute` (`G/item_attribute.cpp:337-344`) and `SetSocket` (`G/item.cpp:1643-1648`) each send
+`UpdatePacket` at once:
+
+- `ChangeAttribute` and `AddAttribute` run before `[LS;399]` (`:6490`, `:6071`) and `[LS;400]`
+  (`:6600`, `:6651`);
+- `SetAccessorySocketMaxGrade` runs before `[LS;406]` (`:6703`);
+- `SetAccessorySocketGrade` runs before `[LS;410]` (`:6737`);
+- the costume reinforcement's `AddAttribute` runs before its line (`:6146`);
+- the aura booster's `SetSocket` runs before its line (`:6775`);
+- the talisman and glove adds run before their line (`:10630`, `:10684`).
+
+The Rewrite chatted first in 12 arms of `world/src/character/use_to_item.rs`. Each now pushes the
+target's update before its line. The stone's `[LS;1613]` stays first, because legacy chats it
+before `SetSocket` (`:7031`).
+
+The talisman and glove changes (`UseItemTalismanChangeAttribute`, `:10705-10724`;
+`UseItemGloveChangeAttribute`, `:10650-10667`) send no line at all. The Rewrite chatted `[LS;399]`,
+a Defect of the Rewrite's own; it no longer does. A player could tell, and nothing is left to
+record.
+
+Legacy sends one update for each `SetAttribute` and `SetSocket` call. The Rewrite sends the
+target's final state once, in the same place, so the client ends on the same row. This is
+recorded here, not as a Divergence: the frames that legacy sends in between are overwritten
+before the chat line, which the player can see.
+
+The scenarios that pinned line-first now read the update first:
+
+- `a_bonus_scroll_adds_and_a_costume_refuses`
+- `a_talisman_add_lands_and_its_change_redraws_and_counts` (no change line)
+- `a_glove_add_lands_and_its_change_redraws_and_counts` (no change line)
+- `a_costume_change_redraws_and_its_reset_rolls_again`
+- `a_booster_lands_on_an_aura_and_a_second_is_refused`
+- `a_body_reinforcement_lands_and_a_repeat_is_a_duplicate`
+- `a_socket_scroll_and_a_jewel_are_used_on_a_bracelet`
+
+The two talisman and glove unit tests now assert that no line is sent.
+
+The four nested glove and talisman rows are `ported` with their scenarios. The outer cases share
+one block whose inner switch picks the arm (`:6077-6120`). The inner change row under the aura
+case is `ported` with the change scenario.
+
+7 `partial` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,689
+passed, 0 failed in 46 targets; with it 5,689 passed, 0 failed in 46 targets (462 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,641 `ported`, 174 `partial`, 511 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 548 scenarios. No ADR changed.
