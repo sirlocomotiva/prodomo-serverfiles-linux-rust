@@ -54060,6 +54060,236 @@ fn a_change_scroll_redraws_a_bonus_and_waits_out_its_minute() {
     );
 }
 
+/// Alpha's four swords at cells 0 to 3 (four bonuses, one, none, and one rare), two
+/// 39004 add scrolls at 10 and 11, and two 72346 rare changes at 12, for
+/// [`a_fifth_bonus_scroll_and_a_rare_change_land_and_refuse_by_their_counts`].
+fn seed_bonus_swords(database: &ScratchDatabase) {
+    // Swords (two cells tall) at 0 to 3: four bonuses, one, none, and one rare.
+    for (id, pos, attrs) in [
+        (30, 0, "1, 500, 2, 500, 3, 5, 4, 5, 0, 0"),
+        (31, 1, "1, 500, 0, 0, 0, 0, 0, 0, 0, 0"),
+        (32, 2, "0, 0, 0, 0, 0, 0, 0, 0, 0, 0"),
+        (33, 3, "0, 0, 0, 0, 0, 0, 0, 0, 1, 500"),
+    ] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, \
+                 attrvalue0, attrtype1, attrvalue1, attrtype2, attrvalue2, attrtype3, \
+                 attrvalue3, attrtype5, attrvalue5) SELECT {id}, id, 1, {pos}, 1, 19, {attrs} \
+                 FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    for (id, pos, count, vnum) in [
+        (34, 10, 1, 39_004),
+        (35, 11, 1, 39_004),
+        (36, 12, 2, 72_346),
+    ] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, \
+                 id, 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let protos = owners_protos();
+    assert_eq!(
+        protos.get(39_004).expect("the add scroll").sub_type,
+        gamedata::item_kind::USE_ADD_ATTRIBUTE2,
+        "the owner's 39004"
+    );
+    assert_eq!(
+        protos.get(72_346).expect("the rare change").sub_type,
+        gamedata::item_kind::USE_CHANGE_ATTRIBUTE2,
+        "the owner's 72346"
+    );
+}
+
+/// `case USE_ADD_ATTRIBUTE2` (`G/char_item.cpp:6638-6688`) with the owner's 39004, and
+/// `case USE_CHANGE_ATTRIBUTE2` (`:6508-6548`) with 72346, on Alpha's swords. The add on a
+/// sword below four bonuses answers `[LS;405]`; on one with four it lands the fifth (the
+/// update first, as `AddAttribute` sends it), chats `[LS;400]` and is spent; a second add on
+/// the five answers `[LS;404]`. The rare change on a sword with no rare bonus answers
+/// `[LS;397]`; on one with a rare bonus it redraws it (the update first), chats `[LS;399]`,
+/// and one of two scrolls goes. Each refused scroll stays.
+#[test]
+fn a_fifth_bonus_scroll_and_a_rare_change_land_and_refuse_by_their_counts() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    seed_bonus_swords(&database);
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // Past the 1.5 s the entry counts as a fight (`IsRecentlyFought`).
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_use_to_item(10, 1));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;405]"),
+        "one bonus is below four"
+    );
+    alpha.quiet("the scroll stays");
+    alpha.send_record(&client_use_to_item(10, 0));
+    let update = alpha.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 0, 1),
+        "the sword: {update:02x?}"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;400]"),
+        "the fifth lands"
+    );
+    let cleared = alpha.read_game();
+    assert_eq!(
+        cleared[..4],
+        [ITEM_SET, 1, 10, 0],
+        "the spent scroll clears"
+    );
+    alpha.quiet("the add sends nothing more");
+    alpha.send_record(&client_use_to_item(11, 0));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;404]"),
+        "five is full"
+    );
+    alpha.quiet("the scroll stays");
+    alpha.send_record(&client_use_to_item(12, 2));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;397]"),
+        "no rare bonus to change"
+    );
+    alpha.quiet("the scroll stays");
+    alpha.send_record(&client_use_to_item(12, 3));
+    let update = alpha.read_game();
+    assert_eq!(
+        update_fields(&update),
+        (1, 3, 1),
+        "the rare sword: {update:02x?}"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;399]"),
+        "the rare bonus redraws"
+    );
+    assert_eq!(
+        update_fields(&alpha.read_game()),
+        (1, 12, 1),
+        "one of two scrolls goes"
+    );
+    alpha.quiet("the change sends nothing more");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT attrtype4 != 0 FROM item WHERE id = 30) AND (SELECT count(*) = 1 FROM item \
+         WHERE id IN (34, 35)) AND (SELECT count = 1 FROM item WHERE id = 36) AND (SELECT \
+         attrtype5 != 0 FROM item WHERE id = 33)",
+    );
+}
+
+/// `case USE_PUT_INTO_BELT_SOCKET` (`G/char_item.cpp:6725-6765`): a belt takes only a belt
+/// jewel (`CanPutInto`, `G/item.cpp:2516-2517`), and a belt is an accessory for the socket
+/// rule (`IsAccessoryForSocket`, `:2273-2277`). Alpha's 18900 on a belt whose one opened
+/// socket is filled answers `[LS;413]` and `[LS;415]` and stays; a bracelet jewel (50623) on
+/// the open belt answers `[LS;417]` and stays; the 18900 on the open belt sets the stone (its
+/// update first, then `[LS;410]`) or misses with `[LS;411]`, and is spent either way.
+#[test]
+fn a_belt_takes_its_own_jewel_and_refuses_a_bracelet_jewel() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, vnum, socket0, socket1) in [
+        (40, 0, 18_000, 0, 1),
+        (41, 1, 18_000, 1, 1),
+        (42, 2, 18_900, 0, 0),
+        (43, 3, 50_623, 0, 0),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, \
+                 socket1) SELECT {id}, id, 1, {pos}, 1, {vnum}, {socket0}, {socket1} FROM \
+                 player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    assert_eq!(
+        owners_protos()
+            .get(18_900)
+            .expect("the belt jewel")
+            .sub_type,
+        gamedata::item_kind::USE_PUT_INTO_BELT_SOCKET,
+        "the owner's 18900"
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // Past the 1.5 s the entry counts as a fight (`IsRecentlyFought`).
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_use_to_item(2, 1));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"[LS;413]"),
+        "open more first"
+    );
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"[LS;415]"),
+        "its second line"
+    );
+    alpha.quiet("the jewel stays");
+    alpha.send_record(&client_use_to_item(3, 0));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"[LS;417]"),
+        "the wrong jewel"
+    );
+    alpha.quiet("the bracelet jewel stays");
+    alpha.send_record(&client_use_to_item(2, 0));
+    let first = alpha.read_game();
+    if first[0] == ITEM_UPDATE {
+        assert_eq!(first[..4], [ITEM_UPDATE, 1, 0, 0], "the belt: {first:02x?}");
+        assert_eq!(first[14..18], 1_i32.to_le_bytes(), "socket 0 sets");
+        assert_eq!(
+            alpha.read_game(),
+            an_info_line(b"[LS;410]"),
+            "the set chats"
+        );
+    } else {
+        assert_eq!(first, an_info_line(b"[LS;411]"), "the miss chats");
+    }
+    let spent = alpha.read_game();
+    assert_eq!(
+        spent[..8],
+        [ITEM_SET, 1, 2, 0, 0, 0, 0, 0],
+        "the jewel clears"
+    );
+    alpha.quiet("the jewel's records end with the cleared jewel");
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT count(*) = 0 FROM item WHERE id = 42) AND (SELECT count(*) = 1 FROM item \
+         WHERE id = 43)",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

@@ -57240,3 +57240,44 @@ passed, 0 failed in 46 targets; with it 5,689 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,641 `ported`, 174 `partial`, 511 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 548 scenarios. No ADR changed.
+## 712. The fifth bonus, the rare change, and the belt jewel (B9)
+
+**The fifth bonus and the rare change.**
+`a_fifth_bonus_scroll_and_a_rare_change_land_and_refuse_by_their_counts` runs in shipped mode
+with the owner's 39004 (`USE_ADD_ATTRIBUTE2`) and 72346 (`USE_CHANGE_ATTRIBUTE2`, 100 in 100) on
+four swords: one with four bonuses, one with one, one with none, and one with a rare bonus.
+
+- **The add** (`G/char_item.cpp:6638-6688`):
+  - below four bonuses it answers `[LS;405]`;
+  - on four it lands the fifth (the update first, as `AddAttribute` sends it), chats `[LS;400]`
+    and is spent;
+  - on the five it answers `[LS;404]`.
+  - It adds `abs(2 - item->GetAttributeCount())` bonuses, and `item` there is the scroll, so the
+    count asked for is two, and the cap keeps it at five.
+- **The rare change** (`:6508-6548`, live because `__ATTR_6TH_7TH__` is defined at
+  `prodomodefines.h:31`):
+  - with no rare bonus it answers `[LS;397]`;
+  - with one it redraws (the update first), chats `[LS;399]`, and one of two scrolls goes.
+- Every refused scroll stays.
+
+**The belt jewel.** `a_belt_takes_its_own_jewel_and_refuses_a_bracelet_jewel` runs in shipped
+mode. The belt is an accessory for the socket rule (`IsAccessoryForSocket`,
+`G/item.cpp:2273-2277`), and it takes only a `USE_PUT_INTO_BELT_SOCKET` jewel (`CanPutInto`,
+`:2516-2517`). With the owner's belt 18000 and jewel 18900 (`:6725-6765`):
+
+- the 18900 on a belt whose one opened socket is filled answers `[LS;413]` and `[LS;415]`;
+- the bracelet jewel 50623 on the open belt answers `[LS;417]`;
+- the 18900 on the open belt sets the stone (the update, then `[LS;410]`) or misses with
+  `[LS;411]`, and is spent either way.
+
+The inner rows under the aura case (`:6508`, `:6631`, `:6725`) are the same arms, reached
+through the shared outer case. They are `ported` with these scenarios.
+
+6 `partial` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,691
+passed, 0 failed in 46 targets; with it 5,691 passed, 0 failed in 46 targets (462 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,647 `ported`, 168 `partial`, 511 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 550 scenarios. No ADR changed.
