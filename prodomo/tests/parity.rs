@@ -54290,6 +54290,101 @@ fn a_belt_takes_its_own_jewel_and_refuses_a_bracelet_jewel() {
     );
 }
 
+/// The pet and mount reinforcements (`case USE_SET_ATT_PET`, `USE_SET_ATT_MOUNT`,
+/// `G/char_item.cpp:6203-6283`) and the body one's refusals (`case USE_SET_ATT_COSTUME`,
+/// `:6123-6162`). Alpha holds a pet costume (53001, its clock years away), a mount costume
+/// (52001, its clock not started), a costume body with two bonuses, and the owner's 50897,
+/// 50896 and 50898. Each scroll on the other kind chats its own wrong-kind line and stays;
+/// the pet and mount scrolls on their own costume land their pair (the update first, as
+/// `AddAttribute` sends it), chat their success line and are spent; the body scroll on the
+/// two-bonus body chats its full line and stays.
+#[test]
+fn each_reinforcement_lands_on_its_own_costume_and_refuses_the_rest() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, vnum, socket0, attrs) in [
+        (30, 0, 53_001, 2_000_000_000, "0, 0, 0, 0"),
+        (31, 1, 52_001, 0, "0, 0, 0, 0"),
+        (32, 2, 41_319, 0, "1, 100, 2, 100"),
+        (33, 10, 50_897, 0, "0, 0, 0, 0"),
+        (34, 11, 50_896, 0, "0, 0, 0, 0"),
+        (35, 12, 50_898, 0, "0, 0, 0, 0"),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, \
+                 attrtype0, attrvalue0, attrtype1, attrvalue1) SELECT {id}, id, 1, {pos}, 1, \
+                 {vnum}, {socket0}, {attrs} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // Past the 1.5 s the entry counts as a fight (`IsRecentlyFought`).
+    std::thread::sleep(Duration::from_millis(1600));
+    let line = |text: &[u8]| chat_packet(CHAT_TYPE_INFO, 1, text);
+    for (scroll, target, refusal) in [
+        (
+            10,
+            1,
+            &b"[i] Aceasta ranforsare merge adaugata doar pe pet."[..],
+        ),
+        (11, 0, b"[i]Ranforsarea merge adaugata doar pe mount."),
+        (12, 2, b"[i] Poti adauga doar 2 ranforsari pe costum!"),
+        (12, 0, b"[i] Ranforsarea merge adaugata doar pe costum."),
+    ] {
+        alpha.send_record(&client_use_to_item(scroll, target));
+        assert_eq!(
+            alpha.read_game(),
+            line(refusal),
+            "scroll {scroll} on {target}"
+        );
+        alpha.quiet("the refused scroll stays");
+    }
+    for (scroll, target, apply, added) in [
+        (
+            10,
+            0,
+            17,
+            &b"[i] Ranforsarea a fost adaugata cu succes!"[..],
+        ),
+        (11, 1, 15, b"[i]Ranforsarea a fost adaugata cu succes!"),
+    ] {
+        alpha.send_record(&client_use_to_item(scroll, target));
+        let update = alpha.read_game();
+        assert_eq!(
+            update_fields(&update),
+            (1, target, 1),
+            "the costume: {update:02x?}"
+        );
+        assert_eq!(update[38], apply, "the scroll's apply lands: {update:02x?}");
+        assert_eq!(alpha.read_game(), line(added), "scroll {scroll} lands");
+        let cleared = alpha.read_game();
+        assert_eq!(
+            cleared[..4],
+            [ITEM_SET, 1, scroll.try_into().expect("a cell"), 0],
+            "spent"
+        );
+        alpha.quiet("the reinforcement sends nothing more");
+    }
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT attrtype0 = 17 AND attrvalue0 = 10 FROM item WHERE id = 30) AND (SELECT \
+         attrtype0 = 15 AND attrvalue0 = 10 FROM item WHERE id = 31) AND (SELECT count(*) = 1 \
+         FROM item WHERE id IN (33, 34, 35))",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

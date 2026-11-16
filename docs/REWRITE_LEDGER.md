@@ -57281,3 +57281,48 @@ passed, 0 failed in 46 targets; with it 5,691 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,647 `ported`, 168 `partial`, 511 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 550 scenarios. No ADR changed.
+## 713. The pet and mount reinforcements, and the body reinforcement's refusals (B9)
+
+`each_reinforcement_lands_on_its_own_costume_and_refuses_the_rest` runs in shipped mode. Alpha
+holds:
+
+- a pet costume 53001, whose `REAL_TIME` clock is set years ahead;
+- a mount costume 52001, whose `REAL_TIME_FIRST_USE` clock has not started;
+- a costume body 41319 with two bonuses;
+- the owner's 50897, 50896 and 50898.
+
+Each scroll on the other kind chats its own wrong-kind line and stays:
+
+- the pet scroll on the mount: `G/char_item.cpp:6238`;
+- the mount scroll on the pet: `:6280`;
+- the body scroll on the pet: `:6158`.
+
+The body scroll on the two-bonus body chats its full line (`:6153`) and stays.
+
+The pet and mount scrolls land on their own costume:
+
+- 50897 lands apply 17 at 10, and 50896 lands apply 15 at 10;
+- the update comes first, then each scroll's own success line (`:6227`, `:6269`);
+- each scroll is spent.
+
+The four line texts were read from the source; their punctuation and spacing differ from arm to
+arm and are kept.
+
+With `a_body_reinforcement_lands_and_a_repeat_is_a_duplicate` (ledger 711), the body, pet and
+mount rows are `ported`.
+
+`use_set_att_costume_weapon` is `unused`. No owner proto has that sub-type; the same search finds
+50898, 50897 and 50896 for the other three, which are its positive controls.
+
+The two nested costume rows are `ported` with `a_costume_change_redraws_and_its_reset_rolls_again`.
+The outer `USE_CHANGE_COSTUME_ATTR` and `USE_RESET_COSTUME_ATTR` share one block (`:6017-6075`),
+and its inner switch runs both arms in that scenario.
+
+5 `partial` rows are `ported` and 1 is `unused`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,692
+passed, 0 failed in 46 targets; with it 5,692 passed, 0 failed in 46 targets (462 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,652 `ported`, 162 `partial`, 512 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 551 scenarios. No ADR changed.
