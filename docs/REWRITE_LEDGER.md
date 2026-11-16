@@ -56584,3 +56584,27 @@ passed, 0 failed in 46 targets; with it 5,671 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,550 `ported`, 253 `partial`, 491 `unused`, 37 `missing`,
 0 `codec`, of 2,331 rows; 531 scenarios. No ADR changed.
+## 695. Each automatic potion's kind of row (B9, the `USE_SPECIAL` auto-recovery arm)
+
+The automatic potions (`G/char_item.cpp:5334-5345`) share one body. An inner switch
+(`:5380-5404`) gives each of the twelve vnums its row: the HP potions (72723-72726, 76021,
+76022) lay `AFFECT_AUTO_HP_RECOVERY` (534) and the SP potions (72727-72730, 76004, 76005) lay
+`AFFECT_AUTO_SP_RECOVERY` (535). The two X potions fall through with `isSpecialPotion` set, so
+their row carries `POINT_MAX_HP_PCT` (119) or `POINT_MAX_SP_PCT` (120) as its apply
+(`:5437-5451`). Only 72723 had a scenario.
+
+`each_auto_potion_lays_its_kind_of_row_and_the_x_ones_their_bonus` (shipped mode) gives Alpha
+each potion in turn through the console. A use lays one row with the expected type and apply,
+value 4 and the item's id. A second use of the same item takes that row down. Each use starts a
+fresh wall-clock second because of the one-second throttle (`:5370`). The Rewrite already
+behaved this way; no code changed.
+
+23 rows are `ported`: the twelve outer vnum arms and eleven inner ones (the inner 72723 arm was
+already `ported`).
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,672
+passed, 0 failed in 46 targets; with it 5,672 passed, 0 failed in 46 targets (457 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,573 `ported`, 230 `partial`, 491 `unused`, 37 `missing`,
+0 `codec`, of 2,331 rows; 532 scenarios. No ADR changed.

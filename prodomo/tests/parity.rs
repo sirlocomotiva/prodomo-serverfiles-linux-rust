@@ -52669,6 +52669,109 @@ fn a_skill_point_climb_refuses_the_top_masters_and_jumps_a_normal_skill_at_17() 
     );
 }
 
+/// The automatic potions' kinds (`G/char_item.cpp:5334-5345`, `:5380-5404`): each of the twelve
+/// vnums lays the HP row (534) or the SP row (535) with the item's id and 4, and the two X
+/// potions carry the special bonus, `POINT_MAX_HP_PCT` (119) or `POINT_MAX_SP_PCT` (120), as the
+/// row's apply (`:5437-5451`). A second use of the same item takes its row down (`:5459-5465`).
+#[test]
+fn each_auto_potion_lays_its_kind_of_row_and_the_x_ones_their_bonus() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 500, sp = 10 WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    for (given, &(vnum, kind, apply)) in AUTO_POTION_KINDS.iter().enumerate() {
+        let id = 100_000_000 + u32::try_from(given).expect("a count");
+        Server::write_console(&console, &format!("item give Alpha {vnum} 1"));
+        server.wait_for(&format!("id {id}; the client has it"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let set = std::iter::from_fn(|| alpha.read_game_until(deadline))
+            .find(|record| record[0] == ITEM_SET)
+            .expect("the item set lands");
+        let (window, cell, set_vnum, count) = set_fields(&set);
+        assert_eq!((window, set_vnum, count), (1, vnum, 1), "{vnum} arrives");
+        // The throttle compares whole seconds (`:5370`): each use waits out a fresh one.
+        std::thread::sleep(Duration::from_millis(1_000));
+        wait_for_a_fresh_second();
+        alpha.send_record(&client_item_use(cell));
+        let (adds, removes) = auto_rows_within(&mut alpha);
+        assert_eq!(adds, [(kind, apply, 4, id)], "{vnum} lays its row");
+        assert!(removes.is_empty(), "{vnum} replaces nothing: {removes:?}");
+        std::thread::sleep(Duration::from_millis(1_000));
+        wait_for_a_fresh_second();
+        alpha.send_record(&client_item_use(cell));
+        let (adds, removes) = auto_rows_within(&mut alpha);
+        assert!(adds.is_empty(), "{vnum} toggles off: {adds:?}");
+        assert_eq!(removes, [(kind, apply)], "{vnum} takes its row down");
+    }
+    drop(alpha);
+}
+
+/// The twelve automatic potions: vnum, the row's type, and its apply.
+const AUTO_POTION_KINDS: [(u32, u32, u8); 12] = [
+    (72_723, 534, 0),
+    (72_724, 534, 0),
+    (72_725, 534, 0),
+    (72_726, 534, 119),
+    (72_727, 535, 0),
+    (72_728, 535, 0),
+    (72_729, 535, 0),
+    (72_730, 535, 120),
+    (76_004, 535, 0),
+    (76_005, 535, 0),
+    (76_021, 534, 0),
+    (76_022, 534, 0),
+];
+
+/// An affect add's type, apply, value and flag.
+type AutoRow = (u32, u8, i32, u32);
+
+/// The affect adds and removes within 700 ms, past every other record.
+fn auto_rows_within(keyed: &mut Keyed) -> (Vec<AutoRow>, Vec<AffectRemoved>) {
+    let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    let mut adds = Vec::new();
+    let mut removes = Vec::new();
+    for record in records.iter().filter(|record| !is_revive_end(record)) {
+        match record.first().copied().unwrap_or_default() {
+            GC_AFFECT_ADD => {
+                assert_eq!(record.len(), AFFECT_ADD_LEN);
+                adds.push((
+                    u32::from_le_bytes(record[1..5].try_into().expect("four bytes")),
+                    record[5],
+                    i32::from_le_bytes(record[6..10].try_into().expect("four bytes")),
+                    u32::from_le_bytes(record[10..14].try_into().expect("four bytes")),
+                ));
+            }
+            GC_AFFECT_REMOVE => {
+                assert_eq!(record.len(), AFFECT_REMOVE_LEN);
+                removes.push((
+                    u32::from_le_bytes(record[1..5].try_into().expect("four bytes")),
+                    record[5],
+                ));
+            }
+            _ => {}
+        }
+    }
+    (adds, removes)
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(
