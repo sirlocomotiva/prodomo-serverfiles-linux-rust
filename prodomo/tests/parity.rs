@@ -18276,8 +18276,9 @@ fn party_swing_tail(
     }
 }
 /// `sys.skill.extra`: Alpha holds 20k exp and reads a 50335 book with skill 164 at 0:
-/// the 80 % `prob` roll climbs 164 to 1 or misses, byte 76 answers with slot 164 as it
-/// stands, and the book is spent either way. The passive's own refresh is the unit
+/// the 80 % `prob` roll climbs 164 to 1, which byte 76 shows with `[LS;954]`, `[LS;955]` and
+/// `[LS;964]`, or misses with `[LS;952]` and `[LS;953]` and no byte 76 (the read stamp sends
+/// nothing, `G/char_skill.cpp:70-74`). The book is spent either way. The passive's own refresh is the unit
 /// test's (`new_passive_ups_refresh_their_own_bonus`), because a level-1 power reads
 /// 0.5 and fills nothing.
 #[test]
@@ -18299,34 +18300,19 @@ fn a_monster_book_reads_and_climbs_or_misses() {
     let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alpha);
     read_login_event(&mut alpha);
-    alpha.send_record(&client_item_use(0));
-    // The read's records: a climb's byte 76 with slot 164 at 1 or a miss's two chat
-    // lines, then the book's clear. The book spends either way.
-    let mut climbed = None;
-    let mut cleared = false;
-    for _ in 0..10 {
-        let record = alpha.read_game();
-        if record[0] == GC_SKILL_LEVEL_NEW {
-            assert_eq!(record.len(), SKILL_LEVEL_LEN);
-            assert_eq!(record[1 + 164 * 6], 0, "slot 164's master: {record:02x?}");
-            let level = record[1 + 164 * 6 + 1];
-            assert!(level <= 1, "slot 164 reads 0 or 1: {record:02x?}");
-            assert!(climbed.replace(level == 1).is_none(), "one byte 76");
-        } else if record[0] == ITEM_SET && record[1] == 1 && record[2] == 0 {
-            assert_eq!(record[4..8], [0; 4], "the book clears: {record:02x?}");
-            cleared = true;
-        } else if record[0] == GC_CHAT {
-            // The miss's [LS;952]+[LS;953] read-fail pair.
-        } else {
-            panic!("past a book read, a record nobody accounted for: {record:02x?}");
-        }
-        if climbed.is_some() && cleared {
-            break;
-        }
-    }
-    assert!(climbed.is_some(), "byte 76 answers the read");
-    assert!(cleared, "the book is spent");
-    if climbed == Some(true) {
+    let read = read_book(&mut alpha, 0, 164);
+    assert!(read.spent, "the book is spent either way");
+    let climbed = !read.shown.is_empty();
+    if climbed {
+        assert_eq!(read.shown, [1], "byte 76 shows 164 at 1");
+        assert_eq!(
+            read.lines,
+            [
+                talking(b"[LS;954]"),
+                talking(b"[LS;955]"),
+                info(b"[LS;964]")
+            ]
+        );
         wait_for(
             &database,
             &format!(
@@ -18334,6 +18320,8 @@ fn a_monster_book_reads_and_climbs_or_misses() {
                 listed.id,
             ),
         );
+    } else {
+        assert_eq!(read.lines, [talking(b"[LS;952]"), info(b"[LS;953]")]);
     }
 }
 
@@ -52771,6 +52759,158 @@ fn auto_rows_within(keyed: &mut Keyed) -> (Vec<AutoRow>, Vec<AffectRemoved>) {
     }
     (adds, removes)
 }
+
+/// What one book read sent within a second: its chat lines (type and text), the levels
+/// byte 76 showed for the read's skill, and whether the book's cell cleared.
+struct BookRead {
+    lines: Vec<(u8, Vec<u8>)>,
+    shown: Vec<u8>,
+    spent: bool,
+}
+
+/// Read the book in `cell`, whose skill is `vnum`, and gather what the read sent.
+fn read_book(alpha: &mut Keyed, cell: u16, vnum: usize) -> BookRead {
+    alpha.send_record(&client_item_use(cell));
+    let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+    let mut read = BookRead {
+        lines: Vec::new(),
+        shown: Vec::new(),
+        spent: false,
+    };
+    while let Some(record) = alpha.read_fight_until(deadline) {
+        match record[0] {
+            GC_CHAT => read.lines.push((record[3], record[10..].to_vec())),
+            GC_SKILL_LEVEL_NEW => read.shown.push(skill_slot(&record, vnum)),
+            ITEM_SET => {
+                let (window, at, set_vnum, count) = set_fields(&record);
+                assert_eq!(
+                    (window, at, set_vnum, count),
+                    (1, cell, 0, 0),
+                    "{record:02x?}"
+                );
+                read.spent = true;
+            }
+            GC_POINT_CHANGE | GC_CHARACTER_UPDATE => {}
+            _ if is_revive_end(&record) => {}
+            other => panic!("past a book read, a record nobody accounted for: {other}"),
+        }
+    }
+    read
+}
+
+/// A talking line's `(type, text)`.
+fn talking(text: &[u8]) -> (u8, Vec<u8>) {
+    (CHAT_TALKING, text.to_vec())
+}
+
+/// An info line's `(type, text)`.
+fn info(text: &[u8]) -> (u8, Vec<u8>) {
+    (1, text.to_vec())
+}
+
+/// The basic books' own arms (`G/char_item.cpp:4406-4551`), each reached with Alpha, a level
+/// 154 shaman of empire 1, past the exp gate (`FN_should_check_exp`, level below the maximum
+/// only). Leadership books 50302 and 50303 refuse at leadership 0, below their `value0` 20 and
+/// 30, with `[LS;274]`; the language book 50311 names Shinsoo, Alpha's own tongue, and refuses
+/// with `[LS;328]`; the summon book 50061 refuses at skill 131 level 10 with `[LS;948]`. Each
+/// refused book stays. The combo book 50306 reads at its 100% and climbs combo to 1. With
+/// combo at 1 and level 50 passed, 50304 and 50305 reach `LearnSkillByBook`, whose read
+/// delay (18 to 30 hours, set by the climb) answers with the waiting lines; both stay. The
+/// language books 50312 and 50313 read at 50% and 50301 trains leadership at 35%: each climbs
+/// or misses and is spent either way.
+#[test]
+fn each_basic_book_reads_by_its_own_arm() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 131, 10, 0 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    for (cell, vnum) in BASIC_BOOKS.iter().enumerate() {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'",
+                60 + cell
+            ),
+        );
+    }
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    for (cell, skill, line) in [
+        (0, 121, &b"[LS;274]"[..]),
+        (1, 121, b"[LS;274]"),
+        (2, 126, b"[LS;328]"),
+        (3, 131, b"[LS;948]"),
+    ] {
+        let read = read_book(&mut alpha, cell, skill);
+        assert_eq!(read.lines, [info(line)], "book {cell} refuses");
+        assert!(read.shown.is_empty() && !read.spent, "book {cell} stays");
+    }
+    let read = read_book(&mut alpha, 4, 122);
+    assert_eq!(read.shown, [1], "50306 climbs combo to 1");
+    assert_eq!(
+        read.lines,
+        [
+            talking(b"[LS;954]"),
+            talking(b"[LS;955]"),
+            info(b"[LS;964]")
+        ]
+    );
+    assert!(read.spent, "50306 is spent");
+    for cell in [5, 6] {
+        let read = read_book(&mut alpha, cell, 122);
+        assert!(
+            read.lines == [talking(b"[LS;983]"), talking(b"[LS;984]")]
+                || read.lines == [talking(b"[LS;985]"), talking(b"[LS;986]")],
+            "book {cell} waits out the read delay: {:?}",
+            read.lines
+        );
+        assert!(read.shown.is_empty() && !read.spent, "book {cell} stays");
+    }
+    for (cell, skill, trains) in [(7, 127, false), (8, 128, false), (9, 121, true)] {
+        let read = read_book(&mut alpha, cell, skill);
+        assert!(read.spent, "book {cell} is spent either way");
+        if read.shown.is_empty() {
+            assert_eq!(
+                read.lines,
+                [talking(b"[LS;952]"), info(b"[LS;953]")],
+                "book {cell} misses"
+            );
+        } else {
+            assert_eq!(read.shown, [1], "book {cell} climbs {skill} to 1");
+            // A training climb tells only `[LS;964]` (`G/char_skill.cpp:589-596`).
+            let climbed = if trains {
+                vec![info(b"[LS;964]")]
+            } else {
+                vec![
+                    talking(b"[LS;954]"),
+                    talking(b"[LS;955]"),
+                    info(b"[LS;964]"),
+                ]
+            };
+            assert_eq!(read.lines, climbed, "book {cell} climbs");
+        }
+    }
+    drop(alpha);
+}
+
+/// The basic books in cells 0 to 9 of `each_basic_book_reads_by_its_own_arm`.
+const BASIC_BOOKS: [u32; 10] = [
+    50_302, 50_303, 50_311, 50_061, 50_306, 50_304, 50_305, 50_312, 50_313, 50_301,
+];
 
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {

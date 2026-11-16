@@ -981,6 +981,8 @@ impl GameState {
             }
             if number(&mut self.dice, 1, 100) <= i32::from(chance) {
                 let climbed = self.skill_level_up(vid, job, group, vnum, SkillUpMethod::Book);
+                // The tail (`G/char_skill.cpp:630-642`) tells the climb after byte 76.
+                self.book_read_tail(vid, mover, vnum, last_level);
                 return (true, climbed);
             }
             self.book_read_tail(vid, mover, vnum, last_level);
@@ -1370,7 +1372,8 @@ impl GameState {
     }
 
     /// `SetSkillNextReadTime(vnum, now + number(64800, 108000))` after a read the gates
-    /// passed, and byte 76 with the new stamp.
+    /// passed. It sends nothing (`G/char_skill.cpp:70-74`): the client sees the stamp in the
+    /// next byte 76.
     fn stamp_next_read(&mut self, vid: Vid, vnum: u32) {
         if vnum >= 255 {
             return;
@@ -1378,7 +1381,6 @@ impl GameState {
         let delay = number(&mut self.dice, SKILLBOOK_DELAY_MIN, SKILLBOOK_DELAY_MAX);
         let stamp = Self::global_time().saturating_add(u32::try_from(delay).unwrap_or(0));
         self.pc_skill_state(vid.raw()).next_read[vnum as usize] = stamp;
-        self.send_skill_levels(vid);
     }
 
     /// The horse book's own body (`:4703-4762`): level 50, the read-time gate with the

@@ -56608,3 +56608,43 @@ passed, 0 failed in 46 targets; with it 5,672 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,573 `ported`, 230 `partial`, 491 `unused`, 37 `missing`,
 0 `codec`, of 2,331 rows; 532 scenarios. No ADR changed.
+## 696. The basic books' own arms, and two parity bugs in a book read (B9, `USE_SPECIAL`)
+
+The leadership, combo, language and summon books (`G/char_item.cpp:4406-4551`) each gate the read
+on their own rule before `LearnSkillByBook`. None had a scenario.
+
+`each_basic_book_reads_by_its_own_arm` (shipped mode) gives Alpha, a level-154 shaman of empire 1,
+ten books and skill 131 at 10. The level is above the configured maximum of 99, so the exp gate
+(`FN_should_check_exp`) does not apply. The scenario checks each read:
+
+- The refusals: leadership books 50302 and 50303 refuse at leadership 0 with `[LS;274]`;
+  language book 50311 names Alpha's own tongue and refuses with `[LS;328]`; summon book 50061
+  refuses at level 10 with `[LS;948]`. Each refused book stays.
+- Combo book 50306 reads at 100% and climbs combo to 1.
+- Combo books 50304 and 50305 then pass their gates. `LearnSkillByBook` answers with the
+  waiting lines for the 18 to 30 hour read delay, and both books stay.
+- Language books 50312 and 50313 read at 50%, and 50301 trains leadership at 35%. Every outcome
+  is accepted with its own records, and the book is spent either way.
+
+Two parity bugs are fixed in `prodomo/src/game_state/pc_skill.rs`:
+
+- A read that climbed on its chance roll told nothing. Legacy ends `LearnSkillByBook` with
+  `[LS;954]`, `[LS;955]` and `[LS;964]` when the level moved (`G/char_skill.cpp:630-642`);
+  `learn_skill_by_book` now runs `book_read_tail` after the climb, too.
+- `stamp_next_read` sent byte 76 after every read. `SetSkillNextReadTime`
+  (`G/char_skill.cpp:70-74`) sends nothing, and no `SkillLevelPacket` is called anywhere in
+  `char_item.cpp`, so a miss sent an extra byte 76 and a climb sent two. It now sends nothing.
+  `a_monster_book_reads_and_climbs_or_misses` pinned the extra record ("byte 76 answers the
+  read"). It now checks legacy's records: a climb's byte 76 and three lines, or a miss's two
+  lines and no byte 76.
+
+10 rows are `ported`. The ladder lines of a master read (`skill.learn_by_book.1` to `.3`) stay
+`partial`: each is one draw in nine per read, and one read per skill per day. The ladder's
+`default` label is `unused`: it shares `case 3`'s body, and `number(1, 3)` yields nothing else.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,673
+passed, 0 failed in 46 targets; with it 5,673 passed, 0 failed in 46 targets (455 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,583 `ported`, 219 `partial`, 492 `unused`, 37 `missing`,
+0 `codec`, of 2,331 rows; 533 scenarios. No ADR changed.
