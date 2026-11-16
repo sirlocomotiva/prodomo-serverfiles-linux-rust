@@ -7,8 +7,8 @@
 //! Using an automatic potion (72723-72730, 76004/76005, 76021/76022,
 //! `G/char_item.cpp:5334-5510`) is refused on an arena map (`[LS;403]`), while fighting a
 //! consent duel with the `no_potions_on_pvp` event flag up and the vnum not on the allowed
-//! list (`[LS;1205]`), and within a second of the last automatic use (`WAIT_BUFF`, whose
-//! locale key is missing everywhere, so the wire carries `@0949WAIT_BUFF`). Past the gates
+//! list (`[LS;1205]`), and within a second of the last automatic use (`WAIT_BUFF`, a key no
+//! locale table holds, so the wire carries the key itself). Past the gates
 //! a stack splits one single off into the first free base cell (nowhere to split is
 //! `[LS;1130]`; the single carries socket 1 only), and the single toggles: with no row of
 //! the type it lays `AddAffect(type, bonus, 4, id, INF, 0)` — the X potions also lay
@@ -75,11 +75,11 @@ const ARENA_REFUSAL: &[u8] = b"[LS;403]";
 const PVP_REFUSAL: &[u8] = b"[LS;1205]";
 /// `[LS;1130]`: a stack with nowhere to split.
 const NO_ROOM_REFUSAL: &[u8] = b"[LS;1130]";
-/// `LC_TEXT("WAIT_BUFF")` with its second: the key is in no locale file (the main table
-/// and all 12 country files were swept), so europe's locale lookup answers `@0949` plus
-/// the key (`G/locale.cpp:244-255`), and the format carries no `%d`, so the second is
-/// ignored.
-const WAIT_BUFF: &[u8] = b"@0949WAIT_BUFF";
+/// `LC_TEXT("WAIT_BUFF")` with its second. `__MULTI_LANGUAGE_SYSTEM__` is defined, so
+/// `LC_TEXT` asks `LOCALE_YMIR` and answers the key itself (`G/locale.cpp:71-88`), and
+/// `ChatPacket`'s lookup in the descriptor's table misses it too and sends it as it is
+/// ([`crate::chat_line`]). The format carries no `%d`, so the second is ignored.
+const WAIT_BUFF: &[u8] = b"WAIT_BUFF";
 
 /// The row's apply value (`AddAffect(type, bonus, 4, ...)`).
 const AUTO_APPLY_VALUE: i32 = 4;

@@ -12603,11 +12603,11 @@ fn throttle_second_use_hears_the_wait_line(keyed: &mut Keyed, database: &Scratch
     wait_for_a_fresh_second();
     keyed.send_record(&client_item_use(0));
     keyed.send_record(&client_item_use(0));
-    // The wait line's record is 10 + 13: the `@0949WAIT_BUFF` text rides raw.
+    // The wait line's record is 10 + 9: the `WAIT_BUFF` key rides as it is.
     let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
         GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
-        GC_CHAT => 10 + b"@0949WAIT_BUFF".len(),
+        GC_CHAT => 10 + b"WAIT_BUFF".len(),
         other => game_len(other),
     });
     assert_eq!(quiet, Quiet::Open);
@@ -12616,11 +12616,7 @@ fn throttle_second_use_hears_the_wait_line(keyed: &mut Keyed, database: &Scratch
         .filter(|record| record.first() == Some(&GC_CHAT))
         .collect();
     assert_eq!(chats.len(), 1, "the second use hears the wait line");
-    assert_eq!(
-        &chats[0][10..],
-        b"@0949WAIT_BUFF",
-        "the missing key rides raw"
-    );
+    assert_eq!(&chats[0][10..], b"WAIT_BUFF", "the missing key rides raw");
     check(
         database,
         "(SELECT socket0 = 1 FROM item WHERE id = 100000000)",
@@ -53613,9 +53609,9 @@ fn a_live_fish_is_used_into_one_of_its_outcomes_and_a_dead_one_changes_nothing()
     let outcome = match (gifts.as_slice(), lines.as_slice(), updates.as_slice()) {
         ([], [], [(2, 2)]) => "the dead fish",
         ([27_799], [], []) => "the bone",
-        ([], [b"@0949The meat disappears without a trace."], []) => "the meat",
-        ([27_987], [b"@0949A clam came out of the fish."], []) => "the clam",
-        ([27_801], [b"@0949An earthworm came out of the stomach."], []) => "the earthworm",
+        ([], [b"The meat disappears without a trace."], []) => "the meat",
+        ([27_987], [b"A clam came out of the fish."], []) => "the clam",
+        ([27_801], [b"An earthworm came out of the stomach."], []) => "the earthworm",
         _ => panic!("no outcome of UseFish: {sets:?} {updates:?} {lines:?}"),
     };
     println!("the live fish gave {outcome}");
@@ -53856,8 +53852,8 @@ fn the_craft_books_stay_and_the_mining_and_horse_books_read_or_miss() {
 
 /// `USE_UNLOCK_SHAMAN` (`G/char_item.cpp:6944-6964`): the arm's upgrade is commented out, so
 /// a use of the owner's 69699 only answers `LC_TEXT("You upgrade your buff successfully")`
-/// and returns false with the item kept. The key is in no locale file, so europe's
-/// `locale_find` answers `@0949` and the key (`G/locale.cpp:244-255`).
+/// and returns false with the item kept. `LC_TEXT` answers the key itself under
+/// `__MULTI_LANGUAGE_SYSTEM__` (`G/locale.cpp:71-88`), and no table translates it.
 #[test]
 fn a_shaman_unlock_answers_its_line_and_stays() {
     let Some(database) = ScratchDatabase::create() else {
@@ -53882,7 +53878,7 @@ fn a_shaman_unlock_answers_its_line_and_stays() {
     assert_eq!(line[0], GC_CHAT, "the line: {line:02x?}");
     assert_eq!(
         (line[3], line[10..].to_vec()),
-        info(b"@0949You upgrade your buff successfully")
+        info(b"You upgrade your buff successfully")
     );
     alpha.quiet("the item stays");
     drop(alpha);
@@ -54538,6 +54534,90 @@ fn a_change_scroll_turns_an_element_and_keeps_its_plus() {
         &database,
         "(SELECT refine_element = 310505505 FROM item WHERE id = 41) AND (SELECT gold = \
          10000000 FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// `LIMIT_REAL_TIME_START_FIRST_USE` in `UseItemEx` (`G/char_item.cpp:2749-2751`,
+/// `:2804-2820`): a first-use item's clock starts at its first use. Alpha's ring 71135
+/// (limit 1,296,000 s, sockets 0 and 1 empty) is worn: its socket 0 is stamped
+/// `time(0) + 1296000` and its use count (socket 1) becomes 1. Taken off and worn again, the
+/// clock is not stamped again and the count climbs to 2: only a use of the unworn ring counts,
+/// and the take-off is a use of the worn one.
+#[test]
+fn a_first_use_ring_starts_its_clock_once_and_counts_its_uses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
+         71135 FROM player WHERE name = 'Alpha'",
+    );
+    let limit = owners_protos().get(71_135).expect("the ring").limits[0];
+    assert_eq!(
+        (limit.kind, limit.value),
+        (
+            gamedata::item_kind::LIMIT_REAL_TIME_START_FIRST_USE,
+            1_296_000
+        ),
+        "the owner's ring starts its clock at first use"
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    // The ring's last set record of one use: its cell and its sockets 0 and 1.
+    let ring_after = |alpha: &mut Keyed, cell: u16| {
+        alpha.send_record(&client_item_use(cell));
+        let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+        std::iter::from_fn(|| alpha.read_fight_until(deadline))
+            .filter(|record| record[0] == ITEM_SET)
+            .map(|record| protocol::gc_item_window::GcItemSet::decode(&record).expect("a set"))
+            .filter(|set| set.vnum == 71_135)
+            .last()
+            .map(|set| (set.cell.cell, set.sockets[0], set.sockets[1]))
+            .expect("the ring lands")
+    };
+    let now = || {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("after 1970")
+                .as_secs(),
+        )
+        .expect("a second count")
+    };
+    let before = now();
+    let (wear, clock, uses) = ring_after(&mut alpha, 0);
+    let after = now();
+    assert!(wear >= 180, "the ring is worn: {wear}");
+    assert!(
+        (before + 1_296_000..=after + 1_296_000).contains(&i64::from(clock)),
+        "the clock starts at the use: {clock} in {before}..={after} + 1296000"
+    );
+    assert_eq!(uses, 1, "the first use counts");
+    let (back, kept, uses) = ring_after(&mut alpha, wear);
+    assert_eq!(
+        (back, kept, uses),
+        (0, clock, 1),
+        "the take-off counts nothing"
+    );
+    let (again, kept, uses) = ring_after(&mut alpha, 0);
+    assert_eq!(
+        (again, kept, uses),
+        (wear, clock, 2),
+        "a second wear counts, unstamped"
+    );
+    drop(alpha);
+    wait_for(
+        &database,
+        &format!("SELECT socket0 = {clock} AND socket1 = 2 FROM item WHERE id = 30"),
     );
 }
 

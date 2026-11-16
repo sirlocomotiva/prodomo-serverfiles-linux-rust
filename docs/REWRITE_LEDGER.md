@@ -57376,3 +57376,60 @@ passed, 0 failed in 46 targets; with it 5,694 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,654 `ported`, 160 `partial`, 512 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 553 scenarios. No ADR changed.
+## 715. The `@0949` lines, the first-use clock, and the stone scroll (B9)
+
+**The `@0949` lines were a Defect of the Rewrite.** `G/locale.cpp` has two bodies of
+`locale_find`:
+
+- the `#else` body (`:240-256`) answers `@0949` and the key for a missing key;
+- the `__MULTI_LANGUAGE_SYSTEM__` body (`:71-88`) is the one compiled, because
+  `prodomodefines.h:133` defines the switch. It answers the key itself.
+
+`LC_TEXT(str)` is `locale_find(str)` with the default `LOCALE_YMIR` (`G/locale.hpp:9`, `:31`),
+which returns the text unread. `ChatPacket` then looks the text up in the descriptor's table and
+sends it unchanged on a miss (`G/char.cpp:5148-5157`). `prodomo/src/chat_line.rs` already does
+exactly this.
+
+Three ledgers had cited the dead body and prefixed `@0949` on five lines:
+
+- ledger 558: `WAIT_BUFF`;
+- ledger 705: the fish's meat, clam and earthworm lines;
+- ledger 709: `You upgrade your buff successfully`.
+
+Each now goes out as its key. A player could see the stray `@0949`. The constants in
+`prodomo/src/game_state/auto_potion.rs`, `fishing.rs` and `shaman.rs` changed. So did the pins of
+three scenarios:
+
+- `an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off`;
+- `a_live_fish_is_used_into_one_of_its_outcomes_and_a_dead_one_changes_nothing`;
+- `a_shaman_unlock_answers_its_line_and_stays`.
+
+The lesson is in `docs/PROTOCOL_NOTES.md` ("Verification lessons"). No Defect row: the mistake
+was the Rewrite's own, not legacy's.
+
+**The first-use clock.** `LIMIT_REAL_TIME_START_FIRST_USE` (`G/char_item.cpp:2749-2751`,
+`:2804-2820`) is ported and now has a scenario: `a_first_use_ring_starts_its_clock_once_and_counts_its_uses`.
+It runs in shipped mode with the owner's ring 71135 (limit 1,296,000 s).
+
+- The first wear stamps socket 0 at `time(0) + 1296000`, measured between two clock reads around
+  the use, and counts socket 1 to 1.
+- The take-off is a use of the worn ring and counts nothing.
+- The second wear keeps the stamp and counts 2.
+- The store holds the same values after the logout.
+
+**The stone scroll.** `a_stone_scroll_spends_and_gives_no_stone` already stood. No owner proto has
+a vnum in 28000-28013. The same search finds the ten of 28030-28039, which is the positive
+control. So `AutoGiveItem(number(28000, 28013))` creates nothing whatever the draw, and only the
+spend is seen.
+
+`limit_timer_based_on_wear` stays `partial`. Its only owner items are the `ITEM_DS` stones,
+whose use is not ported.
+
+2 `partial` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,695
+passed, 0 failed in 46 targets; with it 5,695 passed, 0 failed in 46 targets (466 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,656 `ported`, 158 `partial`, 512 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 554 scenarios. No ADR changed.

@@ -206,13 +206,14 @@ const EARTHWORM_VNUM: u32 = 27_801;
 /// `UseFish`'s accumulated use-result chances out of 10000 (`G/fishing.cpp:797`).
 const USE_RESULT_ACCUMULATED: [i32; 10] =
     [1000, 1500, 1800, 1900, 1950, 1980, 1990, 1995, 1999, 2000];
-/// `LC_TEXT("The meat disappears without a trace.")`: the key is in no locale row, so
-/// europe's `locale_find` answers `@0949` and the key (`G/locale.cpp:244-255`).
-const MEAT_GONE: &[u8] = b"@0949The meat disappears without a trace.";
-/// `LC_TEXT("A clam came out of the fish.")`, unfound as [`MEAT_GONE`] is.
-const CLAM_OUT: &[u8] = b"@0949A clam came out of the fish.";
-/// `LC_TEXT("An earthworm came out of the stomach.")`, unfound as [`MEAT_GONE`] is.
-const WORM_OUT: &[u8] = b"@0949An earthworm came out of the stomach.";
+/// `LC_TEXT("The meat disappears without a trace.")`: under `__MULTI_LANGUAGE_SYSTEM__`
+/// `LC_TEXT` answers the key itself (`G/locale.cpp:71-88`), and `ChatPacket` translates it
+/// by the descriptor's table ([`crate::chat_line`]).
+const MEAT_GONE: &[u8] = b"The meat disappears without a trace.";
+/// `LC_TEXT("A clam came out of the fish.")`, sent as [`MEAT_GONE`] is.
+const CLAM_OUT: &[u8] = b"A clam came out of the fish.";
+/// `LC_TEXT("An earthworm came out of the stomach.")`, sent as [`MEAT_GONE`] is.
+const WORM_OUT: &[u8] = b"An earthworm came out of the stomach.";
 
 impl GameState {
     /// One `CG_FISHING` of the character online under `vid`: the cast, or the take while its

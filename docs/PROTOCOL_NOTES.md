@@ -148,6 +148,12 @@ The sections about the retired DB-peer protocol, the old module lists and the re
   records containing a C++ `long`. Prefer the i686 probe described in the compatibility rules;
   keep a hand sum only as the value you are checking the probe against. The `gg_inventory` table
   is still hand-summed and should be re-measured the same way.
+- **A function with two bodies is read in the body the feature switches compile.**
+  `G/locale.cpp` defines `locale_find` twice. The `#else` body (`:240-256`) answers `@0949` and
+  the key for a missing key. Under `__MULTI_LANGUAGE_SYSTEM__` (`prodomodefines.h:133`) the
+  compiled body (`:71-88`) answers the key itself. Ledgers 558, 705 and 709 read the dead body
+  and sent `@0949` on five lines; ledger 715 removed it. Find the `#ifdef` around a definition
+  before citing it.
 
 ## Game-to-client module notes
 
