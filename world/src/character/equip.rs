@@ -1219,9 +1219,10 @@ fn seated_use_kind(
 /// "additional effect" pair (`G/char_item.cpp:3371-3521`), the main-switch
 /// `USE_AFFECT` (`:6833-6864`), the 507 premium-shop arm (`:6835-6843`), and the
 /// gold bars (`LINGOURI_SURSA`, `:3328-3370`), the cape of courage
-/// (`case USE_SPECIAL`'s 70038/70057/76007 arm, `:3879-3888`), and the Nog
-/// pocket (50216, `:3787-3811`), then the silent pair (`USE_BUCKET` and
-/// `USE_CHANGE_ATTRIBUTE_PLUS`, with no arm), in that order. The branch's
+/// (`case USE_SPECIAL`'s 70038/70057/76007 arm, `:3879-3888`) with the 70008 white flag
+/// beside it (`:3892-3895`), and the Nog pocket (50216, `:3787-3811`), then the silent
+/// arms (`USE_BUCKET` and `USE_CHANGE_ATTRIBUTE_PLUS`, with no arm, and the 70009 treasure
+/// box's bare `break`), in that order. The branch's
 /// `USE_POTION_NODELAY` runs the ordinary nodelay arm, and its `USE_POTION`
 /// answers nothing.
 fn use_special_kind(proto: &ItemProto) -> SeatedArms {
@@ -1239,9 +1240,15 @@ fn use_special_kind(proto: &ItemProto) -> SeatedArms {
             false, false, false, false, false, false, true, false, false, false,
         );
     }
-    if CAPE_OF_COURAGE.contains(&proto.vnum) {
+    if CAPE_OF_COURAGE.contains(&proto.vnum) || proto.vnum == UNIQUE_ITEM_WHITE_FLAG {
         return (
             false, false, false, false, false, false, false, true, false, false,
+        );
+    }
+    // `case UNIQUE_ITEM_TREASURE_BOX` (`:3897-3898`) is a bare `break`: nothing is spent.
+    if proto.vnum == UNIQUE_ITEM_TREASURE_BOX && proto.sub_type == USE_SPECIAL {
+        return (
+            false, false, false, false, false, false, false, false, false, true,
         );
     }
     if proto.vnum == NOG_POCKET {
@@ -1279,6 +1286,13 @@ const NOG_POCKET: u32 = 50_216;
 /// The cape of courage's three vnums: 70038, 70057 and the reward box's 76007
 /// (`G/char_item.cpp:3879-3882`, `G/unique_item.h:23,107`).
 const CAPE_OF_COURAGE: [u32; 3] = [70_038, 70_057, 76_007];
+
+/// `UNIQUE_ITEM_WHITE_FLAG` (`G/unique_item.h:21`): its use spends one and runs
+/// `ForgetMyAttacker` (`G/char_item.cpp:3892-3895`). It shares the cape's consuming arm.
+pub const UNIQUE_ITEM_WHITE_FLAG: u32 = 70_008;
+
+/// `UNIQUE_ITEM_TREASURE_BOX` (`G/unique_item.h:22`).
+const UNIQUE_ITEM_TREASURE_BOX: u32 = 70_009;
 
 /// The gold bars' vnums (`case 80003` .. `case 80008`, `G/char_item.cpp:3335-3340`).
 const GOLD_BAR_LOW: u32 = 80_003;
