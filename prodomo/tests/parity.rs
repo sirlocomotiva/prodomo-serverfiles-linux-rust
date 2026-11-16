@@ -53476,6 +53476,80 @@ fn a_marriage_ring_needs_a_spouse_and_a_ramadan_candy_lands_its_three_rows_once(
     );
 }
 
+/// `case ITEM_FISH` (`G/char_item.cpp:3073-3091`) and `fishing::UseFish`
+/// (`G/fishing.cpp:771-823`). Alpha holds a live 27803 at cell 0 and a dead 27833 at cell 2.
+/// The dead fish's use changes nothing. The live one spends and rolls `number(1, 10000)`; the
+/// scenario accepts every outcome by its own records: the dead fish (4001 or more) merges
+/// into cell 2, the bone 27799 (2001 or more) lands, or 27803's use table gives the meat line
+/// (0, 2, 3), the clam 27987 with its line (1) or the earthworm 27801 with its line (4).
+#[test]
+fn a_live_fish_is_used_into_one_of_its_outcomes_and_a_dead_one_changes_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, vnum) in [(30, 0, 27803), (31, 2, 27833)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // When: the dead fish is used. Then: nothing.
+    alpha.send_record(&client_item_use(2));
+    alpha.quiet("a dead fish's use changes nothing");
+    // When: the live fish is used. Then: it spends, and one outcome lands.
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+    let mut sets = Vec::new();
+    let mut updates = Vec::new();
+    let mut lines = Vec::new();
+    while let Some(record) = alpha.read_fight_until(deadline) {
+        match record[0] {
+            ITEM_SET => {
+                let set = protocol::gc_item_window::GcItemSet::decode(&record).expect("a set");
+                sets.push((set.cell.cell, set.vnum));
+            }
+            ITEM_UPDATE => {
+                let (_window, cell, count) = update_fields(&record);
+                updates.push((cell, count));
+            }
+            GC_CHAT if !record[10..].starts_with(b"[LS;444;") => {
+                lines.push(record[10..].to_vec());
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        sets.first(),
+        Some(&(0, 0)),
+        "the live fish spends: {sets:?}"
+    );
+    let gifts = sets[1..].iter().map(|(_, vnum)| *vnum).collect::<Vec<_>>();
+    let lines = lines.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let outcome = match (gifts.as_slice(), lines.as_slice(), updates.as_slice()) {
+        ([], [], [(2, 2)]) => "the dead fish",
+        ([27_799], [], []) => "the bone",
+        ([], [b"@0949The meat disappears without a trace."], []) => "the meat",
+        ([27_987], [b"@0949A clam came out of the fish."], []) => "the clam",
+        ([27_801], [b"@0949An earthworm came out of the stomach."], []) => "the earthworm",
+        _ => panic!("no outcome of UseFish: {sets:?} {updates:?} {lines:?}"),
+    };
+    println!("the live fish gave {outcome}");
+    drop(alpha);
+    wait_for(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 30)");
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

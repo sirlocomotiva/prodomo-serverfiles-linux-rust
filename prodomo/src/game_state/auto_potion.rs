@@ -108,7 +108,7 @@ impl GameState {
     /// map, and not fighting a consent duel with the `no_potions_on_pvp` event flag up
     /// (`questlib_extra.lua` sets it at load) unless the vnum is allowed. Tells legacy's
     /// line on a refusal.
-    fn auto_gates_open(&self, vid: Vid, vnum: u32, mover: Mover) -> bool {
+    pub(super) fn auto_gates_open(&self, vid: Vid, vnum: u32, mover: Mover) -> bool {
         if self
             .place_of(vid.raw())
             .is_some_and(|(_, map)| self.is_arena_map(map))

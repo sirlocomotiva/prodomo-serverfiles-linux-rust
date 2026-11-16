@@ -56916,3 +56916,53 @@ passed, 0 failed in 46 targets; with it 5,681 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,616 `ported`, 200 `partial`, 508 `unused`, 7 `missing`,
 0 `codec`, of 2,331 rows; 540 scenarios. No ADR changed.
+## 705. A fish's use (B9, `case ITEM_FISH`)
+
+`case ITEM_FISH` (`G/char_item.cpp:3073-3091`) refuses with `[LS;1205]` in two cases: on an arena
+map, and in a consent duel while `no_potions_on_pvp` is up and the vnum is not one of the allowed
+ones. Otherwise it runs `fishing::UseFish` (`G/fishing.cpp:771-823`), but only for a
+`FISH_ALIVE` fish.
+
+`UseFish` counts the fish's row from the third row's vnum. It changes nothing when that row is
+1 or lower, or `MAX_FISH` or higher. Otherwise it spends the fish and rolls `number(1, 10000)`:
+
+| roll | result |
+|---|---|
+| 4001 or more | the dead fish |
+| 2001 to 4000 | the bone 27799 |
+| 2000 or less | the fish's use-table column for the roll |
+
+The use-table values give:
+
+- 0, 2 and 3: the meat line;
+- 1: the clam 27987, with its line;
+- 4: the earthworm 27801, with its line;
+- any other value: that vnum.
+
+The three lines are `LC_TEXT` keys that are in no locale row, so they go out as `@0949` and the
+key, the same way `WAIT_BUFF` does. The Rewrite had no fish use and refused it as not ported.
+
+`use_fish` (`prodomo/src/game_state/fishing.rs`) ports the arm. It reuses the automatic potions'
+`auto_gates_open` for both `[LS;1205]` gates, the use's checks and spend, and `auto_give` for each
+gift. The spend's records go first, then the line, then the gift's records, in legacy's order.
+
+`a_live_fish_is_used_into_one_of_its_outcomes_and_a_dead_one_changes_nothing` (shipped mode):
+
+- Alpha's dead 27833 changes nothing when used.
+- Her live 27803 spends and lands one outcome. The scenario accepts each outcome only with that
+  outcome's own records: the dead fish merging into cell 2, the bone, the meat line, the clam and
+  its line, or the earthworm and its line.
+
+Twenty-four runs under load gave the dead fish 16 times, the bone 5 and the meat 3.
+
+`ITEM_HAIR` has no owner proto, so its row is `unused`. The same search counts the 42
+`ITEM_FISH` rows, which is the search's positive control.
+
+1 `missing` row is `ported` and 1 is `unused`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,682
+passed, 0 failed in 46 targets; with it 5,682 passed, 0 failed in 46 targets (463 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,617 `ported`, 200 `partial`, 509 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 541 scenarios. No ADR changed.

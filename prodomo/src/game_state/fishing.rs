@@ -197,6 +197,23 @@ struct Rod {
     refined_vnum: u32,
 }
 
+/// `FISH_BONE_VNUM` (`G/fishing.cpp:35`): what a fish's use gives on the bone roll.
+const FISH_BONE_VNUM: u32 = 27_799;
+/// `SHELLFISH_VNUM` (`G/fishing.cpp:36`): the clam a fish's use table names with 1.
+const SHELLFISH_VNUM: u32 = 27_987;
+/// `EARTHWORM_VNUM` (`G/fishing.cpp:37`): the earthworm a fish's use table names with 4.
+const EARTHWORM_VNUM: u32 = 27_801;
+/// `UseFish`'s accumulated use-result chances out of 10000 (`G/fishing.cpp:797`).
+const USE_RESULT_ACCUMULATED: [i32; 10] =
+    [1000, 1500, 1800, 1900, 1950, 1980, 1990, 1995, 1999, 2000];
+/// `LC_TEXT("The meat disappears without a trace.")`: the key is in no locale row, so
+/// europe's `locale_find` answers `@0949` and the key (`G/locale.cpp:244-255`).
+const MEAT_GONE: &[u8] = b"@0949The meat disappears without a trace.";
+/// `LC_TEXT("A clam came out of the fish.")`, unfound as [`MEAT_GONE`] is.
+const CLAM_OUT: &[u8] = b"@0949A clam came out of the fish.";
+/// `LC_TEXT("An earthworm came out of the stomach.")`, unfound as [`MEAT_GONE`] is.
+const WORM_OUT: &[u8] = b"@0949An earthworm came out of the stomach.";
+
 impl GameState {
     /// One `CG_FISHING` of the character online under `vid`: the cast, or the take while its
     /// event runs. Every record reaches the client through the world, in legacy's order; the
@@ -603,6 +620,105 @@ impl GameState {
             let _sent = self.write_to_client(vid, record);
         }
         packed.changes
+    }
+    /// Whether the item at `at` is an `ITEM_FISH`.
+    pub(super) fn fish_item_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .is_some_and(|proto| proto.item_type == gamedata::item_kind::ITEM_FISH)
+    }
+
+    /// `case ITEM_FISH` (`G/char_item.cpp:3073-3091`) and `fishing::UseFish`
+    /// (`G/fishing.cpp:771-823`). An arena map, or a consent duel with `no_potions_on_pvp`
+    /// up, refuses with `[LS;1205]`. A dead fish, and a live one outside the table's
+    /// third-to-last rows (`idx <= 1 || idx >= MAX_FISH`, `idx` counted from the third row's
+    /// vnum), is used and changes nothing. Else, past the use's checks, one fish spends and
+    /// `number(1, 10000)` rolls: 4001 or more gives the dead fish, 2001 or more the bone,
+    /// and else the use table's column for the roll gives its vnum, the clam (1) or the
+    /// earthworm (4) with their lines, or nothing with the meat line (0, 2 and 3).
+    pub(super) fn use_fish(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let Some((vnum, sub_type)) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .and_then(|item| self.protos.get(item.vnum))
+            .map(|proto| (proto.vnum, proto.sub_type))
+        else {
+            return Err(MoveItemRefused::NoSuchCharacter { vid });
+        };
+        if !self.auto_gates_open(vid, vnum, actor) {
+            return self.nothing_used(vid, actor);
+        }
+        let fish = self.fishing.fish();
+        let row = fish
+            .get(2)
+            .map(|third| i64::from(vnum) - i64::from(third.vnum) + 2);
+        let Some(fish_row) = row
+            .filter(|idx| *idx > 1)
+            .and_then(|idx| usize::try_from(idx).ok())
+            .filter(|idx| *idx < gamedata::fishing::MAX_FISH)
+            .and_then(|idx| fish.get(idx))
+            .cloned()
+            .filter(|_| sub_type == gamedata::item_kind::FISH_ALIVE)
+        else {
+            return self.nothing_used(vid, actor);
+        };
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            world::character::consume_giftbox(items, at, rules, gear)
+        })?;
+        let roll = number(&mut self.dice, 1, 10_000);
+        let (line, gift) = if roll >= 4001 {
+            (None, Some(fish_row.dead_vnum))
+        } else if roll >= 2001 {
+            (None, Some(FISH_BONE_VNUM))
+        } else {
+            let column = USE_RESULT_ACCUMULATED
+                .iter()
+                .position(|accumulated| *accumulated >= roll)
+                .unwrap_or(USE_RESULT_ACCUMULATED.len() - 1);
+            match fish_row.used_table[column] {
+                0 | 2 | 3 => (Some(MEAT_GONE), None),
+                1 => (Some(CLAM_OUT), Some(SHELLFISH_VNUM)),
+                4 => (Some(WORM_OUT), Some(EARTHWORM_VNUM)),
+                other => (None, u32::try_from(other).ok()),
+            }
+        };
+        let recipient = actor.recipient(&self.locale);
+        if let Some(line) = line {
+            moved
+                .records
+                .push(chat_packet(recipient, CHAT_TYPE_INFO, line, &[]));
+        }
+        if let Some(gift) = gift {
+            let questing = self.quest_running(vid);
+            // `AutoGiveItem` answers null for a vnum with no proto (the third row's dead
+            // vnum 0 among them): nothing lands and the fish is still spent.
+            if let Some((outcome, done)) = self.auto_give(vid, (gift, 1), 0, questing) {
+                if let AutoGiven::Unplaced(item) = outcome {
+                    self.lay_auto_given(vid, item);
+                }
+                let gifts = MovedItems::new(
+                    moved.owner_id,
+                    vid.raw(),
+                    done,
+                    actor,
+                    &self.protos,
+                    &self.locale,
+                );
+                moved.records.extend(gifts.records);
+                moved.changes.extend(gifts.changes);
+            }
+        }
+        Ok(moved)
     }
 
     /// Whether the item at `at` of the character under `vid` is a bait.
