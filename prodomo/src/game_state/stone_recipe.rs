@@ -44,6 +44,9 @@ const MYTHICAL_PEACHES: [u32; 2] = [71_107, 39_032];
 const PEACH_LAST_USE_FLAG: &[u8] = b"mythical_peach.last_use_time";
 /// The alignment ceiling the peach refuses at (`:4831-4835`).
 const PEACH_MAX_ALIGNMENT: i32 = 200_000;
+/// The zen bean (`case 70102`, `G/char_item.cpp:4790-4809`); its sibling 70103 is no
+/// `ITEM_USE` on the owner's data.
+const ZEN_BEAN: u32 = 70_102;
 /// The hair colorants (`case 70201`-`case 70206`, `G/char_item.cpp:4937-4967`).
 const HAIR_COLORANTS: [u32; 6] = [70_201, 70_202, 70_203, 70_204, 70_205, 70_206];
 /// The colorant's throttle flag (`fix_bug.colorante`, `:4943,4962`).
@@ -308,6 +311,62 @@ impl GameState {
             b"[LS;384;%d]",
             &[crate::chat_line::Arg::Int(i64::from(val))],
         ));
+        Ok(moved)
+    }
+
+    /// Whether the item at `at` is a zen bean (`case 70102`, `G/char_item.cpp:4790-4809`).
+    pub(super) fn zen_bean_at(&self, vid: Vid, at: ItemPos) -> bool {
+        self.characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))
+            .is_some_and(|item| item.vnum == ZEN_BEAN)
+    }
+
+    /// The zen bean (`case 70102`, `G/char_item.cpp:4790-4809`): a reader at alignment 0 or
+    /// above is refused silently; else, past the use's checks, `min(-alignment, value(0))`
+    /// lands through `UpdateAlignment`, one bean spends, and when the gain shows (a tenth of
+    /// it is positive) `[LS;383]` talks and `[LS;384]` names that tenth.
+    pub(super) fn use_zen_bean(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let alignment = self.real_alignment_of(vid.raw());
+        if alignment >= 0 {
+            return self.nothing_used(vid, actor);
+        }
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let bean = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(bean.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(bean.vnum))?;
+            world::character::use_checks(&bean, proto, rules, gear.points)?;
+            world::character::spend_one(items, &bean, proto)
+        })?;
+        let value = self.protos.get(ZEN_BEAN).map_or(0, |proto| proto.values[0]);
+        let delta = alignment.saturating_neg().min(value);
+        // The update goes out now, so it lands before the step's records, as legacy's
+        // `UpdateAlignment` precedes the `SetCount`.
+        self.update_alignment(vid, delta);
+        if delta / 10 > 0 {
+            moved.records.push(crate::chat_line::chat_packet(
+                actor.recipient(&self.locale),
+                CHAT_TYPE_TALKING,
+                b"[LS;383]",
+                &[],
+            ));
+            moved.records.push(crate::chat_line::chat_packet(
+                actor.recipient(&self.locale),
+                CHAT_TYPE_INFO,
+                b"[LS;384;%d]",
+                &[crate::chat_line::Arg::Int(i64::from(delta / 10))],
+            ));
+        }
         Ok(moved)
     }
 

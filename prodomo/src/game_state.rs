@@ -4564,6 +4564,9 @@ impl GameState {
         if self.mythical_peach_at(vid, at) {
             return Some(self.use_mythical_peach(vid, at, actor));
         }
+        if self.zen_bean_at(vid, at) {
+            return Some(self.use_zen_bean(vid, at, actor));
+        }
         if self.hair_colorant_at(vid, at) {
             return Some(self.use_hair_colorant(vid, at, actor));
         }

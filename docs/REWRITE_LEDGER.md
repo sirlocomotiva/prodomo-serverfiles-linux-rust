@@ -56736,3 +56736,33 @@ passed, 0 failed in 46 targets; with it 5,675 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. The
 first run failed only `a_gaya_craft_spends_and_a_market_opens` (read above). Parity: 1,604 `ported`, 200 `partial`, 492 `unused`, 35 `missing`,
 0 `codec`, of 2,331 rows; 535 scenarios. No ADR changed.
+## 700. The zen bean (B9, `USE_SPECIAL`)
+
+`case 70102` (`G/char_item.cpp:4790-4809`) was not ported, so its use was refused as not ported.
+A reader at alignment 0 or above is refused silently. Otherwise the arm adds
+`min(-alignment, value0)` through `UpdateAlignment`, spends one bean, and, when a tenth of the gain
+is positive, talks `[LS;383]` and names that tenth in `[LS;384]`. Its sibling label 70103 is
+`ITEM_SPECIAL` on the owner's data and never reaches the arm (its row was already `unused`).
+
+`use_zen_bean` (`prodomo/src/game_state/stone_recipe.rs`) ports the arm beside the mythical
+peach. It runs the use's checks and the spend first, then sends the alignment update. The update
+still reaches the client before the step's records, as legacy's `UpdateAlignment` comes before
+its `SetCount`.
+
+`a_zen_bean_lifts_a_negative_alignment_up_to_zero` (shipped mode) gives Alpha -6000 alignment
+and three beans:
+
+- The first bean gains its cap of 5000 and names 500.
+- The second gains the 1000 left and names 100.
+- The third, at 0, sends nothing and stays.
+
+The store ends at alignment 0 with one bean.
+
+1 `missing` row is `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,676
+passed, 0 failed in 46 targets; with it 5,676 passed, 0 failed in 46 targets (458 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,605 `ported`, 200 `partial`, 492 `unused`, 34 `missing`,
+0 `codec`, of 2,331 rows; 536 scenarios. No ADR changed.

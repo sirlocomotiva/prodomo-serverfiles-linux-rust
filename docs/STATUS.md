@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 699 |
+| measure | value at ledger 700 |
 |---|---|
-| Parity inventory | 2,331 rows: 1,604 `ported`, 200 `partial`, 492 `unused`, 35 `missing`; **235 items left** (the `partial` and `missing` rows, each note ending in `Left:`) |
-| Scenarios | 535 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,675 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 699 has the receipt) |
+| Parity inventory | 2,331 rows: 1,605 `ported`, 200 `partial`, 492 `unused`, 34 `missing`; **234 items left** (the `partial` and `missing` rows, each note ending in `Left:`) |
+| Scenarios | 536 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,676 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 700 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 45 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -27,7 +27,7 @@ the tail is closed.
 A client can do what the `ported` rows say: log in, choose and create characters, enter the
 world, move, chat, fight monsters and players, die and restart, use and trade items, shop, store,
 join parties and guilds, fight guild wars, run quests, and use the GM commands. What it cannot do
-yet is what the 235 rows left still lack (next steps, package B).
+yet is what the 234 rows left still lack (next steps, package B).
 
 ## Direction review, 2026-11-15
 
@@ -110,7 +110,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 | B6. Quests, dungeons, events (11) | `sys.quest.runtime`, `questlib.questlib`, `sys.dungeon.core`, `sys.dungeon.ship_defense`, `sys.dungeon.dragon_lair`, `data.regen.dungeon`, `sys.event.manager`, `sys.event.arena`, `sys.event.xmas`, `sys.event.castle_monarch`, `sys.event.threeway_war` |
 | B7. Life skills and custom systems (4) | `sys.life.fishing`, `sys.life.mining`, `sys.custom.dragon_soul`, `sys.custom.new_set_bonus` |
 | B8. Login, logs, data (7) | `sys.login.by_key`, `sys.login.enter`, `sys.log`, `data.proto.item`, `data.locale.strings`, `data.locale.names`, `data.map.index` |
-| B9. The arm tables (173) | `item-use.md`: 60 `partial`, 33 `missing`; `points.md`: 47 `partial`, 2 `missing`; `skill-arms.md`: 31 `partial`. Most `partial` arms have Rust code and lack only a scenario; the `missing` ones (`ITEM_UNIQUE`, `ITEM_HAIR`, `ITEM_DS`, `ITEM_FISH`, the no-op types, the seasonal `USE_SPECIAL` vnums, 70102, the marriage ring, the ramadan candy, `COSTUME_ATTR_BONUS`) have none |
+| B9. The arm tables (172) | `item-use.md`: 60 `partial`, 32 `missing`; `points.md`: 47 `partial`, 2 `missing`; `skill-arms.md`: 31 `partial`. Most `partial` arms have Rust code and lack only a scenario; the `missing` ones (`ITEM_UNIQUE`, `ITEM_HAIR`, `ITEM_DS`, `ITEM_FISH`, the no-op types, the seasonal `USE_SPECIAL` vnums, the marriage ring, the ramadan candy, `COSTUME_ATTR_BONUS`) have none |
 
 *Exit:* no `partial` or `missing` row is left; each is `ported`, `unused`, or on the owner's list.
 

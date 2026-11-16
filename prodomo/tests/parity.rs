@@ -53089,6 +53089,73 @@ fn a_white_flag_forgets_the_dogs_and_a_treasure_box_does_nothing() {
     drop(alice);
 }
 
+/// `case 70102` (`G/char_item.cpp:4790-4809`), the zen bean. Alpha at -6000 alignment eats
+/// three: the first gains its `value0` cap of 5000 (`[LS;383]`, `[LS;384;500]`), the second the
+/// 1000 left to 0 (`[LS;384;100]`), each spending one; at 0 the third is refused silently and
+/// stays.
+#[test]
+fn a_zen_bean_lifts_a_negative_alignment_up_to_zero() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET alignment = -6000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 3, \
+         70102 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    for (left, tenth) in [(2, 500), (1, 100)] {
+        alpha.send_record(&client_item_use(0));
+        let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+        let mut counts = Vec::new();
+        let mut lines = Vec::new();
+        while let Some(record) = alpha.read_fight_until(deadline) {
+            match record[0] {
+                ITEM_UPDATE => counts.push(update_fields(&record).2),
+                GC_CHAT => lines.push((record[3], record[10..].to_vec())),
+                _ => {}
+            }
+        }
+        assert_eq!(counts, [left], "one bean spends");
+        assert_eq!(
+            lines,
+            [
+                talking(b"[LS;383]"),
+                info(format!("[LS;384;{tenth}]").as_bytes())
+            ],
+            "the gain talks and names {tenth}"
+        );
+    }
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_millis(700);
+    while let Some(record) = alpha.read_fight_until(deadline) {
+        assert!(
+            record[0] != ITEM_UPDATE && record[0] != GC_CHAT,
+            "a bean at 0 is refused silently: {record:02x?}"
+        );
+    }
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT count FROM item WHERE id = 30) = 1 AND (SELECT alignment FROM player WHERE \
+         name = 'Alpha') = 0",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

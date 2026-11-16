@@ -6,16 +6,16 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 699**, the white flag and the treasure box. Package B
+- The last section is **ledger 700**, the zen bean. Package B
   so far: 687 (sibling vnums, the gold bar cap), 688 (the ability potions), 689 (the apply types),
   690 (the arena's potion gate), 691 (the ward and aid climb gate, and the refused `/setskill`
-  sending byte 76), 692 (each skill type's point on a climb and a forget), 693 (each skill's hit cap on one victim), 694 (the master arms of a climb by point), 695 (each automatic potion's kind of row), 696 (the basic books and two book-read bugs), 697 (the passive books' ladder), 698 (the sibling capes and peach), 699. Before them: 686 (the tail made
+  sending byte 76), 692 (each skill type's point on a climb and a forget), 693 (each skill's hit cap on one victim), 694 (the master arms of a climb by point), 695 (each automatic potion's kind of row), 696 (the basic books and two book-read bugs), 697 (the passive books' ladder), 698 (the sibling capes and peach), 699 (the white flag and the treasure box), 700. Before them: 686 (the tail made
   countable: three generated arm tables and every `partial` and `missing` note ending in
   `Left:`), 685 (the scenario timing), 684 (Rust 1.100.0), 683 (the test hygiene), 682 (the
   cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
-- Parity: 1,604 `ported`, 200 `partial`, 492 `unused`, 35 `missing`, 0 `codec`, of 2,331 rows.
-  **235 items left**; the number only goes down.
-- Tests: 5,675 pass in 46 targets with `DATABASE_URL`; 535 are scenarios.
+- Parity: 1,605 `ported`, 200 `partial`, 492 `unused`, 34 `missing`, 0 `codec`, of 2,331 rows.
+  **234 items left**; the number only goes down.
+- Tests: 5,676 pass in 46 targets with `DATABASE_URL`; 536 are scenarios.
 - **What is next is in `docs/STATUS.md`, "Next steps"**: package B, by families (A2). B9 is the
   arm tables; most of their `partial` rows have Rust code and lack only a scenario.
 
@@ -67,4 +67,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 699 is committed and pushed.
+Nothing is left running. Ledger 700 is committed and pushed.
