@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 716 |
+| measure | value at ledger 719 |
 |---|---|
-| Parity inventory | 2,331 rows: 1,658 `ported`, 156 `partial`, 512 `unused`, 5 `missing`; **99 items left** (the `partial` and `missing` rows, each note ending in `Left:`) |
-| Scenarios | 555 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,696 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 716 has the receipt) |
+| Parity inventory | 2,331 rows: 1,661 `ported`, 153 `partial`, 512 `unused`, 5 `missing`; **96 items left** (the `partial` and `missing` rows, each note ending in `Left:`) |
+| Scenarios | 557 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,698 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 719 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 45 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -27,7 +27,7 @@ the tail is closed.
 A client can do what the `ported` rows say: log in, choose and create characters, enter the
 world, move, chat, fight monsters and players, die and restart, use and trade items, shop, store,
 join parties and guilds, fight guild wars, run quests, and use the GM commands. What it cannot do
-yet is what the 99 rows left still lack (next steps, package B).
+yet is what the 96 rows left still lack (next steps, package B).
 
 ## Direction review, 2026-11-15
 
@@ -110,7 +110,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 | B6. Quests, dungeons, events (11) | `sys.quest.runtime`, `questlib.questlib`, `sys.dungeon.core`, `sys.dungeon.ship_defense`, `sys.dungeon.dragon_lair`, `data.regen.dungeon`, `sys.event.manager`, `sys.event.arena`, `sys.event.xmas`, `sys.event.castle_monarch`, `sys.event.threeway_war` |
 | B7. Life skills and custom systems (4) | `sys.life.fishing`, `sys.life.mining`, `sys.custom.dragon_soul`, `sys.custom.new_set_bonus` |
 | B8. Login, logs, data (7) | `sys.login.by_key`, `sys.login.enter`, `sys.log`, `data.proto.item`, `data.locale.strings`, `data.locale.names`, `data.map.index` |
-| B9. The arm tables (99) | `item-use.md`: 16 `partial`, 3 `missing`; `points.md`: 47 `partial`, 2 `missing`; `skill-arms.md`: 31 `partial`. Most `partial` arms have Rust code and lack only a scenario; the `missing` ones (the 71049 silk botary, `ITEM_DS`, `COSTUME_ATTR_BONUS`) have none |
+| B9. The arm tables (96) | `item-use.md`: 13 `partial`, 3 `missing`; `points.md`: 47 `partial`, 2 `missing`; `skill-arms.md`: 31 `partial`. Most `partial` arms have Rust code and lack only a scenario; the `missing` ones (the 71049 silk botary, `ITEM_DS`, `COSTUME_ATTR_BONUS`) have none |
 
 *Exit:* no `partial` or `missing` row is left; each is `ported`, `unused`, or on the owner's list.
 
@@ -517,6 +517,7 @@ owner should know about (178.5):
 | A nonmember woken on an arena map is ejected to its empire start on its own Channel when that Channel serves the target, else on the lowest-numbered Channel that does (ledger 469, owner question 60). | Legacy's `WarpSet` resolves the target's core through the P2P map table (`G/char.cpp:6694-6795`). |
 | The test-server mode ships off: `[game] test_server` defaults to `false`, so no character is a game master without a grant from `prodomo gm` (owner, 2026-11-15, ADR-0007, ledger 679). | `test_server` is compiled on (`G/config.cpp:72`) and the owner's `CONFIG` files never turn it off, so `GetGMLevel()` answers `GM_IMPLEMENTOR` for everyone (`G/gm.cpp:53`). |
 | A character is saved every 10 seconds by default (owner, 2026-11-15, ADR-0003, ledger 679). | `save_event_second_cycle` is compiled as 120 seconds (`G/config.cpp:31`) and the owner's `CONFIG` files set 180, behind the DB cache's own flush. |
+| A refused recipe brew takes nothing: a short source or a missing bottle keeps every source (ledger 718). | The sources taken before the refusal are lost (`G/char_item.cpp:6898-6928`). |
 
 ## Legacy defects not to reproduce
 
@@ -1124,6 +1125,7 @@ owner should know about (178.5):
   through `GetStamina() <= 0` without the mode line ever flipping — restores its pool from a
   garbage clock on its first steps. The Rewrite stamps the first walking step instead
   (`Body::walk_start_ms`, ledger 569).
+- `case USE_RECIPE` takes each source as it checks the next, and the bottle after the sources, so a short second source or a missing bottle refuses with what was taken already lost (`G/char_item.cpp:6898-6928`). The Rewrite checks every source and the bottle first and takes only for a brew that rolls (`GameState::use_recipe`, ledger 718).
 
 
 ## Environment

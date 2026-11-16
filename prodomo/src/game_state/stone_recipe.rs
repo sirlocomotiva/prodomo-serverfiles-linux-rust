@@ -11,9 +11,10 @@
 //! value(2), value(3) of value(4), and one 50901 bottle, and is itself never spent.
 //! A wanted count of 0 skips its source; a missing one chats `[LS;421]`, a short
 //! stack `[LS;422]` with its name, a missing or empty bottle `[LS;423]`, and a
-//! `number(1, 100)` past value(5) `[LS;424]`, each leaving what was already consumed
-//! consumed. All three owner recipes carry value(5) 0, so the brew always fails
-//! after consuming on the owner's data.
+//! `number(1, 100)` past value(5) `[LS;424]`. Only the roll's failure consumes: the
+//! other three refuse before anything is taken, where legacy kept what it had taken
+//! by then (a Defect, ledger 718). All three owner recipes carry value(5) 0, so every
+//! brew that passes its checks fails after consuming on the owner's data.
 //!
 //! `G/` = `server/server/game/`.
 
@@ -1415,26 +1416,37 @@ impl GameState {
                 records: Vec::new(),
                 changes: Vec::new(),
             };
+            // `[LS;421]` for either source before any take (`:6880-6896`).
+            if let Some(&(vnum, _)) = wanted.iter().find(|&&(vnum, needed)| {
+                needed != 0 && world::character::find_specify_item(items, vnum).is_none()
+            }) {
+                stopped = Some((vnum, RecipeTake::Missing));
+                return Ok(spent);
+            }
+            // Legacy takes each source as it checks the next (`:6898-6928`), so a short
+            // second source or a missing bottle lost what was taken: a Defect. The takes
+            // run first on a copy, in legacy's order and with its lines, and only a brew
+            // that passes them all takes from the inventory.
+            let mut trial = items.clone();
             for (vnum, needed) in wanted {
-                match world::character::take_recipe_source(items, protos, vnum, needed) {
-                    Ok(done) => {
-                        spent.records.extend(done.records);
-                        spent.changes.extend(done.changes);
-                    }
-                    Err(take) => {
-                        stopped = Some((vnum, take));
-                        return Ok(spent);
-                    }
+                if let Err(take) =
+                    world::character::take_recipe_source(&mut trial, protos, vnum, needed)
+                {
+                    stopped = Some((vnum, take));
+                    return Ok(spent);
                 }
             }
-            match world::character::take_recipe_source(items, protos, RECIPE_BOTTLE, 1) {
-                Ok(done) => {
-                    spent.records.extend(done.records);
-                    spent.changes.extend(done.changes);
-                }
-                Err(take) => {
-                    bottled = Some(take);
-                }
+            if let Err(take) =
+                world::character::take_recipe_source(&mut trial, protos, RECIPE_BOTTLE, 1)
+            {
+                bottled = Some(take);
+                return Ok(spent);
+            }
+            for (vnum, needed) in wanted.into_iter().chain([(RECIPE_BOTTLE, 1)]) {
+                let done = world::character::take_recipe_source(items, protos, vnum, needed)
+                    .map_err(|_| world::character::MoveRefused::Empty)?;
+                spent.records.extend(done.records);
+                spent.changes.extend(done.changes);
             }
             Ok(spent)
         })?;

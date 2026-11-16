@@ -40081,15 +40081,53 @@ fn client_use_to_item_pos(window: u8, cell: u16, target_window: u8, target: u16)
     .encode()
 }
 
+/// [`a_stone_and_a_blessing_are_used_on_a_sword`]'s stone: the stone in cell 2 used on the
+/// sword in cell 0, then a second one. Whether the stone sat.
+fn stone_the_sword(alpha: &mut Keyed) -> bool {
+    // When: Alpha uses a stone on the sword. Then: the line, the sword's socket, the stack.
+    // The stone sits 30 in 100 and breaks otherwise (`ENABLE_ADDSTONE_FAILURE`); both
+    // outcomes are accepted, each with its own records.
+    alpha.send_record(&client_use_to_item(2, 0));
+    let line = alpha.read_game();
+    let sat = line == an_info_line(b"[LS;1613]");
+    assert!(
+        sat || line == an_info_line(b"[LS;430]"),
+        "the stone sits or breaks: {line:02x?}"
+    );
+    let held: i32 = if sat { 28_030 } else { 28_960 };
+    let sword = alpha.read_game();
+    assert_eq!(
+        sword[..4],
+        [ITEM_UPDATE, 1, 0, 0],
+        "the sword: {sword:02x?}"
+    );
+    assert_eq!(
+        sword[14..18],
+        held.to_le_bytes(),
+        "the stone or the broken stone in socket 0"
+    );
+    let stones = alpha.read_game();
+    assert_eq!(stones[..6], [ITEM_UPDATE, 1, 2, 0, 1, 0], "one stone left");
+    alpha.quiet("the stone's records end with the stack");
+    // And: a second stone is refused: of its kind beside a sat stone, and for want of a
+    // socket beside a broken one (28960 is no kind, `VALUE5` 0).
+    alpha.send_record(&client_use_to_item(2, 0));
+    let refusal: &[u8] = if sat { b"[LS;426]" } else { b"[LS;431]" };
+    assert_eq!(alpha.read_game(), an_info_line(refusal));
+    alpha.quiet("the refused stone changes nothing");
+    sat
+}
+
 /// `REFINE_TYPE_MUSIN`, the type of a war god's blessing's window.
 const REFINE_TYPE_MUSIN: u8 = 5;
 
 /// `cg.game.item_use_to_item`: a stone used on a sword with an empty socket sits in it with
-/// `[LS;1613]` and one stone is spent; a second stone of its kind is refused with `[LS;426]`.
+/// `[LS;1613]` (30 in 100) or breaks into 28960 with `[LS;430]`, and one stone is spent; a
+/// second stone is refused, with `[LS;426]` beside its kind or `[LS;431]` beside the broken one.
 /// A war god's blessing (71021) used on a sword opens the refine window of type 5 for it; on
 /// the +6 sword `CG_REFINE` refuses it with `[LS;1056]`, and on the +0 sword the sure refine
 /// spends the scroll, sends its command line, swaps the sword for the +1 one with its stone
-/// kept, and takes the recipe's fee.
+/// kept (a broken one is not), and takes the recipe's fee.
 #[test]
 fn a_stone_and_a_blessing_are_used_on_a_sword() {
     let Some(database) = ScratchDatabase::create() else {
@@ -40121,27 +40159,7 @@ fn a_stone_and_a_blessing_are_used_on_a_sword() {
     read_login_event(&mut alpha);
     let own = u32::from_le_bytes(entered.add[1..5].try_into().expect("a VID"));
 
-    // When: Alpha uses a stone on the sword. Then: the line, the sword's socket, the stack.
-    alpha.send_record(&client_use_to_item(2, 0));
-    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1613]"));
-    let sword = alpha.read_game();
-    assert_eq!(
-        sword[..4],
-        [ITEM_UPDATE, 1, 0, 0],
-        "the sword: {sword:02x?}"
-    );
-    assert_eq!(
-        sword[14..18],
-        28_030_i32.to_le_bytes(),
-        "the stone in socket 0"
-    );
-    let stones = alpha.read_game();
-    assert_eq!(stones[..6], [ITEM_UPDATE, 1, 2, 0, 1, 0], "one stone left");
-    alpha.quiet("the stone's records end with the stack");
-    // And: a second stone of its kind is refused.
-    alpha.send_record(&client_use_to_item(2, 0));
-    assert_eq!(alpha.read_game(), an_info_line(b"[LS;426]"));
-    alpha.quiet("the refused stone changes nothing");
+    let sat = stone_the_sword(&mut alpha);
 
     // When: Alpha uses the blessing on the +6 sword. Then: the window of type 5, and the
     // refine is refused at its level.
@@ -40189,10 +40207,14 @@ fn a_stone_and_a_blessing_are_used_on_a_sword() {
         &database,
         "SELECT COUNT(*) = 0 FROM item WHERE id IN (41, 43)",
     );
+    // The refine keeps a stone and drops a broken one, leaving the socket open.
+    let kept = if sat { 28_030 } else { 1 };
     check(
         &database,
-        "SELECT COUNT(*) = 1 FROM item WHERE window_type = 1 AND pos = 0 AND vnum = 11 AND \
-         socket0 = 28030",
+        &format!(
+            "SELECT COUNT(*) = 1 FROM item WHERE window_type = 1 AND pos = 0 AND vnum = 11 AND \
+             socket0 = {kept}"
+        ),
     );
     check(&database, "SELECT count = 1 FROM item WHERE id = 42");
     drop(alpha);
@@ -54698,6 +54720,70 @@ fn a_tuning_scroll_refuses_the_upper_stones_and_stands_the_scroll_window() {
     );
 }
 
+/// The `ITEM_METIN` arm's refusals (`G/char_item.cpp:6965-7048`), none of which spends the
+/// stone. Alpha holds the weapon stone 28030, the body stone 28038, the body armour 11200 and
+/// the helmet 12200 each with an open socket, the sword 10 with none, a red potion 27001, the
+/// rod 27400 and the pick 29101. The weapon stone on the body armour and the body stone on the
+/// helmet hear `[LS;427]`; the body stone on the sword `[LS;428]`; the weapon stone on the
+/// potion, and on the sword with no open socket, `[LS;431]`. On the rod and the pick it is
+/// refused silently.
+#[test]
+fn a_stone_is_refused_by_its_wear_and_its_target() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, cell, vnum, socket) in [
+        (30, 0, 28_030, 0),
+        (31, 1, 28_038, 0),
+        (32, 2, 11_200, 1),
+        (33, 3, 12_200, 1),
+        (34, 4, 10, 0),
+        (35, 5, 27_001, 0),
+        (36, 6, 27_400, 0),
+        (37, 7, 29_101, 0),
+    ] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT \
+                 {id}, id, 1, {cell}, 1, {vnum}, {socket} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    for (stone, target, line) in [
+        (0, 2, b"[LS;427]".as_slice()),
+        (1, 3, b"[LS;427]"),
+        (1, 4, b"[LS;428]"),
+        (0, 5, b"[LS;431]"),
+        (0, 4, b"[LS;431]"),
+    ] {
+        alpha.send_record(&client_use_to_item(stone, target));
+        assert_eq!(alpha.read_game(), an_info_line(line), "{stone} on {target}");
+        alpha.quiet("a refused stone changes nothing");
+    }
+    for target in [6, 7] {
+        alpha.send_record(&client_use_to_item(0, target));
+        alpha.quiet("a stone on a rod or a pick is refused silently");
+    }
+    drop(alpha);
+    drop(server);
+    check(
+        &database,
+        "SELECT count(*) = 8 FROM item WHERE id BETWEEN 30 AND 37 AND count = 1 AND socket0 IN \
+         (0, 1) AND socket1 = 0",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(
@@ -55440,6 +55526,76 @@ fn a_blend_use_lays_its_marker_and_its_echo_takes_it_off() {
         .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
         .collect();
     assert_eq!(stopped[3], 0, "socket 3 stops: {stopped:?}");
+}
+
+/// `ITEM_BLEND`'s plain arm (`G/char_item.cpp:7064-7118`): a blend that is not an extended one
+/// lays `AFFECT_BLEND` on its socket's point for its socket's value and seconds, and spends one;
+/// a second use while it holds hears `[LS;99]` and spends nothing. Alpha holds two of the
+/// owner's critical blend 50821 (`CRITICAL_PCT`), made with apply 15, value 20 and 600 s.
+#[test]
+fn a_plain_blend_lays_its_affect_and_its_echo_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1, \
+         socket2) SELECT 30, id, 1, 0, 2, 50821, 15, 20, 600 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (mut laid, mut spent) = (None, false);
+    while laid.is_none() || !spent {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if record[0] == GC_AFFECT_ADD && record[1..5] == 531_u32.to_le_bytes() {
+            laid = Some(record);
+        } else if record[..6] == [ITEM_UPDATE, 1, 0, 0, 1, 0] {
+            spent = true;
+        }
+    }
+    let laid = laid.expect("the blend lays AFFECT_BLEND");
+    assert_eq!(
+        laid[5], 40,
+        "on the critical point (`POINT_CRITICAL_PCT`): {laid:02x?}"
+    );
+    assert!(spent, "one blend is spent");
+    alpha.send_record(&client_item_use(0));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut refused = false;
+    while !refused {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        assert_ne!(
+            record[0], GC_AFFECT_ADD,
+            "the echo lays nothing: {record:02x?}"
+        );
+        assert!(
+            record[..4] != [ITEM_UPDATE, 1, 0, 0],
+            "the echo spends nothing: {record:02x?}"
+        );
+        refused = record == an_info_line(b"[LS;99]");
+    }
+    assert!(refused, "the echo hears [LS;99]");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM player_affect WHERE affect_type = 531 AND apply_on = 40 AND apply_value = 20)",
+    );
 }
 
 /// `sys.item.stack_attribute` (`ITEM_STACK_ATTRIBUTE`, `G/item_stack_attribute.cpp`):
@@ -65065,36 +65221,26 @@ fn a_poison_apple_spends_one_and_its_first_tick_burns() {
 }
 
 /// `cg.game.item_use`: `case USE_RECIPE` (`G/char_item.cpp:6889-6943`) brews value(0)
-/// from two sources and one 50901 bottle, and never spends the scroll. Alpha holds
-/// two sets of the 50905 sources and one bottle: the first use consumes a set and
-/// the bottle, then fails the brew with `[LS;424]` (value(5) is 0); the second
-/// consumes the other set and misses the bottle with `[LS;423]`. The scroll stays.
+/// from two sources and one 50901 bottle, and never spends the scroll. Each refusal keeps
+/// every source (legacy kept what it had taken by then, a Defect, ledger 718). Alpha logs
+/// in four times, the store gaining an item between the sessions: with only the first
+/// source the brew misses the second (`[LS;421]`); with one of the two second sources it
+/// names the short one (`[LS;422;%s]`); with both but no bottle it misses the bottle
+/// (`[LS;423]`); with the bottle the sources and the bottle go and the brew fails
+/// (`[LS;424]`, value(5) is 0).
 #[test]
-fn a_recipe_consumes_its_sources_and_misses_its_bottle() {
+fn a_recipe_refuses_keeping_its_sources_and_consumes_on_its_roll() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
     create_account(&server, "alice");
     add_characters(&database);
-    for (id, pos, count, vnum) in [
-        (30, 0, 1, 50905),
-        (31, 1, 1, 50701),
-        (32, 2, 2, 50702),
-        (33, 3, 1, 50901),
-        (34, 4, 1, 50701),
-        (35, 5, 2, 50702),
-        (36, 6, 1, 50701),
-        (37, 7, 1, 50702),
-    ] {
-        sql(
-            &database,
-            &format!(
-                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
-                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
-            ),
-        );
-    }
     let protos = owners_protos();
     let proto = protos.get(50_905).expect("the owner's data has it");
     assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
@@ -65104,69 +65250,58 @@ fn a_recipe_consumes_its_sources_and_misses_its_bottle() {
         [50801, 50701, 1, 50702, 2, 0],
         "the recipe's brew"
     );
-    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
-    // When: Alpha brews with the bottle. Then: a set and the bottle go, and the
-    // brew fails.
-    alpha.send_record(&client_item_use(0));
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut failed = false;
-    while std::time::Instant::now() < deadline && !failed {
-        let Some(record) = alpha.read_game_until(deadline) else {
-            break;
-        };
-        failed = record == an_info_line(b"[LS;424]");
-    }
-    assert!(failed, "the brew fails");
+    let insert = |id: u32, pos: u8, count: u8, vnum: u32| {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    };
+    insert(30, 0, 1, 50_905);
+    insert(31, 1, 1, 50_701);
+    brew_once(&mut server, b"[LS;421]");
+    check(&database, "(SELECT count = 1 FROM item WHERE id = 31)");
+    insert(32, 2, 1, 50_702);
+    brew_once(&mut server, b"[LS;422;");
+    check(
+        &database,
+        "(SELECT count(*) = 2 FROM item WHERE id IN (31, 32) AND count = 1)",
+    );
+    sql(&database, "UPDATE item SET count = 2 WHERE id = 32");
+    brew_once(&mut server, b"[LS;423]");
+    check(
+        &database,
+        "(SELECT count(*) = 2 FROM item WHERE (id, count) IN ((31, 1), (32, 2)))",
+    );
+    insert(33, 3, 1, 50_901);
+    brew_once(&mut server, b"[LS;424]");
     check(
         &database,
         "NOT EXISTS (SELECT 1 FROM item WHERE id IN (31, 32, 33))",
     );
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
-    // When: Alpha brews without the bottle. Then: the other set goes, and the
-    // bottle is missed.
+}
+
+/// [`a_recipe_refuses_keeping_its_sources_and_consumes_on_its_roll`]'s session: Alpha
+/// enters, uses the recipe in cell 0, hears the line that starts with `line`, and leaves;
+/// the wait ends on the save, so the store may gain an item before the next session.
+fn brew_once(server: &mut Server, line: &[u8]) {
+    let (mut alpha, _listed) = enter_world(server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
     alpha.send_record(&client_item_use(0));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut missed = false;
-    while std::time::Instant::now() < deadline && !missed {
+    let mut heard = false;
+    while !heard {
         let Some(record) = alpha.read_game_until(deadline) else {
             break;
         };
-        missed = record == an_info_line(b"[LS;423]");
+        heard = record[0] == GC_CHAT && record.len() >= 10 && record[10..].starts_with(line);
     }
-    assert!(missed, "the bottle is missed");
-    check(
-        &database,
-        "NOT EXISTS (SELECT 1 FROM item WHERE id IN (34, 35))",
-    );
-    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
-    // When: Alpha brews with a short second source. Then: the first goes, the
-    // short is named, and the scroll stays.
-    alpha.send_record(&client_item_use(0));
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut short = false;
-    while std::time::Instant::now() < deadline && !short {
-        let Some(record) = alpha.read_game_until(deadline) else {
-            break;
-        };
-        short = record.len() > 18 && record[10..].starts_with(b"[LS;422;");
-    }
-    assert!(short, "the short names its source");
-    check(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 36)");
-    check(&database, "(SELECT count = 1 FROM item WHERE id = 37)");
-    // When: Alpha brews with no source left. Then: `[LS;421]`, the scroll kept.
-    alpha.send_record(&client_item_use(0));
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut missing = false;
-    while std::time::Instant::now() < deadline && !missing {
-        let Some(record) = alpha.read_game_until(deadline) else {
-            break;
-        };
-        missing = record == an_info_line(b"[LS;421]");
-    }
-    assert!(missing, "the missing source is reported");
-    check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
+    assert!(heard, "the brew answers {}", String::from_utf8_lossy(line));
     drop(alpha);
-    drop(server);
+    server.wait_for_next("Character disconnected; wrote the row");
 }
 
 /// `cg.game.item_use`: `USE_BUCKET` and `USE_CHANGE_ATTRIBUTE_PLUS` have no arm in

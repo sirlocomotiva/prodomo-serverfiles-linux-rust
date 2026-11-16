@@ -57477,3 +57477,106 @@ passed, 0 failed in 46 targets; with it 5,696 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,658 `ported`, 156 `partial`, 512 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 555 scenarios. No ADR changed.
+
+## 717. A stone breaks 70 in 100 (B9)
+
+**`ENABLE_ADDSTONE_FAILURE` is defined**, by `G/char_item.cpp:2717` itself, just above
+`UseItemEx`. Ledger 386 read it as off, and the Rewrite's `world::character::put_stone` always
+set the stone. Legacy's `ITEM_METIN` arm (`:7025-7034`) draws `number(1, 100) <= 30`: the socket
+takes the stone's vnum with `[LS;1613]`, or else `ITEM_BROKEN_METIN_VNUM` (28960) with
+`[LS;430]`. One stone is spent either way. Ledger 572 had already read the define for the
+socket scroll's 50 in 100 (`:6696`), so the Rewrite contradicted itself. `put_stone` now takes
+the draw. A player could tell (every stone sat), and the mistake was the Rewrite's, so it is
+recorded here, in the rows, and as a lesson in `docs/PROTOCOL_NOTES.md`; it is no Defect row.
+
+`a_stone_and_a_blessing_are_used_on_a_sword` accepts both draws, each with its own records:
+
+- a sat stone: `[LS;1613]`, the socket holds 28030, and a second stone of its kind hears
+  `[LS;426]`;
+- a broken stone: `[LS;430]`, the socket holds 28960, and the second stone hears `[LS;431]`
+  (28960's `VALUE5` is 0, no kind, and no socket is open);
+- the war god's refine then keeps a stone in socket 0, or drops the broken one and leaves the
+  socket open (1), as `world::character::smith_refine` copies.
+
+Sixteen runs of the scenario under eight at once gave six sat stones and ten broken ones, and
+all passed.
+
+**The refusals.** `a_stone_is_refused_by_its_wear_and_its_target` runs in shipped mode:
+
+- the weapon stone 28030 on the body armour 11200 and the body stone 28038 on the helmet 12200
+  hear `[LS;427]`;
+- the body stone on the sword 10 hears `[LS;428]`;
+- the weapon stone on the red potion 27001, and on the sword 10 with no open socket, hears
+  `[LS;431]`;
+- the weapon stone on the rod 27400 and the pick 29101 is refused silently;
+- the store holds all eight items unchanged after the logout.
+
+The notes of `cg.game.item_use_to_item` and `sys.item.sockets`, which repeated ledger 386's
+reading, now say the stone breaks. `use.item_metin` is `ported`.
+
+The first gate run failed only the documentation gate: `put_stone`'s public doc linked
+`STONE_BROKE_NOTICE`, which `world::character` does not re-export. The doc now names `[LS;430]`
+in code. The second run passed every gate but one scenario of ledger 638,
+`a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it`, which waited 12 s in `await_found` for
+the second 131's swing and claim; alone at 24 in parallel it lost 1 run in 120. It touches no
+code of this section; its cause is read in its own section. Ledgers 717 to 719 share the receipt
+at the end of ledger 719.
+
+## 718. A refused brew keeps its sources (B9)
+
+**A Defect of legacy, fixed.** `case USE_RECIPE` (`G/char_item.cpp:6872-6936`) checks that each
+wanted source is held (`[LS;421]`, `:6880-6896`), then for each source checks its first stack
+and takes from it at once (`[LS;422;%s]`, `:6898-6918`), then checks and takes the 50901 bottle
+(`[LS;423]`, `:6920-6928`), then rolls value(5) (`[LS;424]`, `:6930-6934`). A short second source
+or a missing bottle returns `false` with the first source, or both, already taken: a player
+with the sources and no bottle loses the sources and is told only that the bottle is missing.
+Ledger 659 ported this as it stood; the Rewrite also took the first source before checking that
+the second was held, which legacy does not.
+
+The Rewrite now refuses with the same lines in the same order and takes nothing:
+`GameState::use_recipe` (`prodomo/src/game_state/stone_recipe.rs`) checks both sources' presence
+first, then runs the takes on a copy of the inventory, and only a brew that passes all of them
+takes from the inventory itself. Taking the sources and the bottle and then failing the roll is
+the recipe's design and stays. A Defect row and a Divergence row record it.
+
+**The scenario.** `a_recipe_consumes_its_sources_and_misses_its_bottle` is replaced by
+`a_recipe_refuses_keeping_its_sources_and_consumes_on_its_roll`. It runs in shipped mode, and
+Alpha logs in four times, with an item added to the store between sessions after the save line:
+
+1. with only 50701, the brew hears `[LS;421]` and 50701 stays;
+2. with one 50702 of the two wanted, `[LS;422;...]`, and both stay (legacy took the 50701);
+3. with both 50702, `[LS;423]`, and all stay (legacy took both sources);
+4. with the bottle, `[LS;424]`, and the sources and the bottle are gone.
+
+The scroll stays throughout. The success give is unreachable with the owner's data: 50905 has
+value(5) 0, and 50906-50910 have every value 0, so `number(1, 100) > 0` always fails.
+`use.item_use.use_recipe` is now `ported`.
+With the old `use_recipe` put back, the scenario fails at the second session's store check (the
+50701 was taken).
+
+## 719. The plain blend on the wire (B9)
+
+`ITEM_BLEND`'s plain arm (`G/char_item.cpp:7064-7118`) had only the unit test
+`a_plain_blend_lays_its_affect_and_refuses_its_echo` in `prodomo/src/game_state/blend.rs`. A blend
+that `IsExtendedBlend` does not list (`C/VnumHelper.h:73-108`) adds `AFFECT_BLEND` on the point of
+`aApplyInfo[socket 0]` with socket 1 as its value for socket 2 seconds, and spends one; a second
+use while that affect holds, or while `AFFECT_EXP_BONUS_EURO_FREE` holds on `POINT_RESIST_MAGIC`,
+says `[LS;99]` and spends nothing.
+
+The new scenario `a_plain_blend_lays_its_affect_and_its_echo_is_refused` runs in shipped mode.
+Alpha holds two of the owner's critical blend 50821 (`CRITICAL_PCT` in `blend.json`), with apply
+15, value 20 and 600 seconds in its sockets:
+
+- the first use sends the `GC_AFFECT_ADD` of type 531 on point 40 (`POINT_CRITICAL_PCT`) and the
+  item update to a count of 1;
+- the second use hears `[LS;99]` with no affect add and no item update;
+- after the logout the store holds one blend and the `player_affect` row (531, 40, 20).
+
+No Rewrite code changed. `use.item_blend` is now `ported`.
+
+Gates (2026-11-16), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,698
+passed, 0 failed in 46 targets; with it 5,698 passed, 0 failed in 46 targets (502 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. The first run is ledger 717's: it lost `a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it`, whose cause has its own section;
+this run lost nothing.
+Parity: 1,661 `ported`, 153 `partial`, 512 `unused`, 5 `missing`, 0 `codec`, of 2,331 rows; 557 scenarios. No ADR changed.

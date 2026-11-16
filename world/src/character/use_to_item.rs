@@ -42,8 +42,13 @@ pub const NOT_BODY_STONE_NOTICE: &str = "[LS;427]";
 pub const NOT_WEAPON_STONE_NOTICE: &str = "[LS;428]";
 /// No socket takes the stone, or the target takes no stone.
 pub const NO_SOCKET_NOTICE: &str = "[LS;431]";
-/// The stone sits in its socket (`ENABLE_ADDSTONE_FAILURE` is off, so it always does).
+/// The stone sits in its socket: the 30 in 100 of `ENABLE_ADDSTONE_FAILURE`
+/// (`G/char_item.cpp:2717`, `:7025-7034`).
 pub const STONE_SET_NOTICE: &str = "[LS;1613]";
+/// The stone broke in its socket, which keeps [`BROKEN_STONE_SOCKET`] (`:7031-7032`).
+pub const STONE_BROKE_NOTICE: &str = "[LS;430]";
+/// The chance in 100 a stone sits rather than breaks (`:7026`).
+const STONE_SET_PCT: i32 = 30;
 /// No stone sits in the target (`CHARACTER::RefineItem`, `G/char_item.cpp:2037`).
 pub const NO_STONE_NOTICE: &str = "[LS;1108]";
 /// `ITEM_BROKEN_METIN_VNUM` (`G/char_item.cpp:59`): what a detached stone's socket
@@ -289,8 +294,9 @@ fn scroll_subtype_uses_socket_case(sub_type: i32) -> bool {
 /// stone whose kind (`VALUE5`) a socket already holds is refused with [`SAME_STONE_NOTICE`];
 /// armour takes only a body stone into body armour, a weapon only a weapon stone, and any
 /// other item none. The free sockets are 1 and 2; the first that is at least the stone's
-/// `VALUE2` takes the stone's vnum, with [`STONE_SET_NOTICE`]. With
-/// `ENABLE_ADDSTONE_FAILURE` off the stone never breaks.
+/// `VALUE2` takes the stone, and one stone is spent either way. `ENABLE_ADDSTONE_FAILURE`
+/// is defined (`G/char_item.cpp:2717`): 30 in 100 the socket takes the stone's vnum with
+/// [`STONE_SET_NOTICE`], else [`BROKEN_STONE_SOCKET`] with `[LS;430]`.
 ///
 /// # Errors
 ///
@@ -300,6 +306,7 @@ pub fn put_stone(
     (stone, stone_proto): (&Item, &ItemProto),
     dest: ItemPos,
     protos: &ItemProtos,
+    dice: &mut dyn Dice,
 ) -> Result<MoveDone, MoveRefused> {
     let silent = || Ok(done(MoveKind::Used, Trail::default()));
     let told = |text| {
@@ -349,7 +356,12 @@ pub fn put_stone(
     };
     let vnum = i32::try_from(stone.vnum).map_err(|_| MoveRefused::UnknownVnum(stone.vnum))?;
     let mut trail = Trail::default();
-    trail.records.push(MoveRecord::Notice(STONE_SET_NOTICE));
+    let (notice, vnum) = if number(dice, 1, 100) <= STONE_SET_PCT {
+        (STONE_SET_NOTICE, vnum)
+    } else {
+        (STONE_BROKE_NOTICE, BROKEN_STONE_SOCKET)
+    };
+    trail.records.push(MoveRecord::Notice(notice));
     let sockets = items
         .set_socket(target.id, index, vnum)
         .map_err(|_| MoveRefused::Empty)?;

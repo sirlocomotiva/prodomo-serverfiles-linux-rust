@@ -467,7 +467,7 @@ impl GameState {
                             protos,
                         );
                     }
-                    world::character::put_stone(items, (&stone, proto), dest, protos)
+                    world::character::put_stone(items, (&stone, proto), dest, protos, gear.dice)
                 });
             }
         };

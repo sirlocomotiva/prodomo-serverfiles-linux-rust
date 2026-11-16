@@ -154,6 +154,11 @@ The sections about the retired DB-peer protocol, the old module lists and the re
   compiled body (`:71-88`) answers the key itself. Ledgers 558, 705 and 709 read the dead body
   and sent `@0949` on five lines; ledger 715 removed it. Find the `#ifdef` around a definition
   before citing it.
+- **A switch is searched in the `.cpp` files too, not only in `prodomodefines.h`.**
+  `ENABLE_ADDSTONE_FAILURE` is defined by `G/char_item.cpp:2717`, just above `UseItemEx`. Ledger
+  386 called it off and let every stone sit; ledger 572 found the define for the socket scroll,
+  but the stone arm kept its reading until ledger 717. Search every `#define NAME` in the tree
+  before calling a switch off.
 
 ## Game-to-client module notes
 
