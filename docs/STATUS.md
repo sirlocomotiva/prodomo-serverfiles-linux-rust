@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 705 |
+| measure | value at ledger 706 |
 |---|---|
-| Parity inventory | 2,331 rows: 1,617 `ported`, 200 `partial`, 509 `unused`, 5 `missing`; **205 items left** (the `partial` and `missing` rows, each note ending in `Left:`) |
-| Scenarios | 541 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,682 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 705 has the receipt) |
+| Parity inventory | 2,331 rows: 1,623 `ported`, 194 `partial`, 509 `unused`, 5 `missing`; **199 items left** (the `partial` and `missing` rows, each note ending in `Left:`) |
+| Scenarios | 542 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,683 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 706 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 45 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -27,7 +27,7 @@ the tail is closed.
 A client can do what the `ported` rows say: log in, choose and create characters, enter the
 world, move, chat, fight monsters and players, die and restart, use and trade items, shop, store,
 join parties and guilds, fight guild wars, run quests, and use the GM commands. What it cannot do
-yet is what the 205 rows left still lack (next steps, package B).
+yet is what the 199 rows left still lack (next steps, package B).
 
 ## Direction review, 2026-11-15
 
@@ -110,7 +110,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 | B6. Quests, dungeons, events (11) | `sys.quest.runtime`, `questlib.questlib`, `sys.dungeon.core`, `sys.dungeon.ship_defense`, `sys.dungeon.dragon_lair`, `data.regen.dungeon`, `sys.event.manager`, `sys.event.arena`, `sys.event.xmas`, `sys.event.castle_monarch`, `sys.event.threeway_war` |
 | B7. Life skills and custom systems (4) | `sys.life.fishing`, `sys.life.mining`, `sys.custom.dragon_soul`, `sys.custom.new_set_bonus` |
 | B8. Login, logs, data (7) | `sys.login.by_key`, `sys.login.enter`, `sys.log`, `data.proto.item`, `data.locale.strings`, `data.locale.names`, `data.map.index` |
-| B9. The arm tables (143) | `item-use.md`: 60 `partial`, 3 `missing`; `points.md`: 47 `partial`, 2 `missing`; `skill-arms.md`: 31 `partial`. Most `partial` arms have Rust code and lack only a scenario; the `missing` ones (the 71049 silk botary, `ITEM_DS`, `COSTUME_ATTR_BONUS`) have none |
+| B9. The arm tables (137) | `item-use.md`: 54 `partial`, 3 `missing`; `points.md`: 47 `partial`, 2 `missing`; `skill-arms.md`: 31 `partial`. Most `partial` arms have Rust code and lack only a scenario; the `missing` ones (the 71049 silk botary, `ITEM_DS`, `COSTUME_ATTR_BONUS`) have none |
 
 *Exit:* no `partial` or `missing` row is left; each is `ported`, `unused`, or on the owner's list.
 
@@ -189,6 +189,19 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
     (`arena.rs`). *Exit:* the members leave the world in legacy's order on the game thread
     and the scenarios pin it, or the order is a Divergence row with its reason. This is a
     difference the Rewrite's design causes, so ADR-0008 does not make it an improvement.
+12. **An item step's records against the world's own.** A descriptor sends an item step's
+    records only after their rows are stored (`finish_item_step`, `prodomo/src/main.rs`), and
+    the records the world queued for that client before the step (a heal tick, a chat line)
+    wait in its outbox until then. So the client can hear the step's points before a heal the
+    step started from, and keep the heal's older value until the next tick; legacy writes
+    both in the order it ran them. Found in ledger 706: the apply scenario
+    (`every_apply_type_with_its_own_arm_moves_its_points_as_legacy`) lost a full run on it
+    (the move's 953 hit points, then the heal's 787), and its reader now accepts the late heal
+    and names this item. *Exit:* the
+    world marks the step's place in the outbox and the descriptor sends what came before the
+    mark first, for every `finish_item_step` caller, or the order is a Divergence row with
+    its reason. This is a difference the Rewrite's design causes, so ADR-0008 does not make
+    it an improvement.
 
 ### D. The play-test kit (opens step 5; the play test itself is out of scope for now)
 

@@ -56966,3 +56966,53 @@ passed, 0 failed in 46 targets; with it 5,682 passed, 0 failed in 46 targets (46
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,617 `ported`, 200 `partial`, 509 `unused`, 5 `missing`,
 0 `codec`, of 2,331 rows; 541 scenarios. No ADR changed.
+## 706. The wearable types worn by their use (B9)
+
+`UseItemEx`'s wearable arm (`G/char_item.cpp:3040-3053`) wears an unworn item and takes off a worn
+one. The Rewrite already had this toggle through `USED_BY_WEARING`, but no scenario had used a
+weapon, a ring, a belt or a talisman. For the rod and the pick, the second use, which takes the
+item off, had no scenario either.
+
+`each_wearable_type_is_worn_and_taken_off_by_its_use` runs in shipped mode. Alpha, a shaman, holds
+six items at cells 0 to 5: the bell 5000, the pick 29101, the rod 27400, the belt 18000, the
+talisman 9600 and the ring 71135. For each item, the scenario checks:
+
+- a use clears the item's cell and sets it on a single wear cell (180 or above);
+- a use of that wear cell clears it and sets the item back on its own cell.
+
+The store ends with all six on their cells.
+
+The scenario waits 1.6 s after the entry first. Within 1.5 s of it, a use is refused with "the
+character fought in the last 1.5 s", the same wait the cloak scenarios make.
+
+The first gate run lost two older scenarios. Both losses were read, reproduced under load and
+fixed:
+
+- `every_apply_type_with_its_own_arm_moves_its_points_as_legacy` (1 run in 96).
+  - The world healed Alpha (787 hit points) before a hat's wear. The wear's records (1,720
+    maximum, 953 hit points from 787) reached the client first, and the heal's 787 after them.
+  - The descriptor sends an item step's records only once their rows are stored, while
+    records the world queued for that client earlier wait in its outbox.
+  - Legacy writes both in the order it ran them. This is a difference the Rewrite's design
+    causes, so it is recorded as `docs/STATUS.md` C12 with its exit.
+  - The reader (`apply_move_checked`) now checks such a move from the late heal, keeps the
+    move's value, and names C12. 72 runs under load then lost none.
+- `a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit` (14 runs in 48).
+  - The stone spawns its group at once (`__StateIdle_Stone`), and the casters entered with
+    the hit-point column's 0.
+  - A bite during the 12.5 s cooldown wait killed the warrior (`GC_STUN`, `GC_DEAD`), so his
+    second cast landed nothing.
+  - Retrying the cast for 8 more seconds did not help, which ruled out a late Pulse. The
+    casters now enter with 600 hit points, and 48 runs under load lost none to the scenario.
+  - One run lost to the PostgreSQL connection cap (`53300`) of 24 parallel servers.
+
+6 `partial` rows are `ported`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,683
+passed, 0 failed in 46 targets; with it 5,683 passed, 0 failed in 46 targets (460 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. The first
+run failed `every_apply_type_with_its_own_arm_moves_its_points_as_legacy` and
+`a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit`, read and fixed above;
+this is the second run. Parity: 1,623 `ported`, 194 `partial`, 509 `unused`, 5 `missing`,
+0 `codec`, of 2,331 rows; 542 scenarios. No ADR changed.

@@ -11694,6 +11694,55 @@ fn special_apply_values(
     })
 }
 
+/// Check one move of [`every_apply_type_with_its_own_arm_moves_its_points_as_legacy`]: the
+/// `points[at..at + len]` it sent against the client's view `view`, which then takes every
+/// record from `at` on. False when the view does not yet know the points the move needs.
+///
+/// `docs/STATUS.md` C12: a heal the world ran before the move can reach the client after the
+/// move's records, carrying the points the move started from. The move is then checked from
+/// that heal, and the view keeps the move's value, not the late heal's.
+fn apply_move_checked(
+    special: (u8, i16),
+    (sign, real): (i64, (i64, i64)),
+    view: &mut std::collections::HashMap<u8, i64>,
+    (points, at, len): (&[(u8, i64)], usize, usize),
+    label: &str,
+) -> bool {
+    let sent: Vec<i64> = points[at..at + len]
+        .iter()
+        .map(|(_, value)| *value)
+        .collect();
+    let mut want = special_apply_values(special, sign, real, |kind| view.get(&kind).copied());
+    let mut late = None;
+    if want.as_ref().is_some_and(|want| *want != sent) {
+        for (index, &(kind, value)) in points.iter().enumerate().skip(at + len) {
+            if !matches!(kind, 5 | 7) {
+                continue;
+            }
+            let mut healed = view.clone();
+            healed.insert(kind, value);
+            let again = special_apply_values(special, sign, real, |k| healed.get(&k).copied());
+            if again.as_ref() == Some(&sent) {
+                (want, late) = (again, Some(index));
+                break;
+            }
+        }
+    }
+    view.extend(
+        points
+            .iter()
+            .enumerate()
+            .skip(at)
+            .filter(|(index, _)| Some(*index) != late)
+            .map(|(_, point)| *point),
+    );
+    let Some(want) = want else {
+        return false;
+    };
+    assert_eq!(sent, want, "{label}");
+    true
+}
+
 /// `point.apply.*`: the apply types with an arm of their own in `ApplyPoint`
 /// (`G/char.cpp:4830-4893`), the grade bonuses that chain into their grade
 /// (`G/char.cpp:4674-4696`), and the types `ApplyPoint` has no arm for.
@@ -11807,18 +11856,13 @@ fn every_apply_type_with_its_own_arm_moves_its_points_as_legacy() {
                     state.get(&8).copied().unwrap_or(0),
                 );
             }
-            let want = special_apply_values(special, sign, real, |kind| state.get(&kind).copied());
-            let sent: Vec<i64> = points[at..at + kinds.len()]
-                .iter()
-                .map(|(_, value)| *value)
-                .collect();
-            if let Some(want) = want {
-                assert_eq!(sent, want, "apply {apply} round {round}: {seen:?}");
+            let label = format!("apply {apply} round {round}: {seen:?}");
+            let moved = (points.as_slice(), at, kinds.len());
+            if apply_move_checked(special, (sign, real), &mut state, moved, &label) {
                 checked += 1;
             } else {
                 assert_eq!(round, 0, "apply {apply} knows its points after a wear");
             }
-            state.extend(points[at..].iter().copied());
         }
     }
     assert!(
@@ -52532,9 +52576,12 @@ fn records_within(client: &mut Keyed, window: Duration) -> Vec<Vec<u8>> {
 /// sends four attack records of that type. Three-Way Cut (1) and Rolling Dagger (33) land three
 /// and the fourth is refused, their cap of 3 a victim (`:4221-4223`); a second cast of 1, past
 /// its cooldown, clears the count (`TargetVIDMap.clear()`, `G/char_skill.cpp:2977`) and three
-/// more land. Spirit Strike
-/// (18), Dragon Swirl (62), Flame Strike (77) and the shaman's 93 refuse every attack record
-/// (`:4204-4210`), whatever their cast did.
+/// more land. Spirit Strike (18), Dragon Swirl (62), Flame Strike (77) and the shaman's 93
+/// refuse every attack record (`:4204-4210`), whatever their cast did.
+///
+/// The stone spawns its group at once (`__StateIdle_Stone`), and those monsters fight the
+/// caster through the 12.5 s wait, so each caster enters with 600 hit points: one entered with
+/// the column's 0 died to the first bite now and then, and its second cast landed nothing.
 #[test]
 fn a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit() {
     let Some(database) = ScratchDatabase::create() else {
@@ -52556,9 +52603,9 @@ fn a_skill_lands_its_capped_hits_on_a_victim_and_the_named_four_never_hit() {
         sql(
             &database,
             &format!(
-                "INSERT INTO player (account_id, slot, name, job, level, x, y, skill_group, sp) \
-                 SELECT id, 0, '{name}', {job}, 154, 470000, 950000, {group}, 150 FROM account \
-                 WHERE login = '{login}'"
+                "INSERT INTO player (account_id, slot, name, job, level, x, y, skill_group, sp, \
+                 hp) SELECT id, 0, '{name}', {job}, 154, 470000, 950000, {group}, 150, 600 \
+                 FROM account WHERE login = '{login}'"
             ),
         );
         sql(
@@ -53548,6 +53595,89 @@ fn a_live_fish_is_used_into_one_of_its_outcomes_and_a_dead_one_changes_nothing()
     println!("the live fish gave {outcome}");
     drop(alpha);
     wait_for(&database, "NOT EXISTS (SELECT 1 FROM item WHERE id = 30)");
+}
+
+/// The wearable types' use arm (`G/char_item.cpp:3040-3053`): a weapon, a pick, a rod, a belt,
+/// a talisman and a ring are worn by their use and taken off by a use of their wear cell.
+/// Alpha (a shaman) holds the bell 5000, the pick 29101, the rod 27400, the belt 18000, the
+/// talisman 9600 and the ring 71135 at cells 0 to 5. Each use clears the item's cell and sets
+/// it on a wear cell; a use of that wear cell clears it and sets the item back on its cell.
+#[test]
+fn each_wearable_type_is_worn_and_taken_off_by_its_use() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let wearables = [5000, 29101, 27400, 18000, 9600, 71135];
+    for (cell, vnum) in wearables.iter().enumerate() {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, \
+                 1, {cell}, 1, {vnum} FROM player WHERE name = 'Alpha'",
+                30 + cell
+            ),
+        );
+    }
+    let protos = owners_protos();
+    for (vnum, kind) in wearables.iter().zip([
+        gamedata::item_kind::ITEM_WEAPON,
+        gamedata::item_kind::ITEM_PICK,
+        gamedata::item_kind::ITEM_ROD,
+        gamedata::item_kind::ITEM_BELT,
+        gamedata::item_kind::ITEM_TALISMAN,
+        gamedata::item_kind::ITEM_RING,
+    ]) {
+        let proto = protos.get(*vnum).expect("the owner's data has it");
+        assert_eq!(proto.item_type, kind, "the owner's type of {vnum}");
+    }
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // Past the 1.5 s the entry counts as a fight (`IsRecentlyFought`).
+    std::thread::sleep(Duration::from_millis(1600));
+    let sets_of = |alpha: &mut Keyed, cell: u16| {
+        alpha.send_record(&client_item_use(cell));
+        let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+        let mut sets = Vec::new();
+        while let Some(record) = alpha.read_fight_until(deadline) {
+            if record[0] == ITEM_SET {
+                let set = protocol::gc_item_window::GcItemSet::decode(&record).expect("a set");
+                sets.push((set.cell.cell, set.vnum));
+            }
+        }
+        sets
+    };
+    for (cell, vnum) in wearables.iter().enumerate() {
+        let cell = u16::try_from(cell).expect("a cell");
+        let worn = sets_of(&mut alpha, cell);
+        assert_eq!(
+            worn.first(),
+            Some(&(cell, 0)),
+            "{vnum} leaves its cell: {worn:?}"
+        );
+        let wear = match worn[1..] {
+            [(wear, set)] if set == *vnum && wear >= 180 => wear,
+            _ => panic!("{vnum} lands on one wear cell: {worn:?}"),
+        };
+        let off = sets_of(&mut alpha, wear);
+        assert_eq!(
+            off,
+            [(wear, 0), (cell, *vnum)],
+            "{vnum} comes off to its cell"
+        );
+    }
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT count(*) = 6 FROM item WHERE id BETWEEN 30 AND 35 AND window_type = 1 AND pos \
+         = id - 30)",
+    );
 }
 
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
