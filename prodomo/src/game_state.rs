@@ -4567,6 +4567,9 @@ impl GameState {
         if self.zen_bean_at(vid, at) {
             return Some(self.use_zen_bean(vid, at, actor));
         }
+        if let Some(seasonal) = self.seasonal_box_at(vid, at) {
+            return Some(self.use_seasonal_box(vid, at, actor, seasonal));
+        }
         if self.hair_colorant_at(vid, at) {
             return Some(self.use_hair_colorant(vid, at, actor));
         }

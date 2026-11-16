@@ -250,7 +250,7 @@ impl GameState {
     }
 
     /// `GET_SEX(ch) != SEX_MALE`: races 1, 3, 4 and 6 are female.
-    fn is_female(&self, vid: Vid) -> bool {
+    pub(super) fn is_female(&self, vid: Vid) -> bool {
         self.characters
             .find_by_vid(vid)
             .ok()

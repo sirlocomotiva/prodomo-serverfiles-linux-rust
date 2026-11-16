@@ -77,6 +77,19 @@ const SHELL_WHITE_CEILING: i32 = 97;
 /// The shell's blue-pearl ceiling (`[2]`): 99.
 const SHELL_BLUE_CEILING: i32 = 99;
 
+/// The seasonal `USE_SPECIAL` boxes (`G/unique_item.h:53-63`, `G/char_item.cpp:4970-5035`) and
+/// the sex each refuses: the new-year greeting 50023 refuses none; the valentine rose 50024 and
+/// the white-day candy 50032 refuse a male, the chocolate 50025 and the white-day rose 50031 a
+/// female.
+const SEASONAL_BOXES: [(u32, Option<bool>); 5] = [
+    (50_023, None),
+    (50_024, Some(false)),
+    (50_025, Some(true)),
+    (50_031, Some(true)),
+    (50_032, Some(false)),
+];
+/// `ITEM_NEW_YEAR_GREETING_VNUM` (`G/unique_item.h:53`): the one box that names its gold.
+const NEW_YEAR_GREETING: u32 = 50_023;
 /// The slow's seconds (`:9628`).
 const SLOW_SECS: i32 = 300;
 
@@ -225,6 +238,89 @@ impl GameState {
         for (vnum, count) in lines {
             self.push_group_row_lines(to, vnum, count, &mut records);
         }
+        moved.records = records;
+        let mut changes = packed.changes;
+        changes.append(&mut moved.changes);
+        moved.changes = changes;
+        Ok(moved)
+    }
+
+    /// The seasonal box at `at` and whether its refused sex is the female one
+    /// (`G/char_item.cpp:4970-5035`).
+    pub(super) fn seasonal_box_at(&self, vid: Vid, at: ItemPos) -> Option<(u32, Option<bool>)> {
+        let vnum = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.items().item_at(at))?
+            .vnum;
+        SEASONAL_BOXES
+            .iter()
+            .find(|(seasonal, _)| *seasonal == vnum)
+            .copied()
+    }
+
+    /// One seasonal box use (`G/char_item.cpp:4970-5035`). The sex the box refuses hears
+    /// `[LS;387]` and keeps it. Otherwise the box's own special group draws
+    /// (`GiveItemFromSpecialItemGroup`); a failed draw keeps the box and says nothing, as
+    /// legacy only logs it. A landed draw spends one box. Only the greeting names its gold
+    /// rows (`[LS;1269]`); the other four name nothing.
+    pub(super) fn use_seasonal_box(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+        (box_vnum, refused_female): (u32, Option<bool>),
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if refused_female.is_some_and(|female| female == self.is_female(vid)) {
+            self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;387]", &[]);
+            return Ok(self.giftbox_kept(vid, actor));
+        }
+        let questing = self.quest_running(vid);
+        let mut gifts = MoveDone {
+            kind: world::character::MoveKind::Used,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        let mut lines: Vec<(u32, i32)> = Vec::new();
+        if !self.draw_group_rows(vid, box_vnum, questing, &mut gifts, &mut lines) {
+            let pid = self
+                .characters
+                .find_by_vid(vid)
+                .map_or(0, world::character::Character::player_id);
+            return Ok(MovedItems::new(
+                pid,
+                vid.raw(),
+                gifts,
+                actor,
+                &self.protos,
+                &self.locale,
+            ));
+        }
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            world::character::consume_giftbox(items, at, rules, gear)
+        })?;
+        let pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(0, world::character::Character::player_id);
+        let packed = MovedItems::new(pid, vid.raw(), gifts, actor, &self.protos, &self.locale);
+        let to = actor.recipient(&self.locale);
+        // The greeting's gold lines go before the spend (`:4979-4986`).
+        let mut records = packed.records;
+        if box_vnum == NEW_YEAR_GREETING {
+            for (vnum, count) in lines {
+                if vnum == 1 {
+                    records.push(chat_packet(
+                        to,
+                        CHAT_TYPE_INFO,
+                        b"[LS;1269;%d]",
+                        &[Arg::Int(i64::from(count))],
+                    ));
+                }
+            }
+        }
+        records.append(&mut moved.records);
         moved.records = records;
         let mut changes = packed.changes;
         changes.append(&mut moved.changes);
@@ -808,6 +904,74 @@ mod tests {
             "the row tells: {texts:?}"
         );
         assert!(!moved.changes.is_empty(), "the spend and the gift save");
+    }
+
+    /// A drawn greeting names its gold row with `[LS;1269]` before the spend, and the box
+    /// goes; a male's drawn chocolate lands its gift and names no row.
+    #[test]
+    fn a_drawn_seasonal_box_spends_and_only_the_greeting_names_gold() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        world
+            .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).unwrap())
+            .expect("no ids yet");
+        let held = vec![boxed(50_023, 60, 0), boxed(50_025, 61, 1)];
+        let (_inbox, _) = enter_seeing_with(&mut world, PLACE, VID, (5, 5), 10_000, &held);
+        let mut gold = gamedata::special_item_group::SpecialItemGroup::default();
+        gold.add_item(1, 500, 100, 0);
+        let mut sword = gamedata::special_item_group::SpecialItemGroup::default();
+        sword.add_item(19, 1, 100, 0);
+        let groups = gamedata::special_item_group::SpecialItemGroups {
+            special: [(50_023, gold), (50_025, sword)].into_iter().collect(),
+            ..Default::default()
+        };
+        world.item_groups = std::sync::Arc::new(groups);
+        let greeting_at = ItemPos::new(EWindows::Inventory as u8, 0);
+        let seasonal = world
+            .seasonal_box_at(Vid::new(VID), greeting_at)
+            .expect("a seasonal box");
+        let moved = world
+            .use_seasonal_box(Vid::new(VID), greeting_at, mover(), seasonal)
+            .expect("the draw lands");
+        let gold_line = moved
+            .records
+            .iter()
+            .position(|record| record.first() == Some(&4))
+            .expect("the gold line");
+        assert_eq!(text_of(&moved.records[gold_line]), b"[LS;1269;500]");
+        assert!(
+            moved.records[gold_line..]
+                .iter()
+                .any(|record| record.first() == Some(&0x15)),
+            "the spend follows the line"
+        );
+        let chocolate_at = ItemPos::new(EWindows::Inventory as u8, 1);
+        let seasonal = world
+            .seasonal_box_at(Vid::new(VID), chocolate_at)
+            .expect("a seasonal box");
+        let moved = world
+            .use_seasonal_box(Vid::new(VID), chocolate_at, mover(), seasonal)
+            .expect("the draw lands");
+        let character = world.characters.find_by_vid(Vid::new(VID)).expect("online");
+        assert!(character.items().item(61).is_none(), "the chocolate goes");
+        assert!(character.items().item(60).is_none(), "the greeting went");
+        let texts: Vec<Vec<u8>> = moved
+            .records
+            .iter()
+            .filter(|record| record.first() == Some(&4))
+            .map(|record| record[10..].to_vec())
+            .collect();
+        assert!(
+            !texts.iter().any(|text| text.starts_with(b"[LS;35;")),
+            "the chocolate names no row: {texts:?}"
+        );
+        assert!(
+            moved
+                .records
+                .iter()
+                .any(|record| record.first() == Some(&0x15)),
+            "the gift lands"
+        );
     }
 
     /// Seed 0's shell draw lands in the water-stone band: it tells `[LS;221]`

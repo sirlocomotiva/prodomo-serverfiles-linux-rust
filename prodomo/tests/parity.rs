@@ -53209,6 +53209,88 @@ fn a_material_and_a_special_item_are_used_and_change_nothing() {
     );
 }
 
+/// The seasonal `USE_SPECIAL` boxes (`G/char_item.cpp:4970-5035`). The valentine rose 50024 and
+/// the white-day candy 50032 refuse a male, and the chocolate 50025 and the white-day rose
+/// 50031 refuse a female, with `[LS;387]`. The owner's `special_item_group.txt` has no group
+/// for any of the five, so every other use draws nothing (legacy only logs), spends nothing and
+/// says nothing. Alpha (female) and Delta (male) each use all five; every box stays.
+#[test]
+fn the_seasonal_boxes_refuse_their_sex_and_draw_nothing_without_a_group() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Delta (male) stands beside Alpha, on a map Channel 1 hosts.
+    sql(
+        &database,
+        "UPDATE player SET x = 470000, y = 950000 WHERE name = 'Delta'",
+    );
+    let boxes = [50_023, 50_024, 50_025, 50_031, 50_032];
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe/special_item_group.txt"),
+    )
+    .expect("the owner's special groups");
+    let groups = gamedata::special_item_group::read(&bytes, &owners_protos())
+        .expect("the owner's special groups parse");
+    assert!(
+        groups.special.contains_key(&50_011),
+        "the reader finds a group the file holds"
+    );
+    for vnum in boxes {
+        assert!(
+            !groups.special.contains_key(&vnum),
+            "the owner has no group {vnum}"
+        );
+    }
+    for (name, base) in [("Alpha", 30), ("Delta", 40)] {
+        for (cell, vnum) in boxes.iter().enumerate() {
+            sql(
+                &database,
+                &format!(
+                    "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, \
+                     id, 1, {cell}, 1, {vnum} FROM player WHERE name = '{name}'",
+                    base + cell
+                ),
+            );
+        }
+    }
+    for (slot, refused) in [(0, [50_025, 50_031]), (3, [50_024, 50_032])] {
+        let (mut keyed, _listed) = enter_world(&server, b"alice", slot);
+        for (cell, vnum) in boxes.iter().enumerate() {
+            keyed.send_record(&client_item_use(u16::try_from(cell).expect("a cell")));
+            if refused.contains(vnum) {
+                let line = keyed.read_game();
+                assert_eq!(line[0], GC_CHAT, "{vnum} refuses: {line:02x?}");
+                assert_eq!(
+                    (line[3], line[10..].to_vec()),
+                    info(b"[LS;387]"),
+                    "{vnum} refuses this sex"
+                );
+            }
+            keyed.quiet("the box draws nothing and stays");
+        }
+        drop(keyed);
+    }
+    server.wait_for_count("Character disconnected; wrote the row", 2);
+    assert!(
+        !server.logged("Item step refused"),
+        "no use is refused as a step: {}",
+        server.console()
+    );
+    check(
+        &database,
+        "(SELECT count(*) = 10 AND bool_and(count = 1) FROM item WHERE id BETWEEN 30 AND 44)",
+    );
+}
+
 /// Enter the two GMs, checking the first arena's starts on the Shared Channel.
 fn enter_arena_pair(server: &Server, channel: u8) -> (Keyed, Listed, Keyed, Listed) {
     let (mut alice, alpha, entered) = enter_world_hearing_team(

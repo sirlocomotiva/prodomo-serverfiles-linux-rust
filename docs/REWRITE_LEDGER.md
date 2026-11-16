@@ -56797,3 +56797,39 @@ passed, 0 failed in 46 targets; with it 5,677 passed, 0 failed in 46 targets (45
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
 test failed on the first run. Parity: 1,607 `ported`, 200 `partial`, 496 `unused`, 28 `missing`,
 0 `codec`, of 2,331 rows; 537 scenarios. No ADR changed.
+## 702. The seasonal boxes (B9, `USE_SPECIAL`)
+
+Five `USE_SPECIAL` vnums were refused as not ported: the new-year greeting 50023, the valentine
+rose 50024 and chocolate 50025, and the white-day rose 50031 and candy 50032
+(`G/char_item.cpp:4970-5035`). The inventory rows had the white-day pair backwards. The candy is
+50032 and the rose is 50031 (`G/unique_item.h:62-63`); the rows now say so.
+
+Each arm draws its own vnum's special group through `GiveItemFromSpecialItemGroup`, and spends one
+box only when the draw succeeds. The greeting refuses no sex, and after the draw names each gold
+row with `[LS;1269]`, before the spend. The other four first refuse a sex with `[LS;387]`: the
+valentine rose and the candy refuse a male, and the chocolate and the white-day rose a female.
+They name no row. A missing group only logs (`sys_err`), so that use keeps the box and sends
+nothing.
+
+`use_seasonal_box` (`prodomo/src/game_state/giftbox.rs`) ports the five beside the giftbox and
+reuses its `draw_group_rows` and its spend. `is_female` (`emotion.rs`) is now shared. Unit test
+`a_drawn_seasonal_box_spends_and_only_the_greeting_names_gold` covers the drawn path with
+installed groups.
+
+The owner's `special_item_group.txt` has no group for any of the five, so the scenario checks
+that with the reader. Its positive control is the 50011 group, which the reader finds.
+`the_seasonal_boxes_refuse_their_sex_and_draw_nothing_without_a_group` (shipped mode) has Alpha
+(female) and Delta (male) each use all five. Each hears `[LS;387]` for the two boxes that refuse
+their sex and nothing for the other three. Every box stays, and no step is refused.
+
+The owner's data has no `ITEM_TOTEM` proto; the same search finds the `ITEM_MATERIAL` rows, so its
+row is `unused`.
+
+5 `missing` rows are `ported` and 1 is `unused`.
+
+Gates (2026-11-15), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,679
+passed, 0 failed in 46 targets; with it 5,679 passed, 0 failed in 46 targets (456 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run. Parity: 1,612 `ported`, 200 `partial`, 497 `unused`, 22 `missing`,
+0 `codec`, of 2,331 rows; 538 scenarios. No ADR changed.
