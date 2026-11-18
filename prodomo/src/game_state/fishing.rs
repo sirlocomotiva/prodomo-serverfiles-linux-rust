@@ -71,12 +71,11 @@ use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover, StoreOrder};
 use crate::save::PASSES_PER_SEC;
-/// What a marked recall carries past the spend: the life it pays, the mark's sockets
-/// as the spend read them, the cell the empire refusal clears, and the test-server flag.
+/// What a marked recall carries: the mark's sockets as the use read them, the portal's
+/// cell, which the spend or the empire refusal touches, and whether the test-server
+/// line tells (the town portal's alone, `:5926-5927`).
 #[derive(Debug, Clone, Copy)]
 struct PortalRecall {
-    /// The life the recall pays.
-    consume: i32,
     /// The mark's sockets.
     sockets: [i32; 6],
     /// The portal's cell.
@@ -874,10 +873,11 @@ impl GameState {
         Ok(moved)
     }
 
-    /// `CG_ITEM_USE` of a recall portal (`case USE_TALISMAN`, `G/char_item.cpp:5862-5958`):
+    /// `CG_ITEM_USE` of a recall portal (`case USE_TALISMAN`, `G/char_item.cpp:5862-5957`):
     /// the use checks, then the arm's own gates, each with its line first. A town mark
-    /// stamps the spot and recalls to the empire's town; a memory mark stamps alone; a
-    /// marked portal recalls to its mark. The recall pays the consume and spends one.
+    /// stamps the spot and recalls to the empire's town, paying the consume; a memory
+    /// mark stamps alone. A marked memory portal pays the consume, then recalls to its
+    /// mark; a marked town portal recalls to its mark and pays nothing.
     pub(super) fn use_portal_item(
         &mut self,
         vid: Vid,
@@ -947,12 +947,11 @@ impl GameState {
             Portaled::TownWarp { consume, .. } => {
                 return Ok(self.portal_town_warp(vid, moved, consume));
             }
-            Portaled::Recall { consume } => {
+            Portaled::Recall { town } => {
                 let recall = PortalRecall {
-                    consume,
                     sockets,
                     at,
-                    test_server,
+                    test_server: test_server && town,
                 };
                 return self.portal_mark_recall(vid, actor, moved, recall);
             }
@@ -990,10 +989,12 @@ impl GameState {
         moved
     }
 
-    /// The marked recall of a portal's use (`ProcessRecallItem`, `G/char_item.cpp:2124-2182`):
+    /// The marked recall of a portal's use (`ProcessRecallItem`, `G/char_item.cpp:2124-2174`):
     /// a mark on no map answers nothing; maps 301-304 refuse under level 90 with
     /// `[LS;1013]`; a mark of another empire refuses with `[LS;1141]` and clears the
-    /// sockets. Else the recall pays `consume` life and warps to the mark.
+    /// sockets. Else the recall warps to the mark and spends one. Each line follows
+    /// what `moved` already holds: the memory portal's payment, which legacy's
+    /// `PointChange` sends before `ProcessRecallItem` runs.
     fn portal_mark_recall(
         &mut self,
         vid: Vid,
@@ -1002,22 +1003,18 @@ impl GameState {
         recall: PortalRecall,
     ) -> Result<MovedItems, MoveItemRefused> {
         let PortalRecall {
-            consume,
             sockets,
             at,
             test_server,
         } = recall;
+        let to = actor.recipient(&self.locale);
         if test_server {
-            let to = actor.recipient(&self.locale);
-            moved.records.insert(
-                0,
-                chat_packet(
-                    to,
-                    CHAT_TYPE_INFO,
-                    b"You will be brought back to the original place.",
-                    &[],
-                ),
-            );
+            moved.records.push(chat_packet(
+                to,
+                CHAT_TYPE_INFO,
+                b"You will be brought back to the original place.",
+                &[],
+            ));
         }
         let point = (sockets[0], sockets[1]);
         let atlas = self.recall.atlas().cloned();
@@ -1034,17 +1031,19 @@ impl GameState {
             .and_then(|character| character.points())
             .map_or(0, world::character::Points::level);
         if matches!(index, 301..=304) && level < 90 {
-            let to = actor.recipient(&self.locale);
             moved
                 .records
-                .insert(0, chat_packet(to, CHAT_TYPE_INFO, b"[LS;1013]", &[]));
+                .push(chat_packet(to, CHAT_TYPE_INFO, b"[LS;1013]", &[]));
             return Ok(moved);
         }
         let empire = self.bodies.get(&vid).map_or(0, |body| body.card.empire);
         let wanted = empire_of_map_index(index);
         if wanted > 0 && i32::from(empire) != wanted {
-            // `[LS;1141]`, and the sockets clear (`:2173-2175`). The clear runs as a
+            // `[LS;1141]`, and the sockets clear (`:2162-2167`). The clear runs as a
             // second step so its updates and row changes ride the answer.
+            moved
+                .records
+                .push(chat_packet(to, CHAT_TYPE_INFO, b"[LS;1141]", &[]));
             let mut cleared = self.run_item_step(vid, actor, |items, _ids, _, _, _| {
                 let Some(id) = items.item_at(at).map(|item| item.id) else {
                     return Ok(MoveDone {
@@ -1065,19 +1064,25 @@ impl GameState {
                     changes,
                 })
             })?;
-            let mut records = Vec::with_capacity(moved.records.len() + 2);
-            records.append(&mut moved.records);
-            records.append(&mut cleared.records);
-            moved.records = records;
+            moved.records.append(&mut cleared.records);
             moved.changes.append(&mut cleared.changes);
-            let to = actor.recipient(&self.locale);
-            moved
-                .records
-                .insert(0, chat_packet(to, CHAT_TYPE_INFO, b"[LS;1141]", &[]));
             return Ok(moved);
         }
-        self.change_pc_point(vid, common::point_slot::POINT_HP, -consume, false);
         self.order_warp(vid, point);
+        // `item->SetCount(item->GetCount() - 1)` (`:2172`): only a recall that goes
+        // spends the portal.
+        let mut spent = self.run_item_step(vid, actor, |items, _ids, _, _, protos| {
+            let portal = world::character::use_source(items, at)?;
+            let proto = protos
+                .get(portal.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(portal.vnum))?;
+            world::character::spend_one(items, &portal, proto)
+        })?;
+        moved.records.append(&mut spent.records);
+        moved.changes.append(&mut spent.changes);
+        if spent.quickslots.is_some() {
+            moved.quickslots = spent.quickslots;
+        }
         Ok(moved)
     }
 }

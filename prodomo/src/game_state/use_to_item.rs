@@ -301,15 +301,7 @@ impl GameState {
         // `UseItemEx`'s head (`G/char_item.cpp:2769-2775`): with the
         // `no_potions_on_pvp` flag up, a duellist's limited potion that is not
         // allowed refuses with the same line.
-        let no_potions = self
-            .quests
-            .as_ref()
-            .is_some_and(|quests| quests.manager().event_flag(b"no_potions_on_pvp") != 0);
-        let fighting = self
-            .characters
-            .find_by_vid(vid)
-            .is_ok_and(|character| self.pvp_is_fighting(character.player_id()));
-        if no_potions && fighting && duel_limited_potion(vnum) {
+        if duel_limited_potion(vnum) && self.potions_barred_in_duel(vid) {
             if let Some(mover) = self.own_mover(vid) {
                 self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1205]", &[]);
             }
@@ -321,7 +313,7 @@ impl GameState {
                 gamedata::item_kind::USE_POTION | gamedata::item_kind::USE_POTION_NODELAY
             )
         {
-            return self.arena_use_potion_allowed(
+            return self.potion_arm_allowed(
                 vid,
                 vnum,
                 sub_type == gamedata::item_kind::USE_POTION_NODELAY,
@@ -330,21 +322,45 @@ impl GameState {
         true
     }
 
-    /// Map-based potion limits are independent of duelist binding.
-    pub(super) fn arena_use_potion_allowed(&mut self, vid: Vid, vnum: u32, no_delay: bool) -> bool {
-        if !self
+    /// Whether `vid` fights a duel while the `no_potions_on_pvp` flag stands
+    /// (`g_NoPotionsOnPVP && CPVPManager::IsFighting`).
+    fn potions_barred_in_duel(&self, vid: Vid) -> bool {
+        let no_potions = self
+            .quests
+            .as_ref()
+            .is_some_and(|quests| quests.manager().event_flag(b"no_potions_on_pvp") != 0);
+        no_potions
+            && self
+                .characters
+                .find_by_vid(vid)
+                .is_ok_and(|character| self.pvp_is_fighting(character.player_id()))
+    }
+
+    /// The potion arms' own gate (`G/char_item.cpp:3443-3479`, `:5581-5616`, `:5684-5721`):
+    /// on an arena map the arena's flags and lists, which read the map, not arena
+    /// membership; elsewhere, with `no_potions_on_pvp` up, a duellist's potion that
+    /// `IsAllowedPotionOnPVP` does not name (`G/arena.cpp:1105-1124`) hears `[LS;1205]`.
+    /// That list is the ten blue potions, so the arm refuses more than the head's
+    /// limited-potion gate: the red potions and every other instant one too.
+    fn potion_arm_allowed(&mut self, vid: Vid, vnum: u32, no_delay: bool) -> bool {
+        let refused = if self
             .place_of(vid.raw())
             .is_some_and(|(_, map)| self.is_arena_map(map))
         {
-            return true;
-        }
-        let refused = arena_potion_refusal(
-            vnum,
-            no_delay,
-            self.arena_event_flag(b"arena_potion_limit"),
-            self.arena_event_flag(b"arena_potion_limit_count"),
-            self.arena_potion_count(vid),
-        );
+            arena_potion_refusal(
+                vnum,
+                no_delay,
+                self.arena_event_flag(b"arena_potion_limit"),
+                self.arena_event_flag(b"arena_potion_limit_count"),
+                self.arena_potion_count(vid),
+            )
+        } else if self.potions_barred_in_duel(vid)
+            && !super::auto_potion::PVP_ALLOWED.contains(&vnum)
+        {
+            Some(&b"[LS;1205]"[..])
+        } else {
+            None
+        };
         if let Some(line) = refused {
             if let Some(mover) = self.own_mover(vid) {
                 self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);

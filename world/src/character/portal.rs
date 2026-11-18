@@ -32,7 +32,6 @@ use super::item_move::{
     done, ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, MoveRefused, MoveRules, Unported,
 };
 use super::items::CharacterItems;
-use super::quickslot::chains_when_used_up;
 use crate::item::ItemIds;
 
 /// Value(0) 1: the town portal, which marks outside a dungeon and recalls to town.
@@ -99,10 +98,13 @@ pub enum Portaled {
         /// Whether the mark landed.
         marked: bool,
     },
-    /// The portal recalls to its mark; the recall pays `consume` life and spends one.
+    /// The portal carries a mark (`:5924-5930`, `:5947-5954`). The memory portal paid the
+    /// consume first, its point records on the trail; the town portal pays nothing. The
+    /// caller runs `ProcessRecallItem` (`:2124-2174`), which warps and spends one only
+    /// when the recall goes.
     Recall {
-        /// The life the recall pays.
-        consume: i32,
+        /// Whether this is the town portal, whose marked recall pays no life.
+        town: bool,
     },
     /// The memory mark landed; nothing is paid and nobody warps.
     Marked,
@@ -196,9 +198,20 @@ pub fn use_portal(
         return unchanged(Portaled::Plain);
     }
     if item.sockets[0] != 0 {
+        let town = portal == TOWN_PORTAL;
         let mut trail = Trail::default();
-        super::potion::use_one(items, &item, chains_when_used_up(proto), &mut trail)?;
-        return Ok((done(MoveKind::Used, trail), Portaled::Recall { consume }));
+        if !town {
+            // `PointChange(POINT_HP, -consumeLife, false)` (`:5949-5951`) comes before
+            // `ProcessRecallItem`, so the memory portal pays whatever the mark comes to.
+            let records = gear
+                .points
+                .point_change(common::point_slot::POINT_HP, -consume, false, false)
+                .unwrap_or_default();
+            trail
+                .records
+                .extend(records.into_iter().map(MoveRecord::Point));
+        }
+        return Ok((done(MoveKind::Used, trail), Portaled::Recall { town }));
     }
     if portal == MEMORY_PORTAL && ground.in_dungeon {
         return unchanged(Portaled::DungeonMark);
@@ -411,14 +424,17 @@ mod tests {
         assert_eq!(calculate_consume(1000, 0), Some(0));
     }
 
-    /// Each ground answers its own outcome: the barred map, the arena, the weak, the
+    /// Each ground answers its own outcome: the barred maps, the arena, the weak, the
     /// wrong empire, and the full pack; a lone town portal marks and warps, a stacked
-    /// one splits the mark off, a marked one recalls and spends, and a memory portal
-    /// marks alone.
+    /// one splits the mark off, a marked one asks for its recall and spends nothing
+    /// yet, and a memory portal marks alone.
     #[test]
     fn each_portal_ground_answers_its_own_outcome() {
         let (mut items, protos) = holding(TOWN_PORTAL, 1, [0; 6]);
         let (_, got) = run(&mut items, &protos, ground(113, (1000, 1000)));
+        assert_eq!(got, Portaled::Barred);
+        let (mut items, protos) = holding(TOWN_PORTAL, 1, [0; 6]);
+        let (_, got) = run(&mut items, &protos, ground(200, (1000, 1000)));
         assert_eq!(got, Portaled::Barred);
         let (mut items, protos) = holding(TOWN_PORTAL, 1, [0; 6]);
         let mut arena = ground(1, (1000, 1000));
@@ -468,11 +484,28 @@ mod tests {
         assert_eq!([split.sockets[0], split.sockets[1]], [100, 200]);
         assert_eq!(split.count, 1);
         assert!(done.records.len() == 2, "the update and the set ride");
-        // A marked portal recalls and spends one.
+        // A marked portal asks for its recall and spends nothing yet: the caller
+        // spends one when the recall goes. The town portal pays no life.
         let (mut items, protos) = holding(TOWN_PORTAL, 2, [500, 600, 0, 0, 0, 0]);
-        let (_, got) = run(&mut items, &protos, ground(1, (1000, 1000)));
-        assert_eq!(got, Portaled::Recall { consume: 300 });
-        assert_eq!(items.item_at(AT).expect("one stays").count, 1);
+        let (done, got) = run(&mut items, &protos, ground(1, (1000, 1000)));
+        assert_eq!(got, Portaled::Recall { town: true });
+        assert_eq!(items.item_at(AT).expect("both stay").count, 2);
+        assert!(done.changes.is_empty(), "nothing is spent yet");
+        assert!(done.records.is_empty(), "nor paid");
+        // The memory portal pays the consume (300 of the warrior's 760) first.
+        let (mut items, protos) = holding(MEMORY_PORTAL, 1, [500, 600, 0, 0, 0, 0]);
+        let (done, got) = run(&mut items, &protos, ground(1, (1000, 1000)));
+        assert_eq!(got, Portaled::Recall { town: false });
+        let paid: Vec<(u8, i64)> = done
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                MoveRecord::Point(point) => Some((point.kind, point.value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paid, [(5, 460)], "the life pays (`POINT_HP`)");
+        assert!(done.changes.is_empty(), "nothing is spent yet");
         // A memory portal marks and stays.
         let (mut items, protos) = holding(MEMORY_PORTAL, 1, [0; 6]);
         let (_, got) = run(&mut items, &protos, ground(1, (1000, 1000)));

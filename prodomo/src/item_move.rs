@@ -147,6 +147,15 @@ pub struct MovedItems {
     /// descriptor to store before it sends (`db::monarch::store_money`). `None`
     /// while the step charged none.
     pub monarch_money: Option<(u8, i64)>,
+    /// The unit prices a bundle shop opened with the silk bundle sends, for the descriptor to
+    /// merge into the store (`HEADER_GD_MYSHOP_PRICELIST_UPDATE`, `G/char.cpp:915-937`).
+    /// `None` while the step sent none.
+    pub price_list: Option<Vec<db::myshop_pricelist::StoredPrice>>,
+    /// The silk botary's first use of the session asked for the stored price list
+    /// (`HEADER_GD_MYSHOP_PRICELIST_REQ`, `G/char_item.cpp:2655-2661`): the records
+    /// `__OpenPrivateShop` sends once the descriptor has sent the list's lines
+    /// (`UseSilkBotaryReal`, `:2215-2228`). `None` while the step asked for none.
+    pub silk_botary: Option<Vec<Vec<u8>>>,
 }
 
 /// What a used quest item's scripts landed besides the step's records and rows: the GRAND
@@ -255,6 +264,8 @@ impl MovedItems {
             quest: (Vec::new(), Vec::new(), None),
             shop_premium: None,
             monarch_money: None,
+            price_list: None,
+            silk_botary: None,
         }
     }
 
@@ -345,6 +356,8 @@ impl MovedItems {
             quest: (Vec::new(), Vec::new(), None),
             shop_premium: None,
             monarch_money: None,
+            price_list: None,
+            silk_botary: None,
         }
     }
 

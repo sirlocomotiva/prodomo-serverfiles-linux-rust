@@ -551,6 +551,10 @@ pub struct Points {
     conqueror_exp: i64,
     real: [i32; SLOTS],
     instant: [i32; SLOTS],
+    /// What the 100 cap cut from each [`CAPPED`] slot's adds, so a later take-back
+    /// subtracts from the uncapped sum (Defect: legacy loses it and the slot goes below
+    /// its sources, `char.cpp:4597-4632`).
+    capped_excess: [i32; CAPPED.len()],
     hp: i32,
     sp: i32,
     stamina: i32,
@@ -662,6 +666,7 @@ impl Points {
             conqueror_exp: row.conqueror_exp,
             real: [0; SLOTS],
             instant: [0; SLOTS],
+            capped_excess: [0; CAPPED.len()],
             hp: 0,
             sp: 0,
             stamina: 0,
@@ -2170,12 +2175,7 @@ impl Points {
                 self.real[kind] = value;
                 i64::from(value)
             }
-            _ if CAPPED.contains(&kind) => {
-                if i64::from(self.instant[kind]) + i64::from(amount) > 100 {
-                    amount = 100 - self.instant[kind];
-                }
-                i64::from(self.add(kind, amount))
-            }
+            _ if CAPPED.contains(&kind) => i64::from(self.capped(kind, &mut amount)),
             _ if PLAIN.contains(&kind) => i64::from(self.add(kind, amount)),
             _ => return Applied::NotPool,
         };
@@ -2240,6 +2240,23 @@ impl Points {
         } else {
             self.immune_flag |= bit;
         }
+        value
+    }
+
+    /// A capped slot (`char.cpp:4597-4632`): the slot holds its uncapped sum, held at 100,
+    /// and `amount` becomes the move the slot made. Legacy cuts the add to what the cap
+    /// leaves and forgets the cut, so taking the source back leaves the slot below what
+    /// its remaining sources give (Defect); the Rewrite keeps the cut and takes it back
+    /// first.
+    fn capped(&mut self, kind: usize, amount: &mut i32) -> i32 {
+        let index = CAPPED.iter().position(|&slot| slot == kind).unwrap_or(0);
+        let sum = i64::from(self.instant[kind])
+            + i64::from(self.capped_excess[index])
+            + i64::from(*amount);
+        let value = narrow(sum.min(100));
+        self.capped_excess[index] = narrow(sum - i64::from(value));
+        *amount = value.wrapping_sub(self.instant[kind]);
+        self.instant[kind] = value;
         value
     }
 
@@ -2403,6 +2420,7 @@ impl Points {
         let conqueror_step = self.instant[point::POINT_CONQUEROR_LEVEL_STEP];
 
         self.instant = [0; SLOTS];
+        self.capped_excess = [0; CAPPED.len()];
         self.skill_damage_bonus.clear();
         self.energy_buff_clear();
         self.energy_pending = None;
@@ -3511,9 +3529,15 @@ mod tests {
                 points.point_change(kind, 50, true, false),
                 Ok(vec![record(kind, 30, 100)])
             );
+            // The take-back spends the 20 the cap cut first, so the slot still reads 100,
+            // and taking both sources back leaves 0, not legacy's -20.
             assert_eq!(
                 points.point_change(kind, -20, true, false),
-                Ok(vec![record(kind, -20, 80)])
+                Ok(vec![record(kind, 0, 100)])
+            );
+            assert_eq!(
+                points.point_change(kind, -100, true, false),
+                Ok(vec![record(kind, -100, 0)])
             );
         }
         assert_eq!(

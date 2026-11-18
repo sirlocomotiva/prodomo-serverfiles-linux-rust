@@ -1162,6 +1162,7 @@ fn use_ported(proto: &ItemProto, classed: UseClassed) -> Option<MoveRefused> {
         && !silent
         && !USED_BY_WEARING.contains(&proto.item_type)
         && !unique_worn_by_use(proto)
+        && proto.item_type != ITEM_DS
     {
         return Some(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
@@ -1178,9 +1179,10 @@ fn unique_worn_by_use(proto: &ItemProto) -> bool {
         && proto.sub_type != USE_ABILITY_UP
 }
 
-/// The silk botary (`case 71049`, `G/char_item.cpp:3008`), the one `USE_SPECIAL` unique with
-/// a case: its `UseSilkBotary` (the stored price list and the shop window) is not ported.
-const SILK_BOTARY: u32 = 71_049;
+/// The silk botary (`case 71049`, `G/char_item.cpp:3008-3023`), the one `USE_SPECIAL` unique
+/// with a case: it keeps itself and answers [`MoveKind::Botary`](super::item_move::MoveKind),
+/// and the game state runs `UseSilkBotary`.
+pub const SILK_BOTARY: u32 = 71_049;
 
 /// The consumed kind of the seated `ITEM_USE` arms (or the skill book, or the
 /// forget book), or `None` when the use is no seated arm: the cure, the cloak, the ability potion, the
@@ -1263,9 +1265,7 @@ fn use_special_kind(proto: &ItemProto) -> SeatedArms {
             ITEM_RESOURCE,
         ]
         .contains(&proto.item_type)
-            || (proto.item_type == ITEM_UNIQUE
-                && proto.sub_type == USE_SPECIAL
-                && proto.vnum != SILK_BOTARY);
+            || (proto.item_type == ITEM_UNIQUE && proto.sub_type == USE_SPECIAL);
         return (
             false, false, false, false, false, false, false, false, false, silent,
         );
@@ -1434,6 +1434,9 @@ pub fn use_item(
     // The stamp landed in `items`: the arms below read the stamped sockets, as the
     // equip checks do when they admit a started first-use clock.
     let item = items.item(item.id).cloned().unwrap_or(item);
+    if proto.item_type == ITEM_DS {
+        return dragon_soul_use(&item, stamped);
+    }
     if quest {
         // `case ITEM_QUEST` changes nothing here: the caller runs the item's quest, or the
         // pick-up arm `RENEWAL_PICKUP_AFFECT` gives 70002 (`G/char_item.cpp:2852-2872`).
@@ -1485,7 +1488,13 @@ pub fn use_item(
         let mut trail = Trail::default();
         trail.records.append(&mut stamped.records);
         trail.changes.append(&mut stamped.changes);
-        return Ok(done(MoveKind::Used, trail));
+        // The silk botary's case keeps it too, and the game state opens the shop.
+        let kind = if proto.item_type == ITEM_UNIQUE && proto.vnum == SILK_BOTARY {
+            MoveKind::Botary
+        } else {
+            MoveKind::Used
+        };
+        return Ok(done(kind, trail));
     }
     let mut equipper = Equipper::new(items, gear, rules.usable_cells);
     let outcome = if super::inventory::is_equip_position(item.pos) {
@@ -1677,8 +1686,27 @@ fn stamp_first_use_clock(
     done
 }
 
+/// `case ITEM_DS` (`G/char_item.cpp:3059-3065`), past the use checks: their
+/// `LIMIT_TIMER_BASED_ON_WEAR` arm is a no-op (`:2753-2755`), so a stone's wear timer neither
+/// refuses nor stamps. A stone that is not worn returns false: nothing changes and the use
+/// answers [`MoveKind::Unused`](super::item_move::MoveKind). A worn one is pulled out
+/// (`DSManager::PullOut`), which is not ported.
+fn dragon_soul_use(
+    item: &Item,
+    stamped: super::item_move::MoveDone,
+) -> Result<super::item_move::MoveDone, MoveRefused> {
+    if super::inventory::is_equip_position(item.pos) {
+        return Err(MoveRefused::NotPorted(Unported::Use(ITEM_DS)));
+    }
+    Ok(super::item_move::MoveDone {
+        kind: super::item_move::MoveKind::Unused,
+        ..stamped
+    })
+}
+
 /// `UseItem`'s source checks (`G/char_item.cpp:7177-7190`): a valid cell of a window this
-/// build lays flat, holding an item that is not offered in a trade.
+/// build lays flat or of the dragon soul inventory, holding an item that is not offered in a
+/// trade.
 ///
 /// # Errors
 ///
@@ -1688,7 +1716,9 @@ pub fn use_source(items: &CharacterItems, at: ItemPos) -> Result<Item, MoveRefus
     if !super::inventory::is_valid_item_position(at) {
         return Err(MoveRefused::InvalidSource);
     }
-    if !super::item_move::is_flat_window(at.window_type) {
+    if !super::item_move::is_flat_window(at.window_type)
+        && at.window_type != EWindows::DragonSoulInventory as u8
+    {
         return Err(MoveRefused::NotPorted(Unported::SourceWindow(
             at.window_type,
         )));
@@ -3023,13 +3053,19 @@ mod tests {
             cell: 0,
         };
         assert_eq!(case.use_refused(safebox), MoveRefused::InvalidSource);
+        // The dragon soul inventory is a use source (`case ITEM_DS`); the belt window is not.
         let dragon_soul = ItemPos {
             window_type: EWindows::DragonSoulInventory as u8,
             cell: 0,
         };
+        assert_eq!(case.use_refused(dragon_soul), MoveRefused::Empty);
+        let belt = ItemPos {
+            window_type: EWindows::BeltInventory as u8,
+            cell: 0,
+        };
         assert_eq!(
-            case.use_refused(dragon_soul),
-            MoveRefused::NotPorted(Unported::SourceWindow(dragon_soul.window_type))
+            case.use_refused(belt),
+            MoveRefused::NotPorted(Unported::SourceWindow(belt.window_type))
         );
         let mut items = CharacterItems::new();
         items.set(inv(3), &Item::new(7, SWORD)).expect("free");

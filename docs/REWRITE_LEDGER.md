@@ -57580,3 +57580,339 @@ passed, 0 failed in 46 targets; with it 5,698 passed, 0 failed in 46 targets (50
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. The first run is ledger 717's: it lost `a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it`, whose cause has its own section;
 this run lost nothing.
 Parity: 1,661 `ported`, 153 `partial`, 512 `unused`, 5 `missing`, 0 `codec`, of 2,331 rows; 557 scenarios. No ADR changed.
+
+## 720. The always-usable skills and the training read's three lines (B9)
+
+**`CanUseSkill`'s always list on the wire** (`G/char_skill.cpp:4175-4177`). The new scenario
+`each_always_usable_skill_casts_by_its_own_arm` casts each vnum of the list through
+`CG_USE_SKILL`:
+
+- 121, 124, 126-130 at level 1 pass `UseSkill`'s gates (`:2896-2977`). Their SP-cost and cooldown
+  polys are empty, and `CPoly::Analyze("")` is true (`libpoly/Poly.cpp:226-227`), so the 0 charge
+  still sends the SP point record (`G/char.cpp:4266-4275`), nothing cools, and `ComputeSkill`
+  lands nothing;
+- 122 toggles the combo and sends `combo 1` (`:2996-3006`);
+- 131 with no horse says `[LS;966]` (`:2933-2944`);
+- 151 and 153-159 at level 0 are refused by the level gate (`:2963-2964`) and send nothing;
+- a warrior skill (1) sent first is refused by `CanUseSkill` and sends nothing, which is the
+  control.
+
+**A Defect of legacy, fixed: the guild skills as personal skills.** 151-159 are the guild skills
+(`G/skill.h:162-171`), which a guild uses through `CGuild::UseSkill` (`G/input_main.cpp:3115-3117`).
+Because `CanUseSkill` lists them, `/skillup 15x` (`G/cmd_general.cpp:925-930`) reaches
+`SkillLevelUp`. Their rows are type 0, the flags of 151-157 lack `DISABLE_BY_POINT_UP`, and type 0
+skips the group gate under `__FIX_SECONDARY_SKILL__` (`C/prodomodefines.h:98`,
+`G/char_skill.cpp:807`), so one sub-skill point per level climbs them. A `CG_USE_SKILL` then casts
+the guild buff on any target with no guild: 152 adds 20% of maximum HP per level, 155 move and
+attack speed, and so on (`:2780-2808`, `:3021-3130`). The Rewrite loads no PC row for 151-159
+(`gamedata::pc_skill_data` `TYPE_ZERO_KEPT`), so the cast is refused at the row lookup. In the
+scenario, 152 at level 1 with 600 SP sends nothing; with 152 added to `TYPE_ZERO_KEPT` the scenario
+fails on the SP charge (600 to 398). A Defect row and a Divergence row record it.
+
+**The training read's three lines.** The 50300 read (`bProb` 0, `G/char_item.cpp:3282-3331`,
+`G/char_skill.cpp:552-632`; `ENABLE_MASTER_SKILLBOOK_NO_STEPS` is off, `:467`) short of its book
+count talks one of `[LS;961]`, `[LS;962]` and `[LS;963]` by `number(1, 3)` (`:600-614`), then
+`[LS;995;n]` with the remainder (`:616`). The new scenario
+`a_master_read_short_of_its_count_talks_each_line` trains Alpha's nine hosted shaman skills from
+29 across sessions until all three lines are heard, each with its remainder line. A miss (952 or
+953) and a full-count climb (964, byte 76 at 30) are accepted with their own records. All tries
+missing a line is about 1 in 200,000.
+
+**A Rewrite mistake, removed: two dead arms of `SkillLevelUp`.** `SetSkillLevel(level + 1)`
+(`G/char_skill.cpp:848`) sets the master type from the new level (`:204-211`) before the switch
+reads it (`:852-888`). So `SKILL_MASTER` always means 20 to 29 and its `>= 30` draw (`:875-880`)
+never fires, and `SKILL_GRAND_MASTER` always means 30 to 39 and its `>= 40` set (`:882-887`)
+never fires. The NORMAL `>= 17` arm is reachable (17 to 19; `ENABLE_FORCE2MASTERSKILL`, `:31`),
+which is the positive control. `GameState::skill_level_up` had both dead arms and now keeps only
+the NORMAL jump. `skill.level_up.skill_master` and `skill.level_up.skill_grand_master.2` are
+`unused`.
+
+The three `skill.learn_by_book` rows and the eighteen `skill.can_use` rows of 121-131 and 151-159
+are now `ported`.
+
+## 721. The silk botary, a stone used from the soul inventory, the pick-up ticket and a costume worn by its use (B9)
+
+**The silk botary 71049** (`case 71049`, `G/char_item.cpp:3008-3023`) was refused as not ported.
+It now keeps itself and runs `UseSilkBotary` (`:2655-2664`). With `enable_bootary_check` on (it is
+off in the owner's configuration), a map other than 1, 3, 21, 23, 41 and 43 (`:153-169`) answers
+the map line. The first use of a session asks the store for the price list and sends
+`MyShopPriceList <vnum> <price>` for each stored price, or `MyShopPriceList 1 0` when there is
+none. It then sends `__OpenPrivateShop`, which sends the `OpenPrivateShop` command while the shown
+body part is 0 to 2, `[i]Un GameMaster` to a game master, and `UNKNOWN_STRING_OPENPRIVATESHOP`
+otherwise (`:2176-2201`, `:2215-2228`). Later uses of the session send only `__OpenPrivateShop`
+(`m_bNoOpenedShop`, `G/char.cpp:185`, which the Rewrite clears on leaving). A bundle shop opened
+while the seller holds the botary stores each item's unit price (price divided by count, by vnum)
+in front of the stored ones, up to 40 (`G/char.cpp:905-937`, `D/Cache.cpp:226-307`). The store
+keeps them in the new table `myshop_pricelist` (migration 0046, module `db::myshop_pricelist`),
+whose `slot` holds the merged order. `MovedItems.price_list` carries them to `myshop_step`, which
+writes them before the item rows. The new scenario is
+`a_silk_botary_lists_the_stored_prices_and_opens_the_shop_window`.
+
+**A Defect of legacy, fixed: the unit price wraps.** Legacy keeps the unit price in a
+`std::map<DWORD, DWORD>` (`G/char.cpp:878`, `:905`) and writes it with `%u` into an unsigned
+`int(10)` column (`D/Cache.cpp:301`, `legacy/sql/schema/player.sql:747`), so a unit price above
+4,294,967,295 wraps. The Rewrite stores it as a `bigint`. A Defect row and a Divergence row
+record it.
+
+**A stone used from the soul inventory.** The dragon soul inventory window was refused as a use
+source. It is one now (`use_source`), and `use_item` sends an `ITEM_DS` stone through
+`use_checks` to the new `dragon_soul_use`. A stone that is not worn reaches `case ITEM_DS`
+(`G/char_item.cpp:3059-3063`) and returns false: the new `MoveKind::Unused` sends nothing,
+refuses nothing, and skips the item-feed tail, while the battle-pass use hook still counts it, as
+legacy runs that hook before the type switch (`:2822-2831`). A worn stone's `PullOut` is still not
+ported. In the owner's data only the 180 `ITEM_DS` protos carry `LIMIT_TIMER_BASED_ON_WEAR` (the
+same search finds 110000, its positive control), and the use arm of that limit is a bare `break`
+(`:2753-2755`). The new scenario `a_stone_in_the_soul_inventory_is_used_into_nothing` uses an
+unworn stone with 90 seconds left and sees nothing sent, socket 0 unchanged and the cell kept. The
+wear timer itself starts and stops with the deck (`G/DragonSoul.cpp:1241`, `:1262`), as
+`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero` already proves.
+
+**The pick-up ticket 70002** (`RENEWAL_PICKUP_AFFECT`, `C/prodomodefines.h:151`;
+`G/char_item.cpp:2852-2872`). `a_pickup_ticket_takes_a_kills_drop_into_the_inventory` now also
+proves the refusal while affect 811 holds: after `/pickup_affect`, a use answers
+` Pick-up Already Active.` and adds no row, and the ticket stays.
+
+**A costume worn by its use** (`G/char_item.cpp:3040-3053`).
+`each_wearable_type_is_worn_and_taken_off_by_its_use` now wears the untimed body costume 41319
+by its use and takes it off by a use of its wear cell. Taken off, the costume lands on cell 1190,
+the first cell of custom inventory category 5 (`GetEmptyInventory`, `:1201-1235`;
+`IsCustomCategory`, `G/item.cpp:3119-3129`).
+
+`use.item_unique.default.71049`, `use.limit.limit_timer_based_on_wear`, `use.item_quest` and
+`use.item_costume` are now `ported`.
+
+## 722. The capped bonuses, the party roles' points and the empire point exchange (B9)
+
+**A Defect of legacy, fixed: a capped bonus forgets what the cap cut.** `PointChange` cuts an add
+that would take a capped point past 100 to `100 - GetPoint(type)` (`G/char.cpp:4597-4632`) and
+forgets the cut. So two worn sources of 60 read 100, and taking them off reads 40 and then -20,
+which lasts until the next `ComputePoints`: a negative potion, drop, gold or exp bonus. The
+Rewrite did the same. `world::character::Points` now keeps the cut of each capped slot
+(`capped_excess`, helper `capped`), a take-back spends the cut first, and the recompute clears
+it; the records keep legacy's shape. The unit test `the_item_shop_and_double_bonuses_cap_at_100`
+now has 70 + 50 read 100, a -20 keep 100 (it read 80) and a -100 reach 0. The new scenario
+`the_capped_bonuses_stop_at_100_while_worn` wears three shaman hats 12620, each carrying applies
+43-46, 65-68 and 84 twice at 60 and the fall, stun and slow immunities at 1: each capped point
+sends 60 and then 100 on the wear and 60 and then 0 on the take-off (before the fix, 40 and -20);
+each immunity sends 1 and then 0 (`:4634-4673`). Legacy reads `IMMUNE_FALL` nowhere but in its own
+set and clear (`:4667`, `:4671`); the same search finds `IMMUNE_STUN` 9 times. A Defect row and a
+Divergence row record it, and it is listed for the owner because it changes numbers players meet.
+
+**The party roles' points** (`ComputeRolePoint`, `G/party.cpp:1215-1300`). In
+`a_party_role_lands_its_bonus_point_on_the_member_and_the_unset_clears_it`, a leader with
+leadership 40 (every seat open, `:1403-1409`) sets roles 2 to 7 on Yankee, whose skill group is 0,
+so the power is 0 (`G/skill_power.cpp:39-40`): the attacker point reads 10, the tanker 50, the
+buffer 5, the skill master 25, the haste 1 and the defender 5, and each unset takes its point
+back to 0.
+
+**A Rewrite gap, fixed: the empire point exchange.** A player killed by a player of another empire
+runs `PointChange(POINT_EMPIRE_POINT, -(iEP / 10))` on the victim and `(iEP / 5)` on the killer,
+`iEP` being the smaller of their points, after `ClearAffect` (`G/char_battle.cpp:1389-1396`);
+the arm sends `GetRealPoint` unchanged (`G/char.cpp:4699-4703`). Ledger 234 called it nothing to
+port, and neither record went out. `exchange_empire_points` in `prodomo/src/game_state/death.rs`
+now sends each its own record at 0 with no amount before its `GC_DEAD`, which
+`a_kingdom_kill_on_the_war_map_fans_the_score` asserts.
+
+**A Rewrite mistake, fixed: the private shop's slot unlock.** The unlock reply sets the point to 0
+and adds the opened count with no amount shown, before the key is spent
+(`G/input_db.cpp:2809-2811`, `G/char.cpp:4570`). The Rewrite showed the amount and sent the
+record after the key's `ITEM_SET`. `private_spend_key_and_grow`
+(`prodomo/src/game_state/private_shop.rs`) now matches, and
+`a_private_shop_renames_and_unlocks_its_slots` reads the point record first.
+
+**Arms the Rewrite already matched, now proven on the wire:**
+
+- `/stun` adds `AFFECT_STUN` on `POINT_NONE`, whose arm returns before any send
+  (`G/char_affect.cpp:799-800`, `G/char.cpp:3880-3881`):
+  `a_gm_stuns_a_character_and_the_target_hears_its_add`;
+- the inventory unlock knock sends `POINT_INVEN` at 1 with no amount (`G/char.cpp:11763-11788`,
+  `:4356-4366`): `an_unlock_knock_raises_the_inventory_point_by_one`;
+- the automatic spell potion 72727 pays what is missing into `POINT_SP_RECOVERY`
+  (`G/char_item.cpp:9935-9993`), and the affect tick moves `MIN(recovery, 600 * 7 / 100)` = 42 out
+  of it (`G/char_affect.cpp:190-200`):
+  `an_auto_spell_potion_pays_the_missing_spell_points_into_the_recovery`;
+- skill 94 raises `POINT_RESIST_NORMAL_DAMAGE`, skill 63 `POINT_HIT_HP_RECOVERY` and skill 79
+  `POINT_MANASHIELD` by their affects' values (`G/skill.cpp:68-75`):
+  `a_blessing_cast_raises_the_resist_normal_damage_point_by_its_value`,
+  `a_sura_toggle_raises_the_hit_hp_recovery_point_by_its_value` and
+  `a_dark_protection_raises_the_manashield_point_by_its_value`.
+
+**Unreachable with the owner's data, each with a controlled search:** `POINT_HIT_SP_RECOVERY` (no
+skill names `HIT_SP_RECOVER`, where `HIT_HP_RECOVER` is found once), `POINT_DEF_BONUS` (its one
+writer, the polymorph DEF arm at `G/polymorph.cpp:95-97`, reads `m_mapDEFType`, which nothing
+fills), `POINT_RAMADAN_CANDY_BONUS_EXP` and `POINT_VOICE` (no writer in the game, no apply row and
+no owner quest call). The costume table's texts for `POINT_MALL_DEFBONUS` and
+`POINT_MALL_EXPBONUS` copy legacy's own (`G/cmd_general.cpp:3031-3033`) and stay.
+
+Twenty-six `point.change` rows are now `ported` and four `unused`. `point_immune_stun` and
+`point_immune_slow` stay `partial`: their records are proven, and the refusal of a stun or a slow
+is covered only by unit tests, since every honest stun and slow is a draw. `point_mall_attbonus`
+stays `partial`: only the nog pocket and the ramadan candy add it, a second is refused while one
+holds, so its cap cannot be reached.
+
+## 723. The cloaked assassin's two wolves (the loss of ledger 717)
+
+`a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it` (ledger 638) lost one full run (ledger
+717) and 1 run in 120 alone at 24 in parallel: `await_found` waited 12 s for a swing on the bare
+feet and a `GC_OWNERSHIP` held by the second `/mob 131`. The scenario asked for an order legacy
+does not fix; the Rewrite's monster AI is not at fault.
+
+**Cause.** After the strip both wolves find Alpha (`G/char_state.cpp:651-694`,
+`G/trigger.cpp:59-174`) and swing on the same 2-second clock (`:1116-1123`, `:1172-1182`). Each
+swing calls `SetSyncOwner` on Alpha (`G/char_battle.cpp:299-302`), which refuses a new owner unless
+`IsSyncOwner` allows it (`G/char.cpp:5492-5494`): the holder, or anyone once the claim is 100 ms
+old under `ENABLE_FLY_FIX` (`:5577-5591`, `C/prodomodefines.h:70`). A refused claim sends nothing.
+So when the first wolf claims first and the second wolf's swing lands under 100 ms later, the
+second is refused, and because the two clocks keep their phase it is refused on every swing. The
+Rewrite does the same (`judge_sync_ownership`, `SYNC_CLAIM_LIFETIME` 100 ms). With temporary
+logging, 6 losses in 576 runs at 24 in parallel all showed it: the swings and claims arrived, all
+by the first wolf, and the second wolf swung 40 to 80 ms after each claim.
+
+A second, rarer loss had the same nature: `/mob` tries 16 points in a box of 200 to 750 on a side
+(`G/cmd_gm.cpp:745-754`) and stands nothing when `SpawnMob` refuses all 16
+(`G/char_manager.cpp:390-430`, `:483-503`). One loss in 144 read a swing before any insert, with
+only one wolf ever finding Alpha [INFERENCE: the 16 refusals were not logged in that run].
+
+**Fix, in the scenario only.** Both wolves stand with `/mob_ld 131 4701 9500`, which stands the
+mob on the given point (`G/cmd_gm.cpp:760-815`), here Alpha's, and `mob_at_feet` asserts the
+insert point. `await_found` accepts the claim of either wolf (`ownership_of(wolf, alpha)` exactly)
+and asserts the swing is on Alpha. `mob_at_feet` keeps the swings and claims it reads before the
+second insert for `await_found`, as the first wolf may swing first; at the first call it asserts
+there are none. The 12 s deadline is unchanged. 288 runs at 24 in parallel: 288 passed. With
+`claim_pc`'s ownership record removed the scenario fails in `await_found`; with `find_victim`'s
+`EUNHYUNG` skip removed it fails on "nothing swings at the cloak".
+
+## 724. The instant drinks, the slow blue potion, and the potion duel gate (B9)
+
+**The two `USE_POTION_NODELAY` arms.** Both drink the same way (`G/char_item.cpp:3480-3544`,
+`:5618-5679`). Each of four values applies only while its pool is below the maximum at that
+moment, in the order HP flat, SP flat, HP%, SP% (`:3483-3521`, `:5620-5658`): a flat value adds
+`value * (100 + POINT_POTION_BONUS) / 100`, a percentage adds `value * Max / 100`, and each
+applied value sends its effect (red 1, blue 2). `PointChange` caps the pool at its maximum
+(`G/char.cpp:4248-4275`). The spend and `m_nPotionLimit--` happen only when something changed
+(`:3523-3541`, `:5660-5678`). `drink_at_once` (`world/src/character/potion.rs`) already did all
+of this; the new scenarios prove it.
+
+`a_508xx_instant_potion_pays_its_pool_and_a_508xx_slow_potion_does_nothing` drinks 50803 (+50 SP),
+50815 (+100 SP, capped at 600), 50804 (+50 HP) and 50816 (+100 HP); a second 50803 at full SP is
+kept. No owner proto reaches the `value(3)`/`value(4)` branches (`:3503-3521`): no
+`USE_POTION_NODELAY` row in 50801-50820 has a non-zero `value3` or `value4`, while outside the
+range 39011-39013, 71018-71020 and 72311 do.
+`an_instant_potion_pays_its_points_at_once_and_one_with_full_pools_is_kept` starts Alpha at
+500/1420 HP and 100/600 SP: 30321 adds 300 HP (red) then 100 SP (blue), in that order, and one of
+two is spent; 27875 adds 230 HP and is the last one spent; 71018 (`value3` 100) fills HP to 1420,
+and a second at full HP is kept and silent; 71020 (100% of both) skips the full HP pool and fills
+SP to 600 with the blue effect only; 27876, 71019 and 30321 at full pools are kept and silent.
+
+**The SP branch of `USE_POTION`.** `value(1)` times `MIN(200, 100 + bonus) / 100` goes to
+`POINT_SP_RECOVERY` with the blue effect, and one potion is spent (`G/char_item.cpp:5723-5733`).
+If `POINT_SP_RECOVERY + SP >= MaxSP` (`:5725-5728`), the potion is refused silently and kept.
+`a_blue_potion_owes_its_spell_points_and_one_the_recovery_fills_is_kept` starts Alpha at 100/600
+SP and drinks 27004 (100 owed), then 27006 (400 more); 27005 is then kept. The affect event pays
+`MIN(owed, 42)`, 7% of 600 (`G/char_affect.cpp:190-201`). The HP branch was ledger 218's. No
+owner proto reaches the SP-then-HP partial refusal (`:5735-5740` after `:5723-5733`): no
+`USE_POTION` row has both `value0` and `value1` non-zero, while among `USE_POTION_NODELAY` 30321
+and 50086 do; the unit test
+`a_slow_potion_refused_on_hit_points_keeps_its_spell_point_recovery_and_the_potion` pins the path.
+
+**A Rewrite mistake, fixed: the potion arms' duel gate.** Under `ENABLE_NEWSTUFF`
+(`C/prodomodefines.h:11`), each potion arm checks `g_NoPotionsOnPVP && CPVPManager::IsFighting &&
+!IsAllowedPotionOnPVP(vnum)` and answers `[LS;1205]`, keeping the potion
+(`G/char_item.cpp:3473-3479`, `:5610-5616`, `:5715-5721`). `IsAllowedPotionOnPVP` names only the
+ten blue potions (`G/arena.cpp:1105-1124`), so the gate refuses every other potion. `UseItemEx`'s
+head refuses only limited potions that are not allowed (`:2769-2775`, `IsLimitedPotionOnPVP`),
+and the Rewrite had ported only that head gate, so a duellist with the flag up could drink any
+unlimited potion. `potion_arm_allowed` in `prodomo/src/game_state/use_to_item.rs` now runs the
+arena lists on an arena map and the duel gate elsewhere, matching legacy's `if arena ... else if
+pvp`. `a_duellist_with_the_flag_up_hears_1205_for_every_potion_but_the_blue_ones` shows it (27875
+in the second arm, 27001 refused and 27004 passing in `USE_POTION`). Nothing reaches the first
+arm's gate: the head already refuses every 50801-50826 with `[LS;1205]` (`IsLimitedPotion` names
+the range, `:1131-1135`).
+
+**A Rewrite mistake, fixed: the 508xx `USE_POTION`.** A 50801-50820 item of sub-type `USE_POTION`
+answered `NotPorted(UseVnum)`. The branch's switch has no `USE_POTION` case and legacy returns
+true (`G/char_item.cpp:3385-3547`); the owner's 50805-50812 are such items, with all values 0.
+`use_potion` now answers a `Used` step with no records and no changes, so the after-use hooks
+legacy's `true` reaches run: the battle-pass `USE_ITEM` count and the `UseItem` stack feed
+(`:7395-7400`), which change nothing with the owner's data. The wire is unchanged; the unit test
+pins the step.
+
+**Hooks with no visible effect, not ported:** `SetUseSeedOrMoonBottleTime` (`:3529`, `:5666`),
+whose getter has no caller in the game; `CDungeon::UsePotion`, which only `d.is_use_potion`
+reads (an `unused` row); and `CWarMap::UsePotion`, whose price `RequestWarOver` drops
+(`G/guild_manager.cpp:522-523`).
+
+Five `use.item_use` rows are now `ported`.
+
+## 725. The event detector's tiers, the stone detector's sixth use, and the portal recall's payment (B9)
+
+**The event detector 50004** (`G/char_item.cpp:4007-4224`). A fresh detector buries its stone with
+`GetRandomLocation(iMapIndex, pos, 700)`, whose third parameter is `dwCurrentX` and whose
+`iMaxDistance` stays at its default 0 (`G/sectree_manager.h:151`, `:876-940`), so the stone can
+lie anywhere on the map; the Rewrite clamped it to 700 around the user, and
+`a_fresh_event_detector_buries_its_stone_anywhere_on_the_map` now proves the open bury. The
+previous bury-and-find scenario depended on the clamp and is replaced. The tier pick is 4 or
+less, 7 or less, else the 10-table (`:4116-4122`, unit-pinned at the edges); a 50001 roll gives
+the lotto ticket (`:4133-4146`); at 10 tries the detector burns out: `[LS;176]`, the removal,
+then the 27002 consolation (`:4187-4193`). Record order follows legacy, including a stacking
+prize's `SetCount`-then-receipt and a new cell's receipt-then-`AddToCharacter`
+(`G/char_item.cpp:9081-9220`). `a_used_event_detector_pays_by_its_tier_points_and_burns_out_at_ten`
+proves it.
+
+**A Defect of legacy, fixed: the lotto ticket's second socket.** At the 50004 call site `pdw` is
+`M2_NEW DWORD[2]`, holding the vnum and the count (`G/char_item.cpp:4135-4143`). The `QID_LOTTO`
+return handler then runs `pkItem->SetSocket(1, pdw[2])` (`G/db.cpp:507-535`), one element past the
+end of the array, so socket1 is heap garbage. The other two callers allocate `DWORD[3]` and put
+the `lotto_round` event flag in `pdw[2]` (`G/item_manager.cpp:1307-1316`,
+`G/questlua_pc.cpp:1758-1765`). The Rewrite sets socket1 to `lotto_round`, as those callers do
+(`give_lotto_ticket` in `prodomo/src/game_state/stone_recipe.rs`). A Defect row and a Divergence
+row record it. The ticket's first socket carries the ticket's own item id, since the Rewrite has
+no `lotto_list` table.
+
+**The stone detector's sixth use.** Socket 0 rises by 1 (`G/char_item.cpp:4233`); the nearest
+stone is named with its band and degree (`:4240-4276`); the sixth use sends `StoneDetect <vid> 0
+0` and removes the detector (`:4279-4283`), proved by
+`a_detector_names_the_stone_a_sixth_time_and_then_breaks` for both 27989 and 76006. Legacy swaps
+the two y values in `GetDegreeFromPositionXY(GetX(), stone.y, stone.x, GetY())` (`:4267`,
+`G/vector.cpp:49-51`), so a stone at (+500, +500) reads 135 degrees; the Rewrite read 45, and the
+two naming scenarios asserted it. The Rewrite mistake is fixed and the scenarios corrected.
+
+**A Rewrite mistake, fixed: the talisman recall's payment.** A marked memory portal pays
+`PointChange(POINT_HP, -consumeLife)` before `ProcessRecallItem` (`G/char_item.cpp:5947-5954`),
+which spends one portal only when the recall goes (`:2171-2172`); a marked town portal recalls
+with no payment (`:5924-5930`). The Rewrite spent the portal up front and paid on both arms.
+`use_portal` now pays the memory consume in the world step ahead of the lines, and the recall
+spends only after `order_warp`.
+`a_memory_portal_pays_for_a_foreign_mark_and_a_marked_town_portal_recalls_free` proves both, and
+`no_portal_runs_on_the_ox_map` proves the map 200/113 gate (`:5869-5873`), which was already
+ported.
+
+Four `use.item_use` rows are now `ported`. The `USE_SPECIAL` parent stays `partial`: only the
+fish mind pill 27610 (`:4401-4404`, an `AddAffect` of 20 minutes) has no inventory row, and two
+nested switches (71109's on the target type, 50011's `CSpecialItemGroup` one) have none either.
+
+## 726. Two waits anchored at the send, and a point stray let through (the losses of ledgers 720-721)
+
+The 720-721 gate run (g721) lost two scenarios, both in the scenario, not the Rewrite. The g720
+run (720 only) had lost six more under heavy worker-build load; none recurred.
+
+**The revive wait's clock.** `a_unique_is_worn_and_taken_off_by_its_use` lost with `[432, 0, 0]`:
+a third look, the revive end's flag-clearing update, landed in the wear's drain. The scenario
+sleeps 5.2 s from `entered_at`, stamped before the login, but the server's five seconds start at
+`CG_ENTER_GAME`, and on a loaded host the login alone takes seconds. The wait is now stamped at
+the send on all four `drain_revive_end` callers, and the helper says so. 48 runs at 24 in
+parallel: 48 passed.
+
+**The relogin tail's stray.** `a_friend_request_answered_yes...` lost in `drain_relogin_tail`,
+reading a 25-byte point record (kind 9, stamina) where it expected the 35-byte second update: a
+stamina refill tick of Yankee's own. The drain now lets a stamina refill through while matching
+the tail. 48 runs at 24 in parallel: 48 passed.
+
+No inventory row changes; the Rewrite is untouched.
+
+
+Gates (2026-11-18), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,721
+passed, 0 failed in 46 targets; with it 5,721 passed, 0 failed in 46 targets (486 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No test failed on the first run. The 720-721 run (g721) had lost `a_unique_is_worn_and_taken_off_by_its_use` and `a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it`; both were scenario clocks (ledger 726) and are fixed in this tree.
+Parity: 1,716 `ported`, 93 `partial`, 518 `unused`, 4 `missing`, 0 `codec`, of 2,331 rows; 577 scenarios. No ADR changed.

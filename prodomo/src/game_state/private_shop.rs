@@ -3699,11 +3699,9 @@ impl GameState {
             )
         };
         let _ = key;
-        let mut done = MoveDone {
-            kind: MoveKind::Removed,
-            records: done.records,
-            changes: done.changes,
-        };
+        // `SetPoint(.., 0)` then `PointChange(.., wUnlockedSlots)` with no amount shown, and
+        // its record before the key's removal (`G/input_db.cpp:2809-2811`).
+        let mut records = Vec::new();
         if let Some(points) = self
             .characters
             .find_by_vid_mut(vid)
@@ -3712,16 +3710,21 @@ impl GameState {
         {
             let now = points.get_point(common::point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT);
             let grow = i32::from(slots) - now;
-            if let Ok(records) = points.point_change(
+            if let Ok(changed) = points.point_change(
                 common::point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT,
                 grow,
-                true,
+                false,
                 false,
             ) {
-                done.records
-                    .extend(records.into_iter().map(MoveRecord::Point));
+                records.extend(changed.into_iter().map(MoveRecord::Point));
             }
         }
+        records.extend(done.records);
+        let done = MoveDone {
+            kind: MoveKind::Removed,
+            records,
+            changes: done.changes,
+        };
         let mut moved = MovedItems::new(pid, vid.raw(), done, actor, &protos, &self.locale);
         if let Ok(character) = self.characters.find_by_vid(vid) {
             moved.points = character.points().cloned();

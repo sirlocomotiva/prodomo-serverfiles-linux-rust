@@ -243,6 +243,13 @@ pub enum MoveKind {
     /// An extractor was used on a dragon soul stone (`case ITEM_EXTRACT`,
     /// `G/char_item.cpp:7111-7141`): the heart melted or the worn stone pulled out.
     Extracted,
+    /// The silk botary was used and kept (`case 71049`, `G/char_item.cpp:3008-3023`): the
+    /// game state runs the zone gate and `UseSilkBotary` (`:2655-2664`).
+    Botary,
+    /// The use passed its checks and `UseItemEx` returned false with nothing changed: a dragon
+    /// soul stone that is not worn (`case ITEM_DS`, `G/char_item.cpp:3059-3065`). The use hook
+    /// before the type switch counted it; the item feed after a true return does not run.
+    Unused,
 }
 
 /// A record the client is sent, in the order legacy sends it.

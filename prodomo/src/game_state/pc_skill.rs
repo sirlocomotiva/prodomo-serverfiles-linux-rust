@@ -746,22 +746,12 @@ impl GameState {
             self.send_point_records(vid, &charged);
         }
         let mut climbed = level.saturating_add(1).min(40);
-        if row.skill_type != 0 {
-            match master_of(climbed) {
-                SKILL_NORMAL if climbed >= 17 => {
-                    climbed = 20;
-                }
-                SKILL_MASTER if climbed >= 30 => {
-                    let window = 31 - i32::from(climbed.min(30));
-                    if number(&mut self.dice, 1, window) == 1 {
-                        climbed = 30;
-                    }
-                }
-                SKILL_GRAND_MASTER if climbed >= 40 => {
-                    climbed = 40;
-                }
-                _ => {}
-            }
+        // The typed jump (`:852-888`) reads the master type `SetSkillLevel` just set from
+        // the new level (`:204-211`): NORMAL is below 20, so its `>= 17` arm lands 20
+        // (`ENABLE_FORCE2MASTERSKILL`, `:31`); MASTER is 20-29 and GRAND 30-39, so their
+        // `>= 30` draw (`:875-880`) and `>= 40` set (`:882-887`) never fire.
+        if row.skill_type != 0 && master_of(climbed) == SKILL_NORMAL && climbed >= 17 {
+            climbed = 20;
         }
         self.pc_skill_state(vid.raw()).levels[vnum as usize] = climbed;
         if vnum == SKILL_ADD_HP {

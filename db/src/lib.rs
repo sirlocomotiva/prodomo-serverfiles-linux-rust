@@ -17,6 +17,7 @@ pub mod item_id_range;
 pub mod items;
 pub mod messenger;
 pub mod monarch;
+pub mod myshop_pricelist;
 pub mod player_affects;
 pub mod player_skills;
 pub mod player_top;

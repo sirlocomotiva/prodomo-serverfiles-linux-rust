@@ -11599,6 +11599,158 @@ fn every_plain_apply_type_raises_its_own_point_while_worn() {
     }
 }
 
+/// `point.change.*` capped and immunity arms: the apply types whose point `PointChange`
+/// caps at 100 (`G/char.cpp:4597-4632`) and the three immunity points (`:4634-4673`).
+///
+/// Alpha holds three [`SHAMAN_HAT`] rows; each carries two of its capped apply types twice
+/// at 60 (three types on the last) and one immunity type at 1. `ModifyPoints` hands every
+/// attribute to `PointChange` on its own (`G/item.cpp:1034-1037`), so the wear sends each
+/// capped point twice: 60, then 100, where the second add of 60 is cut to what the cap
+/// leaves. Each immunity point reads 1 while worn and 0 after the take-off.
+///
+/// The take-off is the fixed Defect: legacy forgets the 20 the cap cut, so its two
+/// take-backs of 60 leave 40, then -20, with no source left. The Rewrite keeps the
+/// cut and spends it first: the take-off sends 60, then 0.
+#[test]
+fn the_capped_bonuses_stop_at_100_while_worn() {
+    const HATS: [[(u8, u8, i16); 7]; 3] = [
+        [
+            (43, 83, 60),
+            (43, 83, 60),
+            (44, 84, 60),
+            (44, 84, 60),
+            (45, 85, 60),
+            (45, 85, 60),
+            (48, 88, 1),
+        ],
+        [
+            (46, 86, 60),
+            (46, 86, 60),
+            (65, 115, 60),
+            (65, 115, 60),
+            (66, 116, 60),
+            (66, 116, 60),
+            (49, 89, 1),
+        ],
+        [
+            (67, 117, 60),
+            (67, 117, 60),
+            (68, 118, 60),
+            (68, 118, 60),
+            (84, 132, 60),
+            (84, 132, 60),
+            (50, 90, 1),
+        ],
+    ];
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (cell, hat) in HATS.iter().enumerate() {
+        let columns = (0..hat.len())
+            .map(|slot| format!("attrtype{slot}, attrvalue{slot}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = hat
+            .iter()
+            .map(|(apply, _, value)| format!("{apply}, {value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, {columns}) \
+                 SELECT {}, id, 1, {cell}, 1, {SHAMAN_HAT}, {values} FROM player \
+                 WHERE name = 'Alpha'",
+                30 + cell
+            ),
+        );
+    }
+    let (mut alpha, _character, _quickslots, items) =
+        load_with_quickslots_in(&server, b"alice", 0, GERMAN);
+    assert_eq!(items.len(), 3);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    let of = |seen: &[Seen], kind: u8| -> Vec<i64> {
+        point_records(seen)
+            .into_iter()
+            .filter(|(at, _)| *at == kind)
+            .map(|(_, value)| value)
+            .collect()
+    };
+    std::thread::sleep(Duration::from_millis(1600));
+    for (cell, hat) in HATS.iter().enumerate() {
+        let cell = u16::try_from(cell).expect("a cell");
+        alpha.send_record(&client_item_move(cell, 181, 0));
+        let worn = read_a_move(&mut alpha, vid);
+        assert_eq!(worn[..2], [Seen::Set(cell, 0), Seen::Set(181, SHAMAN_HAT)]);
+        alpha.send_record(&client_item_move(181, cell, 0));
+        let off = read_a_move(&mut alpha, vid);
+        assert!(off.contains(&Seen::Set(cell, SHAMAN_HAT)), "{off:?}");
+        for &(apply, kind, _) in hat.iter().step_by(2) {
+            if matches!(apply, 48..=50) {
+                assert_eq!(of(&worn, kind), [1], "immunity {kind} worn: {worn:?}");
+                assert_eq!(of(&off, kind), [0], "immunity {kind} off: {off:?}");
+            } else {
+                assert_eq!(of(&worn, kind), [60, 100], "point {kind} worn: {worn:?}");
+                assert_eq!(of(&off, kind), [60, 0], "point {kind} off: {off:?}");
+            }
+        }
+    }
+}
+
+/// `point.change.point_inven` (`G/char.cpp:4356-4366`), reached through the unlock knock
+/// (`ENVANTER_BLACK`, `CInputMain::InventoryExpansion` → `Update_Inven`,
+/// `G/input_main.cpp:1069-1075`, `G/char.cpp:11763-11788`): Alpha holds the two keys
+/// (72319) the first row costs, knocks, and `PointChange(POINT_INVEN, 1, false)` sends the
+/// point at 1 with no amount shown. The logout stores the unlock.
+#[test]
+fn an_unlock_knock_raises_the_inventory_point_by_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, 2, \
+         72319 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    let kind = u8::try_from(common::point_slot::POINT_INVEN).expect("a point byte");
+    alpha.send_record(&[0xe2]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let unlocked = loop {
+        let record = alpha
+            .read_game_until(deadline)
+            .expect("the unlock's point record");
+        if record[0] == GC_POINT_CHANGE && record[8] == kind {
+            break record;
+        }
+    };
+    assert_eq!(
+        unlocked,
+        point_change(listed.id, kind, 0, 1),
+        "one row, no amount"
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    check(
+        &database,
+        "(SELECT envanter = 1 FROM player WHERE name = 'Alpha') \
+         AND NOT EXISTS (SELECT 1 FROM item WHERE vnum = 72319)",
+    );
+}
+
 /// The apply types of [`every_apply_type_with_its_own_arm_moves_its_points_as_legacy`]
 /// and the value each hat carries.
 const SPECIAL_APPLIES: [(u8, i16); 10] = [
@@ -11982,8 +12134,13 @@ fn a_costume_weapon_covers_and_a_hide_unhides() {
     );
 }
 
-/// Past the move window and the revive affect's five seconds since `entered`, drained
-/// so the affect end's pair lands here and not in a move's window.
+/// Past the move window (the entry itself took most of it) and the revive affect's
+/// five seconds since the enter, drained so the affect end's pair lands here and not
+/// in a move's window. `entered` must be stamped right before the client's
+/// `CG_ENTER_GAME` send (as after [`enter_game_shown`]'s own), not before the login:
+/// on a loaded host the login alone takes seconds, and the five seconds then end
+/// inside the move's drain. The pair is read by shape, not assumed: the sleep may
+/// still straddle the expiry.
 fn drain_revive_end(alpha: &mut Keyed, entered: std::time::Instant) {
     std::thread::sleep(Duration::from_millis(5200).saturating_sub(entered.elapsed()));
     let (ends, quiet) = alpha.drain_game(Duration::from_millis(700), |header| match header {
@@ -12462,6 +12619,396 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
     );
 }
 
+/// One record of a drink scenario step, as [`read_drink`] answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Drunk {
+    /// A `GC_CHARACTER_POINT_CHANGE` an effect follows: the kind, and the pool's value
+    /// before and after it.
+    Point(u8, i64, i64),
+    /// A `GC_SEPCIAL_EFFECT`: the type.
+    Effect(u8),
+    /// A `GC_ITEM_SET` of the base window: the cell and the vnum, 0 for a clear.
+    Set(u16, u32),
+    /// A `GC_ITEM_UPDATE` of the base window: the cell and the new count.
+    Count(u16, u16),
+}
+
+/// A point slot as the `GC_CHARACTER_POINT_CHANGE` byte names it.
+fn point_byte(slot: usize) -> u8 {
+    u8::try_from(slot).expect("a point byte")
+}
+
+/// The pools a drink scenario follows, at their seeded values: the hit and spell points
+/// and their two recoveries.
+fn drink_pools(hp: i64, sp: i64) -> HashMap<u8, i64> {
+    use common::point_slot::{POINT_HP, POINT_HP_RECOVERY, POINT_SP, POINT_SP_RECOVERY};
+    [
+        (POINT_HP, hp),
+        (POINT_SP, sp),
+        (POINT_HP_RECOVERY, 0),
+        (POINT_SP_RECOVERY, 0),
+    ]
+    .into_iter()
+    .map(|(slot, value)| (point_byte(slot), value))
+    .collect()
+}
+
+/// Give Alpha one `INVENTORY` row per potion, id 30 at cell 0 and on, each checked against
+/// the owner's data: `(vnum, count, sub type, [value0, value1, value3, value4])`.
+fn give_alpha_potions(database: &ScratchDatabase, potions: &[(u32, u16, i32, [i32; 4])]) {
+    let protos = owners_protos();
+    for (cell, (vnum, count, sub_type, values)) in potions.iter().enumerate() {
+        let proto = protos.get(*vnum).expect("the owner's data has the potion");
+        assert_eq!(
+            (proto.item_type, proto.sub_type),
+            (gamedata::item_kind::ITEM_USE, *sub_type),
+            "{vnum}'s type"
+        );
+        let [hp, sp, hp_pct, sp_pct] = *values;
+        assert_eq!(
+            [
+                proto.values[0],
+                proto.values[1],
+                proto.values[3],
+                proto.values[4]
+            ],
+            [hp, sp, hp_pct, sp_pct],
+            "{vnum}'s values"
+        );
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {}, id, 1, \
+                 {cell}, {count}, {vnum} FROM player WHERE name = 'Alpha'",
+                30 + cell
+            ),
+        );
+    }
+}
+
+/// Read one step of a drink scenario up to the item record of `cell`, and answer its
+/// records. A point record an effect follows is the drink's, answered with the pool before
+/// it; any other point record lands on a clock of its own (the heal, the spirit's
+/// `DistributeSP`, the recovery's pay, ledger 229l) and only moves `pools`. The revive
+/// affect's end and its look, on their own clock too, are stepped over.
+fn read_drink(keyed: &mut Keyed, vid: u32, cell: u16, pools: &mut HashMap<u8, i64>) -> Vec<Drunk> {
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut read = Vec::new();
+    loop {
+        let record = keyed
+            .read_game_until(deadline)
+            .unwrap_or_else(|| panic!("cell {cell}'s item record after {read:?}"));
+        let seen = match record[0] {
+            GC_POINT_CHANGE => {
+                assert_eq!(&record[4..8], &vid.to_le_bytes(), "the drinker's VID");
+                let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+                Drunk::Point(record[8], 0, value)
+            }
+            GC_SPECIAL_EFFECT => {
+                assert_eq!(&record[2..6], &vid.to_le_bytes(), "the drinker's VID");
+                Drunk::Effect(record[1])
+            }
+            ITEM_SET => {
+                let (window, at, vnum, _count) = set_fields(&record);
+                assert_eq!(window, inventory);
+                Drunk::Set(at, vnum)
+            }
+            ITEM_UPDATE => {
+                let (window, at, count) = update_fields(&record);
+                assert_eq!(window, inventory);
+                Drunk::Count(at, count)
+            }
+            GC_AFFECT_REMOVE | GC_CHARACTER_UPDATE => continue,
+            other => panic!("a record no drink accounts for: header {other}"),
+        };
+        let last = matches!(seen, Drunk::Set(at, _) | Drunk::Count(at, _) if at == cell);
+        read.push(seen);
+        if last {
+            break;
+        }
+    }
+    let mut drunk = Vec::with_capacity(read.len());
+    for (index, seen) in read.iter().enumerate() {
+        if let Drunk::Point(kind, _, value) = *seen {
+            let before = pools
+                .insert(kind, value)
+                .unwrap_or_else(|| panic!("point {kind} is a followed pool"));
+            if matches!(read.get(index + 1), Some(Drunk::Effect(_))) {
+                drunk.push(Drunk::Point(kind, before, value));
+            }
+        } else {
+            drunk.push(seen.clone());
+        }
+    }
+    drunk
+}
+
+/// The pool before the `nth` drink point of `drunk`, or -1 when there is none, which no
+/// expected record names.
+fn before_of(drunk: &[Drunk], nth: usize) -> i64 {
+    drunk
+        .iter()
+        .filter_map(|seen| match seen {
+            Drunk::Point(_, before, _) => Some(*before),
+            _ => None,
+        })
+        .nth(nth)
+        .unwrap_or(-1)
+}
+
+/// Read until the affect event pays `pool` out of `recovery` once
+/// (`CHARACTER::UpdateAffect`, `G/char_affect.cpp:175-201`), folding the other clocks'
+/// records into `pools`, and assert the pay: `MIN(owed, max * 7 / 100)` leaves the
+/// recovery and the pool takes it, held at `max`; a full pool drops the whole recovery.
+fn read_recovery_pay(
+    keyed: &mut Keyed,
+    vid: u32,
+    (pool, recovery): (u8, u8),
+    max: i64,
+    pools: &mut HashMap<u8, i64>,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut pool_record: Option<(i64, i64)> = None;
+    loop {
+        let record = keyed
+            .read_game_until(deadline)
+            .expect("the affect event pays within a few seconds");
+        if matches!(record[0], GC_AFFECT_REMOVE | GC_CHARACTER_UPDATE) {
+            continue;
+        }
+        assert_eq!(record[0], GC_POINT_CHANGE, "a pool record: {record:02x?}");
+        assert_eq!(&record[4..8], &vid.to_le_bytes(), "the drinker's VID");
+        let (kind, value) = (
+            record[8],
+            i64::from_le_bytes(record[17..25].try_into().expect("eight bytes")),
+        );
+        let before = pools
+            .insert(kind, value)
+            .unwrap_or_else(|| panic!("point {kind} is a followed pool"));
+        if kind == recovery {
+            let paid = before - value;
+            match pool_record {
+                Some((pool_before, pool_after)) if pool_before < max => {
+                    assert_eq!(paid, before.min(max * 7 / 100), "the pay's share");
+                    assert_eq!(
+                        pool_after,
+                        (pool_before + paid).min(max),
+                        "the pool takes it"
+                    );
+                }
+                _ => assert_eq!(value, 0, "a full pool drops the recovery"),
+            }
+            return;
+        }
+        pool_record = (kind == pool).then_some((before, value));
+    }
+}
+
+/// `cg.game.item_use` of the `USE_POTION` blue potions (`G/char_item.cpp:5683-5755`): the
+/// spell point value goes to `POINT_SP_RECOVERY`, times `MIN(200, 100 + POINT_POTION_BONUS)`
+/// over 100 (Alpha has no bonus), with the blue effect, and one of the stack is spent; a
+/// potion whose pool the recovery already fills (`POINT_SP_RECOVERY + SP >= MaxSP`,
+/// `:5725-5728`) is refused silently and kept; and the affect event pays 7% of the maximum a
+/// second into the pool (`G/char_affect.cpp:190-201`).
+///
+/// Alpha, at 100 of 600 spell points and full hit points, drinks 27004 (100), then 27006
+/// (400): the pool and what is owed then make 600, the maximum, so 27005 (250) is kept. An
+/// item move after it shows nothing came of the refused one.
+#[test]
+fn a_blue_potion_owes_its_spell_points_and_one_the_recovery_fills_is_kept() {
+    use common::point_slot::{POINT_SP, POINT_SP_RECOVERY};
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 1420, sp = 100 WHERE name = 'Alpha'",
+    );
+    let use_potion = gamedata::item_kind::USE_POTION;
+    give_alpha_potions(
+        &database,
+        &[
+            (27_004, 1, use_potion, [0, 100, 0, 0]),
+            (27_006, 1, use_potion, [0, 400, 0, 0]),
+            (27_005, 1, use_potion, [0, 250, 0, 0]),
+        ],
+    );
+    let (sp, owed) = (point_byte(POINT_SP), point_byte(POINT_SP_RECOVERY));
+    let mut pools = drink_pools(1420, 100);
+    let (mut alpha, _listed, entered) = enter_world_seeing(&server, b"alice", 0);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    std::thread::sleep(Duration::from_millis(1600));
+
+    // When: Alpha drinks 27004. Then: 100 owed, the blue effect, the cell cleared.
+    alpha.send_record(&client_item_use(0));
+    let drunk = read_drink(&mut alpha, vid, 0, &mut pools);
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(owed, 0, 100),
+            Drunk::Effect(2),
+            Drunk::Set(0, 0)
+        ]
+    );
+    // When: 27006. Then: 400 more owed on what the event has not paid yet.
+    alpha.send_record(&client_item_use(1));
+    let drunk = read_drink(&mut alpha, vid, 1, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(owed, before, before + 400),
+            Drunk::Effect(2),
+            Drunk::Set(1, 0)
+        ]
+    );
+    // When: 27005, whose pool the recovery fills, then a move of it to cell 10. Then: only
+    // the move's records.
+    alpha.send_record(&client_item_use(2));
+    alpha.send_record(&client_item_move(2, 10, 0));
+    assert_eq!(
+        read_drink(&mut alpha, vid, 10, &mut pools),
+        [Drunk::Set(2, 0), Drunk::Set(10, 27_005)],
+        "the refused potion sends nothing"
+    );
+    check(
+        &database,
+        "(SELECT array_agg((id, pos, count) ORDER BY id)::text FROM item) = '{\"(32,10,1)\"}'",
+    );
+    // And: the event pays 42, 7% of 600, out of what is owed.
+    read_recovery_pay(&mut alpha, vid, (sp, owed), 600, &mut pools);
+}
+
+/// `cg.game.item_use` of the `USE_POTION_NODELAY` potions outside 50801-50820
+/// (`G/char_item.cpp:5579-5681`): `value(0)` and `value(1)` add hit and spell points times
+/// `(100 + POINT_POTION_BONUS) / 100` (Alpha has no bonus), `value(3)` and `value(4)` add
+/// that percentage of the maximum, each only while its pool is below the maximum and each
+/// with its effect (red 1, blue 2), held at the maximum (`G/char.cpp:4248-4275`); a potion
+/// that changed something is spent, one that changed nothing is kept silently.
+///
+/// Alpha, at 500 of 1420 hit points and 100 of 600 spell points, drinks 30321 (300 and 100),
+/// 27875 (230) and 71018 (100%), which fills the hit points; a second 71018 is kept; 71020
+/// (100% of both) skips the full hit points and fills the spell points; then 27876 (500),
+/// 71019 (100%) and 30321 are kept, and an item move after them shows nothing came of them.
+#[test]
+fn an_instant_potion_pays_its_points_at_once_and_one_with_full_pools_is_kept() {
+    use common::point_slot::{POINT_HP, POINT_SP};
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 500, sp = 100 WHERE name = 'Alpha'",
+    );
+    let nodelay = gamedata::item_kind::USE_POTION_NODELAY;
+    give_alpha_potions(
+        &database,
+        &[
+            (30_321, 2, nodelay, [300, 100, 0, 0]),
+            (27_875, 1, nodelay, [230, 0, 0, 0]),
+            (71_018, 2, nodelay, [0, 0, 100, 0]),
+            (27_876, 1, nodelay, [0, 500, 0, 0]),
+            (71_020, 1, nodelay, [0, 0, 100, 100]),
+            (71_019, 1, nodelay, [0, 0, 0, 100]),
+        ],
+    );
+    let (hp, sp) = (point_byte(POINT_HP), point_byte(POINT_SP));
+    let mut pools = drink_pools(500, 100);
+    let (mut alpha, _listed, entered) = enter_world_seeing(&server, b"alice", 0);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    std::thread::sleep(Duration::from_millis(1600));
+
+    // When: 30321. Then: 300 hit points and the red effect, 100 spell points and the blue
+    // one, in that order, and one of two spent.
+    alpha.send_record(&client_item_use(0));
+    let drunk = read_drink(&mut alpha, vid, 0, &mut pools);
+    let (hp_before, sp_before) = (before_of(&drunk, 0), before_of(&drunk, 1));
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(hp, hp_before, hp_before + 300),
+            Drunk::Effect(1),
+            Drunk::Point(sp, sp_before, sp_before + 100),
+            Drunk::Effect(2),
+            Drunk::Count(0, 1)
+        ]
+    );
+    // When: 27875. Then: 230 hit points, the last one spent.
+    alpha.send_record(&client_item_use(1));
+    let drunk = read_drink(&mut alpha, vid, 1, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(hp, before, before + 230),
+            Drunk::Effect(1),
+            Drunk::Set(1, 0)
+        ]
+    );
+    // When: 71018. Then: 100% of 1420 on top, held at 1420.
+    alpha.send_record(&client_item_use(2));
+    let drunk = read_drink(&mut alpha, vid, 2, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert!(before < 1420, "the pool was below its maximum");
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(hp, before, 1420),
+            Drunk::Effect(1),
+            Drunk::Count(2, 1)
+        ]
+    );
+    // When: a second 71018 at full hit points, then 71020. Then: only 71020's spell
+    // points, 100% of 600 held at 600; its hit point half skips the full pool.
+    alpha.send_record(&client_item_use(2));
+    alpha.send_record(&client_item_use(4));
+    let drunk = read_drink(&mut alpha, vid, 4, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert!(before < 600, "the pool was below its maximum");
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(sp, before, 600),
+            Drunk::Effect(2),
+            Drunk::Set(4, 0)
+        ],
+        "the kept 71018 sends nothing"
+    );
+    // When: 27876, 71019 and 30321 at full pools, then a move of 27876 to cell 10. Then:
+    // only the move's records.
+    for cell in [3, 5, 0] {
+        alpha.send_record(&client_item_use(cell));
+    }
+    alpha.send_record(&client_item_move(3, 10, 0));
+    assert_eq!(
+        read_drink(&mut alpha, vid, 10, &mut pools),
+        [Drunk::Set(3, 0), Drunk::Set(10, 27_876)],
+        "the kept potions send nothing"
+    );
+    check(
+        &database,
+        "(SELECT array_agg((id, pos, count) ORDER BY id)::text FROM item) = \
+         '{\"(30,0,1)\",\"(32,2,1)\",\"(33,10,1)\",\"(35,5,1)\"}'",
+    );
+}
+
 /// `cg.game.item_use` of an automatic hit-point potion: the use lays the row with the
 /// item's id, locks, lights its socket 0, pays the missing pool into the recovery and
 /// shows the effect; the affect tick spends 7% into the pool and the process tops the
@@ -12565,6 +13112,59 @@ fn an_auto_potion_lays_its_row_pays_each_tick_and_toggles_off() {
     // the wait line once.
     throttle_second_use_hears_the_wait_line(&mut alpha, &database);
     drop(alpha);
+}
+
+/// `point.change.point_sp_recovery` (`G/char.cpp:4462`): an automatic spell-point potion
+/// (72727, the small moon elixir) pays `GetMaxSP() - (GetSP() + POINT_SP_RECOVERY)` into
+/// `POINT_SP_RECOVERY` (`G/char_item.cpp:9935-9993`), and the affect tick moves
+/// `MIN(recovery, GetMaxSP() * 7 / 100)` from it into the spell points
+/// (`G/char_affect.cpp:190-200`). Alpha's maximum is 600, so the tick moves 42.
+#[test]
+fn an_auto_spell_potion_pays_the_missing_spell_points_into_the_recovery() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE player SET sp = 100 WHERE name = 'Alpha'");
+    let (sp, recovery) = (
+        u8::try_from(common::point_slot::POINT_SP).expect("a point byte"),
+        u8::try_from(common::point_slot::POINT_SP_RECOVERY).expect("a point byte"),
+    );
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    Server::write_console(&console, "item give Alpha 72727 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (1, 0, 72_727, 1));
+    alpha.send_record(&client_item_use(0));
+    // The spell points before the use (regeneration may have raised them), then the
+    // recovery the use pays, then the tick's move of 42 out of it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut sp_now = 100i64;
+    let mut paid = Vec::new();
+    let mut sp_at_pay = None;
+    while paid.len() < 2 {
+        let Some(record) = alpha.read_game_until(deadline) else {
+            panic!("the pay and one tick: {paid:?}");
+        };
+        if record[0] != GC_POINT_CHANGE {
+            continue;
+        }
+        let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+        if record[8] == sp {
+            sp_now = value;
+        } else if record[8] == recovery {
+            if paid.is_empty() {
+                sp_at_pay = Some(sp_now);
+            }
+            paid.push(value);
+        }
+    }
+    let before = sp_at_pay.expect("the pay came");
+    assert_eq!(paid[0], 600 - before, "the missing spell points");
+    assert_eq!(paid[1], paid[0] - 42, "the tick moves 7% of 600");
 }
 
 /// Sleep until the wall clock is in the first 300 ms of a second, for steps that a legacy
@@ -16604,19 +17204,27 @@ fn cast_cloak(alpha: &mut Keyed, alpha_vid: u32) {
     );
 }
 
-/// Ledger 638: `/mob 131`'s insert VID, past ticks, flag reshowings and the login
-/// revive's end.
-fn mob_at_feet(alpha: &mut Keyed) -> u32 {
-    alpha.send_record(&client_chat(CHAT_TALKING, b"/mob 131"));
+/// Ledger 638: `/mob_ld 131 4701 9500`'s insert VID, and the swings and claims read before
+/// it, past ticks, flag reshowings and the login revive's end. The line stands the wolf
+/// on Alpha's own point (`G/cmd_gm.cpp:806-813`), a cell the wolves find her on, so never
+/// a blocked or BANPK one; `/mob` draws 16 points in a box of 200 to 750 a side and
+/// stands nothing when each is refused (`G/char_manager.cpp:483-503`), so a scenario
+/// cannot require its wolf.
+fn mob_at_feet(alpha: &mut Keyed) -> (u32, Vec<Vec<u8>>) {
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/mob_ld 131 4701 9500"));
+    let mut early = Vec::new();
     let end = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let record = alpha.read_game_raw_until(end).expect("the spawn");
         if record[0] == GC_CHARACTER_ADD {
             let stood = u32::from_le_bytes(record[1..5].try_into().unwrap());
             assert_ne!(stood, 0);
-            return stood;
+            assert_eq!(inserted_at(&record), ALPHA_ENTERS_AT, "at the feet");
+            return (stood, early);
         }
-        if record != affect_remove_of(215) {
+        if record[0] == GC_DAMAGE_INFO || record[0] == GC_OWNERSHIP {
+            early.push(record);
+        } else if record != affect_remove_of(215) {
             assert!(
                 record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
                 "a tick or a flag reshown: {record:02x?}"
@@ -16652,20 +17260,32 @@ fn await_strip(alpha: &mut Keyed) {
     }
 }
 
-/// Ledger 638: the wait for a swing on the bare feet and `second`'s claim.
-fn await_found(alpha: &mut Keyed, second: u32) {
+/// Ledger 638: the wait for a swing on the bare feet and a wolf's claim of them. Which
+/// wolf holds the claim is not fixed: a swing that lands under 100 ms after the other
+/// wolf's claim is refused the claim (`IsSyncOwner`, `G/char.cpp:5577-5591`, under
+/// `ENABLE_FLY_FIX`, `common/prodomodefines.h:70`), and two wolves on one 2-second swing
+/// clock keep that order, so the later wolf may never claim (`G/char_battle.cpp:299-302`).
+fn await_found(alpha: &mut Keyed, alpha_vid: u32, wolves: [u32; 2]) {
     let mut saw_swing = false;
     let mut saw_claim = false;
     let end = std::time::Instant::now() + Duration::from_secs(12);
     while !(saw_swing && saw_claim) {
         let record = alpha.read_game_until(end).expect("the bare feet are found");
         if record[0] == GC_DAMAGE_INFO {
+            assert_eq!(
+                record[1..5],
+                alpha_vid.to_le_bytes(),
+                "the swing is on Alpha"
+            );
             saw_swing = true;
         } else if record[0] == GC_OWNERSHIP {
-            let holder = u32::from_le_bytes(record[1..5].try_into().unwrap());
-            if holder == second {
-                saw_claim = true;
-            }
+            assert!(
+                wolves
+                    .iter()
+                    .any(|wolf| record == ownership_of(*wolf, alpha_vid)),
+                "a wolf claims Alpha: {record:02x?}"
+            );
+            saw_claim = true;
         } else {
             assert!(
                 record[0] == GC_POINT_CHANGE || record[0] == GC_CHARACTER_UPDATE,
@@ -16678,11 +17298,11 @@ fn await_found(alpha: &mut Keyed, second: u32) {
 /// Ledger 638: the `EUNHYUNG` hide (`G/char.cpp:6159-6167`, `G/char_state.cpp:201`,
 /// `G/trigger.cpp:103`). Alpha is seeded an assassin holding one skill point; `/skillup 34`
 /// learns the hide and the cast lands it (the SP charge, the flag update, the add). When
-/// `/mob` stands an aggressive 131 at the cloaked feet, ten silent seconds follow: the
+/// `/mob_ld` stands an aggressive 131 on the cloaked feet, ten silent seconds follow: the
 /// login revive expires early in the wait, so its tail is the cloak's alone — no damage,
 /// no claim. A swing then strips the hide within two seconds (the move path's `OnMove(true)`
-/// arm; the cloak's own 16 seconds cannot explain it), and a second 131 finds and swings
-/// at the bare feet, claiming them too.
+/// arm; the cloak's own 16 seconds cannot explain it), and with a second 131 stood the
+/// bare feet are found: a swing lands on Alpha and a wolf claims Alpha, either of the two.
 #[test]
 fn a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it() {
     let Some(database) = ScratchDatabase::create() else {
@@ -16708,7 +17328,11 @@ fn a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it() {
     cast_cloak(&mut alpha, alpha_vid);
     // Ten silent seconds: the login revive expires early in the wait (it is
     // `read_game_until`-swallowed), so the wait's tail is the cloak's alone.
-    let first = mob_at_feet(&mut alpha);
+    let (first, early) = mob_at_feet(&mut alpha);
+    assert!(
+        early.is_empty(),
+        "nothing swings at the cloak: {early:02x?}"
+    );
     let end = std::time::Instant::now() + Duration::from_secs(10);
     while let Some(record) = alpha.read_game_until(end) {
         assert_ne!(record[0], GC_DAMAGE_INFO, "nothing swings at the cloak");
@@ -16719,9 +17343,11 @@ fn a_cloaked_assassin_is_not_found_and_a_swing_uncloaks_it() {
         );
     }
     await_strip(&mut alpha);
-    let second = mob_at_feet(&mut alpha);
+    // The first wolf may find the bare feet and swing before the second insert lands.
+    let (second, early) = mob_at_feet(&mut alpha);
     assert_ne!(second, first);
-    await_found(&mut alpha, second);
+    alpha.unread(early);
+    await_found(&mut alpha, alpha_vid, [first, second]);
 }
 
 #[test]
@@ -18365,6 +18991,126 @@ fn a_monster_book_reads_and_climbs_or_misses() {
     }
 }
 
+/// The shaman's hosted type-4 rows (`SkillList[3]`, `G/char_skill.cpp:4113-4114`, without the
+/// refused 106-108), each trained from 29 in
+/// [`a_master_read_short_of_its_count_talks_each_line`].
+const TRAINED_SKILLS: [u32; 9] = [91, 92, 93, 94, 95, 96, 109, 110, 111];
+
+/// Use the 50300 in `cell` and gather its chat lines and the levels byte 76 showed for
+/// `vnum`, until the book's clearing `ITEM_SET` (every read here is spent) and the read's
+/// closing info line have both arrived.
+fn train_read(alpha: &mut Keyed, cell: u16, vnum: u32) -> (Vec<(u8, Vec<u8>)>, Vec<u8>) {
+    alpha.send_record(&client_item_use(cell));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let (mut lines, mut shown, mut spent) = (Vec::new(), Vec::new(), false);
+    while !spent || lines.last().is_none_or(|(kind, _)| *kind != 1) {
+        let record = alpha
+            .read_game_until(deadline)
+            .unwrap_or_else(|| panic!("the read of cell {cell} ends within the window"));
+        match record[0] {
+            GC_CHAT => lines.push((record[3], record[10..].to_vec())),
+            GC_SKILL_LEVEL_NEW => shown.push(skill_slot(&record, vnum as usize)),
+            ITEM_SET => {
+                assert_eq!(set_fields(&record), (1, cell, 0, 0), "{record:02x?}");
+                spent = true;
+            }
+            GC_POINT_CHANGE | GC_CHARACTER_UPDATE => {}
+            _ if is_revive_end(&record) => {}
+            other => panic!("past a training read, a record nobody accounted for: {other}"),
+        }
+    }
+    (lines, shown)
+}
+
+/// The training arm of `LearnSkillByBook` (`G/char_skill.cpp:552-632`, `bProb` 0 from the
+/// 50300 arm, `G/char_item.cpp:3282-3331`). Alpha, a level-154 shaman of group 1 past the exp
+/// gate, holds its nine hosted type-4 skills at 29 (MASTER), so each needs nine counted reads
+/// (`need_bookcount = 29 - 20`). Each 50300 read is spent, then rolls `number(1,100) > 65`: a
+/// miss tells `[LS;952]` and `[LS;953]`; a pass short of the count bumps
+/// `traning_master_skill.{vnum}.read_count` and tells one of `[LS;961]`, `[LS;962]` or
+/// `[LS;963]` by `number(1,3)` (`:600-614`), then `[LS;995;n]` with the reads left (`:616`); a
+/// pass at the full count climbs to 30 with `[LS;964]` (`:589-596`). Each session reads one
+/// book a skill (the read stamps an 18-30 h delay, reset between sessions), until all three
+/// talking lines were heard: a read draws each line at 35/300, so twelve sessions of nine
+/// reads miss one with odds near 1 in 200,000. The Rewrite sends the book's clearing
+/// `ITEM_SET` before the read's lines (legacy removes the book after them), so the order
+/// between the two is not asserted.
+#[test]
+fn a_master_read_short_of_its_count_talks_each_line() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 1, exp = 5000000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, vnum, 29, \
+             0 FROM player, unnest(ARRAY{TRAINED_SKILLS:?}) AS s(vnum) WHERE name = 'Alpha'"
+        ),
+    );
+    let mut counts = [0_u8; TRAINED_SKILLS.len()];
+    let mut climbed = [false; TRAINED_SKILLS.len()];
+    let mut heard = [false; 3];
+    for _session in 0..12 {
+        sql(&database, "UPDATE player_skill SET next_read = 0");
+        sql(&database, "DELETE FROM item WHERE vnum = 50300");
+        for (cell, vnum) in TRAINED_SKILLS.iter().enumerate() {
+            sql(
+                &database,
+                &format!(
+                    "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) \
+                     SELECT {}, id, 1, {cell}, 1, 50300, {vnum} FROM player WHERE name = 'Alpha'",
+                    60 + cell
+                ),
+            );
+        }
+        let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+        std::thread::sleep(Duration::from_millis(1600));
+        for (slot, vnum) in TRAINED_SKILLS.iter().enumerate() {
+            if climbed[slot] {
+                continue;
+            }
+            let cell = u16::try_from(slot).expect("a cell");
+            let (lines, shown) = train_read(&mut alpha, cell, *vnum);
+            if lines == [talking(b"[LS;952]"), info(b"[LS;953]")] {
+                assert!(shown.is_empty(), "a missed read climbs nothing");
+            } else if counts[slot] == 9 {
+                assert_eq!(lines, [info(b"[LS;964]")], "the full count climbs {vnum}");
+                assert_eq!(shown, [30], "{vnum} climbs to 30");
+                climbed[slot] = true;
+            } else {
+                let left = format!("[LS;995;{}]", 9 - counts[slot]);
+                assert_eq!(lines.len(), 2, "{lines:?}");
+                assert_eq!(lines[1], info(left.as_bytes()), "the reads left for {vnum}");
+                let line = [b"[LS;961]", b"[LS;962]", b"[LS;963]"]
+                    .iter()
+                    .position(|text| lines[0] == talking(*text))
+                    .unwrap_or_else(|| panic!("a counted read talks: {lines:?}"));
+                heard[line] = true;
+                assert!(shown.is_empty(), "a counted read climbs nothing");
+                counts[slot] += 1;
+            }
+        }
+        drop(alpha);
+        server.wait_for("Character disconnected; wrote the row");
+        if heard == [true; 3] {
+            return;
+        }
+    }
+    panic!("twelve sessions heard only {heard:?} of the three count lines");
+}
+
 /// Ledger 230f: `/skillup 109` spends a skill point and sends byte 76 with slot
 /// 109 learned, then `CG_USE_SKILL 109` heals: the SP charge and the HP point
 /// change, with no affect add. Alpha is stored group 2 with 100/100, so 109 is
@@ -18442,6 +19188,168 @@ fn a_skill_up_spends_and_a_cast_heals_over_the_wire() {
         }
     }
     assert!(charged && healed, "the charge and the heal both land");
+}
+
+/// `CanUseSkill`'s always list (`G/char_skill.cpp:4175-4177`) on the wire, each `CG_USE_SKILL`
+/// aimed at the caster. Alpha, a group-1 shaman with its full 600 SP, holds every listed vnum from 121 to
+/// 131 at level 1, the warrior's 1 at 1, and the guild skill 152 at 1. The warrior's 1 refuses
+/// `CanUseSkill` (not Alpha's `SkillList`, not on the list) and sends nothing. 121, 124, 126-130
+/// pass every gate: their empty `szSPCostPoly` charges 0, which still sends the SP record
+/// (`PointChange`, `G/char.cpp:4266-4275,4800-4820`), the empty cooldown stamps nothing that
+/// cools, and `ComputeSkill` (`:2443-2895`) lands nothing (no point, no duration). 131 at 1, with
+/// no horse, tells `[LS;966]` (`:2933-2944`). The guild vnums 151-159 send nothing: 151 and
+/// 153-159 are at 0 (`:2963-2964`), and 152 at 1, which 600 SP can pay for, is refused as a
+/// Defect fix (legacy charges `150+150*k` and adds its `MAX_HP` buff). 122 then toggles the combo
+/// (`:2996-3006`), `combo 1`.
+#[test]
+fn each_always_usable_skill_casts_by_its_own_arm() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 1, sp = 600 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, vnum, 1, 0 \
+         FROM player, unnest(ARRAY[1, 121, 122, 124, 126, 127, 128, 129, 130, 131, 152]) AS \
+         s(vnum) WHERE name = 'Alpha'",
+    );
+    let (mut alpha, listed) = enter_world(&server, b"alice", 0);
+    let vid = listed.id;
+    let cast = |vnum: u32| {
+        let mut record = vec![CG_USE_SKILL];
+        record.extend_from_slice(&vnum.to_le_bytes());
+        record.extend_from_slice(&vid.to_le_bytes());
+        record
+    };
+    let deadline = || std::time::Instant::now() + Duration::from_secs(5);
+    for vnum in [121, 124, 126, 127, 128, 129, 130] {
+        alpha.send_record(&cast(1));
+        alpha.send_record(&cast(vnum));
+        assert_eq!(
+            alpha.read_game_until(deadline()),
+            Some(point_change(vid, 7, 0, 600)),
+            "{vnum} charges its 0 SP"
+        );
+    }
+    alpha.send_record(&cast(131));
+    assert_eq!(
+        alpha.read_game_until(deadline()),
+        Some(an_info_line(b"[LS;966]")),
+        "131 finds no horse"
+    );
+    for vnum in 151..=159 {
+        alpha.send_record(&cast(vnum));
+    }
+    alpha.send_record(&cast(122));
+    let combo = alpha
+        .read_game_until(deadline())
+        .expect("the combo toggle within the window");
+    assert_eq!(
+        combo[0], GC_CHAT,
+        "the guild vnums send nothing: {combo:02x?}"
+    );
+    assert_eq!((combo[3], &combo[10..]), (5, &b"combo 1"[..]));
+}
+
+/// Yankee (a level-154 character of `job` in `group`, account bob) knows `skill` at level
+/// 20 and casts it on itself: the `GC_AFFECT_ADD` on point `kind` and the
+/// `GC_CHARACTER_POINT_CHANGE` of `kind` that follows it. `ComputeAffect` hands the add's
+/// value to `PointChange` (`G/char_affect.cpp:799-800`), whose plain arm sends the point
+/// at 0 + the value (`G/char.cpp:4505-4553`). `None` when no server ran.
+fn self_buff_point(job: u8, group: u8, skill: u32, kind: usize) -> Option<(i32, i64)> {
+    let database = ScratchDatabase::create()?;
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "bob");
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO player (account_id, slot, name, job, level, skill_group, sp, x, y) \
+             SELECT id, 0, 'Yankee', {job}, 154, {group}, 200, 469000, 950000 FROM account \
+             WHERE login = 'bob'"
+        ),
+    );
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, {skill}, \
+             20, 0 FROM player WHERE name = 'Yankee'"
+        ),
+    );
+    let kind = u8::try_from(kind).expect("a point byte");
+    let (mut yankee, listed, _entered) = enter_world_seeing(&server, b"bob", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    let mut use_skill = vec![CG_USE_SKILL];
+    use_skill.extend_from_slice(&skill.to_le_bytes());
+    use_skill.extend_from_slice(&listed.id.to_le_bytes());
+    yankee.send_record(&use_skill);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (mut added, mut point) = (None, None);
+    while added.is_none() || point.is_none() {
+        let Some(record) = yankee.read_game_until(deadline) else {
+            panic!("skill {skill}: the add and the point: {added:?} {point:?}");
+        };
+        if record[0] == GC_AFFECT_ADD && record[5] == kind {
+            added = Some(i32::from_le_bytes(record[6..10].try_into().expect("four")));
+        } else if record[0] == GC_POINT_CHANGE && record[8] == kind {
+            point = Some(i64::from_le_bytes(
+                record[17..25].try_into().expect("eight"),
+            ));
+        }
+    }
+    Some((added.expect("the add"), point.expect("the point")))
+}
+
+/// `point.change.point_resist_normal_damage` (`G/char.cpp:4499`), reached through skill 94
+/// (the shaman's blessing, `szPointOn` `RESIST_NORMAL`, `G/skill.cpp:68`): a shaman of
+/// group 1 casts it on itself and the point reads the affect's value.
+#[test]
+fn a_blessing_cast_raises_the_resist_normal_damage_point_by_its_value() {
+    let Some((value, point)) =
+        self_buff_point(3, 1, 94, common::point_slot::POINT_RESIST_NORMAL_DAMAGE)
+    else {
+        return;
+    };
+    assert!(value > 0, "the blessing resists: {value}");
+    assert_eq!(point, i64::from(value), "the point reads 0 + the value");
+}
+
+/// `point.change.point_hit_hp_recovery` (`G/char.cpp:4526`), reached through skill 63 (the
+/// sura's toggle, `szPointOn2` `HIT_HP_RECOVER` at `10*k`, `G/skill.cpp:72`): a sura of
+/// group 1 toggles it on and the point reads the second affect's value.
+#[test]
+fn a_sura_toggle_raises_the_hit_hp_recovery_point_by_its_value() {
+    let Some((value, point)) = self_buff_point(2, 1, 63, common::point_slot::POINT_HIT_HP_RECOVERY)
+    else {
+        return;
+    };
+    assert!(value > 0, "the toggle recovers: {value}");
+    assert_eq!(point, i64::from(value), "the point reads 0 + the value");
+}
+
+/// `point.change.point_manashield` (`G/char.cpp:4528`), reached through skill 79 (the
+/// sura's dark protection, `szPointOn2` `MANASHIELD` at `100-((iq*0.84)*k)`,
+/// `G/skill.cpp:75`): a sura of group 2 toggles it on and the point reads the second
+/// affect's value.
+#[test]
+fn a_dark_protection_raises_the_manashield_point_by_its_value() {
+    let Some((value, point)) = self_buff_point(2, 2, 79, common::point_slot::POINT_MANASHIELD)
+    else {
+        return;
+    };
+    assert!(value > 0, "the shield takes a share: {value}");
+    assert_eq!(point, i64::from(value), "the point reads 0 + the value");
 }
 
 /// Ledger 635: a forget book (`ITEM_SKILLFORGET`, 70037) with socket 109 drops Alpha's
@@ -23134,26 +24042,35 @@ fn messenger_list(name: &[u8]) -> Vec<u8> {
 /// and the list rides Alice's next enter. The remove takes both rows back.
 ///
 /// Drain the tail a relogin wrote behind Yankee's LIST: the pair, the entrant's entry
-/// and its login restatement (`G/questlua_pc.cpp:3598`), the point change, the teleport,
-/// and two updates. Each is asserted by header and length.
-fn drain_relogin_tail(yankee: &mut Keyed) {
-    for (header, len) in [
+/// and its login restatement (`G/questlua_pc.cpp:3598`), the teleport, and two updates.
+/// Each is asserted by header and length. Yankee's own stamina refill (a point change
+/// of kind 9 at his own VID) runs on its own clock and may land anywhere in here on a
+/// loaded host; it is stepped over wherever it lands, so the drain asserts the other
+/// seven in order.
+fn drain_relogin_tail(yankee: &mut Keyed, yankee_vid: u32) {
+    let expected: [(u8, usize); 7] = [
         (GC_CHARACTER_ADD, CHARACTER_ADD_LEN),
         (GC_CHAR_ADDITIONAL_INFO, CHAR_ADDITIONAL_INFO_LEN),
         (19, CHARACTER_UPDATE_LEN),
         (19, CHARACTER_UPDATE_LEN),
-        (GC_POINT_CHANGE, POINT_CHANGE_LEN),
         (0x7f, 6),
         (19, CHARACTER_UPDATE_LEN),
         (19, CHARACTER_UPDATE_LEN),
-    ] {
+    ];
+    let mut at = 0;
+    while at < expected.len() {
         let tail = loop {
             let tail = yankee.read_game_raw();
             if !is_farm_line(&tail) {
                 break tail;
             }
         };
+        if is_stamina_refill(&tail) && tail[4..8] == yankee_vid.to_le_bytes() {
+            continue;
+        }
+        let (header, len) = expected[at];
         assert_eq!((tail[0], tail.len()), (header, len), "{tail:02x?}");
+        at += 1;
     }
 }
 
@@ -23247,7 +24164,7 @@ fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
     // line goes to Alpha's wire naming Yankee and the record to Yankee's naming
     // Alpha. Yankee first drains the tail his own earlier bursts wrote behind
     // the LIST.
-    drain_relogin_tail(&mut yankee);
+    drain_relogin_tail(&mut yankee, yankee_listed.id);
     // The remove is called with `(char_name, ch->GetName()) =
     // (Alpha, Yankee)`, so the line goes to Alice's wire and the record to
     // Yankee's: legacy `RemoveFromList(account, companion)` sends the line to
@@ -28921,6 +29838,84 @@ fn a_party_leader_sets_and_unsets_a_role() {
     quiet_past_party_walk(&mut yankee, "the quiet guest");
 }
 
+/// Read `who`'s records until a `GC_CHARACTER_POINT_CHANGE` of `kind` carrying `value` and a
+/// `GC_PARTY_UPDATE` for `pid` naming `role` have both come, within ten seconds.
+fn read_role_point(who: &mut Keyed, (pid, role): (u32, u8), (kind, value): (u8, i64)) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (mut updated, mut pointed) = (false, false);
+    let mut seen = Vec::new();
+    while !(updated && pointed) {
+        let Some(record) = who.read_game_until(deadline) else {
+            panic!("role {role}: point {kind} at {value} and the update: {seen:?}");
+        };
+        if record[0] == GC_PARTY_UPDATE
+            && u32::from_le_bytes(record[1..5].try_into().expect("a PID")) == pid
+            && record[5] == role
+        {
+            updated = true;
+        } else if record[0] == GC_POINT_CHANGE && record[8] == kind {
+            let at = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+            seen.push(at);
+            pointed = at == value;
+        }
+    }
+}
+
+/// `point.change.point_party_*_bonus` (`G/char.cpp:4580-4590`), reached through
+/// `CParty::SetRole` and `ComputeRolePoint` (`G/party.cpp:963-1010`, `:1215-1300`).
+///
+/// Alpha leads with leadership (skill 121) 40, where every role has a seat
+/// (`G/party.cpp:1403-1409`). Yankee has no skill group, so its power row reads 0
+/// (`G/skill_power.cpp:39-40`) and `k` is 0: each role's bonus is its base. The leader
+/// sets each role on Yankee in turn, and Yankee reads the role's point at `ATTACKER` 10,
+/// `TANKER` 50, `BUFFER` 5, `SKILL_MASTER` 25, `HASTE` 1, `DEFENDER` 5; the unset takes it
+/// back to 0 (`ComputeRolePoint(.., false)`, `G/party.cpp:1217-1226`).
+#[test]
+fn a_party_role_lands_its_bonus_point_on_the_member_and_the_unset_clears_it() {
+    use common::point_slot as point;
+    let roles = [
+        (2, point::POINT_PARTY_ATTACKER_BONUS, 10),
+        (3, point::POINT_PARTY_TANKER_BONUS, 50),
+        (4, point::POINT_PARTY_BUFFER_BONUS, 5),
+        (5, point::POINT_PARTY_SKILL_MASTER_BONUS, 25),
+        (6, point::POINT_PARTY_HASTE_BONUS, 1),
+        (7, point::POINT_PARTY_DEFENDER_BONUS, 5),
+    ];
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) SELECT id, 121, 40, 0 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, true, None);
+    let invited = u32::from_le_bytes(yankee_listed.id.to_le_bytes());
+    let head = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let guest_pid = form_party(&mut alice, &mut yankee, invited, head);
+    // One 3 s Update reads the leadership and opens the seats.
+    std::thread::sleep(Duration::from_secs(6));
+    for (role, kind, bonus) in roles {
+        let kind = u8::try_from(kind).expect("a point byte");
+        alice.send_record(&client_party_set_state(guest_pid, role, 1));
+        read_role_point(&mut yankee, (guest_pid, role), (kind, bonus));
+        alice.send_record(&client_party_set_state(guest_pid, role, 0));
+        read_role_point(&mut yankee, (guest_pid, 0), (kind, 0));
+    }
+}
+
 /// `cg.game.pong`, `cg.game.time_sync` (`G/input_main.cpp:3661-3666`): in the game
 /// phase a PONG is read and not answered, and the character keeps playing
 /// afterwards; a `TIME_SYNC` naming a wrong token closes the connection, as a
@@ -29604,6 +30599,115 @@ fn a_508xx_potion_lands_516_and_a_second_is_refused_while_held() {
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
 }
 
+/// `cg.game.item_use` of the `USE_POTION_NODELAY` potions inside 50801-50820, which run the
+/// 508xx branch's own drink (`G/char_item.cpp:3373`, `:3441-3544`): `value(0)` adds hit points
+/// and `value(1)` spell points, times `(100 + POINT_POTION_BONUS) / 100` (Alpha has no
+/// bonus), each only while its pool is below the maximum, with its effect (red 1, blue 2),
+/// held at the maximum (`G/char.cpp:4248-4275`); a potion that changed something is spent,
+/// one that changed nothing is kept silently. The branch's switch has no `USE_POTION` case,
+/// so 50805, a `USE_POTION` of the range, does nothing at all (`:3385-3547`). Every vnum
+/// here falls through the gold-bar switch's `default` first (`:3369-3370`).
+///
+/// Alpha, at 500 of 1420 hit points and 460 of 600 spell points, drinks 50803 (50 spell
+/// points) and 50815 (100, held at 600); a second 50803 at full spell points is kept and
+/// 50805 does nothing, which 50804 (50 hit points) right after them shows; then 50816 (100).
+#[test]
+fn a_508xx_instant_potion_pays_its_pool_and_a_508xx_slow_potion_does_nothing() {
+    use common::point_slot::{POINT_HP, POINT_SP};
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 500, sp = 460 WHERE name = 'Alpha'",
+    );
+    let nodelay = gamedata::item_kind::USE_POTION_NODELAY;
+    give_alpha_potions(
+        &database,
+        &[
+            (50_804, 2, nodelay, [50, 0, 0, 0]),
+            (50_816, 1, nodelay, [100, 0, 0, 0]),
+            (50_803, 2, nodelay, [0, 50, 0, 0]),
+            (50_815, 1, nodelay, [0, 100, 0, 0]),
+            (50_805, 1, gamedata::item_kind::USE_POTION, [0, 0, 0, 0]),
+        ],
+    );
+    let (hp, sp) = (point_byte(POINT_HP), point_byte(POINT_SP));
+    let mut pools = drink_pools(500, 460);
+    let (mut alpha, _listed, entered) = enter_world_seeing(&server, b"alice", 0);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    std::thread::sleep(Duration::from_millis(1600));
+
+    // When: 50803. Then: 50 spell points, the blue effect, one of two spent.
+    alpha.send_record(&client_item_use(2));
+    let drunk = read_drink(&mut alpha, vid, 2, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(sp, before, before + 50),
+            Drunk::Effect(2),
+            Drunk::Count(2, 1)
+        ]
+    );
+    // When: 50815. Then: 100 on top, held at 600, the last one spent.
+    alpha.send_record(&client_item_use(3));
+    let drunk = read_drink(&mut alpha, vid, 3, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert!(
+        (500..600).contains(&before),
+        "100 fills the pool from {before}"
+    );
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(sp, before, 600),
+            Drunk::Effect(2),
+            Drunk::Set(3, 0)
+        ]
+    );
+    // When: 50803 at full spell points, 50805, then 50804. Then: only 50804's 50 hit points.
+    alpha.send_record(&client_item_use(2));
+    alpha.send_record(&client_item_use(4));
+    alpha.send_record(&client_item_use(0));
+    let drunk = read_drink(&mut alpha, vid, 0, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(hp, before, before + 50),
+            Drunk::Effect(1),
+            Drunk::Count(0, 1)
+        ],
+        "the kept 50803 and 50805 send nothing"
+    );
+    // When: 50816. Then: 100 hit points, the last one spent.
+    alpha.send_record(&client_item_use(1));
+    let drunk = read_drink(&mut alpha, vid, 1, &mut pools);
+    let before = before_of(&drunk, 0);
+    assert_eq!(
+        drunk,
+        [
+            Drunk::Point(hp, before, before + 100),
+            Drunk::Effect(1),
+            Drunk::Set(1, 0)
+        ]
+    );
+    check(
+        &database,
+        "(SELECT array_agg((id, pos, count) ORDER BY id)::text FROM item) = \
+         '{\"(30,0,1)\",\"(32,2,1)\",\"(34,4,1)\"}'",
+    );
+}
+
 /// `cg.game.item_use`: a `USE_ABILITY_UP` potion (27053) lands attack speed 10 for
 /// 600 s, and a second use while it is held is refused. Alpha uses the potion at
 /// cell 0: one of two goes (the update record), the `GC_AFFECT_ADD` of kind 201
@@ -30157,6 +31261,17 @@ fn a_gm_stuns_a_character_and_the_target_hears_its_add() {
     assert_eq!(added.len(), AFFECT_ADD_LEN);
     assert_eq!(added[0], GC_AFFECT_ADD);
     assert_eq!(&added[1..5], &210u32.to_le_bytes(), "the stun's kind");
+    assert_eq!(added[5], 0, "the stun applies on POINT_NONE");
+    // The stun's affect applies on `POINT_NONE`: `ComputeAffect` hands it to `PointChange`
+    // (`G/char_affect.cpp:799-800`), whose `POINT_NONE` arm returns before any send
+    // (`G/char.cpp:3880-3881`), so no point record of kind 0 follows.
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    while let Some(record) = yankee.read_game_until(deadline) {
+        assert!(
+            !(record[0] == GC_POINT_CHANGE && record[8] == 0),
+            "POINT_NONE sends nothing: {record:02x?}"
+        );
+    }
 }
 
 /// Seed the warp world's three GMs and the Shared Channel player: Yankee
@@ -34478,6 +35593,64 @@ fn an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero() {
     drop(server);
 }
 
+/// `UseItemEx`'s limit loop on a wear-timed stone (`case LIMIT_TIMER_BASED_ON_WEAR`, a bare
+/// `break`, `G/char_item.cpp:2753-2755`) and `case ITEM_DS` for a stone that is not worn
+/// (`:3059-3063`): Alpha holds the owner's first stone, 110000 (`TIMER_BASED_ON_WEAR` 86400),
+/// at dragon soul inventory cell 0 with 90 seconds left. Its use passes the checks, starts
+/// no clock and returns false: nothing is sent, the use is not refused, and the stone keeps
+/// its cell and its 90 seconds. The wear timer runs only on the deck
+/// (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`).
+#[test]
+fn a_stone_in_the_soul_inventory_is_used_into_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let soul_window = common::item_slots::EWindows::DragonSoulInventory as u8;
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 40, \
+             id, {soul_window}, 0, 1, 110000, 90 FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    let protos = owners_protos();
+    let proto = protos.get(110_000).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_DS);
+    assert!(
+        proto.timer_based_on_wear.is_some(),
+        "110000 is timed on wear"
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(
+        &protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(soul_window, 0))
+            .encode(),
+    );
+    alpha.quiet("a stone that is not worn is used into nothing");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    assert!(
+        !server.logged("Item step refused"),
+        "the use is not refused: {}",
+        server.console()
+    );
+    check(
+        &database,
+        &format!(
+            "(SELECT window_type = {soul_window} AND pos = 0 AND socket0 = 90 FROM item WHERE \
+             id = 40)"
+        ),
+    );
+}
+
 /// `cmd.dragon_soul` and `cmd.ds_list`: the deck lands its affect and writes socket 2
 /// with the update riding and the row saved, `d` takes it back, and the list names
 /// each held stone. The qualification comes from the login event's own grant.
@@ -38128,7 +39301,8 @@ fn pickup_add(kind: u32, record: &[u8]) -> Option<i32> {
 /// Alpha's stack of three, and the sword goes highlighted into the first free cell, each
 /// with its `Ai primit:` line (`AutoGiveItemNew`, `G/char_item.cpp:10725-10829`), and
 /// Alpha's descriptor stores the rows. `/pickup_affect` swaps 810 for 811 with the seconds
-/// left, and again back (`G/cmd_general.cpp:279-300`). The saved row keeps the end second,
+/// left, and again back (`G/cmd_general.cpp:279-300`); a use while 811 is held is refused
+/// with ` Pick-up Already Active.` (`G/char_item.cpp:2856-2863`). The saved row keeps the end second,
 /// not the seconds left (`IsRealTimeAffect`, `G/char_affect.cpp:29-40`).
 #[test]
 fn a_pickup_ticket_takes_a_kills_drop_into_the_inventory() {
@@ -38228,6 +39402,8 @@ fn a_pickup_ticket_takes_a_kills_drop_into_the_inventory() {
 
     // When: Alpha switches the pick-up off. Then: 810 goes and 811 takes its seconds.
     switch_pickup(&mut alpha, 810, 811);
+    // And: with the pick-up switched off, a use is refused with its own line.
+    use_pickup_while_off(&mut alpha);
     // And: switched on again, 811 goes and 810 takes the seconds back.
     switch_pickup(&mut alpha, 811, 810);
 
@@ -38310,6 +39486,23 @@ fn switch_pickup(alpha: &mut Keyed, held: u32, to: u32) {
     assert!(
         matches!(added.as_slice(), [left] if (25_100..=25_200).contains(left)),
         "{added:?}"
+    );
+}
+
+/// A use of the ticket at cell 0 while 811 is held: the ` Pick-up Already Active.` line and
+/// no row added (`G/char_item.cpp:2856-2863`).
+fn use_pickup_while_off(alpha: &mut Keyed) {
+    alpha.send_record(&client_item_use(0));
+    let (wire, _) = alpha.drain_game(Duration::from_secs(1), game_len);
+    assert!(
+        wire.iter().all(|record| record[0] != GC_AFFECT_ADD),
+        "{wire:02x?}"
+    );
+    assert!(
+        wire.contains(&an_info_line(
+            b"@@(char_item.cpp)tradus: Pick-up Already Active."
+        )),
+        "{wire:02x?}"
     );
 }
 
@@ -53426,12 +54619,15 @@ fn a_unique_is_worn_and_taken_off_by_its_use() {
     let entered_at = std::time::Instant::now();
     let (mut alpha, _character, _quickslots, _load_sets) =
         load_with_quickslots_in(&server, b"alice", 0, ENGLISH);
+    // Stamped at the send, so the five seconds are measured from the server's own
+    // entry affect: on a loaded host the login above takes seconds.
+    let sent_at = std::time::Instant::now();
     let entered = enter_game_view(&mut alpha);
     let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
     // Past the equip's 1.5 s window and the revive's five seconds, as the move scenario
     // waits.
     std::thread::sleep(Duration::from_millis(1600).saturating_sub(entered_at.elapsed()));
-    drain_revive_end(&mut alpha, entered_at);
+    drain_revive_end(&mut alpha, sent_at);
 
     // When: the cloak is used. Then: it moves onto the first unique cell and hides.
     alpha.send_record(&client_item_use(0));
@@ -53482,6 +54678,112 @@ fn a_unique_is_worn_and_taken_off_by_its_use() {
         "(SELECT pos = 0 AND window_type = 1 FROM item WHERE id = 30) AND (SELECT count = 1 \
          FROM item WHERE id = 31)",
     );
+}
+
+/// `case 71049` (`G/char_item.cpp:3008-3023`), the silk botary, with `enable_bootary_check`
+/// off (the owner's default): `UseSilkBotary` (`:2655-2664`). Alpha (no armour, no GM)
+/// holds the botary at cell 0 and five red potions at cell 1, and the store keeps one price
+/// for her, 27002 at 77. Her first use of the session asks the store: she hears
+/// `MyShopPriceList 27002 77`, then `OpenPrivateShop` (`UseSilkBotaryReal`, `:2215-2228`,
+/// `__OpenPrivateShop`, `:2176-2201`). A second use hears `OpenPrivateShop` alone. A bundle
+/// shop selling the five potions for 500 yang with the botary held stores the unit price 100
+/// in front of the kept one (`G/char.cpp:905-937`, `UpdateList`, `D/Cache.cpp:226-277`).
+/// Relogged, her first use lists both prices in that order. The botary stays throughout.
+#[test]
+fn a_silk_botary_lists_the_stored_prices_and_opens_the_shop_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    for (id, pos, count, vnum) in [(30, 0, 1, 71049), (31, 1, 5, 27001)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, {count}, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    sql(
+        &database,
+        "INSERT INTO myshop_pricelist (owner_id, slot, item_vnum, price) SELECT id, 0, 27002, \
+         77 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(71_049).expect("the owner's data has it");
+    assert_eq!(
+        (proto.item_type, proto.sub_type),
+        (gamedata::item_kind::ITEM_UNIQUE, 10),
+        "71049 is a USE_SPECIAL unique of the owner's data"
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    // When: the first use. Then: the stored price, then the window.
+    alpha.send_record(&client_item_use(0));
+    let heard = read_commands(&mut alpha, 2);
+    assert_eq!(
+        heard,
+        [
+            a_command_line(b"MyShopPriceList 27002 77"),
+            a_command_line(b"OpenPrivateShop"),
+        ]
+    );
+    // When: a second use. Then: the window alone; the list came first if at all.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        read_commands(&mut alpha, 1),
+        [a_command_line(b"OpenPrivateShop")]
+    );
+    // When: the bundle shop opens with the botary held. Then: 100 a potion leads.
+    alpha.send_record(&myshop_build(27001, 1, 500, 0));
+    wait_for(
+        &database,
+        "(SELECT string_agg(slot || ':' || item_vnum || ':' || price, ',' ORDER BY slot) FROM \
+         myshop_pricelist) = '0:27001:100,1:27002:77'",
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    // When: relogged, the first use. Then: both prices in the stored order, then the window.
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        read_commands(&mut alpha, 3),
+        [
+            a_command_line(b"MyShopPriceList 27001 100"),
+            a_command_line(b"MyShopPriceList 27002 77"),
+            a_command_line(b"OpenPrivateShop"),
+        ]
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    check(
+        &database,
+        "(SELECT pos = 0 AND window_type = 1 AND count = 1 FROM item WHERE id = 30)",
+    );
+}
+
+/// The first `count` `CHAT_TYPE_COMMAND` lines `keyed` hears within ten seconds, every other
+/// record passed over.
+fn read_commands(keyed: &mut Keyed, count: usize) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut heard = Vec::new();
+    while heard.len() < count {
+        let Some(record) = keyed.read_game_until(deadline) else {
+            break;
+        };
+        if record[0] == GC_CHAT && record.get(3) == Some(&5) {
+            heard.push(record);
+        }
+    }
+    heard
 }
 
 /// `case ITEM_MARRIAGE_RING` (`G/char_item.cpp:3841-3878`) and `case ITEM_RAMADAN_CANDY`
@@ -53642,10 +54944,13 @@ fn a_live_fish_is_used_into_one_of_its_outcomes_and_a_dead_one_changes_nothing()
 }
 
 /// The wearable types' use arm (`G/char_item.cpp:3040-3053`): a weapon, a pick, a rod, a belt,
-/// a talisman and a ring are worn by their use and taken off by a use of their wear cell.
-/// Alpha (a shaman) holds the bell 5000, the pick 29101, the rod 27400, the belt 18000, the
-/// talisman 9600 and the ring 71135 at cells 0 to 5. Each use clears the item's cell and sets
-/// it on a wear cell; a use of that wear cell clears it and sets the item back on its cell.
+/// a talisman, a ring and a costume are worn by their use and taken off by a use of their wear
+/// cell. Alpha (a shaman) holds the bell 5000, the pick 29101, the rod 27400, the belt 18000, the
+/// talisman 9600 and the ring 71135 at cells 0 to 5, and the untimed body costume 41319 at 8.
+/// Each use clears the item's cell and sets it on a wear cell; a use of that wear cell clears
+/// it and sets the item back on its cell, the costume on 1190, the first cell of the custom
+/// inventory's costume category (category 5, `GetEmptyInventory`, `G/char_item.cpp:1201-1235`,
+/// `CItem::IsCustomCategory`, `G/item.cpp:3119-3129`).
 #[test]
 fn each_wearable_type_is_worn_and_taken_off_by_its_use() {
     let Some(database) = ScratchDatabase::create() else {
@@ -53659,8 +54964,18 @@ fn each_wearable_type_is_worn_and_taken_off_by_its_use() {
     );
     create_account(&server, "alice");
     add_characters(&database);
-    let wearables = [5000, 29101, 27400, 18000, 9600, 71135];
-    for (cell, vnum) in wearables.iter().enumerate() {
+    // The pick (size 2) and the rod (size 3) reach down cells 6, 7 and 12, so the
+    // two-cell costume stands at 8.
+    let wearables = [
+        (0, 5000),
+        (1, 29101),
+        (2, 27400),
+        (3, 18000),
+        (4, 9600),
+        (5, 71135),
+        (8, 41319),
+    ];
+    for (cell, vnum) in wearables {
         sql(
             &database,
             &format!(
@@ -53671,13 +54986,14 @@ fn each_wearable_type_is_worn_and_taken_off_by_its_use() {
         );
     }
     let protos = owners_protos();
-    for (vnum, kind) in wearables.iter().zip([
+    for ((_, vnum), kind) in wearables.iter().zip([
         gamedata::item_kind::ITEM_WEAPON,
         gamedata::item_kind::ITEM_PICK,
         gamedata::item_kind::ITEM_ROD,
         gamedata::item_kind::ITEM_BELT,
         gamedata::item_kind::ITEM_TALISMAN,
         gamedata::item_kind::ITEM_RING,
+        gamedata::item_kind::ITEM_COSTUME,
     ]) {
         let proto = protos.get(*vnum).expect("the owner's data has it");
         assert_eq!(proto.item_type, kind, "the owner's type of {vnum}");
@@ -53697,8 +55013,7 @@ fn each_wearable_type_is_worn_and_taken_off_by_its_use() {
         }
         sets
     };
-    for (cell, vnum) in wearables.iter().enumerate() {
-        let cell = u16::try_from(cell).expect("a cell");
+    for (cell, vnum) in wearables {
         let worn = sets_of(&mut alpha, cell);
         assert_eq!(
             worn.first(),
@@ -53706,21 +55021,18 @@ fn each_wearable_type_is_worn_and_taken_off_by_its_use() {
             "{vnum} leaves its cell: {worn:?}"
         );
         let wear = match worn[1..] {
-            [(wear, set)] if set == *vnum && wear >= 180 => wear,
+            [(wear, set)] if set == vnum && wear >= 180 => wear,
             _ => panic!("{vnum} lands on one wear cell: {worn:?}"),
         };
         let off = sets_of(&mut alpha, wear);
-        assert_eq!(
-            off,
-            [(wear, 0), (cell, *vnum)],
-            "{vnum} comes off to its cell"
-        );
+        let back = if vnum == 41319 { 1190 } else { cell };
+        assert_eq!(off, [(wear, 0), (back, vnum)], "{vnum} comes off to {back}");
     }
     drop(alpha);
     wait_for(
         &database,
-        "(SELECT count(*) = 6 FROM item WHERE id BETWEEN 30 AND 35 AND window_type = 1 AND pos \
-         = id - 30)",
+        "(SELECT count(*) = 6 FROM item WHERE id IN (30, 31, 32, 33, 34, 35) AND window_type = \
+         1 AND pos = id - 30) AND (SELECT pos = 1190 FROM item WHERE id = 38)",
     );
 }
 
@@ -57647,7 +58959,7 @@ fn a_private_shop_renames_and_unlocks_its_slots() {
     create_account(&server, "alice");
     create_account(&server, "bob");
     add_characters(&database);
-    let (mut alice, _alice_listed, mut yankee, yankee_listed) =
+    let (mut alice, alice_listed, mut yankee, yankee_listed) =
         enter_two_swords_and_buyer(&server, &database, true);
     let entity = build_axes_shop(&mut alice, &mut yankee);
     let owner_vid = u32::from_le_bytes(entity[16..20].try_into().expect("four bytes"));
@@ -57694,8 +59006,12 @@ fn a_private_shop_renames_and_unlocks_its_slots() {
         &[GC_PRIVATE_SHOP, 42, 0, 2],
         "TITLE: {yankee_title:02x?}"
     );
-    // The unlock spends the key at cell 2 and opens the shop's slots.
+    // The unlock opens the shop's slots and spends the key at cell 2. The reply sets
+    // `POINT_PRIVATE_SHOP_UNLOCKED_SLOT` to 0 and `PointChange`s it by the opened count with
+    // no amount shown (`G/char.cpp:4570`, `G/input_db.cpp:2809-2811`), so the owner hears
+    // the point at the count before the key's spend.
     alice.send_record(&[CG_PRIVATE_SHOP, 16, 2, 0]);
+    let pointed = alice.read_game();
     let unlocked = alice.read_game();
     assert_eq!(unlocked[0], ITEM_SET, "the key's spend: {unlocked:02x?}");
     let viewed = yankee.read_game();
@@ -57704,9 +59020,17 @@ fn a_private_shop_renames_and_unlocks_its_slots() {
         &[GC_PRIVATE_SHOP, 6, 0, 20],
         "UNLOCKED_SLOTS_CHANGE: {viewed:02x?}"
     );
-    assert!(
-        u16::from_le_bytes(viewed[4..6].try_into().expect("two bytes")) > 0,
-        "the opened count"
+    let opened = u16::from_le_bytes(viewed[4..6].try_into().expect("two bytes"));
+    assert!(opened > 0, "the opened count");
+    assert_eq!(
+        pointed,
+        point_change(
+            alice_listed.id,
+            u8::try_from(common::point_slot::POINT_PRIVATE_SHOP_UNLOCKED_SLOT).expect("a byte"),
+            0,
+            i64::from(opened)
+        ),
+        "the point at the opened count, no amount"
     );
     check(
         &database,
@@ -62044,20 +63368,34 @@ fn a_kingdom_kill_on_the_war_map_fans_the_score() {
         }
     }
     assert!(landed, "the fan lands within {swings} swings");
-    assert_eq!(
-        read_until_record(&mut alice, &dead_of(yankee.id), deadline),
-        dead_of(yankee.id),
-        "then the death"
+    // Across empires the death exchanges the empire points (`G/char_battle.cpp:1389-1396`):
+    // the arm returns the real point unchanged (`G/char.cpp:4699-4703`), so the killer and
+    // the victim each hear their own record of 0, after `ClearAffect` and before the dead.
+    let empire_point = u8::try_from(common::point_slot::POINT_EMPIRE_POINT).expect("a byte");
+    let until_dead = |keyed: &mut Keyed, own: u32, who: &str| {
+        let mut exchanged = false;
+        loop {
+            let record = keyed
+                .read_game_until(deadline)
+                .unwrap_or_else(|| panic!("{who} hears the death"));
+            if record == dead_of(yankee.id) {
+                return exchanged;
+            }
+            exchanged |= record == point_change(own, empire_point, 0, 0);
+        }
+    };
+    assert!(
+        until_dead(&mut alice, alpha.id, "the killer"),
+        "the killer's empire point, then the death"
     );
     assert_eq!(
         read_until_record(&mut bob, &score, deadline),
         score,
         "the victim hears the fan"
     );
-    assert_eq!(
-        read_until_record(&mut bob, &dead_of(yankee.id), deadline),
-        dead_of(yankee.id),
-        "then its own death"
+    assert!(
+        until_dead(&mut bob, yankee.id, "the victim"),
+        "the victim's empire point, then its own death"
     );
     carol.quiet_allowing_farm("map 1 hears no fan");
     // The second click ends the war: one Shinsoo kill sorts last of the four
@@ -63927,10 +65265,11 @@ fn a_worn_cloaks_saved_seconds_fire_and_remove_it() {
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
     assert_eq!(load_sets.len(), 1, "the load sets the cloak");
     let mut alpha = keyed;
+    let sent_at = std::time::Instant::now();
     let entered = enter_game_view(&mut alpha);
     let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
     std::thread::sleep(Duration::from_millis(1600).saturating_sub(entered_at.elapsed()));
-    drain_revive_end(&mut alpha, entered_at);
+    drain_revive_end(&mut alpha, sent_at);
 
     // When: the cloak is moved onto the first unique cell.
     alpha.send_record(&client_item_move(0, 187, 0));
@@ -64037,6 +65376,7 @@ fn a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it() {
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
     assert_eq!(load_sets.len(), 1, "the load sets the cloak");
     let mut alpha = keyed;
+    let sent_at = std::time::Instant::now();
     let entered = enter_game_view(&mut alpha);
     let add = entered.add;
     let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
@@ -64044,7 +65384,7 @@ fn a_worn_cloak_hides_the_shown_alignment_and_its_takeoff_restores_it() {
     // revive's five seconds, so the affect end's pair lands here and not in a
     // move's window.
     std::thread::sleep(Duration::from_millis(1600).saturating_sub(entered_at.elapsed()));
-    drain_revive_end(&mut alpha, entered_at);
+    drain_revive_end(&mut alpha, sent_at);
 
     // When: the cloak is moved onto the first unique cell.
     alpha.send_record(&client_item_move(0, 187, 0));
@@ -64129,7 +65469,11 @@ fn read_a_move_with_updates(
     let mut updates = Vec::new();
     let seen = records
         .iter()
-        .filter(|record| !is_revive_end(record))
+        // The revive end's pair (the removal and the flag-clearing update) runs on its
+        // own clock; on a loaded host the five seconds end inside this drain. The
+        // removal carries type 215, and the update clears every flag while the entry
+        // and the hide restatements carry flag 28, so only that pair is stepped over.
+        .filter(|record| !is_revive_end(record) && !keyed.timer_end(record))
         .map(|record| match record.first().copied().unwrap_or_default() {
             ITEM_SET => {
                 let (window, cell, vnum, _count) = set_fields(record);
@@ -64362,6 +65706,291 @@ fn a_town_portal_marks_the_spot_and_recalls_to_town() {
     check(
         &database,
         "(SELECT socket0 = 470100 AND socket1 = 950000 FROM item WHERE id = 30)",
+    );
+}
+
+/// Whether `record` is a `GC_CHARACTER_POINT_CHANGE` of `POINT_HP` (5).
+fn is_hp_change(record: &[u8]) -> bool {
+    record.len() == POINT_CHANGE_LEN && record[0] == GC_POINT_CHANGE && record[8] == 5
+}
+
+/// Alpha's full life (`POINT_MAX_HP`, 700 + 18 x 40), which the portal scenarios store.
+const ALPHA_FULL_HP: i64 = 1420;
+
+/// Alpha's life after a recall from full: `CalculateConsume` (`G/char_item.cpp:2667-2698`)
+/// takes 30% (426), and `PointChange(POINT_HP, -consumeLife, false)` writes amount 0 and
+/// the new life.
+const ALPHA_HP_AFTER_RECALL: i64 = ALPHA_FULL_HP - ALPHA_FULL_HP * 30 / 100;
+
+/// The `(amount, value)` of the point change `record`.
+fn point_change_fields(record: &[u8]) -> (i64, i64) {
+    (
+        i64::from_le_bytes(record[9..17].try_into().expect("eight")),
+        i64::from_le_bytes(record[17..25].try_into().expect("eight")),
+    )
+}
+
+/// Every record up to and including the first for which `last` holds.
+fn read_through(client: &mut Keyed, mut last: impl FnMut(&[u8]) -> bool) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut records = Vec::new();
+    loop {
+        let Some(record) = client.read_game_until(deadline) else {
+            panic!("the awaited record never came: {records:02x?}");
+        };
+        let ends = last(&record);
+        records.push(record);
+        if ends {
+            return records;
+        }
+    }
+}
+
+/// `use.item_use.use_talisman`: no portal runs on the OX map (`GetMapIndex() == 200 ||
+/// GetMapIndex() == 113`, `G/char_item.cpp:5869-5873`). Alpha stands on the attender
+/// seat of map 113 (hosted on Channel 1 by [`ox_channels`]) with a town portal and a
+/// memory portal. She is a `LOW_WIZARD`, so the finished event's `Enter` refusal keeps
+/// her there instead of sending her home (`G/input_login.cpp:868-873`). Each use
+/// answers `[LS;388]` alone, stamps no socket and warps nobody, and both rows stay
+/// unmarked. The map's own login records ride ahead of the first answer and are read
+/// past.
+#[test]
+fn no_portal_runs_on_the_ox_map() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &ox_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 896500, y = 24600 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30 + n, id, 1, n, \
+         1, 22000 + 10 * n FROM player, generate_series(0, 1) AS n WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    assert_eq!(protos.get(22_000).expect("owner's").values[0], 1, "town");
+    assert_eq!(protos.get(22_010).expect("owner's").values[0], 2, "memory");
+    let (mut alpha, _listed) = enter_world_reading(&server, b"alice", 0);
+    for cell in 0..2_u16 {
+        std::thread::sleep(Duration::from_millis(1600));
+        alpha.send_record(&client_item_use(cell));
+        let records = read_through(&mut alpha, |record| record == an_info_line(b"[LS;388]"));
+        assert!(
+            !records
+                .iter()
+                .any(|record| record[0] == ITEM_UPDATE || record[0] == GC_WARP),
+            "the gate comes before any mark or warp: {records:02x?}"
+        );
+    }
+    // A third use proves nothing trailed the second: its line is again the first
+    // item record.
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_item_use(0));
+    let records = read_through(&mut alpha, |record| record == an_info_line(b"[LS;388]"));
+    assert!(
+        !records
+            .iter()
+            .any(|record| record[0] == ITEM_UPDATE || record[0] == GC_WARP),
+        "{records:02x?}"
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    check(
+        &database,
+        "(SELECT count(*) = 2 FROM item WHERE id IN (30, 31) AND count = 1 AND socket0 = 0 AND \
+         socket1 = 0)",
+    );
+}
+
+/// `use.item_use.use_talisman`: the memory portal (22010, value(0) 2,
+/// `G/char_item.cpp:5932-5955`). The first use of the lone portal marks: the two
+/// socket updates stamp (470100, 950000) and nothing else happens. The second use
+/// recalls (`ProcessRecallItem`, `:2124-2182`): the life pays 30% once, `GC_WARP`
+/// names the mark on Channel 1, and the portal is spent — its cell clears and its
+/// row goes.
+#[test]
+fn a_memory_portal_marks_the_spot_and_then_recalls_to_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        &format!("UPDATE player SET hp = {ALPHA_FULL_HP} WHERE name = 'Alpha'"),
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 1, \
+         22010 FROM player WHERE name = 'Alpha'",
+    );
+    let protos = owners_protos();
+    let proto = protos.get(22_010).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    assert_eq!(proto.sub_type, 1, "the owner's item is USE_TALISMAN");
+    assert_eq!(proto.values[0], 2, "the item is the memory portal");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    // When: Alpha uses. Then: the mark, and nothing else.
+    alpha.send_record(&client_item_use(0));
+    let marked = |record: &[u8]| {
+        record[0] == ITEM_UPDATE && update_sockets(record)[..2] == [470_100, 950_000]
+    };
+    let mut records = read_through(&mut alpha, marked);
+    let stamps: Vec<Vec<i32>> = records
+        .iter()
+        .filter(|record| record[0] == ITEM_UPDATE)
+        .map(|record| update_sockets(record)[..2].to_vec())
+        .collect();
+    assert_eq!(
+        stamps,
+        [vec![470_100, 0], vec![470_100, 950_000]],
+        "socket 0, then socket 1"
+    );
+    wait_for(
+        &database,
+        "(SELECT count = 1 AND socket0 = 470100 AND socket1 = 950000 FROM item WHERE id = 30)",
+    );
+    // When: Alpha uses again. Then: the life, the warp and the spent portal. The
+    // records of both uses hold one life payment and one warp, so the mark paid and
+    // warped nothing.
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_item_use(0));
+    let port = server.channel(1).port();
+    let warp = a_warp_record((470_100, 950_000), port);
+    let mut seen = (false, false);
+    let recall = read_through(&mut alpha, |record| {
+        seen.0 |= record == warp;
+        seen.1 |= clears_cell(record, 0);
+        seen.0 && seen.1
+    });
+    records.extend(recall);
+    let paid: Vec<&Vec<u8>> = records.iter().filter(|r| is_hp_change(r)).collect();
+    assert_eq!(paid.len(), 1, "one life payment: {paid:02x?}");
+    assert_eq!(
+        point_change_fields(paid[0]),
+        (0, ALPHA_HP_AFTER_RECALL),
+        "the recall pays 30% of the full life"
+    );
+    assert_eq!(
+        records.iter().filter(|record| **record == warp).count(),
+        1,
+        "one warp, to the mark"
+    );
+    assert!(
+        !records.iter().any(|r| r[0] == GC_WARP && *r != warp),
+        "no other warp"
+    );
+    wait_for(&database, "(SELECT count(*) = 0 FROM item WHERE id = 30)");
+}
+
+/// `use.item_use.use_talisman`: `ProcessRecallItem`'s refusal and the town portal's
+/// marked recall (`G/char_item.cpp:2124-2174`, `:5924-5930`, `:5947-5954`). Alpha, of
+/// empire 1, holds a lone memory portal marked on map 21, an empire 2 map: its use pays
+/// 30% of the life first (`PointChange` runs before `ProcessRecallItem`), then answers
+/// `[LS;1141]` and clears both sockets with an update each, and the portal is kept. A
+/// town portal marked on map 1 then recalls to its mark: the warp and the spent portal,
+/// and no life paid, as the town arm calls `ProcessRecallItem` with no `PointChange`.
+/// The life starts full, so the payment is the one record that lowers it; the
+/// regeneration that follows only raises it.
+#[test]
+fn a_memory_portal_pays_for_a_foreign_mark_and_a_marked_town_portal_recalls_free() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        &format!("UPDATE player SET hp = {ALPHA_FULL_HP} WHERE name = 'Alpha'"),
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1) SELECT \
+         30, id, 1, 0, 1, 22010, 60000, 150000 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1) SELECT \
+         31, id, 1, 1, 1, 22000, 470100, 950000 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    // When: Alpha uses the foreign mark. Then: the payment, the line, the two clears.
+    alpha.send_record(&client_item_use(0));
+    let wiped = |record: &[u8]| record[0] == ITEM_UPDATE && update_sockets(record)[..2] == [0, 0];
+    let records = read_through(&mut alpha, wiped);
+    let answer: Vec<&Vec<u8>> = records
+        .iter()
+        .filter(|record| {
+            is_hp_change(record)
+                || record[0] == ITEM_UPDATE
+                || (record[0] == GC_CHAT && record.len() > 10 && record[10..].starts_with(b"[LS;"))
+        })
+        .collect();
+    assert_eq!(answer.len(), 4, "payment, line, two updates: {answer:02x?}");
+    assert!(is_hp_change(answer[0]), "the payment first: {answer:02x?}");
+    assert_eq!(
+        point_change_fields(answer[0]),
+        (0, ALPHA_HP_AFTER_RECALL),
+        "30% of the full life"
+    );
+    assert_eq!(*answer[1], an_info_line(b"[LS;1141]"), "then the line");
+    assert_eq!(update_sockets(answer[2])[..2], [0, 150_000], "socket 0");
+    assert_eq!(update_fields(answer[3]).2, 1, "the portal is kept");
+    wait_for(
+        &database,
+        "(SELECT count = 1 AND socket0 = 0 AND socket1 = 0 FROM item WHERE id = 30)",
+    );
+    // When: Alpha uses the marked town portal. Then: the warp and the spent portal.
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&client_item_use(1));
+    let warp = a_warp_record((470_100, 950_000), server.channel(1).port());
+    let mut seen = (false, false);
+    let recall = read_through(&mut alpha, |record| {
+        seen.0 |= record == warp;
+        seen.1 |= clears_cell(record, 1);
+        seen.0 && seen.1
+    });
+    let mut hp_now = ALPHA_HP_AFTER_RECALL;
+    for record in recall.iter().filter(|record| is_hp_change(record)) {
+        let (_amount, value) = point_change_fields(record);
+        assert!(
+            value > hp_now,
+            "only regeneration moves the life; the town recall pays none: {recall:02x?}"
+        );
+        hp_now = value;
+    }
+    wait_for(&database, "(SELECT count(*) = 0 FROM item WHERE id = 31)");
+    wait_for(
+        &database,
+        "(SELECT count = 1 AND socket0 = 0 FROM item WHERE id = 30)",
     );
 }
 
@@ -65344,50 +66973,41 @@ fn a_bucket_and_a_plus_scroll_are_used_and_heard_nowhere() {
     drop(server);
 }
 
-/// `cg.game.item_use`: `UseItemEx`'s head (`G/char_item.cpp:2769-2775`) refuses a
-/// duellist's limited potion while `no_potions_on_pvp` stands. Alice (a
-/// `HIGH_WIZARD`) stands the flag herself, then fights Yankee; she uses the
-/// limited 50817 and hears `[LS;1205]` with the row kept. A GM stands the flag
-/// because `questlib_extra.lua`'s load set is not ported (only the boot's two
-/// seeds stand). Yankee enters first while Alpha is offline, so his own team
-/// list names her with the offline byte; her enter then fans him `TEAM_LOGIN`.
-#[test]
-fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
-    let Some(database) = ScratchDatabase::create() else {
-        return;
-    };
-    let server = Server::start(binary(), database.url());
+/// The cast of the duel potion gates. Alice (a `HIGH_WIZARD`) and Yankee enter, Alice stands
+/// `no_potions_on_pvp` herself, and the two fight a consent duel. `seed` runs once Alpha's
+/// row exists, before anyone enters. A GM stands the flag because `questlib_extra.lua`'s load
+/// set is not ported (only the boot's two seeds stand). Yankee enters first while Alpha is
+/// offline, so his own team list names her with the offline byte; her enter then fans him
+/// `TEAM_LOGIN`.
+fn potion_duel(
+    server: &Server,
+    database: &ScratchDatabase,
+    seed: impl FnOnce(&ScratchDatabase),
+) -> (Keyed, Keyed) {
     for login in ["alice", "bob"] {
-        create_account(&server, login);
+        create_account(server, login);
     }
-    add_characters(&database);
+    add_characters(database);
     sql(
-        &database,
+        database,
         "UPDATE account SET empire = 2 WHERE login = 'bob'",
     );
     sql(
-        &database,
+        database,
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
          470000, 950000 FROM account WHERE login = 'bob'",
     );
-    sql(
-        &database,
-        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, 2, \
-         50817 FROM player WHERE name = 'Alpha'",
-    );
+    seed(database);
     // Alice carries the grant from the select, where `/eventflag` reads it.
     sql(
-        &database,
+        database,
         "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
          FROM account WHERE login = 'alice'",
     );
-    let protos = owners_protos();
-    let proto = protos.get(50_817).expect("the owner's data has it");
-    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
     // Yankee enters while Alpha is offline: his own team list names Alpha with
     // the offline byte, inside his login event, ahead of the board's line. The
     // enter helper only reads the online shape, so the enter is manual here.
-    let (mut yankee, _, yankee_list) = select_screen_on(&server, 1, b"bob", ENGLISH);
+    let (mut yankee, _, yankee_list) = select_screen_on(server, 1, b"bob", ENGLISH);
     let (_yankee_character, _yankee_quickslots, _yankee_items) =
         load_selected(&mut yankee, &yankee_list, 0);
     let _yankee_entered = enter_game_shown(&mut yankee);
@@ -65398,7 +67018,7 @@ fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
     );
     read_login_event(&mut yankee);
     yankee.still("nothing follows");
-    let (mut alice, _empire, list) = select_screen_on(&server, 1, b"alice", ENGLISH);
+    let (mut alice, _empire, list) = select_screen_on(server, 1, b"alice", ENGLISH);
     let (_character, _quickslots, _items) = load_selected(&mut alice, &list, 0);
     let entered = enter_game_shown(&mut alice);
     // Alice hears no team list of her own: the team is every GM name other
@@ -65435,8 +67055,6 @@ fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
         .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[5..11] == b"Yankee"[..])
         .map(|record| u32::from_le_bytes(record[1..5].try_into().expect("a VID")))
         .expect("Yankee stands in view");
-    // When: Alice stands the flag, the duel begins, and Alice uses. Then:
-    // `[LS;1205]`, the row kept.
     alice.send_record(&client_chat(
         CHAT_TALKING,
         b"/eventflag no_potions_on_pvp 1",
@@ -65447,6 +67065,46 @@ fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
         "the flag stands"
     );
     challenge_and_accept(&mut alice, &mut yankee, alice_vid, yankee_vid);
+    (alice, yankee)
+}
+
+/// Read a duellist's records until one `stop` accepts, past whatever else the duel sends,
+/// and answer them all, the stopping one last.
+fn read_duel_until(keyed: &mut Keyed, stop: impl Fn(&[u8]) -> bool, note: &str) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut read = Vec::new();
+    loop {
+        let record = keyed
+            .read_game_until(deadline)
+            .unwrap_or_else(|| panic!("{note}: not heard"));
+        let last = stop(&record);
+        read.push(record);
+        if last {
+            return read;
+        }
+    }
+}
+
+/// `cg.game.item_use`: `UseItemEx`'s head (`G/char_item.cpp:2769-2775`) refuses a
+/// duellist's limited potion while `no_potions_on_pvp` stands. Alice, in the
+/// [`potion_duel`], uses the limited 50817 and hears `[LS;1205]` with the row kept.
+#[test]
+fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let (mut alice, yankee) = potion_duel(&server, &database, |database| {
+        sql(
+            database,
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 0, \
+             2, 50817 FROM player WHERE name = 'Alpha'",
+        );
+    });
+    let protos = owners_protos();
+    let proto = protos.get(50_817).expect("the owner's data has it");
+    assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
+    // When: Alice uses. Then: `[LS;1205]`, the row kept.
     alice.send_record(&client_item_use(0));
     let mut refused = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -65460,6 +67118,66 @@ fn a_duellist_with_the_flag_up_hears_1205_for_a_limited_potion() {
     }
     assert!(refused, "the duel gate refuses");
     check(&database, "(SELECT count = 2 FROM item WHERE id = 30)");
+    drop(alice);
+    drop(yankee);
+}
+
+/// `cg.game.item_use`: the potion arms' own duel gate (`G/char_item.cpp:5610-5616`,
+/// `:5715-5721`, under `ENABLE_NEWSTUFF`, `C/prodomodefines.h:11`) refuses every potion
+/// `IsAllowedPotionOnPVP` does not name (`G/arena.cpp:1105-1124`, the ten blue ones) while
+/// `no_potions_on_pvp` stands, which is more than the head's limited-potion gate. Alice, in
+/// the [`potion_duel`], hears `[LS;1205]` for the red 27001 (`USE_POTION`) and for 27875
+/// (`USE_POTION_NODELAY`), both kept; the blue 27004 passes the gate (at full spell points
+/// its arm then refuses silently), which an item move after it shows.
+#[test]
+fn a_duellist_with_the_flag_up_hears_1205_for_every_potion_but_the_blue_ones() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    let (use_potion, nodelay) = (
+        gamedata::item_kind::USE_POTION,
+        gamedata::item_kind::USE_POTION_NODELAY,
+    );
+    let (mut alice, yankee) = potion_duel(&server, &database, |database| {
+        give_alpha_potions(
+            database,
+            &[
+                (27_001, 2, use_potion, [300, 0, 0, 0]),
+                (27_875, 1, nodelay, [230, 0, 0, 0]),
+                (27_004, 1, use_potion, [0, 100, 0, 0]),
+            ],
+        );
+    });
+    let refusal = an_info_line(b"[LS;1205]");
+    // When: Alice uses the red potion, then 27875. Then: `[LS;1205]` for each.
+    for (cell, note) in [(0, "the red potion's refusal"), (1, "27875's refusal")] {
+        alice.send_record(&client_item_use(cell));
+        let _before = read_duel_until(&mut alice, |record| record == refusal.as_slice(), note);
+    }
+    // When: the blue potion, then a move of it to cell 10. Then: no refusal before the move.
+    alice.send_record(&client_item_use(2));
+    alice.send_record(&client_item_move(2, 10, 0));
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let read = read_duel_until(
+        &mut alice,
+        |record| record[0] == ITEM_SET && set_fields(record) == (inventory, 10, 27_004, 1),
+        "the blue potion's move",
+    );
+    assert!(
+        !read.contains(&refusal),
+        "the blue potion passes the duel gate"
+    );
+    check(
+        &database,
+        "(SELECT array_agg((id, pos, count) ORDER BY id)::text FROM item) = \
+         '{\"(30,0,2)\",\"(31,1,1)\",\"(32,10,1)\"}'",
+    );
     drop(alice);
     drop(yankee);
 }
@@ -66810,9 +68528,10 @@ fn a_detector_names_the_nearest_stone_and_counts_its_use() {
         .parse()
         .expect("a number");
     assert!((0..360).contains(&degree), "a compass degree: {degree}");
-    // The stone stands at (610, 545) cells, (470600, 950500): 500 east and 500
-    // north of Alpha, so the degree is 45.
-    assert_eq!(degree, 45, "north-east at equal legs");
+    // The stone stands at (610, 545) cells, (470600, 950500): 500 past Alpha on
+    // both axes. `GetDegreeFromPositionXY(GetX(), stone.y, stone.x, GetY())`
+    // (`:4267`) swaps the two `y`s, so the vector is (500, -500) and the degree 135.
+    assert_eq!(degree, 135, "the swapped legs");
     check(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
     drop(alpha);
     wait_for(&database, "(SELECT socket0 = 3 FROM item WHERE id = 30)");
@@ -66820,8 +68539,8 @@ fn a_detector_names_the_nearest_stone_and_counts_its_use() {
 }
 
 /// `cg.game.item_use`: `case 76006` shares `case 27989`'s sweep (`G/char_item.cpp:4226-4292`):
-/// the second detector, socket 0 at 2, names the stone 500 east and 500 north of Alpha at
-/// 45 degrees, and its socket rises to 3.
+/// the second detector, socket 0 at 2, names the stone 500 past Alpha on both axes at
+/// 135 degrees (the call swaps the two `y`s, `:4267`), and its socket rises to 3.
 #[test]
 fn the_second_detector_names_the_nearest_stone_and_counts_its_use() {
     let Some(database) = ScratchDatabase::create() else {
@@ -66862,7 +68581,7 @@ fn the_second_detector_names_the_nearest_stone_and_counts_its_use() {
     let words: Vec<&[u8]> = told.split(|&byte| byte == b' ').collect();
     assert_eq!(
         &words[2..],
-        &[b"2".as_slice(), b"45".as_slice()],
+        &[b"2".as_slice(), b"135".as_slice()],
         "{}",
         told.escape_ascii()
     );
@@ -66871,60 +68590,520 @@ fn the_second_detector_names_the_nearest_stone_and_counts_its_use() {
     drop(server);
 }
 
-/// `cg.game.item_use`: `case 50004` (`G/char_item.cpp:4007-4225`) buries and
-/// finds the event stone at once: a fresh detector buries its stone within 700
-/// of Alpha, which is inside the 1000 find range, so the `StoneDetect 0 0` line
-/// goes around and the detector leaves with its prize paid.
+/// The item and detector records of one item use, in order, read until `done` says the
+/// use answered in full: the `GC_ITEM_UPDATE`s, the `GC_ITEM_SET`s (a clear is one of
+/// vnum 0) and the `StoneDetect` and `[LS;...]` lines. Anything else is skipped.
+fn read_use_trail(client: &mut Keyed, done: impl Fn(&[Vec<u8>]) -> bool) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut trail: Vec<Vec<u8>> = Vec::new();
+    while !done(&trail) {
+        let Some(record) = client.read_game_raw_until(deadline) else {
+            panic!("the use's records stop short: {trail:02x?}");
+        };
+        let kept = match record[0] {
+            ITEM_UPDATE | ITEM_SET => true,
+            GC_CHAT => {
+                record.len() > 10
+                    && (record[10..].starts_with(b"StoneDetect ")
+                        || record[10..].starts_with(b"[LS;"))
+            }
+            _ => false,
+        };
+        if kept {
+            trail.push(record);
+        }
+    }
+    trail
+}
+
+/// Whether `record` clears inventory cell `cell`: a `GC_ITEM_SET` of vnum 0 there.
+fn clears_cell(record: &[u8], cell: u16) -> bool {
+    record[0] == ITEM_SET && {
+        let (_window, at, vnum, _count) = set_fields(record);
+        at == cell && vnum == 0
+    }
+}
+
+/// `use.item_use.use_special.27989`, `use.item_use.use_special.76006`: the sixth use
+/// (`G/char_item.cpp:4279-4283`). Both detectors carry socket 0 at 5 and a stone stands
+/// 500 past Alpha on both axes. Each use sends, in legacy's order, the update that
+/// raises socket 0 to 6, the stone's own line `StoneDetect <vid> 2 135`, the closing
+/// `StoneDetect <vid> 0 0`, and the clear of the cell; the rows are gone.
 #[test]
-fn a_fresh_event_detector_buries_and_finds_its_stone_at_once() {
+fn a_detector_names_the_stone_a_sixth_time_and_then_breaks() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let mut server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t610\t545\t0\t0\t0\t1\t1s\t100\t1\t8001\n",
+        "test_server = false",
+    );
     create_account(&server, "alice");
     add_characters(&database);
     sql(
         &database,
-        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, \
-         0, 1, 50004 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 30 + n, \
+         id, 1, n, 1, CASE n WHEN 0 THEN 27989 ELSE 76006 END, 5 FROM player, \
+         generate_series(0, 1) AS n WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    let mut vids = Vec::new();
+    for cell in 0..2_u16 {
+        std::thread::sleep(Duration::from_millis(1600));
+        alpha.send_record(&client_item_use(cell));
+        let trail = read_use_trail(&mut alpha, |trail| {
+            trail.iter().any(|record| clears_cell(record, cell))
+        });
+        assert_eq!(trail.len(), 4, "update, answer, close, clear: {trail:02x?}");
+        assert_eq!(
+            update_fields(&trail[0]),
+            (common::item_slots::EWindows::Inventory as u8, cell, 1),
+            "the detector's own update comes first"
+        );
+        assert_eq!(update_sockets(&trail[0])[0], 6, "socket 0 counts the sixth");
+        let answer = trail[1][10..].to_vec();
+        let words: Vec<&[u8]> = answer.split(|&byte| byte == b' ').collect();
+        assert_eq!(trail[1][3], 5, "a command line");
+        assert_eq!(
+            (words[0], &words[2..]),
+            (
+                b"StoneDetect".as_slice(),
+                [b"2".as_slice(), b"135".as_slice()].as_slice()
+            ),
+            "the stone is still named: {}",
+            answer.escape_ascii()
+        );
+        let mut close = b"StoneDetect ".to_vec();
+        close.extend_from_slice(words[1]);
+        close.extend_from_slice(b" 0 0");
+        assert_eq!(trail[2], a_command_line(&close), "then the closing line");
+        assert!(clears_cell(&trail[3], cell), "and the detector leaves last");
+        vids.push(words[1].to_vec());
+    }
+    assert_eq!(vids[0], vids[1], "both lines name Alpha");
+    wait_for(
+        &database,
+        "(SELECT count(*) = 0 FROM item WHERE id IN (30, 31))",
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT count(*) = 0 FROM item WHERE id IN (30, 31))",
+    );
+    drop(server);
+}
+
+/// Where Alpha enters map 1.
+const ALPHA_SPOT: (i32, i32) = (470_100, 950_000);
+
+/// `(int)GetDegreeFromPositionXY(GetX(), stone.y, stone.x, GetY())`
+/// (`G/char_item.cpp:4201`, `G/vector.cpp:25-51`) for a caller at [`ALPHA_SPOT`]: the
+/// call swaps the two `y`s, so the vector is `(stone.x - x, y - stone.y)`; the angle to
+/// the `+y` axis, mirrored past 180 when `x` is negative, truncated.
+fn detector_degree(stone: (i32, i32)) -> i32 {
+    let x = common::cfloat::i32_to_f32(stone.0 - ALPHA_SPOT.0);
+    let y = common::cfloat::i32_to_f32(ALPHA_SPOT.1 - stone.1);
+    let length = (x * x + y * y + 1.0e-12_f32).sqrt();
+    let degrees = (y / length).acos() * (180.0_f32 / std::f32::consts::PI);
+    common::cfloat::f32_to_i32(if x / length < 0.0 {
+        360.0 - degrees
+    } else {
+        degrees
+    })
+}
+
+/// The prizes a find may pay after `uses` uses (`info_4`, `info_7`, `info_10`,
+/// `G/char_item.cpp:4040-4122`): each row of nonzero weight but the 50001 lotto row.
+fn event_prizes(uses: i32) -> &'static [(u32, u16)] {
+    if uses <= 4 {
+        &[(27_999, 1), (25_100, 1), (50_003, 1)]
+    } else if uses <= 7 {
+        &[
+            (27_001, 10),
+            (27_004, 10),
+            (27_005, 10),
+            (27_100, 1),
+            (27_103, 1),
+            (27_101, 1),
+            (27_104, 1),
+            (27_999, 1),
+            (25_040, 1),
+            (27_410, 1),
+            (27_600, 1),
+            (25_100, 1),
+            (50_003, 1),
+        ]
+    } else {
+        &[
+            (27_001, 10),
+            (27_004, 10),
+            (27_002, 10),
+            (27_005, 10),
+            (27_100, 1),
+            (27_103, 1),
+            (27_101, 1),
+            (27_104, 1),
+            (27_999, 1),
+            (25_040, 1),
+            (50_003, 1),
+        ]
+    }
+}
+
+/// Whether the trail of an event detector's use from `cell`, which stood at `before`
+/// uses, is whole: a direction line; the burnout through its 27002; or a find through
+/// the clear of the cell, and through the lotto ticket's line, set and two socket
+/// updates when a find of the first tier paid nothing before the clear.
+fn event_use_done(trail: &[Vec<u8>], cell: u16, before: i32) -> bool {
+    let told = |text: &[u8]| trail.iter().any(|record| *record == an_info_line(text));
+    if told(b"[LS;176]") {
+        // The consolation: its receipt and a new cell, or a top-up and its receipt.
+        return match trail {
+            [.., last] if last[0] == ITEM_SET => set_fields(last).2 == 27_002,
+            [.., update, last] => update[0] == ITEM_UPDATE && is_receipt(last),
+            _ => false,
+        };
+    }
+    if told(b"[LS;165]") {
+        let Some(cleared) = trail.iter().position(|record| clears_cell(record, cell)) else {
+            return false;
+        };
+        let found = trail
+            .iter()
+            .position(|record| *record == an_info_line(b"[LS;165]"))
+            .expect("told above");
+        let paid = trail[found + 1..cleared]
+            .iter()
+            .any(|record| record[0] != GC_CHAT);
+        return before >= 4 || paid || trail.len() >= cleared + 5;
+    }
+    trail
+        .iter()
+        .any(|record| record[0] == GC_CHAT && record[3] == 5)
+}
+
+/// Whether `record` is `AutoGiveItem`'s receipt, `[LS;444;<name>]` (`G/char_item.cpp:9119`,
+/// `:9178`).
+fn is_receipt(record: &[u8]) -> bool {
+    record[0] == GC_CHAT
+        && record.len() > 10
+        && record[3] == CHAT_TYPE_INFO
+        && record[10..].starts_with(b"[LS;444;")
+}
+
+/// What an event-detector scenario got so far, by cell: vnum and count.
+type HeldPrizes = Vec<(u16, u32, u16)>;
+
+/// Assert what one `AutoGiveItem` of a find of use number `uses` from `cell` sent and
+/// note it in `held` (`G/char_item.cpp:9081-9200`): the receipt, then a `GC_ITEM_SET`
+/// of a tier row into a cell that is not the detector's, which still holds its own;
+/// or a `GC_ITEM_UPDATE` that tops up a held stack of a tier row's vnum by that row's
+/// count (stacking comes first), then the receipt.
+fn assert_event_prize(given: &[Vec<u8>], cell: u16, uses: i32, held: &mut HeldPrizes) {
+    assert_eq!(
+        given.len(),
+        2,
+        "one item record and its receipt: {given:02x?}"
+    );
+    if given[1][0] == ITEM_SET {
+        assert!(is_receipt(&given[0]), "the receipt first: {given:02x?}");
+        let (_window, at, vnum, count) = set_fields(&given[1]);
+        assert_ne!(at, cell, "the detector still holds its cell");
+        assert!(
+            event_prizes(uses).contains(&(vnum, count)),
+            "{vnum} x{count} is no prize of use {uses}"
+        );
+        held.push((at, vnum, count));
+        return;
+    }
+    assert!(is_receipt(&given[1]), "the receipt last: {given:02x?}");
+    assert_eq!(given[0][0], ITEM_UPDATE, "a top-up: {given:02x?}");
+    let (_window, at, count) = update_fields(&given[0]);
+    assert_ne!(at, cell, "the detector still holds its cell");
+    let stack = held
+        .iter_mut()
+        .find(|(held_at, _, _)| *held_at == at)
+        .unwrap_or_else(|| panic!("a top-up of a stack the scenario holds: {given:02x?}"));
+    let added = count.checked_sub(stack.2).expect("a top-up adds");
+    assert!(
+        event_prizes(uses).contains(&(stack.1, added)),
+        "{} x{added} is no prize of use {uses}",
+        stack.1
+    );
+    stack.2 = count;
+}
+
+/// Assert the tail of a find (`G/char_item.cpp:4036-4177`), `rest` being what follows
+/// the socket updates of the use number `uses` from `cell`: `[LS;165]`; at most one
+/// prize ([`assert_event_prize`]); `StoneDetect <vid> 0 0`; the clear. A first-tier
+/// find that paid nothing drew the lotto row: the ticket's receipt and set come behind
+/// the clear and its two sockets are written, the first with a number that is not 0.
+fn assert_event_find(
+    rest: &[Vec<u8>],
+    vid: &[u8],
+    (cell, uses): (u16, i32),
+    held: &mut HeldPrizes,
+) {
+    assert_eq!(rest[0], an_info_line(b"[LS;165]"), "the find's line");
+    let mut close = b"StoneDetect ".to_vec();
+    close.extend_from_slice(vid);
+    close.extend_from_slice(b" 0 0");
+    let closed = rest
+        .iter()
+        .position(|record| *record == a_command_line(&close))
+        .expect("the closing line");
+    let prizes = &rest[1..closed];
+    if !prizes.is_empty() {
+        assert_event_prize(prizes, cell, uses, held);
+    }
+    assert!(
+        clears_cell(&rest[closed + 1], cell),
+        "the detector leaves last"
+    );
+    let ticket = &rest[closed + 2..];
+    if uses > 4 || !prizes.is_empty() {
+        assert!(ticket.is_empty(), "nothing follows: {ticket:02x?}");
+        return;
+    }
+    assert_eq!(ticket.len(), 4, "the ticket and its sockets: {ticket:02x?}");
+    assert!(
+        is_receipt(&ticket[0]),
+        "the ticket's receipt: {ticket:02x?}"
+    );
+    let (_window, at, vnum, count) = set_fields(&ticket[1]);
+    assert_eq!((vnum, count), (50_001, 1), "the lotto ticket");
+    for update in &ticket[2..] {
+        assert_eq!(update_fields(update).1, at, "the ticket's own update");
+    }
+    assert_ne!(update_sockets(&ticket[2])[0], 0, "the ticket's number");
+    assert_eq!(update_sockets(&ticket[3])[1], 0, "no lotto round is set");
+}
+
+/// One use of the event detector at `cell`, which stood at `before` uses with its
+/// stone at `seeded` (`case 50004`, `G/char_item.cpp:4007-4225`). The socket updates
+/// come first: all three for a fresh detector, whose buried point they tell, else
+/// socket 0 alone. Then by the point's distance from Alpha: a find under 1000
+/// ([`assert_event_find`]); else at the tenth use `[LS;176]`, the clear and a 27002;
+/// else `StoneDetect <vid> <dist> <degree>` with 1 under 20000, 2 under 70000, else 3.
+/// `held` holds what the scenario got before and takes what this use gives. Answers
+/// the stone's point.
+fn assert_event_use(
+    alpha: &mut Keyed,
+    (cell, before): (u16, i32),
+    seeded: (i32, i32),
+    held: &mut HeldPrizes,
+) -> (i32, i32) {
+    alpha.send_record(&client_item_use(cell));
+    let trail = read_use_trail(alpha, |trail| event_use_done(trail, cell, before));
+    let stamps = if before == 0 { 3 } else { 1 };
+    for update in &trail[..stamps] {
+        assert_eq!(
+            update_fields(update),
+            (common::item_slots::EWindows::Inventory as u8, cell, 1),
+            "the detector's updates come first: {trail:02x?}"
+        );
+    }
+    let sockets = update_sockets(&trail[stamps - 1]);
+    assert_eq!(sockets[0], before + 1, "socket 0 counts the use");
+    let stone = (sockets[1], sockets[2]);
+    if before != 0 {
+        assert_eq!(stone, seeded, "the stone stays where it lies");
+    }
+    let (dx, dy) = (
+        i64::from(stone.0 - ALPHA_SPOT.0),
+        i64::from(stone.1 - ALPHA_SPOT.1),
+    );
+    let squared = dx * dx + dy * dy;
+    let rest = &trail[stamps..];
+    let line = rest
+        .iter()
+        .find(|record| record[0] == GC_CHAT && record[3] == 5);
+    if squared < 1000 * 1000 {
+        let line = line.expect("a find closes with its line");
+        let vid = line[10..].split(|&byte| byte == b' ').nth(1).expect("vid");
+        assert_event_find(rest, vid, (cell, before + 1), held);
+    } else if before + 1 >= 10 {
+        assert_eq!(
+            rest.len(),
+            4,
+            "line, clear, receipt, consolation: {rest:02x?}"
+        );
+        assert_eq!(rest[0], an_info_line(b"[LS;176]"), "the burnout's line");
+        assert!(clears_cell(&rest[1], cell), "the detector leaves");
+        assert!(is_receipt(&rest[2]), "AutoGiveItem's receipt: {rest:02x?}");
+        let (_window, at, vnum, count) = set_fields(&rest[3]);
+        assert_eq!((vnum, count), (27_002, 1), "the consolation");
+        assert_eq!(at, cell, "it takes the cell the detector left");
+        held.push((at, vnum, count));
+    } else {
+        assert_eq!(rest.len(), 1, "the direction line alone: {rest:02x?}");
+        let text = rest[0][10..].to_vec();
+        let words: Vec<&[u8]> = text.split(|&byte| byte == b' ').collect();
+        let dist = if squared < 20_000 * 20_000 {
+            "1"
+        } else if squared < 70_000 * 70_000 {
+            "2"
+        } else {
+            "3"
+        };
+        let degree = detector_degree(stone).to_string();
+        assert_eq!(
+            (words[0], &words[2..]),
+            (
+                b"StoneDetect".as_slice(),
+                [dist.as_bytes(), degree.as_bytes()].as_slice()
+            ),
+            "the stone at {stone:?}: {}",
+            text.escape_ascii()
+        );
+    }
+    stone
+}
+
+/// `use.item_use.use_special.50004`: a fresh detector buries its stone anywhere on the
+/// map. `GetRandomLocation(iMapIndex, pos, 700)` (`G/char_item.cpp:4020`) hands the 700
+/// to `dwCurrentX` and leaves `iMaxDistance` at its default 0
+/// (`G/sectree_manager.h:151`), so no draw is clamped to the caller. Alpha uses three
+/// fresh detectors: each stamps sockets 0, 1 and 2 and answers by its own stone's
+/// distance ([`assert_event_use`]), and the store keeps the stamps of one that stays.
+/// Map 1 is 102400 by 128000, so a stone within 1000 of Alpha is a draw of about one
+/// in four thousand; the scenario accepts it for each detector and asks only that the
+/// three do not all lie there, which a clamp to 700 would make certain.
+#[test]
+fn a_fresh_event_detector_buries_its_stone_anywhere_on_the_map() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30 + n, id, 1, \
+         n, 1, 50004 FROM player, generate_series(0, 2) AS n WHERE name = 'Alpha'",
     );
     let protos = owners_protos();
     let proto = protos.get(50_004).expect("the owner's data has it");
     assert_eq!(proto.item_type, gamedata::item_kind::ITEM_USE);
     assert_eq!(proto.sub_type, 10, "the owner's detector is USE_SPECIAL");
     let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
-    alpha.send_record(&client_item_use(0));
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut told = None;
-    while std::time::Instant::now() < deadline && told.is_none() {
-        let Some(record) = alpha.read_game_raw_until(deadline) else {
-            break;
-        };
-        if record.len() > 10 && record[0] == GC_CHAT && record[3] == 5 {
-            let text = &record[10..];
-            if text.starts_with(b"StoneDetect ") {
-                told = Some(text.to_vec());
-            }
+    let mut far = 0;
+    let mut held = HeldPrizes::new();
+    for cell in 0..3_u16 {
+        std::thread::sleep(Duration::from_millis(1600));
+        let stone = assert_event_use(&mut alpha, (cell, 0), (0, 0), &mut held);
+        assert!(
+            (409_600..512_000).contains(&stone.0) && (896_000..1_024_000).contains(&stone.1),
+            "the stone lies on map 1: {stone:?}"
+        );
+        let (dx, dy) = (
+            i64::from(stone.0 - ALPHA_SPOT.0),
+            i64::from(stone.1 - ALPHA_SPOT.1),
+        );
+        if dx * dx + dy * dy >= 1000 * 1000 {
+            far += 1;
+            wait_for(
+                &database,
+                &format!(
+                    "(SELECT socket0 = 1 AND socket1 = {} AND socket2 = {} FROM item WHERE id = \
+                     {})",
+                    stone.0,
+                    stone.1,
+                    30 + cell
+                ),
+            );
+        } else {
+            wait_for(
+                &database,
+                &format!("(SELECT count(*) = 0 FROM item WHERE id = {})", 30 + cell),
+            );
         }
     }
-    let told = told.expect("the detector tells its line");
-    let words: Vec<&[u8]> = told.split(|&byte| byte == b' ').collect();
-    assert_eq!(
-        words.len(),
-        4,
-        "vid, dist and degree: {}",
-        told.escape_ascii()
+    assert!(far > 0, "no clamp holds the stones at Alpha's feet");
+    drop(server);
+}
+
+/// `use.item_use.use_special.50004`: the later uses (`G/char_item.cpp:4025-4225`), on
+/// detectors whose sockets the store already holds. In turn: one at 9 uses with its
+/// stone 10000 off counts to 10 and burns out (`:4187-4193`): `[LS;176]`, the clear,
+/// and a 27002 in the freed cell; one at 4 uses with the same stone counts to 5 and
+/// tells `StoneDetect <vid> 1 90`; one at 1 use, 4 uses and 7 uses, each lying on
+/// Alpha's own spot, finds its stone and pays by the table of its tier (`:4116-4122`:
+/// 4 or less, 7 or less, else the last) into a free cell or onto a stack it already
+/// gave, the 50001 lotto row being a ticket set behind the clear.
+#[test]
+fn a_used_event_detector_pays_by_its_tier_points_and_burns_out_at_ten() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
     );
-    // The clamp keeps the buried point within 700 of the caller, so the find
-    // (under 1000) always fires on the first use: `[LS;165]` ahead, the `0 0`
-    // line around, and the detector leaves with its prize paid.
-    assert_eq!(
-        &words[2..],
-        &[b"0".as_slice(), b"0".as_slice()],
-        "found at once: {}",
-        told.escape_ascii()
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Cells 0 and 1 lie 10000 off along x; cells 2-4 find at Alpha's spot.
+    let far = (ALPHA_SPOT.0 + 10_000, ALPHA_SPOT.1);
+    let detectors = [
+        (9, far),
+        (4, far),
+        (1, ALPHA_SPOT),
+        (4, ALPHA_SPOT),
+        (7, ALPHA_SPOT),
+    ];
+    for (cell, (before, stone)) in detectors.iter().enumerate() {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1, \
+                 socket2) SELECT {}, id, 1, {cell}, 1, 50004, {before}, {}, {} FROM player WHERE \
+                 name = 'Alpha'",
+                30 + cell,
+                stone.0,
+                stone.1
+            ),
+        );
+    }
+    assert_eq!(detector_degree(far), 90, "due +x reads 90");
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    let mut held = HeldPrizes::new();
+    for (cell, (before, stone)) in detectors.iter().enumerate() {
+        std::thread::sleep(Duration::from_millis(1600));
+        let cell = u16::try_from(cell).expect("a cell");
+        assert_event_use(&mut alpha, (cell, *before), *stone, &mut held);
+    }
+    // The three finders and the burnt one are gone, the one that pointed stays at 5,
+    // and the consolation holds the burnt one's cell (the last tier's ten 27002 may
+    // top it up).
+    wait_for(
+        &database,
+        "(SELECT count(*) = 0 FROM item WHERE id IN (30, 32, 33, 34))",
+    );
+    wait_for(&database, "(SELECT socket0 = 5 FROM item WHERE id = 31)");
+    let (_, _, consolation) = held
+        .iter()
+        .find(|(at, vnum, _)| (*at, *vnum) == (0, 27_002))
+        .expect("the consolation is held");
+    wait_for(
+        &database,
+        &format!(
+            "(SELECT count(*) = 1 FROM item WHERE vnum = 27002 AND pos = 0 AND count = \
+             {consolation} AND window_type = 1)"
+        ),
     );
     drop(alpha);
-    wait_for(&database, "(SELECT count(*) = 0 FROM item WHERE id = 30)");
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(&database, "(SELECT socket0 = 5 FROM item WHERE id = 31)");
     drop(server);
 }

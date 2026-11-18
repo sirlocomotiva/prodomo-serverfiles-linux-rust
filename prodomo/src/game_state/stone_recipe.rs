@@ -101,8 +101,6 @@ const DETECT_NEAR: u32 = 10_000;
 const DETECT_MID: u32 = 70_000;
 /// The event-stone detector (`case 50004`, `G/char_item.cpp:4007-4225`).
 const EVENT_DETECTOR: u32 = 50_004;
-/// The arming clamp (`:4018`): the buried point is drawn within 700 of the caller.
-const EVENT_BURY_RANGE: i32 = 700;
 /// The arming tries (`G/sectree_manager.cpp:890-937`): 100 draws per region.
 const EVENT_BURY_TRIES: i32 = 100;
 /// The find's distance (`:4031`): under 1000 the stone is found.
@@ -115,6 +113,8 @@ const EVENT_MID: f32 = 70_000.0;
 const EVENT_TRIES: i32 = 10;
 /// The burnout's consolation (`:4191`): a 27002.
 const EVENT_CONSOLATION: u32 = 27_002;
+/// The lotto ticket of the prize tables' 50001 row (`:4132`).
+const LOTTO_TICKET: u32 = 50_001;
 /// The event-stone prizes (`:4047-4108`): vnum, count, weight, by socket-0 band.
 /// The `info_7` table names 27004 twice (the second row should be 27002) and the
 /// three tables sum to 100/89/93, so a high roll in the upper bands wins nothing;
@@ -701,18 +701,12 @@ impl GameState {
             .is_some_and(|item| STONE_DETECTORS.contains(&item.vnum))
     }
 
-    /// The stone detector (`case 27989` / `case 76006`, `G/char_item.cpp:4226-4292`):
-    /// socket 0 counts the uses up by 1, then the nearest live stone on the map is
-    /// found (`FFindStone`, `:65-80`, over the map's characters; a stone at distance
-    /// 0 is skipped, and the seed is the lowest VID, as the `std::map` iterates by
-    /// key). With one, the caller hears `StoneDetect <vid> <val> <degree>` as a
-    /// command line, where `val` is 2 under 10000, 1 under 70000, else 3, and the
-    /// degree is `GetDegreeFromPositionXY` of the caller to the stone; with none,
-    /// `[LS;1461]`. At socket 0 past 5 the line `StoneDetect <vid> 0 0` tells and
-    /// the whole detector leaves (`RemoveItem`, the stack with it).
     /// The detector's answer for `spot`: the nearest live stone of `stones` names
     /// its val and degree (`:4240-4272`). The seed is the first stone in VID order;
     /// only a nearer stone at a nonzero distance replaces it, in legacy's order.
+    /// The degree is `GetDegreeFromPositionXY(GetX(), stone.y, stone.x, GetY())`
+    /// (`:4267`): the call swaps the two `y`s, so the vector is `(stone.x - x,
+    /// y - stone.y)`.
     fn detector_answer(stones: &[(u32, i32, i32)], spot: super::view::Spot) -> Option<(u32, i32)> {
         let mut stones = stones.to_vec();
         stones.sort_by_key(|(vid, _, _)| *vid);
@@ -739,10 +733,119 @@ impl GameState {
             3
         };
         let degree =
-            common::cfloat::f32_to_i32(super::motion::rotation_to_xy(tx - spot.x, ty - spot.y));
+            common::cfloat::f32_to_i32(super::motion::rotation_to_xy(tx - spot.x, spot.y - ty));
         Some((val, degree))
     }
 
+    /// The first step of a detector's use: `UseItem`'s checks on the detector at
+    /// `at` (and the secured gate, `G/char_item.cpp:7236-7241`), then each
+    /// `SetSocket` of `stamps` with its update, in order.
+    fn detector_stamped(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+        stamps: &[(usize, i32)],
+    ) -> Result<MovedItems, MoveItemRefused> {
+        self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let detector = world::character::use_source(items, at)?;
+            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
+                world::character::Unported::Equipment,
+            ))?;
+            let proto = protos
+                .get(detector.vnum)
+                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
+            world::character::use_checks(&detector, proto, rules, gear.points)?;
+            if rules.secured {
+                return Err(world::character::MoveRefused::Secured);
+            }
+            let mut done = MoveDone {
+                kind: world::character::MoveKind::Socketed,
+                records: Vec::new(),
+                changes: Vec::new(),
+            };
+            for stamp in stamps {
+                let set = world::character::set_item_socket(items, detector.id, *stamp);
+                done.records.extend(set.records);
+                done.changes.extend(set.changes);
+            }
+            Ok(done)
+        })
+    }
+
+    /// `ITEM_MANAGER::RemoveItem` of the detector at `at`, joined to `moved`: the
+    /// quickslot sync, the cleared cell and the deleted row follow what the use
+    /// already answered.
+    fn detector_removed(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+        moved: &mut MovedItems,
+    ) -> Result<(), MoveItemRefused> {
+        let removed = self.run_item_step(vid, actor, |items, _ids, rules, _gear, _protos| {
+            world::character::destroy_item(items, at, rules.questing, rules.secured)
+                .map(|(done, _)| done)
+        })?;
+        Self::join_step(moved, removed);
+        Ok(())
+    }
+
+    /// Append `next`'s records and row changes to `moved`, in order, with its kind
+    /// and the points and quickslots it left.
+    fn join_step(moved: &mut MovedItems, next: MovedItems) {
+        moved.kind = next.kind;
+        moved.records.extend(next.records);
+        moved.changes.extend(next.changes);
+        if next.points.is_some() {
+            moved.points = next.points;
+        }
+        if next.quickslots.is_some() {
+            moved.quickslots = next.quickslots;
+        }
+    }
+
+    /// `AutoGiveItem(vnum, count)` joined to `moved`: the stacks, a free cell, or
+    /// the ground at the caller's feet. Answers the new item's id when it went into
+    /// a cell of its own.
+    fn give_joined(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        prize: (u32, u16),
+        moved: &mut MovedItems,
+    ) -> Option<u32> {
+        let questing = self.quest_running(vid);
+        let (outcome, done) = self.auto_give(vid, prize, 0, questing)?;
+        let placed = match outcome {
+            AutoGiven::Unplaced(item) => {
+                self.lay_auto_given(vid, item);
+                None
+            }
+            AutoGiven::Placed { id, .. } => Some(id),
+            _ => None,
+        };
+        let packed = MovedItems::new(
+            moved.owner_id,
+            vid.raw(),
+            done,
+            actor,
+            &self.protos,
+            &self.locale,
+        );
+        Self::join_step(moved, packed);
+        placed
+    }
+
+    /// The stone detector (`case 27989` / `case 76006`, `G/char_item.cpp:4226-4292`):
+    /// socket 0 counts the uses up by 1 with its update, then the nearest live stone
+    /// on the map is found (`FFindStone`, `:65-80`, over the map's characters; a
+    /// stone at distance 0 is skipped, and the seed is the lowest VID, as the
+    /// `std::map` iterates by key). With one, the caller hears `StoneDetect <vid>
+    /// <val> <degree>` as a command line, where `val` is 2 under 10000, 1 under
+    /// 70000, else 3; with none, `[LS;1461]`. At socket 0 past 5 the line
+    /// `StoneDetect <vid> 0 0` follows that answer and the whole detector leaves
+    /// (`RemoveItem`, `:4279-4283`).
     pub(super) fn use_stone_detector(
         &mut self,
         vid: Vid,
@@ -759,7 +862,7 @@ impl GameState {
         let Some(held) = held else {
             return Err(MoveItemRefused::NoSuchCharacter { vid });
         };
-        let (id, uses) = (held.id, held.sockets[0].saturating_add(1));
+        let uses = held.sockets[0].saturating_add(1);
         let mut stones: Vec<(u32, i32, i32)> = Vec::new();
         if let Some((channel, map)) = place {
             if let Some(list) = self.npcs.get(&(channel, map)) {
@@ -772,49 +875,30 @@ impl GameState {
             }
         }
         let target = spot.and_then(|spot| Self::detector_answer(&stones, spot));
-        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
-            let detector = world::character::use_source(items, at)?;
-            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
-                world::character::Unported::Equipment,
-            ))?;
-            let proto = protos
-                .get(detector.vnum)
-                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
-            world::character::use_checks(&detector, proto, rules, gear.points)?;
-            if uses >= DETECTOR_USES {
-                let (done, _) =
-                    world::character::destroy_item(items, at, rules.questing, rules.secured)?;
-                return Ok(done);
-            }
-            Ok(world::character::set_item_socket(items, id, (0, uses)))
-        })?;
+        let mut moved = self.detector_stamped(vid, at, actor, &[(0, uses)])?;
+        let to = actor.recipient(&self.locale);
+        let caller = Arg::Int(i64::from(vid.raw()));
+        moved.records.push(match target {
+            Some((val, degree)) => crate::chat_line::chat_packet(
+                to,
+                CHAT_TYPE_COMMAND,
+                b"StoneDetect %u %d %d",
+                &[
+                    caller,
+                    Arg::Int(i64::from(val)),
+                    Arg::Int(i64::from(degree)),
+                ],
+            ),
+            None => crate::chat_line::chat_packet(to, CHAT_TYPE_INFO, b"[LS;1461]", &[]),
+        });
         if uses >= DETECTOR_USES {
-            self.tell(
-                vid,
-                actor,
+            moved.records.push(crate::chat_line::chat_packet(
+                to,
                 CHAT_TYPE_COMMAND,
                 b"StoneDetect %u 0 0",
                 &[Arg::Int(i64::from(vid.raw()))],
-            );
-            return Ok(moved);
-        }
-        match target {
-            Some((val, degree)) => {
-                self.tell(
-                    vid,
-                    actor,
-                    CHAT_TYPE_COMMAND,
-                    b"StoneDetect %u %d %d",
-                    &[
-                        Arg::Int(i64::from(vid.raw())),
-                        Arg::Int(i64::from(val)),
-                        Arg::Int(i64::from(degree)),
-                    ],
-                );
-            }
-            None => {
-                self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;1461]", &[]);
-            }
+            ));
+            self.detector_removed(vid, at, actor, &mut moved)?;
         }
         Ok(moved)
     }
@@ -830,31 +914,17 @@ impl GameState {
     }
 
     /// Bury the event stone for the detector's first use
-    /// (`GetRandomLocation(map, pos, 700)`, `G/sectree_manager.cpp:876-940`): up to
-    /// 100 draws over the channel's region, each clamped within 700 of the caller;
-    /// the first movable one wins. `None` when the map stood no region or no
-    /// draw lands movable.
-    fn bury_event_stone(&mut self, channel: u8, map: i32, at: (i32, i32)) -> Option<(i32, i32)> {
+    /// (`GetRandomLocation(iMapIndex, pos, 700)`, `G/char_item.cpp:4020`,
+    /// `G/sectree_manager.cpp:876-940`): up to 100 draws over the map's region, the
+    /// first movable one wins. The call's 700 is the function's `dwCurrentX`; its
+    /// `iMaxDistance` stays at the default 0, so no draw is clamped and the stone
+    /// lies anywhere on the map. `None` when the map stood no region or no draw
+    /// lands movable.
+    fn bury_event_stone(&mut self, channel: u8, map: i32) -> Option<(i32, i32)> {
         let region = self.regens.region_of(channel, map)?;
         for _ in 0..EVENT_BURY_TRIES {
-            let mut x = number(&mut self.dice, region.sx + 50, region.ex - 50);
-            let mut y = number(&mut self.dice, region.sy + 50, region.ey - 50);
-            let dx = (x - at.0).abs();
-            if dx > EVENT_BURY_RANGE {
-                x = if x < at.0 {
-                    at.0 - EVENT_BURY_RANGE
-                } else {
-                    at.0 + EVENT_BURY_RANGE
-                };
-            }
-            let dy = (y - at.1).abs();
-            if dy > EVENT_BURY_RANGE {
-                y = if y < at.1 {
-                    at.1 - EVENT_BURY_RANGE
-                } else {
-                    at.1 + EVENT_BURY_RANGE
-                };
-            }
+            let x = number(&mut self.dice, region.sx + 50, region.ex - 50);
+            let y = number(&mut self.dice, region.sy + 50, region.ey - 50);
             if self.is_movable(map, x, y) {
                 return Some((x, y));
             }
@@ -865,9 +935,8 @@ impl GameState {
     /// The event-stone prize for socket-0 `uses` and `roll` (`:4113-4150`): the
     /// band's table (4 at 4 or less, 7 at 7 or less, else 10), walked down while
     /// the roll exceeds each nonzero weight. `None` when the roll falls past the
-    /// last weight — the upper tables sum below 100 — or names the 50001 lotto
-    /// row, whose DB insert has no Rewrite table (the kill lotto's hook likewise
-    /// holds the draw and grants nothing).
+    /// last weight: the upper tables sum below 100. The 50001 row is the lotto
+    /// ticket, which the caller gives by [`Self::give_lotto_ticket`].
     fn event_prize(uses: i32, mut roll: i32) -> Option<(u32, u16)> {
         let table = if uses <= 4 {
             EVENT_PRIZES_4
@@ -881,11 +950,7 @@ impl GameState {
                 continue;
             }
             if roll <= weight {
-                return if vnum == 50_001 {
-                    None
-                } else {
-                    Some((vnum, count))
-                };
+                return Some((vnum, count));
             }
             roll -= weight;
         }
@@ -893,14 +958,14 @@ impl GameState {
     }
 
     /// The event-stone detector (`case 50004`, `G/char_item.cpp:4007-4225`): the
-    /// first use buries the stone at a random movable point within 700 (`[LS;154]`
-    /// when none lands) and stamps sockets 0-2; later uses count socket 0 up.
-    /// Within 1000 of the buried point the stone is found (`[LS;165]`), the prize
-    /// table pays, the `StoneDetect <vid> 0 0` line goes around, and the detector
-    /// leaves. Else past 9 tries the detector burns out (`[LS;176]`, a 27002
-    /// consolation, and the detector leaves); otherwise the caller hears
-    /// `StoneDetect <vid> <dist> <degree>` with 1 under 20000, 2 under 70000,
-    /// else 3.
+    /// first use buries the stone at a random movable point of the map (`[LS;154]`
+    /// when none lands) and stamps sockets 0-2; later uses count socket 0 up. Each
+    /// stamp sends its update first. Within 1000 of the buried point the stone is
+    /// found. Else at 10 tries the detector burns out; otherwise the characters
+    /// around hear `StoneDetect <vid> <dist> <degree>` with 1 under 20000, 2 under
+    /// 70000, else 3 (`PacketAround`, `:4196-4219`). The degree is
+    /// `GetDegreeFromPositionXY(GetX(), socket2, socket1, GetY())` (`:4201`): the
+    /// call swaps the two `y`s, so the vector is `(socket1 - x, y - socket2)`.
     pub(super) fn use_event_detector(
         &mut self,
         vid: Vid,
@@ -915,7 +980,7 @@ impl GameState {
         let Some(held) = held else {
             return Err(MoveItemRefused::NoSuchCharacter { vid });
         };
-        let (id, sockets) = (held.id, held.sockets);
+        let sockets = held.sockets;
         let Some(place) = self.place_of(vid.raw()) else {
             return Err(MoveItemRefused::NoSuchCharacter { vid });
         };
@@ -926,23 +991,27 @@ impl GameState {
         let buried = if armed {
             Some((sockets[1], sockets[2]))
         } else {
-            self.bury_event_stone(place.0, place.1, (spot.x, spot.y))
+            self.bury_event_stone(place.0, place.1)
         };
         let Some((bx, by)) = buried else {
             self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;154]", &[]);
             return self.arena_item_refused(vid, actor);
         };
-        let uses = if armed {
-            sockets[0].saturating_add(1)
+        let (uses, stamps) = if armed {
+            let uses = sockets[0].saturating_add(1);
+            (uses, vec![(0, uses)])
         } else {
-            1
+            (1, vec![(0, 1), (1, bx), (2, by)])
         };
+        let mut moved = self.detector_stamped(vid, at, actor, &stamps)?;
         let distance = super::motion::distance_sqrt(spot.x - bx, spot.y - by);
         if distance < EVENT_FIND {
-            return self.find_event_stone(vid, at, actor, uses);
+            self.find_event_stone(vid, at, actor, uses, &mut moved)?;
+            return Ok(moved);
         }
         if uses >= EVENT_TRIES {
-            return self.burn_out_event_detector(vid, at, actor);
+            self.burn_out_event_detector(vid, at, actor, &mut moved)?;
+            return Ok(moved);
         }
         let dist = if distance < EVENT_NEAR {
             1
@@ -952,31 +1021,23 @@ impl GameState {
             3
         };
         let degree =
-            common::cfloat::f32_to_i32(super::motion::rotation_to_xy(bx - spot.x, by - spot.y));
-        let first = !armed;
-        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
-            let detector = world::character::use_source(items, at)?;
-            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
-                world::character::Unported::Equipment,
-            ))?;
-            let proto = protos
-                .get(detector.vnum)
-                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
-            world::character::use_checks(&detector, proto, rules, gear.points)?;
-            let mut done = world::character::set_item_socket(items, id, (0, uses));
-            if first {
-                let x = world::character::set_item_socket(items, id, (1, bx));
-                let y = world::character::set_item_socket(items, id, (2, by));
-                done.records.extend(x.records);
-                done.changes.extend(x.changes);
-                done.records.extend(y.records);
-                done.changes.extend(y.changes);
-            }
-            Ok(done)
-        })?;
-        self.tell(
-            vid,
-            actor,
+            common::cfloat::f32_to_i32(super::motion::rotation_to_xy(bx - spot.x, spot.y - by));
+        self.stone_detect_around(vid, actor, (dist, degree), &mut moved);
+        Ok(moved)
+    }
+
+    /// `StoneDetect <vid> <dist> <degree>` as a command line to the characters
+    /// around the caller (`PacketAround`): the others hear it now, and the caller's
+    /// own copy joins `moved`, behind what the use already answered.
+    fn stone_detect_around(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+        (dist, degree): (i32, i32),
+        moved: &mut MovedItems,
+    ) {
+        let line = crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
             CHAT_TYPE_COMMAND,
             b"StoneDetect %u %d %d",
             &[
@@ -985,101 +1046,100 @@ impl GameState {
                 Arg::Int(i64::from(degree)),
             ],
         );
-        Ok(moved)
+        let me = super::view::EntityKey::Character(vid.raw());
+        self.packet_around(me, &line, Some(me));
+        moved.records.push(line);
     }
 
-    /// The find (`:4031-4177`): `[LS;165]`, the prize, the `0 0` line around, and
-    /// the detector leaves.
+    /// The find (`:4031-4177`): `[LS;165]`, the prize by `AutoGiveItem` while the
+    /// detector still holds its cell, the `0 0` line around, and the detector
+    /// leaves. The lotto row's ticket comes after all of it, as legacy's waits for
+    /// its query.
     fn find_event_stone(
         &mut self,
         vid: Vid,
         at: ItemPos,
         actor: Mover,
         uses: i32,
-    ) -> Result<MovedItems, MoveItemRefused> {
+        moved: &mut MovedItems,
+    ) -> Result<(), MoveItemRefused> {
+        moved.records.push(crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
+            CHAT_TYPE_INFO,
+            b"[LS;165]",
+            &[],
+        ));
         let roll = number(&mut self.dice, 1, 100);
         let prize = Self::event_prize(uses, roll);
-        let questing = self.quest_running(vid);
-        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
-            let detector = world::character::use_source(items, at)?;
-            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
-                world::character::Unported::Equipment,
-            ))?;
-            let proto = protos
-                .get(detector.vnum)
-                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
-            world::character::use_checks(&detector, proto, rules, gear.points)?;
-            let (done, _) =
-                world::character::destroy_item(items, at, rules.questing, rules.secured)?;
-            Ok(done)
-        })?;
-        if let Some((vnum, count)) = prize {
-            if let Some((outcome, done)) = self.auto_give(vid, (vnum, count), 0, questing) {
-                if let AutoGiven::Unplaced(item) = outcome {
-                    self.lay_auto_given(vid, item);
-                }
-                let packed = MovedItems::new(
-                    moved.owner_id,
-                    vid.raw(),
-                    done,
-                    actor,
-                    &self.protos,
-                    &self.locale,
-                );
-                moved.records.extend(packed.records);
-                moved.changes.extend(packed.changes);
-            }
+        let lotto = prize.is_some_and(|(vnum, _)| vnum == LOTTO_TICKET);
+        if let Some(prize) = prize.filter(|_| !lotto) {
+            let _placed = self.give_joined(vid, actor, prize, moved);
         }
-        self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;165]", &[]);
-        let line = crate::chat_line::chat_packet(
-            actor.recipient(&self.locale),
-            CHAT_TYPE_COMMAND,
-            b"StoneDetect %u 0 0",
-            &[Arg::Int(i64::from(vid.raw()))],
-        );
-        self.packet_around(super::view::EntityKey::Character(vid.raw()), &line, None);
-        Ok(moved)
+        self.stone_detect_around(vid, actor, (0, 0), moved);
+        self.detector_removed(vid, at, actor, moved)?;
+        if lotto {
+            self.give_lotto_ticket(vid, actor, moved);
+        }
+        Ok(())
     }
 
-    /// The burnout (`:4187-4193`): `[LS;176]`, a 27002 consolation, and the
-    /// detector leaves.
+    /// The lotto ticket of the find's 50001 row (`:4132-4142`, `QID_LOTTO`,
+    /// `G/db.cpp:507-535`): legacy inserts a `lotto_list` row and, when the query
+    /// answers, gives the ticket and writes the row's id to socket 0 and the round
+    /// to socket 1. Nothing in the game reads `lotto_list`, and the Rewrite has no
+    /// such table: the ticket's number is its own item id, which is as unique. The
+    /// round is the `lotto_round` event flag, as `pc.give_lotto` passes it; the
+    /// detector's own array is one element short, so legacy writes whatever lies
+    /// behind it (a Defect).
+    fn give_lotto_ticket(&mut self, vid: Vid, actor: Mover, moved: &mut MovedItems) {
+        let round = self
+            .quests
+            .as_ref()
+            .map_or(0, |quests| quests.manager().event_flag(b"lotto_round"));
+        let Some(id) = self.give_joined(vid, actor, (LOTTO_TICKET, 1), moved) else {
+            return;
+        };
+        let number = i32::try_from(id).unwrap_or(i32::MAX);
+        let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+            return;
+        };
+        let mut done = world::character::set_item_socket(character.items_mut(), id, (0, number));
+        let second = world::character::set_item_socket(character.items_mut(), id, (1, round));
+        done.records.extend(second.records);
+        done.changes.extend(second.changes);
+        let packed = MovedItems::new(
+            moved.owner_id,
+            vid.raw(),
+            done,
+            actor,
+            &self.protos,
+            &self.locale,
+        );
+        let kind = moved.kind;
+        Self::join_step(moved, packed);
+        moved.kind = kind;
+    }
+
+    /// The burnout (`:4187-4193`): `[LS;176]`, the detector leaves, and a 27002
+    /// consolation comes by `AutoGiveItem`, which may take the freed cell.
     fn burn_out_event_detector(
         &mut self,
         vid: Vid,
         at: ItemPos,
         actor: Mover,
-    ) -> Result<MovedItems, MoveItemRefused> {
-        let questing = self.quest_running(vid);
-        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
-            let detector = world::character::use_source(items, at)?;
-            let gear = gear.ok_or(world::character::MoveRefused::NotPorted(
-                world::character::Unported::Equipment,
-            ))?;
-            let proto = protos
-                .get(detector.vnum)
-                .ok_or(world::character::MoveRefused::UnknownVnum(detector.vnum))?;
-            world::character::use_checks(&detector, proto, rules, gear.points)?;
-            let (done, _) =
-                world::character::destroy_item(items, at, rules.questing, rules.secured)?;
-            Ok(done)
-        })?;
-        if let Some((outcome, done)) = self.auto_give(vid, (EVENT_CONSOLATION, 1), 0, questing) {
-            if let AutoGiven::Unplaced(item) = outcome {
-                self.lay_auto_given(vid, item);
-            }
-            let packed = MovedItems::new(
-                moved.owner_id,
-                vid.raw(),
-                done,
-                actor,
-                &self.protos,
-                &self.locale,
-            );
-            moved.records.extend(packed.records);
-            moved.changes.extend(packed.changes);
-        }
-        self.tell(vid, actor, CHAT_TYPE_INFO, b"[LS;176]", &[]);
-        Ok(moved)
+        moved: &mut MovedItems,
+    ) -> Result<(), MoveItemRefused> {
+        moved.records.push(crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
+            CHAT_TYPE_INFO,
+            b"[LS;176]",
+            &[],
+        ));
+        self.detector_removed(vid, at, actor, moved)?;
+        let kind = moved.kind;
+        let _placed = self.give_joined(vid, actor, (EVENT_CONSOLATION, 1), moved);
+        moved.kind = kind;
+        Ok(())
     }
 
     /// Whether the item at `at` is a firework (`case 50107` / `case 50108`,
@@ -1505,12 +1565,24 @@ mod tests {
         assert_eq!(GameState::event_prize(4, 100), Some((50_003, 1)));
     }
 
-    /// The 50001 lotto row pays nothing: at 1 use roll 41..=50 names it (25 + 15
-    /// walked off), and the arm holds the draw with no table to write.
+    /// Each band starts past the last count of the one below (`:4116-4122`): roll 1
+    /// at 4 uses lands the 4-band's 27999, at 5 the 7-band's first row; roll 3 at 7
+    /// uses walks the 7-band's 1 + 1 to the 27004, at 8 it stays in the 10-band's
+    /// first row of weight 8.
     #[test]
-    fn the_lotto_row_holds_its_draw() {
-        assert_eq!(GameState::event_prize(1, 41), None);
-        assert_eq!(GameState::event_prize(1, 50), None);
+    fn each_band_starts_past_the_one_below() {
+        assert_eq!(GameState::event_prize(4, 1), Some((27_999, 1)));
+        assert_eq!(GameState::event_prize(5, 1), Some((27_001, 10)));
+        assert_eq!(GameState::event_prize(7, 3), Some((27_004, 10)));
+        assert_eq!(GameState::event_prize(8, 3), Some((27_001, 10)));
+    }
+
+    /// The 50001 lotto row names the ticket: at 1 use roll 41..=50 lands it (25 + 15
+    /// walked off).
+    #[test]
+    fn the_lotto_row_names_the_ticket() {
+        assert_eq!(GameState::event_prize(1, 41), Some((LOTTO_TICKET, 1)));
+        assert_eq!(GameState::event_prize(1, 50), Some((LOTTO_TICKET, 1)));
     }
 
     /// The upper tables sum below 100, so a roll past their last weight wins

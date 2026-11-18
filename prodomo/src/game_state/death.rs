@@ -862,6 +862,7 @@ impl GameState {
         }
         combat.death_penalty = death_penalty_flag(combat.death_penalty, killer, forked);
         self.clear_affects_on_death(vid);
+        self.exchange_empire_points(vid, killer);
         // `ClearSync` (`:1461`), then the stun event ends (`:1464`). The poison event ends
         // with the victim: legacy cancels nothing, but the Rewrite's tick resolves the
         // slot, and a dead victim must tick no more (V18b).
@@ -893,6 +894,31 @@ impl GameState {
         self.close_pc_death_windows(vid);
     }
 
+    /// `Dead`'s player-killer arm across empires (`G/char_battle.cpp:1389-1396`): the
+    /// victim's `POINT_EMPIRE_POINT` changes by `-(iEP / 10)` and the killer's by
+    /// `iEP / 5`, `iEP` the smaller of the two. The arm returns the real point unchanged
+    /// (`G/char.cpp:4699-4703`), so each side hears its own record and nothing moves.
+    fn exchange_empire_points(&mut self, vid: Vid, killer: Option<Attacker>) {
+        let Some(killer) = killer.filter(|killer| killer.pc) else {
+            return;
+        };
+        let empire = |state: &Self, vid: Vid| state.bodies.get(&vid).map(|body| body.card.empire);
+        if empire(self, vid) == empire(self, killer.vid) {
+            return;
+        }
+        let point_of = |state: &Self, vid: Vid| {
+            state
+                .characters
+                .find_by_vid(vid)
+                .ok()
+                .and_then(|character| character.points())
+                .map_or(0, |points| points.get_point(point::POINT_EMPIRE_POINT))
+        };
+        let shared = point_of(self, vid).min(point_of(self, killer.vid));
+        self.change_pc_point(vid, point::POINT_EMPIRE_POINT, -(shared / 10), false);
+        self.change_pc_point(killer.vid, point::POINT_EMPIRE_POINT, shared / 5, false);
+    }
+
     /// Killer bookkeeping precedes arena scoring and the quest/guild kill hooks
     /// (`G/char_battle.cpp:1268-1310`). Returns the agreed-PvP and arena-duel exemptions.
     fn pc_death_killer_hooks(&mut self, vid: Vid, killer: Option<Attacker>) -> (bool, bool) {
@@ -917,8 +943,8 @@ impl GameState {
         // The killer's no-NPC `kill` scripts still run during an arena death.
         self.raise_quest_kill(vid.raw(), killer.vid, 0);
         self.guild_war_kill(killer.vid, vid);
-        // `Dead`'s same-empire arm (`:1411-1442`): the cross-empire transfer is nothing
-        // to port (ledger 234), and the killer here pays the alignment below.
+        // `Dead`'s same-empire arm (`:1411-1442`); the cross-empire arm is
+        // `exchange_empire_points`, after `ClearAffect`. The killer here pays the alignment.
         self.penalize_same_empire_killer(vid, killer.vid, agreed_pvp, arena_duel);
         (agreed_pvp, arena_duel)
     }
@@ -937,7 +963,7 @@ impl GameState {
         arena_duel: bool,
     ) {
         // `GetEmpire() != pkKiller->GetEmpire()` (`:1389`): the other empire is the
-        // empire-point arm, which changes nothing (ledger 234).
+        // empire-point arm (`exchange_empire_points`).
         let empires = (
             self.bodies.get(&victim).map(|body| body.card.empire),
             self.bodies.get(&killer).map(|body| body.card.empire),

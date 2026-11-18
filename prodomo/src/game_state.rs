@@ -1036,6 +1036,14 @@ pub struct GameState {
     /// `m_pDragonSoulRefineWindowOpener` (`G/char.h:473`,
     /// `G/char_dragonsoul.cpp:137-168`). Absent when no window stands.
     ds_windows: std::collections::HashSet<common::vid::Vid>,
+    /// The characters whose silk botary already asked for the price list this session:
+    /// `m_bNoOpenedShop` cleared (`G/char.cpp:185`, `G/char_item.cpp:2655-2664`). The
+    /// flag lives on the `CHARACTER`, so the leave forgets it.
+    silk_asked: std::collections::HashSet<common::vid::Vid>,
+    /// `g_bEnableBootaryCheck` (`[game] enable_bootary_check`, `G/config.cpp:44`): the maps
+    /// the silk botary opens on while the check is on (`IS_BOTARYABLE_ZONE`,
+    /// `G/char_item.cpp:153-169`), `None` for every map.
+    botary_maps: Option<&'static [i32; 6]>,
     /// The Gaya market shelf of each character that has one, keyed by its VID:
     /// the nine items and the six slot unlocks (`<Name>_gaya_system.txt`,
     /// `G/char_gaya.cpp:175-273`). Absent until the market opens.
@@ -3983,6 +3991,7 @@ impl GameState {
         // `CloseMyShop` in `CHARACTER::Destroy` (`G/char.cpp:570`): the window drops
         // before the body goes, so the viewers see the sign clear.
         self.close_my_shop(vid);
+        let _asked = self.silk_asked.remove(&vid);
         self.arena_potions.remove(&vid);
         // `CheckMultiFarmAccount(..., false)` (`G/char.cpp:1791`): the leaver stops
         // farming before its body goes.
@@ -4708,9 +4717,11 @@ impl GameState {
             self.start_affect_event(vid);
         }
         // The `UseItem` tail (`G/char_item.cpp:7375,7398`): a `UseItemEx` that returned
-        // true feeds the used vnum as an item feed. The book path above returns early,
-        // as the premium arm does, so only a run step reaches here.
-        self.stack_on_use(vid, actor, used_vnum, &mut moved);
+        // true feeds the used vnum as an item feed; an unused stone returned false. The book
+        // path above returns early, as the premium arm does, so only a run step reaches here.
+        if kind != world::character::MoveKind::Unused {
+            self.stack_on_use(vid, actor, used_vnum, &mut moved);
+        }
         moved.climbed = climbed;
         // A unique worn or taken off by its use (`case ITEM_UNIQUE`'s default arm) syncs
         // the hide-alignment cloak and the unique expiry as the move does.
@@ -4788,6 +4799,9 @@ impl GameState {
             if let Some((socket0, socket1, socket2, skill)) = pbook {
                 self.land_polymorph_book(vid, at, (socket0, socket1, socket2), skill, moved);
             }
+        }
+        if kind == world::character::MoveKind::Botary {
+            self.use_silk_botary(vid, moved);
         }
     }
 

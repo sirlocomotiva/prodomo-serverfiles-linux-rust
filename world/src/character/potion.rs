@@ -1,20 +1,24 @@
-//! Potions: the `USE_POTION_NODELAY` and `USE_POTION` arms of `UseItemEx`
-//! (`G/char_item.cpp:5579-5755`), the `SetCount(GetCount() - 1)` both end with
-//! (`CItem::SetCount`, `G/item.cpp:296-330`), and the hit and spell point part of the affect
-//! event `USE_POTION` starts (`CHARACTER::UpdateAffect`, `G/char_affect.cpp:165-200`).
+//! Potions: the `USE_POTION_NODELAY` arms of `UseItemEx` (`G/char_item.cpp:3441-3544`,
+//! `:5579-5681`) and its `USE_POTION` arm (`:5683-5755`), the `SetCount(GetCount() - 1)` they
+//! end with (`CItem::SetCount`, `G/item.cpp:296-330`), and the hit and spell point part of the
+//! affect event `USE_POTION` starts (`CHARACTER::UpdateAffect`, `G/char_affect.cpp:165-200`).
 //!
 //! A `USE_POTION_NODELAY` potion changes the pools at once. A `USE_POTION` potion adds to
 //! `POINT_HP_RECOVERY` or `POINT_SP_RECOVERY`, and [`update_recovery`] moves at most 7% of the
 //! maximum a second from there into the pool, which the caller runs once a second while
-//! [`is_recovering`] holds.
+//! [`is_recovering`] holds. The two `USE_POTION_NODELAY` arms are the same drink: the first
+//! runs for 50801-50820 (`:3373`), the second for every other vnum.
 //!
 //! The last potion of a stack syncs its slots as `SetCount(0)` does (ledger 220): a
 //! `USE_POTION` potion's slots follow the next stack of its vnum, and a `USE_POTION_NODELAY`
 //! potion's are deleted.
 //!
-//! Arena admission and accepted-use counts run in the game state's item dispatch. Not ported:
-//! the `PvP` potion limits, dungeon and guild war hooks, moon cake timer and continuous
-//! recovery affects. The rest of the affect event runs in the game state.
+//! Arena admission, the `PvP` potion gate and accepted-use counts run in the game state's
+//! item dispatch. The drink's other hooks change nothing a player can see: the moon cake
+//! stamp (`SetUseSeedOrMoonBottleTime`) is never read, the dungeon's `UsePotion` flag is read
+//! only by `d.is_use_potion`, which no quest names, and the war map's potion price feeds a
+//! reward `RequestWarOver` drops (`p.lWarPrice = 0`, `G/guild_manager.cpp:522-523`). The rest
+//! of the affect event runs in the game state.
 //!
 //! The automatic potions' item half is [`toggle_auto_potion`] (ledger 558); their gates,
 //! rows and tick run in the game state's `auto_potion`.
@@ -160,11 +164,13 @@ const RECOVERY_PER_SECOND_PCT: i64 = 7;
 /// The cap `USE_POTION` puts on `100 + POINT_POTION_BONUS`.
 const POTION_BONUS_CAP: i32 = 200;
 
-/// The gold bars, whose arm is not ported (`G/char_item.cpp:3334-3369`).
+/// The gold bars (`G/char_item.cpp:3334-3369`). The owner's are `USE_SPECIAL`, whose arm runs
+/// in the game state (ledger 687); a potion-typed one would pay before it drinks, which is not
+/// ported.
 const GOLD_BARS: core::ops::RangeInclusive<u32> = 80_003..=80_008;
 
-/// The ability potions, whose arm answers every sub type but `USE_POTION_NODELAY` in its own
-/// way (`G/char_item.cpp:3371-3521`).
+/// The 50801-50820 branch (`G/char_item.cpp:3373-3548`), whose sub-type switch has a
+/// `USE_POTION_NODELAY` case but no `USE_POTION` one.
 const ABILITY_POTIONS: core::ops::RangeInclusive<u32> = 50_801..=50_820;
 
 /// Whether `CG_ITEM_USE` on an item of this prototype runs [`use_potion`].
@@ -177,9 +183,13 @@ pub(super) fn is_potion(proto: &ItemProto) -> bool {
 /// The `ITEM_USE` arm of `UseItemEx` for a potion: its effect on `points`, then one of its
 /// stack used up.
 ///
+/// A 50801-50820 `USE_POTION` (the owner's 50805-50812) finds no case in that branch's
+/// switch and returns true (`G/char_item.cpp:3385-3547`): it answers a use that changed
+/// nothing.
+///
 /// # Errors
 ///
-/// [`MoveRefused::NotPorted`] for a gold bar and for an ability potion's other sub types.
+/// [`MoveRefused::NotPorted`] for a gold bar.
 /// [`MoveRefused::NothingToRecover`] when the potion changed nothing: a `USE_POTION_NODELAY`
 /// potion whose pools are all full, or a `USE_POTION` one whose pool the recovery already
 /// fills. A `USE_POTION` potion that recovers both pools and refuses only the second keeps
@@ -190,10 +200,11 @@ pub(super) fn use_potion(
     proto: &ItemProto,
     points: &mut Points,
 ) -> Result<MoveDone, MoveRefused> {
-    if GOLD_BARS.contains(&item.vnum)
-        || (ABILITY_POTIONS.contains(&item.vnum) && proto.sub_type != USE_POTION_NODELAY)
-    {
+    if GOLD_BARS.contains(&item.vnum) {
         return Err(MoveRefused::NotPorted(Unported::UseVnum(item.vnum)));
+    }
+    if ABILITY_POTIONS.contains(&item.vnum) && proto.sub_type != USE_POTION_NODELAY {
+        return Ok(done(MoveKind::Used, Trail::default()));
     }
     let mut trail = Trail::default();
     let used = if proto.sub_type == USE_POTION_NODELAY {
@@ -693,20 +704,27 @@ mod tests {
     }
 
     #[test]
-    fn the_gold_bars_and_the_ability_potions_other_arms_are_not_ported() {
+    fn a_potion_gold_bar_is_not_ported_and_a_508xx_slow_potion_changes_nothing() {
         let mut points = warrior(300);
-        for (vnum, sub_type) in [
-            (80_003, USE_POTION_NODELAY),
-            (80_008, USE_POTION),
-            (50_801, USE_POTION),
-            (50_820, USE_POTION),
-        ] {
+        for (vnum, sub_type) in [(80_003, USE_POTION_NODELAY), (80_008, USE_POTION)] {
             let (mut items, item) = holding(2, vnum);
             let proto = potion(vnum, sub_type, [100, 0, 0, 0, 0, 0]);
             assert_eq!(
                 use_potion(&mut items, &item, &proto, &mut points),
                 Err(MoveRefused::NotPorted(Unported::UseVnum(vnum)))
             );
+        }
+        // The 50801-50820 branch has no `USE_POTION` case: the use returns true and
+        // changes nothing (`G/char_item.cpp:3385-3547`).
+        for vnum in [50_801, 50_805, 50_820] {
+            let (mut items, item) = holding(2, vnum);
+            let proto = potion(vnum, USE_POTION, [100, 0, 0, 0, 0, 0]);
+            let before = points.clone();
+            let done = use_potion(&mut items, &item, &proto, &mut points).expect("returns true");
+            assert_eq!(done.kind, MoveKind::Used);
+            assert!(done.records.is_empty() && done.changes.is_empty());
+            assert_eq!(points, before);
+            assert_eq!(items.item_at(AT).map(|kept| kept.count), Some(2));
         }
         for vnum in [50_800, 50_801, 50_820, 50_821, 80_002, 80_009] {
             let (mut items, item) = holding(2, vnum);

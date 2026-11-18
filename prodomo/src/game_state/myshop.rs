@@ -35,8 +35,22 @@
 //! the `personal_shop` tax, and updates every guest (`CShop::Buy`, `G/shop.cpp:610-808`).
 //! Both sides settle in one transaction, as a trade's do.
 //!
-//! The silk bundle's price list is a DB-server packet (`HEADER_GD_MYSHOP_PRICELIST_UPDATE`)
-//! with no client record; the market-price slice reads the shops themselves.
+//! With the silk bundle held, the build sends the shop's unit prices, which the
+//! descriptor merges into the store (`HEADER_GD_MYSHOP_PRICELIST_UPDATE`,
+//! `G/char.cpp:915-937`): each held table's price over its item's count, by vnum.
+//!
+//! # The silk botary
+//!
+//! The botary's use (`case 71049`, `G/char_item.cpp:3008-3023`) keeps it. With
+//! `enable_bootary_check` on, off the six botary maps it refuses with the map line.
+//! Otherwise `UseSilkBotary` (`:2655-2664`) runs: the first use of a session asks the
+//! store for the price list, and once it answers the client hears one
+//! `MyShopPriceList <vnum> <price>` command per price, or `MyShopPriceList 1 0` for an
+//! empty list (`UseSilkBotaryReal`, `:2215-2228`), then `__OpenPrivateShop`
+//! (`:2176-2201`); a later use runs `__OpenPrivateShop` alone. That one tells the client
+//! to open the build window while the body part shown is 0, 1 or 2 (no armour), a GM
+//! hearing its refusal line instead; any other part hears
+//! `UNKNOWN_STRING_OPENPRIVATESHOP`.
 //!
 //! # Divergences
 //!
@@ -51,14 +65,19 @@ use std::collections::BTreeSet;
 use common::item_slots::EWindows;
 use common::vid::Vid;
 use protocol::cg_myshop::{CgMyShopTable, CG_MYSHOP_SIGN_FIELD_SIZE};
-use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
 use protocol::gc_fields::{GcShopSign, GC_SHOP_SIGN_FIELD_SIZE};
 use world::character::{count_specify_item, race_to_job, remove_specify_item, Character, Points};
 use world::item::{ItemId, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_MYSHOP};
 
 use super::view::EntityKey;
 use super::GameState;
+use crate::command::{GM_IMPLEMENTOR, GM_PLAYER};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
+
+/// `IS_BOTARYABLE_ZONE` (`G/char_item.cpp:153-169`): the maps the silk botary opens on
+/// while the bootary check is on.
+const BOTARY_MAPS: [i32; 6] = [1, 3, 21, 23, 41, 43];
 
 /// `SHOP_HOST_ITEM_MAX_NUM` (`C/length.h:44`): the window's slots.
 pub const MYSHOP_WINDOW_SLOTS: usize = 40;
@@ -256,6 +275,7 @@ impl GameState {
         if !self.myshop_bundle(vid, actor, &mut moved) {
             return Ok(moved);
         }
+        moved.price_list = self.silk_price_list(vid, tables);
         self.myshop_stand(vid, shown, &slots);
         Ok(moved)
     }
@@ -447,6 +467,96 @@ impl GameState {
                 .map_or(0, |points| race_to_job(points.race()))
         });
         self.set_polymorph(vid, u32::from(job), true);
+    }
+
+    /// `[game] enable_bootary_check` (`g_bEnableBootaryCheck`, `G/config.cpp:1074-1088`): on,
+    /// the silk botary opens only on the six botary maps.
+    #[must_use]
+    pub const fn with_bootary_check(mut self, on: bool) -> Self {
+        self.botary_maps = if on { Some(&BOTARY_MAPS) } else { None };
+        self
+    }
+
+    /// The unit prices a build with the silk bundle held sends (`G/char.cpp:905-937`): each
+    /// held table's price over its item's count, keyed and ordered by vnum as legacy's
+    /// `std::map` is, a later table of a vnum replacing the earlier. `None` without the
+    /// silk bundle. Legacy kept the unit price in a `DWORD` and wrapped it; here it stays
+    /// whole (a Defect fixed).
+    fn silk_price_list(
+        &self,
+        vid: Vid,
+        tables: &[CgMyShopTable],
+    ) -> Option<Vec<db::myshop_pricelist::StoredPrice>> {
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let usable = common::item_slots::usable_inventory_cells(character.inven_point());
+        if count_specify_item(character.items(), usable, MYSHOP_SILK_BUNDLE) == 0 {
+            return None;
+        }
+        let mut kinds = std::collections::BTreeMap::new();
+        for table in tables {
+            if let Some(item) = character.items().item_at(table.pos) {
+                let count = u64::from(item.count.max(1));
+                kinds.insert(item.vnum, table.price / count);
+            }
+        }
+        Some(kinds.into_iter().collect())
+    }
+
+    /// The silk botary's arm past its step (`case 71049`, `G/char_item.cpp:3008-3023`): the
+    /// bootary check's map refusal, else `UseSilkBotary` (`:2655-2664`). The first use of
+    /// the session hands the `__OpenPrivateShop` records to the descriptor, which sends
+    /// them after the stored price list's lines; a later use sends them with the step.
+    pub(super) fn use_silk_botary(&mut self, vid: Vid, moved: &mut MovedItems) {
+        let Some(actor) = self.own_mover(vid) else {
+            return;
+        };
+        if let Some(maps) = self.botary_maps {
+            let map = self.place_of(vid.raw()).map_or(0, |(_, map)| map);
+            if !maps.contains(&map) {
+                moved.records.push(crate::chat_line::chat_packet(
+                    actor.recipient(&self.locale),
+                    CHAT_TYPE_INFO,
+                    b"[#Unk]You cannot open a private shop on this map.",
+                    &[],
+                ));
+                return;
+            }
+        }
+        let open = self.open_private_shop(vid, actor);
+        if self.silk_asked.insert(vid) {
+            moved.silk_botary = Some(vec![open]);
+        } else {
+            moved.records.push(open);
+        }
+    }
+
+    /// `__OpenPrivateShop` (`G/char_item.cpp:2176-2201`, `ENABLE_OPEN_SHOP_WITH_ARMOR`
+    /// unset): with body part 0, 1 or 2 shown the `OpenPrivateShop` command, or a GM's
+    /// refusal line (`GetGMLevel() > GM_PLAYER`); with any other part the unknown-string
+    /// line.
+    fn open_private_shop(&self, vid: Vid, mover: Mover) -> Vec<u8> {
+        let points = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(Character::points);
+        let part = points.map_or(0, |points| {
+            points.parts()[common::enums::EParts::Main as usize]
+        });
+        let gm_level = if self.test_server {
+            GM_IMPLEMENTOR
+        } else {
+            points.map_or(GM_PLAYER, Points::gm_level)
+        };
+        let (chat_type, line): (u8, &[u8]) = match part {
+            0..=2 if gm_level > GM_PLAYER => (
+                CHAT_TYPE_INFO,
+                b"[i]Un GameMaster nu poate deschide un shop-offline.",
+            ),
+            0..=2 => (CHAT_TYPE_COMMAND, b"OpenPrivateShop"),
+            _ => (CHAT_TYPE_INFO, b"UNKNOWN_STRING_OPENPRIVATESHOP"),
+        };
+        crate::chat_line::chat_packet(mover.recipient(&self.locale), chat_type, line, &[])
     }
 
     /// Whether the character under `vid` has a summoned horse standing.

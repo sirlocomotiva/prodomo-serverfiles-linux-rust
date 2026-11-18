@@ -848,7 +848,7 @@ async fn pump_descriptor<S>(
                     handle,
                     number: channel_number,
                 });
-                let open = analyze(session, addr, context, seat, step, held).await;
+                let open = Box::pin(analyze(session, addr, context, seat, step, held)).await;
                 if !open || session.phase() == ClientPhase::Close {
                     break;
                 }
@@ -1359,7 +1359,69 @@ where
             return false;
         }
     }
-    finish_item_step(session, addr, context, held, actor, answer).await
+    // The silk botary's first use asked the store for the price list: its lines and the
+    // shop-open records follow the step's own (`UseSilkBotaryReal`, `G/char_item.cpp:2215-2228`).
+    let botary = match &answer {
+        Ok(Ok(moved)) => moved.silk_botary.clone(),
+        _ => None,
+    };
+    let owner = held.character.as_ref().map(|character| character.id);
+    if !finish_item_step(session, addr, context, held, actor, answer).await {
+        return false;
+    }
+    match (botary, owner) {
+        (Some(open), Some(owner)) => {
+            send_silk_price_list(session, addr, context, actor, owner, open).await
+        }
+        _ => true,
+    }
+}
+
+/// `UseSilkBotaryReal` (`G/char_item.cpp:2215-2228`) once the store answered the price
+/// list request (`MyshopPricelistRequest`, `server/server/db/ClientManager.cpp:2273-2303`):
+/// one `MyShopPriceList <vnum> <price>` command per stored price, or the dummy
+/// `MyShopPriceList 1 0` for none (`SendMyShopPriceListCmd`, `:2204-2210`), then the
+/// `__OpenPrivateShop` records the world built. A store that cannot answer closes.
+async fn send_silk_price_list<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    actor: Mover,
+    owner: u32,
+    open: Vec<Vec<u8>>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut prices = match db::myshop_pricelist::load(&context.store, owner).await {
+        Ok(prices) => prices,
+        Err(error) => {
+            warn!(%addr, %error, "The price list could not be loaded; closing");
+            return false;
+        }
+    };
+    if prices.is_empty() {
+        prices.push((1, 0));
+    }
+    let to = actor.recipient(&context.locale);
+    let mut records: Vec<Vec<u8>> = prices
+        .iter()
+        .map(|(vnum, price)| {
+            let line = format!("MyShopPriceList {vnum} {price}");
+            prodomo::chat_line::chat_packet(
+                to,
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                line.as_bytes(),
+                &[],
+            )
+        })
+        .collect();
+    records.extend(open);
+    if let Err(error) = send_all(session, &records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
 }
 
 /// Whether `header` is `CG_ITEM_USE`, a destroy, a gift, a refine, an element refine, a
@@ -5962,6 +6024,18 @@ where
         .game
         .myshop(vid, build.sign, build.tables, actor)
         .await;
+    // A build with the silk bundle held sends its unit prices for the store to merge
+    // (`HEADER_GD_MYSHOP_PRICELIST_UPDATE`, `G/char.cpp:915-937`), before the rows.
+    if let Ok(Ok(moved)) = &answer {
+        if let Some(prices) = &moved.price_list {
+            if let Err(error) =
+                db::myshop_pricelist::update(&context.store, moved.owner_id, prices).await
+            {
+                warn!(%addr, %error, "The price list could not be stored; closing");
+                return false;
+            }
+        }
+    }
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -11834,6 +11908,7 @@ fn build_world(
         .with_status_point_set_max_value(config.game.status_point_set_max_value)
         .with_protect_level(config.game.pk_protect_level)
         .with_protect_normal(config.game.protect_normal_player)
+        .with_bootary_check(config.game.enable_bootary_check)
         .with_recall(Arc::clone(&data.atlas), &channel_maps, &shared);
     stand_up_npcs(
         &mut game_state,
