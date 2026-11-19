@@ -815,6 +815,34 @@ impl GameState {
         true
     }
 
+    /// `SetPoint(POINT_MOV_SPEED)`'s mid-walk arm (`G/char.cpp:3812-3815`): while the
+    /// character's leg is still in flight, re-anchor the start at the current spot and
+    /// recompute the remaining duration at the new speed (`CalculateMoveDuration`, `:3585-3603`).
+    pub(super) fn rescale_pc_leg(&mut self, vid: Vid) {
+        let raw = vid.raw();
+        let now = self.clock.now();
+        let move_speed = self.move_speed_of(raw);
+        let motion_speed = self.motion_speed_of(raw);
+        let Some(body) = self.bodies.get_mut(&vid) else {
+            return;
+        };
+        if !body.motion.moving || body.motion.duration_ms == 0 {
+            return;
+        }
+        if now.wrapping_sub(body.motion.start_ms) >= body.motion.duration_ms {
+            return;
+        }
+        let Some((spot, arrived)) = body.motion.at(now) else {
+            return;
+        };
+        if arrived {
+            return;
+        }
+        body.motion.start = spot;
+        body.motion.duration_ms = move_duration(spot, body.motion.dest, motion_speed, move_speed);
+        body.motion.start_ms = now;
+    }
+
     /// `CHARACTER::Move` (`G/char.cpp:3610-3622`): the same point returns true at once, with
     /// nothing changed; any other point runs `OnMove` (only its `mining_cancel` is ported) and
     /// is a `Sync`.
@@ -2020,5 +2048,36 @@ mod tests {
         let own = sender.try_recv().map(|record| record.len());
         game.join().expect("the world ran the relay");
         assert_eq!(own, Ok(1 << 20), "queued before the relay settled");
+    }
+
+    /// `SetPoint(POINT_MOV_SPEED)` mid-walk (`G/char.cpp:3812-3815`): raising the character's
+    /// movement speed half-way through a leg re-anchors the start at the current spot and halves
+    /// the remaining duration.
+    #[test]
+    fn a_move_speed_change_mid_walk_rescales_the_remaining_leg() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _rx = enter(&mut world, 7, (3200, 3200), 100);
+        clock.set(1_000);
+        assert!(world.goto(7, 4800, 3200));
+        let initial = world.bodies.get(&Vid::new(7)).unwrap().motion;
+        assert_eq!(initial.start, (3200, 3200));
+        assert_eq!(initial.dest, (4800, 3200));
+        let half = initial.duration_ms / 2;
+        clock.set(1_000 + half);
+        world.change_pc_point(Vid::new(7), POINT_MOV_SPEED, 100, false);
+        let rescaled = world.bodies.get(&Vid::new(7)).unwrap().motion;
+        assert_eq!(rescaled.start_ms, 1_000 + half);
+        assert!(
+            rescaled.start.0 > 3200 && rescaled.start.0 < 4800,
+            "re-anchored mid-leg: {:?}",
+            rescaled.start
+        );
+        assert!(
+            rescaled.duration_ms < initial.duration_ms - half,
+            "doubled speed shortens remaining duration: {} vs {}",
+            rescaled.duration_ms,
+            initial.duration_ms - half
+        );
     }
 }

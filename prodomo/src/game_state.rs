@@ -992,6 +992,10 @@ pub struct GameState {
     /// (`CManager::m_map_pkObjByVID`, `G/building.cpp:843-844`): the reverse of
     /// [`GameState::building_objects`], so the view keys an object by its VID.
     building_places: HashMap<u32, (u8, i32)>,
+    /// Dynamic `ATTR_OBJECT` cells stamped by standing building objects (`CObject::Show` /
+    /// `CObject::Destroy`, `G/building.cpp:179-186`), refcounted per `(cell_x, cell_y)` on
+    /// `(channel, map)` so overlapping footprints clear cleanly on removal.
+    building_attr_cells: HashMap<(u8, i32), HashMap<(i32, i32), u32>>,
     /// The next building object id (`CObject::m_dwID`, from the `object` table's
     /// auto-increment).
     next_object_id: u32,
@@ -3108,6 +3112,7 @@ impl GameState {
             // refresh (`:887-897`), the last `Entergame` lines before the quest login.
             self.enter_horse(vid);
             self.enter_arena(vid);
+            self.enter_war_or_wedding(vid);
             // `CheckMount` (`G/input_login.cpp:932-936`), gated on map 113 and the
             // arenas, before the ranks close `Entergame`.
             self.enter_pet(vid);

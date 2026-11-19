@@ -283,6 +283,9 @@ impl GameState {
     /// `SECTREE_MANAGER::IsMovablePosition` (`G/sectree_manager.cpp:779-787`) on the cells boot
     /// handed over: false on a map it handed none of.
     pub(super) fn is_movable(&self, map: i32, x: i32, y: i32) -> bool {
+        if self.has_building_attr(map, x, y) {
+            return false;
+        }
         self.regens
             .cells
             .get(map)

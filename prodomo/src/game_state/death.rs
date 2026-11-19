@@ -559,6 +559,10 @@ impl GameState {
         if let Some(morph) = morph {
             self.set_polymorph(vid, u32::from_ne_bytes(morph.to_ne_bytes()), false);
         }
+        // `SetPoint(POINT_MOV_SPEED)`'s mid-walk rescale (`G/char.cpp:3812-3815`).
+        if kind == point::POINT_MOV_SPEED {
+            self.rescale_pc_leg(vid);
+        }
     }
     /// `PointChange(POINT_HP, hp - GetHP())`: sets the hit points of the player under `vid`.
     fn set_pc_hp(&mut self, vid: Vid, hp: i32, show_amount: bool) {

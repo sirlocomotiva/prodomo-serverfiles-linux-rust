@@ -42200,15 +42200,17 @@ fn wait_for_the_bite(alice: &mut Keyed, vid: u32) {
 /// bait socket.
 fn read_practice(alice: &mut Keyed) {
     let mut sockets = read_rod_update(alice);
-    if sockets[0] == 1 {
+    if sockets[2] != 0 {
+        let level = sockets[0];
+        let expected = format!("The training level of the fishing rod has increased! ({level}/10)");
         assert_eq!(
             alice.read_game(),
-            an_info_line(b"The training level of the fishing rod has increased! (1/10)"),
+            an_info_line(expected.as_bytes()),
             "the training's line"
         );
         sockets = read_rod_update(alice);
     }
-    assert_eq!((sockets[0] <= 1, sockets[2]), (true, 0), "the bait is gone");
+    assert_eq!(sockets[2], 0, "the bait is gone");
 }
 
 /// `event.fishing.fishing_event`, `data.fishing`: the bite sends `REACT` around, and a fish
@@ -71106,11 +71108,25 @@ fn the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
+    let beta_dungeon_probe: &[u8] = b"quest beta_dungeon_probe begin\n\
+        state start begin\n\
+        when login begin\n\
+        if pc.get_name() == \"Beta\" and not pc.in_dungeon() then\n\
+        pc.setf(\"enchanted_forest_zone\", \"dungeon_enter\", 1)\n\
+        d.new_jump(210, 782400, 1502100)\n\
+        end\n\
+        end\n\
+        end\n\
+        end\n";
     let mut channels = default_channels();
-    channels[0].maps.push(110);
-    let mut server = Server::start_configured(
+    channels[0].maps.push(210);
+    let (mut server, _root) = Server::start_with_files_channels(
         binary(),
         database.url(),
+        &[(
+            "locale/europe/quest/zz_probe/beta_dungeon.lua",
+            beta_dungeon_probe,
+        )],
         &channels,
         "test_server = false\nno_wander = true\n",
     );
@@ -71127,7 +71143,7 @@ fn the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon
     );
     sql(
         &database,
-        "UPDATE player SET map_index = 110, x = 36800, y = 5200 WHERE name = 'Beta'",
+        "UPDATE player SET map_index = 1, x = 469500, y = 950000 WHERE name = 'Beta'",
     );
     let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
     let _entered = enter_game_shown(&mut alice);
@@ -71191,11 +71207,33 @@ fn the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon
     drop(alice);
     server.wait_for("Character disconnected; wrote the row");
 
-    let (mut war_client, _listed2, _items2) = load_character(&server, b"alice", 1);
-    let _entered2 = enter_game_shown(&mut war_client);
-    let _ = drain_all_game(&mut war_client, 200);
-    war_client.send_record(&slash(b"/click_safebox"));
-    let blocked = drain_all_game(&mut war_client, 300);
+    assert_beta_safebox_blocked_in_dungeon(&server, &database);
+}
+
+fn assert_beta_safebox_blocked_in_dungeon(server: &Server, database: &ScratchDatabase) {
+    // Beta enters map 1, the quest probe jumps Beta into private dungeon 2100000, and on
+    // re-entering inside that dungeon `/click_safebox` refuses with the dungeon/war notice.
+    let (_auth, key) = login_key(server, b"alice");
+    let mut beta_pre = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut beta_pre, b"alice", key, CLIENT_KEY).expect("beta logs in");
+    let _ = load_selected(&mut beta_pre, &list, 1);
+    let _ = enter_game_shown(&mut beta_pre);
+    let _ = drain_all_game(&mut beta_pre, 300);
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Beta') = 2100000",
+    );
+    drop(beta_pre);
+
+    let mut beta = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut beta, b"alice", key, CLIENT_KEY).expect("beta re-enters dungeon");
+    let _ = load_selected(&mut beta, &list, 1);
+    let _ = enter_game_shown(&mut beta);
+    let _ = drain_all_game(&mut beta, 200);
+    beta.send_record(&slash(b"/click_safebox"));
+    let blocked = drain_all_game(&mut beta, 300);
     assert!(
         blocked.iter().any(|r| {
             r.windows(b"You cannot open the safebox in dungeon or at war".len())
@@ -71203,4 +71241,225 @@ fn the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon
         }),
         "expected dungeon/war safebox block notice from /click_safebox"
     );
+}
+
+/// Ledger 736 (`sys.guild.core`, `sys.guild.war`, `sys.bus`): during an active guild war,
+/// casting a non-teleport guild skill (`155` Accelerare: `MOV_SPEED` + `ATT_SPEED`) buffs
+/// every online guild member on the wire with both `GC_AFFECT_ADD` rows and point changes.
+#[test]
+fn a_guild_war_skill_buffs_every_online_member_on_the_wire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    create_account_before_boot(&database, "carol");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Zulu', 0, \
+         40, 470200, 950000 FROM account WHERE login = 'carol'",
+    );
+    seed_war_pair(&database);
+    // Add Zulu to guild 1 (MyGuild) and give guild 1 skill 155 (slot 4: 155 - 151 = 4) at level 7.
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade, is_general, offer) \
+         SELECT id, 1, 2, false, 0 FROM player WHERE name = 'Zulu'",
+    );
+    sql(
+        &database,
+        "UPDATE guild SET sp = 500, skill_point = 0, \
+         skills = E'\\\\x000000000700000000000000' WHERE id = 1",
+    );
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nno_wander = true\n",
+    );
+    let (mut alice, _, _) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    let _ = drain_all_game(&mut alice, 300);
+    let (mut yankee, _, _) = load_character(&server, b"bob", 0);
+    yankee.send_record(&client_enter_game());
+    let _ = drain_all_game(&mut yankee, 300);
+    let (mut zulu, _, _) = load_character(&server, b"carol", 0);
+    zulu.send_record(&client_enter_game());
+    let _ = drain_all_game(&mut zulu, 300);
+
+    // Start a field war between MyGuild and Wolves.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves"));
+    let _ = drain_all_game(&mut alice, 250);
+    let _ = drain_all_game(&mut yankee, 250);
+    let _ = drain_all_game(&mut zulu, 250);
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/war MyGuild"));
+    let _ = drain_all_game(&mut alice, 250);
+    let _ = drain_all_game(&mut yankee, 250);
+    let _ = drain_all_game(&mut zulu, 250);
+
+    // Alice casts guild skill 155 (Accelerare): both Alice and online member Zulu receive
+    // GC_AFFECT_ADD for affect_type = 155 on MOV_SPEED (19) and ATT_SPEED (17).
+    alice.send_record(&client_guild_use_skill(155, 0));
+    let alice_recs = drain_all_game(&mut alice, 300);
+    let zulu_recs = drain_all_game(&mut zulu, 300);
+    for (who, recs) in [("Alice", &alice_recs), ("Zulu", &zulu_recs)] {
+        let adds: Vec<(u32, u8)> = recs
+            .iter()
+            .filter_map(|r| protocol::gc_nested::GcAffectAdd::decode(r).ok())
+            .filter(|a| a.element.affect_type == 155)
+            .map(|a| (a.element.affect_type, a.element.apply_on))
+            .collect();
+        assert!(
+            adds.contains(&(155, 19)) && adds.contains(&(155, 17)),
+            "{who} must receive both MOV_SPEED (19) and ATT_SPEED (17) affects for guild skill 155: {adds:?}"
+        );
+    }
+}
+
+/// Ledger 736 (`sys.world.map`, `sys.world.objects`): standing a building stamps `ATTR_OBJECT`
+/// over its prototype footprint so overlapping placement is refused, and knocking it down clears
+/// the cells so the same spot can be built again.
+#[test]
+fn a_standing_building_stamps_attr_object_and_blocks_overlap_until_knocked_down() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    // Stand Alpha inside map 1's land 1 (region 409600, 896000; land x=20200, y=10000, 3000x3000),
+    // well clear of the build point (21200, 11000) so only ATTR_OBJECT blocks the overlap.
+    sql(
+        &database,
+        "UPDATE player SET x = 432600, y = 908500, gold = 5000000 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild (id, name, master_pid, ladder_point) \
+         SELECT 1, 'MyGuild', id, 1000 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, \
+         CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, \
+         CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 15) grade",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade) \
+         SELECT id, 1, 1 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (1, 1)",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) \
+         SELECT 501, id, 1, 0, 20, 90010 FROM player WHERE name = 'Alpha'",
+    );
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nno_wander = true\n",
+    );
+    let (mut alice, _, _) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    let _ = drain_all_game(&mut alice, 300);
+
+    // First wall (14300) stands at (21200, 11000) and stamps its footprint in ATTR_OBJECT.
+    alice.send_record(&slash(b"/build c 14300 21200 11000 0 0 0"));
+    let first_vid = read_stood_object(&mut alice);
+    let _ = drain_all_game(&mut alice, 250);
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM building_object WHERE land_id = 1 AND vnum = 14300) = 1",
+    );
+
+    // A second wall at the exact same spot is refused by the dynamic ATTR_OBJECT footprint.
+    alice.send_record(&slash(b"/build c 14300 21200 11000 0 0 0"));
+    let refused = drain_all_game(&mut alice, 300);
+    assert!(
+        !refused.iter().any(|r| r.first() == Some(&GC_CHARACTER_ADD)),
+        "overlapping build must be refused while ATTR_OBJECT is stamped"
+    );
+    check(
+        &database,
+        "(SELECT count(*) FROM building_object WHERE land_id = 1 AND vnum = 14300) = 1",
+    );
+
+    // Knock down the first wall: its ATTR_OBJECT footprint clears, so building at the same spot
+    // now succeeds.
+    alice.send_record(&slash(format!("/build d {first_vid}").as_bytes()));
+    let _ = drain_all_game(&mut alice, 250);
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM building_object WHERE land_id = 1 AND vnum = 14300) = 0",
+    );
+
+    alice.send_record(&slash(b"/build c 14300 21200 11000 0 0 0"));
+    let second_vid = read_stood_object(&mut alice);
+    assert_ne!(second_vid, 0, "rebuild after knockdown must stand");
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM building_object WHERE land_id = 1 AND vnum = 14300) = 1",
+    );
+}
+
+/// Ledger 736 (`sys.world.warp`): outside `test_server`, entering directly onto a base war map
+/// (110) or base wedding map (81) warps the character back to its empire's home town
+/// (`G/input_login.cpp:876-885`).
+#[test]
+fn entering_a_war_or_wedding_map_outside_test_server_warps_home() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(110);
+    channels[0].maps.push(81);
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &channels,
+        "test_server = false\nno_wander = true\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "UPDATE player SET map_index = 110, x = 36800, y = 5200 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET map_index = 81, x = 825000, y = 25000 WHERE name = 'Beta'",
+    );
+    let port = server.channel(1).port();
+    for (slot, label) in [(0u8, "war map 110"), (1u8, "wedding map 81")] {
+        let (mut client, _, _) = load_character(&server, b"alice", slot);
+        let _ = enter_game_shown(&mut client);
+        let burst = drain_all_game(&mut client, 400);
+        let want = a_warp_record((469_300, 964_200), port);
+        assert!(
+            burst.iter().any(|r| r == &want),
+            "entering {label} outside test_server must warp to Shinsoo home (469300, 964200)"
+        );
+        drop(client);
+        wait_for(
+            &database,
+            if slot == 0 {
+                "(SELECT x FROM player WHERE name = 'Alpha') = 469300"
+            } else {
+                "(SELECT x FROM player WHERE name = 'Beta') = 469300"
+            },
+        );
+    }
 }

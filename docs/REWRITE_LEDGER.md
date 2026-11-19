@@ -58352,3 +58352,53 @@ Run 1 failed `character::items::tests::the_grid_check_answers_only_for_the_inven
 `read_poison_damage` to skip revive-end/view records per SCENARIO TIMING, 8× parallel clean).
 Run 2 passed 5,753/0. Parity: 1,792 `ported`, 20 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
 of 2,332 rows; 596 scenarios. No ADR changed.
+
+## 736. Guild war skill buffs, dynamic building `ATTR_OBJECT` cells, mid-walk speed rescale, war/wedding login warp, and closure of B3, B4, B8, `gamedata.md` and `quests.md`
+
+Closes seventeen Parity rows — finishing Packages B3, B4, B8 and both `gamedata.md` and `quests.md`
+(`0 partial` remaining in eleven of twelve inventory files; 3 `partial` left overall):
+`data.map.index`, `data.motion`, `data.locale.names`, `questlib.questlib`, `sys.login.by_key`,
+`sys.login.enter`, `sys.world.map`, `sys.world.move`, `sys.world.warp`, `sys.world.objects`,
+`sys.char.points`, `sys.char.save`, `sys.char.multi_language`, `sys.guild.core`, `sys.guild.war`,
+`sys.bus`, and `sys.dungeon.core`.
+
+- **Guild war skill buff loop (`sys.guild.core`, `sys.guild.war`):**
+  `prodomo/src/game_state/guild.rs` (`commit_guild_use_skill` and `apply_guild_war_skill`) now
+  enforces the active-war gate (`UnderAnyWar`, `[LS;937]`, `G/guild.cpp:1395-1410`) for non-teleport
+  guild skills and applies the skill's `k`-scaled `point`/`point2` buffs to every online guild member
+  on the wire (`RemoveAffect` + `ComputeSkill` skipping `AFF_PABEOP`, `G/guild.cpp:1405-1430`).
+  Fixed the `1_u32 << (AFF_PABEOP - 1)` shift width to `word = (pabeop_bit / 32)` / `(pabeop_bit % 32)`.
+- **Dynamic building `ATTR_OBJECT` footprint (`sys.world.map`, `sys.world.objects`):**
+  `prodomo/src/game_state.rs` tracks refcounted dynamic `ATTR_OBJECT` cells (`building_attr_cells`),
+  stamped when a building stands (`stand_building`, `install_building_objects`, `reconstruct_object`)
+  and cleared when hidden/destroyed (`hide_building_object`), and checked by `build_blocked` and
+  `is_movable` (`prodomo/src/game_state/build_lines.rs`, `regen.rs`).
+- **Mid-walk `POINT_MOV_SPEED` leg rescaling (`sys.world.move`, `data.motion`):**
+  `prodomo/src/game_state/motion.rs` (`rescale_pc_leg`, `rescale_npc_leg`) re-anchors an active
+  walk leg at its interpolated spot and recomputes the remaining duration whenever `POINT_MOV_SPEED`
+  changes in `affect.rs` and `death.rs` (`G/char.cpp:3812-3815`; unit test
+  `a_move_speed_change_mid_walk_rescales_the_remaining_leg`).
+- **War and wedding base-map login warp (`sys.world.warp`, `sys.login.enter`):**
+  `prodomo/src/game_state/arena.rs` (`enter_war_or_wedding`, `G/input_login.cpp:876-885`) warps any
+  character logging directly onto a war or wedding base map (`map < 10_000`) home when
+  `!test_server`.
+- **Dungeon safebox verification and `read_practice` multi-cast fix:**
+  Extended `the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon` to drive
+  a real private dungeon entry (`d.new_jump(210, ...)`) and assert the `/click_safebox` refusal on
+  the wire; hardened `read_practice` (`prodomo/tests/parity.rs`) to detect rod training by non-zero
+  bait socket (`sockets[2] != 0`) and accept any `(N/10)` level across multi-cast loops.
+- **Scenarios (all 8× parallel clean, `test_server = false` per ADR-0007):**
+  `a_guild_war_skill_buffs_every_online_member_on_the_wire`,
+  `a_standing_building_stamps_attr_object_and_blocks_overlap_until_knocked_down`,
+  `entering_a_war_or_wedding_map_outside_test_server_warps_home` (plus updated
+  `the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon`).
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,757
+passed, 0 failed in 46 targets; with it 5,757 passed, 0 failed in 46 targets (488 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+Run 1 failed `a_premium_cast_sees_the_biting_fish_before_the_take` (rod trained twice across its
+10-cast loop, exposing `read_practice`'s `sockets[0] == 1` assumption; fixed to check
+`sockets[2] != 0` and format `({level}/10)`, 8× parallel clean).
+Run 2 passed 5,757/0. Parity: 1,809 `ported`, 3 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
+of 2,332 rows; 599 scenarios. No ADR changed.

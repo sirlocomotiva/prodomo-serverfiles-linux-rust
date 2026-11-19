@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 735 |
+| measure | value at ledger 736 |
 |---|---|
-| Parity inventory | 2,332 rows: 1,792 `ported`, 20 `partial`, 520 `unused`, 0 `missing`; **B1, B2, B7, B9, `client-packets.md`, `timed-events.md` and all three arm tables closed** (20 open rows left across B3–B6 and B8, each note ending in `Left:`) |
-| Scenarios | 596 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,753 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 735 has the receipt) |
+| Parity inventory | 2,332 rows: 1,809 `ported`, 3 `partial`, 520 `unused`, 0 `missing`; **B1–B4, B7–B9 and 11 of 12 inventory files closed** (3 open rows left in `systems.md`, each note ending in `Left:`) |
+| Scenarios | 599 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,757 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 736 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 47 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -104,12 +104,12 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 |---|---|
 | B1. Items (0) | Closed (ledger 733): `cg.game.item_use`, `cg.game.item_use_to_item`, `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`, `sys.item.core`, `sys.item.refine`, `data.item.special_group`, `table.item_attr`, `event.item.timer_based_on_wear_expire_event` |
 | B2. Monsters, combat, drops (0) | Closed (ledger 734): `sys.combat.core`, `sys.mob.ai`, `sys.mob.proto`, `data.proto.mob`, `data.drop.mob`, `data.drop.common`, `data.drop.etc`, `data.drop.group`, `data.map.regen`, `sys.world.regen` |
-| B3. Skills (1) | `data.motion` (`sys.skill.core`, `sys.skill.extra`, `cg.game.add_fly_targeting`, `cg.game.fly_targeting`, `table.skill_proto` closed in ledger 735) |
-| B4. Character and world (7) | `sys.char.points`, `sys.char.save`, `sys.char.multi_language`, `sys.world.map`, `sys.world.move`, `sys.world.warp`, `sys.world.objects` (`cg.game.on_click`, `sys.char.pk`, `sys.npc.safebox` closed in ledger 735) |
-| B5. Guild and the cross-Channel paths (4) | `sys.guild.core`, `sys.guild.war`, `sys.guild.dungeon`, `sys.bus` |
-| B6. Quests, dungeons, events (4) | `sys.quest.runtime`, `questlib.questlib`, `sys.dungeon.core`, `sys.dungeon.dragon_lair` (all 5 event rows closed in ledger 731; `data.regen.dungeon` and `sys.dungeon.ship_defense` closed in ledger 734) |
+| B3. Skills (0) | Closed (ledgers 735–736): `sys.skill.core`, `sys.skill.extra`, `cg.game.add_fly_targeting`, `cg.game.fly_targeting`, `table.skill_proto`, `data.motion` |
+| B4. Character and world (0) | Closed (ledgers 735–736): `cg.game.on_click`, `sys.char.pk`, `sys.npc.safebox`, `sys.char.points`, `sys.char.save`, `sys.char.multi_language`, `sys.world.map`, `sys.world.move`, `sys.world.warp`, `sys.world.objects` |
+| B5. Guild and the cross-Channel paths (1) | `sys.guild.dungeon` (`sys.guild.core`, `sys.guild.war`, `sys.bus` closed in ledger 736) |
+| B6. Quests, dungeons, events (2) | `sys.quest.runtime`, `sys.dungeon.dragon_lair` (all 5 event rows closed in ledger 731; `data.regen.dungeon` and `sys.dungeon.ship_defense` closed in ledger 734; `questlib.questlib` and `sys.dungeon.core` closed in ledger 736) |
 | B7. Life skills and custom systems (0) | Closed (ledger 730): `sys.life.fishing`, `sys.life.mining`, `sys.custom.dragon_soul`, `sys.custom.new_set_bonus` |
-| B8. Login, logs, data (4) | `sys.login.by_key`, `sys.login.enter`, `data.locale.names`, `data.map.index` (`sys.log` closed in ledger 732; `data.proto.item` and `data.locale.strings` closed in ledger 735) |
+| B8. Login, logs, data (0) | Closed (ledgers 732, 735–736): `sys.log`, `data.proto.item`, `data.locale.strings`, `sys.login.by_key`, `sys.login.enter`, `data.locale.names`, `data.map.index` |
 | B9. The arm tables (0) | Closed: `item-use.md` (0 open, ledger 728), `points.md` (0 open, ledger 729), `skill-arms.md` (0 open, ledger 727) |
 
 *Exit:* no `partial` or `missing` row is left; each is `ported`, `unused`, or on the owner's list.

@@ -707,13 +707,115 @@ impl GameState {
     /// The `checkAnother` occupancy (`:545-560`): an `ATTR_OBJECT` cell in the
     /// footprint, or a non-monster body or NPC standing in it.
     fn build_blocked(&self, place: (u8, i32), footprint: (i32, i32, i32, i32)) -> bool {
-        if self.attr_in_rect(place.1, footprint, gamedata::server_attr::ATTR_OBJECT) {
+        if self.attr_in_rect(place.1, footprint, gamedata::server_attr::ATTR_OBJECT)
+            || self.building_attr_in_rect(place, footprint)
+        {
             return true;
         }
         self.bodies
             .values()
             .any(|body| (body.channel, body.map) == place && in_rect(footprint, body.motion.dest))
             || self.npc_in_rect(place, footprint)
+    }
+
+    /// Footprint cell coordinates `(cx, cy)` covered by a building object's prototype regions
+    /// (`CObject::Show`, `G/building.cpp:179-186`).
+    fn building_footprint_cells(&self, object: &BuildingObject) -> Vec<(i32, i32)> {
+        use gamedata::server_attr::CELL_SIZE;
+        let Some(proto) = self.object_protos.get(object.vnum) else {
+            return Vec::new();
+        };
+        let footprint = (
+            object.x.saturating_add(proto.regions[0]),
+            object.y.saturating_add(proto.regions[1]),
+            object.x.saturating_add(proto.regions[2]),
+            object.y.saturating_add(proto.regions[3]),
+        );
+        if footprint.0 > footprint.2 || footprint.1 > footprint.3 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut y = footprint.1 - footprint.1 % CELL_SIZE;
+        while y <= footprint.3 {
+            let mut x = footprint.0 - footprint.0 % CELL_SIZE;
+            while x <= footprint.2 {
+                out.push((x / CELL_SIZE, y / CELL_SIZE));
+                x = x.saturating_add(CELL_SIZE);
+            }
+            y = y.saturating_add(CELL_SIZE);
+        }
+        out
+    }
+
+    /// Stamp `ATTR_OBJECT` over a standing building object's footprint (`G/building.cpp:179-186`).
+    pub(super) fn stamp_building_attr(&mut self, place: (u8, i32), object: &BuildingObject) {
+        let cells = self.building_footprint_cells(object);
+        if cells.is_empty() {
+            return;
+        }
+        let map = self.building_attr_cells.entry(place).or_default();
+        for cell in cells {
+            *map.entry(cell).or_insert(0) += 1;
+        }
+    }
+
+    /// Clear `ATTR_OBJECT` over a knocked-down building object's footprint (`G/building.cpp:104-112`).
+    pub(super) fn unstamp_building_attr(&mut self, place: (u8, i32), object: &BuildingObject) {
+        let cells = self.building_footprint_cells(object);
+        if cells.is_empty() {
+            return;
+        }
+        let empty = if let Some(map) = self.building_attr_cells.get_mut(&place) {
+            for cell in cells {
+                if let Some(count) = map.get_mut(&cell) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        map.remove(&cell);
+                    }
+                }
+            }
+            map.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            self.building_attr_cells.remove(&place);
+        }
+    }
+
+    /// Whether any dynamic `ATTR_OBJECT` cell lies inside `footprint` on `place`.
+    fn building_attr_in_rect(&self, place: (u8, i32), footprint: (i32, i32, i32, i32)) -> bool {
+        use gamedata::server_attr::CELL_SIZE;
+        let Some(map) = self.building_attr_cells.get(&place) else {
+            return false;
+        };
+        let mut y = footprint.1 - footprint.1 % CELL_SIZE;
+        while y <= footprint.3 {
+            let mut x = footprint.0 - footprint.0 % CELL_SIZE;
+            while x <= footprint.2 {
+                if map.contains_key(&(x / CELL_SIZE, y / CELL_SIZE)) {
+                    return true;
+                }
+                x = x.saturating_add(CELL_SIZE);
+            }
+            y = y.saturating_add(CELL_SIZE);
+        }
+        false
+    }
+
+    /// Whether any Channel holds a dynamic `ATTR_OBJECT` cell at `(x, y)` on `map`.
+    pub(super) fn has_building_attr(&self, map: i32, x: i32, y: i32) -> bool {
+        use gamedata::server_attr::CELL_SIZE;
+        if self.building_attr_cells.is_empty() {
+            return false;
+        }
+        let cell = (
+            (x - x % CELL_SIZE) / CELL_SIZE,
+            (y - y % CELL_SIZE) / CELL_SIZE,
+        );
+        self.building_attr_cells
+            .iter()
+            .any(|((_, m), cells)| *m == map && cells.contains_key(&cell))
     }
 
     /// Whether a non-monster NPC stands in the rect on `map` (`FIsIn`,
@@ -795,6 +897,7 @@ impl GameState {
     /// region (`:179-186`) is not ported: the Rewrite walks by server-attr
     /// cells, which no object writes.
     fn show_building_object(&mut self, place: (u8, i32), object: &BuildingObject) {
+        self.stamp_building_attr(place, object);
         let mut effects = Vec::new();
         if let Some(index) = self.maps.get_mut(&place) {
             let _shown = index.show(
@@ -808,8 +911,10 @@ impl GameState {
     }
 
     /// The sectree's half of `CLand::DeleteObject` (`:430-447`): the object
-    /// entity leaves, and the delete fans to whoever saw it.
+    /// entity leaves, its `ATTR_OBJECT` footprint clears, and the delete fans
+    /// to whoever saw it.
     fn hide_building_object(&mut self, place: (u8, i32), object: &BuildingObject) {
+        self.unstamp_building_attr(place, object);
         let mut effects = Vec::new();
         if let Some(index) = self.maps.get_mut(&place) {
             index.remove(super::view::EntityKey::Npc(object.vid), &mut effects);

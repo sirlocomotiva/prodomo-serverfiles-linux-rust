@@ -1417,6 +1417,7 @@ impl GameState {
                     .or_default()
                     .push(stood.clone());
                 self.building_places.insert(vid, place);
+                self.stamp_building_attr(place, &stood);
                 // `CManager::FinalizeBoot` (`G/building.cpp:865-879`): every
                 // booted object shows, so a late entrant's view finds it. No
                 // client is connected yet, so the inserts land nowhere.
@@ -1686,6 +1687,8 @@ impl GameState {
         }
         self.building_places.remove(&object.vid);
         self.building_places.insert(vid, place);
+        self.unstamp_building_attr(place, object);
+        self.stamp_building_attr(place, &rebuilt);
         let mut effects = Vec::new();
         if let Some(index) = self.maps.get_mut(&place) {
             index.remove(super::view::EntityKey::Npc(object.vid), &mut effects);
@@ -5684,11 +5687,15 @@ impl GameState {
             .values()
             .filter_map(|member| member.vid)
             .collect();
-        for member in members {
+        for &member in &members {
             let _sent = self.write_to_client(member, guild_skill_info_record(&info));
         }
         if vnum != GUILD_SKILL_TELEPORT {
-            self.tell_guild(speaker, b"[LS;937]", &[]);
+            if !self.guild_under_any_war(guild_id) {
+                self.tell_guild(speaker, b"[LS;937]", &[]);
+                return GuildSkillUseAnswer::Committed;
+            }
+            self.apply_guild_war_skill(speaker, guild_id, vnum, &members);
             return GuildSkillUseAnswer::Committed;
         }
         let victim = self
@@ -5719,6 +5726,100 @@ impl GameState {
         };
         self.order_warp(speaker, (spot.x, spot.y));
         GuildSkillUseAnswer::Committed
+    }
+
+    /// `CGuild::UseSkill`'s war-buff loop (`G/guild.cpp:1405-1416`): removes any
+    /// prior affect of `vnum` on each online member and runs the skill's first and
+    /// second `ComputeSkill` point/duration polys (`G/char_skill.cpp:2515-2610`).
+    fn apply_guild_war_skill(&mut self, speaker: Vid, guild_id: u32, vnum: u32, members: &[Vid]) {
+        let Some(row) = self.guild_skill_tables.get(vnum).cloned() else {
+            return;
+        };
+        let real = vnum.saturating_sub(GUILD_SKILL_START);
+        let Some(index) = usize::try_from(real)
+            .ok()
+            .filter(|&i| i < GUILD_SKILL_COUNT)
+        else {
+            return;
+        };
+        let Some(level) = self
+            .guilds
+            .by_id
+            .get(&guild_id)
+            .map(|guild| guild.skills[index])
+        else {
+            return;
+        };
+        // `CHARACTER::GetSkillPower` for guild skills (`G/char_skill.cpp:3175`):
+        // `100 * level / 7 / 7`, then `k = power * bMaxLevel / 100`.
+        let power = (100 * i32::from(level)) / 7 / 7;
+        let k = f64::from(power) * f64::from(row.record.max_level) / 100.0;
+        let (def, odef) = self.points_of(speaker.raw()).map_or((0, 0), |pts| {
+            let d = pts.get_point(common::point_slot::POINT_DEF_GRADE);
+            let bonus = pts.get_point(common::point_slot::POINT_DEF_GRADE_BONUS);
+            (d, d.saturating_sub(bonus))
+        });
+        let on1 = super::mob_skill::point_on(&row.record.point_on);
+        let on2 = super::mob_skill::point_on(&row.record.point_on2);
+        for &victim in members {
+            self.remove_pc_affect(victim, vnum);
+            let pabeop_bit = crate::loading_phase::AFF_PABEOP - 1;
+            let word = usize::try_from(pabeop_bit / 32).unwrap_or(0);
+            if self.affect_flags_of(victim)[word] & (1_u32 << (pabeop_bit % 32)) != 0 {
+                continue;
+            }
+            let (max_health, max_mana, max_speed) =
+                self.points_of(victim.raw()).map_or((0, 0, 100), |pts| {
+                    (
+                        pts.max_hp(),
+                        pts.max_sp(),
+                        pts.limit_point(common::point_slot::POINT_MOV_SPEED),
+                    )
+                });
+            let mut vars = std::collections::BTreeMap::new();
+            vars.insert("k", k);
+            vars.insert("maxhp", f64::from(max_health));
+            vars.insert("maxsp", f64::from(max_mana));
+            vars.insert("def", f64::from(def));
+            vars.insert("odef", f64::from(odef));
+            vars.insert("maxv", f64::from(max_speed));
+            if on1 != common::point_slot::POINT_NONE {
+                let val1 = f64_to_i32(row.point.eval(&vars));
+                let dur1 = f64_to_i32(row.duration.eval(&vars));
+                if dur1 > 0 {
+                    self.add_pc_affect(
+                        victim,
+                        super::affect::Affect {
+                            kind: vnum,
+                            apply_on: u8::try_from(on1).unwrap_or(0),
+                            value: val1,
+                            flag: row.record.affect_flag,
+                            remaining: dur1,
+                            sp_cost: 0,
+                        },
+                        true,
+                    );
+                }
+            }
+            if on2 != common::point_slot::POINT_NONE {
+                let val2 = f64_to_i32(row.point2.eval(&vars));
+                let dur2 = f64_to_i32(row.duration2.eval(&vars));
+                if dur2 > 0 {
+                    self.add_pc_affect(
+                        victim,
+                        super::affect::Affect {
+                            kind: vnum,
+                            apply_on: u8::try_from(on2).unwrap_or(0),
+                            value: val2,
+                            flag: row.record.affect_flag2,
+                            remaining: dur2,
+                            sp_cost: 0,
+                        },
+                        false,
+                    );
+                }
+            }
+        }
     }
 
     /// Land one judged `/greset` under the stored row (`CGuild::Reset`,

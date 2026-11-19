@@ -144,6 +144,52 @@ impl GameState {
         }
     }
 
+    /// `CInputLogin::Entergame`'s war-map and wedding-map eject (`G/input_login.cpp:876-885`):
+    /// outside `test_server`, anyone entering directly onto a war map (`110`, `111`, `112` or
+    /// their private copies) or wedding map (`81` or private copy) is warped to their empire's
+    /// home town.
+    pub(super) fn enter_war_or_wedding(&mut self, vid: Vid) {
+        if self.test_server {
+            return;
+        }
+        let Some((channel, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        if map >= 10_000 {
+            return;
+        }
+        let is_war = super::war_map::war_map_of(map).is_some();
+        let is_wedding = map == 81 || map / 10_000 == 81;
+        if !is_war && !is_wedding {
+            return;
+        }
+        let Some(empire) = self.bodies.get(&vid).map(|body| body.card.empire) else {
+            return;
+        };
+        let Some(point) = crate::warp::go_home(empire) else {
+            return;
+        };
+        let index = self
+            .recall
+            .atlas()
+            .and_then(|atlas| atlas.index_at(point.0, point.1).filter(|&i| i != 0));
+        match index {
+            Some(index) if self.recall.hosts(channel, index) => {
+                self.order_warp(vid, point);
+            }
+            Some(index) => {
+                let mut hosts: Vec<u8> = (1..=common::config::SHARED_CHANNEL)
+                    .filter(|&c| self.recall.hosts(c, index))
+                    .collect();
+                hosts.sort_unstable();
+                if let Some(&target_ch) = hosts.first() {
+                    self.arena_return_warp(vid, point, target_ch);
+                }
+            }
+            None => {}
+        }
+    }
+
     pub(super) fn load_arenas(&mut self, configs: &[quest::host::Arena]) {
         for config in configs {
             let map = u32::from_ne_bytes(config.map_index.to_ne_bytes());
