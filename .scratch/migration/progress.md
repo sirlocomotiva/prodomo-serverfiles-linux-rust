@@ -6,15 +6,15 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 728**, the fish mind pill (27610), worn dragon-soul pull-out and the `item-use.md` closure. Package B
+- The last section is **ledger 729**, `POINT_COSTUME_ATTR_BONUS` / `APPLY_COSTUME_ATTR_BONUS` and the `points.md` closure (all of B9 closed). Package B
   so far: 687 (sibling vnums, the gold bar cap), 688 (the ability potions), 689 (the apply types),
   690 (the arena's potion gate), 691 (the ward and aid climb gate, and the refused `/setskill`
   sending byte 76), 692 (each skill type's point on a climb and a forget), 693 (each skill's hit cap on one victim), 694 (the master arms of a climb by point), 695 (each automatic potion's kind of row), 696 (the basic books and two book-read bugs), 697 (the passive books' ladder), 698 (the sibling capes and peach), 699 (the white flag and the treasure box), 700 (the zen bean), 701 (the no-op item types), 702 (the seasonal boxes), 703 (a unique worn by its use), 704 (the ramadan candy and the marriage ring), 705 (a fish's use), 706 (the wearable types worn by their use), 707 (a use refused by its limits), 708 (the craft, mining and horse books), 709 (the shaman unlock line), 710 (a use with no arm), 711 (the bonus change and the order of a scroll's records), 712 (the fifth bonus, the rare change and the belt jewel), 713 (the pet and mount reinforcements), 714 (the giftbox with no group and the element change), 715 (the stone scroll and the shaman unlock), 716 (the tuning and detachment scrolls), 717 (the metin stone failure and wear checks), 718 (the recipe refusal), 719 (the plain blend), 720 (the guild skills as personal skills), 721 (the unworn dragon-soul stone), 722 (the capped bonuses and immunities), 723 (the item-use quest and special checks), 724 (the 508xx potions and potion-nodelay), 725 (the detectors and the portal payment), 726 (the clock-fix scenarios), 727 (the horse skills and `skill-arms.md` closure), 728 (the fish mind pill, dragon-soul pull-out and `item-use.md` closure). Before them: 686 (the tail made countable: three generated arm tables and every `partial` and `missing` note ending in `Left:`), 685 (the scenario timing), 684 (Rust 1.100.0), 683 (the test hygiene), 682 (the cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
-- Parity: 1,729 `ported`, 81 `partial`, 520 `unused`, 2 `missing`, 0 `codec`, of 2,332 rows.
-  **21 B9 arm items left** (83 open rows across B1–B9); the number only goes down.
-- Tests: 5,725 pass in 46 targets with `DATABASE_URL`; 580 are scenarios.
-- **What is next is in `docs/STATUS.md`, "Next steps"**: package B, by families (A2). B9 is the
-  arm tables; most of their `partial` rows have Rust code and lack only a scenario.
+- Parity: 1,750 `ported`, 62 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows.
+  **62 open rows left** across B1–B8 (B9 is closed); the number only goes down.
+- Tests: 5,730 pass in 46 targets with `DATABASE_URL`; 583 are scenarios.
+- **What is next is in `docs/STATUS.md`, "Next steps"**: package B1–B8 (62 `partial` rows) and
+  package C (hardening, C1–C12).
 
 ## Where things are
 
@@ -64,4 +64,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 728 is committed and pushed.
+Nothing is left running. Ledger 729 is committed and pushed.

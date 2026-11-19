@@ -5678,7 +5678,9 @@ where
             debug!(%addr, header = frame.header, "an observer's record is refused");
             true
         }
-        Some(MainRecord::Chat) => chat_line(session, addr, context, locations, held, &frame).await,
+        Some(MainRecord::Chat) => {
+            Box::pin(chat_line(session, addr, context, locations, held, &frame)).await
+        }
         Some(MainRecord::Whisper) => whisper_line(addr, context, held, &frame).await,
         Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, &frame).await,
         Some(MainRecord::Belongings) => belongings_step(session, addr, context, held, &frame).await,

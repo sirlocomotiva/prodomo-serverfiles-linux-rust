@@ -56,8 +56,9 @@ use protocol::item_pos::ItemPos;
 
 use super::dice::{number, Dice};
 use super::equipment::{
-    accessory_socket_grade, counted_attrs, is_energy_wear, is_set_item, item_applies,
-    removal_applies, Equipment, Worn, PARTS,
+    accessory_socket_grade, costume_attr_worn_attrs, counted_attrs, energy_worn_attrs,
+    is_costume_attr_wear, is_energy_wear, is_set_item, item_applies, removal_applies, Equipment,
+    Worn, PARTS,
 };
 use super::item_move::{
     ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, MoveRefused, Unported,
@@ -729,7 +730,25 @@ impl<'s, 'g> Equipper<'s, 'g> {
             removal_applies(&applies)
         };
         for (apply, value) in applies {
-            let records = self.gear.points.apply_point(apply, value);
+            let mut records = self.gear.points.apply_point(apply, value);
+            if let Some(val) = self.gear.points.take_energy_pending() {
+                let worn = energy_worn_attrs(&Equipment::of(self.items, self.gear.protos));
+                let at = records.len();
+                self.gear.points.energy_buff_on(&worn, val, &mut records);
+                if records.len() > at && at > 0 {
+                    records[at - 1..].rotate_left(1);
+                }
+            }
+            if let Some(val) = self.gear.points.take_costume_attr_pending() {
+                let worn = costume_attr_worn_attrs(&Equipment::of(self.items, self.gear.protos));
+                let at = records.len();
+                self.gear
+                    .points
+                    .costume_attr_buff_on(&worn, val, &mut records);
+                if records.len() > at && at > 0 {
+                    records[at - 1..].rotate_left(1);
+                }
+            }
             self.push_points(records);
         }
         let points = &*self.gear.points;
@@ -769,10 +788,17 @@ impl<'s, 'g> Equipper<'s, 'g> {
         let proto = self.proto(item.vnum)?;
         self.modify_points(wear, item, proto, false);
         // `BuffOnAttr_RemoveBuffsFromItem` before the wear clears (`G/item.cpp:1560`).
-        if is_energy_wear(wear) {
+        if is_energy_wear(wear) || is_costume_attr_wear(wear) {
             let attrs = counted_attrs(item);
             let mut records = Vec::new();
-            self.gear.points.energy_buff_remove(&attrs, &mut records);
+            if is_energy_wear(wear) {
+                self.gear.points.energy_buff_remove(&attrs, &mut records);
+            }
+            if is_costume_attr_wear(wear) {
+                self.gear
+                    .points
+                    .costume_attr_buff_remove(&attrs, &mut records);
+            }
             self.push_points(records);
         }
         let _ = self.items.release(item.id).map_err(MoveRefused::Storage)?;
@@ -814,10 +840,15 @@ impl<'s, 'g> Equipper<'s, 'g> {
         self.modify_points(wear, &stored, proto, true);
         // `BuffOnAttr_AddBuffsFromItem` before the recompute (`G/item.cpp:1477`): a set
         // piece's recompute clears the pool and its affects re-arm it.
-        if is_energy_wear(wear) {
+        if is_energy_wear(wear) || is_costume_attr_wear(wear) {
             let attrs = counted_attrs(&stored);
             let mut records = Vec::new();
-            self.gear.points.energy_buff_add(&attrs, &mut records);
+            if is_energy_wear(wear) {
+                self.gear.points.energy_buff_add(&attrs, &mut records);
+            }
+            if is_costume_attr_wear(wear) {
+                self.gear.points.costume_attr_buff_add(&attrs, &mut records);
+            }
             self.push_points(records);
         }
         self.recompute(item.vnum);

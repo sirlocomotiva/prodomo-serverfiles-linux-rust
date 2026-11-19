@@ -69615,3 +69615,326 @@ fn a_worn_dragon_soul_stone_pulls_out_by_use_or_extractor() {
     server.wait_for("Character disconnected; wrote the row");
     drop(server);
 }
+
+/// Decode every `GC_POINT_CHANGE` (0x11) in `records` into `(point_type, value)` pairs.
+fn decoded_point_changes(records: &[Vec<u8>]) -> Vec<(u8, i64)> {
+    records
+        .iter()
+        .filter(|record| record.first() == Some(&GC_POINT_CHANGE))
+        .filter_map(|record| protocol::gc_nested::GcPointChange::decode(record).ok())
+        .map(|change| (change.change_type, change.value))
+        .collect()
+}
+
+/// `point.change.point_costume_attr_bonus` (`G/char.cpp:4718`) and
+/// `point.apply.apply_costume_attr_bonus` (`:4991`): wearing a timeless hair costume (`45155`)
+/// with `APPLY_MAX_HP = 1000` and a necklace (`16000`) with `APPLY_COSTUME_ATTR_BONUS = 50`
+/// adds +500 scaled `POINT_MAX_HP` via `CBuffOnAttributes` before the `POINT_COSTUME_ATTR_BONUS`
+/// record; taking the costume off removes both 1000 and 500, re-wearing restores both, and
+/// taking the necklace off clears the 500 bonus and drops `POINT_COSTUME_ATTR_BONUS` to 0.
+#[test]
+fn a_costume_attr_bonus_scales_costume_bonuses_and_recomputes_on_wear() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, attrvalue0) \
+         VALUES \
+         (50, (SELECT id FROM player WHERE name = 'Alpha'), 1, 0, 1, 45155, 1, 1000), \
+         (51, (SELECT id FROM player WHERE name = 'Alpha'), 1, 1, 1, 16000, 82, 50)",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    let use_cell = |window: u8, cell: u16| {
+        protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(window, cell))
+            .encode()
+    };
+    // 1. Wear hair costume 45155 (+1000 MAX_HP).
+    alpha.send_record(&use_cell(1, 0));
+    let wear_costume = records_within(&mut alpha, Duration::from_millis(800));
+    let hp_with_costume = decoded_point_changes(&wear_costume)
+        .into_iter()
+        .rev()
+        .find_map(|(kind, val)| (kind == 6).then_some(val))
+        .expect("wearing costume sends POINT_MAX_HP");
+    let base_hp = hp_with_costume - 1000;
+    // 2. Wear necklace 16000 (APPLY_COSTUME_ATTR_BONUS = 50 -> +500 MAX_HP before point 130).
+    alpha.send_record(&use_cell(1, 1));
+    let wear_bonus = records_within(&mut alpha, Duration::from_millis(800));
+    let bonus_pts = decoded_point_changes(&wear_bonus);
+    let buff_hp_pos = bonus_pts
+        .iter()
+        .position(|&(kind, val)| kind == 6 && val == base_hp + 1500)
+        .expect("buff raises MAX_HP by 50% of costume 1000 -> +1500");
+    let bonus_index = bonus_pts
+        .iter()
+        .position(|&(kind, val)| kind == 130 && val == 50)
+        .expect("POINT_COSTUME_ATTR_BONUS rises to 50");
+    assert!(
+        buff_hp_pos < bonus_index,
+        "buff MAX_HP lands before POINT_COSTUME_ATTR_BONUS: {bonus_pts:?}"
+    );
+    // 3. Take off hair costume (WEAR_COSTUME_HAIR = 180 + 20 = 200): removes both 1000 and 500.
+    alpha.send_record(&use_cell(2, 200));
+    let off_costume = records_within(&mut alpha, Duration::from_millis(800));
+    let off_hp = decoded_point_changes(&off_costume)
+        .into_iter()
+        .rev()
+        .find_map(|(kind, val)| (kind == 6).then_some(val))
+        .expect("unequipping costume updates POINT_MAX_HP");
+    assert_eq!(off_hp, base_hp, "costume + scaled buff both removed");
+    // 4. Re-wear hair costume from the cell it unequipped into: restores 1000 + 500.
+    let (back_win, back_cell) = off_costume
+        .iter()
+        .find_map(|r| {
+            (r.first() == Some(&ITEM_SET) && r.get(4..8) == Some(&45155_u32.to_le_bytes()[..]))
+                .then(|| (r[1], u16::from_le_bytes([r[2], r[3]])))
+        })
+        .expect("unequipped hair costume lands in an inventory cell");
+    alpha.send_record(&use_cell(back_win, back_cell));
+    let rewear_costume = records_within(&mut alpha, Duration::from_millis(800));
+    let rewear_hp = decoded_point_changes(&rewear_costume)
+        .into_iter()
+        .rev()
+        .find_map(|(kind, val)| (kind == 6).then_some(val))
+        .expect("re-wearing costume updates POINT_MAX_HP");
+    assert_eq!(rewear_hp, base_hp + 1500);
+    // 5. Take off necklace (WEAR_NECK = 180 + 5 = 185): drops scaled 500 and point 130 -> 0.
+    alpha.send_record(&use_cell(2, 185));
+    let off_bonus = records_within(&mut alpha, Duration::from_millis(800));
+    let off_pts = decoded_point_changes(&off_bonus);
+    assert!(
+        off_pts.contains(&(6, base_hp + 1000)) && off_pts.contains(&(130, 0)),
+        "removing bonus necklace clears +500 MAX_HP and sets point 130 to 0: {off_pts:?}"
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}
+
+/// Seed `Alpha` (Shinsoo GM with a 100%-slow sword) plus Chunjo targets `Yankee` (bare) and
+/// `Charlie` (wearing an `IMMUNE_STUN` + `IMMUNE_SLOW` shield) outside the safezone.
+fn seed_immune_cast(database: &ScratchDatabase) {
+    add_characters(database);
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 2 WHERE login IN ('bob', 'carol')",
+    );
+    sql(
+        database,
+        "UPDATE player SET job = 0, level = 20, hp = 500, sp = 100, x = 470000, y = 950000 \
+         WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) \
+         SELECT id, 0, 'Yankee', 0, 20, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) \
+         SELECT id, 0, 'Charlie', 0, 20, 470000, 950000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) \
+         SELECT id, 'Alpha', 'LOW_WIZARD' FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, attrvalue0, \
+         attrtype1, attrvalue1) VALUES \
+         (60, (SELECT id FROM player WHERE name = 'Alpha'), 1, 0, 1, 10, 14, 100, 0, 0), \
+         (61, (SELECT id FROM player WHERE name = 'Charlie'), 1, 0, 1, 13000, 48, 1, 49, 1)",
+    );
+}
+
+/// `point.change.point_immune_stun` (`G/char.cpp:4634`) and `point.change.point_immune_slow`
+/// (`:4649`): a 100% `APPLY_SLOW_PCT` melee hit and `/stun` land `AFFECT_SLOW` (211) and
+/// `AFFECT_STUN` (210) on an unprotected opponent (`Yankee`), while an opponent wearing a shield
+/// (`13000`) with `APPLY_IMMUNE_STUN` (48) and `APPLY_IMMUNE_SLOW` (49) (`Charlie`) takes the
+/// melee hit (`GC_DAMAGE_INFO`) without `AFFECT_SLOW` and ignores `/stun` without `AFFECT_STUN`.
+#[test]
+fn immune_stun_and_immune_slow_block_stun_and_slow_on_the_wire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    for login in ["alice", "bob", "carol"] {
+        create_account(&server, login);
+    }
+    seed_immune_cast(&database);
+    let (mut alpha, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, _) = enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    let (mut charlie, _) =
+        enter_world_on_with_team(&server, 1, b"carol", 0, ENGLISH, Some(b"Alpha"));
+    let alpha_sees = records_within(&mut alpha, Duration::from_millis(600));
+    let _ = records_within(&mut yankee, Duration::from_millis(400));
+    let _ = records_within(&mut charlie, Duration::from_millis(400));
+    let vid_named = |name: &[u8]| -> u32 {
+        alpha_sees
+            .iter()
+            .find(|r| r[0] == GC_CHAR_ADDITIONAL_INFO && r.get(5..5 + name.len()) == Some(name))
+            .map(|r| u32::from_le_bytes(r[1..5].try_into().expect("a VID")))
+            .expect("peer stands in Alpha's view")
+    };
+    let yankee_vid = vid_named(b"Yankee");
+    let charlie_vid = vid_named(b"Charlie");
+    std::thread::sleep(Duration::from_millis(1600));
+    let use_cell0 =
+        protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(1, 0)).encode();
+    alpha.send_record(&use_cell0);
+    charlie.send_record(&use_cell0);
+    let _ = records_within(&mut alpha, Duration::from_millis(600));
+    let _ = records_within(&mut yankee, Duration::from_millis(400));
+    let _ = records_within(&mut charlie, Duration::from_millis(400));
+    let has_affect = |records: &[Vec<u8>], affect_type: u32| -> bool {
+        records.iter().any(|r| {
+            r.first() == Some(&GC_AFFECT_ADD)
+                && protocol::gc_nested::GcAffectAdd::decode(r)
+                    .is_ok_and(|a| a.element.affect_type == affect_type)
+        })
+    };
+    // 1. Unprotected Yankee: 100% slow hit lands AFFECT_SLOW (211), /stun lands AFFECT_STUN (210).
+    alpha.send_record(&client_attack(yankee_vid));
+    let y_hit = records_within(&mut yankee, Duration::from_millis(800));
+    assert!(
+        has_affect(&y_hit, 211),
+        "unprotected Yankee takes AFFECT_SLOW (211): {y_hit:02x?}"
+    );
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/stun Yankee"));
+    let y_stun = records_within(&mut yankee, Duration::from_millis(800));
+    assert!(
+        has_affect(&y_stun, 210),
+        "unprotected Yankee takes AFFECT_STUN (210): {y_stun:02x?}"
+    );
+    // 2. Immune Charlie: hit lands GC_DAMAGE_INFO with NO AFFECT_SLOW, /stun lands NO AFFECT_STUN.
+    alpha.send_record(&client_attack(charlie_vid));
+    let c_hit = records_within(&mut charlie, Duration::from_millis(800));
+    assert!(
+        c_hit.iter().any(|r| r.first() == Some(&GC_DAMAGE_INFO)),
+        "hit still lands on immune Charlie: {c_hit:02x?}"
+    );
+    assert!(
+        !has_affect(&c_hit, 211),
+        "IMMUNE_SLOW blocks AFFECT_SLOW (211): {c_hit:02x?}"
+    );
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/stun Charlie"));
+    let c_stun = records_within(&mut charlie, Duration::from_millis(800));
+    assert!(
+        !has_affect(&c_stun, 210),
+        "IMMUNE_STUN blocks AFFECT_STUN (210): {c_stun:02x?}"
+    );
+    drop(alpha);
+    drop(yankee);
+    drop(charlie);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}
+
+/// `point.change.point_dx.2`, `point.change.point_ht.2`, `point.change.point_sungma_move.2`,
+/// `point.change.point_sungma_immune.2`, `point.change.point_max_sp.2`,
+/// `point.change.point_max_stamina.2`, and `point.apply.apply_none`: wearing five necklaces
+/// (`16000`, whose proto slots 1-2 carry `APPLY_NONE`) each carrying one bonus (`APPLY_DX`,
+/// `APPLY_CON`, `APPLY_MAX_SP`, `APPLY_SUNGMA_MOVE`, `APPLY_SUNGMA_IMMUNE`) sends each point's
+/// `GC_POINT_CHANGE` and its battle-point recompute on the wire.
+#[test]
+fn wearing_dx_ht_sungma_sp_stamina_and_none_recomputes_on_the_wire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    // Six necklaces (16000: proto applies[1..3] are APPLY_NONE), one attribute each:
+    // cell 0: APPLY_DX (6) +10
+    // cell 1: APPLY_CON (3) +10 (drives POINT_HT, POINT_MAX_HP, POINT_MAX_STAMINA + battle recompute)
+    // cell 2: APPLY_MAX_SP (2) +200
+    // cell 3: APPLY_SUNGMA_MOVE (100) +10
+    // cell 4: APPLY_SUNGMA_IMMUNE (101) +10
+    // cell 5: APPLY_SKILL (51) +10 (routes to m_SkillDamageBonus without a point record)
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, attrtype0, attrvalue0) \
+         VALUES \
+         (70, (SELECT id FROM player WHERE name = 'Alpha'), 1, 0, 1, 16000, 6, 10), \
+         (71, (SELECT id FROM player WHERE name = 'Alpha'), 1, 1, 1, 16000, 3, 10), \
+         (72, (SELECT id FROM player WHERE name = 'Alpha'), 1, 2, 1, 16000, 2, 200), \
+         (73, (SELECT id FROM player WHERE name = 'Alpha'), 1, 3, 1, 16000, 100, 10), \
+         (74, (SELECT id FROM player WHERE name = 'Alpha'), 1, 4, 1, 16000, 101, 10), \
+         (75, (SELECT id FROM player WHERE name = 'Alpha'), 1, 5, 1, 16000, 51, 10)",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1600));
+    let use_cell = |window: u8, cell: u16| {
+        protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(window, cell))
+            .encode()
+    };
+    let wear_and_unequip = |client: &mut Keyed, cell: u16| -> Vec<(u8, i64)> {
+        client.send_record(&use_cell(1, cell));
+        let worn = records_within(client, Duration::from_millis(600));
+        client.send_record(&use_cell(2, 185));
+        let _off = records_within(client, Duration::from_millis(600));
+        decoded_point_changes(&worn)
+    };
+    let dx = wear_and_unequip(&mut alpha, 0);
+    assert!(
+        dx.iter().any(|&(k, _)| k == 14) && dx.iter().any(|&(k, _)| k == 18),
+        "APPLY_DX sends POINT_DX (14) and battle recompute POINT_ATT_GRADE (18): {dx:?}"
+    );
+    let ht = wear_and_unequip(&mut alpha, 1);
+    assert!(
+        ht.iter().any(|&(k, _)| k == 13)
+            && ht.iter().any(|&(k, _)| k == 10)
+            && ht.iter().any(|&(k, _)| k == 16),
+        "APPLY_CON sends POINT_HT (13), POINT_MAX_STAMINA (10) and POINT_DEF_GRADE (16): {ht:?}"
+    );
+    let sp = wear_and_unequip(&mut alpha, 2);
+    assert!(
+        sp.iter().any(|&(k, _)| k == 8),
+        "APPLY_MAX_SP sends POINT_MAX_SP (8): {sp:?}"
+    );
+    let sm_move = wear_and_unequip(&mut alpha, 3);
+    assert!(
+        sm_move.iter().any(|&(k, _)| k == 171) && sm_move.iter().any(|&(k, _)| k == 18),
+        "APPLY_SUNGMA_MOVE sends POINT_SUNGMA_MOVE (171) and battle recompute: {sm_move:?}"
+    );
+    let sm_imm = wear_and_unequip(&mut alpha, 4);
+    assert!(
+        sm_imm.iter().any(|&(k, _)| k == 172) && sm_imm.iter().any(|&(k, _)| k == 18),
+        "APPLY_SUNGMA_IMMUNE sends POINT_SUNGMA_IMMUNE (172) and battle recompute: {sm_imm:?}"
+    );
+    let skill = wear_and_unequip(&mut alpha, 5);
+    assert!(
+        skill.iter().any(|&(k, _)| k == 21) && !skill.iter().any(|&(k, _)| k == 0),
+        "APPLY_SKILL + APPLY_NONE emit no POINT_NONE (0) alongside the necklace's own points: {skill:?}"
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}

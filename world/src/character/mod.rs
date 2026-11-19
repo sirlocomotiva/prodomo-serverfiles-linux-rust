@@ -86,8 +86,9 @@ pub use equip::{
     UNIQUE_ITEM_WHITE_FLAG,
 };
 pub use equipment::{
-    accessory_socket_grade, counted_attrs, energy_worn_attrs, is_accessory_for_socket,
-    is_energy_wear, is_set_item, item_applies, removal_applies, Equipment, PartChange, Worn, PARTS,
+    accessory_socket_grade, costume_attr_worn_attrs, counted_attrs, energy_worn_attrs,
+    is_accessory_for_socket, is_costume_attr_wear, is_energy_wear, is_set_item, item_applies,
+    removal_applies, Equipment, PartChange, Worn, PARTS,
 };
 pub use give::{
     can_receive, unported_of, GiveAnswer, GiveUnported, ALCHEMIST_MOB, BLACKSMITH2_MOB,

@@ -568,6 +568,33 @@ pub fn energy_worn_attrs(equipment: &Equipment<'_>) -> Vec<(u8, i16)> {
     worn
 }
 
+/// The three costume wear cells `CBuffOnAttributes` for `POINT_COSTUME_ATTR_BONUS` reads
+/// (`G/char_item.cpp:8683-8690`, `ENABLE_WEAPON_COSTUME_SYSTEM` defined).
+const COSTUME_ATTR_WEARS: [EWearPositions; 3] = [
+    EWearPositions::CostumeBody,
+    EWearPositions::CostumeHair,
+    EWearPositions::CostumeWeapon,
+];
+
+/// Whether a wear cell is one the costume-attribute buff reads.
+#[must_use]
+pub fn is_costume_attr_wear(wear: u16) -> bool {
+    COSTUME_ATTR_WEARS.iter().any(|slot| *slot as u16 == wear)
+}
+
+/// The counted attributes of the three costume wear cells the costume-attribute buff reads,
+/// in wear order.
+#[must_use]
+pub fn costume_attr_worn_attrs(equipment: &Equipment<'_>) -> Vec<(u8, i16)> {
+    let mut worn = Vec::new();
+    for wear in COSTUME_ATTR_WEARS {
+        if let Some(w) = equipment.wear(wear as u16) {
+            worn.extend(counted_attrs(w.item));
+        }
+    }
+    worn
+}
+
 /// The applies `ModifyPoints(true)` makes for one worn item, in the order legacy makes them.
 ///
 /// `protos` resolves the stones in the item's sockets and the item a sash has absorbed. An

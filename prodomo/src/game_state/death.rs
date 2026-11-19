@@ -73,8 +73,8 @@ use protocol::gc_nested::GcDamageInfo;
 use protocol::gc_small::GcHeaderAndByte;
 use tracing::{debug, warn};
 use world::character::{
-    death_penalty_loss, energy_worn_attrs, number, pc_poison_rate, Equipment, PointRecord, Points,
-    DAMAGE_POISON,
+    costume_attr_worn_attrs, death_penalty_loss, energy_worn_attrs, number, pc_poison_rate,
+    Equipment, PointRecord, Points, DAMAGE_POISON,
 };
 
 use super::affect::{affect_add_frame, affect_remove_frame, Affect};
@@ -517,6 +517,15 @@ impl GameState {
                 let worn = energy_worn_attrs(&Equipment::of(items, protos));
                 let at = records.len();
                 points.energy_buff_on(&worn, value, &mut records);
+                if records.len() > at {
+                    records[at - 1..].rotate_left(1);
+                }
+            }
+        } else if kind == point::POINT_COSTUME_ATTR_BONUS {
+            if let Some(value) = points.take_costume_attr_pending() {
+                let worn = costume_attr_worn_attrs(&Equipment::of(items, protos));
+                let at = records.len();
+                points.costume_attr_buff_on(&worn, value, &mut records);
                 if records.len() > at {
                     records[at - 1..].rotate_left(1);
                 }

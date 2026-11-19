@@ -58025,3 +58025,60 @@ and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; 
 test failed on the first run.
 Parity: 1,729 `ported`, 81 `partial`, 520 `unused`, 2 `missing`, 0 `codec`, of 2,332 rows; 580
 scenarios. No ADR changed.
+
+## 729. The costume attribute bonus and the closure of `points.md`
+
+Closes all 21 remaining rows of `.scratch/parity/points.md` (`points.md`: 320 rows, 316 `ported`, 4
+`unused`, 0 open), finishing package B9 across all three generated arm tables (`item-use.md`,
+`points.md`, `skill-arms.md`).
+
+**`POINT_COSTUME_ATTR_BONUS` and `APPLY_COSTUME_ATTR_BONUS` (`G/char.cpp:4718-4725`, `:4991`,
+`G/char_item.cpp:8683-8690`, `G/buff_on_attributes.cpp`).** Added `COSTUME_ATTR_WEARS`
+(`WEAR_COSTUME_BODY`, `WEAR_COSTUME_HAIR`, `WEAR_COSTUME_WEAPON`), `is_costume_attr_wear`, and
+`costume_attr_worn_attrs` (`world/src/character/equipment.rs`), factored `Points`'s energy buff
+into a shared `AttrBuff` supporting both `POINT_ENERGY` and `POINT_COSTUME_ATTR_BONUS`
+(`world/src/character/points.rs`, removing `POINT_COSTUME_ATTR_BONUS` from `NOT_PORTED`, leaving
+only the 7 dedicated-arm level/exp/gold slots), wired wear/take-off and `modify_points` pending
+drains (`world/src/character/equip.rs`, `prodomo/src/game_state/death.rs`), removed
+`WornSystem::Apply(APPLY_COSTUME_ATTR_BONUS)` from `prodomo/src/item_load.rs`, and boxed the
+`MainRecord::Chat` arm in `prodomo/src/main.rs` for Clippy `large_futures`.
+
+**Legacy Defect fixed (ADR-0008): `CBuffOnAttributes` zero-delta / self-driving recursion.** The
+first `tools/gates.sh` run failed `every_plain_apply_type_raises_its_own_point_while_worn` (1 of
+5,729): equipping a hat carrying `APPLY_ENERGY` in `WEAR_HEAD` triggered `BuffOnAttr_ValueChange`
+with `old_b == new_b` on a `0`-delta `ApplyPoint(APPLY_ENERGY, 0)` from inside `CBuffOnAttributes`,
+causing infinite recursion and a stack overflow (legacy `G/char_item.cpp:8658-8712` and
+`G/buff_on_attributes.cpp:99-158` share this Defect). Fixed in `world/src/character/points.rs` by
+returning on `old_b == new_b` in `attr_buff_value_change`, updating `buff.value` before invoking
+`self.apply`, and excluding each buff's own driving apply (`APPLY_ENERGY` /
+`APPLY_COSTUME_ATTR_BONUS`) from its attribute pool; pinned by unit test
+`the_attr_buff_ignores_zero_deltas_and_its_own_driving_apply`.
+
+**Closing the remaining 19 `partial` rows of `points.md`.**
+- `point.apply.apply_costume_attr_bonus` and `point.change.point_costume_attr_bonus`: scenario
+  `a_costume_attr_bonus_scales_costume_bonuses_and_recomputes_on_wear` (8× in parallel) and unit
+  test `the_costume_attr_bonus_buff_scales_and_clears`.
+- `point.change.point_immune_stun` and `point.change.point_immune_slow`: scenario
+  `immune_stun_and_immune_slow_block_stun_and_slow_on_the_wire` (8× in parallel) proves immune
+  affects block `AFF_STUN` and `AFF_SLOW` on the wire.
+- `point.apply.apply_none`, `apply_skill`, `apply_dx`, `apply_ht`, `apply_sp`,
+  `apply_stamina`, `apply_sungma_str`, `apply_sungma_hp`, `apply_sungma_move`,
+  `apply_sungma_immune`: scenario
+  `wearing_dx_ht_sungma_sp_stamina_and_none_recomputes_on_the_wire` (8× in parallel).
+- `point.change.point_level`, `point_level_step`, `point_exp`, `point_gold`,
+  `point_conqueror_level`, `point_conqueror_level_step`, `point_conqueror_exp`, and
+  `point_mall_attbonus`: each live caller routes through its dedicated arm (`level_arm`,
+  `step_arm`, `gain_exp`/`lose_exp`, gold Transfers, `conqueror_*`, and the 20-cap mall bonus on
+  `AFFECT_NOG_ABILITY`/`AFFECT_RAMADAN_ABILITY`), closed with their existing scenarios. Also
+  updated `.scratch/parity/systems.md` row `sys.custom.new_set_bonus` to drop the stale
+  `POINT_COSTUME_ATTR_BONUS` note.
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,730
+passed, 0 failed in 46 targets; with it 5,730 passed, 0 failed in 46 targets (484 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. First
+run failed `every_plain_apply_type_raises_its_own_point_while_worn` (stack overflow on zero-delta /
+self-driving `APPLY_ENERGY` in `CBuffOnAttributes`), fixed above; second full run passed with 0
+failures.
+Parity: 1,750 `ported`, 62 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 583
+scenarios. No ADR changed.
