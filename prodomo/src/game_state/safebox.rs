@@ -19,6 +19,7 @@
 //! call it, `CanWarp` (`:8788-8793`) and the summoning items (`char_item.cpp:7254-7261`). None of
 //! their commands or items is ported.
 
+use common::enums::EPremiumTypes;
 use common::item_slots::usable_inventory_cells;
 use common::vid::Vid;
 use gamedata::locale_string::LocaleStrings;
@@ -31,7 +32,7 @@ use protocol::gc_small::{GcHeaderAndByte, GcHeaderOnly};
 use protocol::item_pos::ItemPos;
 use world::character::{
     checkin, checkout, move_stored, sync_quickslots, MoveRules, Safebox, SafeboxRefused,
-    StoreChange, MALL_ROWS, SAFEBOX_PAGE_SIZE, SAFEBOX_ROWS,
+    StoreChange, MALL_ROWS, SAFEBOX_EXPANDED_ROWS, SAFEBOX_PAGE_SIZE, SAFEBOX_ROWS,
 };
 use world::item::Item;
 
@@ -58,6 +59,11 @@ pub const OTHER_WINDOW_NOTICE: &str = "[LS;773]";
 pub const TRADE_WAIT_NOTICE: &[u8] = b"[LS;661;%d]";
 /// The seconds [`TRADE_WAIT_NOTICE`] names.
 pub const TRADE_WAIT_SECONDS: i64 = 10;
+/// `UNIQUE_GROUP_LARGE_SAFEBOX` (`G/unique_item.h:11`): wearing a unique in this group expands
+/// the safebox to six pages (`G/input_db.cpp:1145-1147`).
+const UNIQUE_GROUP_LARGE_SAFEBOX: i32 = 10_021;
+/// `do_click_safebox` refusal for a non-GM in a dungeon or war (`G/cmd_general.cpp:3496`).
+const CLICK_SAFEBOX_BLOCKED_NOTICE: &str = "You cannot open the safebox in dungeon or at war";
 
 /// The windows of one character.
 #[derive(Debug, Default)]
@@ -118,6 +124,8 @@ impl Storage {
 /// One safebox or mall step of a character.
 #[derive(Debug)]
 pub enum SafeboxStep {
+    /// `do_click_safebox` (`G/cmd_general.cpp:3492-3502`).
+    Click,
     /// `ReqSafeboxLoad` before the password is checked.
     BeginOpen,
     /// The password was wrong (`HEADER_GC_SAFEBOX_WRONG_PASSWORD`).
@@ -223,9 +231,20 @@ impl GameState {
             Err(_) => return Err(MoveItemRefused::NoSuchCharacter { vid }),
         };
         let pulse = self.last_pulse;
+        if matches!(step, SafeboxStep::Click) {
+            return Ok(self.click_safebox(vid, mover));
+        }
+        let expanded = self.premium_runs(vid, EPremiumTypes::Safebox)
+            || self.wears_unique_group(vid, UNIQUE_GROUP_LARGE_SAFEBOX);
+        let other_window = self.trading.contains_key(&vid)
+            || self.browsing.contains_key(&vid)
+            || self.my_shops.contains_key(&vid)
+            || self.cubes.contains_key(&vid)
+            || self.aura_windows.contains_key(&vid);
         let locale = &self.locale;
         let storage = self.storages.entry(vid).or_default();
         let answer = match step {
+            SafeboxStep::Click => unreachable!("handled above"),
             SafeboxStep::BeginOpen => begin(storage, pulse, false, mover, locale),
             SafeboxStep::BeginMall => begin(storage, pulse, true, mover, locale),
             SafeboxStep::WrongPassword { mall } => {
@@ -241,15 +260,30 @@ impl GameState {
             SafeboxStep::Resize { rows } => resize(storage, rows, mover, locale),
             SafeboxStep::Open { account, items } => {
                 storage.opening = false;
-                if self.trading.contains_key(&vid) || self.browsing.contains_key(&vid) {
+                if other_window {
                     SafeboxAnswer::Sent(vec![notice(OTHER_WINDOW_NOTICE, mover, locale)])
                 } else {
-                    open(&mut storage.safebox, StoreWindow::Safebox, account, items)
+                    let rows = if expanded {
+                        SAFEBOX_EXPANDED_ROWS
+                    } else {
+                        SAFEBOX_ROWS
+                    };
+                    open(
+                        &mut storage.safebox,
+                        StoreWindow::Safebox,
+                        rows,
+                        account,
+                        items,
+                    )
                 }
             }
-            SafeboxStep::OpenMall { account, items } => {
-                open(&mut storage.mall, StoreWindow::Mall, account, items)
-            }
+            SafeboxStep::OpenMall { account, items } => open(
+                &mut storage.mall,
+                StoreWindow::Mall,
+                MALL_ROWS,
+                account,
+                items,
+            ),
             SafeboxStep::Move { from, to, count } => {
                 let limit = self.item_count_limit;
                 match storage.safebox.as_mut() {
@@ -283,6 +317,35 @@ impl GameState {
             }
         };
         Ok(answer)
+    }
+
+    /// `do_click_safebox` (`G/cmd_general.cpp:3492-3502`): refuses a non-GM inside a dungeon or
+    /// war map, otherwise asks the client for the safebox password.
+    fn click_safebox(&self, vid: Vid, mover: Mover) -> SafeboxAnswer {
+        let gm = if self.test_server {
+            crate::command::GM_IMPLEMENTOR
+        } else {
+            self.characters
+                .find_by_vid(vid)
+                .ok()
+                .and_then(|c| c.points().map(world::character::Points::gm_level))
+                .unwrap_or(crate::command::GM_PLAYER)
+        };
+        let blocked = gm == crate::command::GM_PLAYER
+            && self.place_of(vid.raw()).is_some_and(|(_, map)| {
+                self.dungeons.get(map).is_some() || super::war_map::war_map_of(map).is_some()
+            });
+        let record = if blocked {
+            notice(CLICK_SAFEBOX_BLOCKED_NOTICE, mover, &self.locale)
+        } else {
+            chat_packet(
+                mover.recipient(&self.locale),
+                CHAT_TYPE_COMMAND,
+                b"ShowMeSafeboxPassword",
+                &[],
+            )
+        };
+        SafeboxAnswer::Sent(vec![record])
     }
 
     /// Whether the character under `vid` has its safebox open (`IsOpenSafebox`).
@@ -500,15 +563,16 @@ fn resize(storage: &mut Storage, rows: u8, mover: Mover, locale: &LocaleStrings)
 fn open(
     slot: &mut Option<Safebox>,
     window: StoreWindow,
+    rows: u8,
     account: u32,
     items: Vec<Item>,
 ) -> SafeboxAnswer {
     if slot.is_some() {
         return SafeboxAnswer::Sent(Vec::new());
     }
-    let (rows, header) = match window {
-        StoreWindow::Safebox => (SAFEBOX_ROWS, HEADER_GC_SAFEBOX_SIZE),
-        StoreWindow::Mall => (MALL_ROWS, HEADER_GC_MALL_OPEN),
+    let header = match window {
+        StoreWindow::Safebox => HEADER_GC_SAFEBOX_SIZE,
+        StoreWindow::Mall => HEADER_GC_MALL_OPEN,
     };
     let (safebox, skipped) = Safebox::open(window, rows, account, items);
     for item in &skipped {

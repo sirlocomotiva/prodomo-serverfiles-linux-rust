@@ -42,10 +42,9 @@
 //!
 //! # Not ported
 //!
-//! A worn item, a dragon-soul item and an item outside the `INVENTORY` window cannot be put in,
-//! and nothing is taken out into the dragon-soul inventory: each is [`Unported`], refused
-//! silently. The item lock (`isLocked`), `CanHandleItem` and the item log are not ported either,
-//! nor are the six pages a premium account or the large-safebox item opens ([`SAFEBOX_ROWS`]).
+//! A worn item and an item outside `INVENTORY`/`DRAGON_SOUL_INVENTORY` cannot be put in
+//! ([`Unported`], refused silently). The item lock (`isLocked`), `CanHandleItem`, the mall
+//! `DragonSoulItemInitialize` and the item log run in the game-state caller.
 //! The running-quest check (`G/input_main.cpp:2278`) is the caller's: a character whose script
 //! waits stores nothing, silently.
 
@@ -62,11 +61,12 @@ use gamedata::item_proto::ItemProtos;
 use protocol::gc_safebox::{GcStoreItemSet, StoreWindow};
 use protocol::item_pos::ItemPos;
 
+use super::auto_give_new::{dragon_soul_buy_cell, DRAGON_SOUL_BOX_SIZE, DRAGON_SOUL_GRADE_MAX};
 use super::dice::Dice;
 use super::equip::roll_sash;
 use super::inventory::{
     custom_inventory_category_of, is_belt_inventory_position, is_custom_inventory_position,
-    is_equip_position,
+    is_dragon_soul_equip_position, is_equip_position,
 };
 use super::item_move::{
     ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, MoveRules, Unported,
@@ -84,9 +84,12 @@ pub const SAFEBOX_WIDTH: u32 = 5;
 pub const SAFEBOX_PAGE_SIZE: u8 = 9;
 
 /// The rows a safebox opens with: one page (`input_db.cpp:1135`), whatever its size column says.
-/// The six pages of a premium account or the large-safebox item (`:1144-1150`) are not ported.
 pub const SAFEBOX_ROWS: u8 = SAFEBOX_PAGE_SIZE;
 
+/// The rows an expanded safebox opens with (`__EXTENDED_SAFEBOX__`, `input_db.cpp:1144-1150`,
+/// `C/length.h:92`): `SAFEBOX_MAX_PAGE_COUNT * SAFEBOX_PAGE_SIZE` (6 pages, 54 rows) for an
+/// account with `PREMIUM_SAFEBOX` or wearing `UNIQUE_GROUP_LARGE_SAFEBOX`.
+pub const SAFEBOX_EXPANDED_ROWS: u8 = 6 * SAFEBOX_PAGE_SIZE;
 /// The rows the item mall opens with: `3 * SAFEBOX_PAGE_SIZE` (`G/char.cpp:7224`, `LoadMall`).
 pub const MALL_ROWS: u8 = 3 * SAFEBOX_PAGE_SIZE;
 
@@ -497,15 +500,14 @@ pub fn checkin(
     if item.vnum == UNIQUE_ITEM_SAFEBOX_EXPAND || proto.anti_flags & ITEM_ANTIFLAG_SAFEBOX != 0 {
         return Err(SafeboxRefused::NotStorable);
     }
-    // Legacy's `IsEquipped` branch, then `RemoveFromCharacter`, which takes a worn item off and
-    // sends a dragon-soul item back to its own window.
-    if is_equip_position(from) {
+    // Legacy's `IsEquipped` branch, then `RemoveFromCharacter`.
+    if is_equip_position(from) || is_dragon_soul_equip_position(from) {
         return Err(SafeboxRefused::NotPorted(Unported::Equipment));
     }
-    if proto.item_type == ITEM_DS {
-        return Err(SafeboxRefused::NotPorted(Unported::DragonSoul));
-    }
-    if from.window_type != EWindows::Inventory as u8 {
+    let is_ds = proto.item_type == ITEM_DS;
+    if from.window_type != EWindows::Inventory as u8
+        && from.window_type != EWindows::DragonSoulInventory as u8
+    {
         return Err(SafeboxRefused::NotPorted(Unported::SourceWindow(
             from.window_type,
         )));
@@ -521,13 +523,14 @@ pub fn checkin(
     let left = items.release(item.id).map_err(SafeboxRefused::Storage)?;
     let id = item.id;
     safebox.put(safe_pos, item, true);
-    let mut records = vec![
-        MoveRecord::Item(ItemRecord::Set(gc_item_clear(left))),
-        MoveRecord::QuickslotSync(QuickslotSync {
+    let mut records = vec![MoveRecord::Item(ItemRecord::Set(gc_item_clear(left)))];
+    // `if (!pkItem->IsDragonSoul()) ch->SyncQuickslot(...)` (`G/input_main.cpp:2359-2360`).
+    if !is_ds {
+        records.push(MoveRecord::QuickslotSync(QuickslotSync {
             from: cell,
             to: SyncTo::Delete,
-        }),
-    ];
+        }));
+    }
     if let Some(stored) = safebox.get(safe_pos) {
         records.push(MoveRecord::Store(safebox.set_record(stored)));
     }
@@ -571,26 +574,41 @@ pub fn checkout(
     {
         return Err(SafeboxRefused::WrongBank);
     }
-    // This build has no dragon-soul grid for `IsEmptyItemGrid` to read.
-    if to.window_type == EWindows::DragonSoulInventory as u8 {
-        return Err(SafeboxRefused::NotPorted(Unported::DragonSoul));
-    }
-    if !items.is_empty_item_grid(to, item.size, None, rules.usable_cells, rules.belt_grade) {
-        return Err(SafeboxRefused::CellTaken);
-    }
-    if proto.item_type == ITEM_DS {
-        return Err(SafeboxRefused::NotPorted(Unported::DragonSoul));
-    }
-    if is_belt_inventory_position(to) && !can_move_into_belt_inventory(proto) {
-        return Err(SafeboxRefused::NotForBelt);
-    }
+    let dest = if proto.item_type == ITEM_DS {
+        // `G/input_main.cpp:2402-2430`: a dragon soul goes only into `DRAGON_SOUL_INVENTORY`;
+        // an invalid cell falls back to `GetEmptyDragonSoulInventory`, or `[LS;666]` when full.
+        if to.window_type != EWindows::DragonSoulInventory as u8 {
+            return Err(SafeboxRefused::NoRoom);
+        }
+        if !items.is_empty_item_grid(to, item.size, None, rules.usable_cells, rules.belt_grade) {
+            return Err(SafeboxRefused::CellTaken);
+        }
+        if is_valid_ds_cell(item.vnum, proto.sub_type, to) {
+            to
+        } else {
+            dragon_soul_buy_cell(items, &item, proto.sub_type, true)
+                .ok_or(SafeboxRefused::NoRoom)?
+        }
+    } else {
+        // `G/input_main.cpp:2433-2447`: a non-DS item cannot go into `DRAGON_SOUL_INVENTORY`.
+        if to.window_type == EWindows::DragonSoulInventory as u8 {
+            return Err(SafeboxRefused::NoRoom);
+        }
+        if !items.is_empty_item_grid(to, item.size, None, rules.usable_cells, rules.belt_grade) {
+            return Err(SafeboxRefused::CellTaken);
+        }
+        if is_belt_inventory_position(to) && !can_move_into_belt_inventory(proto) {
+            return Err(SafeboxRefused::NotForBelt);
+        }
+        to
+    };
     let rolled = roll_sash(&mut item, proto, dice);
-    items.set(to, &item).map_err(SafeboxRefused::Storage)?;
+    items.set(dest, &item).map_err(SafeboxRefused::Storage)?;
     let _taken = safebox.take(safe_pos);
     let mut changes = vec![ItemChange::Retrieved {
         id: item.id,
         account: safebox.account,
-        pos: to,
+        pos: dest,
     }];
     if rolled {
         changes.push(ItemChange::Sockets {
@@ -605,10 +623,36 @@ pub fn checkout(
                 window: safebox.window,
                 pos: safe_pos,
             }),
-            MoveRecord::Item(ItemRecord::Set(item.gc_item_set(to, u8::from(!deposited)))),
+            MoveRecord::Item(ItemRecord::Set(
+                item.gc_item_set(dest, u8::from(!deposited)),
+            )),
         ],
         changes,
     })
+}
+
+/// `DSManager::IsValidCellForThisItem` (`G/DragonSoul.cpp:150-163`): `pos` lies inside
+/// the 32-cell box of `(sub_type, grade)` in `DRAGON_SOUL_INVENTORY`.
+fn is_valid_ds_cell(vnum: u32, sub_type: i32, pos: ItemPos) -> bool {
+    if pos.window_type != EWindows::DragonSoulInventory as u8 {
+        return false;
+    }
+    let Ok(grade) = u16::try_from((vnum / 1000) % 10) else {
+        return false;
+    };
+    if grade > DRAGON_SOUL_GRADE_MAX {
+        return false;
+    }
+    let Ok(column) = u16::try_from(sub_type) else {
+        return false;
+    };
+    let Some(base) = column
+        .checked_mul(DRAGON_SOUL_GRADE_MAX * DRAGON_SOUL_BOX_SIZE)
+        .and_then(|start| start.checked_add(grade * DRAGON_SOUL_BOX_SIZE))
+    else {
+        return false;
+    };
+    (base..base + DRAGON_SOUL_BOX_SIZE).contains(&pos.cell)
 }
 
 /// `CSafebox::MoveItem` (`G/safebox.cpp:179-249`): the item anchored at `from` goes to `to`, or
@@ -1055,11 +1099,17 @@ mod tests {
         assert_eq!(refuse(95, 0), SafeboxRefused::Irremovable);
         // The first locked cell pins it; the last unlocked one does not.
         assert_eq!(refuse(90, 5), SafeboxRefused::Irremovable);
-        assert_eq!(
-            refuse(7, 5),
-            SafeboxRefused::NotPorted(Unported::DragonSoul)
-        );
         assert_eq!(refuse(8, 5), SafeboxRefused::BeltNotEmpty);
+        // A dragon-soul item checks in without a quickslot sync (`G/input_main.cpp:2359-2360`).
+        let ds_done = checkin(&mut safebox, &mut items, inv(7), 10, RULES, &protos())
+            .expect("dragon soul checks in");
+        assert!(
+            !ds_done
+                .records
+                .iter()
+                .any(|r| matches!(r, MoveRecord::QuickslotSync(_))),
+            "dragon soul checkin skips SyncQuickslot"
+        );
         assert_eq!(SafeboxRefused::NoRoom.notice(), Some("[LS;666]"));
         assert_eq!(SafeboxRefused::NotStorable.notice(), Some("[LS;667]"));
         assert_eq!(SafeboxRefused::BeltNotEmpty.notice(), Some("[LS;1095]"));
@@ -1255,13 +1305,10 @@ mod tests {
         // The leather's bank takes no item that belongs to bank 0 alone.
         let leather_bank = CUSTOM_INVENTORY_SLOT_START + 2 * CUSTOM_INVENTORY_MAX_NUM;
         assert_eq!(refuse(4, inv(leather_bank)), SafeboxRefused::WrongBank);
-        assert_eq!(
-            refuse(1, inv(1)),
-            SafeboxRefused::NotPorted(Unported::DragonSoul)
-        );
+        assert_eq!(refuse(1, inv(1)), SafeboxRefused::NoRoom);
         assert_eq!(
             refuse(0, ItemPos::new(EWindows::DragonSoulInventory as u8, 0)),
-            SafeboxRefused::NotPorted(Unported::DragonSoul)
+            SafeboxRefused::NoRoom
         );
         assert_eq!(SafeboxRefused::WrongBank.notice(), Some(WRONG_BANK_NOTICE));
         assert_eq!(SafeboxRefused::NotForBelt.notice(), Some("[LS;1097]"));

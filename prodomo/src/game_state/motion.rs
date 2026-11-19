@@ -560,8 +560,13 @@ impl GameState {
         // `Show`: the move time starts at the entering clock (`G/char.cpp:261`).
         let now = self.clock.now();
         // `SetPlayerProto` (`G/char.cpp:2244-2245`): the shown alignment starts at the
-        // stored one.
-        let shown = card.alignment;
+        // stored one, then `LoadItems` -> `EquipTo` hides it when
+        // `UNIQUE_ITEM_HIDE_ALIGNMENT_TITLE` (70048) is already worn (`G/item.cpp:2177`).
+        let shown = if self.wears_vnum(vid, super::alignment::HIDE_ALIGNMENT_UNIQUE) {
+            0
+        } else {
+            card.alignment
+        };
         let mut body = Body::new(
             place.channel,
             place.map,

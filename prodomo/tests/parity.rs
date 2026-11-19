@@ -34887,6 +34887,8 @@ fn drain_silence(keyed: &mut Keyed, note: &str) {
             record[0] == GC_WALK_MODE
                 || record[0] == GC_CHARACTER_ADD
                 || record[0] == GC_CHAR_ADDITIONAL_INFO
+                || record[0] == GC_CHARACTER_UPDATE
+                || record[0] == GC_AFFECT_REMOVE
                 || record[0] == GC_OWNERSHIP
                 || record[0] == GC_CHARACTER_DEL
                 || is_stamina_refill(&record)
@@ -34894,6 +34896,35 @@ fn drain_silence(keyed: &mut Keyed, note: &str) {
                 || keyed.timer_restate(&record)
                 || is_farm_line(&record),
             "{note}: {record:02x?}"
+        );
+    }
+}
+
+/// Reads until the next `GC_DAMAGE_INFO` poison tick, skipping concurrent view and
+/// revive-expiry records that may land on their own clock during a full run.
+fn read_poison_damage(client: &mut Keyed) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let record = client
+            .read_game_raw_until(deadline)
+            .expect("the poison tick lands");
+        if record[0] == GC_DAMAGE_INFO {
+            return record;
+        }
+        assert!(
+            record[0] == GC_CHARACTER_UPDATE
+                || record[0] == GC_AFFECT_REMOVE
+                || record[0] == GC_PING
+                || record[0] == GC_WALK_MODE
+                || record[0] == GC_CHARACTER_ADD
+                || record[0] == GC_CHAR_ADDITIONAL_INFO
+                || record[0] == GC_OWNERSHIP
+                || record[0] == GC_CHARACTER_DEL
+                || is_stamina_refill(&record)
+                || client.timer_record(&record)
+                || client.timer_restate(&record)
+                || is_farm_line(&record),
+            "unexpected record before poison tick: {record:02x?}"
         );
     }
 }
@@ -35001,22 +35032,29 @@ fn a_cannot_dead_player_keeps_its_hit_points_until_it_can() {
     assert_eq!(update[0], GC_CHARACTER_UPDATE, "the poison's flag update");
     let added = yankee.read_game();
     assert_eq!(added[0], GC_AFFECT_ADD, "the poison's add");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let tick = yankee
-        .read_game_until(deadline)
-        .expect("the poison's first tick lands");
+    let tick = read_poison_damage(&mut yankee);
     assert_eq!(tick[0], GC_DAMAGE_INFO, "the tick shows its damage");
     drain_silence(&mut yankee, "the hit points never move");
     // After `/can_dead` the next tick's change lands.
     yankee.send_record(&client_chat(CHAT_TALKING, b"/can_dead"));
     drain_silence(&mut yankee, "the clear line is silent");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let tick = yankee
-        .read_game_until(deadline)
-        .expect("the next tick lands");
+    let tick = read_poison_damage(&mut yankee);
     assert_eq!(tick[0], GC_DAMAGE_INFO, "the tick shows its damage");
-    let changed = yankee.read_game();
-    assert_eq!(changed[0], GC_POINT_CHANGE, "the change lands");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let changed = yankee
+            .read_game_raw_until(deadline)
+            .expect("the hit-point change lands");
+        if changed[0] == GC_POINT_CHANGE {
+            break;
+        }
+        assert!(
+            changed[0] == GC_CHARACTER_UPDATE
+                || changed[0] == GC_AFFECT_REMOVE
+                || changed[0] == GC_PING,
+            "unexpected record before hit-point change: {changed:02x?}"
+        );
+    }
     drop(alice);
     drop(yankee);
     drop(zulu);
@@ -70887,5 +70925,282 @@ fn a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle() {
     assert!(
         !helpers.is_empty() && helpers.len() <= 18,
         "expected 1..=18 summoned 992 helpers, saw {helpers:?}"
+    );
+}
+
+/// Ledger 735 (`cg.game.fly_targeting`, `cg.game.add_fly_targeting`): a fly target
+/// carrying an unknown VID still relays `dwTargetVID = 0` and `(x, y)` to the view
+/// (`G/char_battle.cpp:3357-3366`).
+#[test]
+fn fly_targeting_unknown_vid_relays_zero_target_and_coordinates() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nno_wander = true\n",
+    );
+    seat_alpha_and_zulu(&server, &database, &[]);
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let (mut zulu, _listed, _items) = load_character(&server, b"bob", 0);
+    let alpha_entered = enter_game_shown(&mut alpha);
+    let alpha_vid = u32::from_le_bytes(alpha_entered.add[1..5].try_into().expect("alpha vid"));
+    let _zulu_entered = enter_game_shown(&mut zulu);
+    let _ = drain_all_game(&mut alpha, 200);
+    let _ = drain_all_game(&mut zulu, 200);
+
+    let unknown = 999_999u32;
+    let first = (ALPHA_ENTERS_AT.0 + 123, ALPHA_ENTERS_AT.1 + 456);
+    let second = (ALPHA_ENTERS_AT.0 + 321, ALPHA_ENTERS_AT.1 + 654);
+    alpha.send_record(&client_fly(CG_FLY_TARGETING, unknown, first));
+    alpha.send_record(&client_fly(CG_ADD_FLY_TARGETING, unknown + 1, second));
+
+    let mut saw_target = false;
+    let mut saw_add = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && !(saw_target && saw_add) {
+        let Some(record) = zulu.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.len() == 17
+            && (record[0] == GC_FLY_TARGETING || record[0] == GC_ADD_FLY_TARGETING)
+        {
+            let shooter = u32::from_le_bytes(record[1..5].try_into().expect("shooter"));
+            let target = u32::from_le_bytes(record[5..9].try_into().expect("target"));
+            let x = i32::from_le_bytes(record[9..13].try_into().expect("x"));
+            let y = i32::from_le_bytes(record[13..17].try_into().expect("y"));
+            assert_eq!(shooter, alpha_vid, "shooter VID");
+            assert_eq!(target, 0, "unknown target VID relays 0");
+            if record[0] == GC_FLY_TARGETING {
+                assert_eq!((x, y), first);
+                saw_target = true;
+            } else {
+                assert_eq!((x, y), second);
+                saw_add = true;
+            }
+        }
+    }
+    assert!(saw_target && saw_add, "target={saw_target} add={saw_add}");
+}
+
+fn drain_damage_amounts(client: &mut Keyed, ms: u64) -> Vec<i32> {
+    drain_all_game(client, ms)
+        .into_iter()
+        .filter(|r| r.first() == Some(&GC_DAMAGE_INFO) && r.len() >= 10)
+        .map(|r| i32::from_le_bytes(r[6..10].try_into().expect("dmg")))
+        .collect()
+}
+
+/// Ledger 735 (`sys.char.pk`, `sys.skill.extra`): `UNIQUE_ITEM_HIDE_ALIGNMENT_TITLE`
+/// (70048) hides a negative alignment from `PK::IsEnemy`'s revenge-mode outlaw check
+/// (`G/pvp.cpp:477`), and the 7th/8th skill ward (`SKILL_ANTI_PALBANG` 221) cuts
+/// PvP damage from `SKILL_PALBANG` (2) (`G/char_skill.cpp:1695-1795`).
+#[test]
+fn pvp_skill_ward_reduces_damage_and_hide_alignment_protects_from_revenge_pk() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nno_wander = true\n",
+    );
+    seat_alpha_and_zulu(&server, &database, &[]);
+    sql(
+        &database,
+        "UPDATE player SET job = 0, level = 40, st = 90, dx = 10, ht = 90, hp = 1500, sp = 200, \
+         skill_group = 1 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET level = 40, st = 10, dx = 10, ht = 90, hp = 1500, sp = 200, \
+         skill_group = 1, alignment = -20000 WHERE name = 'Zulu'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) \
+         SELECT id, 2, 20, 0 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) \
+         SELECT 1001, id, 2, 7, 1, 70048, 3600 FROM player WHERE name = 'Zulu'",
+    );
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let (mut zulu, _listed, _items) = load_character(&server, b"bob", 0);
+    let _alpha_entered = enter_game_shown(&mut alpha);
+    let zulu_entered = enter_game_shown(&mut zulu);
+    let zulu_vid = u32::from_le_bytes(zulu_entered.add[1..5].try_into().expect("zulu vid"));
+    let _ = drain_all_game(&mut alpha, 200);
+    let _ = drain_all_game(&mut zulu, 200);
+    std::thread::sleep(Duration::from_millis(1600));
+    alpha.send_record(&slash(b"/pkmode 1"));
+    let _ = drain_all_game(&mut alpha, 200);
+    let _ = drain_all_game(&mut zulu, 200);
+
+    alpha.send_record(&client_attack(zulu_vid));
+    assert!(
+        drain_damage_amounts(&mut zulu, 400).is_empty(),
+        "hide-alignment unique must block revenge-mode PK"
+    );
+    zulu.send_record(&client_item_use(187));
+    let _ = drain_all_game(&mut zulu, 250);
+    let _ = drain_all_game(&mut alpha, 250);
+    alpha.send_record(&client_attack(zulu_vid));
+    assert!(
+        !drain_damage_amounts(&mut zulu, 400).is_empty(),
+        "unhiding negative alignment must allow revenge-mode PK"
+    );
+
+    alpha.send_record(&client_use_skill_on(2, zulu_vid));
+    alpha.send_record(&client_attack_typed(2, zulu_vid));
+    let unwarded = drain_damage_amounts(&mut zulu, 500);
+    assert!(
+        !unwarded.is_empty(),
+        "expected PvP PALBANG damage without ward"
+    );
+    drop(zulu);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(alpha);
+    server.wait_for_next("Character disconnected; wrote the row");
+    sql(
+        &database,
+        "UPDATE player SET hp = 1500, alignment = -20000 WHERE name = 'Zulu'",
+    );
+    sql(&database, "UPDATE player SET sp = 200 WHERE name = 'Alpha'");
+    sql(
+        &database,
+        "INSERT INTO player_skill (player_id, vnum, level, next_read) \
+         SELECT id, 221, 40, 0 FROM player WHERE name = 'Zulu'",
+    );
+    let (mut zulu2, _listed, _items) = load_character(&server, b"bob", 0);
+    let warded_entered = enter_game_shown(&mut zulu2);
+    let warded_vid = u32::from_le_bytes(warded_entered.add[1..5].try_into().expect("warded vid"));
+    let (mut alpha2, _listed, _items) = load_character(&server, b"alice", 0);
+    let _ = enter_game_shown(&mut alpha2);
+    let _ = drain_all_game(&mut alpha2, 200);
+    let _ = drain_all_game(&mut zulu2, 200);
+    alpha2.send_record(&slash(b"/pkmode 1"));
+    let _ = drain_all_game(&mut alpha2, 200);
+    let _ = drain_all_game(&mut zulu2, 200);
+    alpha2.send_record(&client_use_skill_on(2, warded_vid));
+    alpha2.send_record(&client_attack_typed(2, warded_vid));
+    let warded = drain_damage_amounts(&mut zulu2, 500);
+    assert!(!warded.is_empty(), "expected PvP PALBANG damage with ward");
+    assert!(
+        warded[0] < unwarded[0],
+        "ANTI_PALBANG ward must reduce PALBANG PvP damage: warded={} unwarded={}",
+        warded[0],
+        unwarded[0]
+    );
+}
+
+/// Ledger 735 (`sys.npc.safebox`): `PREMIUM_SAFEBOX` opens the six-page safebox
+/// (`GC_SAFEBOX_SIZE = 54`), a Dragon Soul stone checks into and out of
+/// `DRAGON_SOUL_INVENTORY` (window 7), and `/click_safebox` sends the password prompt.
+#[test]
+fn the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(110);
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &channels,
+        "test_server = false\nno_wander = true\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET safebox_expire = 2100000000 WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) \
+         SELECT 1002, id, 5, 160, 1, 115000, 43200 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET map_index = 110, x = 36800, y = 5200 WHERE name = 'Beta'",
+    );
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alice);
+    let _ = drain_all_game(&mut alice, 200);
+
+    alice.send_record(&slash(b"/click_safebox"));
+    let prompt = drain_all_game(&mut alice, 300);
+    assert!(
+        prompt.iter().any(|r| {
+            r.windows(b"ShowMeSafeboxPassword".len())
+                .any(|w| w == b"ShowMeSafeboxPassword")
+        }),
+        "expected ShowMeSafeboxPassword from /click_safebox"
+    );
+
+    alice.send_record(&slash(b"/safebox_password 000000"));
+    let opened = drain_all_game(&mut alice, 300);
+    let size = opened
+        .iter()
+        .find(|r| r.first() == Some(&GC_SAFEBOX_SIZE) && r.len() >= 2)
+        .map(|r| r[1]);
+    assert_eq!(
+        size,
+        Some(54),
+        "PREMIUM_SAFEBOX must open 6 pages (54 rows)"
+    );
+
+    let mut checkin = vec![CG_SAFEBOX_CHECKIN];
+    checkin.extend_from_slice(&100u32.to_le_bytes());
+    checkin.push(common::item_slots::EWindows::DragonSoulInventory as u8);
+    checkin.extend_from_slice(&160u16.to_le_bytes());
+    alice.send_record(&checkin);
+    let checked_in = drain_all_game(&mut alice, 300);
+    assert!(
+        checked_in
+            .iter()
+            .any(|r| r.first() == Some(&GC_SAFEBOX_SET)),
+        "expected GC_SAFEBOX_SET on Dragon Soul checkin"
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 1002 AND owner_id IS NULL AND window_type = 3 AND pos = 100)",
+    );
+
+    let mut checkout = vec![CG_SAFEBOX_CHECKOUT];
+    checkout.extend_from_slice(&100u32.to_le_bytes());
+    checkout.push(common::item_slots::EWindows::DragonSoulInventory as u8);
+    checkout.extend_from_slice(&161u16.to_le_bytes());
+    alice.send_record(&checkout);
+    let checked_out = drain_all_game(&mut alice, 300);
+    assert!(
+        checked_out
+            .iter()
+            .any(|r| r.first() == Some(&GC_SAFEBOX_DEL)),
+        "expected GC_SAFEBOX_DEL on Dragon Soul checkout"
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 1002 AND window_type = 5 AND pos = 161)",
+    );
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+
+    let (mut war_client, _listed2, _items2) = load_character(&server, b"alice", 1);
+    let _entered2 = enter_game_shown(&mut war_client);
+    let _ = drain_all_game(&mut war_client, 200);
+    war_client.send_record(&slash(b"/click_safebox"));
+    let blocked = drain_all_game(&mut war_client, 300);
+    assert!(
+        blocked.iter().any(|r| {
+            r.windows(b"You cannot open the safebox in dungeon or at war".len())
+                .any(|w| w == b"You cannot open the safebox in dungeon or at war")
+        }),
+        "expected dungeon/war safebox block notice from /click_safebox"
     );
 }

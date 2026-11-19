@@ -739,6 +739,10 @@ pub struct GameState {
     /// (`m_aiPremiumTimes[PREMIUM_GOLD]`): the unix time the premium ran to, 0
     /// when never bought. Seeded at admission, cleared on leave.
     gold_premium_expiry: HashMap<common::vid::Vid, i64>,
+    /// The account's SAFEBOX premium expiry each online character holds
+    /// (`m_aiPremiumTimes[PREMIUM_SAFEBOX]`): the unix time the premium ran to, 0
+    /// when never bought. Seeded at admission, cleared on leave.
+    safebox_premium_expiry: HashMap<common::vid::Vid, i64>,
     /// The number of the last affect event started, which orders two events due on one Pulse.
     affect_sequence: u64,
     /// The affect event of each non-player that has one: the timed affects only, no
@@ -3645,28 +3649,17 @@ impl GameState {
         let _installed = self.horse_names.insert(player_id, loaded.horse_name);
         // The account's premium expiry rides the admission too, as `aiPremiumTimes`
         // rides the player table (`G/char.cpp:2386`): the character holds it from now on.
-        let _expiry = self
-            .shop_premium_expiry
-            .insert(vid, loaded.shop_premium_expire);
-        let _fish = self.fish_mind_expiry.insert(vid, loaded.fish_mind_expire);
-        let _exp = self
-            .exp_premium_expiry
-            .insert(vid, loaded.exp_premium_expire);
-        let _item = self
-            .item_premium_expiry
-            .insert(vid, loaded.item_premium_expire);
-        let _gold = self
-            .gold_premium_expiry
-            .insert(vid, loaded.gold_premium_expire);
-        // `SEventLetters`' premium expiries, held for the loop below: the move of
-        // `loaded` takes the fields before it runs.
-        let held_premiums = [
-            loaded.exp_premium_expire,
-            loaded.item_premium_expire,
-            loaded.fish_mind_expire,
-            loaded.gold_premium_expire,
-            loaded.shop_premium_expire,
-        ];
+        let held_premiums = self.remember_premiums(
+            vid,
+            [
+                loaded.exp_premium_expire,
+                loaded.item_premium_expire,
+                loaded.safebox_expire,
+                loaded.fish_mind_expire,
+                loaded.gold_premium_expire,
+                loaded.shop_premium_expire,
+            ],
+        );
         // `GetBattlePass` (`G/char.cpp:2434-2436`): the stored missions split into
         // the buckets, then both refresh.
         self.install_pass_loaded(vid, &loaded.battle_pass);
@@ -3966,6 +3959,18 @@ impl GameState {
         }
     }
 
+    /// Remember the held premium expiries of `loaded` for `vid` and return them in affect order.
+    fn remember_premiums(&mut self, vid: common::vid::Vid, held: [i64; 6]) -> [i64; 6] {
+        let [exp, item, safebox, fish, gold, shop] = held;
+        let _expiry = self.shop_premium_expiry.insert(vid, shop);
+        let _fish = self.fish_mind_expiry.insert(vid, fish);
+        let _exp = self.exp_premium_expiry.insert(vid, exp);
+        let _item = self.item_premium_expiry.insert(vid, item);
+        let _gold = self.gold_premium_expiry.insert(vid, gold);
+        let _safebox = self.safebox_premium_expiry.insert(vid, safebox);
+        held
+    }
+
     /// Forget the held premium expiries of the character under `vid`, as its departure does.
     fn forget_premiums(&mut self, vid: common::vid::Vid) {
         let _expiry = self.shop_premium_expiry.remove(&vid);
@@ -3973,6 +3978,7 @@ impl GameState {
         let _exp = self.exp_premium_expiry.remove(&vid);
         let _item = self.item_premium_expiry.remove(&vid);
         let _gold = self.gold_premium_expiry.remove(&vid);
+        let _safebox = self.safebox_premium_expiry.remove(&vid);
     }
 
     /// `SEventLetters`' premium loop (`G/input_login.cpp:731-742`): every held
@@ -3980,11 +3986,18 @@ impl GameState {
     /// `POINT_NONE` with the seconds left. Only the five held kinds (0, 1, 4,
     /// 6, 7): the others have no stored expiry. The loop's `<= PREMIUM_MAX_NUM`
     /// reads index 9 past the array (a Defect, not reproduced).
-    fn seed_premium_affects(&mut self, vid: common::vid::Vid, held_premiums: [i64; 5]) {
+    fn seed_premium_affects(&mut self, vid: common::vid::Vid, held_premiums: [i64; 6]) {
         use crate::loading_phase::AFFECT_PREMIUM_START;
         let now = i64::from(Self::global_time());
-        let [exp, item, fish, gold, shop] = held_premiums;
-        let held = [(0, exp), (1, item), (4, fish), (6, gold), (7, shop)];
+        let [exp, item, safebox, fish, gold, shop] = held_premiums;
+        let held = [
+            (0, exp),
+            (1, item),
+            (2, safebox),
+            (4, fish),
+            (6, gold),
+            (7, shop),
+        ];
         for (index, expire) in held {
             let remain = expire.saturating_sub(now);
             if remain <= 0 {
@@ -4162,6 +4175,7 @@ impl GameState {
             }),
             rank: self.rank_row(character.player_id()),
         };
+        let _skills = self.pc_skills.remove(&vid.raw());
         self.characters.destroy(vid).ok()?;
         Some(kept)
     }
@@ -9501,6 +9515,7 @@ mod tests {
                 exp_premium_expire: 0,
                 item_premium_expire: 0,
                 gold_premium_expire: 0,
+                safebox_expire: 0,
                 addr: String::new(),
             }),
             outbox,
@@ -9563,6 +9578,7 @@ mod tests {
                 exp_premium_expire: now + 7200,
                 item_premium_expire: 0,
                 gold_premium_expire: now - 1,
+                safebox_expire: 0,
                 addr: String::new(),
             }),
             outbox,
@@ -9626,6 +9642,7 @@ mod tests {
                 exp_premium_expire: 0,
                 item_premium_expire: 0,
                 gold_premium_expire: 0,
+                safebox_expire: 0,
                 addr: String::new(),
             }),
             outbox,

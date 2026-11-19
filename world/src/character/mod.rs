@@ -154,8 +154,8 @@ pub use quickslot::{
 pub use recovery::{distribute_sp, hp_recovery, RECOVERY_PERCENTS};
 pub use safebox::{
     checkin, checkout, move_stored, Safebox, SafeboxRefused, StoreChange, StoreMove, StoreRecord,
-    IRREMOVABLE_NOTICE, MALL_ROWS, SAFEBOX_PAGE_SIZE, SAFEBOX_ROWS, SAFEBOX_WIDTH,
-    UNIQUE_ITEM_SAFEBOX_EXPAND, WRONG_BANK_NOTICE,
+    IRREMOVABLE_NOTICE, MALL_ROWS, SAFEBOX_EXPANDED_ROWS, SAFEBOX_PAGE_SIZE, SAFEBOX_ROWS,
+    SAFEBOX_WIDTH, UNIQUE_ITEM_SAFEBOX_EXPAND, WRONG_BANK_NOTICE,
 };
 pub use shop::{
     buy_item, sale_price, sell_item, unported_creation, ShopRefused, UnportedCreation, GAYA_MAX,

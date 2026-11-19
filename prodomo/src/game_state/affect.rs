@@ -885,6 +885,10 @@ impl GameState {
         let held = [
             (0, self.exp_premium_expiry.get(&vid).copied().unwrap_or(0)),
             (1, self.item_premium_expiry.get(&vid).copied().unwrap_or(0)),
+            (
+                2,
+                self.safebox_premium_expiry.get(&vid).copied().unwrap_or(0),
+            ),
             (4, self.fish_mind_expiry.get(&vid).copied().unwrap_or(0)),
             (6, self.gold_premium_expiry.get(&vid).copied().unwrap_or(0)),
             (7, self.shop_premium_expiry.get(&vid).copied().unwrap_or(0)),

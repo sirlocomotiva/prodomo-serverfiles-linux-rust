@@ -3661,6 +3661,10 @@ pub struct Loaded {
     /// before it sends the admission, as the auth query reads it with the login
     /// (`G/input_auth.cpp:143`).
     pub gold_premium_expire: i64,
+    /// The account's SAFEBOX premium expiry (`safebox_expire`), which the world
+    /// holds as the character's `m_aiPremiumTimes[2]` (`PREMIUM_SAFEBOX`) from
+    /// admission on (`G/input_auth.cpp:139`).
+    pub safebox_expire: i64,
     /// The descriptor's host address, which the multi-farm registry keys on
     /// (`GetHostName`, `G/desc.h:55`).
     pub addr: String,

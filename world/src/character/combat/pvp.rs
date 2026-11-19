@@ -61,6 +61,10 @@ pub enum PvKind {
     /// normal arm's block, critical, penetrate, steals and recoveries, and the type
     /// switch's bonuses.
     Special,
+    /// `DAMAGE_TYPE_MELEE | RANGE | MAGIC`: a PC skill's hit on a PC (`G/char_battle.cpp:2140-2159`).
+    /// Skips the normal-only block/reflect/crit/pen/steals block, applies `POINT_SKILL_DAMAGE_BONUS`,
+    /// `POINT_SKILL_DEFEND_BONUS`, `POINT_RESIST_COMBAT` (`hp_pct >= 90`) and the shared region.
+    Skill,
 }
 
 /// How a player's hit on a player ended.
@@ -259,17 +263,23 @@ pub fn strike_pc_by_pc(
     }
     // The type switch (`G/char_battle.cpp:2124-2139`): the attacker's hit bonus and the
     // victim's defend bonus with its combat resist. A special hit takes neither.
-    if kind == PvKind::Normal {
-        let bonus = attacker
-            .points
-            .get_point(point::POINT_NORMAL_HIT_DAMAGE_BONUS);
+    let type_slots = match kind {
+        PvKind::Normal => Some((
+            point::POINT_NORMAL_HIT_DAMAGE_BONUS,
+            point::POINT_NORMAL_HIT_DEFEND_BONUS,
+        )),
+        PvKind::Skill => Some((
+            point::POINT_SKILL_DAMAGE_BONUS,
+            point::POINT_SKILL_DEFEND_BONUS,
+        )),
+        PvKind::Special => None,
+    };
+    if let Some((bonus_slot, defend_slot)) = type_slots {
+        let bonus = attacker.points.get_point(bonus_slot);
         if bonus != 0 {
             damage = damage.wrapping_mul(100_i32.wrapping_add(bonus)) / 100;
         }
-        let defend = victim
-            .points
-            .get_point(point::POINT_NORMAL_HIT_DEFEND_BONUS)
-            .min(99);
+        let defend = victim.points.get_point(defend_slot).min(99);
         let combat = if pc_hp_pct(victim.points) >= 90 {
             victim.points.get_point(point::POINT_RESIST_COMBAT).min(99)
         } else {

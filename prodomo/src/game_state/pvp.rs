@@ -110,6 +110,34 @@ impl GameState {
         stolen
     }
 
+    /// A player's skill damage on a player victim (`G/char_battle.cpp:2140-2267`): runs
+    /// `PvKind::Skill` (`POINT_SKILL_DAMAGE_BONUS`, `POINT_SKILL_DEFEND_BONUS`,
+    /// `POINT_RESIST_COMBAT` and the shared region), then `damage_pc_head` / `damage_pc_tail`.
+    pub(super) fn pvp_skill_strike(&mut self, attacker: Vid, victim: Vid, damage: i32) {
+        let Some(strike) = self.pvp_damage(attacker, victim, damage, PvKind::Skill) else {
+            return;
+        };
+        let PvEnd::Landed { damage, flag } = strike.end else {
+            return;
+        };
+        let killer = Attacker {
+            vid: attacker,
+            pc: true,
+        };
+        let head = self.damage_pc_head(Some(killer), victim, damage, Some(flag), false);
+        match head {
+            PcDamageHead::Open { hp, damage } => {
+                self.damage_pc_tail(Some(killer), victim, hp, damage);
+            }
+            PcDamageHead::Died | PcDamageHead::Dead => {
+                if let Some(body) = self.bodies.get_mut(&attacker) {
+                    body.fighting = false;
+                }
+            }
+            PcDamageHead::Gone => {}
+        }
+    }
+
     /// `NormalAttackAffect` of the player under `attacker` on the player under `victim`
     /// (`G/battle.cpp:734-758`): the poison, the stun and the slow, in legacy's order.
     fn pvp_affect(&mut self, attacker: Vid, victim: Vid) -> AttackAffect {

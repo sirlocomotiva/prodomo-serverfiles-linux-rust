@@ -2701,6 +2701,9 @@ impl GameState {
         let Some(spot) = self.spot_of(vid.raw()) else {
             return false;
         };
+        if self.characters.find_by_vid(Vid::new(target_vid)).is_ok() {
+            return self.skill_attack_player(vid, &row, Vid::new(target_vid));
+        }
         let npc_alive = self
             .npc_on(target_vid, place)
             .is_some_and(|npc| is_struck(npc) && !npc.dead);
@@ -2978,7 +2981,7 @@ impl GameState {
             return;
         };
         let victims = if flag & SKILL_FLAG_SPLASH != 0 {
-            self.splash_walk(centre, nx, ny, row.record.splash_range)
+            self.splash_walk(vid.raw(), centre, nx, ny, row.record.splash_range)
         } else {
             vec![centre]
         };
@@ -2998,14 +3001,16 @@ impl GameState {
         }
         // `iRet != BATTLE_NONE`: `SetSyncOwner(this)`, then the main victim's
         // `BeginFight` (`:2714-2726` — the functor already began each victim's).
-        let victim_pos = SyncPositionVictim {
-            vid: Vid::new(centre),
-            kind: SyncPositionVictimKind::Monster,
-            x: nx,
-            y: ny,
-        };
-        let now_ms = self.clock.elapsed();
-        let _owner = self.set_npc_sync_owner(vid, (spot.x, spot.y), &victim_pos, now_ms);
+        if self.npc_by_vid(centre).is_some() {
+            let victim_pos = SyncPositionVictim {
+                vid: Vid::new(centre),
+                kind: SyncPositionVictimKind::Monster,
+                x: nx,
+                y: ny,
+            };
+            let now_ms = self.clock.elapsed();
+            let _owner = self.set_npc_sync_owner(vid, (spot.x, spot.y), &victim_pos, now_ms);
+        }
     }
     /// `CHARACTER::ComputeSkill`'s affect arm (`G/char_skill.cpp:2443-2457`,
     /// `:2516-2560`, `:2585-2590`, `:2593-2602`, `:2707-2757`) for the 230f buff
@@ -3192,6 +3197,201 @@ impl GameState {
         damage + f64_to_i32(f64::from(damage) * percent)
     }
 
+    /// The `__7AND8TH_SKILLS__` ward arm (`G/char_skill.cpp:1697-1748`): when the
+    /// cast vnum names a trigger of [`HELP_ANTI_TRIGGER`] and the player victim
+    /// learned its ward (`221..=228`, `helper - 15`), `iDam` shrinks by the ward's
+    /// `point` percent (`k = power * max_level / 100` at the victim's own job/group).
+    fn skill_ward_reduction(&self, victim: Vid, vnum: u32, damage: i32) -> i32 {
+        let Some((_, helper)) = HELP_ANTI_TRIGGER
+            .iter()
+            .find(|(trigger, _)| *trigger == vnum)
+        else {
+            return damage;
+        };
+        let ward_vnum = helper - 15;
+        let level = self.pc_skill_level(victim.raw(), ward_vnum);
+        if level == 0 {
+            return damage;
+        }
+        let Some(ward) = self.pc_skill_tables.get(ward_vnum) else {
+            return damage;
+        };
+        let Some(body) = self.bodies.get(&victim) else {
+            return damage;
+        };
+        let k = f64::from(self.pc_skill_tables.power(
+            body.card.job,
+            body.card.skill_group,
+            level,
+            false,
+        )) * f64::from(ward.record.max_level)
+            / 100.0;
+        let percent = ward.point.eval(&BTreeMap::from([("k", k)])) / 100.0;
+        damage - f64_to_i32(f64::from(damage) * percent)
+    }
+
+    /// `skill_attack` against a player victim (`G/char_battle.cpp:297-304`, `G/char_skill.cpp`).
+    fn skill_attack_player(
+        &mut self,
+        vid: Vid,
+        row: &gamedata::pc_skill_data::PcSkill,
+        victim: Vid,
+    ) -> bool {
+        if !self.check_skill_hit_count(vid, row.record.vnum, victim.raw()) {
+            return false;
+        }
+        if !self.pvp_gate(vid, victim.raw()) {
+            return false;
+        }
+        let now = self.last_pulse;
+        let term = self
+            .pc_skills
+            .get(&vid.raw())
+            .and_then(|state| state.last_skill)
+            .is_some_and(|last| now.saturating_sub(last) > SKILL_TERM_PULSES);
+        if term {
+            return false;
+        }
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return false;
+        };
+        let Some(victim_spot) = self.spot_of(victim.raw()) else {
+            return false;
+        };
+        if row.is_castable_splash_melee()
+            || row.record.flag & (SKILL_FLAG_CRUSH | SKILL_FLAG_CRUSH_LONG) != 0
+        {
+            self.compute_skill(vid, row.record.vnum, victim.raw());
+        } else {
+            let level = self.pc_skill_level(vid.raw(), row.record.vnum);
+            if level == 0 || self.computes_nothing(vid, row.record.vnum, row.record.skill_type) {
+                return false;
+            }
+            let Some((nx, ny)) = self.skill_range_spot(row, victim.raw(), spot) else {
+                return false;
+            };
+            let Some(body) = self.bodies.get(&vid) else {
+                return false;
+            };
+            let k = self.pc_skill_k(body.card.job, body.card.skill_group, row.record.vnum, level);
+            self.skill_functor_player(vid, row, victim, k, victim.raw(), (nx, ny));
+        }
+        let now_ms = self.clock.now();
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.fighting = true;
+            body.last_move = now_ms;
+            body.last_attack = Some(now_ms);
+            body.rotation = rotation_to_xy(
+                victim_spot.x.saturating_sub(spot.x),
+                victim_spot.y.saturating_sub(spot.y),
+            );
+        }
+        self.cancel_mining(vid);
+        true
+    }
+
+    /// `FuncSplashDamage` on a player victim (`G/char_skill.cpp:1356-1792`): rim, `pvp_gate`,
+    /// `HitOnce`, skill poly, floor, splash adjust, `skill_help_boost`, `skill_ward_reduction`
+    /// (`221..=228`), attr resist/defence, `pvp_skill_strike`, and `pvp_claim`.
+    fn skill_functor_player(
+        &mut self,
+        vid: Vid,
+        row: &gamedata::pc_skill_data::PcSkill,
+        victim: Vid,
+        k: f64,
+        main: u32,
+        centre: (i32, i32),
+    ) {
+        if vid == victim {
+            return;
+        }
+        let Some(victim_spot) = self.spot_of(victim.raw()) else {
+            return;
+        };
+        if crate::sync_position::distance_approx(victim_spot.x - centre.0, victim_spot.y - centre.1)
+            > i32::try_from(row.record.splash_range).unwrap_or(i32::MAX)
+            && victim.raw() != main
+        {
+            return;
+        }
+        if !self.pvp_gate(vid, victim.raw()) {
+            return;
+        }
+        let now = self.last_pulse;
+        let once = self
+            .pc_skill_state(vid.raw())
+            .uses
+            .entry(row.record.vnum)
+            .or_default()
+            .hit_once(now, row.record.vnum);
+        if !once {
+            return;
+        }
+        let (ignore_defence, ignore_rating) =
+            self.skill_ignore_draws(row.record.flag, &row.point2, k);
+        let Some(points_snapshot) = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points().cloned())
+        else {
+            return;
+        };
+        let Some(victim_points) = self
+            .characters
+            .find_by_vid(victim)
+            .ok()
+            .and_then(|character| character.points().cloned())
+        else {
+            return;
+        };
+        let poly = self.poly_attack_of(vid);
+        let ar = attack_rating(AttackRatingInput {
+            attacker_dexterity: poly_attacker_dexterity(&points_snapshot, poly),
+            attacker_level: i32::from(points_snapshot.level()),
+            victim_dexterity: victim_points.get_point(point::POINT_DX),
+            ignore_target_rating: ignore_rating,
+        });
+        let atk = self.player_damage(vid, victim).unwrap_or(0);
+        let weapon = self.wielded_weapon(vid);
+        let mwep = weapon.as_ref().map_or(0, |weapon| {
+            number(&mut self.dice, weapon.values[1], weapon.values[2])
+                .wrapping_add(weapon.values[5])
+        });
+        let mut vars = buff_vars(&points_snapshot, k, atk, ar, self.ek_of(vid));
+        vars.insert("maxhp", f64::from(victim_points.max_hp()));
+        vars.insert("maxsp", f64::from(victim_points.max_sp()));
+        vars.insert("mwep", f64::from(mwep));
+        let mut amount = -f64_to_i32(row.point.eval(&vars));
+        amount = battle_damage_floor(&mut self.dice, amount);
+        if victim.raw() != main {
+            let adjust = row.splash_adjust.eval(&BTreeMap::from([("k", k)]));
+            amount = f64_to_i32(f64::from(amount) * adjust);
+        }
+        amount = self.skill_help_boost(vid, row.record.vnum, amount);
+        amount = self.skill_ward_reduction(victim, row.record.vnum, amount);
+        let damage = match row.record.skill_attr_type {
+            SKILL_ATTR_RANGE => {
+                let resist = victim_points.get_point(point::POINT_RESIST_BOW);
+                amount.wrapping_mul(100_i32.wrapping_sub(resist)) / 100
+            }
+            SKILL_ATTR_MAGIC => {
+                let resist = victim_points.get_point(point::POINT_RESIST_MAGIC);
+                amount.wrapping_mul(100_i32.wrapping_sub(resist)) / 100
+            }
+            SKILL_ATTR_MELEE => {
+                if ignore_defence {
+                    amount
+                } else {
+                    amount.wrapping_sub(victim_points.get_point(point::POINT_DEF_GRADE))
+                }
+            }
+            _ => amount,
+        };
+        self.pvp_skill_strike(vid, victim, damage);
+        self.pvp_claim(vid, victim);
+    }
+
     fn compute_skill_on(
         &mut self,
         vid: Vid,
@@ -3333,18 +3533,18 @@ impl GameState {
     /// first (`ForEachAround` visits the centre's own sectree first, and the functor
     /// held the centre's spot — a Divergence pins the order, legacy's walk order is
     /// pointer order).
-    fn splash_walk(&self, centre: u32, nx: i32, ny: i32, range: u32) -> Vec<u32> {
-        // A SELFONLY centre is the caster: the walk starts empty (the caster refuses
-        // its own functor's `is_struck` gate, so it is not walked as a victim).
-        let mut victims = if self.npc_by_vid(centre).is_some() {
+    fn splash_walk(&self, caster: u32, centre: u32, nx: i32, ny: i32, range: u32) -> Vec<u32> {
+        let mut victims = if self.npc_by_vid(centre).is_some()
+            || (centre != caster && self.characters.find_by_vid(Vid::new(centre)).is_ok())
+        {
             vec![centre]
         } else {
             Vec::new()
         };
-        let centre_key = if victims.is_empty() {
-            super::view::EntityKey::Character(centre)
-        } else {
+        let centre_key = if self.npc_by_vid(centre).is_some() {
             super::view::EntityKey::Npc(centre)
+        } else {
+            super::view::EntityKey::Character(centre)
         };
         let Some(place) = self
             .npc_of
@@ -3357,20 +3557,27 @@ impl GameState {
         let Some(index) = self.maps.get(&place) else {
             return victims;
         };
+        let limit = i32::try_from(range).unwrap_or(i32::MAX);
         for key in index.around_of(centre_key) {
-            let super::view::EntityKey::Npc(other) = key else {
-                continue;
-            };
-            if other == centre {
-                continue;
-            }
-            let Some(npc) = self.npc_by_vid(other) else {
-                continue;
-            };
-            if crate::sync_position::distance_approx(npc.x - nx, npc.y - ny)
-                <= i32::try_from(range).unwrap_or(i32::MAX)
-            {
-                victims.push(other);
+            match key {
+                super::view::EntityKey::Npc(other)
+                    if other != centre
+                        && self.npc_by_vid(other).is_some_and(|npc| {
+                            crate::sync_position::distance_approx(npc.x - nx, npc.y - ny) <= limit
+                        }) =>
+                {
+                    victims.push(other);
+                }
+                super::view::EntityKey::Character(other)
+                    if other != caster
+                        && other != centre
+                        && self.spot_of(other).is_some_and(|at| {
+                            crate::sync_position::distance_approx(at.x - nx, at.y - ny) <= limit
+                        }) =>
+                {
+                    victims.push(other);
+                }
+                _ => {}
             }
         }
         victims
@@ -3399,6 +3606,10 @@ impl GameState {
         let Some(spot) = self.spot_of(vid.raw()) else {
             return;
         };
+        if self.characters.find_by_vid(Vid::new(victim)).is_ok() {
+            self.skill_functor_player(vid, row, Vid::new(victim), k, main, centre);
+            return;
+        }
         let Some(npc_snapshot) = self.npc_on(victim, place).cloned() else {
             return;
         };

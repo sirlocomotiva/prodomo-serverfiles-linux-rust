@@ -8756,11 +8756,11 @@ async fn admission_premiums(
     context: &ConnectionContext,
     addr: SocketAddr,
     held: &Held,
-) -> Option<(i64, i64, i64, i64, i64)> {
+) -> Option<(i64, i64, i64, i64, i64, i64)> {
     let shop = shop_premium_expiry_of(context, addr, held).await?;
     let fish = fish_mind_expiry_of(context, addr, held).await?;
-    let (exp, item, gold) = combat_premium_expiry_of(context, addr, held).await?;
-    Some((shop, fish, exp, item, gold))
+    let (exp, item, gold, safebox) = combat_premium_expiry_of(context, addr, held).await?;
+    Some((shop, fish, exp, item, gold, safebox))
 }
 
 /// Read the account's EXP, ITEM and GOLD premium expiries for the admission, as the auth
@@ -8771,9 +8771,9 @@ async fn combat_premium_expiry_of(
     context: &ConnectionContext,
     addr: SocketAddr,
     held: &Held,
-) -> Option<(i64, i64, i64)> {
+) -> Option<(i64, i64, i64, i64)> {
     let Some(account) = held.account.as_ref() else {
-        return Some((0, 0, 0));
+        return Some((0, 0, 0, 0));
     };
     let store = &context.store;
     let id = account.id;
@@ -8798,7 +8798,14 @@ async fn combat_premium_expiry_of(
             return None;
         }
     };
-    Some((exp, item, gold))
+    let safebox = match db::accounts::safebox_expire(store, id).await {
+        Ok(expire) => expire,
+        Err(error) => {
+            warn!(%addr, %error, "SAFEBOX premium expiry load failed; closing");
+            return None;
+        }
+    };
+    Some((exp, item, gold, safebox))
 }
 
 async fn enter_game<S>(
@@ -8889,6 +8896,7 @@ where
         loaded.exp_premium_expire,
         loaded.item_premium_expire,
         loaded.gold_premium_expire,
+        loaded.safebox_expire,
     ) = premiums;
     let Some((world_vid, shown)) =
         join_the_world(context, addr, character, vid, (items, loaded), outbox).await
@@ -9126,6 +9134,7 @@ fn loaded_state(
         exp_premium_expire: 0,
         item_premium_expire: 0,
         gold_premium_expire: 0,
+        safebox_expire: 0,
         addr: addr.ip().to_string(),
     }
 }
@@ -12433,8 +12442,10 @@ where
             send_line(session, addr, context, held, CHAT_TYPE_INFO, TYPE_IN_FULL).await
         }
         LineCommand::ClickSafebox => {
-            let text = "ShowMeSafeboxPassword";
-            send_line(session, addr, context, held, CHAT_TYPE_COMMAND, text).await
+            let step = SafeboxStep::Click;
+            safebox_step(session, addr, context, held, step)
+                .await
+                .unwrap_or(true)
         }
         LineCommand::ClickMall => {
             let text = "ShowMeMallPassword";

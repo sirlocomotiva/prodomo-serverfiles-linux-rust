@@ -878,46 +878,42 @@ impl GameState {
     ///
     /// The swing itself is [`super::pvp`]: the affects, the victim's `Damage` and the
     /// claim.
-    fn attack_player(&mut self, vid: Vid, target: u32) -> AttackAnswer {
+    /// The PvP attackability gate shared by melee and skill attacks on a player
+    /// (`G/battle.cpp:99-153`, `G/pvp.cpp:378-529`): same map, live sides, not `BANPK`,
+    /// `ice_damage`, guild war / arena override, else grade-1 horse refusal + `pk_eligibility`
+    /// (setting killer mode when required).
+    pub(super) fn pvp_gate(&mut self, vid: Vid, target: u32) -> bool {
         let victim = Vid::new(target);
         let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
-            return AttackAnswer::default();
+            return false;
         };
         let (Some(victim_place), Some(victim_spot)) = (self.place_of(target), self.spot_of(target))
         else {
-            return AttackAnswer::default();
+            return false;
         };
         if victim_place != place {
-            return AttackAnswer::default();
+            return false;
         }
-        // `battle_is_attackable` (`G/battle.cpp:99-153`): the dead, the `ATTR_BANPK` cells,
-        // the icedamage (`:117-119`, before the war arm's accept) and the PK policy.
         if self.is_down(vid.raw())
             || self.is_dead(target)
             || self.is_banpk(place.1, spot.x, spot.y)
             || self.is_banpk(victim_place.1, victim_spot.x, victim_spot.y)
         {
-            return AttackAnswer::default();
+            return false;
         }
         let iced = self.no_damage.get(&victim).cloned().unwrap_or_default();
         if !self.ice_damage_allows(vid, iced.race, &iced.affects) {
-            return AttackAnswer::default();
+            return false;
         }
         let Some(empire) = self.bodies.get(&vid).map(|body| body.card.empire) else {
-            return AttackAnswer::default();
+            return false;
         };
         let Some(victim_empire) = self.bodies.get(&victim).map(|body| body.card.empire) else {
-            return AttackAnswer::default();
+            return false;
         };
-        // The war arm (`G/battle.cpp:125-138`): two players whose guilds are under a war
-        // may fight whatever the PK policy says, and the arm answers before the castle,
-        // the arena and the policy do.
         if !self.guild_war_allows(vid, victim) && !self.arena_can_attack(vid, victim) {
-            // `CanAttack`'s duel tail (`G/pvp.cpp:508-528`): the live fight of the two
-            // PIDs, with its fresh fight touch.
-            // `CanAttack`'s horse gate (`G/pvp.cpp:394-398`): a grade-1 rider hits no one.
             if self.rides_a_grade_one_horse(vid.raw()) {
-                return AttackAnswer::default();
+                return false;
             }
             let fight = self.pvp_is_fight(self.pvp_pid_of(vid), self.pvp_pid_of(victim));
             let mut attacker = self.pk_actor(vid, empire, false);
@@ -931,14 +927,24 @@ impl GameState {
             );
             let allowed = pk_eligibility(attacker, Some(target_actor), self.protect_normal);
             let PkEligibility::Allowed { enter_killer_mode } = allowed else {
-                return AttackAnswer::default();
+                return false;
             };
-            // The policy's killer arm (`G/pvp.cpp:453-500`): a same-empire hit on a
-            // blameless player marks the attacker before the swing lands.
             if enter_killer_mode {
                 self.set_killer_mode(vid, true);
             }
         }
+        true
+    }
+
+    fn attack_player(&mut self, vid: Vid, target: u32) -> AttackAnswer {
+        let victim = Vid::new(target);
+        if !self.pvp_gate(vid, target) {
+            return AttackAnswer::default();
+        }
+        let (Some(spot), Some(victim_spot)) = (self.spot_of(vid.raw()), self.spot_of(target))
+        else {
+            return AttackAnswer::default();
+        };
         // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`G/char_battle.cpp:219-223`).
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.fighting = true;
@@ -947,7 +953,6 @@ impl GameState {
                 victim_spot.y.saturating_sub(spot.y),
             );
         }
-        // `battle_hit` (`G/battle.cpp:760-818`): the damage, then the victim's `Damage`.
         let Some(damage) = self.player_damage(vid, victim) else {
             return AttackAnswer::default();
         };
@@ -966,7 +971,7 @@ impl GameState {
 
     /// `CalcMeleeDamage` of a player attacker on a player victim (`G/battle.cpp:489-666`),
     /// with the wielded weapon's kind resist against the victim (`:775-800`).
-    fn player_damage(&mut self, vid: Vid, victim: Vid) -> Option<i32> {
+    pub(super) fn player_damage(&mut self, vid: Vid, victim: Vid) -> Option<i32> {
         // The victim's facts first: the attacker's borrow of the characters comes after.
         // The rating reads the morphed dexterity (`G/battle.cpp:281`).
         let victim_dexterity = self
@@ -1044,7 +1049,11 @@ impl GameState {
             empire,
             map_empire,
             mode,
-            alignment: body.map_or(0, |body| body.card.alignment),
+            // `G/pvp.cpp:462-509` calls `GetAlignment()` (shown alignment, 0 while wearing
+            // `UNIQUE_ITEM_HIDE_ALIGNMENT_TITLE`), not `GetRealAlignment()`.
+            alignment: body.map_or(0, |body| {
+                body.shown_alignment.unwrap_or(body.card.alignment)
+            }),
             killer_mode: body.is_some_and(|body| body.add_state.killer),
             party_id: self.party_of_vid(vid),
             guild_id: self.guild_of(pid),

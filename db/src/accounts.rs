@@ -474,6 +474,20 @@ pub async fn gold_premium_expire(store: &Store, id: AccountId) -> Result<i64, Ac
         .ok_or(AccountError::NoSuchAccountId(id))
 }
 
+/// Read an account's SAFEBOX premium expiry: the unix time the premium ran to
+/// (`safebox_expire`, read into `aiPremiumTimes[PREMIUM_SAFEBOX]`), 0 when never bought.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`].
+pub async fn safebox_expire(store: &Store, id: AccountId) -> Result<i64, AccountError> {
+    sqlx::query_scalar("SELECT safebox_expire FROM account WHERE id = $1")
+        .bind(id.to_column()?)
+        .fetch_optional(store.pool())
+        .await?
+        .ok_or(AccountError::NoSuchAccountId(id))
+}
+
 /// Write an account's premium private-shop expiry and retime its shops' rows
 /// (`UPDATE account SET premium_privateshop_expire`, then the cached shops'
 /// `UpdatePremiumTime`, `D/ClientManagerPrivateShop.cpp:2336-2348`): legacy

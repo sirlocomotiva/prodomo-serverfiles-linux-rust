@@ -428,6 +428,7 @@ impl GameState {
         let held = match kind {
             common::enums::EPremiumTypes::Exp => &self.exp_premium_expiry,
             common::enums::EPremiumTypes::Item => &self.item_premium_expiry,
+            common::enums::EPremiumTypes::Safebox => &self.safebox_premium_expiry,
             common::enums::EPremiumTypes::Gold => &self.gold_premium_expiry,
             common::enums::EPremiumTypes::FishMind => &self.fish_mind_expiry,
             common::enums::EPremiumTypes::PrivateShop => &self.shop_premium_expiry,
@@ -1589,6 +1590,7 @@ mod tests {
         for hold in [
             &mut world.exp_premium_expiry,
             &mut world.item_premium_expiry,
+            &mut world.safebox_premium_expiry,
             &mut world.gold_premium_expiry,
             &mut world.fish_mind_expiry,
             &mut world.shop_premium_expiry,
@@ -1598,6 +1600,7 @@ mod tests {
         for kind in [
             EPremiumTypes::Exp,
             EPremiumTypes::Item,
+            EPremiumTypes::Safebox,
             EPremiumTypes::Gold,
             EPremiumTypes::FishMind,
             EPremiumTypes::PrivateShop,
@@ -1605,7 +1608,6 @@ mod tests {
             assert!(world.premium_runs(here, kind), "{kind:?} runs");
         }
         for kind in [
-            EPremiumTypes::Safebox,
             EPremiumTypes::AutoLoot,
             EPremiumTypes::MarriageFast,
             EPremiumTypes::MaxNum,

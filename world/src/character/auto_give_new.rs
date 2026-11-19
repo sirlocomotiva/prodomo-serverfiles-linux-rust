@@ -22,10 +22,10 @@ use super::items::CharacterItems;
 use crate::item::{Item, ITEM_FLAG_STACKABLE};
 
 /// `DRAGON_SOUL_BOX_SIZE`: the cells of one dragon soul box.
-const DRAGON_SOUL_BOX_SIZE: u16 = 32;
+pub(super) const DRAGON_SOUL_BOX_SIZE: u16 = 32;
 
 /// `DRAGON_SOUL_GRADE_MAX` with `ENABLE_DRAGONSOUL_ALCHEMY_PLUS`: the boxes of one type.
-const DRAGON_SOUL_GRADE_MAX: u16 = 6;
+pub(super) const DRAGON_SOUL_GRADE_MAX: u16 = 6;
 
 /// Where [`auto_give_item_new`] left the item.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -58297,3 +58297,58 @@ summons helpers in battle; cleared col 52 in `dragon_proto`). Run 2 failed
 fixed `assert_mesh_wire` for non-PC/non-NPC adds and set `no_wander = true`). Run 3 passed
 5,750/0. Parity: 1,782 `ported`, 30 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows;
 593 scenarios. No ADR changed.
+
+## 735. Skills, PvP wards, PK hide-alignment, safebox expansion, and `client-packets.md` closure
+
+Closes ten Parity rows — finishing `client-packets.md` (0 `partial` remaining) alongside
+`data.proto.item`, `data.locale.strings`, `table.skill_proto`, `sys.char.pk`, `sys.npc.safebox`,
+`sys.skill.core`, and `sys.skill.extra`:
+
+- **PvP skill combat and 7th/8th skill ward reduction (`sys.skill.core`, `sys.skill.extra`, `table.skill_proto`):**
+  - `world/src/character/combat/pvp.rs`: adds `PvKind::Skill` (`DAMAGE_TYPE_MELEE | RANGE | MAGIC`
+    with `POINT_SKILL_DAMAGE_BONUS` / `POINT_SKILL_DEFEND_BONUS`, skipping normal-only block/reflect/crit/pen/steal).
+  - `prodomo/src/game_state/fight.rs`: adds `pvp_gate` and `pvp_skill_strike`; fixes `pvp_actor`
+    to read `self.alignment_of(vid.raw())` (shown alignment, `G/pvp.cpp:477`) rather than real alignment.
+  - `prodomo/src/game_state/pc_skill.rs`: wires `skill_attack_player`, `skill_functor_player`,
+    player victims in `splash_walk`, and `skill_ward_reduction` (`__7AND8TH_SKILLS__` `221..=228`,
+    `G/char_skill.cpp:1695-1748`).
+  - `prodomo/src/game_state.rs`: clears `self.pc_skills.remove(&vid.raw())` in `leave_world_by`
+    so skill cooldowns and state do not leak across relogin.
+- **Hide-alignment on login (`sys.char.pk`):**
+  `prodomo/src/game_state/motion.rs` initializes `Body::shown_alignment` to `0` when
+  `UNIQUE_ITEM_HIDE_ALIGNMENT_TITLE` (`70048`) is already worn at login (`G/item.cpp:2177`), matching
+  equip/unequip behaviour.
+- **Safebox expansion, Dragon Soul checkin/checkout, and `/click_safebox` war/dungeon refusal (`sys.npc.safebox`):**
+  - `db/migrations/0047_safebox_premium.sql` + `db/src/accounts.rs`: adds `account.safebox_expire`
+    and `safebox_premium_expire` query (`EPremiumTypes::Safebox`).
+  - `world/src/character/safebox.rs`: adds `SAFEBOX_EXPANDED_ROWS` (54 = 6 pages),
+    `UNIQUE_GROUP_LARGE_SAFEBOX` (`10021`), and `DragonSoulInventory` checkin/checkout (including
+    `is_valid_ds_cell` and fallback cell selection).
+  - `world/src/character/items.rs`: adds the `EWindows::DragonSoulInventory` arm to
+    `CharacterItems::is_empty_item_grid` (`G/char_item.cpp:955-1013`, fixing legacy's `:1005`
+    `bItemGrid` typo for `bSize > 1`).
+  - `prodomo/src/game_state/safebox.rs` + `prodomo/src/main.rs`: wires `SafeboxStep::Click` so
+    `/click_safebox` refuses non-GMs inside a dungeon or war map (`G/cmd_general.cpp:3492-3502`),
+    and expands the safebox to 6 pages when `EPremiumTypes::Safebox` or `UNIQUE_GROUP_LARGE_SAFEBOX`
+    is active (`G/input_db.cpp:1145-1147`).
+- **Fly targeting, OnClick, and stale-note closures (`cg.game.on_click`, `cg.game.fly_targeting`,
+  `cg.game.add_fly_targeting`, `data.proto.item`, `data.locale.strings`):**
+  Verified `CHARACTER::OnClick` (`G/char.cpp:6181-6352`), `data.proto.item`, and
+  `data.locale.strings` (`locale_quest.txt` live via `gamedata::quest_translate`), and added a
+  wire scenario for the unknown-VID zero-target fly-targeting relay (`G/char_battle.cpp:3357-3366`).
+- **Scenarios (all 8× parallel clean, `test_server = false` per ADR-0007):**
+  `fly_targeting_unknown_vid_relays_zero_target_and_coordinates`,
+  `pvp_skill_ward_reduces_damage_and_hide_alignment_protects_from_revenge_pk`, and
+  `the_safebox_expands_under_premium_checks_dragon_soul_in_and_blocks_in_dungeon`.
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,753
+passed, 0 failed in 46 targets; with it 5,753 passed, 0 failed in 46 targets (486 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+Run 1 failed `character::items::tests::the_grid_check_answers_only_for_the_inventory_window_and_the_switchbot`
+(updated contract test for the new `DragonSoulInventory` arm of `is_empty_item_grid`) and
+`a_cannot_dead_player_keeps_its_hit_points_until_it_can` (a 5 s `AFF_REVIVE_INVISIBLE` expiry
+`GC_CHARACTER_UPDATE` landed between poison ticks; updated `drain_silence` and extracted
+`read_poison_damage` to skip revive-end/view records per SCENARIO TIMING, 8× parallel clean).
+Run 2 passed 5,753/0. Parity: 1,792 `ported`, 20 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
+of 2,332 rows; 596 scenarios. No ADR changed.

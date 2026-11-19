@@ -824,6 +824,26 @@ impl CharacterItems {
             return dest.cell < common::item_slots::SWITCHBOT_SLOT_COUNT
                 && self.item_at(dest).is_none();
         }
+        if dest.window_type == EWindows::DragonSoulInventory as u8 {
+            // `IsEmptyItemGrid`'s `DRAGON_SOUL_INVENTORY` arm (`G/char_item.cpp:955-1013`),
+            // checking `ds_grid` across the full footprint (fixing legacy's `:1005` typo that
+            // read `bItemGrid[p]` instead of `wDSItemGrid[p]` for `bSize > 1`).
+            if size == 0 || dest.cell >= DRAGON_SOUL_INVENTORY_MAX_NUM {
+                return false;
+            }
+            let exception = exception_cell.and_then(|source| source.checked_add(1));
+            return (0..u16::from(size)).all(|j| {
+                let Some(p) = dest.cell.checked_add(j * DRAGON_SOUL_BOX_COLUMN_NUM) else {
+                    return false;
+                };
+                p < DRAGON_SOUL_INVENTORY_MAX_NUM
+                    && self
+                        .ds_grid
+                        .get(usize::from(p))
+                        .copied()
+                        .is_some_and(|anchor| anchor == 0 || Some(anchor) == exception)
+            });
+        }
         if dest.window_type != EWindows::Inventory as u8 || size == 0 {
             return false;
         }
@@ -2485,13 +2505,26 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_check_answers_only_for_the_inventory_window_and_the_switchbot() {
-        let items = CharacterItems::new();
-        for window in [EQUIP, DS, A67, SAFEBOX, MALL, BELT] {
+    fn the_grid_check_answers_for_inventory_dragon_soul_and_switchbot() {
+        let mut items = CharacterItems::new();
+        for window in [EQUIP, A67, SAFEBOX, MALL, BELT] {
             assert!(!items.is_empty_item_grid(pos(window, 3), 1, None, 90, None));
         }
         assert!(!items.is_empty_item_grid(pos(INV, 3), 0, None, 90, None));
-        // A free slot takes any size; past the slots nothing is empty.
+        // Dragon soul grid: empty cells fit, occupied or past DRAGON_SOUL_INVENTORY_MAX_NUM fail.
+        assert!(items.is_empty_item_grid(pos(DS, 3), 1, None, 90, None));
+        assert!(!items.is_empty_item_grid(pos(DS, 3), 0, None, 90, None));
+        assert!(!items.is_empty_item_grid(
+            pos(DS, DRAGON_SOUL_INVENTORY_MAX_NUM),
+            1,
+            None,
+            90,
+            None
+        ));
+        items.set(pos(DS, 3), &one_cell(11)).expect("ds cell 3");
+        assert!(!items.is_empty_item_grid(pos(DS, 3), 1, None, 90, None));
+        assert!(items.is_empty_item_grid(pos(DS, 3), 1, Some(3), 90, None));
+        // A free switchbot slot takes any size; past the slots nothing is empty.
         assert!(items.is_empty_item_grid(pos(SWITCH, 3), 2, None, 90, None));
         assert!(!items.is_empty_item_grid(pos(SWITCH, 5), 1, None, 90, None));
     }
